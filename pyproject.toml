@@ -1,0 +1,64 @@
+[project]
+name = "surogates"
+dynamic = ["version"]
+description = "Open Managed Agents"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Flavius Burca", email = "flavius@invergent.ai" }
+]
+maintainers = [
+    { name = "Flavius Burca", email = "flavius@invergent.ai" }
+]
+urls = { "Homepage" = "https://surogate.ai", "Repository" = "https://github.com/invergent-ai/surogates", "Issues" = "https://github.com/invergent-ai/surogates/issues" }
+keywords = ["machine learning", "large language model"]
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+dependencies = [
+    "pydantic>=2.4,<3.0",
+    "pydantic-settings>=2.0,<3.0",
+    "sqlalchemy[asyncio]>=2.0,<3.0",
+    "asyncpg>=0.29,<1.0",
+    "httpx>=0.27,<1.0",
+    "redis[hiredis]>=5.0,<6.0",
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.30,<1.0",
+    "sse-starlette>=1.6,<3.0",
+    "python-jose[cryptography]>=3.3,<4.0",
+    "passlib[bcrypt]>=1.7,<2.0",
+    "cryptography>=42.0,<45.0",
+    "email-validator>=2.0,<3.0",
+    "openai>=1.30,<2.0",
+    "pyyaml>=6.0,<7.0",
+    "agent-os-kernel>=3.0,<4.0",
+]
+scripts = { "surogate" = "surogates.cli.main:cli_main" }
+
+[tool.setuptools.packages.find]
+include = ["surogates*"]
+
+[tool.uv]
+prerelease = "allow"
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "surogate/**/*.py" },
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0a0",
+    "testcontainers[postgres,redis]>=4.0,<5.0",
+    "httpx>=0.27,<1.0",
+]

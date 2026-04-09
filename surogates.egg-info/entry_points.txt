@@ -1,0 +1,2 @@
+[console_scripts]
+surogate = surogates.cli.main:cli_main

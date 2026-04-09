@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: surogates
+  labels:
+    app: surogates
+    component: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: surogates
+      component: api
+  template:
+    metadata:
+      labels:
+        app: surogates
+        component: api
+    spec:
+      serviceAccountName: surogates-api
+      containers:
+        - name: api
+          image: ghcr.io/invergent-ai/surogates:latest
+          command: ["surogate", "api"]
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: SUROGATES_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: surogates-db
+                  key: url
+            - name: SUROGATES_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: surogates-redis
+                  key: url
+            - name: SUROGATES_LOG_LEVEL
+              value: "INFO"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: surogates
+spec:
+  selector:
+    app: surogates
+    component: api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

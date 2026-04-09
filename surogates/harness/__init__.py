@@ -1,0 +1,197 @@
+"""Harness utilities -- budget tracking, model metadata, context compression, prompt building, and the core agent loop."""
+
+from __future__ import annotations
+
+from surogates.harness.budget import IterationBudget
+from surogates.harness.connection_health import (
+    cleanup_dead_connections,
+    force_close_tcp_sockets,
+    is_openai_client_closed,
+    probe_dead_connections,
+)
+from surogates.harness.context import ContextCompressor
+from surogates.harness.context_files import (
+    load_project_context,
+    load_soul_md,
+    scan_context_content,
+    truncate_context,
+)
+from surogates.harness.cost_tracker import SessionCostTracker
+from surogates.harness.credentials import CredentialPool, PooledCredential
+from surogates.harness.llm_call import (
+    DEVELOPER_ROLE_MODELS,
+    STREAM_STALE_TIMEOUT,
+    apply_developer_role,
+    call_llm_non_streaming,
+    call_llm_streaming,
+    call_llm_streaming_inner,
+    call_llm_with_retry,
+    extract_retry_after,
+    extract_status_code,
+    interruptible_sleep,
+    is_transient_error,
+)
+from surogates.harness.loop import AgentHarness
+from surogates.harness.message_utils import (
+    coerce_message_content,
+    make_skipped_tool_result,
+    message_to_dict,
+    reconstruct_message_from_deltas,
+)
+from surogates.harness.model_metadata import (
+    CONTEXT_PROBE_TIERS,
+    DEFAULT_FALLBACK_CONTEXT,
+    MODEL_CATALOG,
+    ModelInfo,
+    estimate_cost,
+    estimate_tokens,
+    get_model_info,
+    get_next_probe_tier,
+    parse_context_limit_from_error,
+)
+from surogates.harness.prompt import (
+    GOOGLE_OPERATIONAL_GUIDANCE,
+    OPENAI_EXECUTION_GUIDANCE,
+    PLATFORM_HINTS,
+    TOOL_USE_ENFORCEMENT_MODELS,
+    PromptBuilder,
+)
+from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
+from surogates.harness.prompt_cache import (
+    SystemPromptCache,
+    apply_cache_control,
+    build_cache_extra_body,
+    is_cacheable_model,
+)
+from surogates.harness.provider import (
+    APIMode,
+    anthropic_to_openai_response,
+    call_anthropic_messages,
+    detect_api_mode,
+    openai_to_anthropic_messages,
+)
+from surogates.harness.reasoning import (
+    THINK_RE,
+    ContentWithToolsCache,
+    extract_reasoning,
+    has_incomplete_scratchpad,
+    is_thinking_budget_exhausted,
+    is_thinking_only_response,
+    strip_think_blocks,
+)
+from surogates.harness.resilience import (
+    BUDGET_CAUTION_THRESHOLD,
+    BUDGET_WARNING_THRESHOLD,
+    extract_api_error_context,
+    find_invalid_tool_calls,
+    get_budget_warning,
+    get_error_diagnostic,
+    inject_budget_warning,
+    repair_tool_name,
+    summarize_api_error,
+    try_activate_fallback,
+    try_rotate_credential,
+)
+from surogates.harness.retry import jittered_backoff
+from surogates.harness.sanitize import (
+    cap_delegate_calls,
+    deduplicate_tool_calls,
+    sanitize_messages,
+    sanitize_surrogates,
+    sanitize_tool_pairs,
+    strip_budget_warnings,
+)
+from surogates.harness.tool_exec import (
+    execute_single_tool,
+    execute_tool_calls,
+    execute_tool_calls_concurrent,
+    execute_tool_calls_sequential,
+    is_destructive_command,
+    paths_do_not_overlap,
+    should_parallelize,
+)
+
+__all__ = [
+    "APIMode",
+    "AgentHarness",
+    "ContextCompressor",
+    "CredentialPool",
+    "DEVELOPER_ROLE_MODELS",
+    "GOOGLE_OPERATIONAL_GUIDANCE",
+    "IterationBudget",
+    "MODEL_CATALOG",
+    "ModelInfo",
+    "OPENAI_EXECUTION_GUIDANCE",
+    "PLATFORM_HINTS",
+    "PooledCredential",
+    "PromptBuilder",
+    "SessionCostTracker",
+    "SubdirectoryHintTracker",
+    "SystemPromptCache",
+    "TOOL_USE_ENFORCEMENT_MODELS",
+    "anthropic_to_openai_response",
+    "apply_cache_control",
+    "build_cache_extra_body",
+    "call_anthropic_messages",
+    "call_llm_non_streaming",
+    "call_llm_streaming",
+    "call_llm_streaming_inner",
+    "apply_developer_role",
+    "call_llm_with_retry",
+    "cap_delegate_calls",
+    "cleanup_dead_connections",
+    "coerce_message_content",
+    "force_close_tcp_sockets",
+    "deduplicate_tool_calls",
+    "detect_api_mode",
+    "estimate_cost",
+    "estimate_tokens",
+    "execute_single_tool",
+    "execute_tool_calls",
+    "execute_tool_calls_concurrent",
+    "execute_tool_calls_sequential",
+    "extract_api_error_context",
+    "extract_reasoning",
+    "extract_retry_after",
+    "extract_status_code",
+    "find_invalid_tool_calls",
+    "get_error_diagnostic",
+    "get_model_info",
+    "has_incomplete_scratchpad",
+    "is_thinking_budget_exhausted",
+    "is_destructive_command",
+    "is_openai_client_closed",
+    "is_thinking_only_response",
+    "BUDGET_CAUTION_THRESHOLD",
+    "BUDGET_WARNING_THRESHOLD",
+    "CONTEXT_PROBE_TIERS",
+    "DEFAULT_FALLBACK_CONTEXT",
+    "get_budget_warning",
+    "get_next_probe_tier",
+    "parse_context_limit_from_error",
+    "inject_budget_warning",
+    "interruptible_sleep",
+    "is_cacheable_model",
+    "is_transient_error",
+    "jittered_backoff",
+    "load_project_context",
+    "load_soul_md",
+    "make_skipped_tool_result",
+    "message_to_dict",
+    "openai_to_anthropic_messages",
+    "paths_do_not_overlap",
+    "probe_dead_connections",
+    "reconstruct_message_from_deltas",
+    "repair_tool_name",
+    "sanitize_messages",
+    "sanitize_surrogates",
+    "scan_context_content",
+    "sanitize_tool_pairs",
+    "should_parallelize",
+    "summarize_api_error",
+    "truncate_context",
+    "strip_budget_warnings",
+    "strip_think_blocks",
+    "try_activate_fallback",
+    "try_rotate_credential",
+]

@@ -1,0 +1,24 @@
+// Copyright (c) 2026, Invergent SA, developed by Flavius Burca
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+import { createRoute } from "@tanstack/react-router";
+import { lazy } from "react";
+import { requireAuth } from "../auth-guards";
+import { Route as rootRoute } from "./__root";
+
+const ChatPage = lazy(() =>
+  import("@/features/chat/chat-page").then((m) => ({ default: m.ChatPage })),
+);
+
+export const chatRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/chat",
+  beforeLoad: () => requireAuth(),
+  component: ChatPage,
+});
+
+export const chatSessionRoute = createRoute({
+  getParentRoute: () => chatRoute,
+  path: "/$sessionId",
+  component: ChatPage,
+});

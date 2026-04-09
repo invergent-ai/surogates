@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: surogates
+  labels:
+    app: surogates
+    component: worker
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: surogates
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: surogates
+        component: worker
+    spec:
+      serviceAccountName: surogates-worker
+      containers:
+        - name: worker
+          image: ghcr.io/invergent-ai/surogates:latest
+          command: ["surogate", "worker"]
+          env:
+            - name: SUROGATES_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: surogates-db
+                  key: url
+            - name: SUROGATES_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: surogates-redis
+                  key: url
+            - name: SUROGATES_WORKER_CONCURRENCY
+              value: "50"
+            # Worker ID from pod name (K8s downward API)
+            - name: SUROGATES_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SUROGATES_LOG_LEVEL
+              value: "INFO"
+          volumeMounts:
+            - name: platform-policies
+              mountPath: /etc/surogates/policies
+              readOnly: true
+            - name: platform-skills
+              mountPath: /etc/surogates/skills
+              readOnly: true
+            - name: platform-tools
+              mountPath: /etc/surogates/tools
+              readOnly: true
+            - name: platform-mcp
+              mountPath: /etc/surogates/mcp
+              readOnly: true
+            - name: model-metadata
+              mountPath: /etc/surogates/model-metadata.json
+              subPath: model-metadata.json
+              readOnly: true
+            - name: tenant-assets
+              mountPath: /data/tenant-assets
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      volumes:
+        - name: platform-policies
+          configMap:
+            name: platform-policies
+        - name: platform-skills
+          configMap:
+            name: platform-skills
+        - name: platform-tools
+          configMap:
+            name: platform-tools
+        - name: platform-mcp
+          configMap:
+            name: platform-mcp
+        - name: model-metadata
+          configMap:
+            name: model-metadata
+        - name: tenant-assets
+          persistentVolumeClaim:
+            claimName: tenant-assets

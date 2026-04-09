@@ -1,0 +1,68 @@
+{
+  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "files": {
+    "ignore": [
+      "dist",
+      "node_modules",
+      "test",
+      "test/**",
+      "**/._*",
+      "._*",
+      "**/.DS_Store",
+      "tsconfig*.json"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2
+  },
+  "organizeImports": {
+    "enabled": true
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": false,
+      "a11y": { 
+        "all": true,
+        "useKeyWithClickEvents": "off",
+        "noLabelWithoutControl": "off"
+      },
+      "complexity": { 
+        "all": true,
+        "useLiteralKeys": "off"
+      },
+      "correctness": { 
+        "all": true, 
+        "useImportExtensions": "off",
+        "useExhaustiveDependencies": "off"
+      },
+      "performance": { "all": true },
+      "security": { "all": true },
+      "style": {
+        "all": true,
+        "useNamingConvention": { "options": { "strictCase": false }, "level": "off" }
+      },
+      "suspicious": { 
+        "all": true, 
+        "noReactSpecificProps": "off",
+        "noExplicitAny": "off"
+       }
+    }
+  },
+  "overrides": [
+    {
+      "include": ["src/components/ui/**"],
+      "linter": {
+        "enabled": false
+      },
+      "formatter": {
+        "enabled": false
+      },
+      "organizeImports": {
+        "enabled": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+"""Event type enumeration for the append-only session event log."""
+
+from __future__ import annotations
+
+from enum import unique
+from enum import Enum
+
+
+@unique
+class EventType(str, Enum):
+    """Every event in the system's append-only log has exactly one of these types.
+
+    The string values use a ``<domain>.<verb>`` convention so they read
+    naturally in JSON payloads and database rows.
+    """
+
+    # User interaction
+    USER_MESSAGE = "user.message"
+
+    # LLM interaction
+    LLM_REQUEST = "llm.request"
+    LLM_RESPONSE = "llm.response"
+    LLM_THINKING = "llm.thinking"
+    LLM_DELTA = "llm.delta"
+
+    # Tool execution
+    TOOL_CALL = "tool.call"
+    TOOL_RESULT = "tool.result"
+
+    # Sandbox lifecycle
+    SANDBOX_PROVISION = "sandbox.provision"
+    SANDBOX_EXECUTE = "sandbox.execute"
+    SANDBOX_RESULT = "sandbox.result"
+    SANDBOX_DESTROY = "sandbox.destroy"
+
+    # Session lifecycle
+    SESSION_START = "session.start"
+    SESSION_PAUSE = "session.pause"
+    SESSION_RESUME = "session.resume"
+    SESSION_COMPLETE = "session.complete"
+    SESSION_FAIL = "session.fail"
+
+    # Context management
+    CONTEXT_COMPACT = "context.compact"
+    MEMORY_UPDATE = "memory.update"
+
+    # Harness lifecycle
+    HARNESS_WAKE = "harness.wake"
+    HARNESS_CRASH = "harness.crash"
+
+    # Governance
+    POLICY_DENIED = "policy.denied"

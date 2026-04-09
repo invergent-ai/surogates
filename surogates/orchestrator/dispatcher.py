@@ -1,0 +1,206 @@
+"""Orchestrator -- pulls sessions from the Redis work queue and dispatches them to the harness.
+
+The :class:`Orchestrator` is the long-running event loop that:
+
+* Blocks on Redis ``BZPOPMIN`` to dequeue session IDs in priority order.
+* Spawns bounded async tasks (controlled by a semaphore) that call
+  ``AgentHarness.wake()`` for each session.
+* Implements retry with exponential back-off for transient failures.
+* Provides graceful shutdown: stops accepting new work and waits for
+  in-flight tasks to drain.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import traceback
+from typing import TYPE_CHECKING, Any, Callable
+from uuid import UUID
+
+from surogates.session.events import EventType
+
+if TYPE_CHECKING:
+    from redis.asyncio import Redis
+
+    from surogates.session.store import SessionStore
+
+logger = logging.getLogger(__name__)
+
+# Maximum number of retry attempts for a single session.
+_MAX_RETRIES: int = 3
+
+# Base delay (seconds) for exponential back-off on retry.
+_BASE_RETRY_DELAY: float = 1.0
+
+# Default sorted-set key used as the work queue.
+_DEFAULT_QUEUE_KEY: str = "surogates:work_queue"
+
+
+class Orchestrator:
+    """Pulls session IDs from a Redis sorted-set and dispatches them to the agent harness."""
+
+    def __init__(
+        self,
+        redis_client: Redis,
+        session_store: SessionStore,
+        harness_factory: Callable[..., Any],
+        *,
+        max_concurrent: int = 50,
+        queue_key: str = _DEFAULT_QUEUE_KEY,
+        poll_timeout: int = 5,
+    ) -> None:
+        self.redis = redis_client
+        self.session_store = session_store
+        self.harness_factory = harness_factory
+        self.semaphore = asyncio.Semaphore(max_concurrent)
+        self._queue_key = queue_key
+        self._poll_timeout = poll_timeout
+        self._running = True
+        self._tasks: set[asyncio.Task] = set()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def enqueue(self, session_id: UUID, priority: float = 0) -> None:
+        """Add session to Redis sorted set work queue.
+
+        Lower *priority* values are dequeued first (``BZPOPMIN``).
+        """
+        await self.redis.zadd(self._queue_key, {str(session_id): priority})
+        logger.debug("Enqueued session %s with priority %s", session_id, priority)
+
+    async def run(self) -> None:
+        """Main worker loop.  Pull from queue, wake harness.  Runs forever.
+
+        Uses ``BZPOPMIN`` with a timeout for blocking dequeue.  On each
+        item, a bounded async task is spawned via the semaphore.
+        """
+        logger.info(
+            "Orchestrator starting (queue=%s, poll_timeout=%ds)",
+            self._queue_key,
+            self._poll_timeout,
+        )
+
+        while self._running:
+            try:
+                # BZPOPMIN returns (key, member, score) or None on timeout.
+                result = await self.redis.bzpopmin(
+                    self._queue_key, timeout=self._poll_timeout,
+                )
+            except asyncio.CancelledError:
+                logger.info("Orchestrator cancelled during poll")
+                break
+            except Exception:
+                logger.exception("Redis BZPOPMIN failed; retrying after delay")
+                await asyncio.sleep(1.0)
+                continue
+
+            if result is None:
+                # Timeout -- no work available.
+                continue
+
+            # result is (key, member, score) for redis-py >= 5.
+            _key, member, _score = result
+            session_id_str = member.decode() if isinstance(member, bytes) else str(member)
+
+            try:
+                session_id = UUID(session_id_str)
+            except ValueError:
+                logger.error("Invalid session ID in work queue: %s", session_id_str)
+                continue
+
+            # Spawn a bounded task.
+            await self.semaphore.acquire()
+            task = asyncio.create_task(
+                self._guarded_process(session_id),
+                name=f"harness-{session_id_str[:8]}",
+            )
+            self._tasks.add(task)
+            task.add_done_callback(self._task_done)
+
+        # Wait for in-flight tasks to drain.
+        if self._tasks:
+            logger.info(
+                "Orchestrator shutting down; waiting for %d in-flight tasks",
+                len(self._tasks),
+            )
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+
+        logger.info("Orchestrator stopped")
+
+    async def shutdown(self) -> None:
+        """Graceful shutdown -- stop accepting work, wait for in-flight tasks."""
+        logger.info("Orchestrator shutdown requested")
+        self._running = False
+
+    # ------------------------------------------------------------------
+    # Internal dispatch
+    # ------------------------------------------------------------------
+
+    async def _guarded_process(self, session_id: UUID) -> None:
+        """Wrapper that always releases the semaphore."""
+        try:
+            await self._process(session_id)
+        finally:
+            self.semaphore.release()
+
+    async def _process(self, session_id: UUID, attempt: int = 0) -> None:
+        """Process a single session.  Retry with exponential backoff on failure."""
+        try:
+            harness = self.harness_factory(session_id)
+            await harness.wake(session_id)
+        except Exception as exc:
+            logger.exception(
+                "Harness failed for session %s (attempt %d/%d)",
+                session_id,
+                attempt + 1,
+                _MAX_RETRIES,
+            )
+
+            if attempt + 1 < _MAX_RETRIES:
+                delay = _BASE_RETRY_DELAY * (2 ** attempt)
+                logger.info(
+                    "Retrying session %s in %.1fs (attempt %d/%d)",
+                    session_id,
+                    delay,
+                    attempt + 2,
+                    _MAX_RETRIES,
+                )
+                await asyncio.sleep(delay)
+                await self._process(session_id, attempt=attempt + 1)
+            else:
+                # All retries exhausted -- emit SESSION_FAIL.
+                logger.error(
+                    "All retries exhausted for session %s; emitting SESSION_FAIL",
+                    session_id,
+                )
+                try:
+                    await self.session_store.emit_event(
+                        session_id,
+                        EventType.SESSION_FAIL,
+                        {
+                            "reason": "max_retries_exhausted",
+                            "error": str(exc),
+                            "traceback": traceback.format_exc()[-2000:],
+                            "attempts": _MAX_RETRIES,
+                        },
+                    )
+                    await self.session_store.update_session_status(
+                        session_id, "failed",
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to emit SESSION_FAIL for session %s",
+                        session_id,
+                    )
+
+    def _task_done(self, task: asyncio.Task) -> None:
+        """Remove the task from the tracking set on completion."""
+        self._tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("Task %s raised: %s", task.get_name(), exc)
