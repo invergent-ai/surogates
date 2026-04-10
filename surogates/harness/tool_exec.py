@@ -18,6 +18,32 @@ import time
 from typing import TYPE_CHECKING, Any, Callable
 
 from surogates.harness.message_utils import make_skipped_tool_result
+
+# ---------------------------------------------------------------------------
+# Path sanitisation — replace workspace absolute paths with __WORKSPACE__
+# so that real filesystem paths never leak to the frontend via SSE events.
+# ---------------------------------------------------------------------------
+
+_WORKSPACE_TOKEN = "__WORKSPACE__"
+
+
+def _sanitize_paths(data: Any, workspace_path: str | None) -> Any:
+    """Replace occurrences of the workspace absolute path with __WORKSPACE__.
+
+    Works on strings, dicts, and nested structures.  Returns a new object;
+    does not mutate the input.
+    """
+    if not workspace_path:
+        return data
+    # Normalise: ensure no trailing slash for consistent replacement.
+    ws = workspace_path.rstrip("/")
+    if isinstance(data, str):
+        return data.replace(ws, _WORKSPACE_TOKEN)
+    if isinstance(data, dict):
+        return {k: _sanitize_paths(v, workspace_path) for k, v in data.items()}
+    if isinstance(data, list):
+        return [_sanitize_paths(v, workspace_path) for v in data]
+    return data
 from surogates.session.events import EventType
 from surogates.tools.coerce import coerce_tool_args
 
@@ -330,12 +356,18 @@ async def execute_single_tool(
     # Coerce argument types to match JSON Schema declarations.
     tool_args = coerce_tool_args(tool_name, tool_args, tools)
 
+    # Sanitise paths in tool arguments before emitting events — replace
+    # the workspace absolute path with __WORKSPACE__ so real filesystem
+    # paths never leak to the frontend.
+    workspace_path = session.config.get("workspace_path")
+    sanitized_args = _sanitize_paths(tool_args, workspace_path)
+
     # Emit TOOL_CALL event.
     # Include checkpoint hash if the harness stashed one (file-mutating tools).
     tool_call_data: dict[str, Any] = {
         "tool_call_id": tool_call_id,
         "name": tool_name,
-        "arguments": tool_args,
+        "arguments": sanitized_args,
     }
     checkpoint_hash = tc.get("_checkpoint_hash")
     if checkpoint_hash:
@@ -350,7 +382,6 @@ async def execute_single_tool(
     # Workspace sandbox check — enforced at the governance layer before
     # the tool is dispatched.  Uses AGT ExecutionSandbox for path
     # containment (symlink resolution, is_relative_to).
-    workspace_path = session.config.get("workspace_path")
     from surogates.governance.policy import GovernanceGate, _PATH_ARGUMENT_MAP
     path_keys = _PATH_ARGUMENT_MAP.get(tool_name)
     if workspace_path and path_keys:
@@ -430,6 +461,9 @@ async def execute_single_tool(
         tool_name=tool_name,
         tool_use_id=tool_call_id,
     )
+
+    # Sanitise result content — replace workspace paths with __WORKSPACE__.
+    result_content = _sanitize_paths(result_content, workspace_path)
 
     # Emit TOOL_RESULT event.
     result_event_id = await store.emit_event(

@@ -19,6 +19,9 @@ export type WorkspaceSlice = {
 
   workspacePanelOpen: boolean;
 
+  /** Currently selected path in the file tree. */
+  selectedFilePath: string | undefined;
+
   /** Maps toolCallId -> checkpoint hash for file-mutating tool calls. */
   toolCheckpoints: Record<string, string>;
 
@@ -27,6 +30,7 @@ export type WorkspaceSlice = {
   clearWorkspaceFile: () => void;
   clearWorkspace: () => void;
   setWorkspacePanelOpen: (open: boolean) => void;
+  setSelectedFilePath: (path: string | undefined) => void;
   setToolCheckpoint: (toolCallId: string, hash: string) => void;
 };
 
@@ -47,6 +51,8 @@ export const createWorkspaceSlice: StateCreator<
   workspaceFileError: null,
 
   workspacePanelOpen: false,
+
+  selectedFilePath: undefined,
 
   toolCheckpoints: {},
 
@@ -81,7 +87,13 @@ export const createWorkspaceSlice: StateCreator<
     try {
       const res = await workspaceApi.getWorkspaceFile(sessionId, path);
       if (get().activeSessionId !== sessionId) return;
-      set({ workspaceFile: res, workspaceFileLoading: false });
+      // Use the resolved relative path from the API response for
+      // file tree selection (the input path may be absolute).
+      set({
+        workspaceFile: res,
+        workspaceFileLoading: false,
+        selectedFilePath: res.path,
+      });
     } catch (e) {
       if (get().activeSessionId !== sessionId) return;
       set({
@@ -108,6 +120,8 @@ export const createWorkspaceSlice: StateCreator<
     }),
 
   setWorkspacePanelOpen: (open) => set({ workspacePanelOpen: open }),
+
+  setSelectedFilePath: (path) => set({ selectedFilePath: path }),
 
   setToolCheckpoint: (toolCallId, hash) =>
     set((s) => ({

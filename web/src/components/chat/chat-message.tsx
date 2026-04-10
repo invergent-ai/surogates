@@ -18,11 +18,13 @@ import type { ChatMessage as ChatMessageType } from "@/hooks/use-session-runtime
 interface ChatMessageProps {
   message: ChatMessageType;
   isLast: boolean;
+  onFileSelect?: (path: string) => void;
 }
 
 export const ChatMessage = memo(function ChatMessage({
   message,
   isLast,
+  onFileSelect,
 }: ChatMessageProps) {
   if (message.role === "user") {
     return (
@@ -32,15 +34,17 @@ export const ChatMessage = memo(function ChatMessage({
     );
   }
 
-  return <AssistantMessage message={message} isLast={isLast} />;
+  return <AssistantMessage message={message} isLast={isLast} onFileSelect={onFileSelect} />;
 });
 
 function AssistantMessage({
   message,
   isLast,
+  onFileSelect,
 }: {
   message: ChatMessageType;
   isLast: boolean;
+  onFileSelect?: (path: string) => void;
 }) {
   const hasReasoning = !!message.reasoning;
   const hasToolCalls = !!(message.toolCalls && message.toolCalls.length > 0);
@@ -62,9 +66,9 @@ function AssistantMessage({
         )}
 
         {hasToolCalls && (
-          <div className="w-full space-y-1">
+          <div className="w-full flex flex-col gap-8">
             {message.toolCalls!.map((tc) => (
-              <ToolCallBlock key={tc.id} tc={tc} />
+              <ToolCallBlock key={tc.id} tc={tc} onFileSelect={onFileSelect} />
             ))}
           </div>
         )}

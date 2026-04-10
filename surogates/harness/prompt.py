@@ -476,21 +476,25 @@ class PromptBuilder:
         # stay within the workspace.
         workspace = self._get_workspace_path()
         if workspace:
-            parts.append(f"- **Workspace**: `{workspace}`")
-            parts.append(f"- **HOME**: `{workspace}` (overridden)")
+            parts.append(f"- **Workspace**: `$HOME` (your working directory)")
             parts.append(
-                "\n## Workspace Rules\n"
-                "You are operating inside a sandboxed workspace. "
-                "All file operations and terminal commands are restricted "
-                "to the workspace directory above. You MUST:\n"
-                "- Use relative paths or `$HOME` for all file operations\n"
-                "- Clone repositories into the workspace (e.g. `git clone <url>` "
-                "without specifying a path, or `git clone <url> ./dirname`)\n"
-                "- Never use absolute paths outside the workspace\n"
-                "- Never attempt to read `~/.ssh`, `~/.aws`, or other "
-                "credential directories\n"
-                "\nAttempts to access files outside the workspace will be "
-                "blocked by the sandbox and the operation will fail."
+                "\n## Workspace Rules (MANDATORY)\n"
+                "Your working directory is `$HOME`. The filesystem is sandboxed — "
+                "ALL writes outside `$HOME` are blocked and will fail with "
+                "`Read-only file system`.\n\n"
+                "**You MUST follow these rules for every command and file operation:**\n"
+                "1. ALWAYS work in `$HOME`. Never `cd` to `/tmp`, `/home`, or any absolute path.\n"
+                "2. Clone repos with `git clone <url>` (clones into `$HOME/<repo>`) — "
+                "NEVER specify an absolute target path.\n"
+                "3. Use relative paths for all tools: `read_file`, `write_file`, "
+                "`list_files`, `search_files`, `patch`.\n"
+                "4. In terminal commands, use relative paths or `$HOME`: "
+                "`cd surogate && ls` NOT `cd /home/user/surogate`.\n"
+                "5. `/tmp`, `/etc`, `/home`, `/var` are all read-only. "
+                "Do not try to write there.\n"
+                "6. Never read `~/.ssh`, `~/.aws`, `~/.kube`, or credential files.\n\n"
+                "Commands that violate these rules will fail. Do not retry with "
+                "a different absolute path — use a relative path instead."
             )
 
         # Platform hint based on session channel.

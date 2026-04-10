@@ -144,11 +144,7 @@ async def stream_events(
                 if await request.is_disconnected():
                     return
 
-                try:
-                    events = await store.get_events(session_id, after=cursor, limit=50)
-                except asyncio.CancelledError:
-                    # Client disconnected mid-query — exit cleanly.
-                    return
+                events = await store.get_events(session_id, after=cursor, limit=50)
 
                 for event in events:
                     yield {
@@ -163,8 +159,6 @@ async def stream_events(
                     # No new events -- check if the session has terminated.
                     try:
                         session = await store.get_session(session_id)
-                    except asyncio.CancelledError:
-                        return
                     except SessionNotFoundError:
                         yield {
                             "event": "session.done",
@@ -202,6 +196,10 @@ async def stream_events(
                 "event": "stream.timeout",
                 "data": json.dumps({"reason": "max_duration_exceeded"}),
             }
+        except asyncio.CancelledError:
+            # Client disconnected — exit cleanly without letting the
+            # cancellation propagate through SQLAlchemy's connection pool.
+            return
         finally:
             if pubsub is not None:
                 try:

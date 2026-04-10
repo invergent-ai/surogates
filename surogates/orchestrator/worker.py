@@ -181,7 +181,9 @@ async def run_worker(settings: Settings) -> None:
         memory_store = MemoryStore(memory_dir=memory_dir)
         memory_manager = MemoryManager(memory_store)
 
-        prompt_builder = PromptBuilder(tenant, memory_manager=memory_manager)
+        prompt_builder = PromptBuilder(
+            tenant, memory_manager=memory_manager, session=session,
+        )
 
         return AgentHarness(
             session_store=session_store,

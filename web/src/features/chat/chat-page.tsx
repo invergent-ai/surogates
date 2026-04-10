@@ -3,14 +3,10 @@
 //
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
-import { FolderOpenIcon } from "lucide-react";
 import { ChatThread } from "@/components/chat/chat-thread";
 import { SessionSidebar } from "@/components/navbar";
 import { WorkspacePanel } from "@/components/workspace-panel";
-import { FileViewer } from "@/components/file-viewer";
 import { TransparencyBanner } from "@/components/transparency-banner";
-import { Button } from "@/components/ui/button";
-import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { useAppStore } from "@/stores/app-store";
 import { useSessionRuntime } from "@/hooks/use-session-runtime";
 import * as sessionsApi from "@/api/sessions";
@@ -26,9 +22,6 @@ export function ChatPage() {
   const setActiveSession = useAppStore((s) => s.setActiveSession);
   const fetchSessions = useAppStore((s) => s.fetchSessions);
   const fetchUser = useAppStore((s) => s.fetchUser);
-  const workspacePanelOpen = useAppStore((s) => s.workspacePanelOpen);
-  const setWorkspacePanelOpen = useAppStore((s) => s.setWorkspacePanelOpen);
-
   const sessions = useAppStore((s) => s.sessions);
   const sessionsLoading = useAppStore((s) => s.sessionsLoading);
 
@@ -139,6 +132,17 @@ export function ChatPage() {
     }
   }, [sessionId]);
 
+  const fetchWorkspaceFile = useAppStore((s) => s.fetchWorkspaceFile);
+  const setSelectedFilePath = useAppStore((s) => s.setSelectedFilePath);
+  const handleFileSelect = useCallback(
+    (path: string) => {
+      if (!sessionId) return;
+      setSelectedFilePath(path);
+      void fetchWorkspaceFile(sessionId, path);
+    },
+    [sessionId, fetchWorkspaceFile, setSelectedFilePath],
+  );
+
   const handleDisclosureConfirmed = useCallback(() => {
     if (!sessionId) return;
     setDisclosureState((prev) => ({ ...prev, [sessionId]: "accepted" }));
@@ -166,23 +170,6 @@ export function ChatPage() {
           </div>
         )}
 
-        {!workspacePanelOpen && sessionId && (
-          <div className="absolute top-3 right-3 z-20">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={() => setWorkspacePanelOpen(true)}
-                >
-                  <FolderOpenIcon className="w-4 h-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="left">Workspace files</TooltipContent>
-            </Tooltip>
-          </div>
-        )}
-
         {sessionDeclined ? (
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center text-muted-foreground space-y-3 px-4 max-w-5xl">
@@ -205,12 +192,12 @@ export function ChatPage() {
             isRunning={isRunning}
             onSend={handleSend}
             onStop={handleStop}
+            onFileSelect={handleFileSelect}
             disabled={sessionDeclined}
           />
         )}
       </main>
       <WorkspacePanel sessionId={sessionId ?? null} />
-      <FileViewer />
     </div>
   );
 }

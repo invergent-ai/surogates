@@ -30,8 +30,8 @@ router = APIRouter()
 # Limits
 # ---------------------------------------------------------------------------
 
-_MAX_LIST_DEPTH = 8
-_MAX_ENTRIES = 500
+_MAX_LIST_DEPTH = 12
+_MAX_ENTRIES = 5000
 _MAX_READ_BYTES = 512_000  # 500 KB
 _MAX_UPLOAD_BYTES = 50_000_000  # 50 MB
 _MAX_DOWNLOAD_BYTES = 100_000_000  # 100 MB
@@ -212,12 +212,34 @@ def _is_text_file(path: Path) -> bool:
 
 
 def _safe_resolve(workspace_root: Path, relative: str) -> Path:
-    """Resolve a relative path within the workspace, preventing traversal.
+    """Resolve a path within the workspace, preventing traversal.
+
+    Accepts relative paths and absolute paths.  For absolute paths that
+    don't directly resolve inside the workspace, progressively strips
+    leading path components to find a match (handles the case where the
+    agent records paths using the real HOME instead of the overridden
+    workspace HOME).
 
     Uses ``Path.is_relative_to`` for proper path-component comparison,
-    avoiding prefix-confusion attacks (e.g. /data/org-acme matching
-    /data/org-acme-other).
+    avoiding prefix-confusion attacks.
     """
+    candidate = Path(relative)
+    if candidate.is_absolute():
+        resolved = candidate.resolve()
+        if resolved.is_relative_to(workspace_root):
+            return resolved
+        # Try stripping leading components to find a match inside the
+        # workspace.  E.g. /home/user/repo/src/file.py → repo/src/file.py
+        parts = candidate.parts[1:]  # skip the root "/"
+        for i in range(len(parts)):
+            tail = Path(*parts[i:])
+            attempt = (workspace_root / tail).resolve()
+            if attempt.is_relative_to(workspace_root) and attempt.exists():
+                return attempt
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Path traversal not allowed.",
+        )
     target = (workspace_root / relative).resolve()
     if not target.is_relative_to(workspace_root):
         raise HTTPException(
@@ -357,8 +379,12 @@ async def get_workspace_file(
 
     mime, _ = mimetypes.guess_type(str(target))
 
+    # Return the path relative to the workspace root so the frontend
+    # can match it against the file tree (which uses relative paths).
+    relative_path = str(target.relative_to(workspace))
+
     return FileContentResponse(
-        path=path,
+        path=relative_path,
         content=content,
         size=size,
         mime_type=mime,

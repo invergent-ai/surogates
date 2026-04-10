@@ -20,6 +20,7 @@ interface ChatThreadProps {
   isRunning: boolean;
   onSend: (text: string) => void;
   onStop: () => void;
+  onFileSelect?: (path: string) => void;
   disabled?: boolean;
 }
 
@@ -28,10 +29,11 @@ export function ChatThread({
   isRunning,
   onSend,
   onStop,
+  onFileSelect,
   disabled = false,
 }: ChatThreadProps) {
   return (
-    <div className="flex h-full flex-col overflow-hidden">
+    <div className="flex h-full flex-col overflow-hidden bg-card">
       <Conversation className="relative flex-1 min-h-0">
         <ConversationContent className="mx-auto max-w-3xl">
           {messages.length === 0 && !disabled ? (
@@ -46,6 +48,7 @@ export function ChatThread({
                 key={msg.id}
                 message={msg}
                 isLast={i === messages.length - 1}
+                onFileSelect={onFileSelect}
               />
             ))
           )}

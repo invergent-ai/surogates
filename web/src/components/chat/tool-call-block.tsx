@@ -6,7 +6,7 @@ import {
   CheckCircle2Icon,
   ChevronRightIcon,
   Loader2Icon,
-  AlertCircleIcon,
+  CopyIcon,
   ListTodoIcon,
 } from "lucide-react";
 import {
@@ -23,19 +23,50 @@ import {
 } from "@/components/ai-elements/queue";
 import {
   Terminal,
-  TerminalActions,
-  TerminalCopyButton,
   TerminalHeader,
-  TerminalTitle,
 } from "@/components/ai-elements/terminal";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import type { ToolCallInfo } from "@/hooks/use-session-runtime";
 
-const STATUS_ICON = {
-  running: <Loader2Icon className="size-3.5 animate-spin text-primary" />,
-  complete: <CheckCircle2Icon className="size-3.5 text-emerald-500" />,
-  error: <AlertCircleIcon className="size-3.5 text-destructive" />,
-} as const;
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="shrink-0 p-0.5 rounded opacity-0 group-hover/in:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
+      onClick={(e) => {
+        e.stopPropagation();
+        void navigator.clipboard.writeText(text).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+        });
+      }}
+      aria-label="Copy command"
+    >
+      {copied ? <CheckCircle2Icon className="size-3" /> : <CopyIcon className="size-3" />}
+    </button>
+  );
+}
+
+function StatusBullet({ status }: { status: "running" | "complete" | "error" }) {
+  if (status === "running") {
+    return <span className="inline-block size-2 rounded-full shrink-0 bg-primary animate-pulse" />;
+  }
+  return (
+    <span className={cn(
+      "inline-block size-2 rounded-full shrink-0",
+      status === "error" ? "bg-red-500" : "bg-emerald-500",
+    )} />
+  );
+}
 
 // ── Terminal result detection ───────────────────────────────────────
 
@@ -79,7 +110,7 @@ const COLLAPSED_HEIGHT = 96; // px — ~6 lines of mono text
 function TerminalToolResult({ result, isRunning }: { result: TerminalResult; isRunning: boolean }) {
   const exitOk = result.exit_code === 0;
   const output = result.output || result.error || "";
-  const [expanded, setExpanded] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
   const [overflows, setOverflows] = useState(false);
 
@@ -89,85 +120,80 @@ function TerminalToolResult({ result, isRunning }: { result: TerminalResult; isR
     }
   }, [output]);
 
-  // Build IN/OUT content for Claude Code-style display.
   const terminalContent = [
     result.command && `${result.command}`,
     output ? `\n${output}` : (!isRunning ? "\n(no output)" : ""),
   ].filter(Boolean).join("");
 
   return (
-    <Terminal
-      output={terminalContent}
-      isStreaming={isRunning}
-      className="my-1 w-full text-xs"
-    >
-      <TerminalHeader className="py-1.5 px-3">
-        <div className="flex items-center gap-2 min-w-0 text-xs">
-          <span className="font-semibold text-zinc-100 shrink-0">Bash</span>
-          {!isRunning && (
-            <span className={cn(
-              "text-[10px] font-mono shrink-0",
-              exitOk ? "text-emerald-500" : "text-red-400",
-            )}>
-              [{result.exit_code}]
-            </span>
-          )}
-        </div>
-        <TerminalActions>
-          <TerminalCopyButton className="size-6" />
-        </TerminalActions>
-      </TerminalHeader>
-      <div className="relative">
+    <>
+      <Terminal
+        output={terminalContent}
+        isStreaming={isRunning}
+        className="group/term relative w-full text-xs"
+      >
+        <TerminalHeader className="py-1.5 px-2">
+          <div className="flex items-center gap-1.5 min-w-0 text-sm font-mono">
+            <StatusBullet status={isRunning ? "running" : exitOk ? "complete" : "error"} />
+            <span className="font-semibold text-foreground shrink-0">Bash</span>
+          </div>
+        </TerminalHeader>
+        {result.command && (
+          <div className="group/in flex items-start gap-2 bg-background text-muted-foreground px-3 pt-2 font-mono text-xs leading-relaxed">
+            <span className="shrink-0 select-none text-emerald-600">IN</span>
+            <pre className="whitespace-pre-wrap wrap-break-word text-foreground/90 flex-1">{result.command}</pre>
+            <CopyButton text={result.command} />
+          </div>
+        )}
         <div
           ref={contentRef}
+          role="button"
+          tabIndex={0}
+          onClick={() => overflows && setDialogOpen(true)}
+          onKeyDown={(e) => { if (e.key === "Enter" && overflows) setDialogOpen(true); }}
           className={cn(
-            "overflow-hidden px-3 py-2 font-mono text-xs leading-relaxed transition-[max-height] duration-200",
-            !expanded && "max-h-24",
+            "overflow-hidden px-3 py-2 bg-background font-mono text-xs leading-relaxed max-h-16",
+            overflows && "cursor-pointer",
           )}
-          style={expanded ? { maxHeight: contentRef.current?.scrollHeight } : undefined}
         >
-          {result.command && (
-            <div className="flex gap-2 text-zinc-400">
-              <span className="shrink-0 select-none text-emerald-600">IN</span>
-              <pre className="whitespace-pre-wrap wrap-break-word text-zinc-200">{result.command}</pre>
-            </div>
-          )}
           {(output || !isRunning) && (
-            <div className="mt-1.5 flex gap-2 text-zinc-400">
+            <div className="flex gap-2 text-muted-foreground">
               <span className="shrink-0 select-none text-sky-600">OUT</span>
               <pre className="whitespace-pre-wrap wrap-break-word">
-                {output || <span className="text-zinc-500">(no output)</span>}
+                {output || <span className="text-muted-foreground/60">(no output)</span>}
               </pre>
             </div>
           )}
           {isRunning && !output && (
-            <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-zinc-100" />
+            <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-foreground" />
           )}
         </div>
-        {overflows && !expanded && (
-          <div className="absolute inset-x-0 bottom-0 flex items-end justify-center bg-linear-to-t from-zinc-950 to-transparent pt-6 pb-1">
-            <button
-              type="button"
-              onClick={() => setExpanded(true)}
-              className="text-[11px] text-zinc-400 hover:text-zinc-200 transition-colors font-medium"
-            >
-              Show more
-            </button>
-          </div>
+        {overflows && (
+          <Button
+            variant="outline"
+            size="xs"
+            onClick={() => setDialogOpen(true)}
+            className="absolute bottom-1.5 right-2 opacity-0 group-hover/term:opacity-100 transition-opacity backdrop-blur-sm"
+          >
+            Expand
+          </Button>
         )}
-        {overflows && expanded && (
-          <div className="flex justify-center pb-1">
-            <button
-              type="button"
-              onClick={() => setExpanded(false)}
-              className="text-[11px] text-zinc-400 hover:text-zinc-200 transition-colors font-medium"
-            >
-              Show less
-            </button>
-          </div>
-        )}
-      </div>
-    </Terminal>
+      </Terminal>
+
+      {/* Full output dialog */}
+      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <DialogContent className="sm:max-w-[50vw] w-full h-[70vh] flex flex-col p-0 gap-0 overflow-hidden">
+          <DialogHeader className="px-4 py-3 border-b border-border shrink-0">
+            <DialogTitle>&nbsp;</DialogTitle>
+          </DialogHeader>
+          <ScrollArea className="flex-1 min-h-0">
+            <pre className="px-4 py-3 font-mono text-xs leading-relaxed whitespace-pre-wrap wrap-break-word">
+              {output || "(no output)"}
+            </pre>
+          </ScrollArea>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -204,7 +230,7 @@ function TodoResult({ todos }: { todos: TodoItem[] }) {
   const total = todos.length;
 
   return (
-    <Queue className="mt-1">
+    <Queue>
       <QueueSection>
         <QueueSectionTrigger>
           <QueueSectionLabel
@@ -247,7 +273,7 @@ function TodoResult({ todos }: { todos: TodoItem[] }) {
 
 // ── Main tool call block ────────────────────────────────────────────
 
-export function ToolCallBlock({ tc }: { tc: ToolCallInfo }) {
+export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSelect?: (path: string) => void }) {
   const [expanded, setExpanded] = useState(false);
 
   const todos = useMemo(() =>
@@ -271,13 +297,12 @@ export function ToolCallBlock({ tc }: { tc: ToolCallInfo }) {
     }
     // Running with no result yet — show command with spinner.
     if (isRunning) {
-      let command = "";
-      try { command = JSON.parse(tc.args)?.command ?? ""; } catch { /* ignore */ }
       return (
-        <Terminal output="" isStreaming className="my-1 w-full text-xs">
+        <Terminal output="" isStreaming className="w-full text-xs">
           <TerminalHeader className="py-1.5 px-3">
-            <div className="flex items-center gap-2 min-w-0 text-xs">
-              <span className="font-semibold text-zinc-100 shrink-0">Bash</span>
+            <div className="flex items-center gap-1.5 min-w-0 text-xs">
+              <StatusBullet status="running" />
+              <span className="font-semibold text-foreground shrink-0">Bash</span>
             </div>
           </TerminalHeader>
         </Terminal>
@@ -285,9 +310,113 @@ export function ToolCallBlock({ tc }: { tc: ToolCallInfo }) {
     }
   }
 
+  // Web extract / web search / web crawl — compact one-liner with URL.
+  if (["web_extract", "web_search", "web_crawl"].includes(tc.toolName)) {
+    let displayText = "";
+    try {
+      const args = JSON.parse(tc.args);
+      if (tc.toolName === "web_extract") {
+        const urls: string[] = args.urls ?? [];
+        displayText = urls[0] ?? "";
+      } else if (tc.toolName === "web_search") {
+        displayText = args.query ?? "";
+      } else if (tc.toolName === "web_crawl") {
+        displayText = args.url ?? "";
+      }
+    } catch { /* ignore */ }
+
+    const toolLabel = {
+      web_extract: "Web Fetch",
+      web_search: "Web Search",
+      web_crawl: "Web Crawl",
+    }[tc.toolName] ?? tc.toolName;
+
+    return (
+      <div className="flex items-center gap-1.5 px-2 py-1 text-sm font-mono">
+        <StatusBullet status={tc.status} />
+        <span className="font-semibold text-foreground">{toolLabel}</span>
+        <span className="text-muted-foreground truncate">{displayText}</span>
+      </div>
+    );
+  }
+
+  // Read/write/patch/search/list file tools — compact one-liner.
+  if (["read_file", "write_file", "patch", "search_files", "list_files"].includes(tc.toolName)) {
+    let filePath = "";
+    let detail = "";
+    try {
+      const args = JSON.parse(tc.args);
+      filePath = args.path ?? args.file_path ?? "";
+      if (tc.toolName === "read_file") {
+        const parts: string[] = [];
+        if (args.offset != null || args.limit != null) {
+          const start = (args.offset ?? 0) + 1;
+          const end = args.limit ? start + args.limit - 1 : undefined;
+          parts.push(end ? `lines ${start}-${end}` : `from line ${start}`);
+        }
+        if (parts.length) detail = `(${parts.join(", ")})`;
+      } else if (tc.toolName === "search_files") {
+        detail = args.pattern ? `"${args.pattern}"` : "";
+      } else if (tc.toolName === "list_files") {
+        detail = args.pattern && args.pattern !== "*" ? `"${args.pattern}"` : "";
+      }
+    } catch { /* ignore */ }
+
+    const toolLabel = {
+      read_file: "Read",
+      write_file: "Write",
+      patch: "Patch",
+      search_files: "Search",
+      list_files: "List",
+    }[tc.toolName] ?? tc.toolName;
+
+    // The backend replaces the workspace path with __WORKSPACE__.
+    // Also handle legacy events with absolute paths by stripping
+    // everything up to a recognizable project directory.
+    const displayPath = (() => {
+      // New format: __WORKSPACE__/path
+      if (filePath.startsWith("__WORKSPACE__")) {
+        return filePath.replace(/^__WORKSPACE__\/?/, "");
+      }
+      // Legacy: absolute path — strip /home/user/... prefix.
+      if (filePath.startsWith("/")) {
+        const parts = filePath.split("/").filter(Boolean);
+        // Skip system dirs, usernames, workspace UUIDs.
+        const uuidRe = /^[0-9a-f]{8}-/;
+        const skip = new Set(["home", "tmp", "work", "var", "opt", "data", "surogates", "workspaces"]);
+        for (let i = 0; i < parts.length - 1; i++) {
+          if (!skip.has(parts[i]) && !uuidRe.test(parts[i])) {
+            return parts.slice(i).join("/");
+          }
+        }
+        return parts.slice(-2).join("/");
+      }
+      return filePath;
+    })();
+
+    return (
+      <div className="flex items-center gap-1.5 px-2 py-1 text-sm font-mono">
+        <StatusBullet status={tc.status} />
+        <span className="font-semibold text-foreground">{toolLabel}</span>
+        {onFileSelect && filePath && ["read_file", "write_file", "patch"].includes(tc.toolName) ? (
+          <button
+            type="button"
+            onClick={() => onFileSelect(filePath)}
+            className="text-primary hover:underline truncate text-left cursor-pointer underline"
+          >
+            {displayPath}
+          </button>
+        ) : (
+          <span className="text-muted-foreground truncate">{displayPath}</span>
+        )}
+        {detail && <span className="text-muted-foreground ml-1">{detail}</span>}
+      </div>
+    );
+  }
+
   // Default — generic collapsible tool call.
   return (
-    <div className="my-1">
+    <div>
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
@@ -303,12 +432,12 @@ export function ToolCallBlock({ tc }: { tc: ToolCallInfo }) {
             expanded && "rotate-90",
           )}
         />
-        {STATUS_ICON[tc.status]}
+        <StatusBullet status={tc.status} />
         <span className="font-medium text-foreground/80">{tc.toolName}</span>
       </button>
 
       {expanded && (
-        <div className="ml-6 mt-0.5 space-y-1 text-xs font-mono">
+        <div className="ml-6 mt-0.5 space-y-1 text-sm font-mono">
           <pre className="overflow-x-auto rounded bg-muted/40 px-2 py-1 text-muted-foreground whitespace-pre-wrap break-all">
             {formatArgs(tc.args)}
           </pre>
