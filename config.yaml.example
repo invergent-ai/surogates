@@ -55,6 +55,8 @@ worker:
 sandbox:
   backend: "process"            # "process" or "kubernetes"
   default_timeout: 300
+  srt_enabled: true            # Sandboxing tool for enforcing filesystem and network restrictions on arbitrary processes at the OS level
+  srt_settings_dir: "/tmp/surogates/srt"
 
 # ── Governance ────────────────────────────────────────────────────────
 governance:

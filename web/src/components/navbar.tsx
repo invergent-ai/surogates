@@ -3,7 +3,8 @@
 //
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { PlusIcon, MessageSquareIcon, LogOutIcon, TrashIcon } from "lucide-react";
+import { PlusIcon, MessageSquareIcon, LogOutIcon, TrashIcon, SunIcon, MoonIcon } from "lucide-react";
+import { useTheme } from "next-themes";
 import { useAppStore } from "@/stores/app-store";
 import { logout } from "@/api/auth";
 import { cn } from "@/lib/utils";
@@ -19,6 +20,7 @@ export function SessionSidebar() {
   const createSession = useAppStore((s) => s.createSession);
   const deleteSession = useAppStore((s) => s.deleteSession);
   const user = useAppStore((s) => s.user);
+  const { theme, setTheme } = useTheme();
 
   async function handleNewSession() {
     const session = await createSession({});
@@ -153,14 +155,28 @@ export function SessionSidebar() {
                 </div>
               </div>
             )}
-            <button
-              type="button"
-              onClick={handleLogout}
-              className="flex items-center gap-2 w-full px-2.5 py-1.5 rounded-md text-sm text-subtle hover:bg-input hover:text-foreground transition-colors"
-            >
-              <LogOutIcon className="w-4 h-4" />
-              Sign out
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="flex items-center gap-2 flex-1 px-2.5 py-1.5 rounded-md text-sm text-subtle hover:bg-input hover:text-foreground transition-colors"
+              >
+                <LogOutIcon className="w-4 h-4" />
+                Sign out
+              </button>
+              <button
+                type="button"
+                onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+                className="p-1.5 rounded-md text-subtle hover:bg-input hover:text-foreground transition-colors"
+                aria-label="Toggle theme"
+              >
+                {theme === "dark" ? (
+                  <SunIcon className="w-4 h-4" />
+                ) : (
+                  <MoonIcon className="w-4 h-4" />
+                )}
+              </button>
+            </div>
           </>
         )}
         <button
