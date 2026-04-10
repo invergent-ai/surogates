@@ -144,7 +144,11 @@ async def stream_events(
                 if await request.is_disconnected():
                     return
 
-                events = await store.get_events(session_id, after=cursor, limit=50)
+                try:
+                    events = await store.get_events(session_id, after=cursor, limit=50)
+                except asyncio.CancelledError:
+                    # Client disconnected mid-query — exit cleanly.
+                    return
 
                 for event in events:
                     yield {
@@ -159,6 +163,8 @@ async def stream_events(
                     # No new events -- check if the session has terminated.
                     try:
                         session = await store.get_session(session_id)
+                    except asyncio.CancelledError:
+                        return
                     except SessionNotFoundError:
                         yield {
                             "event": "session.done",

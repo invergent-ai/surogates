@@ -147,6 +147,18 @@ class LLMSettings(BaseSettings):
 
 
 class SandboxSettings(BaseSettings):
+    """Sandbox execution environment configuration.
+
+    ``srt_enabled`` activates the Anthropic Sandbox Runtime (``srt``)
+    which uses bubblewrap (Linux) for kernel-level filesystem and network
+    restrictions on every terminal command.  This prevents shell escape
+    attacks (``cd ~``, ``echo > /etc/passwd``, etc.) that application-level
+    checks cannot catch.
+
+    Requires ``srt``, ``bubblewrap``, ``socat``, and ``ripgrep`` on the
+    worker node.  Disabled by default for local dev.
+    """
+
     model_config = {"env_prefix": "SUROGATES_SANDBOX_"}
 
     backend: str = "process"  # "process" or "kubernetes"
@@ -154,6 +166,8 @@ class SandboxSettings(BaseSettings):
     default_timeout: int = 300
     default_cpu: str = "500m"
     default_memory: str = "512Mi"
+    srt_enabled: bool = False
+    srt_settings_dir: str = "/tmp/surogates/srt"
 
 
 class TransparencySettings(BaseSettings):

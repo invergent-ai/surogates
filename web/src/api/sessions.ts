@@ -81,7 +81,10 @@ export async function pauseSession(sessionId: string): Promise<void> {
     `/api/v1/sessions/${sessionId}/pause`,
     { method: "POST" },
   );
-  if (!response.ok) throw new Error("Failed to pause session");
+  // 409 = already paused — treat as success.
+  if (!response.ok && response.status !== 409) {
+    throw new Error("Failed to pause session");
+  }
 }
 
 export async function resumeSession(sessionId: string): Promise<void> {

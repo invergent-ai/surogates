@@ -52,6 +52,9 @@ export function useSessionRuntime(sessionId: string | null) {
   const esRef = useRef<EventSource | null>(null);
   const lastEventIdRef = useRef<number>(0);
   const sessionDoneRef = useRef<boolean>(false);
+  // Tracks whether llm.delta events have streamed content for the current
+  // turn.  When true, llm.response content is redundant and ignored.
+  const hadDeltasRef = useRef<boolean>(false);
   // Ref to the latest connect function so onerror can call it without
   // a circular declaration dependency.
   const connectRef = useRef<() => void>(() => {});
@@ -78,13 +81,25 @@ export function useSessionRuntime(sessionId: string | null) {
           }
 
           case "llm.delta": {
+            hadDeltasRef.current = true;
             const lastIdx = findLastAssistantIndex(next);
-            if (lastIdx >= 0 && next[lastIdx].status === "streaming") {
-              // Create a new object to ensure React detects the change.
-              const prev = next[lastIdx];
+            const lastMsg = lastIdx >= 0 ? next[lastIdx] : null;
+            // Append to the current message only if it's streaming,
+            // doesn't already have tool calls, AND there's no user
+            // message after it (which means a new turn started).
+            const hasUserAfter = lastIdx >= 0 && next.slice(lastIdx + 1).some(
+              (m) => m.role === "user",
+            );
+            const canAppend = !!(
+              lastMsg &&
+              lastMsg.status === "streaming" &&
+              !(lastMsg.toolCalls && lastMsg.toolCalls.length > 0) &&
+              !hasUserAfter
+            );
+            if (canAppend) {
               next[lastIdx] = {
-                ...prev,
-                content: prev.content + ((data.content as string) ?? ""),
+                ...lastMsg!,
+                content: lastMsg!.content + ((data.content as string) ?? ""),
               };
             } else {
               next.push({
@@ -108,22 +123,68 @@ export function useSessionRuntime(sessionId: string | null) {
               Array.isArray(msg.tool_calls) &&
               (msg.tool_calls as unknown[]).length > 0
             );
-            const respIdx = findLastAssistantIndex(next);
-            if (respIdx >= 0) {
-              next[respIdx] = {
-                ...next[respIdx],
-                content: responseContent || next[respIdx].content,
-                status: hasToolCalls ? "streaming" : "complete",
-              };
-            } else {
+
+            // When llm.delta events already streamed the content, the
+            // llm.response carries the same text — ignore it to avoid
+            // duplication.  Only use responseContent when no deltas were
+            // received (non-streaming providers).
+            const useDeltaContent = hadDeltasRef.current;
+            // Reset for next turn.
+            hadDeltasRef.current = false;
+
+            const prevAssistant = findLastAssistant(next);
+            const prevHasTools = !!(
+              prevAssistant?.toolCalls && prevAssistant.toolCalls.length > 0
+            );
+            const idx = findLastAssistantIndex(next);
+
+            if (useDeltaContent && idx >= 0) {
+              // Deltas already delivered content. Just update status
+              // and move content to reasoning if tool calls follow.
+              if (hasToolCalls) {
+                next[idx] = {
+                  ...next[idx],
+                  reasoning:
+                    (next[idx].reasoning ?? "") + next[idx].content,
+                  content: "",
+                  status: "streaming",
+                };
+              } else {
+                next[idx] = {
+                  ...next[idx],
+                  status: "complete",
+                };
+              }
+            } else if (prevHasTools || !prevAssistant) {
+              // New turn (previous had tools or no previous message).
               next.push({
                 id: `evt-${eventId}`,
                 role: "assistant",
-                content: responseContent,
+                content: hasToolCalls ? "" : responseContent,
+                reasoning: hasToolCalls && responseContent
+                  ? responseContent
+                  : undefined,
                 createdAt: new Date(),
                 status: hasToolCalls ? "streaming" : "complete",
               });
+            } else if (idx >= 0) {
+              // Same turn, no deltas — use response content.
+              if (hasToolCalls && responseContent) {
+                next[idx] = {
+                  ...next[idx],
+                  reasoning:
+                    (next[idx].reasoning ?? "") + responseContent,
+                  status: "streaming",
+                };
+              } else {
+                next[idx] = {
+                  ...next[idx],
+                  content: responseContent || next[idx].content,
+                  status: hasToolCalls ? "streaming" : "complete",
+                };
+              }
             }
+
             if (!hasToolCalls) {
               setIsRunning(false);
             }
@@ -149,7 +210,11 @@ export function useSessionRuntime(sessionId: string | null) {
 
           case "tool.call": {
             let assistant = findLastAssistant(next);
-            if (!assistant || assistant.status === "complete") {
+            const assistantIdx = findLastAssistantIndex(next);
+            const userAfterAssistant = assistantIdx >= 0 && next.slice(assistantIdx + 1).some(
+              (m) => m.role === "user",
+            );
+            if (!assistant || assistant.status === "complete" || userAfterAssistant) {
               assistant = {
                 id: `evt-${eventId}-tc`,
                 role: "assistant",
@@ -207,14 +272,26 @@ export function useSessionRuntime(sessionId: string | null) {
             break;
           }
 
+          case "session.pause":
           case "session.complete":
           case "session.fail":
           case "session.done":
           case "harness.crash": {
             const doneIdx = findLastAssistantIndex(next);
             if (doneIdx >= 0 && next[doneIdx].status === "streaming") {
+              // Mark any running tool calls as complete/error.
+              const finalTools = next[doneIdx].toolCalls?.map((tc) =>
+                tc.status === "running"
+                  ? {
+                      ...tc,
+                      status: (type === "session.pause" ? "complete" : "error") as ToolCallInfo["status"],
+                      result: tc.result ?? (type === "session.pause" ? "[interrupted]" : "[failed]"),
+                    }
+                  : tc,
+              );
               next[doneIdx] = {
                 ...next[doneIdx],
+                toolCalls: finalTools,
                 status:
                   type === "session.fail" || type === "harness.crash"
                     ? "error"
@@ -261,6 +338,9 @@ export function useSessionRuntime(sessionId: string | null) {
 
     for (const eventType of LISTENED_EVENTS) {
       es.addEventListener(eventType, (e: MessageEvent) => {
+        // Ignore events from a stale EventSource (React StrictMode
+        // cleanup may close the ES while queued events are still firing).
+        if (esRef.current !== es) return;
         const data = JSON.parse(e.data) as Record<string, unknown>;
         const eventId = e.lastEventId ? Number(e.lastEventId) : 0;
         if (eventId > lastEventIdRef.current) {
@@ -298,7 +378,9 @@ export function useSessionRuntime(sessionId: string | null) {
 
     lastEventIdRef.current = 0;
     sessionDoneRef.current = false;
+    hadDeltasRef.current = false;
     setMessages([]);
+    setIsRunning(false);
     connect();
 
     return () => {

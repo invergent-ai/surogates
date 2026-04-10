@@ -24,6 +24,7 @@ import os
 import re
 import time
 import traceback
+from pathlib import Path
 from typing import Any, Optional
 
 from surogates.tools.registry import ToolRegistry, ToolSchema
@@ -51,6 +52,78 @@ _DEFAULT_TIMEOUT = int(os.getenv("TERMINAL_TIMEOUT", "180"))
 
 _DEFAULT_CWD = os.getenv("TERMINAL_CWD", os.getcwd())
 """Default working directory for commands."""
+
+
+
+# ---------------------------------------------------------------------------
+# Anthropic Sandbox Runtime (srt) integration
+# ---------------------------------------------------------------------------
+
+
+def _get_srt_settings_path(workspace_path: str) -> str:
+    """Return the path to the per-workspace srt settings file.
+
+    Creates the file if it doesn't exist.  The settings restrict writes
+    to the workspace directory and block reads of secrets.
+    """
+    import hashlib
+    ws_hash = hashlib.sha256(workspace_path.encode()).hexdigest()[:12]
+    from surogates.config import load_settings
+    settings_dir = Path(load_settings().sandbox.srt_settings_dir)
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    settings_path = settings_dir / f"srt-{ws_hash}.json"
+
+    if not settings_path.exists():
+        settings = {
+            "filesystem": {
+                "denyRead": [
+                    "~/.ssh",
+                    "~/.aws",
+                    "~/.gnupg",
+                    "~/.kube",
+                    "~/.docker",
+                ],
+                "allowWrite": [workspace_path],
+                "denyWrite": [
+                    ".env",
+                    ".env.local",
+                    ".env.production",
+                    "credentials.json",
+                    "secrets.yaml",
+                ],
+            },
+            "network": {
+                "allowedDomains": [
+                    "github.com",
+                    "*.github.com",
+                    "*.githubusercontent.com",
+                    "pypi.org",
+                    "*.pypi.org",
+                    "files.pythonhosted.org",
+                    "npmjs.org",
+                    "*.npmjs.org",
+                    "registry.npmjs.org",
+                ],
+                "deniedDomains": [],
+            },
+            "mandatoryDenySearchDepth": 3,
+        }
+        settings_path.write_text(
+            json.dumps(settings, indent=2), encoding="utf-8"
+        )
+
+    return str(settings_path)
+
+
+def _wrap_with_srt(command: str, workspace_path: str) -> str:
+    """Wrap a shell command with the Anthropic Sandbox Runtime.
+
+    Uses ``srt -c`` which passes the command string directly to a shell
+    (like ``sh -c``), avoiding double-quoting issues.
+    """
+    settings_path = _get_srt_settings_path(workspace_path)
+    escaped = command.replace("'", "'\\''")
+    return f"srt --settings '{settings_path}' -c '{escaped}'"
 
 
 # ---------------------------------------------------------------------------
@@ -368,15 +441,6 @@ async def _terminal_handler(
         check_interval = arguments.get("check_interval")
         notify_on_complete = arguments.get("notify_on_complete", False)
 
-        # --- Delegate to sandbox pool when available -----------------------
-        sandbox_pool = kwargs.get("sandbox_pool")
-        session_id = kwargs.get("session_id")
-        if sandbox_pool is not None and session_id is not None:
-            input_str = json.dumps(arguments)
-            return await sandbox_pool.execute(
-                str(session_id), "terminal", input_str
-            )
-
         # --- Resolve workdir (workspace-sandboxed) -------------------------
         # workspace_path from session config is the only trusted CWD.
         # User-supplied workdir is allowed only if it resolves inside
@@ -442,11 +506,16 @@ async def _terminal_handler(
         if background:
             task_id = kwargs.get("task_id", "default")
             use_pty = arguments.get("pty", False)
+            bg_env = _build_child_env()
+            if workspace_path:
+                bg_env["HOME"] = workspace_path
+                bg_env.pop("CDPATH", None)
             session = process_registry.spawn(
                 command=command,
                 cwd=workdir,
                 task_id=task_id,
                 use_pty=use_pty,
+                env_vars=bg_env,
             )
 
             if notify_on_complete:
@@ -476,6 +545,31 @@ async def _terminal_handler(
 
         # --- Foreground execution with retry logic -------------------------
         child_env = _build_child_env()
+
+        # Sandbox the environment when workspace_path is set.
+        # Override HOME so `cd ~`, `~/...` paths, and `$HOME` all resolve
+        # inside the workspace.  Clear CDPATH to prevent `cd` from jumping
+        # to directories outside the workspace.
+        if workspace_path:
+            child_env["HOME"] = workspace_path
+            child_env.pop("CDPATH", None)
+            # Prevent git from reading/writing config files that srt
+            # blocks as mandatory deny paths (.gitconfig, .gitmodules).
+            child_env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+            child_env["GIT_CONFIG_SYSTEM"] = "/dev/null"
+            child_env["GIT_CONFIG_NOSYSTEM"] = "1"
+            # XDG config dir — redirect to workspace to avoid srt denials
+            # on $HOME/.config/ access attempts.
+            child_env["XDG_CONFIG_HOME"] = os.path.join(workspace_path, ".config")
+
+        # Wrap command with Anthropic Sandbox Runtime (srt) for OS-level
+        # filesystem and network isolation via bubblewrap + seccomp.
+        # This prevents shell escapes (cd ~, echo > /etc/passwd, etc.)
+        # that application-level checks cannot catch.
+        from surogates.config import load_settings as _load_settings
+        if _load_settings().sandbox.srt_enabled and workspace_path:
+            command = _wrap_with_srt(command, workspace_path)
+
         max_retries = 3
         retry_count = 0
         result: dict[str, Any] | None = None

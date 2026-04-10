@@ -283,14 +283,26 @@ async def pause_session(
     store = _get_session_store(request)
     session = await _get_session_for_tenant(store, session_id, tenant)
 
-    if session.status != "active":
+    if session.status not in ("active", "processing", "paused"):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Cannot pause session in '{session.status}' state.",
         )
 
-    await store.emit_event(session_id, EventType.SESSION_PAUSE, {})
-    await store.update_session_status(session_id, "paused")
+    # Only emit event + update status if not already paused.
+    if session.status != "paused":
+        await store.emit_event(session_id, EventType.SESSION_PAUSE, {})
+        await store.update_session_status(session_id, "paused")
+
+    # Always publish the interrupt signal — the harness may still be
+    # running even if the DB status is already "paused" (race condition
+    # between status update and harness loop iteration).
+    redis = request.app.state.redis
+    import json as _json
+    await redis.publish(
+        f"surogates:interrupt:{session_id}",
+        _json.dumps({"reason": "paused by user"}),
+    )
 
     return await store.get_session(session_id)
 

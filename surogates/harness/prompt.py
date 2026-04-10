@@ -472,6 +472,27 @@ class PromptBuilder:
             "(multi-tenant, K8s-native)"
         )
 
+        # Workspace path — tells the LLM where it is and that it must
+        # stay within the workspace.
+        workspace = self._get_workspace_path()
+        if workspace:
+            parts.append(f"- **Workspace**: `{workspace}`")
+            parts.append(f"- **HOME**: `{workspace}` (overridden)")
+            parts.append(
+                "\n## Workspace Rules\n"
+                "You are operating inside a sandboxed workspace. "
+                "All file operations and terminal commands are restricted "
+                "to the workspace directory above. You MUST:\n"
+                "- Use relative paths or `$HOME` for all file operations\n"
+                "- Clone repositories into the workspace (e.g. `git clone <url>` "
+                "without specifying a path, or `git clone <url> ./dirname`)\n"
+                "- Never use absolute paths outside the workspace\n"
+                "- Never attempt to read `~/.ssh`, `~/.aws`, or other "
+                "credential directories\n"
+                "\nAttempts to access files outside the workspace will be "
+                "blocked by the sandbox and the operation will fail."
+            )
+
         # Platform hint based on session channel.
         channel = self._get_channel()
         if channel:

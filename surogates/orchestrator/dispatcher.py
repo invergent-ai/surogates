@@ -58,10 +58,25 @@ class Orchestrator:
         self._poll_timeout = poll_timeout
         self._running = True
         self._tasks: set[asyncio.Task] = set()
+        # Active harnesses by session ID — for delivering interrupt signals.
+        self._active_harnesses: dict[UUID, Any] = {}
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def interrupt_session(self, session_id: UUID, message: str | None = None) -> bool:
+        """Interrupt a running harness for the given session.
+
+        Returns ``True`` if the session was active and the interrupt was
+        delivered, ``False`` if the session was not running on this worker.
+        """
+        harness = self._active_harnesses.get(session_id)
+        if harness is None:
+            return False
+        harness.interrupt(message or "Session paused by user")
+        logger.info("Interrupted harness for session %s", session_id)
+        return True
 
     async def enqueue(self, session_id: UUID, priority: float = 0) -> None:
         """Add session to Redis sorted set work queue.
@@ -76,11 +91,20 @@ class Orchestrator:
 
         Uses ``BZPOPMIN`` with a timeout for blocking dequeue.  On each
         item, a bounded async task is spawned via the semaphore.
+
+        Also starts a Redis pub/sub listener for interrupt signals so
+        that the API server can pause/stop running sessions.
         """
         logger.info(
             "Orchestrator starting (queue=%s, poll_timeout=%ds)",
             self._queue_key,
             self._poll_timeout,
+        )
+
+        # Start interrupt listener in background.
+        interrupt_task = asyncio.create_task(
+            self._listen_for_interrupts(),
+            name="interrupt-listener",
         )
 
         while self._running:
@@ -120,6 +144,13 @@ class Orchestrator:
             self._tasks.add(task)
             task.add_done_callback(self._task_done)
 
+        # Stop interrupt listener.
+        interrupt_task.cancel()
+        try:
+            await interrupt_task
+        except asyncio.CancelledError:
+            pass
+
         # Wait for in-flight tasks to drain.
         if self._tasks:
             logger.info(
@@ -153,7 +184,12 @@ class Orchestrator:
             # Support both sync and async factories.
             if hasattr(harness, "__await__"):
                 harness = await harness
-            await harness.wake(session_id)
+            # Track the active harness so interrupt signals can reach it.
+            self._active_harnesses[session_id] = harness
+            try:
+                await harness.wake(session_id)
+            finally:
+                self._active_harnesses.pop(session_id, None)
         except Exception as exc:
             logger.exception(
                 "Harness failed for session %s (attempt %d/%d)",
@@ -207,3 +243,47 @@ class Orchestrator:
         exc = task.exception()
         if exc is not None:
             logger.error("Task %s raised: %s", task.get_name(), exc)
+
+    async def _listen_for_interrupts(self) -> None:
+        """Subscribe to Redis pub/sub for session interrupt signals.
+
+        The API server publishes to ``surogates:interrupt:{session_id}``
+        when a session is paused.  This listener delivers the signal to
+        the running harness on this worker.
+        """
+        import json as _json
+
+        pubsub = self.redis.pubsub()
+        await pubsub.psubscribe("surogates:interrupt:*")
+        logger.debug("Interrupt listener subscribed to surogates:interrupt:*")
+
+        try:
+            async for message in pubsub.listen():
+                if message["type"] != "pmessage":
+                    continue
+                try:
+                    channel = message["channel"]
+                    if isinstance(channel, bytes):
+                        channel = channel.decode()
+                    # Channel format: surogates:interrupt:<session_id>
+                    session_id_str = channel.rsplit(":", 1)[-1]
+                    session_id = UUID(session_id_str)
+
+                    data = message.get("data", b"{}")
+                    if isinstance(data, bytes):
+                        data = data.decode()
+                    payload = _json.loads(data) if data else {}
+                    reason = payload.get("reason", "interrupted")
+
+                    self.interrupt_session(session_id, reason)
+                except Exception:
+                    logger.debug(
+                        "Failed to process interrupt message: %s",
+                        message,
+                        exc_info=True,
+                    )
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await pubsub.punsubscribe("surogates:interrupt:*")
+            await pubsub.aclose()

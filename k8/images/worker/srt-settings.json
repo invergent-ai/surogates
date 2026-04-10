@@ -1,0 +1,26 @@
+{
+  "filesystem": {
+    "denyRead": [
+      "~/.ssh",
+      "~/.aws",
+      "~/.gnupg",
+      "~/.kube",
+      "~/.docker",
+      "~/.config/gcloud"
+    ],
+    "allowWrite": [],
+    "denyWrite": [
+      ".env",
+      ".env.local",
+      ".env.production",
+      "credentials.json",
+      "secrets.yaml"
+    ]
+  },
+  "network": {
+    "allowedDomains": [],
+    "deniedDomains": [],
+    "allowLocalBinding": false
+  },
+  "mandatoryDenySearchDepth": 3
+}

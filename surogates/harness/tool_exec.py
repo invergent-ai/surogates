@@ -347,6 +347,47 @@ async def execute_single_tool(
         tool_call_data,
     )
 
+    # Workspace sandbox check — enforced at the governance layer before
+    # the tool is dispatched.  Uses AGT ExecutionSandbox for path
+    # containment (symlink resolution, is_relative_to).
+    workspace_path = session.config.get("workspace_path")
+    from surogates.governance.policy import GovernanceGate, _PATH_ARGUMENT_MAP
+    path_keys = _PATH_ARGUMENT_MAP.get(tool_name)
+    if workspace_path and path_keys:
+        _sandbox_gate = GovernanceGate()
+        decision = _sandbox_gate.check(
+            tool_name, tool_args, workspace_path=workspace_path,
+        )
+        if not decision.allowed:
+            logger.warning(
+                "Workspace sandbox blocked %s for session %s: %s",
+                tool_name, session.id, decision.reason,
+            )
+            result_content = json.dumps({
+                "error": f"Blocked: {decision.reason}",
+            })
+
+            result_event_id = await store.emit_event(
+                session.id,
+                EventType.TOOL_RESULT,
+                {
+                    "tool_call_id": tool_call_id,
+                    "name": tool_name,
+                    "content": result_content,
+                    "elapsed_ms": 0,
+                },
+            )
+            await store.advance_harness_cursor(
+                session.id,
+                through_event_id=result_event_id,
+                lease_token=lease.lease_token,
+            )
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": result_content,
+            }
+
     # Execute the tool, capturing errors as results (never crash the loop).
     start = time.monotonic()
     try:
@@ -360,7 +401,7 @@ async def execute_single_tool(
             budget=budget,
             memory_manager=memory_manager,
             sandbox_pool=sandbox_pool,
-            workspace_path=session.config.get("workspace_path"),
+            workspace_path=workspace_path,
         )
     except KeyError:
         result_content = json.dumps({
