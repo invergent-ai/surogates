@@ -3,7 +3,7 @@
 Provides :data:`MODEL_CATALOG` for fast lookups and convenience functions
 for token estimation and cost calculation.
 
-Context-probing helpers (ported from Hermes agent/model_metadata.py):
+Context-probing helpers:
 
 - :data:`CONTEXT_PROBE_TIERS` -- descending tiers for iterative step-down.
 - :func:`get_next_probe_tier` -- returns the next lower tier.
@@ -231,7 +231,7 @@ def estimate_cost(
 
 
 # ---------------------------------------------------------------------------
-# Context probe tiers (ported from Hermes agent/model_metadata.py)
+# Context probe tiers
 # ---------------------------------------------------------------------------
 
 CONTEXT_PROBE_TIERS: list[int] = [

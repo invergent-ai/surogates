@@ -18,7 +18,7 @@ Provides two integration points:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request, status
@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/health",
     "/v1/auth/",
+    "/v1/transparency",
     "/docs",
     "/redoc",
     "/openapi.json",
@@ -67,9 +68,20 @@ async def get_current_tenant(
 ) -> TenantContext:
     """FastAPI dependency that enforces JWT auth and returns ``TenantContext``.
 
+    Accepts JWT from either the ``Authorization: Bearer`` header or a
+    ``?token=`` query parameter (for SSE/WebSocket clients that cannot
+    set headers).
+
     Attach to routes via ``Depends(get_current_tenant)``.
     """
-    if credentials is None:
+    # Try header first, fall back to query param.
+    raw_token: str | None = None
+    if credentials is not None:
+        raw_token = credentials.credentials
+    else:
+        raw_token = request.query_params.get("token")
+
+    if not raw_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing authentication credentials.",
@@ -77,7 +89,7 @@ async def get_current_tenant(
         )
 
     try:
-        payload = decode_token(credentials.credentials)
+        payload = decode_token(raw_token)
     except InvalidTokenError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -147,15 +159,21 @@ class _AuthMiddleware(BaseHTTPMiddleware):
         if any(path.startswith(prefix) for prefix in _PUBLIC_PATH_PREFIXES):
             return await call_next(request)
 
+        # Extract token from Authorization header or ?token= query param.
+        # SSE (EventSource) and WebSocket clients cannot set headers, so they
+        # pass the JWT as a query parameter instead.
         auth_header = request.headers.get("authorization", "")
-        if not auth_header.lower().startswith("bearer "):
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:]
+        else:
+            token = request.query_params.get("token", "")
+
+        if not token:
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={"detail": "Missing authentication credentials."},
                 headers={"WWW-Authenticate": "Bearer"},
             )
-
-        token = auth_header[7:]  # strip "Bearer "
         try:
             payload = decode_token(token)
         except InvalidTokenError as exc:
@@ -222,15 +240,22 @@ def setup_auth_middleware(app: FastAPI, settings: Settings) -> None:
         if any(path.startswith(prefix) for prefix in _PUBLIC_PATH_PREFIXES):
             return await call_next(request)
 
+        # Extract token from Authorization header or ?token= query param.
+        # SSE (EventSource) and WebSocket clients cannot set headers, so
+        # they pass the JWT as a query parameter instead.
         auth_header = request.headers.get("authorization", "")
-        if not auth_header.lower().startswith("bearer "):
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:]
+        else:
+            token = request.query_params.get("token", "")
+
+        if not token:
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={"detail": "Missing authentication credentials."},
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        token = auth_header[7:]
         try:
             payload = decode_token(token)
         except InvalidTokenError as exc:

@@ -1,8 +1,10 @@
 # Surogates
 
-An open platform for running managed agents on Kubernetes.
+**Open platform for running Managed Agents on Kubernetes** with a clear hands/brain separation, multi-tenancy, session durability, and a governance layer for policy enforcement and MCP tool poisoning defense.
 
-Surogates decouples the components of an agent — session, harness, and sandbox — so each can fail, scale, and be replaced independently. The session is a durable append-only event log. The harness (brain) is a stateless worker that drives the LLM loop. The sandbox (hands) is an isolated execution environment reached via tool calls. No component assumes anything about the others beyond a small set of interfaces.
+**Surogates** decouples the components of an agent — session, harness, and sandbox — so each can fail, scale, and be replaced independently. The session is a durable append-only event log. The harness (brain) is a stateless worker that drives the LLM loop. The sandbox (hands) is an isolated execution environment reached via tool calls. No component assumes anything about the others beyond a small set of interfaces. 
+
+This makes Surogates more **resilient, scalable, and secure** than existing open agent frameworks, and a better fit **for enterprise use cases**. It is designed to run on Kubernetes, with **multi-tenancy, per-tenant credential vaults, pluggable auth, and a governance layer for policy enforcement and MCP tool poisoning defense**.
 
 ## Why
 
@@ -12,7 +14,7 @@ The two most prominent open agent projects occupy opposite ends of a spectrum, a
 
 **Hermes Agent** (NousResearch) is a self-improving agent framework with a genuine agent loop, 40+ built-in tools, MCP support, a skill system, memory with full-text search, and platform adapters for Telegram, Slack, Discord, and more. But it is a single-user, single-process system — state lives in a local SQLite database, there is no multi-tenancy, no credential isolation, no orchestration layer, and no crash recovery beyond restarting the process. It runs on a $5 VPS, not a fleet.
 
-Surogates fills the gap. It takes the operational pattern from Anthropic's Managed Agents architecture — decoupled session, harness, and sandbox — and makes it an open, self-hosted Kubernetes-native platform with what neither project provides:
+**Surogates** fills the gap. It takes the operational pattern from Anthropic's Managed Agents architecture — decoupled session, harness, and sandbox — and makes it an open, self-hosted Kubernetes-native platform with what neither project provides:
 
 - **Session durability** — an append-only event log in PostgreSQL. The harness crashes? A new one calls `wake(session_id)`, replays events, and picks up where it left off. The sandbox dies? The harness gets a tool-call error and provisions a new one.
 - **Multi-tenancy** — orgs, users, per-tenant credentials vault, pluggable auth.
@@ -42,9 +44,18 @@ Channel Adapters (Web Chat, Slack, Teams, Telegram)
 - **Kubernetes-native** — workers, sandboxes, and adapters are all K8s workloads. Sandbox pods are provisioned on demand.
 - **Multi-tenant** — orgs, users, per-tenant credentials vault, pluggable auth (database, LDAP, OIDC).
 - **OpenAI-compatible LLM providers** — swap models without changing application code. Native Anthropic path retained where needed.
-- **Governance** — Microsoft Agent Governance Toolkit for tool-call policy enforcement and MCP tool poisoning defense.
+- **Governance** — Tool-call policy enforcement and MCP tool poisoning defense.
 
 
-## Status
+## Contributing
+Our platform borrowed the best ideas and sometimes pieces of code from many notable open source projects:
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent)
+- [OpenClaw](https://github.com/openclaw/openclaw)
+- [Nvidia OpenShell](https://github.com/NVIDIA/OpenShell)
+- [Anthropic's Managed Agents](https://platform.claude.com/docs/en/managed-agents/overview)
+- [Anthropic Sandbox](https://github.com/anthropic-experimental/sandbox-runtime)
+- [Microsft AI Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit)
 
-Early development. 
+If we missed any projects, do let us know ! We are grateful to those communities for their contributions to the open agent ecosystem.
+
+We are committed to open source, and welcome contributions from the community to help us build a robust, secure, and feature-rich platform.

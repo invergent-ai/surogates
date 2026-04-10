@@ -45,16 +45,16 @@ class TestRepairToolName:
         assert repair_tool_name("file read", reg) == "file_read"
 
     def test_mixed_normalization(self) -> None:
-        reg = _make_registry("web_search", "memory_read")
+        reg = _make_registry("web_search", "memory")
         assert repair_tool_name("Web-Search", reg) == "web_search"
 
     def test_fuzzy_match_typo(self) -> None:
-        reg = _make_registry("file_read", "file_write", "memory_read")
+        reg = _make_registry("file_read", "file_write", "memory")
         result = repair_tool_name("file_raed", reg)
         assert result == "file_read"
 
     def test_fuzzy_match_close(self) -> None:
-        reg = _make_registry("delegate_task", "memory_read")
+        reg = _make_registry("delegate_task", "memory")
         result = repair_tool_name("delegat_task", reg)
         assert result == "delegate_task"
 
@@ -89,7 +89,7 @@ class TestFindInvalidToolCallsWithRepair:
         assert tool_calls[0]["function"]["name"] == "file_read"
 
     def test_fuzzy_repair_in_place(self) -> None:
-        reg = _make_registry("file_read", "memory_read")
+        reg = _make_registry("file_read", "memory")
         tool_calls = [
             {"id": "1", "function": {"name": "file_raed", "arguments": "{}"}},
         ]

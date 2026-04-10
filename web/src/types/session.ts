@@ -22,10 +22,7 @@ export interface Session {
 }
 
 export interface SessionCreateRequest {
-  model?: string;
   system?: string;
-  tools?: string[];
-  sandbox?: { image?: string };
 }
 
 export interface SessionEvent {

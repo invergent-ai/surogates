@@ -27,7 +27,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = settings
     app.state.session_factory = async_session_factory(engine)
     app.state.redis = Redis.from_url(settings.redis.url)
-    app.state.session_store = SessionStore(app.state.session_factory)
+    app.state.session_store = SessionStore(app.state.session_factory, redis=app.state.redis)
 
     logger.info("Surogates API started (workers=%d)", settings.api.workers)
 
@@ -72,13 +72,15 @@ def create_app() -> FastAPI:
     setup_rate_limit_middleware(app, settings)
 
     # --- routes ----------------------------------------------------------
-    from surogates.api.routes import admin, auth, events, health, sessions, tools
+    from surogates.api.routes import admin, auth, events, health, sessions, tools, transparency, workspace
 
     app.include_router(health.router, tags=["health"])
     app.include_router(auth.router, prefix="/v1", tags=["auth"])
     app.include_router(sessions.router, prefix="/v1", tags=["sessions"])
     app.include_router(events.router, prefix="/v1", tags=["events"])
     app.include_router(tools.router, prefix="/v1", tags=["tools"])
+    app.include_router(transparency.router, prefix="/v1", tags=["transparency"])
+    app.include_router(workspace.router, prefix="/v1", tags=["workspace"])
     app.include_router(admin.router, prefix="/v1/admin", tags=["admin"])
 
     return app

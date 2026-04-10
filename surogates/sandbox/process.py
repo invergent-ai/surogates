@@ -1,4 +1,4 @@
-"""Subprocess-based sandbox backend (Phase 1).
+"""Subprocess-based sandbox backend.
 
 Provides command execution inside ephemeral temporary directories with
 restricted environment variables and configurable timeouts.  Suitable for

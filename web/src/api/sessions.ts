@@ -61,6 +61,14 @@ export async function sendMessage(
   return (await response.json()) as { event_id: number; status: string };
 }
 
+export async function confirmDisclosure(sessionId: string): Promise<void> {
+  const response = await authFetch(
+    `/api/v1/sessions/${sessionId}/confirm-disclosure`,
+    { method: "POST" },
+  );
+  if (!response.ok) throw new Error("Failed to confirm disclosure");
+}
+
 export async function deleteSession(sessionId: string): Promise<void> {
   const response = await authFetch(`/api/v1/sessions/${sessionId}`, {
     method: "DELETE",

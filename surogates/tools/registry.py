@@ -163,7 +163,7 @@ class ToolRegistry:
         """
         entry = self._entries.get(name)
         if entry is None:
-            raise KeyError(f"Unknown tool: {name!r}")
+            return json.dumps({"error": f"Unknown tool: {name}"})
 
         # Parse JSON string arguments if needed.
         parsed: dict[str, Any]

@@ -6,7 +6,7 @@ import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 
 from surogates.tenant.auth.database import DatabaseAuthProvider
 from surogates.tenant.auth.jwt import (
@@ -30,9 +30,9 @@ router = APIRouter()
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    email: str
     password: str
-    org_id: UUID
+    org_id: UUID | None = None  # optional — defaults to the server's configured org
 
 
 class TokenResponse(BaseModel):
@@ -60,7 +60,18 @@ async def login(body: LoginRequest, request: Request) -> TokenResponse:
     """Authenticate a user and issue access + refresh tokens."""
     session_factory = request.app.state.session_factory
 
-    provider = DatabaseAuthProvider(session_factory, body.org_id)
+    # Use the request's org_id if provided, otherwise the server's configured org.
+    org_id = body.org_id
+    if org_id is None:
+        settings = request.app.state.settings
+        if not settings.org_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="org_id is required (server has no default org configured).",
+            )
+        org_id = UUID(settings.org_id)
+
+    provider = DatabaseAuthProvider(session_factory, org_id)
     result = await provider.authenticate(
         {"email": body.email, "password": body.password}
     )
@@ -76,12 +87,12 @@ async def login(body: LoginRequest, request: Request) -> TokenResponse:
     permissions: set[str] = {"sessions:read", "sessions:write", "tools:read"}
 
     access_token = create_access_token(
-        org_id=body.org_id,
+        org_id=org_id,
         user_id=user_id,
         permissions=permissions,
     )
     refresh_token = create_refresh_token(
-        org_id=body.org_id,
+        org_id=org_id,
         user_id=user_id,
     )
 

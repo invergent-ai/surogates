@@ -138,7 +138,6 @@ class AgentHarness:
         session_store: SessionStore,
         tool_registry: ToolRegistry,
         llm_client: AsyncOpenAI,
-        sandbox_pool: SandboxPool,
         tenant: TenantContext,
         worker_id: str,
         budget: IterationBudget,
@@ -148,17 +147,25 @@ class AgentHarness:
         redis_client: Redis | None = None,
         system_prompt_cache: SystemPromptCache | None = None,
         memory_manager: MemoryManager | None = None,
+        sandbox_pool: SandboxPool | None = None,
+        checkpoints_enabled: bool = False,
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
         self._llm = llm_client
-        self._sandbox_pool = sandbox_pool
         self._tenant = tenant
         self._worker_id = worker_id
         self._budget = budget
         self._compressor = context_compressor
         self._prompt = prompt_builder
         self._redis: Redis | None = redis_client
+        self._sandbox_pool: SandboxPool | None = sandbox_pool
+
+        # Filesystem checkpoint manager — takes snapshots before
+        # file-mutating operations (write_file, patch). Transparent
+        # to the LLM; controlled by config.
+        from surogates.tools.utils.checkpoint_manager import CheckpointManager
+        self._checkpoint_mgr = CheckpointManager(enabled=checkpoints_enabled)
 
         # System prompt cache (shared across wake() calls for the same worker).
         self._system_prompt_cache: SystemPromptCache = (
@@ -210,9 +217,15 @@ class AgentHarness:
         The interrupt is checked at the top of each loop iteration and
         before every tool execution.  If *message* is provided it is
         stored so the next ``wake()`` can log why the loop was stopped.
+
+        Also sets the global interrupt event so that tools polling
+        :func:`surogates.tools.utils.interrupt.is_interrupted` see the
+        signal immediately.
         """
         self._interrupt_requested = True
         self._interrupt_message = message
+        from surogates.tools.utils.interrupt import set_interrupt
+        set_interrupt(True)
 
     def _check_interrupt(self) -> bool:
         """Return ``True`` if an interrupt has been requested."""
@@ -222,6 +235,8 @@ class AgentHarness:
         """Reset the interrupt flag (called after handling)."""
         self._interrupt_requested = False
         self._interrupt_message = None
+        from surogates.tools.utils.interrupt import set_interrupt
+        set_interrupt(False)
 
     # ------------------------------------------------------------------
     # Entry point
@@ -285,7 +300,7 @@ class AgentHarness:
             # 5a. Initialize memory manager if available.
             if self._memory_manager is not None:
                 try:
-                    await self._memory_manager.initialize_all()
+                    self._memory_manager.initialize_all()
                 except Exception:
                     logger.debug("Memory manager initialization failed", exc_info=True)
 
@@ -408,10 +423,13 @@ class AgentHarness:
                 self._clear_interrupt()
                 return
 
+            # --- Checkpoint manager: reset per-turn dedup ---
+            self._checkpoint_mgr.new_turn()
+
             # --- Memory manager: on_turn_start hook ---
             if self._memory_manager is not None:
                 try:
-                    await self._memory_manager.on_turn_start()
+                    self._memory_manager.on_turn_start(turn_number=0, message="")
                 except Exception:
                     logger.debug("Memory manager on_turn_start failed", exc_info=True)
 
@@ -836,6 +854,30 @@ class AgentHarness:
             messages.append(assistant_message)
 
             # 7. Execute tool calls (sequential or parallel) with truncation.
+            # Checkpoint before file-mutating tools (write_file, patch).
+            # The checkpoint hash is stashed on the tool call dict so
+            # execute_single_tool can include it in the TOOL_CALL event,
+            # enabling the web UI to offer per-tool-call rollback.
+            if self._checkpoint_mgr.enabled:
+                for tc in tool_calls_raw:
+                    fn = tc.get("function", {})
+                    tool_name = fn.get("name", "")
+                    if tool_name in ("write_file", "patch"):
+                        try:
+                            import json as _json
+                            args = _json.loads(fn.get("arguments", "{}"))
+                            file_path = args.get("path", "")
+                            if file_path:
+                                work_dir = self._checkpoint_mgr.get_working_dir_for_path(file_path)
+                                self._checkpoint_mgr.ensure_checkpoint(
+                                    work_dir, f"before {tool_name}",
+                                )
+                                cp_hash = self._checkpoint_mgr.latest_hash(work_dir)
+                                if cp_hash:
+                                    tc["_checkpoint_hash"] = cp_hash
+                        except Exception:
+                            logger.debug("Checkpoint before %s failed", tool_name, exc_info=True)
+
             tool_results = await execute_tool_calls(
                 tool_calls_raw,
                 session=session,
@@ -843,12 +885,12 @@ class AgentHarness:
                 store=self._store,
                 tools=self._tools,
                 tenant=self._tenant,
-                sandbox_pool=self._sandbox_pool,
                 interrupt_check=self._check_interrupt,
                 redis=self._redis,
                 budget=self._budget,
                 memory_manager=self._memory_manager,
                 hint_tracker=hint_tracker,
+                sandbox_pool=self._sandbox_pool,
             )
 
             # 7a. Reset nudge counters when relevant tools are used
@@ -859,7 +901,11 @@ class AgentHarness:
                 elif tc_name == "skill_manage":
                     self._iters_since_skill = 0
 
-            # 7b. Budget pressure warning -- inject into the last tool result.
+            # 7b. Layer 3: enforce aggregate turn budget -- persist oversized results.
+            from surogates.tools.utils.tool_result_storage import enforce_turn_budget
+            tool_results = enforce_turn_budget(tool_results)
+
+            # 7c. Budget pressure warning -- inject into the last tool result.
             tool_results = inject_budget_warning(tool_results, self._budget)
 
             # 8. Append tool results to messages.
@@ -875,7 +921,7 @@ class AgentHarness:
                             user_content = m.get("content", "")
                             break
                     assistant_content = assistant_message.get("content", "") or ""
-                    await self._memory_manager.sync_all(user_content, assistant_content)
+                    self._memory_manager.sync_all(user_content, assistant_content)
                 except Exception:
                     logger.debug("Memory manager sync_all failed", exc_info=True)
 
@@ -884,7 +930,7 @@ class AgentHarness:
                 # Memory manager: extract insights before compression.
                 if self._memory_manager is not None:
                     try:
-                        pre_compress_text = await self._memory_manager.on_pre_compress(messages)
+                        pre_compress_text = self._memory_manager.on_pre_compress(messages)
                         if pre_compress_text:
                             logger.debug(
                                 "Session %s: memory pre-compress extracted %d chars",
@@ -1085,7 +1131,7 @@ class AgentHarness:
         # Use memory manager if available.
         if self._memory_manager is not None:
             try:
-                raw = await self._memory_manager.prefetch_all("")
+                raw = self._memory_manager.prefetch_all("")
                 if raw and raw.strip():
                     from surogates.memory.manager import build_memory_context_block
                     return build_memory_context_block(raw)
@@ -1352,7 +1398,7 @@ class AgentHarness:
         # Notify memory manager of session end.
         if self._memory_manager is not None:
             try:
-                await self._memory_manager.on_session_end()
+                self._memory_manager.on_session_end(messages=[])
             except Exception:
                 logger.debug("Memory manager on_session_end failed", exc_info=True)
 

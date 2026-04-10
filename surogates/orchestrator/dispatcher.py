@@ -150,6 +150,9 @@ class Orchestrator:
         """Process a single session.  Retry with exponential backoff on failure."""
         try:
             harness = self.harness_factory(session_id)
+            # Support both sync and async factories.
+            if hasattr(harness, "__await__"):
+                harness = await harness
             await harness.wake(session_id)
         except Exception as exc:
             logger.exception(

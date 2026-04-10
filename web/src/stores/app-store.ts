@@ -4,9 +4,11 @@
 import { create } from "zustand";
 import { createSessionsSlice, type SessionsSlice } from "./sessions-slice";
 import { createUserSlice, type UserSlice } from "./user-slice";
+import { createWorkspaceSlice, type WorkspaceSlice } from "./workspace-slice";
 
 export type AppState = SessionsSlice &
-  UserSlice & {
+  UserSlice &
+  WorkspaceSlice & {
     loading: boolean;
     error: string | null;
   };
@@ -16,4 +18,5 @@ export const useAppStore = create<AppState>((...a) => ({
   error: null,
   ...createSessionsSlice(...a),
   ...createUserSlice(...a),
+  ...createWorkspaceSlice(...a),
 }));

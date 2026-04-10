@@ -25,22 +25,27 @@ logger = logging.getLogger(__name__)
 MEMORY_TOOL_SCHEMA: dict[str, Any] = {
     "name": "memory",
     "description": (
-        "Manage your persistent memory. Memory survives across sessions.\n\n"
-        "Actions:\n"
-        "- add: Save a new memory entry\n"
-        "- replace: Update an existing entry by matching old text\n"
-        "- remove: Delete an entry by matching text\n\n"
-        "Targets:\n"
-        "- memory: Your personal notes and learned patterns\n"
-        "- user: What you know about the user (preferences, role, context)\n\n"
-        "WHEN TO SAVE:\n"
-        "- User preferences, corrections, or recurring patterns\n"
-        "- Important project context that spans sessions\n"
-        "- User's role, team, and communication style\n\n"
-        "PRIORITY:\n"
-        "1. Corrections to existing entries (replace)\n"
-        "2. New durable facts (add)\n"
-        "3. Outdated information cleanup (remove)"
+        "Save durable information to persistent memory that survives across sessions. "
+        "Memory is injected into future turns, so keep it compact and focused on facts "
+        "that will still matter later.\n\n"
+        "WHEN TO SAVE (do this proactively, don't wait to be asked):\n"
+        "- User corrects you or says 'remember this' / 'don't do that again'\n"
+        "- User shares a preference, habit, or personal detail (name, role, timezone, coding style)\n"
+        "- You discover something about the environment (OS, installed tools, project structure)\n"
+        "- You learn a convention, API quirk, or workflow specific to this user's setup\n"
+        "- You identify a stable fact that will be useful again in future sessions\n\n"
+        "PRIORITY: User preferences and corrections > environment facts > procedural knowledge. "
+        "The most valuable memory prevents the user from having to repeat themselves.\n\n"
+        "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
+        "state to memory; use session_search to recall those from past transcripts.\n"
+        "If you've discovered a new way to do something, solved a problem that could be "
+        "necessary later, save it as a skill with the skill tool.\n\n"
+        "TWO TARGETS:\n"
+        "- 'user': who the user is -- name, role, preferences, communication style, pet peeves\n"
+        "- 'memory': your notes -- environment facts, project conventions, tool quirks, lessons learned\n\n"
+        "ACTIONS: add (new entry), replace (update existing -- old_text identifies it), "
+        "remove (delete -- old_text identifies it).\n\n"
+        "SKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state."
     ),
     "parameters": {
         "type": "object",
@@ -53,19 +58,18 @@ MEMORY_TOOL_SCHEMA: dict[str, Any] = {
             "target": {
                 "type": "string",
                 "enum": ["memory", "user"],
-                "default": "memory",
                 "description": "Which memory store: 'memory' for personal notes, 'user' for user profile.",
             },
             "content": {
                 "type": "string",
-                "description": "For add: the new entry. For replace: the new content.",
+                "description": "The entry content. Required for 'add' and 'replace'.",
             },
             "old_text": {
                 "type": "string",
-                "description": "For replace/remove: substring to match in existing entries.",
+                "description": "Short unique substring identifying the entry to replace or remove.",
             },
         },
-        "required": ["action"],
+        "required": ["action", "target"],
     },
 }
 
@@ -83,11 +87,15 @@ class BuiltinMemoryProvider(MemoryProvider):
     def name(self) -> str:
         return "builtin"
 
-    async def initialize(self) -> None:
+    def is_available(self) -> bool:
+        """Built-in memory is always available."""
+        return True
+
+    def initialize(self, session_id: str = "", **kwargs) -> None:
         """Load memory from disk."""
         self._store.load_from_disk()
 
-    def system_prompt_block(self) -> str | None:
+    def system_prompt_block(self) -> str:
         """Return MEMORY.md and USER.md content for the system prompt.
 
         Uses the frozen snapshot captured at load time.
@@ -99,29 +107,20 @@ class BuiltinMemoryProvider(MemoryProvider):
         user_block = self._store.format_for_system_prompt("user")
         if user_block:
             parts.append(user_block)
-        return "\n\n".join(parts) if parts else None
+        return "\n\n".join(parts)
 
-    async def prefetch(self, query: str, session_id: str = "") -> str:
+    def prefetch(self, query: str, *, session_id: str = "") -> str:
         """Built-in memory doesn't do query-based recall."""
         return ""
 
-    async def sync_turn(
-        self,
-        user_content: str,
-        assistant_content: str,
-        session_id: str = "",
-    ) -> None:
+    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Built-in memory doesn't auto-sync turns."""
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         """Return the memory tool schema."""
         return [MEMORY_TOOL_SCHEMA]
 
-    async def handle_tool_call(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> str:
+    def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs) -> str:
         """Dispatch a memory tool call to the store."""
         if tool_name != "memory":
             return json.dumps({
@@ -177,10 +176,10 @@ class BuiltinMemoryProvider(MemoryProvider):
 
         return json.dumps(result, ensure_ascii=False)
 
+    def shutdown(self) -> None:
+        """No cleanup needed -- files are saved on every write."""
+
     @property
     def store(self) -> MemoryStore:
         """Access the underlying MemoryStore."""
         return self._store
-
-    async def shutdown(self) -> None:
-        """No cleanup needed -- files are saved on every write."""

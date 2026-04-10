@@ -43,7 +43,6 @@ NEVER_PARALLEL_TOOLS: frozenset[str] = frozenset({"clarify", "delegate_task"})
 PARALLEL_SAFE_TOOLS: frozenset[str] = frozenset({
     "file_read",
     "read_file",
-    "memory_read",
     "session_search",
     "skills_list",
     "web_search",
@@ -174,12 +173,12 @@ async def execute_tool_calls(
     store: SessionStore,
     tools: ToolRegistry,
     tenant: TenantContext,
-    sandbox_pool: SandboxPool,
     interrupt_check: Callable[[], bool],
     redis: Redis | None = None,
     budget: IterationBudget | None = None,
     memory_manager: Any | None = None,
     hint_tracker: SubdirectoryHintTracker | None = None,
+    sandbox_pool: SandboxPool | None = None,
 ) -> list[dict]:
     """Execute tool calls, choosing parallel vs sequential."""
     if should_parallelize(tool_calls):
@@ -190,12 +189,12 @@ async def execute_tool_calls(
             store=store,
             tools=tools,
             tenant=tenant,
-            sandbox_pool=sandbox_pool,
             interrupt_check=interrupt_check,
             redis=redis,
             budget=budget,
             memory_manager=memory_manager,
             hint_tracker=hint_tracker,
+            sandbox_pool=sandbox_pool,
         )
     return await execute_tool_calls_sequential(
         tool_calls,
@@ -204,12 +203,12 @@ async def execute_tool_calls(
         store=store,
         tools=tools,
         tenant=tenant,
-        sandbox_pool=sandbox_pool,
         interrupt_check=interrupt_check,
         redis=redis,
         budget=budget,
         memory_manager=memory_manager,
         hint_tracker=hint_tracker,
+        sandbox_pool=sandbox_pool,
     )
 
 
@@ -221,12 +220,12 @@ async def execute_tool_calls_sequential(
     store: SessionStore,
     tools: ToolRegistry,
     tenant: TenantContext,
-    sandbox_pool: SandboxPool,
     interrupt_check: Callable[[], bool],
     redis: Redis | None = None,
     budget: IterationBudget | None = None,
     memory_manager: Any | None = None,
     hint_tracker: SubdirectoryHintTracker | None = None,
+    sandbox_pool: SandboxPool | None = None,
 ) -> list[dict]:
     """Execute tool calls one at a time, emitting events for each."""
     results: list[dict] = []
@@ -244,11 +243,11 @@ async def execute_tool_calls_sequential(
             store=store,
             tools=tools,
             tenant=tenant,
-            sandbox_pool=sandbox_pool,
             redis=redis,
             budget=budget,
             memory_manager=memory_manager,
             hint_tracker=hint_tracker,
+            sandbox_pool=sandbox_pool,
         )
         results.append(result_msg)
 
@@ -263,12 +262,12 @@ async def execute_tool_calls_concurrent(
     store: SessionStore,
     tools: ToolRegistry,
     tenant: TenantContext,
-    sandbox_pool: SandboxPool,
     interrupt_check: Callable[[], bool],
     redis: Redis | None = None,
     budget: IterationBudget | None = None,
     memory_manager: Any | None = None,
     hint_tracker: SubdirectoryHintTracker | None = None,
+    sandbox_pool: SandboxPool | None = None,
 ) -> list[dict]:
     """Execute tool calls concurrently using asyncio.gather.
 
@@ -291,11 +290,11 @@ async def execute_tool_calls_concurrent(
                 store=store,
                 tools=tools,
                 tenant=tenant,
-                sandbox_pool=sandbox_pool,
                 redis=redis,
                 budget=budget,
                 memory_manager=memory_manager,
                 hint_tracker=hint_tracker,
+                sandbox_pool=sandbox_pool,
             )
 
     tasks = [_guarded(tc) for tc in tool_calls]
@@ -310,11 +309,11 @@ async def execute_single_tool(
     store: SessionStore,
     tools: ToolRegistry,
     tenant: TenantContext,
-    sandbox_pool: SandboxPool,
     redis: Redis | None = None,
     budget: IterationBudget | None = None,
     memory_manager: Any | None = None,
     hint_tracker: SubdirectoryHintTracker | None = None,
+    sandbox_pool: SandboxPool | None = None,
 ) -> dict:
     """Execute a single tool call: emit events, dispatch, return result message."""
     fn = tc.get("function", {})
@@ -332,14 +331,20 @@ async def execute_single_tool(
     tool_args = coerce_tool_args(tool_name, tool_args, tools)
 
     # Emit TOOL_CALL event.
+    # Include checkpoint hash if the harness stashed one (file-mutating tools).
+    tool_call_data: dict[str, Any] = {
+        "tool_call_id": tool_call_id,
+        "name": tool_name,
+        "arguments": tool_args,
+    }
+    checkpoint_hash = tc.get("_checkpoint_hash")
+    if checkpoint_hash:
+        tool_call_data["checkpoint_hash"] = checkpoint_hash
+
     call_event_id = await store.emit_event(
         session.id,
         EventType.TOOL_CALL,
-        {
-            "tool_call_id": tool_call_id,
-            "name": tool_name,
-            "arguments": tool_args,
-        },
+        tool_call_data,
     )
 
     # Execute the tool, capturing errors as results (never crash the loop).
@@ -350,11 +355,12 @@ async def execute_single_tool(
             tool_args,
             session_id=str(session.id),
             tenant=tenant,
-            sandbox_pool=sandbox_pool,
             session_store=store,
             redis=redis,
             budget=budget,
             memory_manager=memory_manager,
+            sandbox_pool=sandbox_pool,
+            workspace_path=session.config.get("workspace_path"),
         )
     except KeyError:
         result_content = json.dumps({
@@ -375,14 +381,14 @@ async def execute_single_tool(
         if hints:
             result_content += hints
 
-    # Tool result truncation.
-    entry = tools.get(tool_name)
-    max_size = entry.max_result_size if entry else 50_000
-    if len(result_content) > max_size:
-        result_content = (
-            result_content[:max_size]
-            + f"\n\n[truncated: {len(result_content)} chars, showing first {max_size}]"
-        )
+    # Layer 2: persist oversized results to disk instead of truncating.
+    from surogates.tools.utils.tool_result_storage import maybe_persist_tool_result
+
+    result_content = maybe_persist_tool_result(
+        content=result_content,
+        tool_name=tool_name,
+        tool_use_id=tool_call_id,
+    )
 
     # Emit TOOL_RESULT event.
     result_event_id = await store.emit_event(

@@ -24,4 +24,10 @@ tmp/**
 *.log
 surogate.db
 .claude/**
-.codex/
+.codex
+*.egg-info/
+dist/**
+*.egg
+.dev/
+config.dev.yaml
+.venv/

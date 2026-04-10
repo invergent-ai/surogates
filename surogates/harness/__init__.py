@@ -9,7 +9,11 @@ from surogates.harness.connection_health import (
     is_openai_client_closed,
     probe_dead_connections,
 )
-from surogates.harness.context import ContextCompressor
+from surogates.harness.context import (
+    LEGACY_SUMMARY_PREFIX,
+    SUMMARY_PREFIX,
+    ContextCompressor,
+)
 from surogates.harness.context_files import (
     load_project_context,
     load_soul_md,
@@ -50,8 +54,9 @@ from surogates.harness.model_metadata import (
     parse_context_limit_from_error,
 )
 from surogates.harness.prompt import (
-    GOOGLE_OPERATIONAL_GUIDANCE,
-    OPENAI_EXECUTION_GUIDANCE,
+    DEVELOPER_ROLE_MODELS as _PROMPT_DEVELOPER_ROLE_MODELS,
+    GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
+    OPENAI_MODEL_EXECUTION_GUIDANCE,
     PLATFORM_HINTS,
     TOOL_USE_ENFORCEMENT_MODELS,
     PromptBuilder,
@@ -117,15 +122,17 @@ __all__ = [
     "ContextCompressor",
     "CredentialPool",
     "DEVELOPER_ROLE_MODELS",
-    "GOOGLE_OPERATIONAL_GUIDANCE",
+    "LEGACY_SUMMARY_PREFIX",
+    "GOOGLE_MODEL_OPERATIONAL_GUIDANCE",
     "IterationBudget",
     "MODEL_CATALOG",
     "ModelInfo",
-    "OPENAI_EXECUTION_GUIDANCE",
+    "OPENAI_MODEL_EXECUTION_GUIDANCE",
     "PLATFORM_HINTS",
     "PooledCredential",
     "PromptBuilder",
     "SessionCostTracker",
+    "SUMMARY_PREFIX",
     "SubdirectoryHintTracker",
     "SystemPromptCache",
     "TOOL_USE_ENFORCEMENT_MODELS",

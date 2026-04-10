@@ -13,8 +13,8 @@ from surogates.harness.llm_call import (
     apply_developer_role,
 )
 from surogates.harness.prompt import (
-    GOOGLE_OPERATIONAL_GUIDANCE,
-    OPENAI_EXECUTION_GUIDANCE,
+    GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
+    OPENAI_MODEL_EXECUTION_GUIDANCE,
     PLATFORM_HINTS,
     TOOL_USE_ENFORCEMENT_MODELS,
     PromptBuilder,

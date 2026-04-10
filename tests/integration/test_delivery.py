@@ -157,7 +157,7 @@ async def test_mark_failed_makes_retryable(
     # with raw SQL
     from sqlalchemy import text
 
-    async with delivery_service._session_factory() as db:
+    async with delivery_service._sf() as db:
         row = (
             await db.execute(
                 text("SELECT status FROM delivery_outbox WHERE id = :id"),

@@ -25,6 +25,7 @@ from surogates.harness.llm_call import (
     is_transient_error as _is_transient_error,
 )
 from surogates.harness.loop import AgentHarness
+from surogates.sandbox.pool import SandboxPool
 
 
 # ---------------------------------------------------------------------------
@@ -170,12 +171,12 @@ def _make_harness(**overrides: Any) -> AgentHarness:
         session_store=AsyncMock(),
         tool_registry=ToolRegistry(),
         llm_client=AsyncMock(),
-        sandbox_pool=AsyncMock(),
         tenant=tenant,
         worker_id="test-worker",
         budget=IterationBudget(max_total=90),
         context_compressor=MagicMock(spec=ContextCompressor),
         prompt_builder=MagicMock(spec=PromptBuilder),
+        sandbox_pool=MagicMock(spec=SandboxPool),
     )
     defaults.update(overrides)
 
@@ -183,12 +184,12 @@ def _make_harness(**overrides: Any) -> AgentHarness:
         session_store=defaults["session_store"],
         tool_registry=defaults["tool_registry"],
         llm_client=defaults["llm_client"],
-        sandbox_pool=defaults["sandbox_pool"],
         tenant=defaults["tenant"],
         worker_id=defaults["worker_id"],
         budget=defaults["budget"],
         context_compressor=defaults["context_compressor"],
         prompt_builder=defaults["prompt_builder"],
+        sandbox_pool=defaults["sandbox_pool"],
     )
 
 

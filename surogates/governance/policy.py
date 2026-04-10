@@ -1,18 +1,18 @@
 """Governance gate for tool-call policy enforcement.
 
-Wraps Microsoft's Agent Governance Toolkit (``agent-os-kernel``) PolicyEngine
-for deterministic, sub-millisecond policy checks.  The AGT engine provides:
+Wraps Microsoft's Agent Governance Toolkit (``agent-os-kernel``) for
+deterministic, sub-millisecond policy checks.  Integrates:
 
-* Role-based tool permissions via ``state_permissions``
-* ABAC conditional permissions via ``add_conditional_permission``
-* Argument-level checks (path traversal, dangerous code patterns, SQL injection)
-* Protected path enforcement
-* Freeze / immutability
+* **PolicyEngine** — role-based tool permissions, ABAC, argument checks
+* **ExecutionSandbox** — workspace path containment via ``check_file_access()``
+* **EgressPolicy** — network egress control (domain/port allow/deny)
+* **TrustRoot** — non-overridable top-level authority (wraps this gate)
 
 Our ``GovernanceGate`` is a thin Surogates-specific wrapper that:
 1. Translates allow-list / deny-list config into AGT's ``state_permissions``
 2. Loads policies from platform volumes + org config overlay
-3. Returns ``PolicyDecision`` dataclass for the ToolRouter
+3. Checks workspace sandbox, egress policy, and argument-level rules
+4. Returns ``PolicyDecision`` dataclass for the ToolRouter
 """
 
 from __future__ import annotations
@@ -24,11 +24,35 @@ from pathlib import Path
 from typing import Any
 
 from agent_os import PolicyEngine as AGTPolicyEngine
+from agent_os.egress_policy import EgressDecision, EgressPolicy, EgressRule
+from agent_os.sandbox import ExecutionSandbox, SandboxConfig
+from surogates.governance.transparency import TransparencyInterceptor, TransparencyLevel, ToolCallRequest
 
 logger = logging.getLogger(__name__)
 
 # Agent role used for all Surogates tool-call checks.
 _DEFAULT_ROLE = "agent"
+
+# Tools whose arguments contain filesystem paths that must be validated
+# against the workspace sandbox.  Maps tool name → list of argument keys
+# that hold paths.
+_PATH_ARGUMENT_MAP: dict[str, list[str]] = {
+    "read_file": ["path"],
+    "write_file": ["path"],
+    "patch": ["path"],
+    "search_files": ["path"],
+    "list_files": ["path"],
+    "terminal": ["workdir"],
+}
+
+# Tools whose arguments contain URLs that must be validated against
+# the egress policy.  Maps tool name → list of argument keys with URLs.
+_URL_ARGUMENT_MAP: dict[str, list[str]] = {
+    "web_search": ["query"],       # query may not be a URL, but search/extract have url
+    "web_extract": ["url"],
+    "web_crawl": ["url", "start_url"],
+    "browser_navigate": ["url"],
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,12 +85,28 @@ class GovernanceGate:
         denied_tools: set[str] | None = None,
         *,
         enabled: bool = True,
+        egress_policy: EgressPolicy | None = None,
+        transparency: TransparencyInterceptor | None = None,
     ) -> None:
         self._enabled: bool = enabled
         self._open_policy: bool = (allowed_tools is None and denied_tools is None)
 
         # Initialise AGT engine.
         self._engine = AGTPolicyEngine()
+
+        # AGT ExecutionSandbox cache — one per workspace_path, created
+        # lazily in check().  Thread-safe: dict reads/writes are atomic
+        # in CPython and worst case we create a duplicate (idempotent).
+        self._sandbox_cache: dict[str, ExecutionSandbox] = {}
+
+        # AGT EgressPolicy — controls which domains/ports tools can reach.
+        # When None, egress is unchecked (all outbound allowed).
+        self._egress_policy: EgressPolicy | None = egress_policy
+
+        # AGT TransparencyInterceptor — EU AI Act Art. 13/50 compliance.
+        # When set, tool calls are blocked until AI disclosure is confirmed
+        # for the session.  When None, transparency is not enforced.
+        self._transparency: TransparencyInterceptor | None = transparency
 
         # Resolve effective allow-set.
         if allowed_tools is not None:
@@ -129,22 +169,70 @@ class GovernanceGate:
     # Check
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Transparency (EU AI Act)
+    # ------------------------------------------------------------------
+
+    def confirm_disclosure(self, session_id: str) -> None:
+        """Mark AI disclosure as confirmed for a session.
+
+        Must be called before tool execution when transparency is enabled.
+        Typically called when the user starts a new session and the
+        frontend has shown the AI disclosure notice.
+        """
+        if self._transparency is not None:
+            self._transparency.confirm_disclosure(session_id)
+
+    def is_disclosure_confirmed(self, session_id: str) -> bool:
+        """Check if AI disclosure has been confirmed for a session."""
+        if self._transparency is None:
+            return True
+        return self._transparency.is_disclosure_confirmed(session_id)
+
+    # ------------------------------------------------------------------
+    # Check
+    # ------------------------------------------------------------------
+
     def check(
         self,
         tool_name: str,
         arguments: dict[str, Any] | None = None,
+        *,
+        workspace_path: str | None = None,
+        session_id: str | None = None,
     ) -> PolicyDecision:
         """Evaluate whether a tool invocation is permitted.
 
         Delegates to the AGT PolicyEngine for:
+
         - Role-based tool permission checks
-        - Argument-level validation (path traversal, dangerous code, SQL injection)
+        - Argument-level validation (path traversal, dangerous code,
+          SQL injection)
         - Conditional permissions (ABAC)
+        - **Workspace sandbox** — path containment via AGT ExecutionSandbox
+        - **Egress policy** — network egress control via AGT EgressPolicy
+        - **Transparency** — EU AI Act Art. 13/50 disclosure enforcement
         """
         if not self._enabled:
             return PolicyDecision(
                 allowed=True, reason="governance disabled", tool_name=tool_name
             )
+
+        # Transparency check — blocks until AI disclosure is confirmed.
+        if self._transparency is not None and session_id:
+            tc_request = ToolCallRequest(
+                tool_name=tool_name,
+                arguments=arguments or {},
+                agent_id=session_id,
+                metadata={"session_id": session_id},
+            )
+            tc_result = self._transparency.intercept(tc_request)
+            if not tc_result.allowed:
+                return PolicyDecision(
+                    allowed=False,
+                    reason=tc_result.reason or "AI disclosure not confirmed",
+                    tool_name=tool_name,
+                )
 
         # Fast deny-list check (before AGT role check).
         if tool_name in self._denied_tools:
@@ -152,6 +240,25 @@ class GovernanceGate:
                 allowed=False,
                 reason=f"denied: tool {tool_name!r} explicitly blocked",
                 tool_name=tool_name,
+            )
+
+        # Workspace sandbox check — enforced before all other checks.
+        # Uses AGT ExecutionSandbox.check_file_access() with symlink
+        # resolution and is_relative_to() containment.
+        sandbox_violation = self._check_workspace_sandbox(
+            tool_name, arguments or {}, workspace_path
+        )
+        if sandbox_violation:
+            return PolicyDecision(
+                allowed=False, reason=sandbox_violation, tool_name=tool_name
+            )
+
+        # Egress policy check — enforced for tools that make outbound
+        # network requests.  Uses AGT EgressPolicy.check_url().
+        egress_violation = self._check_egress(tool_name, arguments or {})
+        if egress_violation:
+            return PolicyDecision(
+                allowed=False, reason=egress_violation, tool_name=tool_name
             )
 
         # Open policy: skip role check, only run argument checks.
@@ -177,6 +284,101 @@ class GovernanceGate:
         return PolicyDecision(
             allowed=True, reason="allowed", tool_name=tool_name
         )
+
+    def _get_sandbox(self, workspace_path: str) -> ExecutionSandbox:
+        """Get or create an AGT ExecutionSandbox for a workspace path.
+
+        Cached per workspace_path so repeated calls for the same session
+        reuse the same instance.
+        """
+        sandbox = self._sandbox_cache.get(workspace_path)
+        if sandbox is None:
+            sandbox = ExecutionSandbox(
+                config=SandboxConfig(allowed_paths=[workspace_path]),
+            )
+            self._sandbox_cache[workspace_path] = sandbox
+        return sandbox
+
+    def _check_workspace_sandbox(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        workspace_path: str | None,
+    ) -> str | None:
+        """Check filesystem paths in tool arguments against the workspace sandbox.
+
+        Uses AGT ``ExecutionSandbox.check_file_access()`` which:
+
+        - Resolves symlinks via ``pathlib.Path.resolve()``
+        - Uses ``is_relative_to()`` for safe containment checking
+        - Prevents path traversal (``../../etc/passwd``)
+        - Prevents absolute path escapes (``/etc/shadow``)
+
+        Returns a violation message string if blocked, ``None`` if allowed.
+        """
+        if not workspace_path:
+            return None
+
+        path_keys = _PATH_ARGUMENT_MAP.get(tool_name)
+        if not path_keys:
+            return None
+
+        sandbox = self._get_sandbox(workspace_path)
+
+        for key in path_keys:
+            raw_path = arguments.get(key)
+            if not raw_path or not isinstance(raw_path, str):
+                continue
+
+            # For relative paths, resolve against workspace root so the
+            # sandbox check uses the correct absolute path.
+            import os
+            expanded = os.path.expanduser(raw_path)
+            if not os.path.isabs(expanded):
+                expanded = os.path.join(workspace_path, expanded)
+
+            mode = "w" if tool_name in ("write_file", "patch") else "r"
+            if not sandbox.check_file_access(expanded, mode):
+                return (
+                    f"Workspace sandbox violation: '{raw_path}' resolves "
+                    f"outside the session workspace. All file operations "
+                    f"must stay within the workspace directory."
+                )
+
+        return None
+
+    def _check_egress(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> str | None:
+        """Check URL arguments against the AGT EgressPolicy.
+
+        Returns a violation message if the URL's domain/port is blocked,
+        ``None`` if allowed or no egress policy is configured.
+        """
+        if self._egress_policy is None:
+            return None
+
+        url_keys = _URL_ARGUMENT_MAP.get(tool_name)
+        if not url_keys:
+            return None
+
+        for key in url_keys:
+            raw_url = arguments.get(key)
+            if not raw_url or not isinstance(raw_url, str):
+                continue
+            # Only check values that look like URLs.
+            if not raw_url.startswith(("http://", "https://")):
+                continue
+            decision: EgressDecision = self._egress_policy.check_url(raw_url)
+            if not decision.allowed:
+                return (
+                    f"Egress policy violation: outbound request to "
+                    f"'{raw_url}' blocked — {decision.reason}"
+                )
+
+        return None
 
     def _check_arguments(
         self, tool_name: str, arguments: dict[str, Any]
@@ -239,6 +441,8 @@ class GovernanceGate:
         cls,
         platform_policy_path: str,
         org_config: dict[str, Any],
+        *,
+        transparency_settings: Any | None = None,
     ) -> GovernanceGate:
         """Load policies from a platform volume and an org-config overlay.
 
@@ -249,6 +453,11 @@ class GovernanceGate:
 
         *org_config* may contain a ``"governance"`` key with the same
         structure; values are merged (union) with platform policies.
+
+        *transparency_settings* is an optional
+        :class:`~surogates.config.TransparencySettings` instance.  When
+        provided and enabled, the EU AI Act transparency interceptor is
+        activated.
         """
         allowed: set[str] = set()
         denied: set[str] = set()
@@ -272,10 +481,54 @@ class GovernanceGate:
             if "enabled" in gov:
                 enabled = bool(gov["enabled"])
 
+        # --- Egress policy ---
+        egress = None
+        egress_data = (platform_data or {}).get("egress") or {}
+        org_egress = gov.get("egress", {}) if isinstance(gov, dict) else {}
+        # Merge org egress rules over platform
+        merged_egress_rules = list(egress_data.get("rules", []))
+        merged_egress_rules.extend(org_egress.get("rules", []))
+        if merged_egress_rules:
+            default_action = (
+                org_egress.get("default_action")
+                or egress_data.get("default_action")
+                or "deny"
+            )
+            egress = EgressPolicy(default_action=default_action)
+            for rule in merged_egress_rules:
+                egress.add_rule(
+                    domain=rule.get("domain", ""),
+                    ports=rule.get("ports", [443]),
+                    protocol=rule.get("protocol", "tcp"),
+                    action=rule.get("action", "allow"),
+                )
+
+        # --- Transparency (EU AI Act Art. 13/50) ---
+        transparency = None
+        if transparency_settings is not None and getattr(
+            transparency_settings, "enabled", False
+        ):
+            level_str = getattr(transparency_settings, "level", "basic")
+            try:
+                level = TransparencyLevel(level_str)
+            except ValueError:
+                level = TransparencyLevel.BASIC
+            transparency = TransparencyInterceptor(
+                default_level=level,
+                require_disclosure_confirmation=getattr(
+                    transparency_settings, "require_confirmation", True
+                ),
+                emotion_recognition_notice=getattr(
+                    transparency_settings, "emotion_recognition", False
+                ),
+            )
+
         return cls(
             allowed_tools=allowed if allowed else None,
             denied_tools=denied if denied else None,
             enabled=enabled,
+            egress_policy=egress,
+            transparency=transparency,
         )
 
 

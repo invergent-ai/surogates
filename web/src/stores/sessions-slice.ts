@@ -45,6 +45,10 @@ export const createSessionsSlice: StateCreator<
       if (active && !res.sessions.find((s) => s.id === active)) {
         set({ activeSessionId: null });
       }
+      // Auto-select first session if none is active
+      if (!get().activeSessionId && res.sessions.length > 0) {
+        set({ activeSessionId: res.sessions[0].id });
+      }
     } catch (e) {
       set({ sessionsLoading: false, error: (e as Error).message });
     }

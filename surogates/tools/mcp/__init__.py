@@ -1,14 +1,33 @@
-"""MCP (Model Context Protocol) integration -- Phase 3.
+"""MCP (Model Context Protocol) integration.
 
 This package provides the client and proxy layers for connecting to
-MCP servers.  The interfaces are defined here so that the
-:class:`~surogates.tools.router.ToolRouter` can reference them, but
-the implementations raise :class:`NotImplementedError` until Phase 3.
+external MCP servers, discovering their tools, and registering them
+into the Surogates ToolRegistry.
+
+The ``mcp`` Python package is an optional dependency.  When not installed,
+all public entry points degrade gracefully to no-ops.
 """
 
 from __future__ import annotations
 
-from surogates.tools.mcp.client import MCPClient
+from surogates.tools.mcp.client import (
+    MCPServerTask,
+    SamplingHandler,
+    discover_mcp_tools,
+    get_mcp_status,
+    sanitize_mcp_name_component,
+    set_sampling_llm_caller,
+    shutdown_mcp_servers,
+)
 from surogates.tools.mcp.proxy import MCPToolProxy
 
-__all__ = ["MCPClient", "MCPToolProxy"]
+__all__ = [
+    "MCPServerTask",
+    "MCPToolProxy",
+    "SamplingHandler",
+    "discover_mcp_tools",
+    "get_mcp_status",
+    "sanitize_mcp_name_component",
+    "set_sampling_llm_caller",
+    "shutdown_mcp_servers",
+]

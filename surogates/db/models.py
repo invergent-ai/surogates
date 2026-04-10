@@ -58,16 +58,16 @@ class Org(Base):
     )
 
     # Relationships
-    users: Mapped[list[User]] = relationship(back_populates="org", lazy="selectin")
+    users: Mapped[list[User]] = relationship(back_populates="org", lazy="raise")
     sessions: Mapped[list[Session]] = relationship(
-        back_populates="org", lazy="selectin"
+        back_populates="org", lazy="raise"
     )
     credentials: Mapped[list[Credential]] = relationship(
-        back_populates="org", lazy="selectin"
+        back_populates="org", lazy="raise"
     )
-    skills: Mapped[list[Skill]] = relationship(back_populates="org", lazy="selectin")
+    skills: Mapped[list[Skill]] = relationship(back_populates="org", lazy="raise")
     mcp_servers: Mapped[list[McpServer]] = relationship(
-        back_populates="org", lazy="selectin"
+        back_populates="org", lazy="raise"
     )
 
 
@@ -103,19 +103,19 @@ class User(Base):
     )
 
     # Relationships
-    org: Mapped[Org] = relationship(back_populates="users", lazy="joined")
+    org: Mapped[Org] = relationship(back_populates="users", lazy="raise")
     channel_identities: Mapped[list[ChannelIdentity]] = relationship(
-        back_populates="user", lazy="selectin"
+        back_populates="user", lazy="raise"
     )
     sessions: Mapped[list[Session]] = relationship(
-        back_populates="user", lazy="selectin"
+        back_populates="user", lazy="raise"
     )
     credentials: Mapped[list[Credential]] = relationship(
-        back_populates="user", lazy="selectin"
+        back_populates="user", lazy="raise"
     )
-    skills: Mapped[list[Skill]] = relationship(back_populates="user", lazy="selectin")
+    skills: Mapped[list[Skill]] = relationship(back_populates="user", lazy="raise")
     mcp_servers: Mapped[list[McpServer]] = relationship(
-        back_populates="user", lazy="selectin"
+        back_populates="user", lazy="raise"
     )
 
 
@@ -144,7 +144,7 @@ class ChannelIdentity(Base):
 
     # Relationships
     user: Mapped[User] = relationship(
-        back_populates="channel_identities", lazy="joined"
+        back_populates="channel_identities", lazy="raise"
     )
 
 
@@ -206,22 +206,22 @@ class Session(Base):
     )
 
     # Relationships
-    user: Mapped[User] = relationship(back_populates="sessions", lazy="joined")
-    org: Mapped[Org] = relationship(back_populates="sessions", lazy="joined")
+    user: Mapped[User] = relationship(back_populates="sessions", lazy="raise")
+    org: Mapped[Org] = relationship(back_populates="sessions", lazy="raise")
     parent: Mapped[Optional[Session]] = relationship(
-        remote_side=[id], lazy="selectin"
+        remote_side=[id], lazy="raise"
     )
     events: Mapped[list[Event]] = relationship(
-        back_populates="session", lazy="selectin"
+        back_populates="session", lazy="raise"
     )
     lease: Mapped[Optional[SessionLease]] = relationship(
-        back_populates="session", lazy="selectin", uselist=False
+        back_populates="session", lazy="raise", uselist=False
     )
     cursor: Mapped[Optional[SessionCursor]] = relationship(
-        back_populates="session", lazy="selectin", uselist=False
+        back_populates="session", lazy="raise", uselist=False
     )
     delivery_outbox_items: Mapped[list[DeliveryOutbox]] = relationship(
-        back_populates="session", lazy="selectin"
+        back_populates="session", lazy="raise"
     )
 
 
@@ -249,7 +249,7 @@ class Event(Base):
     )
 
     # Relationships
-    session: Mapped[Session] = relationship(back_populates="events", lazy="joined")
+    session: Mapped[Session] = relationship(back_populates="events", lazy="raise")
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +273,7 @@ class SessionLease(Base):
     )
 
     # Relationships
-    session: Mapped[Session] = relationship(back_populates="lease", lazy="joined")
+    session: Mapped[Session] = relationship(back_populates="lease", lazy="raise")
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +295,7 @@ class SessionCursor(Base):
     )
 
     # Relationships
-    session: Mapped[Session] = relationship(back_populates="cursor", lazy="joined")
+    session: Mapped[Session] = relationship(back_populates="cursor", lazy="raise")
 
 
 # ---------------------------------------------------------------------------
@@ -338,9 +338,9 @@ class DeliveryOutbox(Base):
 
     # Relationships
     session: Mapped[Session] = relationship(
-        back_populates="delivery_outbox_items", lazy="joined"
+        back_populates="delivery_outbox_items", lazy="raise"
     )
-    event: Mapped[Event] = relationship(lazy="joined")
+    event: Mapped[Event] = relationship(lazy="raise")
 
 
 # ---------------------------------------------------------------------------
@@ -385,9 +385,9 @@ class Credential(Base):
     )
 
     # Relationships
-    org: Mapped[Org] = relationship(back_populates="credentials", lazy="joined")
+    org: Mapped[Org] = relationship(back_populates="credentials", lazy="raise")
     user: Mapped[Optional[User]] = relationship(
-        back_populates="credentials", lazy="joined"
+        back_populates="credentials", lazy="raise"
     )
 
 
@@ -422,9 +422,9 @@ class Skill(Base):
     )
 
     # Relationships
-    org: Mapped[Org] = relationship(back_populates="skills", lazy="joined")
+    org: Mapped[Org] = relationship(back_populates="skills", lazy="raise")
     user: Mapped[Optional[User]] = relationship(
-        back_populates="skills", lazy="joined"
+        back_populates="skills", lazy="raise"
     )
 
 
@@ -471,7 +471,7 @@ class McpServer(Base):
     )
 
     # Relationships
-    org: Mapped[Org] = relationship(back_populates="mcp_servers", lazy="joined")
+    org: Mapped[Org] = relationship(back_populates="mcp_servers", lazy="raise")
     user: Mapped[Optional[User]] = relationship(
-        back_populates="mcp_servers", lazy="joined"
+        back_populates="mcp_servers", lazy="raise"
     )

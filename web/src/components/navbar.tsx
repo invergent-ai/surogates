@@ -91,8 +91,9 @@ export function SessionSidebar() {
           });
 
           return (
-            <button
-              type="button"
+            <div
+              role="button"
+              tabIndex={0}
               key={session.id}
               className={cn(
                 "group flex items-center gap-2 w-full cursor-pointer transition-colors text-left",
@@ -102,6 +103,7 @@ export function SessionSidebar() {
                   : "bg-transparent text-subtle hover:bg-input hover:text-foreground border-l-2 border-l-transparent",
               )}
               onClick={() => handleSelectSession(session.id)}
+              onKeyDown={(e) => { if (e.key === "Enter") handleSelectSession(session.id); }}
             >
               {collapsed ? (
                 <MessageSquareIcon className="w-4 h-4 shrink-0" />
@@ -125,7 +127,7 @@ export function SessionSidebar() {
                   </button>
                 </>
               )}
-            </button>
+            </div>
           );
         })}
         {sessions.length === 0 && !collapsed && (

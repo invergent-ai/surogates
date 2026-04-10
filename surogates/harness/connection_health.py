@@ -196,9 +196,15 @@ async def cleanup_dead_connections(client: object) -> int:
             return cleaned
 
         # httpx.AsyncHTTPTransport wraps httpcore.AsyncConnectionPool.
-        connections = getattr(pool, "_pool", None) or getattr(
-            pool, "connections", None
-        )
+        # The pool itself is not iterable — the connections list is at
+        # pool._connections (httpcore 1.x) or pool._pool (httpcore 0.x).
+        connections = None
+        for attr in ("_connections", "_pool", "connections"):
+            candidate = getattr(pool, attr, None)
+            if candidate is not None and isinstance(candidate, (list, tuple)):
+                connections = candidate
+                break
+
         if not connections:
             return cleaned
 

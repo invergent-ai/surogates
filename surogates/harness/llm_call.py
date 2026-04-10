@@ -221,7 +221,7 @@ async def call_llm_with_retry(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Call the LLM with retry, backoff, rate-limit handling, and credential rotation.
 
-    Production-hardening features (ported from Hermes):
+    Production-hardening features:
 
     - Jittered exponential backoff on transient errors (429, 500, 502, 503, 529)
     - Credential rotation on 401/402/429 via *rotate_credential*

@@ -1,11 +1,17 @@
-"""Tool routing through governance and into the correct execution backend.
+"""Tool routing through governance into the tool registry or sandbox.
 
 The :class:`ToolRouter` sits between the harness loop and the actual tool
 implementations.  Every call goes through:
 
 1. Governance check (:meth:`GovernanceGate.check`).
-2. Location resolution (harness-local, sandbox, or MCP).
-3. Dispatch to the appropriate backend.
+2. Location resolution (:meth:`resolve_location`).
+3. Dispatch — harness-local tools via :meth:`ToolRegistry.dispatch`,
+   sandbox tools via :class:`SandboxPool`.
+
+Harness-local tools (memory, skills, web_search, etc.) run in the worker
+process.  Sandbox tools (terminal, file I/O, code execution) run in a
+provisioned sandbox that is lazily created per session and reused across
+tool calls.
 """
 
 from __future__ import annotations
@@ -17,49 +23,56 @@ from typing import Any
 from uuid import UUID
 
 from surogates.governance.policy import GovernanceGate, PolicyDecision
-from surogates.sandbox.base import SandboxSpec
 from surogates.sandbox.pool import SandboxPool
+from surogates.sandbox.base import SandboxSpec
 from surogates.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
 
 class ToolLocation(str, Enum):
-    """Where a tool's handler is executed."""
+    """Where a tool should be executed."""
 
-    HARNESS = "harness"
-    SANDBOX = "sandbox"
-    MCP = "mcp"
+    HARNESS = "harness"   # runs in the worker process
+    SANDBOX = "sandbox"   # runs in a provisioned sandbox
 
 
-# Default classification for builtin tools.
 TOOL_LOCATIONS: dict[str, ToolLocation] = {
-    # Harness-local tools -- run in the harness process.
+    # Harness-local (no isolation needed)
     "memory": ToolLocation.HARNESS,
-    "memory_read": ToolLocation.HARNESS,
-    "memory_write": ToolLocation.HARNESS,
     "skills_list": ToolLocation.HARNESS,
+    "skill_view": ToolLocation.HARNESS,
     "skill_manage": ToolLocation.HARNESS,
     "session_search": ToolLocation.HARNESS,
     "web_search": ToolLocation.HARNESS,
+    "web_extract": ToolLocation.HARNESS,
+    "web_crawl": ToolLocation.HARNESS,
+    "clarify": ToolLocation.HARNESS,
     "delegate_task": ToolLocation.HARNESS,
-    # Sandbox tools -- forwarded to the sandbox runtime.
+    "todo": ToolLocation.HARNESS,
+    "process": ToolLocation.HARNESS,
+    # Sandbox (code execution, file mutation, need isolation)
     "terminal": ToolLocation.SANDBOX,
-    "file_write": ToolLocation.SANDBOX,
-    "file_read": ToolLocation.SANDBOX,
+    "execute_code": ToolLocation.SANDBOX,
+    "read_file": ToolLocation.SANDBOX,
+    "write_file": ToolLocation.SANDBOX,
+    "patch": ToolLocation.SANDBOX,
+    "search_files": ToolLocation.SANDBOX,
+    "list_files": ToolLocation.SANDBOX,
     "browser_navigate": ToolLocation.SANDBOX,
 }
 
 
 class ToolRouter:
-    """Routes tool calls through governance and into the correct backend.
+    """Routes tool calls through governance and into the registry or sandbox.
 
     Parameters
     ----------
     registry:
         The worker-local :class:`ToolRegistry` holding all registered tools.
     sandbox_pool:
-        The :class:`SandboxPool` used for sandbox-located tools.
+        The :class:`SandboxPool` that manages session-to-sandbox mappings
+        and dispatches sandbox tool calls.
     governance:
         The :class:`GovernanceGate` that enforces allow/deny policies.
     """
@@ -73,8 +86,6 @@ class ToolRouter:
         self.registry = registry
         self.sandbox_pool = sandbox_pool
         self.governance = governance
-        self._location_overrides: dict[str, ToolLocation] = {}
-        self._mcp_prefixes: list[str] = []
 
     # ------------------------------------------------------------------
     # Schema export
@@ -91,43 +102,18 @@ class ToolRouter:
         return self.registry.get_schemas(names=allowed_tools)
 
     # ------------------------------------------------------------------
-    # Location management
+    # Location resolution
     # ------------------------------------------------------------------
 
-    def set_location_override(self, tool_name: str, location: ToolLocation) -> None:
-        """Override the default location for *tool_name*."""
-        self._location_overrides[tool_name] = location
-
-    def add_mcp_prefix(self, prefix: str) -> None:
-        """Register a prefix (e.g. ``"github_"``) that marks MCP tools."""
-        if prefix not in self._mcp_prefixes:
-            self._mcp_prefixes.append(prefix)
-
     def resolve_location(self, tool_name: str) -> ToolLocation:
-        """Resolve where a tool should execute.
+        """Return where *tool_name* should execute.
 
-        Resolution order:
-        1. Per-instance overrides (set via :meth:`set_location_override`).
-        2. The static :data:`TOOL_LOCATIONS` mapping.
-        3. MCP prefix matching (any tool whose name starts with a
-           registered MCP prefix).
-        4. Default to :attr:`ToolLocation.HARNESS`.
+        Tools listed in :data:`TOOL_LOCATIONS` use their explicit mapping.
+        Unknown tools default to :attr:`ToolLocation.SANDBOX` so that any
+        newly-registered tool that is not explicitly classified gets
+        isolation by default.
         """
-        # 1. Overrides.
-        if tool_name in self._location_overrides:
-            return self._location_overrides[tool_name]
-
-        # 2. Static mapping.
-        if tool_name in TOOL_LOCATIONS:
-            return TOOL_LOCATIONS[tool_name]
-
-        # 3. MCP wildcard prefix matching.
-        for prefix in self._mcp_prefixes:
-            if tool_name.startswith(prefix):
-                return ToolLocation.MCP
-
-        # 4. Default.
-        return ToolLocation.HARNESS
+        return TOOL_LOCATIONS.get(tool_name, ToolLocation.SANDBOX)
 
     # ------------------------------------------------------------------
     # Execution
@@ -138,21 +124,26 @@ class ToolRouter:
         *,
         name: str,
         arguments: str | dict[str, Any],
-        tenant: Any,  # TenantContext -- typed as Any to avoid hard import
+        tenant: Any,
         session_id: UUID,
-        sandbox_spec: SandboxSpec | None = None,
+        workspace_path: str | None = None,
     ) -> str:
-        """Route a tool call through governance and into the correct backend.
+        """Route a tool call through governance and dispatch.
 
         Steps:
 
-        1. Run :meth:`GovernanceGate.check`.  If denied, return a JSON
-           error payload immediately.
-        2. Resolve the tool's location.
-        3. Dispatch to the matching backend:
-           - **HARNESS** -- :meth:`ToolRegistry.dispatch`.
-           - **SANDBOX** -- :meth:`SandboxPool.execute`.
-           - **MCP** -- not yet implemented (returns an error message).
+        1. Run :meth:`GovernanceGate.check` (includes workspace sandbox
+           enforcement via AGT ``ExecutionSandbox``).  If denied, return
+           a JSON error payload immediately.
+        2. Resolve the tool location (harness vs. sandbox).
+        3. Dispatch via the appropriate backend.
+
+        Parameters
+        ----------
+        workspace_path:
+            Absolute path to the session's workspace directory.  When set,
+            all filesystem path arguments are validated to be within this
+            directory before the tool is allowed to execute.
         """
         # -- 1. Governance check ----------------------------------------
         parsed_args: dict[str, Any] | None = None
@@ -164,7 +155,11 @@ class ToolRouter:
             except json.JSONDecodeError:
                 parsed_args = None
 
-        decision: PolicyDecision = self.governance.check(name, parsed_args)
+        decision: PolicyDecision = self.governance.check(
+            name, parsed_args,
+            workspace_path=workspace_path,
+            session_id=str(session_id),
+        )
         if not decision.allowed:
             logger.warning(
                 "Governance denied tool %s: %s", name, decision.reason,
@@ -180,49 +175,29 @@ class ToolRouter:
         # -- 2. Resolve location ----------------------------------------
         location = self.resolve_location(name)
 
-        # -- 3. Dispatch to backend -------------------------------------
-        session_id_str = str(session_id)
-
-        if location == ToolLocation.HARNESS:
-            return await self.registry.dispatch(
-                name,
-                arguments,
-                tenant=tenant,
-                session_id=session_id,
-            )
-
-        if location == ToolLocation.SANDBOX:
-            # Ensure a sandbox exists for this session.
-            spec = sandbox_spec or SandboxSpec()
-            await self.sandbox_pool.ensure(session_id_str, spec)
-
-            # Serialise arguments for the sandbox runtime.
-            input_str: str
-            if isinstance(arguments, dict):
-                input_str = json.dumps(arguments)
-            else:
-                input_str = arguments
-
-            return await self.sandbox_pool.execute(
-                session_id_str,
-                name,
-                input_str,
-            )
-
-        if location == ToolLocation.MCP:
-            # Phase 3 -- MCP transport not yet wired.
-            from surogates.tools.mcp import MCPClient
-
-            return json.dumps(
-                {
-                    "error": "mcp_not_configured",
-                    "tool": name,
-                    "message": (
-                        "MCP tool execution is not yet available.  "
-                        "This tool requires an MCP server connection."
-                    ),
-                }
-            )
-
-        # Should never reach here, but be defensive.
-        return json.dumps({"error": "unknown_location", "tool": name})
+        # -- 3. Dispatch ------------------------------------------------
+        match location:
+            case ToolLocation.HARNESS:
+                return await self.registry.dispatch(
+                    name,
+                    arguments,
+                    tenant=tenant,
+                    session_id=session_id,
+                )
+            case ToolLocation.SANDBOX:
+                # Lazily provision or reuse the session's sandbox.
+                sandbox_spec = (
+                    getattr(tenant, "sandbox_spec", None)
+                    or SandboxSpec()
+                )
+                await self.sandbox_pool.ensure(
+                    str(session_id), sandbox_spec,
+                )
+                # Serialise arguments to a JSON string for the sandbox.
+                if isinstance(arguments, dict):
+                    args_str = json.dumps(arguments)
+                else:
+                    args_str = arguments if arguments else "{}"
+                return await self.sandbox_pool.execute(
+                    str(session_id), name, args_str,
+                )

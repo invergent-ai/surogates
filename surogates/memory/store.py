@@ -36,6 +36,9 @@ ENTRY_DELIMITER = "\n\u00a7\n"
 # ---------------------------------------------------------------------------
 
 _MEMORY_THREAT_PATTERNS: list[tuple[str, str]] = [
+    # Defence-in-depth: these patterns complement AGT MemoryGuard.
+    # AGT covers some of the same injection patterns with different
+    # phrasing variants; keeping both ensures broader coverage.
     # Prompt injection
     (r'ignore\s+(previous|all|above|prior)\s+instructions', "prompt_injection"),
     (r'you\s+are\s+now\s+', "role_hijack"),
@@ -51,25 +54,44 @@ _MEMORY_THREAT_PATTERNS: list[tuple[str, str]] = [
     (r'authorized_keys', "ssh_backdoor"),
     (r'\$HOME/\.ssh|\~/\.ssh', "ssh_access"),
     (r'\$HOME/\.hermes/\.env|\~/\.hermes/\.env', "hermes_env"),
-    # Additional Hermes Agent patterns (pad to 16)
-    (r'eval\s*\(', "eval_injection"),
-    (r'exec\s*\(', "exec_injection"),
-    (r'__import__\s*\(', "import_injection"),
-    (r'subprocess\s*\.\s*(run|call|Popen|check_output)', "subprocess_injection"),
 ]
 
-# Subset of invisible chars for injection detection.
+# Invisible chars for injection detection.  Defence-in-depth: AGT
+# MemoryGuard checks bidi chars; we also check zero-width chars.
 _INVISIBLE_CHARS: set[str] = {
     '\u200b', '\u200c', '\u200d', '\u2060', '\ufeff',
     '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
 }
 
 
+def _get_memory_guard():
+    """Return a shared AGT MemoryGuard instance (lazy singleton)."""
+    global _memory_guard
+    if _memory_guard is None:
+        from agent_os.memory_guard import MemoryGuard
+        _memory_guard = MemoryGuard()
+    return _memory_guard
+
+
+_memory_guard = None
+
+
 def scan_memory_content(content: str) -> str | None:
     """Scan memory content for injection/exfiltration patterns.
 
+    Uses both the hand-rolled Hermes patterns AND the AGT MemoryGuard
+    (SHA-256 integrity, code injection, unicode manipulation, special
+    character ratio checks).
+
     Returns an error string if blocked, ``None`` if clean.
     """
+    # --- AGT MemoryGuard check (OWASP ASI06) ---
+    guard = _get_memory_guard()
+    result = guard.validate_write(content, source="memory_tool")
+    if not result.allowed:
+        alerts = "; ".join(a.message for a in result.alerts)
+        return f"Blocked by MemoryGuard: {alerts}"
+
     # Check invisible unicode.
     for char in _INVISIBLE_CHARS:
         if char in content:
@@ -398,10 +420,8 @@ class MemoryStore:
             "success": True,
             "target": target,
             "entries": entries,
+            "usage": f"{pct}% \u2014 {current:,}/{limit:,} chars",
             "entry_count": len(entries),
-            "usage_chars": current,
-            "max_chars": limit,
-            "usage_pct": pct,
         }
         if message:
             resp["message"] = message

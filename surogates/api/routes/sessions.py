@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from uuid import UUID
+from pathlib import Path
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -16,6 +17,19 @@ from surogates.tenant.context import TenantContext
 
 logger = logging.getLogger(__name__)
 
+# Lazy singleton for the AGT PromptInjectionDetector — screens user
+# messages before they enter the event log.
+_injection_detector = None
+
+
+def _get_injection_detector():
+    """Return a shared PromptInjectionDetector instance."""
+    global _injection_detector
+    if _injection_detector is None:
+        from agent_os.prompt_injection import PromptInjectionDetector
+        _injection_detector = PromptInjectionDetector()
+    return _injection_detector
+
 router = APIRouter()
 
 
@@ -24,14 +38,8 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 
-class WorkspaceConfig(BaseModel):
-    mode: str = "ephemeral"
-
-
 class CreateSessionRequest(BaseModel):
-    model: str = "gpt-4o"
     system: str | None = None
-    workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     config: dict = Field(default_factory=dict)
 
 
@@ -111,16 +119,29 @@ async def create_session(
     """Create a new session for the authenticated user."""
     store = _get_session_store(request)
 
+    # Model is always set from server config — not user-selectable.
+    settings = request.app.state.settings
+    model = settings.llm.model or "gpt-5.4"
+
     config = body.config.copy()
     if body.system:
         config["system"] = body.system
-    config["workspace"] = body.workspace.model_dump()
+
+    # Workspace path is always server-configured, never user-specified.
+    # Each session gets its own subdirectory under the configured root.
+    workspace_root = Path(settings.worker.workspace_path)
+    # Pre-generate the session ID so we can create the workspace dir first.
+    session_id = uuid4()
+    session_workspace = workspace_root / str(session_id)
+    session_workspace.mkdir(parents=True, exist_ok=True)
+    config["workspace_path"] = str(session_workspace)
 
     session = await store.create_session(
+        session_id=session_id,
         user_id=tenant.user_id,
         org_id=tenant.org_id,
         channel="web",
-        model=body.model,
+        model=model,
         config=config,
     )
 
@@ -147,10 +168,26 @@ async def send_message(
     store = _get_session_store(request)
     session = await _get_session_for_tenant(store, session_id, tenant)
 
-    if session.status not in ("active", "idle"):
+    if session.status not in ("active", "idle", "failed", "paused"):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Session is in '{session.status}' state and cannot accept messages.",
+        )
+
+    # Reset failed/paused sessions back to active on new message.
+    if session.status in ("failed", "paused"):
+        await store.update_session_status(session_id, "active")
+
+    # Screen user message for prompt injection (AGT PromptInjectionDetector).
+    injection_result = _get_injection_detector().detect(
+        body.content, source="web_channel"
+    )
+    if injection_result.is_injection:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Message blocked: {injection_result.explanation}"
+            ),
         )
 
     # Emit the user message event.
@@ -168,6 +205,29 @@ async def send_message(
     )
 
     return SendMessageResponse(event_id=event_id)
+
+
+@router.post(
+    "/sessions/{session_id}/confirm-disclosure",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def confirm_disclosure(
+    session_id: UUID,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> None:
+    """Confirm AI disclosure for a session (EU AI Act Art. 50).
+
+    Must be called before the agent can execute tools when transparency
+    enforcement is enabled.  Typically called by the frontend after
+    showing the AI disclosure notice to the user.
+    """
+    store = _get_session_store(request)
+    await _get_session_for_tenant(store, session_id, tenant)
+
+    governance = getattr(request.app.state, "governance_gate", None)
+    if governance is not None:
+        governance.confirm_disclosure(str(session_id))
 
 
 @router.get("/sessions/{session_id}", response_model=Session)

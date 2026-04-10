@@ -22,14 +22,16 @@ router = APIRouter()
 
 # Terminal session statuses -- when the session enters one of these states the
 # SSE stream sends a final event and closes.
-_TERMINAL_STATUSES = frozenset({"completed", "failed", "archived"})
+# Only truly terminal statuses close the SSE stream. "failed" is excluded
+# because users can retry by sending a new message (which resets to active).
+_TERMINAL_STATUSES = frozenset({"completed", "archived"})
 
 # Maximum time (seconds) an SSE connection stays open before the server
 # closes it gracefully.  Clients are expected to reconnect.
 _MAX_STREAM_DURATION = 300
 
 # Interval (seconds) between polls when no new events are found.
-_POLL_INTERVAL = 1.0
+_POLL_INTERVAL = 0.5  # Fallback poll; Redis pub/sub is the primary notification
 
 
 # ---------------------------------------------------------------------------
@@ -95,56 +97,112 @@ async def stream_events(
     stream closes.
     """
     store = _get_session_store(request)
-    await _verify_session_access(store, session_id, tenant)
+
+    # Single DB call for access check + terminal status check.
+    try:
+        session_check = await store.get_session(session_id)
+    except SessionNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
+    if session_check.org_id != tenant.org_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
+
+    if session_check and session_check.status in _TERMINAL_STATUSES:
+        remaining = await store.get_events(session_id, after=after, limit=1)
+        if not remaining:
+            # Nothing left to deliver — close permanently.
+            async def _terminal_generator():  # noqa: ANN202
+                yield {
+                    "event": "session.done",
+                    "data": json.dumps({"reason": session_check.status, "status": session_check.status}),
+                    "retry": 0,  # tell EventSource not to reconnect
+                }
+            return EventSourceResponse(_terminal_generator())
+
+    # Try to get Redis for pub/sub notifications (faster than polling).
+    redis = getattr(request.app.state, "redis", None)
 
     async def event_generator():  # noqa: ANN202
         cursor = after
         elapsed = 0.0
 
-        while elapsed < _MAX_STREAM_DURATION:
-            # Check if client disconnected.
-            if await request.is_disconnected():
-                return
+        # Subscribe to Redis channel for this session (if available).
+        pubsub = None
+        if redis is not None:
+            try:
+                pubsub = redis.pubsub()
+                await pubsub.subscribe(f"surogates:session:{session_id}")
+            except Exception:
+                pubsub = None
 
-            events = await store.get_events(session_id, after=cursor, limit=50)
+        try:
+            # Send an immediate comment to establish the SSE connection
+            # (browsers show the request as "pending" until first byte).
+            yield {"comment": "connected"}
 
-            for event in events:
-                yield {
-                    "id": str(event.id),
-                    "event": event.type,
-                    "data": json.dumps(event.data, default=str),
-                }
-                if event.id is not None:
-                    cursor = event.id
+            while elapsed < _MAX_STREAM_DURATION:
+                # Check if client disconnected.
+                if await request.is_disconnected():
+                    return
 
-            if not events:
-                # No new events -- check if the session has terminated.
+                events = await store.get_events(session_id, after=cursor, limit=50)
+
+                for event in events:
+                    yield {
+                        "id": str(event.id),
+                        "event": event.type,
+                        "data": json.dumps(event.data, default=str),
+                    }
+                    if event.id is not None:
+                        cursor = event.id
+
+                if not events:
+                    # No new events -- check if the session has terminated.
+                    try:
+                        session = await store.get_session(session_id)
+                    except SessionNotFoundError:
+                        yield {
+                            "event": "session.done",
+                            "data": json.dumps({"reason": "session_not_found"}),
+                            "retry": 0,
+                        }
+                        return
+
+                    if session.status in _TERMINAL_STATUSES:
+                        yield {
+                            "event": "session.done",
+                            "data": json.dumps(
+                                {"reason": session.status, "status": session.status}
+                            ),
+                            "retry": 0,  # tell EventSource not to reconnect
+                        }
+                        return
+
+                    # Wait for a Redis notification or fall back to polling.
+                    if pubsub is not None:
+                        try:
+                            msg = await asyncio.wait_for(
+                                pubsub.get_message(ignore_subscribe_messages=True, timeout=_POLL_INTERVAL),
+                                timeout=_POLL_INTERVAL + 0.5,
+                            )
+                        except (asyncio.TimeoutError, Exception):
+                            pass
+                    else:
+                        await asyncio.sleep(_POLL_INTERVAL)
+
+                    elapsed += _POLL_INTERVAL
+
+            # Stream duration exceeded -- close gracefully.
+            yield {
+                "event": "stream.timeout",
+                "data": json.dumps({"reason": "max_duration_exceeded"}),
+            }
+        finally:
+            if pubsub is not None:
                 try:
-                    session = await store.get_session(session_id)
-                except SessionNotFoundError:
-                    yield {
-                        "event": "session.done",
-                        "data": json.dumps({"reason": "session_not_found"}),
-                    }
-                    return
-
-                if session.status in _TERMINAL_STATUSES:
-                    yield {
-                        "event": "session.done",
-                        "data": json.dumps(
-                            {"reason": session.status, "status": session.status}
-                        ),
-                    }
-                    return
-
-                await asyncio.sleep(_POLL_INTERVAL)
-                elapsed += _POLL_INTERVAL
-
-        # Stream duration exceeded -- close gracefully.
-        yield {
-            "event": "stream.timeout",
-            "data": json.dumps({"reason": "max_duration_exceeded"}),
-        }
+                    await pubsub.unsubscribe()
+                    await pubsub.aclose()
+                except Exception:
+                    pass
 
     return EventSourceResponse(event_generator())
 

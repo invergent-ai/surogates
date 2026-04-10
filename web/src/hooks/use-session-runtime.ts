@@ -23,9 +23,9 @@ export interface ToolCallInfo {
   args: string;
   result?: string;
   status: "running" | "complete" | "error";
+  checkpointHash?: string;
 }
 
-// All event types the backend can emit
 const LISTENED_EVENTS = [
   "user.message",
   "llm.request",
@@ -49,52 +49,19 @@ const LISTENED_EVENTS = [
 export function useSessionRuntime(sessionId: string | null) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isRunning, setIsRunning] = useState(false);
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const esRef = useRef<EventSource | null>(null);
   const lastEventIdRef = useRef<number>(0);
-
-  const connect = useCallback(() => {
-    if (!sessionId) return;
-
-    const token = getAuthToken();
-    const url = new URL(
-      `/api/v1/sessions/${sessionId}/events`,
-      window.location.origin,
-    );
-    url.searchParams.set("after", String(lastEventIdRef.current));
-    if (token) url.searchParams.set("token", token);
-
-    const es = new EventSource(url.toString());
-    eventSourceRef.current = es;
-
-    // The backend sends named events (event: user.message, event: llm.delta, etc.)
-    // Register a listener for each event type.
-    for (const eventType of LISTENED_EVENTS) {
-      es.addEventListener(eventType, (e: MessageEvent) => {
-        const data = JSON.parse(e.data) as Record<string, unknown>;
-        const eventId = e.lastEventId ? Number(e.lastEventId) : 0;
-        if (eventId > lastEventIdRef.current) {
-          lastEventIdRef.current = eventId;
-        }
-        applyEvent(eventType, eventId, data);
-      });
-    }
-
-    es.onerror = () => {
-      es.close();
-      eventSourceRef.current = null;
-      // Reconnect after a short delay (unless unmounted)
-      setTimeout(() => {
-        if (eventSourceRef.current === null) connect();
-      }, 3000);
-    };
-  }, [sessionId]);
+  const sessionDoneRef = useRef<boolean>(false);
+  // Ref to the latest connect function so onerror can call it without
+  // a circular declaration dependency.
+  const connectRef = useRef<() => void>(() => {});
 
   const applyEvent = useCallback(
-    (
-      type: string,
-      eventId: number,
-      data: Record<string, unknown>,
-    ) => {
+    (type: string, eventId: number, data: Record<string, unknown>) => {
+      if (type === "session.done") {
+        sessionDoneRef.current = true;
+      }
+
       setMessages((prev) => {
         const next = [...prev];
 
@@ -111,9 +78,14 @@ export function useSessionRuntime(sessionId: string | null) {
           }
 
           case "llm.delta": {
-            const streaming = findLastAssistant(next);
-            if (streaming && streaming.status === "streaming") {
-              streaming.content += (data.content as string) ?? "";
+            const lastIdx = findLastAssistantIndex(next);
+            if (lastIdx >= 0 && next[lastIdx].status === "streaming") {
+              // Create a new object to ensure React detects the change.
+              const prev = next[lastIdx];
+              next[lastIdx] = {
+                ...prev,
+                content: prev.content + ((data.content as string) ?? ""),
+              };
             } else {
               next.push({
                 id: `evt-${eventId}`,
@@ -128,30 +100,48 @@ export function useSessionRuntime(sessionId: string | null) {
           }
 
           case "llm.response": {
-            const lastAssistant = findLastAssistant(next);
-            if (lastAssistant) {
-              lastAssistant.content =
-                (data.content as string) ?? lastAssistant.content;
-              lastAssistant.status = "complete";
+            const msg = data.message as Record<string, unknown> | undefined;
+            const responseContent =
+              (msg?.content as string) ?? (data.content as string) ?? "";
+            const hasToolCalls = !!(
+              msg?.tool_calls &&
+              Array.isArray(msg.tool_calls) &&
+              (msg.tool_calls as unknown[]).length > 0
+            );
+            const respIdx = findLastAssistantIndex(next);
+            if (respIdx >= 0) {
+              next[respIdx] = {
+                ...next[respIdx],
+                content: responseContent || next[respIdx].content,
+                status: hasToolCalls ? "streaming" : "complete",
+              };
             } else {
               next.push({
                 id: `evt-${eventId}`,
                 role: "assistant",
-                content: (data.content as string) ?? "",
+                content: responseContent,
                 createdAt: new Date(),
-                status: "complete",
+                status: hasToolCalls ? "streaming" : "complete",
               });
             }
-            setIsRunning(false);
+            if (!hasToolCalls) {
+              setIsRunning(false);
+            }
             break;
           }
 
           case "llm.thinking": {
-            const assistant = findLastAssistant(next);
-            if (assistant) {
-              assistant.reasoning =
-                (assistant.reasoning ?? "") +
-                ((data.content as string) ?? "");
+            const thinkIdx = findLastAssistantIndex(next);
+            if (thinkIdx >= 0) {
+              const prev = next[thinkIdx];
+              next[thinkIdx] = {
+                ...prev,
+                reasoning:
+                  (prev.reasoning ?? "") +
+                  ((data.reasoning as string) ??
+                    (data.content as string) ??
+                    ""),
+              };
             }
             setIsRunning(true);
             break;
@@ -170,16 +160,26 @@ export function useSessionRuntime(sessionId: string | null) {
               next.push(assistant);
             }
             assistant.toolCalls = assistant.toolCalls ?? [];
-            assistant.toolCalls.push({
-              id:
-                (data.tool_call_id as string) ?? `tc-${eventId}`,
-              toolName: (data.tool_name as string) ?? "unknown",
-              args:
-                typeof data.arguments === "string"
-                  ? data.arguments
-                  : JSON.stringify(data.arguments ?? {}),
-              status: "running",
-            });
+            // Deduplicate — skip if this tool_call_id already exists.
+            const tcId = (data.tool_call_id as string) ?? `tc-${eventId}`;
+            if (!assistant.toolCalls.some((t) => t.id === tcId)) {
+              const entry: ToolCallInfo = {
+                id: tcId,
+                toolName:
+                  (data.name as string) ??
+                  (data.tool_name as string) ??
+                  "unknown",
+                args:
+                  typeof data.arguments === "string"
+                    ? data.arguments
+                    : JSON.stringify(data.arguments ?? {}),
+                status: "running",
+              };
+              if (data.checkpoint_hash) {
+                entry.checkpointHash = data.checkpoint_hash as string;
+              }
+              assistant.toolCalls.push(entry);
+            }
             setIsRunning(true);
             break;
           }
@@ -190,10 +190,12 @@ export function useSessionRuntime(sessionId: string | null) {
               (t) => t.id === (data.tool_call_id as string),
             );
             if (tc) {
+              const resultContent =
+                (data.content as string) ?? (data.result as string);
               tc.result =
-                typeof data.result === "string"
-                  ? data.result
-                  : JSON.stringify(data.result ?? null);
+                typeof resultContent === "string"
+                  ? resultContent
+                  : JSON.stringify(resultContent ?? null);
               tc.status = "complete";
             }
             break;
@@ -209,29 +211,27 @@ export function useSessionRuntime(sessionId: string | null) {
           case "session.fail":
           case "session.done":
           case "harness.crash": {
-            // Mark any streaming assistant message as complete
-            const last = findLastAssistant(next);
-            if (last && last.status === "streaming") {
-              last.status =
-                type === "session.fail" || type === "harness.crash"
-                  ? "error"
-                  : "complete";
+            const doneIdx = findLastAssistantIndex(next);
+            if (doneIdx >= 0 && next[doneIdx].status === "streaming") {
+              next[doneIdx] = {
+                ...next[doneIdx],
+                status:
+                  type === "session.fail" || type === "harness.crash"
+                    ? "error"
+                    : "complete",
+              };
             }
             setIsRunning(false);
             break;
           }
 
-          case "stream.timeout": {
-            // Server closed the SSE stream due to max duration.
-            // The onerror handler will reconnect automatically.
+          case "stream.timeout":
             break;
-          }
 
           case "policy.denied": {
             const assistant = findLastAssistant(next);
             if (assistant) {
-              assistant.content +=
-                `\n\n**Policy denied**: ${(data.reason as string) ?? "Action blocked by governance policy."}`;
+              assistant.content += `\n\n**Policy denied**: ${(data.reason as string) ?? "Action blocked by governance policy."}`;
               assistant.status = "error";
             }
             setIsRunning(false);
@@ -245,7 +245,50 @@ export function useSessionRuntime(sessionId: string | null) {
     [],
   );
 
-  // Connect/disconnect on sessionId change
+  const connect = useCallback(() => {
+    if (!sessionId) return;
+
+    const token = getAuthToken();
+    const url = new URL(
+      `/api/v1/sessions/${sessionId}/events`,
+      window.location.origin,
+    );
+    url.searchParams.set("after", String(lastEventIdRef.current));
+    if (token) url.searchParams.set("token", token);
+
+    const es = new EventSource(url.toString());
+    esRef.current = es;
+
+    for (const eventType of LISTENED_EVENTS) {
+      es.addEventListener(eventType, (e: MessageEvent) => {
+        const data = JSON.parse(e.data) as Record<string, unknown>;
+        const eventId = e.lastEventId ? Number(e.lastEventId) : 0;
+        if (eventId > lastEventIdRef.current) {
+          lastEventIdRef.current = eventId;
+        }
+        applyEvent(eventType, eventId, data);
+      });
+    }
+
+    es.onerror = () => {
+      es.close();
+      esRef.current = null;
+      if (!sessionDoneRef.current) {
+        setTimeout(() => {
+          if (esRef.current === null) connectRef.current();
+        }, 3000);
+      }
+    };
+  }, [sessionId, applyEvent]);
+
+  // Keep ref in sync with latest connect callback.
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
+
+  /* eslint-disable react-hooks/set-state-in-effect -- intentional:
+     we must reset messages/running state synchronously when sessionId
+     changes; this is the standard pattern for external-store hooks. */
   useEffect(() => {
     if (!sessionId) {
       setMessages([]);
@@ -254,24 +297,31 @@ export function useSessionRuntime(sessionId: string | null) {
     }
 
     lastEventIdRef.current = 0;
+    sessionDoneRef.current = false;
     setMessages([]);
     connect();
 
     return () => {
-      const es = eventSourceRef.current;
-      eventSourceRef.current = null; // prevent reconnect in onerror
+      const es = esRef.current;
+      esRef.current = null;
       es?.close();
     };
   }, [sessionId, connect]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   return { messages, isRunning };
 }
 
-function findLastAssistant(
-  msgs: ChatMessage[],
-): ChatMessage | undefined {
+function findLastAssistant(msgs: ChatMessage[]): ChatMessage | undefined {
   for (let i = msgs.length - 1; i >= 0; i--) {
     if (msgs[i].role === "assistant") return msgs[i];
   }
   return undefined;
+}
+
+function findLastAssistantIndex(msgs: ChatMessage[]): number {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === "assistant") return i;
+  }
+  return -1;
 }

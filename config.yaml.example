@@ -1,0 +1,89 @@
+# Surogates configuration
+# Mount at /etc/surogates/config.yaml (K8s ConfigMap) or set SUROGATES_CONFIG env var.
+# Environment variables (SUROGATES_*) override these values.
+
+# ── Database ──────────────────────────────────────────────────────────
+db:
+  url: "postgresql+asyncpg://surogates:surogates@localhost:5432/surogates"
+  pool_size: 10
+  pool_overflow: 20
+
+# ── Redis ─────────────────────────────────────────────────────────────
+redis:
+  url: "redis://localhost:6379/0"
+
+# ── API Gateway ───────────────────────────────────────────────────────
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1
+  # cors_origins: ["https://app.example.com"]
+
+# ── LLM Provider ─────────────────────────────────────────────────────
+llm:
+  model: "gpt-4o"
+  # provider: "openai"          # openai, anthropic, openrouter, etc.
+  # base_url: ""                # custom endpoint (vLLM, Ollama, etc.)
+  # api_key: ""                 # or set SUROGATES_LLM_API_KEY env var
+  temperature: 0.7
+
+  # Fallback chain — tried in order when primary fails (429, 402, 503)
+  # fallback_providers:
+  #   - provider: "anthropic"
+  #     model: "claude-sonnet-4-20250514"
+  #     api_key: ""             # or set ANTHROPIC_API_KEY
+  #   - provider: "openrouter"
+  #     model: "openai/gpt-4o"
+
+  # Credential pool — rotate API keys on rate limits
+  # credential_pool:
+  #   - api_key: "sk-key-1"
+  #     label: "primary"
+  #     priority: 0
+  #   - api_key: "sk-key-2"
+  #     label: "secondary"
+  #     priority: 1
+
+# ── Worker ────────────────────────────────────────────────────────────
+worker:
+  concurrency: 50
+  queue_name: "surogates:work_queue"
+  poll_timeout: 5
+  workspace_path: "/tmp/surogates/workspaces"
+
+# ── Sandbox ───────────────────────────────────────────────────────────
+sandbox:
+  backend: "process"            # "process" or "kubernetes"
+  default_timeout: 300
+
+# ── Governance ────────────────────────────────────────────────────────
+governance:
+  enabled: true
+  # platform_policy_path: "/etc/surogates/policies"
+
+  # EU AI Act Art. 13/50 transparency enforcement
+  transparency:
+    enabled: false              # set to true for EU deployments
+    level: "basic"              # "none", "basic", "enhanced", "full"
+    require_confirmation: true  # block tools until user confirms AI disclosure
+    emotion_recognition: false  # Art. 50(3) — set true if using sentiment analysis
+
+  # Network egress policy — restrict outbound URLs from web tools
+  # egress:
+  #   default_action: "deny"    # "allow" or "deny" when no rule matches
+  #   rules:
+  #     - domain: "*.openai.com"
+  #       ports: [443]
+  #       action: allow
+  #     - domain: "*.anthropic.com"
+  #       ports: [443]
+  #       action: allow
+  #     - domain: "*.tavily.com"
+  #       ports: [443]
+  #       action: allow
+
+# ── Authentication ────────────────────────────────────────────────────
+jwt_secret: "change-me-in-production"
+
+# ── Logging ───────────────────────────────────────────────────────────
+log_level: "INFO"

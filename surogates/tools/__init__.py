@@ -4,10 +4,9 @@ Key exports:
 
 - :class:`ToolRegistry` -- central tool storage and dispatch.
 - :class:`ToolSchema` / :class:`ToolEntry` -- data classes describing tools.
-- :class:`ToolRouter` -- governance-aware routing to harness / sandbox / MCP.
+- :class:`ToolRouter` -- governance-aware dispatch via the registry.
 - :class:`ToolRuntime` -- bootstrap helper that wires builtins into a registry.
 - :class:`ResourceLoader` -- loads skills and MCP configs from volumes.
-- :class:`ToolLocation` -- enum for tool execution backends.
 """
 
 from __future__ import annotations

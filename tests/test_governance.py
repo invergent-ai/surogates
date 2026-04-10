@@ -176,6 +176,154 @@ class TestGovernanceGateFromConfig:
 
 
 # =========================================================================
+# Workspace Sandbox (AGT ExecutionSandbox)
+# =========================================================================
+
+
+class TestWorkspaceSandbox:
+    """GovernanceGate workspace sandbox enforces path containment."""
+
+    def test_read_file_inside_workspace_allowed(self, tmp_path):
+        gate = GovernanceGate()
+        ws = str(tmp_path)
+        # Create a file so resolve() doesn't complain
+        (tmp_path / "data.txt").touch()
+        decision = gate.check(
+            "read_file",
+            {"path": str(tmp_path / "data.txt")},
+            workspace_path=ws,
+        )
+        assert decision.allowed is True
+
+    def test_read_file_outside_workspace_blocked(self, tmp_path):
+        gate = GovernanceGate()
+        ws = str(tmp_path)
+        decision = gate.check(
+            "read_file",
+            {"path": "/etc/passwd"},
+            workspace_path=ws,
+        )
+        assert decision.allowed is False
+        assert "sandbox violation" in decision.reason.lower()
+
+    def test_write_file_traversal_blocked(self, tmp_path):
+        gate = GovernanceGate()
+        ws = str(tmp_path)
+        decision = gate.check(
+            "write_file",
+            {"path": "../../etc/shadow"},
+            workspace_path=ws,
+        )
+        assert decision.allowed is False
+
+    def test_relative_path_inside_workspace_allowed(self, tmp_path):
+        gate = GovernanceGate()
+        ws = str(tmp_path)
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").touch()
+        decision = gate.check(
+            "read_file",
+            {"path": "src/main.py"},
+            workspace_path=ws,
+        )
+        assert decision.allowed is True
+
+    def test_patch_outside_workspace_blocked(self, tmp_path):
+        gate = GovernanceGate()
+        ws = str(tmp_path)
+        decision = gate.check(
+            "patch",
+            {"path": "/tmp/other/file.py"},
+            workspace_path=ws,
+        )
+        assert decision.allowed is False
+
+    def test_terminal_workdir_outside_workspace_blocked(self, tmp_path):
+        gate = GovernanceGate()
+        ws = str(tmp_path)
+        decision = gate.check(
+            "terminal",
+            {"command": "ls", "workdir": "/etc"},
+            workspace_path=ws,
+        )
+        assert decision.allowed is False
+
+    def test_terminal_workdir_inside_workspace_allowed(self, tmp_path):
+        gate = GovernanceGate()
+        ws = str(tmp_path)
+        (tmp_path / "subdir").mkdir()
+        decision = gate.check(
+            "terminal",
+            {"command": "ls", "workdir": str(tmp_path / "subdir")},
+            workspace_path=ws,
+        )
+        assert decision.allowed is True
+
+    def test_no_workspace_path_skips_sandbox(self):
+        gate = GovernanceGate()
+        decision = gate.check(
+            "read_file",
+            {"path": "/tmp/some_file.txt"},
+            workspace_path=None,
+        )
+        # Without workspace_path, the workspace sandbox is not enforced
+        # (AGT's own argument checks may still block protected paths)
+        assert decision.allowed is True
+
+    def test_tools_without_path_args_not_affected(self, tmp_path):
+        gate = GovernanceGate()
+        ws = str(tmp_path)
+        # memory tool has no path arguments
+        decision = gate.check(
+            "memory",
+            {"action": "add", "content": "test"},
+            workspace_path=ws,
+        )
+        assert decision.allowed is True
+
+    def test_symlink_escape_blocked(self, tmp_path):
+        gate = GovernanceGate()
+        ws = str(tmp_path)
+        # Create a symlink that points outside the workspace
+        (tmp_path / "escape").symlink_to("/etc")
+        decision = gate.check(
+            "read_file",
+            {"path": str(tmp_path / "escape" / "passwd")},
+            workspace_path=ws,
+        )
+        assert decision.allowed is False
+
+    def test_sandbox_cached_per_workspace(self):
+        gate = GovernanceGate()
+        # Access the same workspace twice — should reuse the sandbox
+        gate._get_sandbox("/tmp/ws1")
+        gate._get_sandbox("/tmp/ws1")
+        assert len(gate._sandbox_cache) == 1
+        gate._get_sandbox("/tmp/ws2")
+        assert len(gate._sandbox_cache) == 2
+
+    def test_list_files_outside_workspace_blocked(self, tmp_path):
+        gate = GovernanceGate()
+        ws = str(tmp_path)
+        decision = gate.check(
+            "list_files",
+            {"path": "/"},
+            workspace_path=ws,
+        )
+        assert decision.allowed is False
+
+    def test_search_files_outside_workspace_blocked(self, tmp_path):
+        gate = GovernanceGate()
+        ws = str(tmp_path)
+        decision = gate.check(
+            "search_files",
+            {"path": "/var/log", "pattern": "*.log"},
+            workspace_path=ws,
+        )
+        assert decision.allowed is False
+
+
+# =========================================================================
 # MCPGovernance
 # =========================================================================
 

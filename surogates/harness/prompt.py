@@ -106,8 +106,15 @@ TOOL_USE_ENFORCEMENT_MODELS: tuple[str, ...] = (
     "gpt", "codex", "gemini", "gemma", "grok",
 )
 
+# Model name substrings that should use the 'developer' role instead of
+# 'system' for the system prompt.  OpenAI's newer models (GPT-5, Codex)
+# give stronger instruction-following weight to the 'developer' role.
+# The swap happens at the API boundary so internal message representation
+# stays consistent ("system" everywhere).
+DEVELOPER_ROLE_MODELS: tuple[str, ...] = ("gpt-5", "codex")
+
 # OpenAI GPT/Codex execution discipline.
-OPENAI_EXECUTION_GUIDANCE: str = (
+OPENAI_MODEL_EXECUTION_GUIDANCE: str = (
     "# Execution discipline\n"
     "<tool_persistence>\n"
     "- Use tools whenever they improve correctness, completeness, or grounding.\n"
@@ -167,8 +174,9 @@ OPENAI_EXECUTION_GUIDANCE: str = (
     "</missing_context>"
 )
 
-# Gemini/Gemma operational guidance (thanks Hermes Agent, adapted from OpenCode).
-GOOGLE_OPERATIONAL_GUIDANCE: str = (
+# Gemini/Gemma-specific operational guidance, adapted from OpenCode's gemini.txt.
+# Injected alongside TOOL_USE_ENFORCEMENT_GUIDANCE when the model is Gemini or Gemma.
+GOOGLE_MODEL_OPERATIONAL_GUIDANCE: str = (
     "# Google model operational directives\n"
     "Follow these operational rules strictly:\n"
     "- **Absolute paths:** Always construct and use absolute file paths for all "
@@ -244,9 +252,8 @@ _MAX_FILE_BYTES: int = 32_768
 # Compiled injection detection patterns (case-insensitive).
 # ---------------------------------------------------------------------------
 _INJECTION_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"ignore\s+(all\s+)?previous\s+instructions", re.IGNORECASE),
-    re.compile(r"ignore\s+(all\s+)?prior\s+instructions", re.IGNORECASE),
-    re.compile(r"disregard\s+(all\s+)?previous\s+instructions", re.IGNORECASE),
+    re.compile(r"ignore\s+(previous|all|above|prior)\s+instructions", re.IGNORECASE),
+    re.compile(r"disregard\s+(your|all|any)\s+(instructions|rules|guidelines)", re.IGNORECASE),
     re.compile(r"(?:^|\n)\s*system\s*:", re.IGNORECASE),
     re.compile(r"you\s+are\s+now\b", re.IGNORECASE),
     re.compile(r"\boverride\s+(system|instructions|rules)\b", re.IGNORECASE),
@@ -509,11 +516,11 @@ class PromptBuilder:
 
         # OpenAI-specific execution discipline.
         if any(p in model_lower for p in ("gpt", "codex", "o3", "o4")):
-            parts.append(OPENAI_EXECUTION_GUIDANCE)
+            parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
 
         # Google-specific operational guidance.
         if any(p in model_lower for p in ("gemini", "gemma")):
-            parts.append(GOOGLE_OPERATIONAL_GUIDANCE)
+            parts.append(GOOGLE_MODEL_OPERATIONAL_GUIDANCE)
 
         return "\n\n".join(parts)
 

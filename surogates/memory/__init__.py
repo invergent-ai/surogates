@@ -11,7 +11,11 @@ Public API:
 from __future__ import annotations
 
 from surogates.memory.builtin import BuiltinMemoryProvider
-from surogates.memory.manager import MemoryManager, build_memory_context_block
+from surogates.memory.manager import (
+    MemoryManager,
+    build_memory_context_block,
+    sanitize_context,
+)
 from surogates.memory.provider import MemoryProvider
 from surogates.memory.store import MemoryStore
 
@@ -21,4 +25,5 @@ __all__ = [
     "MemoryProvider",
     "MemoryStore",
     "build_memory_context_block",
+    "sanitize_context",
 ]

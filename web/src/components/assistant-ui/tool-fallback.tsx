@@ -6,6 +6,7 @@ import {
   CheckIcon,
   ChevronDownIcon,
   LoaderIcon,
+  RotateCcwIcon,
   XCircleIcon,
 } from "lucide-react";
 import {
@@ -18,7 +19,13 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { Button } from "@/components/ui/button";
+import {
+  ConfirmDialog,
+} from "@/components/ui/confirm-dialog";
 import { cn } from "@/lib/utils";
+import { useAppStore } from "@/stores/app-store";
+import * as workspaceApi from "@/api/workspace";
 
 const ANIMATION_DURATION = 200;
 
@@ -268,7 +275,54 @@ function ToolFallbackError({
   );
 }
 
+const FILE_MUTATING_TOOLS = new Set(["write_file", "patch"]);
+
+function ToolRollbackButton({ toolCallId }: { toolCallId: string }) {
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [rolledBack, setRolledBack] = useState(false);
+  const checkpointHash = useAppStore(
+    (s) => s.toolCheckpoints[toolCallId],
+  );
+  const activeSessionId = useAppStore((s) => s.activeSessionId);
+  const fetchWorkspaceTree = useAppStore((s) => s.fetchWorkspaceTree);
+
+  if (!checkpointHash || !activeSessionId || rolledBack) return null;
+
+  async function handleRollback() {
+    await workspaceApi.rollbackToCheckpoint(activeSessionId!, checkpointHash);
+    setRolledBack(true);
+    void fetchWorkspaceTree(activeSessionId!);
+  }
+
+  return (
+    <>
+      <Button
+        variant="ghost"
+        size="xs"
+        className="gap-1 text-muted-foreground hover:text-foreground"
+        onClick={(e) => {
+          e.stopPropagation();
+          setConfirmOpen(true);
+        }}
+      >
+        <RotateCcwIcon className="w-3 h-3" />
+        Undo
+      </Button>
+      <ConfirmDialog
+        open={confirmOpen}
+        title="Roll back this change?"
+        description="This will restore the workspace to the state before this tool call. A snapshot of the current state is taken first so you can undo the rollback."
+        confirmLabel="Roll back"
+        variant="destructive"
+        onConfirm={handleRollback}
+        onCancel={() => setConfirmOpen(false)}
+      />
+    </>
+  );
+}
+
 const ToolFallbackImpl: ToolCallMessagePartComponent = ({
+  toolCallId,
   toolName,
   argsText,
   result,
@@ -276,12 +330,18 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
 }) => {
   const isCancelled =
     status?.type === "incomplete" && status.reason === "cancelled";
+  const isComplete = status?.type === "complete";
+  const showRollback =
+    isComplete && FILE_MUTATING_TOOLS.has(toolName);
 
   return (
     <ToolFallbackRoot
       className={cn(isCancelled && "border-muted-foreground/30 bg-muted/30")}
     >
-      <ToolFallbackTrigger toolName={toolName} status={status} />
+      <div className="flex items-center">
+        <ToolFallbackTrigger toolName={toolName} status={status} className="flex-1" />
+        {showRollback && <ToolRollbackButton toolCallId={toolCallId} />}
+      </div>
       <ToolFallbackContent>
         <ToolFallbackError status={status} />
         <ToolFallbackArgs

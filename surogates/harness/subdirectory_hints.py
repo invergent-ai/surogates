@@ -158,19 +158,17 @@ class SubdirectoryHintTracker:
                 content = hint_path.read_text(encoding="utf-8").strip()
                 if not content:
                     continue
-                scanned = scan_context_content(content, filename)
-                if scanned is None:
-                    continue
-                if len(scanned) > MAX_HINT_CHARS:
-                    scanned = (
-                        scanned[:MAX_HINT_CHARS]
+                content = scan_context_content(content, filename)
+                if len(content) > MAX_HINT_CHARS:
+                    content = (
+                        content[:MAX_HINT_CHARS]
                         + f"\n\n[...truncated {filename}: "
-                        f"{len(scanned):,} chars total]"
+                        f"{len(content):,} chars total]"
                     )
                 # First match wins per directory.
                 logger.debug("Loaded subdirectory hint from %s", hint_path)
                 return (
-                    f"[Subdirectory context discovered: {hint_path}]\n{scanned}"
+                    f"[Subdirectory context discovered: {hint_path}]\n{content}"
                 )
             except Exception as exc:
                 logger.debug("Could not read %s: %s", hint_path, exc)

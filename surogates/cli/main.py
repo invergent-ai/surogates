@@ -24,6 +24,9 @@ def _configure_logging(level: str) -> None:
         format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
         stream=sys.stderr,
     )
+    # Silence noisy third-party loggers.
+    for name in ("uvicorn.access", "httpcore", "httpx", "hpack", "sse_starlette"):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 # -- subcommands -------------------------------------------------------------
@@ -107,7 +110,7 @@ def cmd_migrate(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="surogate",
+        prog="surogates",
         description="Surogates — Managed Agent Platform",
     )
     sub = parser.add_subparsers(dest="command", required=True)

@@ -1,9 +1,94 @@
-"""Application settings loaded from environment variables."""
+"""Application settings — YAML config file + environment variable overrides.
+
+Settings are loaded from two sources, merged in this order:
+
+1. Config file at ``$SUROGATES_CONFIG`` (default: ``/etc/surogates/config.yaml``)
+2. Environment variables (``SUROGATES_*``)
+
+Environment variables **always take precedence** over config file values.
+
+In Kubernetes, the config file is typically mounted from a ConfigMap.
+All other paths (tenant assets, skills, tools, MCP, policies) are
+individually configurable — there is no single "home directory".
+"""
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+from typing import Any
+
+import yaml
 from pydantic import Field
 from pydantic_settings import BaseSettings
+
+
+# ---------------------------------------------------------------------------
+# Config file path
+# ---------------------------------------------------------------------------
+
+# Default config file location (K8s ConfigMap mount point).
+DEFAULT_CONFIG_PATH = "/etc/surogates/config.yaml"
+
+
+def get_config_path() -> Path:
+    """Return the path to the config file.
+
+    Reads ``SUROGATES_CONFIG`` env var, falls back to
+    ``/etc/surogates/config.yaml``.
+    """
+    return Path(os.getenv("SUROGATES_CONFIG", DEFAULT_CONFIG_PATH))
+
+
+# ---------------------------------------------------------------------------
+# YAML config loader
+# ---------------------------------------------------------------------------
+
+
+def _load_yaml_config() -> dict[str, Any]:
+    """Read the YAML config file.
+
+    Returns the parsed dict, or ``{}`` if the file doesn't exist or
+    can't be parsed.
+    """
+    config_path = get_config_path()
+    if not config_path.is_file():
+        return {}
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        if not isinstance(data, dict):
+            return {}
+        return data
+    except Exception:
+        return {}
+
+
+def _flatten_yaml(data: dict[str, Any], prefix: str = "") -> dict[str, str]:
+    """Flatten a nested YAML dict into ``SUROGATES_*`` env-var-style keys.
+
+    Example::
+
+        {"db": {"url": "postgres://..."}}
+        → {"SUROGATES_DB_URL": "postgres://..."}
+
+    Only leaf string/int/float/bool values are included.
+    """
+    result: dict[str, str] = {}
+    for key, value in data.items():
+        env_key = f"{prefix}{key}".upper()
+        if isinstance(value, dict):
+            child_prefix = f"SUROGATES_{key}_" if not prefix else f"{prefix}{key}_"
+            result.update(_flatten_yaml(value, child_prefix))
+        elif isinstance(value, (str, int, float, bool)):
+            full_key = f"SUROGATES_{env_key}" if not prefix else env_key
+            result[full_key] = str(value)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Settings classes
+# ---------------------------------------------------------------------------
 
 
 class DatabaseSettings(BaseSettings):
@@ -30,11 +115,35 @@ class APISettings(BaseSettings):
 
 
 class WorkerSettings(BaseSettings):
+    """Worker process configuration."""
+
     model_config = {"env_prefix": "SUROGATES_WORKER_"}
 
     concurrency: int = 50
     queue_name: str = "surogates:work_queue"
     poll_timeout: int = 5
+    workspace_path: str = "/tmp/surogates/workspaces"
+
+
+class LLMSettings(BaseSettings):
+    """LLM provider configuration."""
+
+    model_config = {"env_prefix": "SUROGATES_LLM_"}
+
+    model: str = "gpt-4o"
+    provider: str = ""  # "openai", "anthropic", "openrouter", etc.
+    base_url: str = ""  # custom endpoint (e.g. vLLM, Ollama)
+    api_key: str = ""  # provider API key
+    max_tokens: int | None = None
+    temperature: float = 0.7
+
+    # Fallback chain — list of dicts with provider/model/api_key/base_url
+    # Configured via config.yaml only (too complex for env vars)
+    fallback_providers: list[dict[str, Any]] = Field(default_factory=list)
+
+    # Credential pool — list of dicts with api_key/base_url/label/priority
+    # Configured via config.yaml only
+    credential_pool: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SandboxSettings(BaseSettings):
@@ -47,11 +156,23 @@ class SandboxSettings(BaseSettings):
     default_memory: str = "512Mi"
 
 
+class TransparencySettings(BaseSettings):
+    """EU AI Act Art. 13/50 transparency enforcement."""
+
+    model_config = {"env_prefix": "SUROGATES_GOVERNANCE_TRANSPARENCY_"}
+
+    enabled: bool = False
+    level: str = "basic"  # "none", "basic", "enhanced", "full"
+    require_confirmation: bool = True
+    emotion_recognition: bool = False
+
+
 class GovernanceSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_GOVERNANCE_"}
 
     platform_policy_path: str = "/etc/surogates/policies"
     enabled: bool = True
+    transparency: TransparencySettings = Field(default_factory=TransparencySettings)
 
 
 class Settings(BaseSettings):
@@ -61,10 +182,11 @@ class Settings(BaseSettings):
     redis: RedisSettings = Field(default_factory=RedisSettings)
     api: APISettings = Field(default_factory=APISettings)
     worker: WorkerSettings = Field(default_factory=WorkerSettings)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
     governance: GovernanceSettings = Field(default_factory=GovernanceSettings)
 
-    # Paths
+    # Paths — each individually configurable, each a separate K8s volume mount
     platform_skills_dir: str = "/etc/surogates/skills"
     platform_tools_dir: str = "/etc/surogates/tools"
     platform_mcp_dir: str = "/etc/surogates/mcp"
@@ -72,10 +194,27 @@ class Settings(BaseSettings):
     model_metadata_path: str = "/etc/surogates/model-metadata.json"
 
     # Identity
+    org_id: str = ""  # the org this agent instance belongs to
     worker_id: str = ""  # set from K8s downward API (pod name)
+    jwt_secret: str = "change-me-in-production"
 
     log_level: str = "INFO"
 
 
 def load_settings() -> Settings:
+    """Load settings from config file + environment variables.
+
+    Merge order:
+    1. YAML config file values are injected as environment variables
+       (with ``SUROGATES_`` prefix)
+    2. Real environment variables override YAML values
+    3. pydantic-settings reads the final environment
+    """
+    yaml_config = _load_yaml_config()
+    if yaml_config:
+        flat = _flatten_yaml(yaml_config)
+        for key, value in flat.items():
+            if key not in os.environ:
+                os.environ[key] = value
+
     return Settings()

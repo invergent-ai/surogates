@@ -160,10 +160,12 @@ class TestToolRegistryDispatch:
         assert "error" in parsed
 
     @pytest.mark.asyncio
-    async def test_dispatch_unknown_tool_raises(self):
+    async def test_dispatch_unknown_tool_returns_error(self):
         reg = ToolRegistry()
-        with pytest.raises(KeyError, match="Unknown tool"):
-            await reg.dispatch("nonexistent", {})
+        result = await reg.dispatch("nonexistent", {})
+        parsed = json.loads(result)
+        assert "error" in parsed
+        assert "Unknown tool" in parsed["error"]
 
     @pytest.mark.asyncio
     async def test_dispatch_sync_handler(self):
@@ -218,14 +220,15 @@ class TestToolRouterGovernance:
     @pytest.mark.asyncio
     async def test_governance_allows_permitted_tool(self):
         reg = ToolRegistry()
-        reg.register("allowed_tool", _make_schema("allowed_tool"), _async_handler)
+        # Register as a harness-local tool so it dispatches via registry.
+        reg.register("memory", _make_schema("memory"), _async_handler)
 
         gate = GovernanceGate()  # open policy
         pool = MagicMock(spec=SandboxPool)
         router = ToolRouter(reg, pool, gate)
 
         result = await router.execute(
-            name="allowed_tool",
+            name="memory",
             arguments={"input": "hi"},
             tenant=None,
             session_id=uuid4(),
@@ -233,41 +236,59 @@ class TestToolRouterGovernance:
         assert result == "result: hi"
 
 
-class TestToolRouterLocation:
-    """Location resolution and routing."""
+class TestToolRouterLocationResolution:
+    """Tests for ToolRouter.resolve_location."""
 
-    def test_resolve_location_default_harness(self):
+    def test_harness_tools_resolve_to_harness(self):
         reg = ToolRegistry()
-        gate = GovernanceGate()
         pool = MagicMock(spec=SandboxPool)
+        gate = GovernanceGate()
         router = ToolRouter(reg, pool, gate)
 
-        assert router.resolve_location("custom_tool") == ToolLocation.HARNESS
+        for tool_name in ("memory", "skills_list", "skill_view", "skill_manage",
+                          "session_search", "web_search", "web_extract",
+                          "web_crawl", "clarify", "delegate_task", "todo", "process"):
+            assert router.resolve_location(tool_name) == ToolLocation.HARNESS, (
+                f"{tool_name} should resolve to HARNESS"
+            )
 
-    def test_resolve_location_static_mapping(self):
+    def test_sandbox_tools_resolve_to_sandbox(self):
         reg = ToolRegistry()
-        gate = GovernanceGate()
         pool = MagicMock(spec=SandboxPool)
+        gate = GovernanceGate()
         router = ToolRouter(reg, pool, gate)
 
-        assert router.resolve_location("terminal") == ToolLocation.SANDBOX
-        assert router.resolve_location("memory_read") == ToolLocation.HARNESS
+        for tool_name in ("terminal", "execute_code", "read_file", "write_file",
+                          "patch", "search_files", "list_files", "browser_navigate"):
+            assert router.resolve_location(tool_name) == ToolLocation.SANDBOX, (
+                f"{tool_name} should resolve to SANDBOX"
+            )
 
-    def test_resolve_location_override(self):
+    def test_unknown_tool_defaults_to_sandbox(self):
         reg = ToolRegistry()
-        gate = GovernanceGate()
         pool = MagicMock(spec=SandboxPool)
+        gate = GovernanceGate()
         router = ToolRouter(reg, pool, gate)
 
-        router.set_location_override("custom", ToolLocation.SANDBOX)
-        assert router.resolve_location("custom") == ToolLocation.SANDBOX
+        assert router.resolve_location("totally_unknown") == ToolLocation.SANDBOX
 
-    def test_resolve_location_mcp_prefix(self):
+    @pytest.mark.asyncio
+    async def test_sandbox_tool_dispatches_to_pool(self):
         reg = ToolRegistry()
+        pool = AsyncMock(spec=SandboxPool)
+        pool.ensure = AsyncMock(return_value="sbx-123")
+        pool.execute = AsyncMock(return_value='{"exit_code": 0, "stdout": "ok"}')
         gate = GovernanceGate()
-        pool = MagicMock(spec=SandboxPool)
         router = ToolRouter(reg, pool, gate)
 
-        router.add_mcp_prefix("github_")
-        assert router.resolve_location("github_create_issue") == ToolLocation.MCP
-        assert router.resolve_location("other_tool") == ToolLocation.HARNESS
+        session_id = uuid4()
+        result = await router.execute(
+            name="terminal",
+            arguments={"command": "echo hi"},
+            tenant=None,
+            session_id=session_id,
+        )
+
+        pool.ensure.assert_called_once()
+        pool.execute.assert_called_once()
+        assert "ok" in result

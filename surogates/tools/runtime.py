@@ -24,7 +24,7 @@ class ToolRuntime:
         runtime = ToolRuntime(registry)
         runtime.register_builtins()
 
-        result = await runtime.dispatch("memory_read", {"key": "project"})
+        result = await runtime.dispatch("memory", {"action": "add", "target": "memory", "content": "project note"})
     """
 
     def __init__(self, registry: ToolRegistry) -> None:
@@ -41,9 +41,35 @@ class ToolRuntime:
         function that calls ``registry.register(...)`` for each tool it
         provides.
         """
-        from surogates.tools.builtin import delegate, file_ops, memory, skill_manager, skills, web_search
+        from surogates.tools.builtin import (
+            browser,
+            clarify,
+            code_execution,
+            delegate,
+            file_ops,
+            memory,
+            session_search,
+            skill_manager,
+            skills,
+            terminal,
+            todo,
+            web_search,
+        )
 
-        modules = [memory, skills, skill_manager, web_search, file_ops, delegate]
+        modules = [
+            memory,
+            skills,
+            skill_manager,
+            web_search,
+            file_ops,
+            delegate,
+            terminal,  # also registers the 'process' tool
+            session_search,
+            todo,
+            browser,
+            clarify,
+            code_execution,
+        ]
 
         for mod in modules:
             try:

@@ -30,9 +30,6 @@ def async_engine_from_settings(db_settings: DatabaseSettings) -> AsyncEngine:
         pool_size=db_settings.pool_size,
         max_overflow=db_settings.pool_overflow,
         pool_pre_ping=True,
-        connect_args={
-            "statement_cache_size": 0,  # avoid asyncpg prepared-statement leaks
-        },
     )
 
 
@@ -53,14 +50,24 @@ def async_session_factory(
 
 
 def run_migrations(db_settings: DatabaseSettings) -> None:
-    """Run Alembic migrations programmatically.
+    """Create all tables from SQLAlchemy ORM metadata.
 
-    This is a deliberate placeholder: Alembic configuration (env.py, versions
-    directory, alembic.ini) is managed separately.  Calling this function logs
-    a warning until the migration infrastructure is wired up.
+    For development and initial deployment this uses
+    ``Base.metadata.create_all`` which is idempotent (skips existing
+    tables).  A future version can wire Alembic for versioned migrations.
     """
-    logger.warning(
-        "run_migrations() called but Alembic is not yet wired; "
-        "database URL: %s",
-        db_settings.url.rsplit("@", 1)[-1],  # log host/db only, not credentials
+    import asyncio
+
+    from surogates.db.models import Base
+
+    async def _create_all() -> None:
+        engine = async_engine_from_settings(db_settings)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        await engine.dispose()
+
+    asyncio.run(_create_all())
+    logger.info(
+        "Database tables created/verified: %s",
+        db_settings.url.rsplit("@", 1)[-1],
     )

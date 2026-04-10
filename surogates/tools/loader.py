@@ -32,6 +32,9 @@ PLATFORM_MCP_DIR = "/etc/surogates/mcp"
 # ------------------------------------------------------------------
 
 
+EXCLUDED_SKILL_DIRS = frozenset((".git", ".github", ".hub"))
+
+
 @dataclass(slots=True)
 class SkillDef:
     """A loaded skill definition."""
@@ -40,6 +43,8 @@ class SkillDef:
     description: str
     content: str  # The SKILL.md body (everything after the frontmatter)
     source: str  # "platform", "org", "user"
+    category: str | None = None  # subdirectory grouping
+    tags: list[str] | None = None  # metadata tags
     # Conditional activation fields (parsed from frontmatter).
     platforms: list[str] | None = None  # e.g. ["linux", "macos"]
     fallback_for_tools: list[str] | None = None  # show only when these tools are unavailable
@@ -184,40 +189,90 @@ class ResourceLoader:
     # ------------------------------------------------------------------
 
     def _load_skills_from_dir(self, path: str, source: str) -> list[SkillDef]:
-        """Load ``SKILL.md`` files from *path*.
+        """Load skills from *path*, supporting both directory-based and flat layouts.
 
-        Each file is expected to contain optional YAML frontmatter
-        delimited by ``---`` lines, followed by the skill body::
+        Directory-based layout (preferred)::
 
-            ---
-            name: my-skill
-            description: Does something useful
-            ---
-            # Skill content here
-            ...
+            skills/
+            ├── my-skill/
+            │   ├── SKILL.md           # Main instructions (required)
+            │   ├── references/
+            │   └── templates/
+            └── category/
+                └── another-skill/
+                    └── SKILL.md
 
-        If no frontmatter is present the filename (minus extension) is
-        used as the name.
+        Flat layout (legacy)::
+
+            skills/
+            ├── my-skill.md
+            └── another-skill.md
+
+        If no frontmatter is present the directory name (or filename minus
+        extension) is used as the skill name.
         """
         directory = Path(path)
         if not directory.is_dir():
             return []
 
         skills: list[SkillDef] = []
+        seen_names: set[str] = set()
+
+        # Walk for SKILL.md files (directory-based layout).
+        for root, dirs, files in os.walk(directory):
+            dirs[:] = [d for d in dirs if d not in EXCLUDED_SKILL_DIRS]
+            if "SKILL.md" in files:
+                skill_md = Path(root) / "SKILL.md"
+                try:
+                    text = skill_md.read_text(encoding="utf-8")
+                    parsed = _parse_skill_frontmatter(text, skill_md.parent.name)
+                    name = parsed["name"]
+                    if name in seen_names:
+                        continue
+                    seen_names.add(name)
+
+                    # Extract category from path structure.
+                    category = _get_category_from_path(skill_md, directory)
+
+                    skills.append(
+                        SkillDef(
+                            name=name,
+                            description=parsed["description"],
+                            content=parsed["content"],
+                            source=source,
+                            category=category,
+                            tags=parsed.get("tags"),
+                            platforms=parsed.get("platforms"),
+                            fallback_for_tools=parsed.get("fallback_for_tools"),
+                            requires_tools=parsed.get("requires_tools"),
+                            trigger=parsed.get("trigger"),
+                        )
+                    )
+                except Exception:
+                    logger.exception("Failed to load skill from %s", skill_md)
+
+        # Flat .md files at the top level (legacy layout).
         for entry in sorted(directory.iterdir()):
             if not entry.is_file():
                 continue
             if not entry.name.lower().endswith(".md"):
                 continue
+            if entry.name == "SKILL.md":
+                continue
             try:
                 text = entry.read_text(encoding="utf-8")
                 parsed = _parse_skill_frontmatter(text, entry.stem)
+                name = parsed["name"]
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
                 skills.append(
                     SkillDef(
-                        name=parsed["name"],
+                        name=name,
                         description=parsed["description"],
                         content=parsed["content"],
                         source=source,
+                        tags=parsed.get("tags"),
                         platforms=parsed.get("platforms"),
                         fallback_for_tools=parsed.get("fallback_for_tools"),
                         requires_tools=parsed.get("requires_tools"),
@@ -323,7 +378,7 @@ def _parse_skill_frontmatter(
 
     Returns a dict with keys: ``name``, ``description``, ``content``,
     and optional ``platforms``, ``fallback_for_tools``, ``requires_tools``,
-    ``trigger``.
+    ``trigger``, ``tags``.
     """
     result: dict[str, Any] = {
         "name": fallback_name,
@@ -353,11 +408,56 @@ def _parse_skill_frontmatter(
                     elif isinstance(val, list):
                         result[key] = [str(v) for v in val]
 
+            # Extract metadata.hermes.* fields (agentskills.io convention).
+            metadata = fm.get("metadata")
+            if isinstance(metadata, dict):
+                hermes_meta = metadata.get("hermes")
+                if isinstance(hermes_meta, dict):
+                    # fallback_for_toolsets, requires_toolsets, fallback_for_tools, requires_tools
+                    for cond_key in ("fallback_for_toolsets", "requires_toolsets",
+                                     "fallback_for_tools", "requires_tools"):
+                        val = hermes_meta.get(cond_key)
+                        if val and cond_key not in result:
+                            if isinstance(val, str):
+                                result[cond_key] = [v.strip() for v in val.split(",")]
+                            elif isinstance(val, list):
+                                result[cond_key] = [str(v) for v in val]
+
+            # Tags: check metadata.hermes.tags first, fall back to top-level.
+            tags = None
+            if isinstance(fm.get("metadata"), dict):
+                hermes_meta = (fm["metadata"].get("hermes") or {})
+                if isinstance(hermes_meta, dict):
+                    tags = hermes_meta.get("tags")
+            if not tags:
+                tags = fm.get("tags")
+            if tags:
+                if isinstance(tags, str):
+                    result["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
+                elif isinstance(tags, list):
+                    result["tags"] = [str(t).strip() for t in tags if t]
+
             trigger = fm.get("trigger")
             if trigger:
                 result["trigger"] = str(trigger)
 
     return result
+
+
+def _get_category_from_path(skill_md: Path, skills_dir: Path) -> str | None:
+    """Extract category from skill path based on directory structure.
+
+    For paths like: skills_dir/mlops/axolotl/SKILL.md -> "mlops"
+    """
+    try:
+        rel_path = skill_md.relative_to(skills_dir)
+        parts = rel_path.parts
+        # parts = ("category", "skill-name", "SKILL.md") -> category = parts[0]
+        if len(parts) >= 3:
+            return parts[0]
+    except ValueError:
+        pass
+    return None
 
 
 def _parse_yaml_or_simple(text: str) -> dict[str, Any]:

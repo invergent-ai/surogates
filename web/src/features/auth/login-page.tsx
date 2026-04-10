@@ -24,7 +24,6 @@ export function LoginPage() {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [orgId, setOrgId] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -126,7 +125,7 @@ export function LoginPage() {
       const response = await fetch("/api/v1/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password, org_id: orgId || undefined }),
+        body: JSON.stringify({ email, password }),
       });
 
       if (!response.ok) {
@@ -255,22 +254,6 @@ export function LoginPage() {
 
         {/* form */}
         <form onSubmit={handleLogin}>
-          <div className="mb-3.5">
-            <label htmlFor="login-org" className="block text-xs text-subtle font-medium mb-1.5 uppercase tracking-wide">
-              Organization
-            </label>
-            <input
-              id="login-org"
-              type="text"
-              value={orgId}
-              onChange={(e) => { setOrgId(e.target.value); clearError(); }}
-              onFocus={() => setFocusedField("org")}
-              onBlur={() => setFocusedField(null)}
-              placeholder="org ID (optional)"
-              className={inputCls("org")}
-            />
-          </div>
-
           <div className="mb-3.5">
             <label htmlFor="login-email" className="block text-xs text-subtle font-medium mb-1.5 uppercase tracking-wide">
               Email

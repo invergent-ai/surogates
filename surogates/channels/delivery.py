@@ -29,7 +29,9 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, AsyncIterator
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import select, text, update
+
+from surogates.db.models import DeliveryOutbox
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -81,7 +83,7 @@ class DeliveryService:
         session_factory: async_sessionmaker[AsyncSession],
         redis_client: Redis,
     ) -> None:
-        self._session_factory = session_factory
+        self._sf = session_factory
         self._redis = redis_client
 
     # ------------------------------------------------------------------
@@ -98,55 +100,42 @@ class DeliveryService:
     ) -> int:
         """Insert a row into ``delivery_outbox`` and return its ID.
 
-        A ``dedupe_key`` of ``"{channel}:{event_id}"`` is written alongside
-        the row.  The ``UNIQUE(channel, dedupe_key)`` constraint on the
-        table prevents the same event from being enqueued twice for the
-        same channel, making this call safe to retry.
+        Uses ORM for the insert. The ``UNIQUE(channel, dedupe_key)``
+        constraint prevents double-enqueue; on conflict the existing
+        row's ID is returned.
         """
         dedupe_key = f"{channel}:{event_id}"
-        async with self._session_factory() as db:
-            row = (
-                await db.execute(
-                    text(
-                        """
-                        INSERT INTO delivery_outbox
-                            (session_id, event_id, channel, destination, payload, dedupe_key)
-                        VALUES
-                            (:session_id, :event_id, :channel, CAST(:destination AS jsonb),
-                             CAST(:payload AS jsonb), :dedupe_key)
-                        ON CONFLICT (channel, dedupe_key) DO NOTHING
-                        RETURNING id
-                        """
-                    ),
-                    {
-                        "session_id": session_id,
-                        "event_id": event_id,
-                        "channel": channel,
-                        "destination": _json_dumps(destination),
-                        "payload": _json_dumps(payload),
-                        "dedupe_key": dedupe_key,
-                    },
+        row = DeliveryOutbox(
+            session_id=session_id,
+            event_id=event_id,
+            channel=channel,
+            destination=destination,
+            payload=payload,
+            dedupe_key=dedupe_key,
+            status="pending",
+        )
+
+        async with self._sf() as db:
+            # Try ORM insert; catch unique violation.
+            try:
+                db.add(row)
+                await db.flush()
+                outbox_id = row.id
+                await db.commit()
+                return int(outbox_id)
+            except Exception:
+                await db.rollback()
+
+        # Dedupe hit — fetch existing row.
+        async with self._sf() as db:
+            result = await db.execute(
+                select(DeliveryOutbox.id).where(
+                    DeliveryOutbox.channel == channel,
+                    DeliveryOutbox.dedupe_key == dedupe_key,
                 )
-            ).mappings().one_or_none()
-            await db.commit()
-
-        if row is None:
-            # Dedupe hit -- fetch the existing row's ID.
-            async with self._session_factory() as db:
-                existing = (
-                    await db.execute(
-                        text(
-                            """
-                            SELECT id FROM delivery_outbox
-                            WHERE channel = :channel AND dedupe_key = :dedupe_key
-                            """
-                        ),
-                        {"channel": channel, "dedupe_key": dedupe_key},
-                    )
-                ).mappings().one()
-            return int(existing["id"])
-
-        return int(row["id"])
+            )
+            existing_id = result.scalar_one()
+        return int(existing_id)
 
     # ------------------------------------------------------------------
     # Claim / acknowledge
@@ -161,12 +150,11 @@ class DeliveryService:
     ) -> list[OutboxItem]:
         """Atomically claim pending outbox items for delivery.
 
-        Uses ``SELECT ... FOR UPDATE SKIP LOCKED`` so that multiple adapter
-        instances for the same channel can run concurrently without
-        double-delivering.  Claimed rows transition from ``'pending'`` to
-        ``'claimed'`` and record the *worker_id* for observability.
+        Uses ``SELECT ... FOR UPDATE SKIP LOCKED`` (raw SQL — ORM can't
+        express this) so that multiple adapter instances for the same
+        channel can run concurrently without double-delivering.
         """
-        async with self._session_factory() as db:
+        async with self._sf() as db:
             rows = (
                 await db.execute(
                     text(
@@ -215,16 +203,11 @@ class DeliveryService:
         provider_message_id: str | None = None,
     ) -> None:
         """Mark an outbox item as successfully delivered."""
-        async with self._session_factory() as db:
+        async with self._sf() as db:
             await db.execute(
-                text(
-                    """
-                    UPDATE delivery_outbox
-                    SET status = 'delivered'
-                    WHERE id = :id
-                    """
-                ),
-                {"id": outbox_id},
+                update(DeliveryOutbox)
+                .where(DeliveryOutbox.id == outbox_id)
+                .values(status="delivered")
             )
             await db.commit()
         logger.debug(
@@ -236,11 +219,10 @@ class DeliveryService:
     async def mark_failed(self, outbox_id: int, error: str) -> None:
         """Mark an outbox item as failed.
 
-        The row returns to ``'pending'`` status with ``available_at`` pushed
-        30 seconds into the future so that the next ``claim_batch`` cycle
-        retries it after a back-off window.
+        The row returns to ``'pending'`` status with ``available_at``
+        pushed 30 seconds into the future for retry backoff.
         """
-        async with self._session_factory() as db:
+        async with self._sf() as db:
             await db.execute(
                 text(
                     """
@@ -260,19 +242,11 @@ class DeliveryService:
     # ------------------------------------------------------------------
 
     async def nudge(self, session_id: UUID) -> None:
-        """Publish a Redis notification that new events are available.
-
-        SSE handlers and channel adapters subscribe to the per-session
-        channel and wake immediately on receipt, avoiding unnecessary
-        polling latency.
-        """
+        """Publish a Redis notification that new events are available."""
         channel_name = f"{_CHANNEL_PREFIX}{session_id}"
         try:
             await self._redis.publish(channel_name, b"1")
         except Exception:
-            # Redis is a latency optimisation, not a correctness requirement.
-            # If publishing fails the adapter's poll loop will still pick up
-            # the outbox row within its next cycle.
             logger.debug(
                 "Redis nudge failed for session %s (non-fatal)", session_id,
                 exc_info=True,
@@ -283,19 +257,7 @@ class DeliveryService:
         self,
         session_id: UUID,
     ) -> AsyncIterator[_SubscriptionIterator]:
-        """Context manager yielding an async iterator of delivery nudges.
-
-        Usage::
-
-            async with delivery.subscribe(session_id) as notifications:
-                async for _ in notifications:
-                    # new events available -- fetch from DB
-                    ...
-
-        Under the hood this creates a Redis pub/sub subscription on the
-        per-session channel.  The subscription is torn down when the
-        context manager exits.
-        """
+        """Context manager yielding an async iterator of delivery nudges."""
         channel_name = f"{_CHANNEL_PREFIX}{session_id}"
         pubsub = self._redis.pubsub()
         await pubsub.subscribe(channel_name)
@@ -307,12 +269,7 @@ class DeliveryService:
 
 
 class _SubscriptionIterator:
-    """Thin async-iterator wrapper around a Redis PubSub object.
-
-    Yields ``True`` for every genuine message received on the subscribed
-    channel, filtering out Redis control messages (subscribe confirmations,
-    etc.).
-    """
+    """Thin async-iterator wrapper around a Redis PubSub object."""
 
     def __init__(self, pubsub: Any) -> None:
         self._pubsub = pubsub
@@ -328,18 +285,5 @@ class _SubscriptionIterator:
             )
             if msg is not None and msg.get("type") == "message":
                 return True
-            # On timeout (msg is None) we yield anyway so the caller can
-            # poll the outbox as a fallback, keeping the system correct
-            # even if a Redis message was lost.
             if msg is None:
                 return True
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
-def _json_dumps(obj: dict[str, Any]) -> str:
-    """Serialise a dict to JSON for use with PostgreSQL ``::jsonb`` casts."""
-    return json.dumps(obj, default=str)

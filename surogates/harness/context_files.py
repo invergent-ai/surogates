@@ -36,7 +36,7 @@ _TRUNCATE_TAIL_RATIO: float = 0.20
 # ---------------------------------------------------------------------------
 
 _CONTEXT_THREAT_PATTERNS = [
-    (r'ignore\s+(previous\s+|all\s+|above\s+|prior\s+)*instructions', "prompt_injection"),
+    (r'ignore\s+(previous|all|above|prior)\s+instructions', "prompt_injection"),
     (r'do\s+not\s+tell\s+the\s+user', "deception_hide"),
     (r'system\s+prompt\s+override', "sys_prompt_override"),
     (r'disregard\s+(your|all|any)\s+(instructions|rules|guidelines)', "disregard_rules"),
@@ -71,11 +71,9 @@ def load_soul_md(asset_root: str) -> str | None:
                 content = candidate.read_text(encoding="utf-8").strip()
                 if not content:
                     continue
-                scanned = scan_context_content(content, "SOUL.md")
-                if scanned is None:
-                    logger.warning("SOUL.md blocked by injection scan")
-                    return None
-                return truncate_context(scanned)
+                content = scan_context_content(content, "SOUL.md")
+                content = truncate_context(content)
+                return content
             except OSError:
                 logger.warning("Failed to read %s", candidate)
     return None
@@ -103,14 +101,8 @@ def load_project_context(workspace_path: str | None) -> str | None:
                     content = candidate.read_text(encoding="utf-8").strip()
                     if not content:
                         continue
-                    scanned = scan_context_content(content, filename)
-                    if scanned is None:
-                        logger.warning(
-                            "Context file %s blocked by injection scan",
-                            candidate,
-                        )
-                        return None
-                    return truncate_context(scanned)
+                    content = scan_context_content(content, filename)
+                    return truncate_context(content)
                 except OSError:
                     logger.warning("Failed to read %s", candidate)
                     continue
@@ -125,10 +117,11 @@ def load_project_context(workspace_path: str | None) -> str | None:
     return None
 
 
-def scan_context_content(content: str, filename: str) -> str | None:
-    """Security scan context file content.
+def scan_context_content(content: str, filename: str) -> str:
+    """Scan context file content for injection. Returns sanitized content.
 
-    Returns sanitized content, or ``None`` if blocked.
+    When threats are detected the original content is replaced with a
+    ``[BLOCKED: ...]`` marker string so that callers never need to handle ``None``.
     """
     findings: list[str] = []
 
@@ -144,27 +137,32 @@ def scan_context_content(content: str, filename: str) -> str | None:
         logger.warning(
             "Context file %s blocked: %s", filename, ", ".join(findings)
         )
-        return None
+        return f"[BLOCKED: {filename} contained potential prompt injection ({', '.join(findings)}). Content not loaded.]"
 
     return content
 
 
 def truncate_context(
-    content: str, max_chars: int = MAX_CONTEXT_CHARS
+    content: str,
+    max_chars: int = MAX_CONTEXT_CHARS,
+    filename: str = "",
 ) -> str:
-    """Truncate to *max_chars* using 70% head + 20% tail strategy."""
+    """Head/tail truncation with a marker in the middle.
+
+    Uses 70% head + 20% tail strategy.
+    """
     if len(content) <= max_chars:
         return content
 
-    head_size = int(max_chars * _TRUNCATE_HEAD_RATIO)
-    tail_size = int(max_chars * _TRUNCATE_TAIL_RATIO)
+    head_chars = int(max_chars * _TRUNCATE_HEAD_RATIO)
+    tail_chars = int(max_chars * _TRUNCATE_TAIL_RATIO)
 
-    head = content[:head_size]
-    tail = content[-tail_size:] if tail_size > 0 else ""
-    omitted = len(content) - head_size - tail_size
-    separator = f"\n\n[...truncated {omitted:,} characters...]\n\n"
+    head = content[:head_chars]
+    tail = content[-tail_chars:]
+    label = filename or "content"
+    marker = f"\n\n[...truncated {label}: kept {head_chars}+{tail_chars} of {len(content)} chars. Use file tools to read the full file.]\n\n"
 
-    return head + separator + tail
+    return head + marker + tail
 
 
 # ---------------------------------------------------------------------------
