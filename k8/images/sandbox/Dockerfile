@@ -1,12 +1,27 @@
 # Surogates Sandbox — agent execution environment
 #
-# Lightweight image with tool binaries. No application code — the
-# sandbox receives commands from the worker via K8s exec API and
-# runs them using the tool-executor script.
+# Includes the surogates Python package so the real tool handlers
+# (terminal, file_ops, code_execution, etc.) run inside the sandbox
+# with full feature parity.
 #
-# Build:
+# Build (from repo root):
 #   docker build -t ghcr.io/invergent-ai/agent-sandbox:latest -f k8/images/sandbox/Dockerfile .
+# Load into k3d cluster (optional, if using k3d):
+#   k3d image import ghcr.io/invergent-ai/agent-sandbox:latest -c surogates
 
+# ── Stage 1: Python dependencies ──────────────────────────────────────
+FROM python:3.12-slim AS python-deps
+
+WORKDIR /build
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+COPY pyproject.toml ./
+COPY surogates/ ./surogates/
+
+RUN uv venv /opt/venv \
+    && uv pip install --python /opt/venv/bin/python .
+
+# ── Stage 2: Final image ─────────────────────────────────────────────
 FROM python:3.12-slim
 
 LABEL org.opencontainers.image.title="agent-sandbox" \
@@ -15,11 +30,6 @@ LABEL org.opencontainers.image.title="agent-sandbox" \
       org.opencontainers.image.source="https://github.com/invergent-ai/surogates"
 
 # ── OS packages ──────────────────────────────────────────────────────
-# git       — workspace operations (clone, commit, push)
-# ripgrep   — fast file search (search_files tool)
-# curl      — web requests
-# jq        — JSON processing
-# tini      — proper PID 1 for signal handling
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         ripgrep \
@@ -28,10 +38,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tini \
     && rm -rf /var/lib/apt/lists/*
 
+# ── Python virtualenv ────────────────────────────────────────────────
+COPY --from=python-deps /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
 # ── Tool executor ───────────────────────────────────────────────────
-# Thin script that accepts tool name + JSON args, dispatches to the
-# right implementation, and writes result JSON to stdout.
-COPY tool-executor /usr/local/bin/tool-executor
+COPY k8/images/sandbox/tool-executor /usr/local/bin/tool-executor
 RUN chmod +x /usr/local/bin/tool-executor
 
 # ── Non-root user ───────────────────────────────────────────────────
@@ -44,5 +58,4 @@ USER sandbox
 WORKDIR /workspace
 
 ENTRYPOINT ["tini", "--"]
-# The sandbox pod runs `sleep infinity` — the worker execs into it.
 CMD ["sleep", "infinity"]

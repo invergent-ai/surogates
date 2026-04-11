@@ -354,12 +354,18 @@ class K8sSandbox:
             raw = resp
         elif isinstance(resp, bytes):
             raw = resp.decode("utf-8", errors="replace")
+        elif hasattr(resp, "data"):
+            # WsResponse or similar object with a .data attribute.
+            data = resp.data
+            raw = data.decode("utf-8", errors="replace") if isinstance(data, bytes) else str(data)
         else:
             raw = str(resp)
 
+        logger.debug("Sandbox exec raw output (%d chars): %s", len(raw), raw[:500])
+
         # The tool-executor writes a JSON result as the LAST line of
         # output.  Stderr (e.g. git progress) may precede it.
-        # Find the last JSON object in the output.
+        # Find the last valid JSON object in the output.
         last_json = None
         for line in reversed(raw.strip().splitlines()):
             line = line.strip()
@@ -369,7 +375,15 @@ class K8sSandbox:
                     last_json = line
                     break
                 except json.JSONDecodeError:
-                    continue
+                    # May be Python repr with single quotes — try converting.
+                    try:
+                        import ast
+                        obj = ast.literal_eval(line)
+                        if isinstance(obj, dict):
+                            last_json = json.dumps(obj)
+                            break
+                    except (ValueError, SyntaxError):
+                        continue
 
         if last_json:
             return last_json

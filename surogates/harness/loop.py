@@ -412,6 +412,12 @@ class AgentHarness:
             # --- Interrupt check at the top of each iteration ---
             if self._check_interrupt():
                 reason_msg = self._interrupt_message or "interrupted"
+                # Destroy the sandbox pod on interrupt.
+                if self._sandbox_pool is not None:
+                    try:
+                        await self._sandbox_pool.destroy_for_session(str(session.id))
+                    except Exception:
+                        logger.debug("Sandbox cleanup on interrupt failed", exc_info=True)
                 await self._store.emit_event(
                     session.id,
                     EventType.SESSION_PAUSE,
@@ -1409,6 +1415,13 @@ class AgentHarness:
         cost_tracker: SessionCostTracker | None = None,
     ) -> None:
         """Emit SESSION_COMPLETE and advance the cursor."""
+        # Destroy the sandbox pod for this session.
+        if self._sandbox_pool is not None:
+            try:
+                await self._sandbox_pool.destroy_for_session(str(session.id))
+            except Exception:
+                logger.debug("Sandbox cleanup failed for %s", session.id, exc_info=True)
+
         # Notify memory manager of session end.
         if self._memory_manager is not None:
             try:

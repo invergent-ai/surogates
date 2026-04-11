@@ -448,6 +448,11 @@ async def _terminal_handler(
         workspace_path = kwargs.get("workspace_path")
         requested_workdir = arguments.get("workdir")
 
+        # Normalize common shell variables to the workspace path.
+        if requested_workdir and workspace_path:
+            if requested_workdir in ("$HOME", "~", "$WORKSPACE_DIR", "${HOME}", "${WORKSPACE_DIR}"):
+                requested_workdir = workspace_path
+
         if workspace_path:
             from pathlib import Path
 

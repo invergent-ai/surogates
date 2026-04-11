@@ -428,25 +428,26 @@ async def execute_single_tool(
             }
 
     # Execute the tool, capturing errors as results (never crash the loop).
-    # Route SANDBOX tools through the sandbox pool; HARNESS tools run in-process.
+    # SANDBOX tools are dispatched to the sandbox pod where the real Python
+    # tool handlers run (the sandbox image includes the surogates package).
+    # HARNESS tools run in-process in the worker.
     start = time.monotonic()
     try:
         from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
-        from surogates.sandbox.base import SandboxSpec
         location = TOOL_LOCATIONS.get(tool_name, ToolLocation.SANDBOX)
 
         if location == ToolLocation.SANDBOX and sandbox_pool is not None:
             # Lazily provision or reuse the session's sandbox.
-            from surogates.sandbox.base import Resource
+            from surogates.sandbox.base import SandboxSpec, Resource
             sandbox_spec = getattr(tenant, "sandbox_spec", None) or SandboxSpec()
-            # Attach the session's workspace bucket as an S3 resource.
             ws_bucket = session.config.get("workspace_bucket", "")
             if ws_bucket and not any(r.source_ref.startswith("s3://") for r in sandbox_spec.resources):
                 sandbox_spec.resources.append(
                     Resource(source_ref=f"s3://{ws_bucket}", mount_path="/workspace"),
                 )
             await sandbox_pool.ensure(str(session.id), sandbox_spec)
-            # Serialize arguments for the sandbox executor.
+            # Dispatch to the sandbox pod — runs the real Python tool handler
+            # inside the sandbox via tool-executor.
             if isinstance(tool_args, dict):
                 args_str = json.dumps(tool_args)
             else:

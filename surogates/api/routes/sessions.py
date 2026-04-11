@@ -351,6 +351,14 @@ async def delete_session(
 
     await store.update_session_status(session_id, "archived")
 
+    # Interrupt the worker so it stops processing and destroys the sandbox pod.
+    redis = request.app.state.redis
+    import json as _json
+    await redis.publish(
+        f"surogates:interrupt:{session_id}",
+        _json.dumps({"reason": "session deleted"}),
+    )
+
     # Delete the session's storage bucket (workspace files).
     storage = request.app.state.storage
     session_bucket = f"session-{session_id}"

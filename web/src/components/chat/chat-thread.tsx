@@ -30,7 +30,8 @@ import {
   TimelineSeparator,
 } from "@/components/reui/timeline";
 import { Shimmer } from "@/components/ai-elements/shimmer";
-import { ToolCallBlock, statusColorClass } from "./tool-call-block";
+import { ToolCallBlock } from "./tool-call-block";
+import { statusColorClass, effectiveStatus } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
 import { ChatComposer } from "./chat-composer";
 import { cn } from "@/lib/utils";
@@ -149,7 +150,7 @@ function TimelineEntryItem({
         <TimelineHeader>
           <TimelineSeparator style={{ backgroundColor: "var(--color-border)" }} />
           <TimelineIndicator
-            className={cn("size-2 border-none", statusColorClass(entry.tc.status))}
+            className={cn("size-2 border-none", statusColorClass(effectiveStatus(entry.tc)))}
           />
         </TimelineHeader>
         <TimelineContent>
