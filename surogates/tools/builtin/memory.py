@@ -77,7 +77,17 @@ async def _memory_handler(
     arguments: dict[str, Any],
     **kwargs: Any,
 ) -> str:
-    """Primary memory tool -- delegates to MemoryManager."""
+    """Primary memory tool -- delegates to MemoryManager or API client."""
+    # API-mediated mode: delegate to the API server.
+    api_client = kwargs.get("api_client")
+    if api_client is not None:
+        action = arguments.get("action", "")
+        target = arguments.get("target", "memory")
+        content = arguments.get("content")
+        old_text = arguments.get("old_text")
+        return await api_client.mutate_memory(action, target, content, old_text)
+
+    # Local mode: delegate to MemoryManager.
     memory_manager = kwargs.get("memory_manager")
     if memory_manager is not None:
         return memory_manager.handle_tool_call("memory", arguments)

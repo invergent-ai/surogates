@@ -1,0 +1,81 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Surogates: API Gateway",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "surogates.cli.main",
+            "args": ["api"],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "SUROGATES_CONFIG": "${workspaceFolder}/config.dev.yaml",
+                "SUROGATES_PLATFORM_SKILLS_DIR": "${workspaceFolder}/.dev/skills"
+            }
+        },
+        {
+            "name": "Surogates: Worker",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "surogates.cli.main",
+            "args": ["worker"],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "SUROGATES_CONFIG": "${workspaceFolder}/config.dev.yaml",
+                "SUROGATES_PLATFORM_MCP_DIR": "${workspaceFolder}/.dev/mcp",
+                "SUROGATES_GOVERNANCE_PLATFORM_POLICY_PATH": "${workspaceFolder}/.dev/policies",
+                "TAVILY_API_KEY": "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"
+            }
+        },
+        {
+            "name": "Surogates: Channel (Slack)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "surogates.cli.main",
+            "args": ["channel", "slack"],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "SUROGATES_CONFIG": "${workspaceFolder}/config.dev.yaml",
+                "SLACK_BOT_TOKEN": "${env:SLACK_BOT_TOKEN}",
+                "SLACK_APP_TOKEN": "${env:SLACK_APP_TOKEN}",
+                "SUROGATES_LOG_LEVEL": "INFO"
+            }
+        },
+        {
+            "name": "Surogates: Run Tests",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["tests/", "-v", "--tb=short"],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "SUROGATES_JWT_SECRET": "test-secret"
+            }
+        },
+        {
+            "name": "Surogates: Run Integration Tests",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["tests/integration/", "-v", "--tb=short"],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "SUROGATES_JWT_SECRET": "test-secret"
+            }
+        }
+    ],
+    "compounds": [
+        {
+            "name": "Surogates: Full Stack (API + Worker)",
+            "configurations": [
+                "Surogates: API Gateway",
+                "Surogates: Worker"
+            ]
+        }
+    ]
+}

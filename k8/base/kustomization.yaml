@@ -7,6 +7,10 @@ resources:
   - namespace.yaml
   - api-deployment.yaml
   - worker-deployment.yaml
+  - worker-rbac.yaml
+  - sandbox-rbac.yaml
+  - sandbox-networkpolicy.yaml
+  - s3/secret.yaml
   - channel-slack-deployment.yaml
   - hpa.yaml
   - ingress.yaml

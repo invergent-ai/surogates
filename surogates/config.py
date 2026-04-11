@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import Field
@@ -123,6 +123,8 @@ class WorkerSettings(BaseSettings):
     queue_name: str = "surogates:work_queue"
     poll_timeout: int = 5
     workspace_path: str = "/tmp/surogates/workspaces"
+    api_base_url: str = "http://localhost:8000"
+    use_api_for_harness_tools: bool = True
 
 
 class LLMSettings(BaseSettings):
@@ -161,13 +163,23 @@ class SandboxSettings(BaseSettings):
 
     model_config = {"env_prefix": "SUROGATES_SANDBOX_"}
 
-    backend: str = "process"  # "process" or "kubernetes"
+    backend: Literal["process", "kubernetes"] = "process"
     runtime_url: str = "http://sandbox-runtime:8080"
     default_timeout: int = 300
     default_cpu: str = "500m"
     default_memory: str = "512Mi"
     srt_enabled: bool = False
     srt_settings_dir: str = "/tmp/surogates/srt"
+
+    # K8s sandbox backend settings (only used when backend == "kubernetes")
+    k8s_namespace: str = "surogates"
+    k8s_service_account: str = "surogates-sandbox"
+    k8s_pod_ready_timeout: int = 60
+    k8s_executor_path: str = "/usr/local/bin/tool-executor"
+    k8s_s3fs_image: str = "ghcr.io/invergent-ai/agent-sandbox-s3fs:latest"
+    # In-cluster S3 endpoint for sandbox pods (they can't use the host NodePort).
+    # If empty, falls back to storage.endpoint.
+    k8s_s3_endpoint: str = ""
 
 
 class TransparencySettings(BaseSettings):
@@ -179,6 +191,26 @@ class TransparencySettings(BaseSettings):
     level: str = "basic"  # "none", "basic", "enhanced", "full"
     require_confirmation: bool = True
     emotion_recognition: bool = False
+
+
+class StorageSettings(BaseSettings):
+    """Object storage configuration.
+
+    ``backend`` selects the implementation:
+    - ``"local"`` — maps buckets to directories under ``base_path``.
+    - ``"s3"`` — uses an S3-compatible API (Garage, MinIO, AWS S3).
+    """
+
+    model_config = {"env_prefix": "SUROGATES_STORAGE_"}
+
+    backend: Literal["local", "s3"] = "local"
+    base_path: str = ""  # LocalBackend root (defaults to tenant_assets_root)
+
+    # S3-compatible settings (only used when backend == "s3")
+    endpoint: str = ""  # e.g. "http://garage.surogates.svc:3900"
+    access_key: str = ""
+    secret_key: str = ""
+    region: str = ""
 
 
 class GovernanceSettings(BaseSettings):
@@ -199,6 +231,7 @@ class Settings(BaseSettings):
     llm: LLMSettings = Field(default_factory=LLMSettings)
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
     governance: GovernanceSettings = Field(default_factory=GovernanceSettings)
+    storage: StorageSettings = Field(default_factory=StorageSettings)
 
     # Paths — each individually configurable, each a separate K8s volume mount
     platform_skills_dir: str = "/etc/surogates/skills"

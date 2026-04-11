@@ -40,6 +40,8 @@ dependencies = [
     "pyyaml>=6.0,<7.0",
     "python-multipart>=0.0.7,<1.0",
     "agent-os-kernel>=3.0,<4.0",
+    "aioboto3>=13.0,<14.0",
+    "kubernetes-asyncio>=31.0,<32.0",
 ]
 scripts = { "surogates" = "surogates.cli.main:cli_main" }
 
@@ -62,4 +64,5 @@ dev = [
     "pytest-asyncio>=1.4.0a0",
     "testcontainers[postgres,redis]>=4.0,<5.0",
     "httpx>=0.27,<1.0",
+    "moto[s3]>=5.0,<6.0",
 ]

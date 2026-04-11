@@ -149,6 +149,7 @@ class AgentHarness:
         memory_manager: MemoryManager | None = None,
         sandbox_pool: SandboxPool | None = None,
         checkpoints_enabled: bool = False,
+        api_client: Any | None = None,
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
@@ -160,12 +161,12 @@ class AgentHarness:
         self._prompt = prompt_builder
         self._redis: Redis | None = redis_client
         self._sandbox_pool: SandboxPool | None = sandbox_pool
+        self._api_client = api_client
 
-        # Filesystem checkpoint manager — takes snapshots before
-        # file-mutating operations (write_file, patch). Transparent
-        # to the LLM; controlled by config.
-        from surogates.tools.utils.checkpoint_manager import CheckpointManager
-        self._checkpoint_mgr = CheckpointManager(enabled=checkpoints_enabled)
+        # Checkpoint flag — when enabled, the harness tells the sandbox
+        # to take filesystem snapshots before file-mutating operations.
+        # The actual checkpoint logic runs inside the sandbox (not here).
+        self._checkpoints_enabled = checkpoints_enabled
 
         # System prompt cache (shared across wake() calls for the same worker).
         self._system_prompt_cache: SystemPromptCache = (
@@ -423,8 +424,15 @@ class AgentHarness:
                 self._clear_interrupt()
                 return
 
-            # --- Checkpoint manager: reset per-turn dedup ---
-            self._checkpoint_mgr.new_turn()
+            # --- Checkpoint: reset per-turn dedup in sandbox ---
+            if self._checkpoints_enabled and self._sandbox_pool:
+                try:
+                    await self._sandbox_pool.execute(
+                        str(session.id), "_checkpoint",
+                        '{"action": "new_turn"}',
+                    )
+                except (ValueError, Exception):
+                    pass  # No sandbox provisioned yet — that's fine.
 
             # --- Memory manager: on_turn_start hook ---
             if self._memory_manager is not None:
@@ -858,7 +866,7 @@ class AgentHarness:
             # The checkpoint hash is stashed on the tool call dict so
             # execute_single_tool can include it in the TOOL_CALL event,
             # enabling the web UI to offer per-tool-call rollback.
-            if self._checkpoint_mgr.enabled:
+            if self._checkpoints_enabled and self._sandbox_pool:
                 for tc in tool_calls_raw:
                     fn = tc.get("function", {})
                     tool_name = fn.get("name", "")
@@ -868,11 +876,16 @@ class AgentHarness:
                             args = _json.loads(fn.get("arguments", "{}"))
                             file_path = args.get("path", "")
                             if file_path:
-                                work_dir = self._checkpoint_mgr.get_working_dir_for_path(file_path)
-                                self._checkpoint_mgr.ensure_checkpoint(
-                                    work_dir, f"before {tool_name}",
+                                cp_input = _json.dumps({
+                                    "action": "take",
+                                    "reason": f"before {tool_name}",
+                                    "file_path": file_path,
+                                })
+                                cp_result = await self._sandbox_pool.execute(
+                                    str(session.id), "_checkpoint", cp_input,
                                 )
-                                cp_hash = self._checkpoint_mgr.latest_hash(work_dir)
+                                cp_data = _json.loads(cp_result)
+                                cp_hash = cp_data.get("hash")
                                 if cp_hash:
                                     tc["_checkpoint_hash"] = cp_hash
                         except Exception:
@@ -891,6 +904,7 @@ class AgentHarness:
                 memory_manager=self._memory_manager,
                 hint_tracker=hint_tracker,
                 sandbox_pool=self._sandbox_pool,
+                api_client=self._api_client,
             )
 
             # 7a. Reset nudge counters when relevant tools are used

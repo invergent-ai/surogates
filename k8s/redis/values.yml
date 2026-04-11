@@ -1,0 +1,24 @@
+# Redis for Surogates dev cluster (Bitnami chart).
+# Used for: work queue, wake nudges, rate limiting, short-lived cache.
+# Exposed on NodePort 32379 for local API server / worker access.
+
+architecture: standalone
+
+auth:
+  enabled: false
+
+master:
+  service:
+    type: NodePort
+    nodePorts:
+      redis: 32379
+  persistence:
+    enabled: true
+    size: 1Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi

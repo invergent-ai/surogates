@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -35,20 +35,6 @@ class ToolInfo(BaseModel):
 
 class ToolListResponse(BaseModel):
     tools: list[ToolInfo]
-    total: int
-
-
-class SkillSummary(BaseModel):
-    """Lightweight skill info for the frontend slash-command menu."""
-
-    name: str
-    description: str
-    category: str | None = None
-    trigger: str | None = None
-
-
-class SkillListResponse(BaseModel):
-    skills: list[SkillSummary]
     total: int
 
 
@@ -115,32 +101,3 @@ async def list_tools(
             )
 
     return ToolListResponse(tools=tools, total=len(tools))
-
-
-@router.get("/skills", response_model=SkillListResponse)
-async def list_skills(
-    tenant: TenantContext = Depends(get_current_tenant),
-) -> SkillListResponse:
-    """List available skills from all layers (platform, org, user).
-
-    Returns lightweight summaries suitable for the frontend
-    slash-command menu.  Skills with a ``trigger`` field are
-    intended to be invokable via ``/trigger-name``.
-    """
-    from surogates.tools.loader import ResourceLoader
-
-    loader = ResourceLoader()
-    skill_defs = loader.load_skills(tenant)
-
-    summaries = [
-        SkillSummary(
-            name=s.name,
-            description=s.description,
-            category=s.category,
-            trigger=s.trigger,
-        )
-        for s in skill_defs
-    ]
-    summaries.sort(key=lambda s: (s.category or "", s.name))
-
-    return SkillListResponse(skills=summaries, total=len(summaries))

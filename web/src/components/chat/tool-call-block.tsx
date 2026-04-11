@@ -87,7 +87,13 @@ function parseTerminalResult(
   if (!result) return null;
   try {
     const parsed = JSON.parse(result);
-    if (typeof parsed?.output !== "string" && typeof parsed?.exit_code !== "number") {
+    // Accept both formats:
+    // - Harness/ProcessSandbox: {output, exit_code, error}
+    // - K8sSandbox: {stdout, stderr, exit_code, truncated, timed_out}
+    const hasOutput = typeof parsed?.output === "string";
+    const hasStdout = typeof parsed?.stdout === "string";
+    const hasExitCode = typeof parsed?.exit_code === "number";
+    if (!hasOutput && !hasStdout && !hasExitCode) {
       return null;
     }
     let command = "";
@@ -95,8 +101,12 @@ function parseTerminalResult(
       const parsedArgs = JSON.parse(args);
       command = parsedArgs?.command ?? "";
     } catch { /* ignore */ }
+    // Merge stdout + stderr for the sandbox format.
+    const output = parsed.output ?? parsed.stdout ?? "";
+    const stderr = parsed.stderr ?? "";
+    const combined = stderr ? `${output}\n${stderr}`.trim() : output;
     return {
-      output: parsed.output ?? "",
+      output: combined,
       exit_code: parsed.exit_code ?? 0,
       error: parsed.error ?? null,
       command,

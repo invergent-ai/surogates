@@ -1,0 +1,34 @@
+ports:
+  websecure:
+    asDefault: true
+    port: 8443
+    expose:
+      default: true
+    exposedPort: 443
+    hostPort: 443
+
+tlsStore:
+  default:
+    defaultCertificate:
+      secretName: "traefik-tls-secret"
+
+deployment:
+  type: DaemonSet
+  podAnnotations:
+    prometheus.io/port: "8082"
+    prometheus.io/scrape: "true"
+  providers:
+    kubernetesIngress:
+      publishedService:
+        enabled: true
+  priorityClassName: "system-cluster-critical"
+
+service:
+  type: NodePort
+  ipFamilyPolicy: "PreferDualStack"
+  externalTrafficPolicy: "Local"
+
+additionalArguments:
+  - '--entryPoints.websecure.transport.respondingTimeouts.readTimeout=3600s'
+  - '--entryPoints.websecure.transport.respondingTimeouts.writeTimeout=3600s'
+  - '--entryPoints.websecure.transport.respondingTimeouts.idleTimeout=3600s'

@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+# tool-executor — dispatches tool commands inside the sandbox pod.
+#
+# Usage: tool-executor <tool_name> <json_args>
+#
+# Runs the tool command and outputs a JSON result to stdout:
+#   {"exit_code": N, "stdout": "...", "stderr": "...", "truncated": false, "timed_out": false}
+#
+# Internal commands (prefixed with _) are handled specially:
+#   _checkpoint — delegates to the checkpoint manager (Python)
+
+set -euo pipefail
+
+TOOL_NAME="${1:-}"
+TOOL_ARGS="${2:-{\}}"
+
+# Maximum output capture (1 MiB).
+MAX_OUTPUT=1048576
+
+if [[ -z "$TOOL_NAME" ]]; then
+    printf '{"exit_code": 1, "stdout": "", "stderr": "No tool name provided", "truncated": false, "timed_out": false}\n'
+    exit 0
+fi
+
+# Helper: extract a JSON field safely.
+json_field() {
+    printf '%s' "$TOOL_ARGS" | jq -r "$1" 2>/dev/null || echo ""
+}
+
+# Helper: build result JSON safely using jq.
+result_json() {
+    jq -n \
+        --argjson exit_code "${1}" \
+        --arg stdout "${2}" \
+        --arg stderr "${3}" \
+        --argjson truncated "${4}" \
+        --argjson timed_out "${5}" \
+        '{exit_code: $exit_code, stdout: $stdout, stderr: $stderr, truncated: $truncated, timed_out: $timed_out}'
+}
+
+# ── Internal commands ────────────────────────────────────────────────
+
+if [[ "$TOOL_NAME" == _checkpoint ]]; then
+    if command -v python3 &>/dev/null; then
+        python3 -c "
+import json, sys
+from surogates.tools.utils.checkpoint_manager import CheckpointManager
+args = json.loads(sys.argv[1])
+action = args.get('action', 'take')
+mgr = CheckpointManager(enabled=True)
+workdir = '${WORKSPACE_DIR:-/workspace}'
+
+if action == 'new_turn':
+    mgr.new_turn()
+    print(json.dumps({'success': True, 'action': 'new_turn'}))
+elif action == 'take':
+    reason = args.get('reason', 'auto')
+    fp = args.get('file_path')
+    if fp:
+        workdir = mgr.get_working_dir_for_path(fp)
+    ok = mgr.ensure_checkpoint(workdir, reason)
+    result = {'success': ok, 'action': 'take'}
+    if ok:
+        h = mgr.latest_hash(workdir)
+        if h:
+            result['hash'] = h
+    print(json.dumps(result))
+elif action == 'latest_hash':
+    h = mgr.latest_hash(workdir)
+    print(json.dumps({'success': True, 'hash': h}))
+elif action == 'list':
+    cps = mgr.list_checkpoints(workdir)
+    print(json.dumps({'success': True, 'checkpoints': cps}))
+elif action == 'restore':
+    ch = args.get('hash', '')
+    fp = args.get('file_path')
+    r = mgr.restore(workdir, ch, fp)
+    print(json.dumps(r))
+else:
+    print(json.dumps({'success': False, 'error': f'Unknown checkpoint action: {action}'}))
+" "$TOOL_ARGS" 2>/dev/null
+    else
+        printf '{"success": false, "error": "python3 not available for checkpoint"}\n'
+    fi
+    exit 0
+fi
+
+# ── Terminal tool ────────────────────────────────────────────────────
+
+if [[ "$TOOL_NAME" == "terminal" ]]; then
+    COMMAND=$(json_field '.command // empty')
+    TIMEOUT=$(json_field '.timeout // 300')
+
+    if [[ -z "$COMMAND" ]]; then
+        result_json 1 "" "No command provided" false false
+        exit 0
+    fi
+
+    STDOUT_FILE=$(mktemp)
+    STDERR_FILE=$(mktemp)
+    TIMED_OUT="false"
+    EXIT_CODE=0
+
+    cd "${WORKSPACE_DIR:-/workspace}"
+
+    if timeout "$TIMEOUT" bash -c "$COMMAND" >"$STDOUT_FILE" 2>"$STDERR_FILE"; then
+        EXIT_CODE=0
+    else
+        EXIT_CODE=$?
+        if [[ $EXIT_CODE -eq 124 ]]; then
+            TIMED_OUT="true"
+        fi
+    fi
+
+    # Truncate if needed.
+    TRUNCATED="false"
+    STDOUT_SIZE=$(stat -c%s "$STDOUT_FILE" 2>/dev/null || echo 0)
+    STDERR_SIZE=$(stat -c%s "$STDERR_FILE" 2>/dev/null || echo 0)
+
+    if [[ $STDOUT_SIZE -gt $MAX_OUTPUT ]]; then
+        truncate -s "$MAX_OUTPUT" "$STDOUT_FILE"
+        TRUNCATED="true"
+    fi
+    if [[ $STDERR_SIZE -gt $MAX_OUTPUT ]]; then
+        truncate -s "$MAX_OUTPUT" "$STDERR_FILE"
+        TRUNCATED="true"
+    fi
+
+    STDOUT=$(cat "$STDOUT_FILE")
+    STDERR=$(cat "$STDERR_FILE")
+    rm -f "$STDOUT_FILE" "$STDERR_FILE"
+
+    result_json "$EXIT_CODE" "$STDOUT" "$STDERR" "$TRUNCATED" "$TIMED_OUT"
+    exit 0
+fi
+
+# ── Read file ────────────────────────────────────────────────────────
+
+if [[ "$TOOL_NAME" == "read_file" ]]; then
+    FILE_PATH=$(json_field '.path // empty')
+    if [[ -z "$FILE_PATH" ]]; then
+        result_json 1 "" "No path provided" false false
+        exit 0
+    fi
+
+    cd "${WORKSPACE_DIR:-/workspace}"
+
+    if [[ ! -f "$FILE_PATH" ]]; then
+        result_json 1 "" "File not found: $FILE_PATH" false false
+        exit 0
+    fi
+
+    CONTENT=$(head -c "$MAX_OUTPUT" "$FILE_PATH")
+    FILE_SIZE=$(stat -c%s "$FILE_PATH" 2>/dev/null || echo 0)
+    TRUNCATED="false"
+    if [[ $FILE_SIZE -gt $MAX_OUTPUT ]]; then
+        TRUNCATED="true"
+    fi
+
+    result_json 0 "$CONTENT" "" "$TRUNCATED" false
+    exit 0
+fi
+
+# ── Write file ───────────────────────────────────────────────────────
+
+if [[ "$TOOL_NAME" == "write_file" ]]; then
+    FILE_PATH=$(json_field '.path // empty')
+    CONTENT=$(json_field '.content // empty')
+
+    if [[ -z "$FILE_PATH" ]]; then
+        result_json 1 "" "No path provided" false false
+        exit 0
+    fi
+
+    cd "${WORKSPACE_DIR:-/workspace}"
+    mkdir -p "$(dirname "$FILE_PATH")"
+    printf '%s' "$CONTENT" > "$FILE_PATH"
+
+    result_json 0 "Written to $FILE_PATH" "" false false
+    exit 0
+fi
+
+# ── List files ───────────────────────────────────────────────────────
+
+if [[ "$TOOL_NAME" == "list_files" ]]; then
+    DIR_PATH=$(json_field '.path // "."')
+    cd "${WORKSPACE_DIR:-/workspace}"
+
+    if [[ ! -d "$DIR_PATH" ]]; then
+        result_json 1 "" "Directory not found: $DIR_PATH" false false
+        exit 0
+    fi
+
+    OUTPUT=$(find "$DIR_PATH" -maxdepth 2 -type f 2>/dev/null | head -200)
+    result_json 0 "$OUTPUT" "" false false
+    exit 0
+fi
+
+# ── Search files ─────────────────────────────────────────────────────
+
+if [[ "$TOOL_NAME" == "search_files" ]]; then
+    PATTERN=$(json_field '.pattern // empty')
+    DIR_PATH=$(json_field '.path // "."')
+    cd "${WORKSPACE_DIR:-/workspace}"
+
+    if [[ -z "$PATTERN" ]]; then
+        result_json 1 "" "No pattern provided" false false
+        exit 0
+    fi
+
+    if command -v rg &>/dev/null; then
+        OUTPUT=$(rg -n --max-count 50 "$PATTERN" "$DIR_PATH" 2>/dev/null | head -200)
+    else
+        OUTPUT=$(grep -rn --max-count=50 "$PATTERN" "$DIR_PATH" 2>/dev/null | head -200)
+    fi
+
+    result_json 0 "$OUTPUT" "" false false
+    exit 0
+fi
+
+# ── Fallback: unknown tool ───────────────────────────────────────────
+
+result_json 1 "" "Unknown tool: $TOOL_NAME" false false

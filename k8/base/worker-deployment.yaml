@@ -22,7 +22,7 @@ spec:
       containers:
         - name: worker
           image: ghcr.io/invergent-ai/surogates:latest
-          command: ["surogate", "worker"]
+          command: ["surogates", "worker"]
           env:
             - name: SUROGATES_DB_URL
               valueFrom:
@@ -34,9 +34,42 @@ spec:
                 secretKeyRef:
                   name: surogates-redis
                   key: url
+            - name: SUROGATES_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: surogates-jwt
+                  key: secret
             - name: SUROGATES_WORKER_CONCURRENCY
               value: "50"
-            # Worker ID from pod name (K8s downward API)
+            # Sandbox backend: "kubernetes" in production.
+            - name: SUROGATES_SANDBOX_BACKEND
+              value: "kubernetes"
+            - name: SUROGATES_SANDBOX_K8S_NAMESPACE
+              value: "surogates"
+            # API server URL for harness tool calls (skills, memory).
+            - name: SUROGATES_WORKER_API_BASE_URL
+              value: "http://api-gateway.surogates.svc:8000"
+            - name: SUROGATES_WORKER_USE_API_FOR_HARNESS_TOOLS
+              value: "true"
+            # Storage backend: S3 (Garage).
+            - name: SUROGATES_STORAGE_BACKEND
+              value: "s3"
+            - name: SUROGATES_STORAGE_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: surogates-s3
+                  key: endpoint
+            - name: SUROGATES_STORAGE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: surogates-s3
+                  key: access-key
+            - name: SUROGATES_STORAGE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: surogates-s3
+                  key: secret-key
+            # Worker ID from pod name (K8s downward API).
             - name: SUROGATES_WORKER_ID
               valueFrom:
                 fieldRef:
@@ -48,6 +81,7 @@ spec:
             - name: SUROGATES_LOG_LEVEL
               value: "INFO"
           volumeMounts:
+            # Platform volumes (read-only, from ConfigMaps).
             - name: platform-policies
               mountPath: /etc/surogates/policies
               readOnly: true
@@ -64,8 +98,6 @@ spec:
               mountPath: /etc/surogates/model-metadata.json
               subPath: model-metadata.json
               readOnly: true
-            - name: tenant-assets
-              mountPath: /data/tenant-assets
           resources:
             requests:
               cpu: 500m
@@ -73,6 +105,16 @@ spec:
             limits:
               cpu: "2"
               memory: 2Gi
+          livenessProbe:
+            exec:
+              command: ["surogates", "health"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command: ["surogates", "health"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
       volumes:
         - name: platform-policies
           configMap:
@@ -89,6 +131,3 @@ spec:
         - name: model-metadata
           configMap:
             name: model-metadata
-        - name: tenant-assets
-          persistentVolumeClaim:
-            claimName: tenant-assets

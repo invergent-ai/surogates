@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -127,14 +126,18 @@ async def create_session(
     if body.system:
         config["system"] = body.system
 
-    # Workspace path is always server-configured, never user-specified.
-    # Each session gets its own subdirectory under the configured root.
-    workspace_root = Path(settings.worker.workspace_path)
-    # Pre-generate the session ID so we can create the workspace dir first.
+    # Each session gets its own storage bucket for workspace files.
     session_id = uuid4()
-    session_workspace = workspace_root / str(session_id)
-    session_workspace.mkdir(parents=True, exist_ok=True)
-    config["workspace_path"] = str(session_workspace)
+    session_bucket = f"session-{session_id}"
+
+    storage = request.app.state.storage
+    await storage.create_bucket(session_bucket)
+
+    config["workspace_bucket"] = session_bucket
+    # Workspace path for the sandbox:
+    # - LocalBackend: resolves to the bucket directory on disk
+    # - S3Backend: /workspace (s3fs-fuse mount point inside the sandbox pod)
+    config["workspace_path"] = storage.resolve_bucket_path(session_bucket)
 
     session = await store.create_session(
         session_id=session_id,
@@ -342,8 +345,16 @@ async def delete_session(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> None:
-    """Archive (soft-delete) a session."""
+    """Archive (soft-delete) a session and delete its workspace storage."""
     store = _get_session_store(request)
     await _get_session_for_tenant(store, session_id, tenant)
 
     await store.update_session_status(session_id, "archived")
+
+    # Delete the session's storage bucket (workspace files).
+    storage = request.app.state.storage
+    session_bucket = f"session-{session_id}"
+    try:
+        await storage.delete_bucket(session_bucket)
+    except Exception:
+        logger.warning("Failed to delete storage bucket %s", session_bucket, exc_info=True)

@@ -1,6 +1,30 @@
 {
+    "python-envs.defaultEnvManager": "ms-python.python:venv",
+    "python-envs.defaultPackageManager": "ms-python.python:pip",
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+    "python-envs.pythonProjects": [],
+    "python.analysis.include": [
+        "./surogates/*.py",
+    ],
+    "python.terminal.activateEnvInCurrentTerminal": false,
+    "python.analysis.exclude": ["**"],
+    "python.analysis.indexing": false,
+    "python.analysis.diagnosticMode": "openFilesOnly",
+    "python.analysis.supportRestructuredText": false,
+    "python.analysis.enablePytestSupport": false,
+    "python.analysis.inlayHints.pytestParameters": false,
+    "python.analysis.autoImportCompletions": false,       
     "files.exclude": {
         "**/__pycache__": true,
         "**/*.pyc": true
-    }
+    },
+    "files.watcherExclude": {
+        "**/.venv/**": true,
+        "**/__pycache__/**": true,
+        "**/web/node_modules/**": true,
+    },   
+    "[typescriptreact]": {
+        "editor.defaultFormatter": "biomejs.biome"
+    },
+    "biome.lsp.bin": "/usr/local/bin/biome",   
 }

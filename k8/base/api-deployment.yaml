@@ -22,7 +22,7 @@ spec:
       containers:
         - name: api
           image: ghcr.io/invergent-ai/surogates:latest
-          command: ["surogate", "api"]
+          command: ["surogates", "api"]
           ports:
             - name: http
               containerPort: 8000
@@ -37,8 +37,39 @@ spec:
                 secretKeyRef:
                   name: surogates-redis
                   key: url
+            - name: SUROGATES_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: surogates-jwt
+                  key: secret
+            # Storage backend: S3 (Garage).
+            # The API server has tenant-wide S3 access for skills, memory,
+            # and workspace file browsing.
+            - name: SUROGATES_STORAGE_BACKEND
+              value: "s3"
+            - name: SUROGATES_STORAGE_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: surogates-s3
+                  key: endpoint
+            - name: SUROGATES_STORAGE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: surogates-s3
+                  key: access-key
+            - name: SUROGATES_STORAGE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: surogates-s3
+                  key: secret-key
             - name: SUROGATES_LOG_LEVEL
               value: "INFO"
+          volumeMounts:
+            # Platform skills — read-only, baked into container or ConfigMap.
+            # Used by GET /v1/skills to include platform-level skills.
+            - name: platform-skills
+              mountPath: /etc/surogates/skills
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /health
@@ -58,6 +89,10 @@ spec:
             limits:
               cpu: "1"
               memory: 512Mi
+      volumes:
+        - name: platform-skills
+          configMap:
+            name: platform-skills
 ---
 apiVersion: v1
 kind: Service
@@ -70,5 +105,5 @@ spec:
     component: api
   ports:
     - name: http
-      port: 80
+      port: 8000
       targetPort: http

@@ -27,6 +27,12 @@ async def main() -> None:
     engine = async_engine_from_settings(settings.db)
     factory = async_session_factory(engine)
 
+    # Create all tables if they don't exist.
+    from surogates.db.models import Base
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    print("Database schema ensured.")
+
     org_id = uuid.uuid4()
     user_id = uuid.uuid4()
     email = "admin@dev.local"

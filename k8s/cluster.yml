@@ -1,0 +1,74 @@
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: ${CLUSTER_NAME}
+
+servers: ${SERVERS}
+agents: ${AGENTS}
+
+kubeAPI:
+  host: "k8s.localhost"
+  hostIP: "0.0.0.0"
+  hostPort: "${API_PORT}"
+
+volumes:
+  # Garage S3 data — persists across cluster restarts.
+  - volume: ${SUROGATES_DIR}/garage-data:/var/lib/garage
+    nodeFilters:
+    - agent:*
+
+ports:
+  - port: ${HTTP_PORT}:80 # http port host:container
+    nodeFilters:
+      - loadbalancer
+  - port: 0.0.0.0:${HTTPS_PORT}:443 # https port host:container
+    nodeFilters:
+      - loadbalancer
+  - port: 0.0.0.0:32432:32432 # postgresql
+    nodeFilters:
+      - agent:*
+  - port: 0.0.0.0:32379:32379 # redis
+    nodeFilters:
+      - agent:*
+  - port: 0.0.0.0:30900:30900 # garage s3 api
+    nodeFilters:
+      - agent:*
+
+hostAliases:
+  - ip: 127.0.0.1
+    hostnames:
+      - k8s.localhost
+      - surogates.k8s.localhost
+      - garage.k8s.localhost
+
+options:
+  k3d:
+    wait: true
+    timeout: "60s"
+    loadbalancer:
+      configOverrides:
+      - settings.workerConnections=2048
+  k3s:
+    extraArgs:
+    - arg: --disable=traefik
+      nodeFilters:
+      - server:*
+    - arg: --tls-san=localhost,127.0.0.1,k8s.localhost,surogates.k8s.localhost,garage.k8s.localhost
+      nodeFilters:
+      - server:*
+    - arg: --kube-proxy-arg=metrics-bind-address=0.0.0.0
+      nodeFilters:
+      - server:*
+      - agent:*
+    - arg: --kube-scheduler-arg=bind-address=0.0.0.0
+      nodeFilters:
+      - server:*
+    - arg: --kubelet-arg=node-status-update-frequency=4s
+      nodeFilters:
+      - server:*
+    - arg: --node-taint=node-role.kubernetes.io/control-plane:NoSchedule
+      nodeFilters:
+      - server:*
+  kubeconfig:
+    updateDefaultKubeconfig: true
+    switchCurrentContext: true

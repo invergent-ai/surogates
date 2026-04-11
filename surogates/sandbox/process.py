@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from surogates.sandbox.base import SandboxSpec, SandboxStatus
+from surogates.tools.utils.checkpoint_manager import CheckpointManager
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class _SandboxEntry:
     spec: SandboxSpec
     process: asyncio.subprocess.Process | None = None
     env: dict[str, str] = field(default_factory=dict)
+    checkpoint_mgr: Any = None  # Lazy-init CheckpointManager
 
 
 class ProcessSandbox:
@@ -81,6 +83,11 @@ class ProcessSandbox:
     async def execute(self, sandbox_id: str, name: str, input: str) -> str:
         """Run *name* as a subprocess inside the sandbox directory.
 
+        Internal commands (prefixed with ``_``) are handled in-process
+        without spawning a subprocess.  Currently supported:
+
+        - ``_checkpoint`` — filesystem checkpoint via shadow git repo.
+
         Parameters
         ----------
         sandbox_id:
@@ -97,6 +104,10 @@ class ProcessSandbox:
             ``stderr``, ``truncated``, and ``timed_out``.
         """
         entry = self._get_entry(sandbox_id)
+
+        # Internal commands — handled in-process, not as subprocesses.
+        if name == "_checkpoint":
+            return await self._handle_checkpoint(entry, input)
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -154,6 +165,65 @@ class ProcessSandbox:
             truncated=truncated,
             timed_out=timed_out,
         )
+
+    async def _handle_checkpoint(self, entry: _SandboxEntry, input: str) -> str:
+        """Handle internal ``_checkpoint`` commands.
+
+        Supported actions:
+        - ``take`` — snapshot the workspace (deduped per turn).
+        - ``new_turn`` — reset per-turn dedup.
+        - ``latest_hash`` — return the latest checkpoint hash.
+        - ``list`` — list available checkpoints.
+        - ``restore`` — restore to a checkpoint.
+        """
+        import asyncio as _asyncio
+
+        try:
+            args = json.loads(input) if input else {}
+        except json.JSONDecodeError:
+            args = {}
+
+        action = args.get("action", "take")
+        workdir = str(entry.workdir)
+
+        # Lazy-init the checkpoint manager for this sandbox.
+        if entry.checkpoint_mgr is None:
+            entry.checkpoint_mgr = CheckpointManager(enabled=True)
+
+        mgr = entry.checkpoint_mgr
+
+        if action == "new_turn":
+            mgr.new_turn()
+            return json.dumps({"success": True, "action": "new_turn"})
+
+        if action == "take":
+            reason = args.get("reason", "auto")
+            file_path = args.get("file_path")
+            if file_path:
+                workdir = mgr.get_working_dir_for_path(file_path)
+            ok = await _asyncio.to_thread(mgr.ensure_checkpoint, workdir, reason)
+            result: dict[str, Any] = {"success": ok, "action": "take"}
+            if ok:
+                hash_val = await _asyncio.to_thread(mgr.latest_hash, workdir)
+                if hash_val:
+                    result["hash"] = hash_val
+            return json.dumps(result)
+
+        if action == "latest_hash":
+            hash_val = await _asyncio.to_thread(mgr.latest_hash, workdir)
+            return json.dumps({"success": True, "hash": hash_val})
+
+        if action == "list":
+            checkpoints = await _asyncio.to_thread(mgr.list_checkpoints, workdir)
+            return json.dumps({"success": True, "checkpoints": checkpoints})
+
+        if action == "restore":
+            commit_hash = args.get("hash", "")
+            file_path = args.get("file_path")
+            result = await _asyncio.to_thread(mgr.restore, workdir, commit_hash, file_path)
+            return json.dumps(result)
+
+        return json.dumps({"success": False, "error": f"Unknown checkpoint action: {action}"})
 
     async def destroy(self, sandbox_id: str) -> None:
         """Kill any running process and remove the sandbox workspace."""

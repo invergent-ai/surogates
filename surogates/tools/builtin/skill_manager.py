@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -23,16 +22,21 @@ from surogates.tools.registry import ToolRegistry, ToolSchema
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Constants
+# Shared validation (canonical source: skill_validation.py)
 # ---------------------------------------------------------------------------
 
-MAX_NAME_LENGTH = 64
-MAX_DESCRIPTION_LENGTH = 1024
-MAX_SKILL_CONTENT_CHARS = 100_000
-MAX_SKILL_FILE_BYTES = 1_048_576  # 1 MiB per supporting file
-
-VALID_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-ALLOWED_SUBDIRS = frozenset({"references", "templates", "scripts", "assets"})
+from surogates.tools.builtin.skill_validation import (
+    ALLOWED_SUBDIRS,
+    MAX_NAME_LENGTH,
+    MAX_SKILL_CONTENT_CHARS,
+    MAX_SKILL_FILE_BYTES,
+    VALID_NAME_RE,
+    validate_category as _validate_category,
+    validate_content_size as _validate_content_size,
+    validate_file_path as _validate_file_path,
+    validate_frontmatter as _validate_frontmatter,
+    validate_name as _validate_name,
+)
 
 SCHEMA = ToolSchema(
     name="skill_manage",
@@ -149,6 +153,11 @@ async def _skill_manage_handler(
     **kwargs: Any,
 ) -> str:
     """Dispatch to the appropriate action handler."""
+    # API-mediated mode: delegate all CRUD to the API server.
+    api_client = kwargs.get("api_client")
+    if api_client is not None:
+        return await _dispatch_via_api(api_client, arguments)
+
     tenant = kwargs.get("tenant")
     if tenant is None:
         return json.dumps({"success": False, "error": "No tenant context available"})
@@ -231,117 +240,7 @@ async def _skill_manage_handler(
     return json.dumps(result, ensure_ascii=False)
 
 
-# ---------------------------------------------------------------------------
-# Validation helpers
-# ---------------------------------------------------------------------------
-
-
-def _validate_name(name: str) -> str | None:
-    """Return an error message if *name* is invalid, else ``None``."""
-    if not name:
-        return "Skill name is required."
-    if len(name) > MAX_NAME_LENGTH:
-        return f"Skill name exceeds {MAX_NAME_LENGTH} characters."
-    if not VALID_NAME_RE.match(name):
-        return (
-            f"Invalid skill name '{name}'. Use lowercase letters, numbers, "
-            "hyphens, dots, and underscores. Must start with a letter or digit."
-        )
-    return None
-
-
-def _validate_category(category: str | None) -> str | None:
-    """Return an error message if *category* is invalid, else ``None``."""
-    if category is None:
-        return None
-    category = category.strip()
-    if not category:
-        return None
-    if "/" in category or "\\" in category:
-        return (
-            f"Invalid category '{category}'. Use lowercase letters, numbers, "
-            "hyphens, dots, and underscores. Categories must be a single directory name."
-        )
-    if len(category) > MAX_NAME_LENGTH:
-        return f"Category exceeds {MAX_NAME_LENGTH} characters."
-    if not VALID_NAME_RE.match(category):
-        return (
-            f"Invalid category '{category}'. Use lowercase letters, numbers, "
-            "hyphens, dots, and underscores. Categories must be a single directory name."
-        )
-    return None
-
-
-def _validate_frontmatter(content: str) -> str | None:
-    """Return an error if frontmatter is missing or invalid, else ``None``."""
-    if not content.strip():
-        return "Content cannot be empty."
-
-    if not content.startswith("---"):
-        return "SKILL.md must start with YAML frontmatter (---). See existing skills for format."
-
-    end_match = re.search(r"\n---\s*\n", content[3:])
-    if not end_match:
-        return "SKILL.md frontmatter is not closed. Ensure you have a closing '---' line."
-
-    yaml_content = content[3 : end_match.start() + 3]
-
-    try:
-        import yaml
-
-        parsed = yaml.safe_load(yaml_content)
-    except Exception as exc:
-        return f"YAML frontmatter parse error: {exc}"
-
-    if not isinstance(parsed, dict):
-        return "Frontmatter must be a YAML mapping (key: value pairs)."
-
-    if "name" not in parsed:
-        return "Frontmatter must include 'name' field."
-    if "description" not in parsed:
-        return "Frontmatter must include 'description' field."
-    if len(str(parsed.get("description", ""))) > MAX_DESCRIPTION_LENGTH:
-        return f"Description exceeds {MAX_DESCRIPTION_LENGTH} characters."
-
-    body = content[end_match.end() + 3 :].strip()
-    if not body:
-        return "SKILL.md must have content after the frontmatter (instructions, procedures, etc.)."
-
-    return None
-
-
-def _validate_content_size(content: str, label: str = "SKILL.md") -> str | None:
-    """Return an error if content exceeds the size limit."""
-    if len(content) > MAX_SKILL_CONTENT_CHARS:
-        return (
-            f"{label} content is {len(content):,} characters "
-            f"(limit: {MAX_SKILL_CONTENT_CHARS:,}). "
-            f"Consider splitting into a smaller SKILL.md with supporting files "
-            f"in references/ or templates/."
-        )
-    return None
-
-
-def _validate_file_path(file_path: str) -> str | None:
-    """Return an error if *file_path* is invalid for write_file/remove_file."""
-    if not file_path:
-        return "file_path is required."
-
-    normalized = Path(file_path)
-
-    if ".." in normalized.parts:
-        return "Path traversal ('..') is not allowed."
-
-    if not normalized.parts or normalized.parts[0] not in ALLOWED_SUBDIRS:
-        allowed = ", ".join(sorted(ALLOWED_SUBDIRS))
-        return f"File must be under one of: {allowed}. Got: '{file_path}'"
-
-    if len(normalized.parts) < 2:
-        return f"Provide a file path, not just a directory. Example: '{normalized.parts[0]}/myfile.md'"
-
-    return None
-
-
+# Validation functions are imported from skill_validation.py above.
 # ---------------------------------------------------------------------------
 # Skill directory helpers
 # ---------------------------------------------------------------------------
@@ -690,3 +589,47 @@ def _remove_file(
         "success": True,
         "message": f"File '{file_path}' removed from skill '{name}'.",
     }
+
+
+# ---------------------------------------------------------------------------
+# API-mediated dispatch (when api_client is available)
+# ---------------------------------------------------------------------------
+
+
+async def _dispatch_via_api(api_client: Any, arguments: dict[str, Any]) -> str:
+    """Route skill_manage actions through the HarnessAPIClient."""
+    action = arguments.get("action", "")
+    name = arguments.get("name", "")
+
+    if action == "create":
+        content = arguments.get("content", "")
+        category = arguments.get("category")
+        return await api_client.create_skill(name, content, category)
+
+    if action == "edit":
+        content = arguments.get("content", "")
+        return await api_client.edit_skill(name, content)
+
+    if action == "patch":
+        old_string = arguments.get("old_string", "")
+        new_string = arguments.get("new_string", "")
+        file_path = arguments.get("file_path")
+        replace_all = arguments.get("replace_all", False)
+        return await api_client.patch_skill(name, old_string, new_string, file_path, replace_all)
+
+    if action == "delete":
+        return await api_client.delete_skill(name)
+
+    if action == "write_file":
+        file_path = arguments.get("file_path", "")
+        file_content = arguments.get("file_content", "")
+        return await api_client.write_skill_file(name, file_path, file_content)
+
+    if action == "remove_file":
+        file_path = arguments.get("file_path", "")
+        return await api_client.remove_skill_file(name, file_path)
+
+    return json.dumps({
+        "success": False,
+        "error": f"Unknown action '{action}'.",
+    })

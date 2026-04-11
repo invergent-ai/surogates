@@ -137,6 +137,12 @@ async def _skills_list_handler(
     Returns only name + description + category to minimise token usage.
     Use skill_view() to load full content, tags, related files, etc.
     """
+    # API-mediated mode: delegate to the API server.
+    api_client = kwargs.get("api_client")
+    if api_client is not None:
+        category = arguments.get("category")
+        return await api_client.list_skills(category)
+
     tenant = kwargs.get("tenant")
     if tenant is None:
         return json.dumps({"error": "No tenant context available"})
@@ -194,6 +200,13 @@ async def _skill_view_handler(
     - Tier 2: Full SKILL.md content + linked_files listing
     - Tier 3: Specific linked file content loaded on demand via file_path
     """
+    # API-mediated mode: delegate to the API server.
+    api_client = kwargs.get("api_client")
+    if api_client is not None:
+        name = arguments.get("name", "")
+        file_path = arguments.get("file_path")
+        return await api_client.view_skill(name, file_path)
+
     tenant = kwargs.get("tenant")
     if tenant is None:
         return json.dumps({"error": "No tenant context available"})

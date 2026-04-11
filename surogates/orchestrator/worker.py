@@ -67,7 +67,19 @@ async def run_worker(settings: Settings) -> None:
     session_store = SessionStore(session_factory, redis=redis_client)
 
     # 4a. Sandbox pool -- one sandbox per session, lazily provisioned.
-    sandbox_backend = ProcessSandbox()
+    if settings.sandbox.backend == "kubernetes":
+        from surogates.sandbox.kubernetes import K8sSandbox
+        sandbox_backend = K8sSandbox(
+            namespace=settings.sandbox.k8s_namespace,
+            service_account=settings.sandbox.k8s_service_account,
+            pod_ready_timeout=settings.sandbox.k8s_pod_ready_timeout,
+            executor_path=settings.sandbox.k8s_executor_path,
+            storage_settings=settings.storage,
+            s3fs_image=settings.sandbox.k8s_s3fs_image,
+            s3_endpoint=settings.sandbox.k8s_s3_endpoint,
+        )
+    else:
+        sandbox_backend = ProcessSandbox()
     sandbox_pool = SandboxPool(sandbox_backend)
 
     # 4. Tool registry -- register all builtin tools + MCP tools.
@@ -185,6 +197,24 @@ async def run_worker(settings: Settings) -> None:
             tenant, memory_manager=memory_manager, session=session,
         )
 
+        # Create API client for harness tools when enabled.
+        harness_api_client = None
+        if settings.worker.use_api_for_harness_tools:
+            from surogates.harness.api_client import HarnessAPIClient
+            # Use the session user's JWT token for authentication.
+            # In production, the orchestrator would issue a session-scoped
+            # token.  For now, reuse the worker's own credentials.
+            from surogates.tenant.auth.jwt import create_access_token
+            token = create_access_token(
+                org_id=tenant.org_id,
+                user_id=tenant.user_id,
+                permissions=set(tenant.permissions) or {"sessions:read", "sessions:write", "tools:read"},
+            )
+            harness_api_client = HarnessAPIClient(
+                base_url=settings.worker.api_base_url,
+                token=token,
+            )
+
         return AgentHarness(
             session_store=session_store,
             tool_registry=tool_registry,
@@ -197,6 +227,7 @@ async def run_worker(settings: Settings) -> None:
             redis_client=redis_client,
             memory_manager=memory_manager,
             sandbox_pool=sandbox_pool,
+            api_client=harness_api_client,
         )
 
     # 8. Orchestrator

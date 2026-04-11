@@ -205,6 +205,7 @@ async def execute_tool_calls(
     memory_manager: Any | None = None,
     hint_tracker: SubdirectoryHintTracker | None = None,
     sandbox_pool: SandboxPool | None = None,
+    api_client: Any | None = None,
 ) -> list[dict]:
     """Execute tool calls, choosing parallel vs sequential."""
     if should_parallelize(tool_calls):
@@ -221,6 +222,7 @@ async def execute_tool_calls(
             memory_manager=memory_manager,
             hint_tracker=hint_tracker,
             sandbox_pool=sandbox_pool,
+            api_client=api_client,
         )
     return await execute_tool_calls_sequential(
         tool_calls,
@@ -235,6 +237,7 @@ async def execute_tool_calls(
         memory_manager=memory_manager,
         hint_tracker=hint_tracker,
         sandbox_pool=sandbox_pool,
+        api_client=api_client,
     )
 
 
@@ -252,6 +255,7 @@ async def execute_tool_calls_sequential(
     memory_manager: Any | None = None,
     hint_tracker: SubdirectoryHintTracker | None = None,
     sandbox_pool: SandboxPool | None = None,
+    api_client: Any | None = None,
 ) -> list[dict]:
     """Execute tool calls one at a time, emitting events for each."""
     results: list[dict] = []
@@ -274,6 +278,7 @@ async def execute_tool_calls_sequential(
             memory_manager=memory_manager,
             hint_tracker=hint_tracker,
             sandbox_pool=sandbox_pool,
+            api_client=api_client,
         )
         results.append(result_msg)
 
@@ -294,6 +299,7 @@ async def execute_tool_calls_concurrent(
     memory_manager: Any | None = None,
     hint_tracker: SubdirectoryHintTracker | None = None,
     sandbox_pool: SandboxPool | None = None,
+    api_client: Any | None = None,
 ) -> list[dict]:
     """Execute tool calls concurrently using asyncio.gather.
 
@@ -321,6 +327,7 @@ async def execute_tool_calls_concurrent(
                 memory_manager=memory_manager,
                 hint_tracker=hint_tracker,
                 sandbox_pool=sandbox_pool,
+                api_client=api_client,
             )
 
     tasks = [_guarded(tc) for tc in tool_calls]
@@ -340,6 +347,7 @@ async def execute_single_tool(
     memory_manager: Any | None = None,
     hint_tracker: SubdirectoryHintTracker | None = None,
     sandbox_pool: SandboxPool | None = None,
+    api_client: Any | None = None,
 ) -> dict:
     """Execute a single tool call: emit events, dispatch, return result message."""
     fn = tc.get("function", {})
@@ -420,20 +428,46 @@ async def execute_single_tool(
             }
 
     # Execute the tool, capturing errors as results (never crash the loop).
+    # Route SANDBOX tools through the sandbox pool; HARNESS tools run in-process.
     start = time.monotonic()
     try:
-        result_content = await tools.dispatch(
-            tool_name,
-            tool_args,
-            session_id=str(session.id),
-            tenant=tenant,
-            session_store=store,
-            redis=redis,
-            budget=budget,
-            memory_manager=memory_manager,
-            sandbox_pool=sandbox_pool,
-            workspace_path=workspace_path,
-        )
+        from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
+        from surogates.sandbox.base import SandboxSpec
+        location = TOOL_LOCATIONS.get(tool_name, ToolLocation.SANDBOX)
+
+        if location == ToolLocation.SANDBOX and sandbox_pool is not None:
+            # Lazily provision or reuse the session's sandbox.
+            from surogates.sandbox.base import Resource
+            sandbox_spec = getattr(tenant, "sandbox_spec", None) or SandboxSpec()
+            # Attach the session's workspace bucket as an S3 resource.
+            ws_bucket = session.config.get("workspace_bucket", "")
+            if ws_bucket and not any(r.source_ref.startswith("s3://") for r in sandbox_spec.resources):
+                sandbox_spec.resources.append(
+                    Resource(source_ref=f"s3://{ws_bucket}", mount_path="/workspace"),
+                )
+            await sandbox_pool.ensure(str(session.id), sandbox_spec)
+            # Serialize arguments for the sandbox executor.
+            if isinstance(tool_args, dict):
+                args_str = json.dumps(tool_args)
+            else:
+                args_str = tool_args if tool_args else "{}"
+            result_content = await sandbox_pool.execute(
+                str(session.id), tool_name, args_str,
+            )
+        else:
+            result_content = await tools.dispatch(
+                tool_name,
+                tool_args,
+                session_id=str(session.id),
+                tenant=tenant,
+                session_store=store,
+                redis=redis,
+                budget=budget,
+                memory_manager=memory_manager,
+                sandbox_pool=sandbox_pool,
+                workspace_path=workspace_path,
+                api_client=api_client,
+            )
     except KeyError:
         result_content = json.dumps({
             "error": f"Unknown tool: {tool_name}",

@@ -1,7 +1,8 @@
 """Workspace file browsing for sessions.
 
-Exposes the session's workspace directory as a read-only file tree so
-the web UI can display a workspace panel alongside the chat thread.
+Exposes the session's workspace via ``StorageBackend`` so the web UI can
+display a workspace panel alongside the chat thread.  Works with both
+``LocalBackend`` (dev) and ``S3Backend`` (production, Garage/S3).
 """
 
 from __future__ import annotations
@@ -10,15 +11,17 @@ import asyncio
 import logging
 import mimetypes
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from surogates.session.store import SessionNotFoundError, SessionStore
+from surogates.storage.backend import StorageBackend
+from surogates.storage.tenant import session_bucket
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 
@@ -57,7 +60,7 @@ _TEXT_NAMES = frozenset({
     "AGENTS.md", "CLAUDE.md", ".cursorrules",
 })
 
-# Directories to skip when walking.
+# Directories to skip when building the tree.
 _SKIP_DIRS = frozenset({
     ".git", ".hg", ".svn", "node_modules", "__pycache__", ".mypy_cache",
     ".pytest_cache", ".ruff_cache", ".tox", ".nox", ".eggs",
@@ -99,40 +102,6 @@ class FileContentResponse(BaseModel):
     truncated: bool = False
 
 
-class Checkpoint(BaseModel):
-    """A single workspace checkpoint."""
-
-    hash: str
-    short_hash: str
-    timestamp: str
-    reason: str
-    files_changed: int = 0
-    insertions: int = 0
-    deletions: int = 0
-
-
-class CheckpointListResponse(BaseModel):
-    """Available checkpoints for a session's workspace."""
-
-    checkpoints: list[Checkpoint]
-
-
-class RollbackRequest(BaseModel):
-    """Request to restore workspace to a checkpoint."""
-
-    checkpoint_hash: str
-    file_path: str | None = None
-
-
-class RollbackResponse(BaseModel):
-    """Result of a rollback operation."""
-
-    success: bool
-    restored_to: str | None = None
-    reason: str | None = None
-    error: str | None = None
-
-
 class UploadResponse(BaseModel):
     """Result of uploading a file to the workspace."""
 
@@ -163,10 +132,15 @@ def _get_session_store(request: Request) -> SessionStore:
     return store
 
 
-async def _get_workspace_path(
+def _get_storage(request: Request) -> StorageBackend:
+    """Retrieve the StorageBackend from app state."""
+    return request.app.state.storage
+
+
+async def _get_session_bucket(
     store: SessionStore, session_id: UUID, tenant: TenantContext,
-) -> Path:
-    """Resolve and validate the workspace path for a session."""
+) -> str:
+    """Resolve and validate the session bucket for workspace access."""
     try:
         session = await store.get_session(session_id)
     except SessionNotFoundError:
@@ -181,128 +155,97 @@ async def _get_workspace_path(
             detail=f"Session {session_id} not found.",
         )
 
-    workspace_path = session.config.get("workspace_path")
-    if not workspace_path:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Session has no workspace path configured.",
-        )
+    bucket = session.config.get("workspace_bucket")
+    if not bucket:
+        # Fallback for sessions created before bucket support.
+        bucket = session_bucket(session_id)
 
-    resolved = Path(workspace_path).resolve()
-    if not resolved.is_dir():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Workspace directory does not exist.",
-        )
-
-    return resolved
+    return bucket
 
 
-def _is_text_file(path: Path) -> bool:
-    """Heuristic check whether a file is likely text-viewable."""
-    if path.name in _TEXT_NAMES:
+def _is_text_key(key: str) -> bool:
+    """Heuristic: is this key likely a text file?"""
+    name = PurePosixPath(key).name
+    if name in _TEXT_NAMES:
         return True
-    ext = path.suffix.lower()
+    ext = PurePosixPath(key).suffix.lower()
     if ext in _TEXT_EXTENSIONS:
         return True
-    mime, _ = mimetypes.guess_type(str(path))
+    mime, _ = mimetypes.guess_type(key)
     if mime and mime.startswith("text/"):
         return True
     return False
 
 
-def _safe_resolve(workspace_root: Path, relative: str) -> Path:
-    """Resolve a path within the workspace, preventing traversal.
+def _should_skip_dir(dirname: str) -> bool:
+    """Should this directory be skipped in the tree listing?"""
+    if dirname.startswith(".") and dirname not in (".github", ".vscode"):
+        return True
+    return dirname in _SKIP_DIRS
 
-    Accepts relative paths and absolute paths.  For absolute paths that
-    don't directly resolve inside the workspace, progressively strips
-    leading path components to find a match (handles the case where the
-    agent records paths using the real HOME instead of the overridden
-    workspace HOME).
 
-    Uses ``Path.is_relative_to`` for proper path-component comparison,
-    avoiding prefix-confusion attacks.
+def _validate_path(path: str) -> None:
+    """Reject path traversal attempts."""
+    parts = PurePosixPath(path).parts
+    if ".." in parts:
+        raise HTTPException(status_code=403, detail="Path traversal not allowed.")
+    if path.startswith("/"):
+        raise HTTPException(status_code=403, detail="Absolute paths not allowed.")
+
+
+def _build_tree(keys: list[str]) -> list[FileEntry]:
+    """Build a nested FileEntry tree from a flat list of S3 keys.
+
+    Filters out hidden/noise directories and respects depth/entry limits.
     """
-    candidate = Path(relative)
-    if candidate.is_absolute():
-        resolved = candidate.resolve()
-        if resolved.is_relative_to(workspace_root):
-            return resolved
-        # Try stripping leading components to find a match inside the
-        # workspace.  E.g. /home/user/repo/src/file.py → repo/src/file.py
-        parts = candidate.parts[1:]  # skip the root "/"
-        for i in range(len(parts)):
-            tail = Path(*parts[i:])
-            attempt = (workspace_root / tail).resolve()
-            if attempt.is_relative_to(workspace_root) and attempt.exists():
-                return attempt
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Path traversal not allowed.",
-        )
-    target = (workspace_root / relative).resolve()
-    if not target.is_relative_to(workspace_root):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Path traversal not allowed.",
-        )
-    return target
-
-
-def _walk_tree(root: Path, rel_prefix: str, depth: int, counter: list[int]) -> list[FileEntry]:
-    """Recursively walk directory, building FileEntry tree."""
-    if depth > _MAX_LIST_DEPTH:
-        return []
-
-    entries: list[FileEntry] = []
-
-    try:
-        items = sorted(root.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
-    except PermissionError:
-        return []
-
-    for item in items:
-        if counter[0] >= _MAX_ENTRIES:
-            return entries
-
-        # Skip symlinks to prevent escaping the workspace root.
-        if item.is_symlink():
+    # Build a dict tree structure first.
+    # Dict values are either nested dicts (directories) or strings (leaf files).
+    tree: dict = {}
+    for key in keys:
+        parts = PurePosixPath(key).parts
+        if not parts:
             continue
+        node = tree
+        for part in parts[:-1]:
+            existing = node.get(part)
+            if existing is None:
+                node[part] = {}
+            elif isinstance(existing, str):
+                # Collision: a file path is also a directory prefix — upgrade to dict.
+                node[part] = {}
+            node = node[part]
+        # Leaf node: only set if not already a directory.
+        leaf = parts[-1]
+        if leaf not in node or isinstance(node[leaf], str):
+            node[leaf] = key
 
-        name = item.name
-        rel_path = f"{rel_prefix}/{name}" if rel_prefix else name
+    def _convert(subtree: dict, prefix: str, depth: int, counter: list[int]) -> list[FileEntry]:
+        if depth > _MAX_LIST_DEPTH:
+            return []
+        entries: list[FileEntry] = []
+        for name in sorted(subtree.keys(), key=lambda n: (isinstance(subtree[n], str), n.lower())):
+            if counter[0] >= _MAX_ENTRIES:
+                break
+            value = subtree[name]
+            rel_path = f"{prefix}/{name}" if prefix else name
 
-        # Skip hidden dirs and known noise directories.
-        if item.is_dir():
-            if name.startswith(".") and name not in (".github", ".vscode"):
-                continue
-            if name in _SKIP_DIRS:
-                continue
-            children = _walk_tree(item, rel_path, depth + 1, counter)
-            counter[0] += 1
-            entries.append(FileEntry(
-                name=name,
-                path=rel_path,
-                kind="dir",
-                children=children,
-            ))
-        elif item.is_file():
-            try:
-                st = item.stat()
-            except OSError:
-                continue
-            # Skip very large files from the tree listing.
-            if st.st_size > 50_000_000:
-                continue
-            counter[0] += 1
-            entries.append(FileEntry(
-                name=name,
-                path=rel_path,
-                kind="file",
-                size=st.st_size,
-            ))
+            if isinstance(value, dict):
+                # Directory
+                if _should_skip_dir(name):
+                    continue
+                counter[0] += 1
+                children = _convert(value, rel_path, depth + 1, counter)
+                entries.append(FileEntry(name=name, path=rel_path, kind="dir", children=children))
+            else:
+                # File
+                counter[0] += 1
+                entries.append(FileEntry(name=name, path=rel_path, kind="file"))
 
-    return entries
+        return entries
+
+    counter = [0]
+    result = _convert(tree, "", 0, counter)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -321,14 +264,15 @@ async def get_workspace_tree(
 ) -> WorkspaceTreeResponse:
     """Return the recursive file tree for a session's workspace."""
     store = _get_session_store(request)
-    workspace = await _get_workspace_path(store, session_id, tenant)
+    storage = _get_storage(request)
+    bucket = await _get_session_bucket(store, session_id, tenant)
 
-    counter = [0]
-    entries = await asyncio.to_thread(_walk_tree, workspace, "", 0, counter)
-    truncated = counter[0] >= _MAX_ENTRIES
+    keys = await storage.list_keys(bucket)
+    entries = _build_tree(keys)
+    truncated = len(keys) >= _MAX_ENTRIES
 
     return WorkspaceTreeResponse(
-        root=workspace.name,
+        root=bucket,
         entries=entries,
         truncated=truncated,
     )
@@ -345,121 +289,37 @@ async def get_workspace_file(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> FileContentResponse:
     """Read the content of a single file in the session's workspace."""
+    _validate_path(path)
     store = _get_session_store(request)
-    workspace = await _get_workspace_path(store, session_id, tenant)
+    storage = _get_storage(request)
+    bucket = await _get_session_bucket(store, session_id, tenant)
 
-    target = _safe_resolve(workspace, path)
+    if not await storage.exists(bucket, path):
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
-    if not target.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"File not found: {path}",
-        )
-
-    if not _is_text_file(target):
+    if not _is_text_key(path):
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail="Binary files cannot be viewed in the workspace panel.",
         )
 
-    def _read_file() -> tuple[str, int, bool]:
-        st = target.stat()
-        truncated = st.st_size > _MAX_READ_BYTES
-        with open(target, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read(_MAX_READ_BYTES)
-        return content, st.st_size, truncated
-
     try:
-        content, size, truncated = await asyncio.to_thread(_read_file)
-    except OSError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to read file: {exc}",
-        )
+        data = await storage.read(bucket, path)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
-    mime, _ = mimetypes.guess_type(str(target))
+    size = len(data)
+    truncated = size > _MAX_READ_BYTES
+    content = data[:_MAX_READ_BYTES].decode("utf-8", errors="replace")
 
-    # Return the path relative to the workspace root so the frontend
-    # can match it against the file tree (which uses relative paths).
-    relative_path = str(target.relative_to(workspace))
+    mime, _ = mimetypes.guess_type(path)
 
     return FileContentResponse(
-        path=relative_path,
+        path=path,
         content=content,
         size=size,
         mime_type=mime,
         truncated=truncated,
-    )
-
-
-@router.get(
-    "/sessions/{session_id}/workspace/checkpoints",
-    response_model=CheckpointListResponse,
-)
-async def list_checkpoints(
-    session_id: UUID,
-    request: Request,
-    tenant: TenantContext = Depends(get_current_tenant),
-) -> CheckpointListResponse:
-    """List available checkpoints for a session's workspace."""
-    store = _get_session_store(request)
-    workspace = await _get_workspace_path(store, session_id, tenant)
-
-    from surogates.tools.utils.checkpoint_manager import CheckpointManager
-
-    mgr = CheckpointManager(enabled=True)
-    raw = await asyncio.to_thread(mgr.list_checkpoints, str(workspace))
-
-    return CheckpointListResponse(
-        checkpoints=[
-            Checkpoint(
-                hash=cp["hash"],
-                short_hash=cp["short_hash"],
-                timestamp=cp["timestamp"],
-                reason=cp["reason"],
-                files_changed=cp.get("files_changed", 0),
-                insertions=cp.get("insertions", 0),
-                deletions=cp.get("deletions", 0),
-            )
-            for cp in raw
-        ],
-    )
-
-
-@router.post(
-    "/sessions/{session_id}/workspace/rollback",
-    response_model=RollbackResponse,
-)
-async def rollback_checkpoint(
-    session_id: UUID,
-    body: RollbackRequest,
-    request: Request,
-    tenant: TenantContext = Depends(get_current_tenant),
-) -> RollbackResponse:
-    """Restore the workspace to a checkpoint state.
-
-    Takes a pre-rollback snapshot automatically so the operation is reversible.
-    """
-    store = _get_session_store(request)
-    workspace = await _get_workspace_path(store, session_id, tenant)
-
-    from surogates.tools.utils.checkpoint_manager import CheckpointManager
-
-    mgr = CheckpointManager(enabled=True)
-    result = await asyncio.to_thread(
-        mgr.restore, str(workspace), body.checkpoint_hash, body.file_path,
-    )
-
-    if not result.get("success"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=result.get("error", "Rollback failed"),
-        )
-
-    return RollbackResponse(
-        success=True,
-        restored_to=result.get("restored_to"),
-        reason=result.get("reason"),
     )
 
 
@@ -478,33 +338,21 @@ async def upload_file(
     ),
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> UploadResponse:
-    """Upload a file into the session's workspace.
-
-    The file is written to ``<workspace>/<path>/<filename>``.
-    Parent directories are created automatically.
-    """
+    """Upload a file into the session's workspace."""
     store = _get_session_store(request)
-    workspace = await _get_workspace_path(store, session_id, tenant)
+    storage = _get_storage(request)
+    bucket = await _get_session_bucket(store, session_id, tenant)
 
     if not file.filename:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No filename provided.",
-        )
+        raise HTTPException(status_code=400, detail="No filename provided.")
 
-    # Sanitise filename — strip path separators to prevent traversal via name.
-    safe_name = Path(file.filename).name
+    safe_name = PurePosixPath(file.filename).name
     if not safe_name or safe_name in (".", ".."):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid filename.",
-        )
+        raise HTTPException(status_code=400, detail="Invalid filename.")
 
-    # Build target path and validate it stays inside the workspace.
-    rel = f"{path}/{safe_name}" if path else safe_name
-    target = _safe_resolve(workspace, rel)
+    key = f"{path}/{safe_name}" if path else safe_name
+    _validate_path(key)
 
-    # Read the upload body with a size limit.
     contents = await file.read(_MAX_UPLOAD_BYTES + 1)
     if len(contents) > _MAX_UPLOAD_BYTES:
         raise HTTPException(
@@ -512,17 +360,9 @@ async def upload_file(
             detail=f"File exceeds maximum upload size ({_MAX_UPLOAD_BYTES // 1_000_000} MB).",
         )
 
-    def _write() -> int:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(contents)
-        return len(contents)
+    await storage.write(bucket, key, contents)
 
-    size = await asyncio.to_thread(_write)
-
-    # Compute the relative path to return.
-    relative = str(target.relative_to(workspace))
-
-    return UploadResponse(path=relative, size=size)
+    return UploadResponse(path=key, size=len(contents))
 
 
 @router.get("/sessions/{session_id}/workspace/download")
@@ -531,43 +371,35 @@ async def download_file(
     request: Request,
     path: str = Query(..., description="Relative path within the workspace"),
     tenant: TenantContext = Depends(get_current_tenant),
-) -> FileResponse:
-    """Download a file from the session's workspace.
-
-    Returns the raw file with appropriate Content-Disposition header.
-    Supports ``?token=`` query parameter for browser-initiated downloads.
-    """
+) -> Response:
+    """Download a file from the session's workspace."""
+    _validate_path(path)
     store = _get_session_store(request)
-    workspace = await _get_workspace_path(store, session_id, tenant)
+    storage = _get_storage(request)
+    bucket = await _get_session_bucket(store, session_id, tenant)
 
-    target = _safe_resolve(workspace, path)
-
-    if not target.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"File not found: {path}",
-        )
+    if not await storage.exists(bucket, path):
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
     try:
-        size = target.stat().st_size
-    except OSError:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Cannot stat file: {path}",
-        )
+        info = await storage.stat(bucket, path)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
-    if size > _MAX_DOWNLOAD_BYTES:
+    if info["size"] > _MAX_DOWNLOAD_BYTES:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail="File too large to download.",
         )
 
-    mime, _ = mimetypes.guess_type(str(target))
+    data = await storage.read(bucket, path)
+    mime, _ = mimetypes.guess_type(path)
+    filename = PurePosixPath(path).name
 
-    return FileResponse(
-        path=str(target),
-        filename=target.name,
+    return Response(
+        content=data,
         media_type=mime or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -582,17 +414,14 @@ async def delete_file(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> DeleteResponse:
     """Delete a file from the session's workspace."""
+    _validate_path(path)
     store = _get_session_store(request)
-    workspace = await _get_workspace_path(store, session_id, tenant)
+    storage = _get_storage(request)
+    bucket = await _get_session_bucket(store, session_id, tenant)
 
-    target = _safe_resolve(workspace, path)
+    if not await storage.exists(bucket, path):
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
-    if not target.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"File not found: {path}",
-        )
-
-    await asyncio.to_thread(target.unlink)
+    await storage.delete(bucket, path)
 
     return DeleteResponse(path=path)

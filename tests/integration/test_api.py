@@ -43,6 +43,9 @@ async def app(session_factory, redis_client, pg_url, redis_url):
     application.state.session_store = SessionStore(session_factory)
     application.state.settings = Settings()
 
+    from surogates.storage.backend import create_backend
+    application.state.storage = create_backend(application.state.settings)
+
     return application
 
 

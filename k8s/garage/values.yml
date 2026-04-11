@@ -1,0 +1,81 @@
+# Garage S3-compatible object storage for Surogates dev cluster.
+#
+# Helm chart: charts-derwitt-dev/garage (v2.3.1)
+#
+# Install:
+#   helm install surogates-s3 charts-derwitt-dev/garage --wait --version 2.3.1 \
+#     -f k8s/garage/values.yml
+#   kubectl apply -f k8s/garage/nodeport.yaml
+#
+# Post-install layout setup:
+#   GARAGE_POD=$(kubectl get pods -l app.kubernetes.io/name=garage -o jsonpath='{.items[0].metadata.name}')
+#   kubectl exec -ti $GARAGE_POD -- /garage layout assign -z dc1 -c 1T \
+#     $(kubectl exec $GARAGE_POD -- /garage node id -q | cut -d@ -f1)
+#   kubectl exec -ti $GARAGE_POD -- /garage layout apply --version 1
+#
+# Create access key:
+#   kubectl exec -ti $GARAGE_POD -- /garage key create surogates-key
+#
+# Copy GK... and secret into config.dev.yaml storage.access_key / secret_key.
+
+garage:
+  replicationFactor: "1"
+  dbEngine: lmdb
+  consistencyMode: consistent
+  compressionLevel: "1"
+
+  rpc:
+    bindAddr: "[::]:3901"
+    secret:
+      create: true
+
+  s3:
+    api:
+      region: garage
+      rootDomain: ".s3.garage.localhost"
+    web:
+      rootDomain: ".web.garage.localhost"
+      index: "index.html"
+
+# DaemonSet mode — uses hostPath volumes backed by the k3d host mount
+# at ~/.surogates/garage-data, so data survives cluster restarts.
+deployment:
+  kind: DaemonSet
+
+persistence:
+  enabled: true
+  meta:
+    hostPath: /var/lib/garage/meta
+  data:
+    hostPath: /var/lib/garage/data
+
+service:
+  type: ClusterIP
+  s3:
+    api:
+      port: 3900
+    web:
+      port: 3902
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+podSecurityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  fsGroupChangePolicy: "OnRootMismatch"
+  runAsNonRoot: true
+
+monitoring:
+  metrics:
+    enabled: false
+
+# Do NOT tolerate control-plane taint — Garage should only run on
+# agent nodes which have the host volume mount (~/.surogates/garage-data).
+tolerations: []
