@@ -33,6 +33,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { ToolCallInfo } from "@/hooks/use-session-runtime";
 
@@ -56,16 +61,14 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-function StatusBullet({ status }: { status: "running" | "complete" | "error" }) {
-  if (status === "running") {
-    return <span className="inline-block size-2 rounded-full shrink-0 bg-primary animate-pulse" />;
-  }
-  return (
-    <span className={cn(
-      "inline-block size-2 rounded-full shrink-0",
-      status === "error" ? "bg-red-500" : "bg-emerald-500",
-    )} />
-  );
+/**
+ * Map a tool-call status to a Tailwind background-color class for use
+ * as a TimelineIndicator color.
+ */
+export function statusColorClass(status: "running" | "complete" | "error"): string {
+  if (status === "running") return "bg-primary animate-pulse";
+  if (status === "error") return "bg-red-500";
+  return "bg-emerald-500";
 }
 
 // ── Terminal result detection ───────────────────────────────────────
@@ -108,7 +111,6 @@ function parseTerminalResult(
 const COLLAPSED_HEIGHT = 96; // px — ~6 lines of mono text
 
 function TerminalToolResult({ result, isRunning }: { result: TerminalResult; isRunning: boolean }) {
-  const exitOk = result.exit_code === 0;
   const output = result.output || result.error || "";
   const [dialogOpen, setDialogOpen] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -130,16 +132,15 @@ function TerminalToolResult({ result, isRunning }: { result: TerminalResult; isR
       <Terminal
         output={terminalContent}
         isStreaming={isRunning}
-        className="group/term relative w-full text-xs"
+        className="group/term relative w-full text-sm"
       >
-        <TerminalHeader className="py-1.5 px-2">
+        <TerminalHeader>
           <div className="flex items-center gap-1.5 min-w-0 text-sm font-mono">
-            <StatusBullet status={isRunning ? "running" : exitOk ? "complete" : "error"} />
             <span className="font-semibold text-foreground shrink-0">Bash</span>
           </div>
         </TerminalHeader>
         {result.command && (
-          <div className="group/in flex items-start gap-2 bg-background text-muted-foreground px-3 pt-2 font-mono text-xs leading-relaxed">
+          <div className="group/in flex items-start gap-2 bg-background text-muted-foreground px-3 pt-2 font-mono text-sm leading-relaxed">
             <span className="shrink-0 select-none text-emerald-600">IN</span>
             <pre className="whitespace-pre-wrap wrap-break-word text-foreground/90 flex-1">{result.command}</pre>
             <CopyButton text={result.command} />
@@ -152,7 +153,7 @@ function TerminalToolResult({ result, isRunning }: { result: TerminalResult; isR
           onClick={() => overflows && setDialogOpen(true)}
           onKeyDown={(e) => { if (e.key === "Enter" && overflows) setDialogOpen(true); }}
           className={cn(
-            "overflow-hidden px-3 py-2 bg-background font-mono text-xs leading-relaxed max-h-16",
+            "overflow-hidden px-3 py-2 bg-background font-mono text-sm leading-relaxed max-h-16",
             overflows && "cursor-pointer",
           )}
         >
@@ -187,7 +188,7 @@ function TerminalToolResult({ result, isRunning }: { result: TerminalResult; isR
             <DialogTitle>&nbsp;</DialogTitle>
           </DialogHeader>
           <ScrollArea className="flex-1 min-h-0">
-            <pre className="px-4 py-3 font-mono text-xs leading-relaxed whitespace-pre-wrap wrap-break-word">
+            <pre className="px-4 py-3 font-mono text-sm leading-relaxed whitespace-pre-wrap wrap-break-word">
               {output || "(no output)"}
             </pre>
           </ScrollArea>
@@ -298,10 +299,9 @@ export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSe
     // Running with no result yet — show command with spinner.
     if (isRunning) {
       return (
-        <Terminal output="" isStreaming className="w-full text-xs">
-          <TerminalHeader className="py-1.5 px-3">
-            <div className="flex items-center gap-1.5 min-w-0 text-xs">
-              <StatusBullet status="running" />
+        <Terminal output="" isStreaming className="w-full text-sm">
+          <TerminalHeader>
+            <div className="flex items-center gap-1.5 min-w-0 text-sm">
               <span className="font-semibold text-foreground shrink-0">Bash</span>
             </div>
           </TerminalHeader>
@@ -332,8 +332,7 @@ export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSe
     }[tc.toolName] ?? tc.toolName;
 
     return (
-      <div className="flex items-center gap-1.5 px-2 py-1 text-sm font-mono">
-        <StatusBullet status={tc.status} />
+      <div className="flex items-center gap-1.5 text-sm font-mono">
         <span className="font-semibold text-foreground">{toolLabel}</span>
         <span className="text-muted-foreground truncate">{displayText}</span>
       </div>
@@ -394,21 +393,27 @@ export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSe
       return filePath;
     })();
 
+    const fileName = displayPath.split("/").pop() || displayPath;
+
     return (
-      <div className="flex items-center gap-1.5 px-2 py-1 text-sm font-mono">
-        <StatusBullet status={tc.status} />
+      <div className="flex items-center gap-1.5 text-sm font-mono">
         <span className="font-semibold text-foreground">{toolLabel}</span>
-        {onFileSelect && filePath && ["read_file", "write_file", "patch"].includes(tc.toolName) ? (
-          <button
-            type="button"
-            onClick={() => onFileSelect(filePath)}
-            className="text-primary hover:underline truncate text-left cursor-pointer underline"
-          >
-            {displayPath}
-          </button>
-        ) : (
-          <span className="text-muted-foreground truncate">{displayPath}</span>
-        )}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            {onFileSelect && filePath && ["read_file", "write_file", "patch"].includes(tc.toolName) ? (
+              <button
+                type="button"
+                onClick={() => onFileSelect(filePath)}
+                className="text-primary hover:underline truncate text-left cursor-pointer underline"
+              >
+                {fileName}
+              </button>
+            ) : (
+              <span className="text-muted-foreground truncate">{fileName}</span>
+            )}
+          </TooltipTrigger>
+          <TooltipContent side="top">{displayPath}</TooltipContent>
+        </Tooltip>
         {detail && <span className="text-muted-foreground ml-1">{detail}</span>}
       </div>
     );
@@ -422,7 +427,7 @@ export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSe
         onClick={() => setExpanded(!expanded)}
         className={cn(
           "flex w-full items-center gap-1.5 rounded-md px-2 py-1",
-          "text-xs text-muted-foreground hover:bg-muted/50 transition-colors",
+          "text-sm text-muted-foreground hover:bg-muted/50 transition-colors",
           "font-mono",
         )}
       >
@@ -432,7 +437,6 @@ export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSe
             expanded && "rotate-90",
           )}
         />
-        <StatusBullet status={tc.status} />
         <span className="font-medium text-foreground/80">{tc.toolName}</span>
       </button>
 

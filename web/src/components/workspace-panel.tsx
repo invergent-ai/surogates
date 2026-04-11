@@ -275,7 +275,7 @@ export function WorkspacePanel({ sessionId }: { sessionId: string | null }) {
   return (
     <aside
       className={cn(
-        "bg-card border-l border-muted flex flex-col overflow-hidden z-10",
+        "bg-card border-line border-muted flex flex-col overflow-hidden z-10",
         "w-150 min-w-150 transition-all duration-200",
       )}
     >

@@ -133,14 +133,12 @@ export function ChatPage() {
   }, [sessionId]);
 
   const fetchWorkspaceFile = useAppStore((s) => s.fetchWorkspaceFile);
-  const setSelectedFilePath = useAppStore((s) => s.setSelectedFilePath);
   const handleFileSelect = useCallback(
     (path: string) => {
       if (!sessionId) return;
-      setSelectedFilePath(path);
       void fetchWorkspaceFile(sessionId, path);
     },
-    [sessionId, fetchWorkspaceFile, setSelectedFilePath],
+    [sessionId, fetchWorkspaceFile],
   );
 
   const handleDisclosureConfirmed = useCallback(() => {

@@ -92,7 +92,6 @@ export const createWorkspaceSlice: StateCreator<
       set({
         workspaceFile: res,
         workspaceFileLoading: false,
-        selectedFilePath: res.path,
       });
     } catch (e) {
       if (get().activeSessionId !== sessionId) return;

@@ -37,7 +37,7 @@ export const TerminalHeader = ({
 }: TerminalHeaderProps) => (
   <div
     className={cn(
-      "flex items-center justify-between border-border border-b px-4 py-2",
+      "flex items-center justify-between border-border border-b p-0",
       className
     )}
     {...props}

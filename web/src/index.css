@@ -265,3 +265,9 @@ input:-webkit-autofill {
   -webkit-text-fill-color: var(--foreground) !important;
   caret-color: var(--foreground);
 }
+
+/* Thin scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
