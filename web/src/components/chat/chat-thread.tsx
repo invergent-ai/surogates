@@ -29,6 +29,7 @@ import {
   TimelineItem,
   TimelineSeparator,
 } from "@/components/reui/timeline";
+import { Shimmer } from "@/components/ai-elements/shimmer";
 import { ToolCallBlock, statusColorClass } from "./tool-call-block";
 import { ChatMessage } from "./chat-message";
 import { ChatComposer } from "./chat-composer";
@@ -180,9 +181,7 @@ function TimelineEntryItem({
         <TimelineIndicator className="size-2 border-none bg-primary animate-pulse" />
       </TimelineHeader>
       <TimelineContent>
-        <div className="flex items-center gap-1.5 py-1 text-muted-foreground">
-          <span className="text-xs">Thinking...</span>
-        </div>
+        <Shimmer duration={1.5} className="text-sm">Working on it...</Shimmer>
       </TimelineContent>
     </TimelineItem>
   );
@@ -239,7 +238,7 @@ export function ChatThread({
   const groups = useMemo(() => groupMessages(messages), [messages]);
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-card">
+    <div className="flex h-full flex-col overflow-hidden bg-card text-sm">
       <Conversation className="relative flex-1 min-h-0">
         <ConversationContent className="mx-auto max-w-4xl">
           {messages.length === 0 && !disabled ? (
@@ -249,29 +248,38 @@ export function ChatThread({
               description="How can I help you today?"
             />
           ) : (
-            groups.map((group) => {
-              if (group.role === "user") {
-                const msg = group.messages[0];
+            <>
+              {groups.map((group) => {
+                if (group.role === "user") {
+                  const msg = group.messages[0];
+                  return (
+                    <ChatMessage
+                      key={msg.id}
+                      message={msg}
+                      isLast={group.lastGlobalIndex === messages.length - 1}
+                      onFileSelect={onFileSelect}
+                    />
+                  );
+                }
+
                 return (
-                  <ChatMessage
-                    key={msg.id}
-                    message={msg}
-                    isLast={group.lastGlobalIndex === messages.length - 1}
+                  <AssistantGroup
+                    key={group.messages[0].id}
+                    messages={group.messages}
+                    lastGlobalIndex={group.lastGlobalIndex}
+                    totalMessages={messages.length}
                     onFileSelect={onFileSelect}
                   />
                 );
-              }
-
-              return (
-                <AssistantGroup
-                  key={group.messages[0].id}
-                  messages={group.messages}
-                  lastGlobalIndex={group.lastGlobalIndex}
-                  totalMessages={messages.length}
-                  onFileSelect={onFileSelect}
-                />
-              );
-            })
+              })}
+              {isRunning && messages.length > 0 && messages[messages.length - 1].role === "user" && (
+                <Message from="assistant">
+                  <MessageContent>
+                    <Shimmer duration={1.5} className="text-sm">Working on it...</Shimmer>
+                  </MessageContent>
+                </Message>
+              )}
+            </>
           )}
         </ConversationContent>
         <ConversationScrollButton />
