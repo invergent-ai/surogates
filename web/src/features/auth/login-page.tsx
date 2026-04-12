@@ -12,7 +12,6 @@ const TAGS = [
   { label: "Managed Agents", icon: "⬡" },
   { label: "MCP Integration", icon: "⚡" },
   { label: "Tool Governance", icon: "◈" },
-  { label: "Session Replay", icon: "⊡" },
   { label: "Multi-Tenant", icon: "◇" },
   { label: "K8s Native", icon: "☁" },
 ] as const;
@@ -244,11 +243,11 @@ export function LoginPage() {
 
         {/* heading */}
         <div className="mb-6">
-          <h3 className="text-2xl font-bold text-foreground tracking-tight mb-1">
+          <h3 className="text-2xl font-bold text-foreground tracking-tight">
             Sign in
           </h3>
           <p className="text-sm text-muted-foreground">
-            Access your agent sessions
+            to access your agent
           </p>
         </div>
 
