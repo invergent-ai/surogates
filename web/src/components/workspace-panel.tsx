@@ -147,6 +147,10 @@ function RenderEntries({
 // WorkspacePanel
 // ---------------------------------------------------------------------------
 
+const DEFAULT_WIDTH = 600; // px – matches the old w-150 (150 * 4px)
+const MIN_WIDTH = 240;
+const MAX_WIDTH = 900;
+
 export function WorkspacePanel({ sessionId }: { sessionId: string | null }) {
   const workspaceTree = useAppStore((s) => s.workspaceTree);
   const workspaceRoot = useAppStore((s) => s.workspaceRoot);
@@ -161,6 +165,43 @@ export function WorkspacePanel({ sessionId }: { sessionId: string | null }) {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const selectedPath = useAppStore((s) => s.selectedFilePath);
   const setSelectedPath = useAppStore((s) => s.setSelectedFilePath);
+
+  // ---- Resize logic ----
+  const [width, setWidth] = useState(DEFAULT_WIDTH);
+  const isResizing = useRef(false);
+  const startX = useRef(0);
+  const startWidth = useRef(DEFAULT_WIDTH);
+
+  const onResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isResizing.current = true;
+    startX.current = e.clientX;
+    startWidth.current = width;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }, [width]);
+
+  useEffect(() => {
+    const onMouseMove = (e: MouseEvent) => {
+      if (!isResizing.current) return;
+      // Panel is on the right side, so dragging left increases width.
+      const delta = startX.current - e.clientX;
+      const newWidth = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth.current + delta));
+      setWidth(newWidth);
+    };
+    const onMouseUp = () => {
+      if (!isResizing.current) return;
+      isResizing.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, []);
 
   // Fetch tree when session changes.
   useEffect(() => {
@@ -275,10 +316,15 @@ export function WorkspacePanel({ sessionId }: { sessionId: string | null }) {
   return (
     <aside
       className={cn(
-        "bg-card border-line border-muted flex flex-col overflow-hidden z-10",
-        "w-150 min-w-150 transition-all duration-200",
+        "bg-card border-line border-muted flex flex-col overflow-hidden z-10 relative",
       )}
+      style={{ width, minWidth: MIN_WIDTH, maxWidth: MAX_WIDTH }}
     >
+      {/* Resize drag handle */}
+      <div
+        className="absolute inset-y-0 left-0 w-1.5 cursor-col-resize hover:bg-primary/20 active:bg-primary/30 transition-colors z-20"
+        onMouseDown={onResizeStart}
+      />
       {/* Hidden file input for uploads */}
       <input
         ref={fileInputRef}
