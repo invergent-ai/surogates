@@ -17,6 +17,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Suppress noisy CancelledError logs from the connection pool when SSE
+# clients disconnect mid-query.  These are harmless — the pool discards
+# the cancelled connection and creates a fresh one.
+logging.getLogger("sqlalchemy.pool.impl").setLevel(logging.CRITICAL)
+
 
 def async_engine_from_settings(db_settings: DatabaseSettings) -> AsyncEngine:
     """Create an :class:`AsyncEngine` from application database settings.

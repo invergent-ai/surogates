@@ -36,7 +36,7 @@ import { ChatMessage } from "./chat-message";
 import { ChatComposer } from "./chat-composer";
 import { cn } from "@/lib/utils";
 import { MessageSquareIcon } from "lucide-react";
-import type { ChatMessage as ChatMessageType, ToolCallInfo } from "@/hooks/use-session-runtime";
+import type { ChatMessage as ChatMessageType, ToolCallInfo, TokenUsage } from "@/hooks/use-session-runtime";
 
 interface ChatThreadProps {
   messages: ChatMessageType[];
@@ -45,6 +45,7 @@ interface ChatThreadProps {
   onStop: () => void;
   onFileSelect?: (path: string) => void;
   disabled?: boolean;
+  tokenUsage?: TokenUsage;
 }
 
 // ── Timeline item types ──────────────────────────────────────────────
@@ -235,6 +236,7 @@ export function ChatThread({
   onStop,
   onFileSelect,
   disabled = false,
+  tokenUsage,
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
 
@@ -292,6 +294,7 @@ export function ChatThread({
           onStop={onStop}
           isRunning={isRunning}
           disabled={disabled}
+          tokenUsage={tokenUsage}
         />
       </div>
     </div>

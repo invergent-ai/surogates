@@ -26,6 +26,16 @@ export interface ToolCallInfo {
   checkpointHash?: string;
 }
 
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  cachedInputTokens: number;
+  totalTokens: number;
+  contextWindow: number;
+  model: string;
+}
+
 const LISTENED_EVENTS = [
   "user.message",
   "llm.request",
@@ -42,13 +52,25 @@ const LISTENED_EVENTS = [
   "session.done",
   "harness.wake",
   "harness.crash",
+  "context.compact",
   "policy.denied",
   "stream.timeout",
 ] as const;
 
+const EMPTY_USAGE: TokenUsage = {
+  inputTokens: 0,
+  outputTokens: 0,
+  reasoningTokens: 0,
+  cachedInputTokens: 0,
+  totalTokens: 0,
+  contextWindow: 0,
+  model: "",
+};
+
 export function useSessionRuntime(sessionId: string | null) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isRunning, setIsRunning] = useState(false);
+  const [tokenUsage, setTokenUsage] = useState<TokenUsage>(EMPTY_USAGE);
   const esRef = useRef<EventSource | null>(null);
   const lastEventIdRef = useRef<number>(0);
   const sessionDoneRef = useRef<boolean>(false);
@@ -188,6 +210,22 @@ export function useSessionRuntime(sessionId: string | null) {
             if (!hasToolCalls) {
               setIsRunning(false);
             }
+
+            // Update token usage from the LLM response — these are the
+            // authoritative numbers from the worker's context compressor.
+            const inputTk = (data.input_tokens as number) ?? 0;
+            const outputTk = (data.output_tokens as number) ?? 0;
+            const reasoningTk = (data.reasoning_tokens as number) ?? 0;
+            const cacheTk = (data.cache_read_tokens as number) ?? 0;
+            setTokenUsage({
+              inputTokens: inputTk,
+              outputTokens: outputTk,
+              reasoningTokens: reasoningTk,
+              cachedInputTokens: cacheTk,
+              totalTokens: inputTk + outputTk,
+              contextWindow: (data.context_window as number) ?? 0,
+              model: (data.model as string) ?? "",
+            });
             break;
           }
 
@@ -305,6 +343,13 @@ export function useSessionRuntime(sessionId: string | null) {
           case "stream.timeout":
             break;
 
+          case "context.compact": {
+            // Clear all messages — the conversation has been compacted/cleared.
+            next.length = 0;
+            setTokenUsage(EMPTY_USAGE);
+            break;
+          }
+
           case "policy.denied": {
             const assistant = findLastAssistant(next);
             if (assistant) {
@@ -373,6 +418,7 @@ export function useSessionRuntime(sessionId: string | null) {
     if (!sessionId) {
       setMessages([]);
       setIsRunning(false);
+      setTokenUsage(EMPTY_USAGE);
       return;
     }
 
@@ -381,6 +427,7 @@ export function useSessionRuntime(sessionId: string | null) {
     hadDeltasRef.current = false;
     setMessages([]);
     setIsRunning(false);
+    setTokenUsage(EMPTY_USAGE);
     connect();
 
     return () => {
@@ -391,7 +438,7 @@ export function useSessionRuntime(sessionId: string | null) {
   }, [sessionId, connect]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  return { messages, isRunning };
+  return { messages, isRunning, tokenUsage };
 }
 
 function findLastAssistant(msgs: ChatMessage[]): ChatMessage | undefined {

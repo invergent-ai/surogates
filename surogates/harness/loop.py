@@ -319,7 +319,24 @@ class AgentHarness:
             # 9. Create per-session cost tracker.
             cost_tracker = SessionCostTracker()
 
-            # 10. Run the core LLM loop.
+            # 10. Handle /compress command — compress context without LLM call.
+            last_user = next(
+                (m for m in reversed(messages) if m.get("role") == "user"),
+                None,
+            )
+            last_user_content = (last_user.get("content") or "").strip() if last_user else ""
+
+            if last_user_content == "/compress":
+                await self._handle_compress_command(
+                    session, messages, system_prompt, lease,
+                )
+                return
+
+            if last_user_content == "/clear":
+                await self._handle_clear_command(session, lease)
+                return
+
+            # 11. Run the core LLM loop.
             await self._run_loop(session, messages, system_prompt, lease, cost_tracker=cost_tracker)
 
         except Exception:
@@ -641,12 +658,18 @@ class AgentHarness:
             output_tokens = usage_data.get("output_tokens", 0)
             finish_reason = usage_data.get("finish_reason", "stop")
 
+            reasoning_tokens = usage_data.get("reasoning_tokens", 0)
+            cache_read_tokens = usage_data.get("cache_read_tokens", 0)
+
             response_data: dict[str, Any] = {
                 "message": assistant_message,
                 "model": usage_data.get("model", model_id),
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "reasoning_tokens": reasoning_tokens,
+                "cache_read_tokens": cache_read_tokens,
                 "finish_reason": finish_reason,
+                "context_window": self._compressor.context_length,
             }
 
             # Compute cost estimate.
@@ -662,8 +685,8 @@ class AgentHarness:
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     cost_usd=cost,
-                    cache_read_tokens=usage_data.get("cache_read_tokens", 0),
-                    reasoning_tokens=usage_data.get("reasoning_tokens", 0),
+                    cache_read_tokens=cache_read_tokens,
+                    reasoning_tokens=reasoning_tokens,
                 )
 
             event_id = await self._store.emit_event(
@@ -1399,6 +1422,147 @@ class AgentHarness:
             session, messages, lease, reason="budget_exhausted",
             cost_tracker=cost_tracker,
         )
+
+    # ------------------------------------------------------------------
+    # /compress command handler
+    # ------------------------------------------------------------------
+
+    async def _handle_clear_command(
+        self,
+        session: Session,
+        lease: SessionLease,
+    ) -> None:
+        """Handle the /clear slash command.
+
+        Emits a CONTEXT_COMPACT event with an empty message list, effectively
+        clearing all conversation history.  The next wake() will rebuild from
+        the compacted (empty) state.
+        """
+        # Destroy the sandbox if one exists.
+        if self._sandbox_pool is not None:
+            try:
+                await self._sandbox_pool.destroy_for_session(str(session.id))
+            except Exception:
+                logger.debug("Sandbox cleanup on /clear failed", exc_info=True)
+
+        # Emit a CONTEXT_COMPACT event with empty messages — this replaces
+        # the entire conversation history on next replay.
+        await self._store.emit_event(
+            session.id,
+            EventType.CONTEXT_COMPACT,
+            {
+                "compacted_messages": [],
+                "strategy": "clear",
+                "original_message_count": 0,
+                "compressed_message_count": 0,
+            },
+        )
+
+        # Emit an assistant message confirming the clear.
+        await self._store.emit_event(
+            session.id,
+            EventType.LLM_RESPONSE,
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Conversation cleared.",
+                },
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "context_window": self._compressor.context_length,
+            },
+        )
+
+        await self._store.release_lease(session.id, lease.lease_token)
+
+    async def _handle_compress_command(
+        self,
+        session: Session,
+        messages: list[dict],
+        system_prompt: str,
+        lease: SessionLease,
+    ) -> None:
+        """Handle the /compress slash command.
+
+        Forces context compression regardless of threshold, emits the
+        result as an assistant message so the user sees what happened.
+        """
+        original_count = len(messages)
+        original_tokens = self._compressor.last_prompt_tokens or 0
+
+        # Remove the /compress message itself — it's not real conversation.
+        messages = [m for m in messages if not (
+            m.get("role") == "user" and (m.get("content") or "").strip() == "/compress"
+        )]
+
+        if len(messages) <= 5:
+            # Too few messages to compress.
+            await self._store.emit_event(
+                session.id,
+                EventType.LLM_RESPONSE,
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "Context is too small to compress — only "
+                                   f"{len(messages)} messages.",
+                    },
+                },
+            )
+            await self._store.release_lease(session.id, lease.lease_token)
+            return
+
+        try:
+            compressed, summary_data = await self._compressor.compress(
+                messages, self._llm,
+            )
+        except Exception as exc:
+            logger.error("Compress command failed: %s", exc, exc_info=True)
+            await self._store.emit_event(
+                session.id,
+                EventType.LLM_RESPONSE,
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": f"Compression failed: {exc}",
+                    },
+                },
+            )
+            await self._store.release_lease(session.id, lease.lease_token)
+            return
+
+        compressed_count = len(compressed)
+        saved = original_count - compressed_count
+
+        # Emit the compacted messages as a CONTEXT_COMPACT event.
+        await self._store.emit_event(
+            session.id,
+            EventType.CONTEXT_COMPACT,
+            {
+                **summary_data,
+                "compacted_messages": compressed,
+            },
+        )
+
+        # Emit an assistant message summarising the result.
+        await self._store.emit_event(
+            session.id,
+            EventType.LLM_RESPONSE,
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": (
+                        f"Context compressed: {original_count} → {compressed_count} messages "
+                        f"({saved} removed). "
+                        f"Strategy: {summary_data.get('strategy', 'unknown')}."
+                    ),
+                },
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "context_window": self._compressor.context_length,
+            },
+        )
+
+        await self._store.release_lease(session.id, lease.lease_token)
 
     # ------------------------------------------------------------------
     # Session completion

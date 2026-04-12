@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { ToolCallInfo } from "@/hooks/use-session-runtime";
+import { DiffViewer } from "../diff-viewer";
 
 // ── Shared path helpers ─────────────────────────────────────────────
 
@@ -153,20 +154,12 @@ export function PatchBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSelec
         <FileNameWithTooltip filePath={filePath} onFileSelect={onFileSelect} />
       </div>
       {(oldString || newString) && (
-        <div className="rounded border bg-muted/30 text-xs font-mono overflow-hidden">
-          {oldString && (
-            <pre className="px-3 py-1.5 bg-red-500/10 text-red-700 dark:text-red-400 whitespace-pre-wrap wrap-break-word border-b border-border/50">
-              <span className="select-none text-red-500/60 mr-2">−</span>
-              {oldString}
-            </pre>
-          )}
-          {newString && (
-            <pre className="px-3 py-1.5 bg-green-500/10 text-green-700 dark:text-green-400 whitespace-pre-wrap wrap-break-word">
-              <span className="select-none text-green-500/60 mr-2">+</span>
-              {newString}
-            </pre>
-          )}
-        </div>
+        <DiffViewer
+          oldValue={oldString}
+          newValue={newString}
+          fileName={fileName(filePath)}
+          contextLines={3}
+        />
       )}
     </div>
   );

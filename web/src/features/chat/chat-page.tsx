@@ -72,7 +72,7 @@ export function ChatPage() {
   >({});
 
   const sessionId = params.sessionId ?? activeSessionId;
-  const { messages, isRunning } = useSessionRuntime(sessionId);
+  const { messages, isRunning, tokenUsage } = useSessionRuntime(sessionId);
 
   // Show disclosure banner for new sessions.
   const sessionDisclosure = sessionId ? disclosureState[sessionId] : undefined;
@@ -192,6 +192,7 @@ export function ChatPage() {
             onStop={handleStop}
             onFileSelect={handleFileSelect}
             disabled={sessionDeclined}
+            tokenUsage={tokenUsage}
           />
         )}
       </main>
