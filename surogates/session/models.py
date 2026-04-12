@@ -41,7 +41,8 @@ class Event(BaseModel):
     """A single entry in the append-only event log.
 
     ``id`` is ``None`` before the event has been persisted (i.e. before the
-    database assigns a ``BIGSERIAL`` value).
+    database assigns a ``BIGSERIAL`` value).  ``trace_id`` and ``span_id``
+    link the event to a distributed trace for end-to-end observability.
     """
 
     model_config = {"from_attributes": True}
@@ -50,6 +51,8 @@ class Event(BaseModel):
     session_id: UUID
     type: str
     data: dict = Field(default_factory=dict)
+    trace_id: str | None = None
+    span_id: str | None = None
     created_at: datetime | None = None
 
 

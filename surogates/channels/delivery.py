@@ -103,7 +103,16 @@ class DeliveryService:
         Uses ORM for the insert. The ``UNIQUE(channel, dedupe_key)``
         constraint prevents double-enqueue; on conflict the existing
         row's ID is returned.
+
+        Trace context is injected into the payload automatically so that
+        channel adapters can correlate delivered messages back to traces.
         """
+        from surogates.trace import get_trace
+
+        trace = get_trace()
+        if trace:
+            payload = {**payload, "_trace_id": trace.trace_id, "_span_id": trace.span_id}
+
         dedupe_key = f"{channel}:{event_id}"
         row = DeliveryOutbox(
             session_id=session_id,

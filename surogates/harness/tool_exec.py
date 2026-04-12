@@ -305,7 +305,19 @@ async def execute_tool_calls_concurrent(
 
     Results are returned in the original tool-call order.
     If interrupted, remaining calls are skipped.
+
+    Each concurrent tool runs inside a copied :mod:`contextvars` context
+    so that ``new_span()`` inside ``execute_single_tool`` does not clobber
+    sibling tasks' trace state.
     """
+    import contextvars as _cv
+
+    from surogates.trace import get_trace
+
+    # Capture the parent trace *before* spawning tasks so every child
+    # span shares the same parent.
+    parent_trace = get_trace()
+
     # Cap concurrency to MAX_TOOL_WORKERS via a semaphore.
     sem = asyncio.Semaphore(MAX_TOOL_WORKERS)
 
@@ -328,9 +340,16 @@ async def execute_tool_calls_concurrent(
                 hint_tracker=hint_tracker,
                 sandbox_pool=sandbox_pool,
                 api_client=api_client,
+                _parent_trace=parent_trace,
             )
 
-    tasks = [_guarded(tc) for tc in tool_calls]
+    # Spawn each task in its own context copy so new_span() calls
+    # inside execute_single_tool are isolated from siblings.
+    loop = asyncio.get_running_loop()
+    tasks = [
+        loop.create_task(_guarded(tc), context=_cv.copy_context())
+        for tc in tool_calls
+    ]
     return list(await asyncio.gather(*tasks))
 
 
@@ -348,8 +367,16 @@ async def execute_single_tool(
     hint_tracker: SubdirectoryHintTracker | None = None,
     sandbox_pool: SandboxPool | None = None,
     api_client: Any | None = None,
+    _parent_trace: Any | None = None,
 ) -> dict:
     """Execute a single tool call: emit events, dispatch, return result message."""
+    from surogates.trace import TraceContext, get_trace, new_span
+
+    # Each tool call gets its own child span for fine-grained tracing.
+    # When called from concurrent execution, _parent_trace is the
+    # captured parent so siblings don't clobber each other.
+    new_span(_parent_trace)
+
     fn = tc.get("function", {})
     tool_name: str = fn.get("name", "")
     tool_args_raw: str = fn.get("arguments", "")
@@ -449,9 +476,22 @@ async def execute_single_tool(
             # Dispatch to the sandbox pod — runs the real Python tool handler
             # inside the sandbox via tool-executor.
             if isinstance(tool_args, dict):
-                args_str = json.dumps(tool_args)
+                sandbox_args = dict(tool_args)
             else:
-                args_str = tool_args if tool_args else "{}"
+                sandbox_args = json.loads(tool_args) if tool_args else {}
+            # Inject trace context so the sandbox can correlate its work.
+            # The key is prefixed with underscore and stripped by the
+            # tool-executor before the tool handler sees the arguments.
+            trace = get_trace()
+            if trace:
+                sandbox_args["_trace_context"] = {
+                    "trace_id": trace.trace_id,
+                    "span_id": trace.span_id,
+                }
+            args_str = json.dumps(sandbox_args)
+            # NOTE: The tool-executor inside the sandbox image must strip
+            # _trace_context from args before dispatching to the handler.
+            # It can use the values for its own structured logging.
             result_content = await sandbox_pool.execute(
                 str(session.id), tool_name, args_str,
             )

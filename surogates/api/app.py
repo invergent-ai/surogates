@@ -64,14 +64,23 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # --- structured logging ------------------------------------------------
+    from surogates.logging_config import configure_logging
+
+    configure_logging(level=settings.api.log_level if hasattr(settings.api, "log_level") else logging.INFO)
+
     # --- middleware -------------------------------------------------------
     from surogates.api.middleware.auth import setup_auth_middleware
     from surogates.api.middleware.rate_limit import setup_rate_limit_middleware
     from surogates.api.middleware.tenant import setup_tenant_middleware
+    from surogates.api.middleware.trace import setup_trace_middleware
 
+    # Trace middleware must be registered AFTER the others so that
+    # Starlette executes it FIRST (outermost layer).
     setup_auth_middleware(app, settings)
     setup_tenant_middleware(app, settings)
     setup_rate_limit_middleware(app, settings)
+    setup_trace_middleware(app, settings)
 
     # --- routes ----------------------------------------------------------
     from surogates.api.routes import admin, auth, events, health, memory, sessions, skills, tools, transparency, workspace

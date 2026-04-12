@@ -152,14 +152,23 @@ class SessionStore:
 
         Returns the newly assigned event id (``BIGSERIAL``).
 
+        Trace context is read automatically from the :mod:`surogates.trace`
+        contextvar.  If no trace is active the ``trace_id`` / ``span_id``
+        columns are left ``NULL``.
+
         Counter updates use raw SQL for atomic increment expressions
         (``message_count = message_count + 1``) which can't be expressed
         cleanly in ORM ``update().values()``.
         """
+        from surogates.trace import get_trace
+
+        trace = get_trace()
         row = EventRow(
             session_id=session_id,
             type=event_type.value,
             data=data,
+            trace_id=trace.trace_id if trace else None,
+            span_id=trace.span_id if trace else None,
         )
         counter_clause = _build_counter_update_clause(event_type, data)
 

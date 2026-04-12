@@ -179,6 +179,15 @@ class Orchestrator:
 
     async def _process(self, session_id: UUID, attempt: int = 0) -> None:
         """Process a single session.  Retry with exponential backoff on failure."""
+        from surogates.trace import new_span, new_trace
+
+        # First attempt gets a fresh trace; retries get child spans so
+        # they stay linked to the original trace for correlation.
+        if attempt == 0:
+            new_trace()
+        else:
+            new_span()
+
         try:
             harness = self.harness_factory(session_id)
             # Support both sync and async factories.

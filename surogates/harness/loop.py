@@ -245,6 +245,11 @@ class AgentHarness:
 
     async def wake(self, session_id: UUID) -> None:
         """Entry point.  Acquire lease, replay events, run loop, release lease."""
+        from surogates.trace import new_span
+
+        # Create a child span for this wake cycle (parent was set by the
+        # orchestrator or API middleware).
+        new_span()
 
         # Honour streaming preference from env.
         env_streaming = os.environ.get("SUROGATES_STREAMING_ENABLED", "").lower()
@@ -425,6 +430,11 @@ class AgentHarness:
 
         while self._budget.remaining > 0:
             iteration += 1
+
+            # Each LLM iteration gets its own span so tool calls and LLM
+            # requests within this iteration share a parent.
+            from surogates.trace import new_span as _new_iter_span
+            _new_iter_span()
 
             # --- Interrupt check at the top of each iteration ---
             if self._check_interrupt():

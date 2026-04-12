@@ -234,6 +234,7 @@ class Event(Base):
     __tablename__ = "events"
     __table_args__ = (
         Index("idx_events_session", "session_id", "id"),
+        Index("idx_events_trace", "trace_id"),
     )
 
     id: Mapped[int] = mapped_column(
@@ -244,6 +245,8 @@ class Event(Base):
     )
     type: Mapped[str] = mapped_column(Text, nullable=False)
     data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=True)
+    trace_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    span_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=func.now()
     )
