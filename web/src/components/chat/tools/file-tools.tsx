@@ -8,11 +8,20 @@
 // - search_files: one-liner with pattern + result count
 // - list_files: one-liner with path + result count
 
+import { useEffect, useRef, useState } from "react";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import type { ToolCallInfo } from "@/hooks/use-session-runtime";
 import { DiffViewer } from "../diff-viewer";
@@ -136,6 +145,8 @@ export function WriteFileBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileS
 
 // ── Patch ───────────────────────────────────────────────────────────
 
+const PATCH_COLLAPSED_HEIGHT = 192;
+
 export function PatchBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSelect?: (path: string) => void }) {
   let filePath = "";
   let oldString = "";
@@ -147,20 +158,76 @@ export function PatchBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSelec
     newString = args.new_string ?? "";
   } catch { /* ignore */ }
 
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [overflows, setOverflows] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
+
+  useEffect(() => {
+    if (contentRef.current) {
+      setOverflows(contentRef.current.scrollHeight > PATCH_COLLAPSED_HEIGHT);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- measure DOM after mount
+
+  const hasDiff = oldString || newString;
+  const fName = fileName(filePath);
+
   return (
     <div className="space-y-1">
       <div className="flex items-center gap-1.5 text-sm font-mono">
         <span className="font-semibold text-foreground">Patch</span>
         <FileNameWithTooltip filePath={filePath} onFileSelect={onFileSelect} />
       </div>
-      {(oldString || newString) && (
-        <DiffViewer
-          oldValue={oldString}
-          newValue={newString}
-          fileName={fileName(filePath)}
-          contextLines={3}
-        />
+      {hasDiff && (
+        <div className="group/patch relative">
+          <div
+            ref={contentRef}
+            role={overflows ? "button" : undefined}
+            tabIndex={overflows ? 0 : undefined}
+            onClick={() => overflows && setDialogOpen(true)}
+            onKeyDown={(e) => { if (e.key === "Enter" && overflows) setDialogOpen(true); }}
+            className={cn(
+              "overflow-hidden",
+              overflows && "cursor-pointer",
+            )}
+            style={{ maxHeight: PATCH_COLLAPSED_HEIGHT }}
+          >
+            <DiffViewer
+              oldValue={oldString}
+              newValue={newString}
+              fileName={fName}
+              contextLines={3}
+            />
+          </div>
+          {overflows && (
+            <Button
+              variant="outline"
+              size="xs"
+              onClick={() => setDialogOpen(true)}
+              className="absolute bottom-1.5 right-2 opacity-0 group-hover/patch:opacity-100 transition-opacity backdrop-blur-sm"
+            >
+              Expand
+            </Button>
+          )}
+        </div>
       )}
+
+      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <DialogContent className="sm:max-w-[50vw] w-full h-[70vh] flex flex-col p-0 gap-0 overflow-hidden">
+          <DialogHeader className="px-4 py-3 border-b border-border shrink-0">
+            <DialogTitle className="text-sm font-mono">Patch {fName}</DialogTitle>
+          </DialogHeader>
+          <ScrollArea className="flex-1 min-h-0">
+            <div className="p-4">
+              <DiffViewer
+                oldValue={oldString}
+                newValue={newString}
+                fileName={fName}
+                contextLines={3}
+              />
+            </div>
+          </ScrollArea>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
