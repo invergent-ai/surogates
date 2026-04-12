@@ -344,9 +344,13 @@ export function useSessionRuntime(sessionId: string | null) {
             break;
 
           case "context.compact": {
-            // Clear all messages — the conversation has been compacted/cleared.
-            next.length = 0;
-            setTokenUsage(EMPTY_USAGE);
+            // Only clear the UI for explicit /clear commands.
+            // /compress keeps the conversation visible — the compacted
+            // messages are server-side only and the UI stays as-is.
+            if (data.strategy === "clear") {
+              next.length = 0;
+              setTokenUsage(EMPTY_USAGE);
+            }
             break;
           }
 
