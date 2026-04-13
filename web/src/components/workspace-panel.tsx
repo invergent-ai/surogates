@@ -147,8 +147,8 @@ function RenderEntries({
 // WorkspacePanel
 // ---------------------------------------------------------------------------
 
-const DEFAULT_WIDTH = 600; // px – matches the old w-150 (150 * 4px)
-const MIN_WIDTH = 240;
+const DEFAULT_WIDTH = 500; // px – matches the old w-150 (150 * 4px)
+const MIN_WIDTH = 300;
 const MAX_WIDTH = 900;
 
 export function WorkspacePanel({ sessionId }: { sessionId: string | null }) {

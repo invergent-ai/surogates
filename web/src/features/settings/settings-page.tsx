@@ -149,9 +149,6 @@ export function SettingsPage() {
               >
                 Connected Channels
               </TabsTrigger>
-              <TabsTrigger value="account" disabled>
-                Account
-              </TabsTrigger>
             </TabsList>
 
             {/* ── Profile ── */}
@@ -232,13 +229,12 @@ export function SettingsPage() {
                   <p className="text-sm text-muted-foreground">
                     No connected channels yet.
                   </p>
-                  <p className="text-xs text-faint">
+                  <p className="text-sm text-faint">
                     Use a pairing code from Slack, Teams, or Telegram to link
                     your account.
                   </p>
                   <Button
                     variant="outline"
-                    size="sm"
                     onClick={() => void navigate({ to: "/link" })}
                   >
                     Link a channel
@@ -258,21 +254,20 @@ export function SettingsPage() {
                       {channels.map((ch) => (
                         <TableRow key={ch.id}>
                           <TableCell>
-                            <Badge variant="default">
+                            <Badge variant="default" className="text-sm">
                               {PLATFORM_LABELS[ch.platform] ?? ch.platform}
                             </Badge>
                           </TableCell>
-                          <TableCell className="font-mono text-xs">
+                          <TableCell className="font-mono">
                             {ch.platform_user_id}
                           </TableCell>
                           <TableCell>
                             <Button
                               variant="ghost"
-                              size="icon-xs"
                               onClick={() => setUnlinkTarget(ch)}
                               className="text-muted-foreground hover:text-destructive"
                             >
-                              <TrashIcon className="w-3.5 h-3.5" />
+                              <TrashIcon className="w-5 h-5" />
                             </Button>
                           </TableCell>
                         </TableRow>
@@ -283,7 +278,6 @@ export function SettingsPage() {
                   <div className="mt-4">
                     <Button
                       variant="outline"
-                      size="sm"
                       onClick={() => void navigate({ to: "/link" })}
                     >
                       Link another channel
@@ -305,13 +299,6 @@ export function SettingsPage() {
                 onConfirm={handleUnlink}
                 onCancel={() => setUnlinkTarget(null)}
               />
-            </TabsContent>
-
-            {/* ── Account (placeholder) ── */}
-            <TabsContent value="account">
-              <p className="text-sm text-muted-foreground">
-                Account settings will be available soon.
-              </p>
             </TabsContent>
           </Tabs>
         </div>
