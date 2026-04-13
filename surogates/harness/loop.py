@@ -150,6 +150,7 @@ class AgentHarness:
         sandbox_pool: SandboxPool | None = None,
         checkpoints_enabled: bool = False,
         api_client: Any | None = None,
+        default_model: str = "gpt-4o",
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
@@ -207,6 +208,7 @@ class AgentHarness:
 
         # Current model (may change on fallback activation).
         self._current_model: str | None = None
+        self._default_model: str = default_model
 
     # ------------------------------------------------------------------
     # Interrupt API (thread-safe)
@@ -489,7 +491,7 @@ class AgentHarness:
                 return
 
             # 1. Emit LLM_REQUEST event.
-            model_id = self._current_model or session.model or "gpt-4o"
+            model_id = self._current_model or session.model or self._default_model
             await self._store.emit_event(
                 session.id,
                 EventType.LLM_REQUEST,
@@ -1339,7 +1341,7 @@ class AgentHarness:
         )
         messages.append({"role": "user", "content": summary_request})
 
-        model_id = self._current_model or session.model or "gpt-4o"
+        model_id = self._current_model or session.model or self._default_model
 
         try:
             api_messages: list[dict] = [

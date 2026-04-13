@@ -9,10 +9,13 @@ counter increments).
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+
+logger = logging.getLogger(__name__)
 from uuid import UUID
 
 from sqlalchemy import select, text, update, delete, func
@@ -38,6 +41,13 @@ class LeaseNotHeldError(Exception):
     """Raised when a lease operation fails because the caller does not hold it."""
 
 
+# Events that should be delivered to messaging channels (Slack, Teams, etc.).
+# Web channel reads from the events table directly via SSE.
+_DELIVERABLE_EVENTS = frozenset({
+    EventType.LLM_RESPONSE,
+})
+
+
 class SessionStore:
     """Async, PostgreSQL-backed store for sessions, events, leases, and cursors.
 
@@ -52,6 +62,9 @@ class SessionStore:
     ) -> None:
         self._sf = session_factory
         self._redis = redis
+        # Session channel cache: session_id → (channel, config).
+        # Populated lazily when a deliverable event is emitted.
+        self._channel_cache: dict[UUID, tuple[str, dict]] = {}
 
     # ------------------------------------------------------------------
     # Session CRUD
@@ -194,7 +207,102 @@ class SessionStore:
             except Exception:
                 pass
 
+        # Channel delivery: enqueue deliverable events to the outbox
+        # for non-web channels (Slack, Teams, Telegram, etc.).
+        if event_type in _DELIVERABLE_EVENTS:
+            await self._enqueue_channel_delivery(session_id, event_id, event_type, data)
+
         return event_id
+
+    async def _enqueue_channel_delivery(
+        self,
+        session_id: UUID,
+        event_id: int,
+        event_type: EventType,
+        data: dict,
+    ) -> None:
+        """Enqueue a deliverable event to the outbox for non-web channels.
+
+        Looks up the session's channel and config (cached after first lookup).
+        Web sessions are skipped — they use SSE polling, not the outbox.
+        """
+        try:
+            # Look up session channel (cached).
+            if session_id not in self._channel_cache:
+                async with self._sf() as db:
+                    row = await db.get(SessionRow, session_id)
+                    if row:
+                        self._channel_cache[session_id] = (
+                            row.channel or "web",
+                            row.config or {},
+                        )
+                    else:
+                        return
+
+            channel, config = self._channel_cache[session_id]
+
+            # Web sessions use SSE — no outbox delivery needed.
+            if channel == "web":
+                return
+
+            # Build channel-specific destination from session config.
+            destination: dict[str, Any] = {}
+            if channel == "slack":
+                destination = {
+                    "channel_id": config.get("slack_channel_id", ""),
+                    "thread_ts": config.get("slack_thread_ts"),
+                    "team_id": config.get("slack_team_id", ""),
+                }
+            elif channel == "teams":
+                destination = {
+                    "conversation_id": config.get("teams_conversation_id", ""),
+                    "activity_id": config.get("teams_activity_id"),
+                }
+            elif channel == "telegram":
+                destination = {
+                    "chat_id": config.get("telegram_chat_id", ""),
+                    "reply_to_message_id": config.get("telegram_reply_to"),
+                }
+            else:
+                destination = {"session_id": str(session_id)}
+
+            # Build payload: extract the user-facing content from the event.
+            payload: dict[str, Any] = {}
+            if event_type == EventType.LLM_RESPONSE:
+                msg = data.get("message", {})
+                content = msg.get("content", "") if isinstance(msg, dict) else ""
+                if content:
+                    payload["content"] = content
+
+            if not payload.get("content"):
+                return  # Nothing to deliver (e.g., tool-call-only LLM_RESPONSE).
+
+            # Enqueue to the delivery outbox.
+            from surogates.db.models import DeliveryOutbox
+            dedupe_key = f"{channel}:{event_id}"
+
+            async with self._sf() as db:
+                outbox = DeliveryOutbox(
+                    session_id=session_id,
+                    event_id=event_id,
+                    channel=channel,
+                    destination=destination,
+                    payload=payload,
+                    dedupe_key=dedupe_key,
+                    status="pending",
+                )
+                db.add(outbox)
+                try:
+                    await db.commit()
+                except Exception:
+                    # Dedupe constraint violation — already enqueued.
+                    await db.rollback()
+
+        except Exception as exc:
+            logger.debug(
+                "Channel delivery enqueue failed for session %s: %s",
+                session_id, exc,
+            )
 
     async def get_events(
         self,

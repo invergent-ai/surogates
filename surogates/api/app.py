@@ -31,6 +31,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.session_store = SessionStore(app.state.session_factory, redis=app.state.redis)
     app.state.storage = create_backend(settings)
 
+    from surogates.channels.pairing import PairingStore
+    app.state.pairing_store = PairingStore(redis=app.state.redis)
+
     logger.info("Surogates API started (workers=%d)", settings.api.workers)
 
     yield

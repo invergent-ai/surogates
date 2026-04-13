@@ -1,3 +1,4 @@
+export { LinkChannelPage } from "./link-channel-page";
 export { LoginPage } from "./login-page";
 export {
   clearAuthTokens,
@@ -6,5 +7,6 @@ export {
   getRefreshToken,
   hasAuthToken,
   hasRefreshToken,
+  setPostAuthRedirect,
   storeAuthTokens,
 } from "./session";

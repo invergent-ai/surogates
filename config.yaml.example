@@ -84,6 +84,27 @@ governance:
   #       ports: [443]
   #       action: allow
 
+# ── Storage (S3-compatible) ───────────────────────────────────────────
+storage:
+  backend: "local"              # "local" (dev) or "s3" (production, Garage/MinIO/AWS)
+  base_path: "/tmp/surogates/tenant-assets"  # LocalBackend root (dev only)
+  # endpoint: "http://garage:3900"  # S3 endpoint (Garage, MinIO, etc.)
+  # access_key: ""
+  # secret_key: ""
+  # region: "garage"
+
+# ── Slack Channel ────────────────────────────────────────────────────
+# Start with: surogates channel slack
+# Requires a Slack app with Socket Mode enabled.
+# slack:
+#   app_token: ""               # xapp-... (Socket Mode token)
+#   bot_token: ""               # xoxb-... (comma-separated for multi-workspace)
+#   require_mention: true       # require @mention in channels (DMs always respond)
+#   free_response_channels: ""  # comma-separated channel IDs where mention not required
+#   allow_bots: "none"          # "none", "mentions", "all" — how to handle bot messages
+#   reply_in_thread: true       # reply in thread (true) or top-level (false)
+#   reply_broadcast: false      # also post reply to channel when replying in thread
+
 # ── Authentication ────────────────────────────────────────────────────
 jwt_secret: "change-me-in-production"
 

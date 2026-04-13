@@ -228,6 +228,7 @@ async def run_worker(settings: Settings) -> None:
             memory_manager=memory_manager,
             sandbox_pool=sandbox_pool,
             api_client=harness_api_client,
+            default_model=model_id,
         )
 
     # 8. Orchestrator

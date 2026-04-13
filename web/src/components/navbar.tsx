@@ -3,7 +3,7 @@
 //
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { PlusIcon, MessageSquareIcon, LogOutIcon, TrashIcon, SunIcon, MoonIcon } from "lucide-react";
+import { PlusIcon, MessageSquareIcon, LogOutIcon, TrashIcon, SunIcon, MoonIcon, SettingsIcon } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useAppStore } from "@/stores/app-store";
 import { logout } from "@/api/auth";
@@ -144,16 +144,21 @@ export function SessionSidebar() {
         {!collapsed && (
           <>
             {user && (
-              <div className="flex items-center gap-2 px-1 py-1.5 mb-1.5">
+              <button
+                type="button"
+                onClick={() => void navigate({ to: "/settings" })}
+                className="flex items-center gap-2 px-1 py-1.5 mb-1.5 w-full rounded-md hover:bg-input transition-colors cursor-pointer"
+              >
                 <div className="w-6 h-6 rounded-full bg-primary/20 flex items-center justify-center font-bold text-primary text-xs shrink-0">
                   {(user.display_name ?? user.email)?.[0]?.toUpperCase() ?? "?"}
                 </div>
-                <div className="flex-1 min-w-0">
+                <div className="flex-1 min-w-0 text-left">
                   <div className="text-subtle font-medium text-sm truncate">
                     {user.display_name ?? user.email}
                   </div>
                 </div>
-              </div>
+                <SettingsIcon className="w-3.5 h-3.5 text-faint shrink-0" />
+              </button>
             )}
             <div className="flex items-center gap-1">
               <button

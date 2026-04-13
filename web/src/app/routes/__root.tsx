@@ -5,7 +5,7 @@ import { Outlet, createRootRoute, useRouterState } from "@tanstack/react-router"
 import { Suspense } from "react";
 import { AppProvider } from "../provider";
 
-const BARE_ROUTES = ["/login"];
+const BARE_ROUTES = ["/login", "/link"];
 
 function RootLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });

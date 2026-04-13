@@ -1,7 +1,7 @@
 export const AUTH_TOKEN_KEY = "surogates_auth_token";
 export const AUTH_REFRESH_TOKEN_KEY = "surogates_auth_refresh_token";
 
-type PostAuthRoute = "/login" | "/chat";
+const POST_AUTH_REDIRECT_KEY = "surogates_post_auth_redirect";
 
 function canUseStorage(): boolean {
   return typeof window !== "undefined";
@@ -42,6 +42,18 @@ export function clearAuthTokens(): void {
   localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
 }
 
-export function getPostAuthRoute(): PostAuthRoute {
-  return hasAuthToken() ? "/chat" : "/login";
+export function setPostAuthRedirect(url: string): void {
+  if (!canUseStorage()) return;
+  sessionStorage.setItem(POST_AUTH_REDIRECT_KEY, url);
+}
+
+export function getPostAuthRoute(): string {
+  if (!canUseStorage()) return "/login";
+  if (!hasAuthToken()) return "/login";
+  const saved = sessionStorage.getItem(POST_AUTH_REDIRECT_KEY);
+  if (saved) {
+    sessionStorage.removeItem(POST_AUTH_REDIRECT_KEY);
+    return saved;
+  }
+  return "/chat";
 }

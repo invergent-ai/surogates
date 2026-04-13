@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from surogates.db.models import Org, User
+from surogates.db.models import ChannelIdentity, Org, User
 from surogates.tenant.auth.database import DatabaseAuthProvider
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -266,3 +266,129 @@ async def list_users(
         ],
         total=total,
     )
+
+
+# ---------------------------------------------------------------------------
+# Channel Identity CRUD
+# ---------------------------------------------------------------------------
+
+
+class ChannelIdentityCreate(BaseModel):
+    user_id: UUID
+    platform: str
+    platform_user_id: str
+    platform_meta: dict = {}
+
+
+class ChannelIdentityResponse(BaseModel):
+    id: UUID
+    user_id: UUID
+    platform: str
+    platform_user_id: str
+    platform_meta: dict
+
+
+@router.post(
+    "/channel-identities",
+    response_model=ChannelIdentityResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_channel_identity(
+    body: ChannelIdentityCreate,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> ChannelIdentityResponse:
+    """Register a platform user ID for a Surogates user."""
+    session_factory = request.app.state.session_factory
+
+    async with session_factory() as session:
+        user = await session.get(User, body.user_id)
+        if not user or user.org_id != tenant.org_id:
+            raise HTTPException(status_code=404, detail="User not found in this org.")
+
+        existing = await session.execute(
+            select(ChannelIdentity)
+            .where(ChannelIdentity.platform == body.platform)
+            .where(ChannelIdentity.platform_user_id == body.platform_user_id)
+        )
+        if existing.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Platform identity {body.platform}:{body.platform_user_id} already registered.",
+            )
+
+        identity = ChannelIdentity(
+            id=uuid.uuid4(),
+            user_id=body.user_id,
+            platform=body.platform,
+            platform_user_id=body.platform_user_id,
+            platform_meta=body.platform_meta,
+        )
+        session.add(identity)
+        await session.commit()
+
+    return ChannelIdentityResponse(
+        id=identity.id,
+        user_id=identity.user_id,
+        platform=identity.platform,
+        platform_user_id=identity.platform_user_id,
+        platform_meta=identity.platform_meta,
+    )
+
+
+@router.get("/channel-identities", response_model=list[ChannelIdentityResponse])
+async def list_channel_identities(
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+    platform: str | None = None,
+) -> list[ChannelIdentityResponse]:
+    """List channel identities for users in the tenant's org."""
+    session_factory = request.app.state.session_factory
+
+    async with session_factory() as session:
+        query = (
+            select(ChannelIdentity)
+            .join(User, ChannelIdentity.user_id == User.id)
+            .where(User.org_id == tenant.org_id)
+        )
+        if platform:
+            query = query.where(ChannelIdentity.platform == platform)
+
+        result = await session.execute(query)
+        identities = result.scalars().all()
+
+    return [
+        ChannelIdentityResponse(
+            id=i.id,
+            user_id=i.user_id,
+            platform=i.platform,
+            platform_user_id=i.platform_user_id,
+            platform_meta=i.platform_meta or {},
+        )
+        for i in identities
+    ]
+
+
+@router.delete(
+    "/channel-identities/{identity_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_channel_identity(
+    identity_id: UUID,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> None:
+    """Remove a channel identity."""
+    session_factory = request.app.state.session_factory
+
+    async with session_factory() as session:
+        identity = await session.get(ChannelIdentity, identity_id)
+        if not identity:
+            raise HTTPException(status_code=404, detail="Channel identity not found.")
+
+        user = await session.get(User, identity.user_id)
+        if not user or user.org_id != tenant.org_id:
+            raise HTTPException(status_code=404, detail="Channel identity not found.")
+
+        await session.delete(identity)
+        await session.commit()

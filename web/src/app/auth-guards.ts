@@ -6,6 +6,7 @@ import {
   getPostAuthRoute,
   hasAuthToken,
   hasRefreshToken,
+  setPostAuthRedirect,
 } from "@/features/auth";
 import { refreshSession } from "@/api/auth";
 
@@ -17,6 +18,10 @@ async function hasActiveSession(): Promise<boolean> {
 
 export async function requireAuth(): Promise<void> {
   if (!(await hasActiveSession())) {
+    const current = window.location.pathname + window.location.search;
+    if (current !== "/login") {
+      setPostAuthRedirect(current);
+    }
     throw redirect({ to: "/login" });
   }
 }

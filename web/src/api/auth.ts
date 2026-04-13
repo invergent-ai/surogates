@@ -99,6 +99,52 @@ export async function fetchCurrentUser(): Promise<{
   return response.json();
 }
 
+export async function updateCurrentUser(fields: {
+  display_name?: string;
+  email?: string;
+}): Promise<{
+  id: string;
+  org_id: string;
+  email: string;
+  display_name: string | null;
+  auth_provider: string;
+  created_at: string;
+}> {
+  const response = await authFetch("/api/v1/auth/me", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => null);
+    throw new Error(data?.detail ?? "Failed to update profile.");
+  }
+  return response.json();
+}
+
+export interface ChannelIdentity {
+  id: string;
+  platform: string;
+  platform_user_id: string;
+  platform_meta: Record<string, unknown>;
+}
+
+export async function fetchMyChannels(): Promise<ChannelIdentity[]> {
+  const response = await authFetch("/api/v1/auth/me/channels");
+  if (!response.ok) throw new Error("Failed to fetch channel identities.");
+  return response.json();
+}
+
+export async function unlinkChannel(identityId: string): Promise<void> {
+  const response = await authFetch(`/api/v1/auth/me/channels/${identityId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => null);
+    throw new Error(data?.detail ?? "Failed to unlink channel.");
+  }
+}
+
 export function logout(): void {
   clearAuthTokens();
 }

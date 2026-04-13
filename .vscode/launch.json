@@ -39,8 +39,6 @@
             "justMyCode": false,
             "env": {
                 "SUROGATES_CONFIG": "${workspaceFolder}/config.dev.yaml",
-                "SLACK_BOT_TOKEN": "${env:SLACK_BOT_TOKEN}",
-                "SLACK_APP_TOKEN": "${env:SLACK_APP_TOKEN}",
                 "SUROGATES_LOG_LEVEL": "INFO"
             }
         },
@@ -75,6 +73,14 @@
             "configurations": [
                 "Surogates: API Gateway",
                 "Surogates: Worker"
+            ]
+        },
+        {
+            "name": "Surogates: Full Stack + Slack",
+            "configurations": [
+                "Surogates: API Gateway",
+                "Surogates: Worker",
+                "Surogates: Channel (Slack)"
             ]
         }
     ]

@@ -21,11 +21,11 @@ spec:
         component: channel
         channel: slack
     spec:
-      serviceAccountName: surogates-channel
+      serviceAccountName: surogates-api
       containers:
         - name: channel
           image: ghcr.io/invergent-ai/surogates:latest
-          command: ["surogate", "channel", "slack"]
+          command: ["surogates", "channel", "slack"]
           env:
             - name: SUROGATES_DB_URL
               valueFrom:
@@ -37,12 +37,17 @@ spec:
                 secretKeyRef:
                   name: surogates-redis
                   key: url
-            - name: SLACK_BOT_TOKEN
+            - name: SUROGATES_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: surogates-jwt
+                  key: secret
+            - name: SUROGATES_SLACK_BOT_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: surogates-slack
                   key: bot-token
-            - name: SLACK_APP_TOKEN
+            - name: SUROGATES_SLACK_APP_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: surogates-slack

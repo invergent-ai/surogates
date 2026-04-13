@@ -97,16 +97,26 @@ async def start_channel(channel_type: str, settings: Settings) -> None:
 
     from surogates.channels.delivery import DeliveryService
     from surogates.db.engine import async_engine_from_settings, async_session_factory
+    from surogates.session.store import SessionStore
 
     engine = async_engine_from_settings(settings.db)
     session_factory = async_session_factory(engine)
     redis_client = Redis.from_url(settings.redis.url)
     delivery_service = DeliveryService(session_factory, redis_client)
+    session_store = SessionStore(session_factory, redis=redis_client)
 
-    # Instantiate the adapter.
+    # Resolve channel-specific settings.
+    channel_settings: dict = {}
+    if channel_type == "slack":
+        channel_settings = settings.slack.model_dump()
+
+    # Instantiate the adapter with full dependencies.
     adapter = adapter_cls(
-        settings={},
+        settings=channel_settings,
         delivery_service=delivery_service,
+        session_store=session_store,
+        session_factory=session_factory,
+        redis_client=redis_client,
     )
 
     # Set up graceful shutdown.

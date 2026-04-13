@@ -112,6 +112,7 @@ class APISettings(BaseSettings):
     port: int = 8000
     workers: int = 1
     cors_origins: list[str] = Field(default_factory=lambda: ["*"])
+    web_url: str = ""  # Public URL for the web UI (used in pairing links, emails, etc.)
 
 
 class WorkerSettings(BaseSettings):
@@ -213,6 +214,20 @@ class StorageSettings(BaseSettings):
     region: str = ""
 
 
+class SlackSettings(BaseSettings):
+    """Slack channel adapter configuration."""
+
+    model_config = {"env_prefix": "SUROGATES_SLACK_"}
+
+    app_token: str = ""       # xapp-... Socket Mode token
+    bot_token: str = ""       # xoxb-... (comma-separated for multi-workspace)
+    require_mention: bool = True
+    free_response_channels: str = ""  # comma-separated channel IDs
+    allow_bots: str = "none"  # "none", "mentions", "all"
+    reply_in_thread: bool = True
+    reply_broadcast: bool = False
+
+
 class GovernanceSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_GOVERNANCE_"}
 
@@ -232,6 +247,7 @@ class Settings(BaseSettings):
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
     governance: GovernanceSettings = Field(default_factory=GovernanceSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
+    slack: SlackSettings = Field(default_factory=SlackSettings)
 
     # Paths — each individually configurable, each a separate K8s volume mount
     platform_skills_dir: str = "/etc/surogates/skills"
