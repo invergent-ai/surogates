@@ -1,26 +1,26 @@
+{{- if .Values.mcpProxy.enabled }}
+{{- $fullname := include "surogates.fullname" . -}}
+{{- $component := "mcp-proxy" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: mcp-proxy
-  namespace: surogates
+  name: {{ $fullname }}-mcp-proxy
   labels:
-    app: surogates
-    component: mcp-proxy
+    {{- include "surogates.fullLabels" (dict "root" . "component" $component) | nindent 4 }}
 spec:
-  replicas: 2
+  replicas: {{ .Values.mcpProxy.replicas }}
   selector:
     matchLabels:
-      app: surogates
-      component: mcp-proxy
+      {{- include "surogates.componentSelector" (dict "root" . "component" $component) | nindent 6 }}
   template:
     metadata:
       labels:
-        app: surogates
-        component: mcp-proxy
+        {{- include "surogates.fullLabels" (dict "root" . "component" $component) | nindent 8 }}
     spec:
       containers:
         - name: mcp-proxy
-          image: ghcr.io/invergent-ai/surogates:latest
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["surogates", "mcp-proxy"]
           ports:
             - name: http
@@ -30,36 +30,35 @@ spec:
             - name: SUROGATES_DB_URL
               valueFrom:
                 secretKeyRef:
-                  name: surogates-db
+                  name: {{ $fullname }}-db
                   key: url
             - name: SUROGATES_REDIS_URL
               valueFrom:
                 secretKeyRef:
-                  name: surogates-redis
+                  name: {{ $fullname }}-redis
                   key: url
             - name: SUROGATES_JWT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: surogates-jwt
+                  name: {{ $fullname }}-jwt
                   key: secret
+            {{- if .Values.encryptionKey }}
             - name: SUROGATES_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
-                  name: surogates-credential-key
+                  name: {{ $fullname }}-credential-key
                   key: key
+            {{- end }}
             - name: SUROGATES_LOG_LEVEL
-              value: "INFO"
+              value: {{ .Values.logLevel | quote }}
+          {{- if .Values.platformMcp }}
           volumeMounts:
             - name: platform-mcp
               mountPath: /etc/surogates/mcp
               readOnly: true
+          {{- end }}
           resources:
-            requests:
-              cpu: 250m
-              memory: 256Mi
-            limits:
-              cpu: "1"
-              memory: 1Gi
+            {{- toYaml .Values.mcpProxy.resources | nindent 12 }}
           livenessProbe:
             httpGet:
               path: /health
@@ -72,25 +71,25 @@ spec:
               port: http
             initialDelaySeconds: 3
             periodSeconds: 10
+      {{- if .Values.platformMcp }}
       volumes:
         - name: platform-mcp
           configMap:
-            name: platform-mcp
+            name: {{ $fullname }}-platform-mcp
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: mcp-proxy
-  namespace: surogates
+  name: {{ $fullname }}-mcp-proxy
   labels:
-    app: surogates
-    component: mcp-proxy
+    {{- include "surogates.fullLabels" (dict "root" . "component" $component) | nindent 4 }}
 spec:
   selector:
-    app: surogates
-    component: mcp-proxy
+    {{- include "surogates.componentSelector" (dict "root" . "component" $component) | nindent 4 }}
   ports:
     - name: http
       port: 8001
       targetPort: http
       protocol: TCP
+{{- end }}

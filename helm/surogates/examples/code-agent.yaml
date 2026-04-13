@@ -1,0 +1,45 @@
+agent:
+  slug: code-agent
+  domain: k8s.local
+
+llm:
+  model: claude-sonnet-4-20250514
+  provider: anthropic
+  apiKey: "sk-ant-PLACEHOLDER"
+
+api:
+  replicas: 2
+
+worker:
+  replicas: 5
+  concurrency: 50
+
+autoscaling:
+  enabled: true
+  minReplicas: 5
+  maxReplicas: 20
+  targetCPU: 70
+
+sandbox:
+  backend: kubernetes
+  srtEnabled: true
+
+storage:
+  backend: s3
+  endpoint: "http://garage.default.svc:3900"
+  accessKey: "PLACEHOLDER"
+  secretKey: "PLACEHOLDER"
+
+mcpProxy:
+  enabled: true
+  replicas: 2
+
+channels:
+  slack:
+    enabled: false
+
+ingress:
+  enabled: true
+  className: nginx
+  tls:
+    enabled: true

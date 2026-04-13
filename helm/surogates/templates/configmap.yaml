@@ -1,0 +1,70 @@
+{{- $fullname := include "surogates.fullname" . -}}
+{{- if .Values.platformSkills }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-platform-skills
+  labels:
+    {{- include "surogates.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.platformSkills }}
+  {{ $key }}: |
+    {{- $value | nindent 4 }}
+  {{- end }}
+---
+{{- end }}
+{{- if .Values.platformPolicies }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-platform-policies
+  labels:
+    {{- include "surogates.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.platformPolicies }}
+  {{ $key }}: |
+    {{- $value | nindent 4 }}
+  {{- end }}
+---
+{{- end }}
+{{- if .Values.platformTools }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-platform-tools
+  labels:
+    {{- include "surogates.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.platformTools }}
+  {{ $key }}: |
+    {{- $value | nindent 4 }}
+  {{- end }}
+---
+{{- end }}
+{{- if .Values.platformMcp }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-platform-mcp
+  labels:
+    {{- include "surogates.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.platformMcp }}
+  {{ $key }}: |
+    {{- $value | nindent 4 }}
+  {{- end }}
+---
+{{- end }}
+{{- if .Values.modelMetadata }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-model-metadata
+  labels:
+    {{- include "surogates.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.modelMetadata }}
+  {{ $key }}: |
+    {{- $value | nindent 4 }}
+  {{- end }}
+{{- end }}

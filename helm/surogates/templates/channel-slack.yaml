@@ -1,0 +1,75 @@
+{{- if .Values.channels.slack.enabled }}
+{{- $fullname := include "surogates.fullname" . -}}
+{{- $component := "channel-slack" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-channel-slack
+  labels:
+    {{- include "surogates.fullLabels" (dict "root" . "component" $component) | nindent 4 }}
+    channel: slack
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "surogates.componentSelector" (dict "root" . "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "surogates.fullLabels" (dict "root" . "component" $component) | nindent 8 }}
+        channel: slack
+    spec:
+      serviceAccountName: {{ $fullname }}-api
+      containers:
+        - name: channel
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["surogates", "channel", "slack"]
+          env:
+            - name: SUROGATES_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-db
+                  key: url
+            - name: SUROGATES_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-redis
+                  key: url
+            - name: SUROGATES_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-jwt
+                  key: secret
+            - name: SUROGATES_SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-slack
+                  key: bot-token
+            - name: SUROGATES_SLACK_APP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-slack
+                  key: app-token
+            - name: SUROGATES_SLACK_REQUIRE_MENTION
+              value: {{ .Values.channels.slack.requireMention | quote }}
+            {{- if .Values.channels.slack.freeResponseChannels }}
+            - name: SUROGATES_SLACK_FREE_RESPONSE_CHANNELS
+              value: {{ .Values.channels.slack.freeResponseChannels | quote }}
+            {{- end }}
+            - name: SUROGATES_SLACK_ALLOW_BOTS
+              value: {{ .Values.channels.slack.allowBots | quote }}
+            - name: SUROGATES_SLACK_REPLY_IN_THREAD
+              value: {{ .Values.channels.slack.replyInThread | quote }}
+            - name: SUROGATES_SLACK_REPLY_BROADCAST
+              value: {{ .Values.channels.slack.replyBroadcast | quote }}
+            - name: SUROGATES_LOG_LEVEL
+              value: {{ .Values.logLevel | quote }}
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+{{- end }}

@@ -1,0 +1,112 @@
+{{- $fullname := include "surogates.fullname" . -}}
+{{- $component := "api" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-api
+  labels:
+    {{- include "surogates.fullLabels" (dict "root" . "component" $component) | nindent 4 }}
+spec:
+  replicas: {{ .Values.api.replicas }}
+  selector:
+    matchLabels:
+      {{- include "surogates.componentSelector" (dict "root" . "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "surogates.fullLabels" (dict "root" . "component" $component) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $fullname }}-api
+      containers:
+        - name: api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["surogates", "api"]
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: SUROGATES_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-db
+                  key: url
+            - name: SUROGATES_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-redis
+                  key: url
+            - name: SUROGATES_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-jwt
+                  key: secret
+            - name: SUROGATES_DB_POOL_SIZE
+              value: {{ .Values.db.poolSize | quote }}
+            - name: SUROGATES_DB_POOL_OVERFLOW
+              value: {{ .Values.db.poolOverflow | quote }}
+            - name: SUROGATES_STORAGE_BACKEND
+              value: {{ .Values.storage.backend | quote }}
+            {{- if eq .Values.storage.backend "s3" }}
+            - name: SUROGATES_STORAGE_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-s3
+                  key: endpoint
+            - name: SUROGATES_STORAGE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-s3
+                  key: access-key
+            - name: SUROGATES_STORAGE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-s3
+                  key: secret-key
+            {{- end }}
+            {{- if .Values.org.id }}
+            - name: SUROGATES_ORG_ID
+              value: {{ .Values.org.id | quote }}
+            {{- end }}
+            - name: SUROGATES_LOG_LEVEL
+              value: {{ .Values.logLevel | quote }}
+          {{- if .Values.platformSkills }}
+          volumeMounts:
+            - name: platform-skills
+              mountPath: /etc/surogates/skills
+              readOnly: true
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+      {{- if .Values.platformSkills }}
+      volumes:
+        - name: platform-skills
+          configMap:
+            name: {{ $fullname }}-platform-skills
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-api
+  labels:
+    {{- include "surogates.fullLabels" (dict "root" . "component" $component) | nindent 4 }}
+spec:
+  selector:
+    {{- include "surogates.componentSelector" (dict "root" . "component" $component) | nindent 4 }}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

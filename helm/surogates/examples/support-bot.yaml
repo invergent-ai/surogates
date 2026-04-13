@@ -1,0 +1,38 @@
+agent:
+  slug: support-bot
+  domain: k8s.local
+
+llm:
+  model: claude-sonnet-4-20250514
+  provider: anthropic
+  apiKey: "sk-ant-PLACEHOLDER"
+
+api:
+  replicas: 2
+
+worker:
+  replicas: 3
+  concurrency: 30
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPU: 70
+
+sandbox:
+  backend: process
+
+channels:
+  slack:
+    enabled: true
+    appToken: "xapp-PLACEHOLDER"
+    botToken: "xoxb-PLACEHOLDER"
+    requireMention: true
+    replyInThread: true
+
+ingress:
+  enabled: true
+  className: nginx
+  tls:
+    enabled: true

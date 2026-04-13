@@ -1,0 +1,136 @@
+# -- Agent identity
+agent:
+  # URL-safe slug — used in resource names, labels, and subdomain.
+  slug: "default"
+  # Base domain.  Agent is reachable at {slug}.{domain}.
+  domain: "k8s.local"
+
+# -- Container image
+image:
+  repository: ghcr.io/invergent-ai/surogates
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# -- Database
+db:
+  url: "postgresql+asyncpg://surogates:surogates@postgres:5432/surogates"
+  poolSize: 10
+  poolOverflow: 20
+
+# -- Redis
+redis:
+  url: "redis://redis:6379/0"
+
+# -- Auth
+auth:
+  jwtSecret: "change-me-in-production"
+
+# -- LLM provider
+llm:
+  model: "gpt-4o"
+  provider: ""
+  baseUrl: ""
+  apiKey: ""
+  temperature: 0.7
+  maxTokens: ""
+
+# -- API server
+api:
+  replicas: 2
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+# -- Worker
+worker:
+  replicas: 5
+  concurrency: 50
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+# -- Worker autoscaling
+autoscaling:
+  enabled: true
+  minReplicas: 5
+  maxReplicas: 20
+  targetCPU: 70
+
+# -- Sandbox
+sandbox:
+  backend: "process"
+  srtEnabled: false
+  k8sNamespace: ""
+  k8sServiceAccount: "surogates-sandbox"
+  k8sPodReadyTimeout: 60
+  k8sExecutorPath: "/usr/local/bin/tool-executor"
+  k8sS3fsImage: "ghcr.io/invergent-ai/agent-sandbox-s3fs:latest"
+  k8sS3Endpoint: ""
+
+# -- Storage (S3-compatible)
+storage:
+  backend: "local"
+  endpoint: ""
+  accessKey: ""
+  secretKey: ""
+  region: ""
+
+# -- MCP proxy
+mcpProxy:
+  enabled: true
+  replicas: 2
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+# -- Channel adapters
+channels:
+  slack:
+    enabled: false
+    appToken: ""
+    botToken: ""
+    requireMention: true
+    freeResponseChannels: ""
+    allowBots: "none"
+    replyInThread: true
+    replyBroadcast: false
+
+# -- Ingress
+ingress:
+  enabled: true
+  className: nginx
+  annotations: {}
+  tls:
+    enabled: true
+    # Empty = auto-generate as {release}-tls.
+    secretName: ""
+
+# -- Platform config (contents mounted as ConfigMaps)
+# Each key becomes a file.  Leave empty to skip.
+platformSkills: {}
+platformPolicies: {}
+platformTools: {}
+platformMcp: {}
+modelMetadata: {}
+
+# -- Org identity
+org:
+  id: ""
+
+# -- Encryption (Fernet key for credential vault)
+encryptionKey: ""
+
+# -- Logging
+logLevel: "INFO"

@@ -1,13 +1,10 @@
-# RBAC for sandbox pods.
-# Sandbox pods have NO K8s API access — minimal ServiceAccount.
+{{- $fullname := include "surogates.fullname" . -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: surogates-sandbox
-  namespace: surogates
+  name: {{ $fullname }}-sandbox
   labels:
-    app: surogates
-    component: sandbox
+    {{- include "surogates.fullLabels" (dict "root" . "component" "sandbox") | nindent 4 }}
 ---
 # No Role/RoleBinding — the sandbox ServiceAccount has zero permissions.
 # The pod cannot list pods, read secrets, or interact with the K8s API.

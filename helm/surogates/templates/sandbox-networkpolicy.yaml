@@ -1,14 +1,14 @@
+{{- $fullname := include "surogates.fullname" . -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: sandbox-isolation
-  namespace: surogates
+  name: {{ $fullname }}-sandbox-isolation
+  labels:
+    {{- include "surogates.labels" . | nindent 4 }}
 spec:
-  # Apply to all sandbox pods.
   podSelector:
     matchLabels:
-      app: surogates
-      component: sandbox
+      {{- include "surogates.componentSelector" (dict "root" . "component" "sandbox") | nindent 6 }}
   policyTypes:
     - Egress
     - Ingress
@@ -18,8 +18,7 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              app: surogates
-              component: worker
+              {{- include "surogates.componentSelector" (dict "root" . "component" "worker") | nindent 14 }}
 
   egress:
     # Allow DNS resolution (kube-dns).
@@ -34,15 +33,16 @@ spec:
         - protocol: TCP
           port: 53
 
+    {{- if .Values.mcpProxy.enabled }}
     # Allow traffic to the MCP proxy service.
     - to:
         - podSelector:
             matchLabels:
-              app: surogates
-              component: mcp-proxy
+              {{- include "surogates.componentSelector" (dict "root" . "component" "mcp-proxy") | nindent 14 }}
       ports:
         - protocol: TCP
           port: 8001
+    {{- end }}
 
     # Allow traffic to Garage S3 (s3fs sidecar mount).
     - to:

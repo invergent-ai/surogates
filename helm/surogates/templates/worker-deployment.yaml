@@ -1,0 +1,183 @@
+{{- $fullname := include "surogates.fullname" . -}}
+{{- $component := "worker" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-worker
+  labels:
+    {{- include "surogates.fullLabels" (dict "root" . "component" $component) | nindent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels:
+      {{- include "surogates.componentSelector" (dict "root" . "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "surogates.fullLabels" (dict "root" . "component" $component) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $fullname }}-worker
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["surogates", "worker"]
+          env:
+            - name: SUROGATES_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-db
+                  key: url
+            - name: SUROGATES_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-redis
+                  key: url
+            - name: SUROGATES_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-jwt
+                  key: secret
+            - name: SUROGATES_WORKER_CONCURRENCY
+              value: {{ .Values.worker.concurrency | quote }}
+            - name: SUROGATES_SANDBOX_BACKEND
+              value: {{ .Values.sandbox.backend | quote }}
+            {{- if eq .Values.sandbox.backend "kubernetes" }}
+            - name: SUROGATES_SANDBOX_K8S_NAMESPACE
+              value: {{ default .Release.Namespace .Values.sandbox.k8sNamespace | quote }}
+            {{- end }}
+            - name: SUROGATES_SANDBOX_SRT_ENABLED
+              value: {{ .Values.sandbox.srtEnabled | quote }}
+            - name: SUROGATES_WORKER_API_BASE_URL
+              value: {{ include "surogates.apiServiceUrl" . | quote }}
+            - name: SUROGATES_WORKER_USE_API_FOR_HARNESS_TOOLS
+              value: "true"
+            - name: SUROGATES_STORAGE_BACKEND
+              value: {{ .Values.storage.backend | quote }}
+            {{- if eq .Values.storage.backend "s3" }}
+            - name: SUROGATES_STORAGE_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-s3
+                  key: endpoint
+            - name: SUROGATES_STORAGE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-s3
+                  key: access-key
+            - name: SUROGATES_STORAGE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-s3
+                  key: secret-key
+            {{- end }}
+            - name: SUROGATES_LLM_MODEL
+              value: {{ .Values.llm.model | quote }}
+            {{- if .Values.llm.provider }}
+            - name: SUROGATES_LLM_PROVIDER
+              value: {{ .Values.llm.provider | quote }}
+            {{- end }}
+            {{- if .Values.llm.baseUrl }}
+            - name: SUROGATES_LLM_BASE_URL
+              value: {{ .Values.llm.baseUrl | quote }}
+            {{- end }}
+            {{- if .Values.llm.apiKey }}
+            - name: SUROGATES_LLM_API_KEY
+              value: {{ .Values.llm.apiKey | quote }}
+            {{- end }}
+            - name: SUROGATES_LLM_TEMPERATURE
+              value: {{ .Values.llm.temperature | quote }}
+            {{- if .Values.llm.maxTokens }}
+            - name: SUROGATES_LLM_MAX_TOKENS
+              value: {{ .Values.llm.maxTokens | quote }}
+            {{- end }}
+            {{- if .Values.mcpProxy.enabled }}
+            - name: SUROGATES_MCP_PROXY_URL
+              value: {{ include "surogates.mcpProxyUrl" . | quote }}
+            {{- end }}
+            {{- if .Values.encryptionKey }}
+            - name: SUROGATES_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-credential-key
+                  key: key
+            {{- end }}
+            {{- if .Values.org.id }}
+            - name: SUROGATES_ORG_ID
+              value: {{ .Values.org.id | quote }}
+            {{- end }}
+            - name: SUROGATES_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SUROGATES_LOG_LEVEL
+              value: {{ .Values.logLevel | quote }}
+          volumeMounts:
+            {{- if .Values.platformPolicies }}
+            - name: platform-policies
+              mountPath: /etc/surogates/policies
+              readOnly: true
+            {{- end }}
+            {{- if .Values.platformSkills }}
+            - name: platform-skills
+              mountPath: /etc/surogates/skills
+              readOnly: true
+            {{- end }}
+            {{- if .Values.platformTools }}
+            - name: platform-tools
+              mountPath: /etc/surogates/tools
+              readOnly: true
+            {{- end }}
+            {{- if .Values.platformMcp }}
+            - name: platform-mcp
+              mountPath: /etc/surogates/mcp
+              readOnly: true
+            {{- end }}
+            {{- if .Values.modelMetadata }}
+            - name: model-metadata
+              mountPath: /etc/surogates/model-metadata.json
+              subPath: model-metadata.json
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          livenessProbe:
+            exec:
+              command: ["surogates", "health"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command: ["surogates", "health"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        {{- if .Values.platformPolicies }}
+        - name: platform-policies
+          configMap:
+            name: {{ $fullname }}-platform-policies
+        {{- end }}
+        {{- if .Values.platformSkills }}
+        - name: platform-skills
+          configMap:
+            name: {{ $fullname }}-platform-skills
+        {{- end }}
+        {{- if .Values.platformTools }}
+        - name: platform-tools
+          configMap:
+            name: {{ $fullname }}-platform-tools
+        {{- end }}
+        {{- if .Values.platformMcp }}
+        - name: platform-mcp
+          configMap:
+            name: {{ $fullname }}-platform-mcp
+        {{- end }}
+        {{- if .Values.modelMetadata }}
+        - name: model-metadata
+          configMap:
+            name: {{ $fullname }}-model-metadata
+        {{- end }}

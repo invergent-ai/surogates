@@ -1,0 +1,30 @@
+Surogates agent "{{ .Values.agent.slug }}" deployed to namespace {{ .Release.Namespace }}.
+
+{{- if .Values.ingress.enabled }}
+
+Web UI:
+  {{- if .Values.ingress.tls.enabled }}
+  https://{{ include "surogates.hostname" . }}
+  {{- else }}
+  http://{{ include "surogates.hostname" . }}
+  {{- end }}
+{{- end }}
+
+API:
+  Internal: {{ include "surogates.apiServiceUrl" . }}
+
+Components:
+  - API server:  {{ .Values.api.replicas }} replica(s)
+  - Worker:      {{ .Values.worker.replicas }} replica(s), concurrency {{ .Values.worker.concurrency }}
+  {{- if .Values.mcpProxy.enabled }}
+  - MCP proxy:   {{ .Values.mcpProxy.replicas }} replica(s)
+  {{- end }}
+  {{- if .Values.channels.slack.enabled }}
+  - Slack:       enabled
+  {{- end }}
+
+LLM: {{ .Values.llm.model }}
+Sandbox: {{ .Values.sandbox.backend }}
+{{- if .Values.autoscaling.enabled }}
+Autoscaling: {{ .Values.autoscaling.minReplicas }}-{{ .Values.autoscaling.maxReplicas }} workers
+{{- end }}

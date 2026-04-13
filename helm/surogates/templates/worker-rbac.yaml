@@ -1,32 +1,24 @@
-# RBAC for worker pods.
-# Workers need to create/delete sandbox pods and their S3 credential secrets.
+{{- $fullname := include "surogates.fullname" . -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: surogates-worker
-  namespace: surogates
+  name: {{ $fullname }}-worker
   labels:
-    app: surogates
-    component: worker
+    {{- include "surogates.fullLabels" (dict "root" . "component" "worker") | nindent 4 }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: surogates-worker
-  namespace: surogates
+  name: {{ $fullname }}-worker
   labels:
-    app: surogates
-    component: worker
+    {{- include "surogates.fullLabels" (dict "root" . "component" "worker") | nindent 4 }}
 rules:
-  # Manage sandbox pods
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["create", "delete", "get", "list", "watch"]
-  # Execute commands inside sandbox pods
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]
-  # Manage session-scoped S3 credential secrets
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create", "delete", "get"]
@@ -34,16 +26,14 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: surogates-worker
-  namespace: surogates
+  name: {{ $fullname }}-worker
   labels:
-    app: surogates
-    component: worker
+    {{- include "surogates.fullLabels" (dict "root" . "component" "worker") | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: surogates-worker
+  name: {{ $fullname }}-worker
 subjects:
   - kind: ServiceAccount
-    name: surogates-worker
-    namespace: surogates
+    name: {{ $fullname }}-worker
+    namespace: {{ .Release.Namespace }}
