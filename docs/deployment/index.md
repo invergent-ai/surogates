@@ -2,154 +2,147 @@
 
 Surogates is Kubernetes-native. All components run as K8s workloads. There is no docker-compose or bare-metal deployment mode.
 
-## Namespace
+Each agent is deployed as an independent Helm release with its own namespace, database, Redis, ingress, and channel adapters. Deploying multiple agents means running multiple `helm install` commands with different values.
 
-All Surogates resources live in the `surogates` namespace:
+## Helm Chart
 
-```yaml
-# k8/base/namespace.yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: surogates
+The Helm chart lives at `helm/surogates/`. Each release creates a fully isolated agent deployment.
+
+```bash
+# Deploy a support bot agent
+helm install support-bot ./helm/surogates \
+  -n support-bot --create-namespace \
+  -f helm/surogates/examples/support-bot.yaml
+
+# Deploy a code assistant agent
+helm install code-agent ./helm/surogates \
+  -n code-agent --create-namespace \
+  -f helm/surogates/examples/code-agent.yaml
 ```
+
+Each agent gets its own subdomain: `{agent.slug}.{agent.domain}` (e.g., `support-bot.k8s.local`, `code-agent.k8s.local`).
+
+### Values Overview
+
+Key sections in `values.yaml`:
+
+| Section | Purpose |
+|---------|---------|
+| `agent.slug` / `agent.domain` | Agent identity and subdomain |
+| `image` | Container image repository and tag |
+| `db` | PostgreSQL connection (each agent uses its own database) |
+| `redis` | Redis connection |
+| `llm` | Model, provider, API key, temperature |
+| `api` | API server replicas and resources |
+| `worker` | Worker replicas, concurrency, and resources |
+| `autoscaling` | Worker HPA configuration |
+| `sandbox` | Sandbox backend (`process` or `kubernetes`) |
+| `storage` | S3-compatible object storage |
+| `mcpProxy` | MCP proxy (enabled/disabled) |
+| `channels.slack` | Slack adapter (enabled/disabled, tokens) |
+| `ingress` | Ingress class, TLS, annotations |
+| `platformSkills` / `platformPolicies` / `platformTools` / `platformMcp` | Platform config mounted as ConfigMaps |
 
 ## Component Overview
 
+Each agent namespace contains:
+
 ```
-Namespace: surogates
+Namespace: {agent-slug}
 |
-+-- Deployment: api-gateway        (2-3 replicas, FastAPI)
-+-- Deployment: worker             (HPA 5-20 replicas)
-+-- Pods: sandbox-{session_id}     (ephemeral, created by worker on demand)
-+-- Deployment: channel-adapters   (1-2 replicas per channel type)
-+-- Deployment: mcp-proxy          (2-3 replicas)
-+-- StatefulSet: postgres          (or managed: RDS, CloudSQL, AlloyDB)
-+-- Deployment: redis              (or managed: ElastiCache, Memorystore)
-+-- StatefulSet: garage            (S3-compatible object storage)
++-- Deployment: {agent-slug}-api          (API server, configurable replicas)
++-- Deployment: {agent-slug}-worker       (HPA-scaled workers)
++-- Pods: sandbox-{session_id}            (ephemeral, created by worker on demand)
++-- Deployment: {agent-slug}-channel-slack (conditional, if channels.slack.enabled)
++-- Deployment: {agent-slug}-mcp-proxy    (conditional, if mcpProxy.enabled)
++-- StatefulSet: postgres                 (or managed: RDS, CloudSQL, AlloyDB)
++-- Deployment: redis                     (or managed: ElastiCache, Memorystore)
++-- StatefulSet: garage                   (S3-compatible object storage)
 ```
 
-## API Server Deployment
+## API Server
 
 The API server serves the REST API, web chat SPA, and SSE event streams.
 
 ```yaml
-# k8/base/api-deployment.yaml (simplified)
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: api-gateway
-  namespace: surogates
-spec:
-  replicas: 2
-  template:
-    spec:
-      containers:
-      - name: api
-        image: ghcr.io/invergent-ai/surogates:latest
-        command: ["uvicorn", "surogates.api.app:create_app", "--factory",
-                  "--host", "0.0.0.0", "--port", "8000"]
-        ports:
-        - containerPort: 8000
-        env:
-        - name: SUROGATES_CONFIG
-          value: /etc/surogates/config.yaml
-        volumeMounts:
-        - name: config
-          mountPath: /etc/surogates/config.yaml
-          subPath: config.yaml
-        - name: platform-skills
-          mountPath: /etc/surogates/skills
-          readOnly: true
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 8000
+# helm/surogates/templates/api-deployment.yaml (simplified)
+containers:
+  - name: api
+    image: ghcr.io/invergent-ai/surogates:latest
+    command: ["surogates", "api"]
+    ports:
+      - containerPort: 8000
+    env:
+      - name: SUROGATES_DB_URL       # from Secret
+      - name: SUROGATES_REDIS_URL    # from Secret
+      - name: SUROGATES_JWT_SECRET   # from Secret
+      - name: SUROGATES_STORAGE_*    # S3 credentials (if storage.backend=s3)
 ```
 
 The API server needs:
 - Database credentials (sessions, tenants, credentials)
 - S3 credentials for all tenant and session buckets
 - JWT signing secret
-- Platform volumes (skills, tools, MCP configs, policies) mounted read-only
+- Platform volumes (skills) mounted read-only
 
-## Worker Deployment
+## Worker
 
 Workers run the orchestrator loop, pulling sessions from the Redis queue and executing the agent harness.
 
 ```yaml
-# k8/base/worker-deployment.yaml (simplified)
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: worker
-  namespace: surogates
-spec:
-  replicas: 5
-  template:
-    spec:
-      serviceAccountName: surogates-worker
-      containers:
-      - name: worker
-        image: ghcr.io/invergent-ai/surogates:latest
-        command: ["python", "-m", "surogates.orchestrator.worker"]
-        env:
-        - name: SUROGATES_CONFIG
-          value: /etc/surogates/config.yaml
-        volumeMounts:
-        - name: config
-          mountPath: /etc/surogates/config.yaml
-          subPath: config.yaml
-        - name: platform-skills
-          mountPath: /etc/surogates/skills
-          readOnly: true
-        - name: platform-tools
-          mountPath: /etc/surogates/tools
-          readOnly: true
-        - name: platform-mcp
-          mountPath: /etc/surogates/mcp
-          readOnly: true
-        - name: platform-policies
-          mountPath: /etc/surogates/policies
-          readOnly: true
+# helm/surogates/templates/worker-deployment.yaml (simplified)
+containers:
+  - name: worker
+    image: ghcr.io/invergent-ai/surogates:latest
+    command: ["surogates", "worker"]
+    env:
+      - name: SUROGATES_DB_URL
+      - name: SUROGATES_REDIS_URL
+      - name: SUROGATES_JWT_SECRET
+      - name: SUROGATES_LLM_MODEL        # from values.llm.model
+      - name: SUROGATES_LLM_API_KEY      # from values.llm.apiKey
+      - name: SUROGATES_WORKER_CONCURRENCY
+      - name: SUROGATES_SANDBOX_BACKEND
+      - name: SUROGATES_WORKER_API_BASE_URL  # auto-generated: http://{release}-api.{ns}.svc:8000
+    volumeMounts:
+      - name: platform-policies   # from ConfigMap (if platformPolicies set)
+      - name: platform-skills     # from ConfigMap (if platformSkills set)
+      - name: platform-tools      # from ConfigMap (if platformTools set)
+      - name: platform-mcp        # from ConfigMap (if platformMcp set)
+      - name: model-metadata      # from ConfigMap (if modelMetadata set)
 ```
 
 The worker needs:
 - Database credentials (sessions, events, leases)
 - Redis access (work queue, nudges)
-- API server URL + token (for skills/memory operations)
+- LLM provider credentials (API key)
+- API server URL (auto-resolved to the release's own API service)
 - K8s API access (ServiceAccount with RBAC to create/delete sandbox pods)
 - Platform volumes mounted read-only
 
 ### HPA Scaling
 
-Workers scale horizontally based on active sessions:
+Workers scale horizontally based on CPU utilization:
 
 ```yaml
-# k8/base/hpa.yaml
+# helm/surogates/templates/hpa.yaml (conditional on autoscaling.enabled)
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
-metadata:
-  name: worker
-  namespace: surogates
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: worker
-  minReplicas: 5
-  maxReplicas: 20
+    name: {release}-worker
+  minReplicas: 5     # values.autoscaling.minReplicas
+  maxReplicas: 20    # values.autoscaling.maxReplicas
   metrics:
-  - type: Pods
-    pods:
-      metric:
-        name: surogates_active_sessions
-      target:
-        type: AverageValue
-        averageValue: "40"
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70  # values.autoscaling.targetCPU
 ```
-
-Target: average 40 active sessions per worker (out of 50 max concurrency).
 
 ## Sandbox Pods
 
@@ -170,7 +163,7 @@ sandbox-{session_id} pod
 | (surogates package)       |  real Python handlers via ToolRegistry
 +---------------------------+
   Session-scoped S3 creds only
-  NetworkPolicy: only MCP proxy
+  NetworkPolicy: only MCP proxy + Garage S3
 ```
 
 **Lifecycle:**
@@ -179,62 +172,40 @@ sandbox-{session_id} pod
 3. Subsequent sandbox tool calls reuse the same pod.
 4. Session ends or times out -- worker destroys the pod.
 
-## Channel Adapter Deployments
+## Channel Adapters
 
-Each messaging channel runs as a separate deployment:
+Each messaging channel runs as a separate deployment, conditional on its `enabled` flag in values.
 
 ```yaml
-# k8/base/channel-slack-deployment.yaml (simplified)
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: channel-slack
-  namespace: surogates
-spec:
-  replicas: 1
-  template:
-    spec:
-      containers:
-      - name: slack
-        image: ghcr.io/invergent-ai/surogates:latest
-        command: ["python", "-m", "surogates.channels.slack"]
-        env:
-        - name: SLACK_APP_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: slack-credentials
-              key: app-token
-        - name: SLACK_BOT_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: slack-credentials
-              key: bot-token
+# helm/surogates/templates/channel-slack.yaml (conditional on channels.slack.enabled)
+containers:
+  - name: channel
+    image: ghcr.io/invergent-ai/surogates:latest
+    command: ["surogates", "channel", "slack"]
+    env:
+      - name: SUROGATES_SLACK_BOT_TOKEN   # from Secret
+      - name: SUROGATES_SLACK_APP_TOKEN   # from Secret
+      - name: SUROGATES_SLACK_REQUIRE_MENTION
+      - name: SUROGATES_SLACK_REPLY_IN_THREAD
 ```
 
 Channel adapters need:
-- Platform credentials (Slack tokens)
-- API server URL (to forward normalized messages)
+- Platform credentials (Slack tokens, from Secret)
+- Database access (for identity resolution and delivery outbox)
 - Redis access (for delivery nudges)
-- Database access (for delivery outbox claiming)
 
-## MCP Proxy Deployment
+## MCP Proxy
 
-The MCP proxy handles credential injection for external MCP tool calls. The sandbox calls MCP tools through this proxy -- it never sees the credentials.
+The MCP proxy handles credential injection for external MCP tool calls. The sandbox calls MCP tools through this proxy -- it never sees the credentials. Conditional on `mcpProxy.enabled`.
 
 ```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: mcp-proxy
-  namespace: surogates
-spec:
-  replicas: 2
-  template:
-    spec:
-      containers:
-      - name: mcp-proxy
-        image: ghcr.io/invergent-ai/surogates:latest
-        command: ["python", "-m", "surogates.mcp_proxy"]
+# helm/surogates/templates/mcp-proxy-deployment.yaml (conditional)
+containers:
+  - name: mcp-proxy
+    image: ghcr.io/invergent-ai/surogates:latest
+    command: ["surogates", "mcp-proxy"]
+    ports:
+      - containerPort: 8001
 ```
 
 ## Infrastructure Dependencies
@@ -243,6 +214,8 @@ spec:
 
 Stores all relational data: sessions, events, tenants, credentials, leases, delivery outbox. Use a managed service (RDS, CloudSQL, AlloyDB) or a StatefulSet.
 
+Each agent deployment should use its own database (or schema) for full isolation.
+
 Key tables: `orgs`, `users`, `channel_identities`, `sessions`, `events`, `session_leases`, `session_cursors`, `delivery_outbox`, `delivery_cursors`, `credentials`, `skills`, `mcp_servers`.
 
 See [Appendix C: Database Schema](../appendices/database-schema.md) for full DDL.
@@ -250,6 +223,8 @@ See [Appendix C: Database Schema](../appendices/database-schema.md) for full DDL
 ### Redis
 
 Used for the work queue (`BZPOPMIN` on sorted set), wake nudges (pub/sub), rate limiting (sliding window), and short-lived caches. Redis is an accelerator, not a source of truth -- all durable state is in PostgreSQL.
+
+Each agent deployment uses its own Redis instance (or database number).
 
 ### Garage
 
@@ -261,39 +236,41 @@ Garage ports: 3900 (S3 API), 3903 (admin API).
 
 ## Platform Volumes
 
-Platform-level resources are provisioned as read-only volumes mounted into worker and API server pods:
+Platform-level resources are provisioned as ConfigMaps and mounted read-only into worker and API server pods. Each is conditional -- only created and mounted when the corresponding values section is non-empty.
 
-| Volume | Mount Path | Contents |
+| Value Key | Mount Path | Contents |
 |---|---|---|
-| `platform-skills` | `/etc/surogates/skills/` | Common skill definitions (`SKILL.md` files) |
-| `platform-tools` | `/etc/surogates/tools/` | Tool enablement and configuration |
-| `platform-mcp` | `/etc/surogates/mcp/` | MCP server definitions |
-| `platform-policies` | `/etc/surogates/policies/` | AGT policy definitions |
-| `model-metadata` | mounted in workers | Model catalog (context windows, pricing, capabilities) |
+| `platformSkills` | `/etc/surogates/skills/` | Common skill definitions (`SKILL.md` files) |
+| `platformTools` | `/etc/surogates/tools/` | Tool enablement and configuration |
+| `platformMcp` | `/etc/surogates/mcp/` | MCP server definitions |
+| `platformPolicies` | `/etc/surogates/policies/` | AGT policy definitions |
+| `modelMetadata` | `/etc/surogates/model-metadata.json` | Model catalog (context windows, pricing, capabilities) |
 
 These volumes are managed by the platform operator, not by tenants. They form the bottom layer of the 3-layer resource loading (platform > org > user).
 
 ## Ingress
 
+Each agent gets its own Ingress resource with a subdomain derived from `agent.slug` and `agent.domain`:
+
 ```yaml
-# k8/base/ingress.yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: surogates
-  namespace: surogates
+# helm/surogates/templates/ingress.yaml (conditional on ingress.enabled)
 spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - support-bot.k8s.local     # {agent.slug}.{agent.domain}
+      secretName: support-bot-tls
   rules:
-  - host: surogates.example.com
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: api-gateway
-            port:
-              number: 8000
+    - host: support-bot.k8s.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: support-bot-api
+                port:
+                  name: http
 ```
 
 Path routing:
@@ -301,47 +278,73 @@ Path routing:
 - `/v1/*` -- REST API
 - `/health` -- health check
 
+For multiple agents, use a wildcard TLS certificate on `*.k8s.local` and let each Helm release create its own Ingress rule.
+
 ## RBAC
 
-Two ServiceAccounts with different privilege levels:
+Two ServiceAccounts per agent namespace with different privilege levels:
 
-**`surogates-worker`** -- used by worker pods:
-- Create/delete pods in the `surogates` namespace (for sandbox management)
-- Create/delete secrets (for session-scoped S3 credentials)
-- Read secrets (for LLM credentials)
+**`{release}-worker`** -- used by worker pods:
+- Create/delete pods in the namespace (for sandbox management)
+- Execute commands in pods (K8s exec API for sandbox tool calls)
+- Create/delete/get secrets (for session-scoped S3 credentials)
 
-**`surogates-sandbox`** -- used by sandbox pods:
+**`{release}-sandbox`** -- used by sandbox pods:
 - Minimal -- no K8s API access at all.
 
 ## Network Policies
 
+Sandbox pods are locked down via NetworkPolicy:
+
 ```yaml
-# k8/base/sandbox-networkpolicy.yaml
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: sandbox-isolation
-  namespace: surogates
+# helm/surogates/templates/sandbox-networkpolicy.yaml
 spec:
   podSelector:
     matchLabels:
-      role: sandbox
+      agent: {agent-slug}
+      component: sandbox
   policyTypes:
-  - Egress
+    - Egress
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              component: worker    # K8s exec from worker only
   egress:
-  - to:
-    - podSelector:
-        matchLabels:
-          app: mcp-proxy
-  - to:
-    - podSelector:
-        matchLabels:
-          app: garage
-    ports:
-    - port: 3900
+    - to: [kube-dns]               # DNS resolution
+    - to: [mcp-proxy]              # External tool calls (if enabled)
+    - to: [garage]                 # Workspace file I/O via s3fs
 ```
 
 Sandbox pods can only reach:
 - The MCP proxy (for external tool calls)
 - Garage S3 API (for workspace file I/O via s3fs)
+- DNS (kube-dns for name resolution)
 - Nothing else -- no internet, no database, no Redis, no API server.
+
+## Multi-Agent Deployment
+
+To deploy multiple agents, run separate `helm install` commands with different values:
+
+```bash
+# Support bot: Slack-connected, lightweight sandbox
+helm install support-bot ./helm/surogates \
+  -n support-bot --create-namespace \
+  -f helm/surogates/examples/support-bot.yaml
+
+# Code agent: web-only, full K8s sandbox with SRT
+helm install code-agent ./helm/surogates \
+  -n code-agent --create-namespace \
+  -f helm/surogates/examples/code-agent.yaml
+```
+
+Each agent is fully isolated:
+- Own namespace, own database, own Redis
+- Own ingress at `{slug}.{domain}`
+- Own LLM credentials and model selection
+- Own channel adapters (Slack, etc.)
+- Own sandbox configuration
+- Independent scaling (separate HPA per agent)
+
+Shared identity across agents is managed externally via LDAP.
