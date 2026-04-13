@@ -1,0 +1,55 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-isolation
+  namespace: surogates
+spec:
+  # Apply to all sandbox pods.
+  podSelector:
+    matchLabels:
+      app: surogates
+      component: sandbox
+  policyTypes:
+    - Egress
+    - Ingress
+
+  ingress:
+    # Allow K8s exec API from the worker.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: surogates
+              component: worker
+
+  egress:
+    # Allow DNS resolution (kube-dns).
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # Allow traffic to the MCP proxy service.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: surogates
+              component: mcp-proxy
+      ports:
+        - protocol: TCP
+          port: 8001
+
+    # Allow traffic to Garage S3 (s3fs sidecar mount).
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: garage
+      ports:
+        - protocol: TCP
+          port: 3900

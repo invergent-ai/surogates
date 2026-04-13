@@ -6,6 +6,7 @@ image with a different subcommand:
     surogate api              Start the API gateway (FastAPI + web SPA)
     surogate worker           Start a harness worker (Redis queue consumer)
     surogate channel slack    Start a channel adapter
+    surogate mcp-proxy        Start the MCP proxy service
     surogate migrate          Run database migrations
 """
 
@@ -90,6 +91,25 @@ def cmd_channel(args: argparse.Namespace) -> None:
     asyncio.run(start_channel(channel_type, settings))
 
 
+def cmd_mcp_proxy(args: argparse.Namespace) -> None:
+    """Start the MCP proxy service."""
+    import uvicorn
+
+    from surogates.mcp_proxy.config import load_proxy_settings
+
+    settings = load_proxy_settings()
+    _configure_logging(settings.log_level)
+
+    uvicorn.run(
+        "surogates.mcp_proxy.app:create_app",
+        factory=True,
+        host=settings.host,
+        port=settings.port,
+        workers=settings.workers,
+        log_level=settings.log_level.lower(),
+    )
+
+
 def cmd_migrate(args: argparse.Namespace) -> None:
     """Run database migrations."""
     from surogates.config import load_settings
@@ -129,6 +149,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Channel type to start",
     )
 
+    # surogate mcp-proxy
+    sub.add_parser("mcp-proxy", help="Start the MCP proxy service")
+
     # surogate migrate
     sub.add_parser("migrate", help="Run database migrations")
 
@@ -139,6 +162,7 @@ COMMANDS = {
     "api": cmd_api,
     "worker": cmd_worker,
     "channel": cmd_channel,
+    "mcp-proxy": cmd_mcp_proxy,
     "migrate": cmd_migrate,
 }
 

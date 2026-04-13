@@ -18,6 +18,7 @@ from jose import JWTError, jwt
 __all__ = [
     "create_access_token",
     "create_refresh_token",
+    "create_sandbox_token",
     "decode_token",
     "InvalidTokenError",
 ]
@@ -55,6 +56,31 @@ def create_access_token(
         "user_id": str(user_id),
         "permissions": sorted(permissions),
         "type": "access",
+        "iat": now,
+        "exp": now + expires_minutes * 60,
+    }
+    return jwt.encode(payload, _get_secret(), algorithm=_ALGORITHM)
+
+
+def create_sandbox_token(
+    org_id: UUID,
+    user_id: UUID,
+    session_id: UUID,
+    expires_minutes: int = 60,
+) -> str:
+    """Create a short-lived token for sandbox-to-MCP-proxy authentication.
+
+    Carries the session context (org, user, session) so the MCP proxy
+    can scope MCP server access and credential resolution.
+    """
+    now = int(time.time())
+    payload: dict[str, Any] = {
+        "sub": str(session_id),
+        "org_id": str(org_id),
+        "user_id": str(user_id),
+        "session_id": str(session_id),
+        "permissions": [],
+        "type": "sandbox",
         "iat": now,
         "exp": now + expires_minutes * 60,
     }
@@ -114,7 +140,7 @@ def decode_token(token: str) -> dict[str, Any]:
     if missing:
         raise InvalidTokenError(f"Token is missing required claims: {missing}")
 
-    if payload["type"] not in ("access", "refresh"):
+    if payload["type"] not in ("access", "refresh", "sandbox"):
         raise InvalidTokenError(
             f"Unknown token type: {payload['type']!r}"
         )

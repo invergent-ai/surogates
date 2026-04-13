@@ -77,6 +77,7 @@ async def run_worker(settings: Settings) -> None:
             storage_settings=settings.storage,
             s3fs_image=settings.sandbox.k8s_s3fs_image,
             s3_endpoint=settings.sandbox.k8s_s3_endpoint,
+            mcp_proxy_url=settings.mcp_proxy_url,
         )
     else:
         sandbox_backend = ProcessSandbox()
@@ -93,39 +94,51 @@ async def run_worker(settings: Settings) -> None:
         ", ".join(sorted(tool_registry.tool_names)),
     )
 
-    # 5b. MCP tools — discover from platform + tenant MCP configs.
+    # 5b. MCP tools — two modes:
+    #   - Direct: worker connects to MCP servers in-process (dev mode)
+    #   - Proxied: worker delegates to the MCP proxy service (production)
     from surogates.tools.mcp.proxy import MCPToolProxy
     mcp_proxy = MCPToolProxy(tool_registry)
+    mcp_proxy_client: Any = None  # HTTP client for proxied mode
 
-    # Load MCP server configs from platform volume + tenant asset root.
-    mcp_servers: dict[str, dict] = {}
-    from surogates.tools.loader import ResourceLoader
-    try:
-        # Platform-level MCP configs (mounted from ConfigMap).
-        platform_loader = ResourceLoader(platform_mcp_dir=settings.platform_mcp_dir)
-        for server_def in platform_loader._load_mcp_from_dir(settings.platform_mcp_dir):
-            mcp_servers[server_def.name] = {
-                "transport": server_def.transport,
-                "command": server_def.command,
-                "args": server_def.args,
-                "url": server_def.url,
-                "env": server_def.env,
-                "timeout": server_def.timeout,
-            }
-    except Exception:
-        logger.debug("No platform MCP configs found", exc_info=True)
-
-    if mcp_servers:
-        registered_mcp = mcp_proxy.add_servers(mcp_servers)
-        if registered_mcp:
-            logger.info(
-                "Registered %d MCP tools from %d servers: %s",
-                len(registered_mcp),
-                len(mcp_servers),
-                ", ".join(sorted(registered_mcp)),
-            )
+    if settings.mcp_proxy_url:
+        # Production: MCP tools are called via the proxy service.
+        # Tool discovery happens at session start (per-tenant), not here.
+        from surogates.orchestrator.mcp_client import McpProxyClient
+        mcp_proxy_client = McpProxyClient(
+            base_url=settings.mcp_proxy_url,
+            registry=tool_registry,
+        )
+        logger.info("MCP tools via proxy: %s", settings.mcp_proxy_url)
     else:
-        logger.debug("No MCP servers configured")
+        # Dev mode: connect directly to MCP servers.
+        mcp_servers: dict[str, dict] = {}
+        from surogates.tools.loader import ResourceLoader
+        try:
+            platform_loader = ResourceLoader(platform_mcp_dir=settings.platform_mcp_dir)
+            for server_def in platform_loader._load_mcp_from_dir(settings.platform_mcp_dir):
+                mcp_servers[server_def.name] = {
+                    "transport": server_def.transport,
+                    "command": server_def.command,
+                    "args": server_def.args,
+                    "url": server_def.url,
+                    "env": server_def.env,
+                    "timeout": server_def.timeout,
+                }
+        except Exception:
+            logger.debug("No platform MCP configs found", exc_info=True)
+
+        if mcp_servers:
+            registered_mcp = mcp_proxy.add_servers(mcp_servers)
+            if registered_mcp:
+                logger.info(
+                    "Registered %d MCP tools from %d servers: %s",
+                    len(registered_mcp),
+                    len(mcp_servers),
+                    ", ".join(sorted(registered_mcp)),
+                )
+        else:
+            logger.debug("No MCP servers configured")
 
     # 6. LLM client -- configured from settings.llm (config.yaml + env vars).
     llm_kwargs: dict[str, Any] = {}
@@ -265,6 +278,8 @@ async def run_worker(settings: Settings) -> None:
         logger.info("Worker %s shutting down", worker_id)
         await sandbox_pool.destroy_all()
         mcp_proxy.shutdown_all()
+        if mcp_proxy_client is not None:
+            await mcp_proxy_client.close()
         await redis_client.aclose()
         await engine.dispose()
         await llm_client.close()

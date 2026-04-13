@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-proxy
+  namespace: surogates
+  labels:
+    app: surogates
+    component: mcp-proxy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: surogates
+      component: mcp-proxy
+  template:
+    metadata:
+      labels:
+        app: surogates
+        component: mcp-proxy
+    spec:
+      containers:
+        - name: mcp-proxy
+          image: ghcr.io/invergent-ai/surogates:latest
+          command: ["surogates", "mcp-proxy"]
+          ports:
+            - name: http
+              containerPort: 8001
+              protocol: TCP
+          env:
+            - name: SUROGATES_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: surogates-db
+                  key: url
+            - name: SUROGATES_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: surogates-redis
+                  key: url
+            - name: SUROGATES_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: surogates-jwt
+                  key: secret
+            - name: SUROGATES_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: surogates-credential-key
+                  key: key
+            - name: SUROGATES_LOG_LEVEL
+              value: "INFO"
+          volumeMounts:
+            - name: platform-mcp
+              mountPath: /etc/surogates/mcp
+              readOnly: true
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+      volumes:
+        - name: platform-mcp
+          configMap:
+            name: platform-mcp
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-proxy
+  namespace: surogates
+  labels:
+    app: surogates
+    component: mcp-proxy
+spec:
+  selector:
+    app: surogates
+    component: mcp-proxy
+  ports:
+    - name: http
+      port: 8001
+      targetPort: http
+      protocol: TCP

@@ -10,6 +10,7 @@ resources:
   - worker-rbac.yaml
   - sandbox-rbac.yaml
   - sandbox-networkpolicy.yaml
+  - mcp-proxy-deployment.yaml
   - s3/secret.yaml
   - channel-slack-deployment.yaml
   - hpa.yaml

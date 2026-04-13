@@ -77,6 +77,7 @@ class K8sSandbox:
         storage_settings: Any = None,
         s3fs_image: str = "ghcr.io/invergent-ai/s3fs-fuse:latest",
         s3_endpoint: str = "",
+        mcp_proxy_url: str = "",
     ) -> None:
         self._namespace = namespace
         self._service_account = service_account
@@ -85,6 +86,7 @@ class K8sSandbox:
         self._storage = storage_settings
         self._s3fs_image = s3fs_image
         self._s3_endpoint = s3_endpoint
+        self._mcp_proxy_url = mcp_proxy_url
         self._pods: dict[str, _PodEntry] = {}
         self._api: client.CoreV1Api | None = None
 
@@ -244,6 +246,20 @@ class K8sSandbox:
         env_vars = [
             client.V1EnvVar(name="WORKSPACE_DIR", value="/workspace"),
         ]
+        if self._mcp_proxy_url:
+            env_vars.append(client.V1EnvVar(
+                name="MCP_PROXY_URL", value=self._mcp_proxy_url,
+            ))
+            # Mint a sandbox token for MCP proxy authentication.
+            from surogates.tenant.auth.jwt import create_sandbox_token
+            sandbox_token = create_sandbox_token(
+                org_id=uuid.UUID(spec.env.get("ORG_ID", "00000000-0000-0000-0000-000000000000")),
+                user_id=uuid.UUID(spec.env.get("USER_ID", "00000000-0000-0000-0000-000000000000")),
+                session_id=uuid.UUID(sandbox_id),
+            )
+            env_vars.append(client.V1EnvVar(
+                name="MCP_PROXY_TOKEN", value=sandbox_token,
+            ))
         for k, v in spec.env.items():
             env_vars.append(client.V1EnvVar(name=k, value=v))
 

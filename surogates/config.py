@@ -260,6 +260,11 @@ class Settings(BaseSettings):
     org_id: str = ""  # the org this agent instance belongs to
     worker_id: str = ""  # set from K8s downward API (pod name)
     jwt_secret: str = "change-me-in-production"
+    encryption_key: str = ""  # Fernet key for credential vault
+
+    # MCP proxy — when set, worker proxies MCP calls through the proxy
+    # service instead of connecting to MCP servers directly.
+    mcp_proxy_url: str = ""  # e.g. "http://mcp-proxy.surogates.svc:8001"
 
     log_level: str = "INFO"
 
