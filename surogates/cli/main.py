@@ -5,7 +5,7 @@ image with a different subcommand:
 
     surogate api              Start the API gateway (FastAPI + web SPA)
     surogate worker           Start a harness worker (Redis queue consumer)
-    surogate channel slack    Start a channel adapter
+    surogate channel slack    Start the Slack channel adapter
     surogate mcp-proxy        Start the MCP proxy service
     surogate migrate          Run database migrations
 """
@@ -145,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_channel = sub.add_parser("channel", help="Start a channel adapter")
     p_channel.add_argument(
         "type",
-        choices=["slack", "teams", "telegram", "webhook"],
+        choices=["slack"],
         help="Channel type to start",
     )
 

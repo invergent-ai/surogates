@@ -537,8 +537,8 @@ class ExpertTrainingDataResponse(BaseModel):
 @router.post("/skills/{name}/activate", response_model=SkillActionResponse)
 async def activate_expert(
     name: str,
-    body: ExpertActivateRequest | None = None,
     request: Request,
+    body: ExpertActivateRequest | None = None,
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> SkillActionResponse:
     """Set an expert skill's status to ``active``.
