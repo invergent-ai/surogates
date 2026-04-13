@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 from uuid import UUID
 
 from sqlalchemy import select, text, update, delete, func
-from sqlalchemy.exc import NoResultFound
 
 from surogates.db.models import (
     Event as EventRow,
@@ -495,6 +494,102 @@ class SessionStore:
             )
             rows = result.mappings().all()
         return [Event.model_validate(dict(r)) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Session reset (idle auto-reset)
+    # ------------------------------------------------------------------
+
+    async def find_idle_sessions(
+        self,
+        idle_minutes: int,
+        *,
+        daily_at_hour: int | None = None,
+        mode: str = "idle",
+        limit: int = 200,
+    ) -> list[Session]:
+        """Find sessions that should be reset based on the reset policy.
+
+        Returns sessions whose ``updated_at`` exceeds the idle threshold
+        and/or crossed a daily boundary, depending on *mode*.
+
+        Only sessions in ``active`` or ``idle`` status are considered.
+        Sessions with an active lease (not yet expired) are excluded —
+        they are currently being processed by a worker.
+
+        Results are capped at *limit* (default 200) to bound memory and
+        processing time per cron run.  Remaining sessions are picked up
+        on the next run.
+        """
+        conditions: list[str] = []
+
+        if mode in ("idle", "both"):
+            conditions.append(
+                "s.updated_at < now() - make_interval(mins => :idle_minutes)"
+            )
+
+        if mode in ("daily", "both") and daily_at_hour is not None:
+            conditions.append(
+                """s.updated_at < (
+                    CASE WHEN EXTRACT(HOUR FROM now()) >= :at_hour
+                         THEN date_trunc('day', now()) + make_interval(hours => :at_hour)
+                         ELSE date_trunc('day', now()) - interval '1 day'
+                              + make_interval(hours => :at_hour)
+                    END
+                )"""
+            )
+
+        if not conditions:
+            return []
+
+        if mode == "both":
+            where_clause = "(" + " OR ".join(conditions) + ")"
+        else:
+            where_clause = conditions[0]
+
+        query = f"""
+            SELECT s.* FROM sessions s
+            LEFT JOIN session_leases l
+                ON l.session_id = s.id AND l.expires_at > now()
+            WHERE s.status IN ('active', 'idle')
+              AND l.session_id IS NULL
+              AND {where_clause}
+            ORDER BY s.updated_at ASC
+            LIMIT :lim
+        """
+
+        params: dict[str, Any] = {"idle_minutes": idle_minutes, "lim": limit}
+        if daily_at_hour is not None:
+            params["at_hour"] = daily_at_hour
+
+        async with self._sf() as db:
+            result = await db.execute(text(query), params)
+            rows = result.mappings().all()
+        return [Session.model_validate(dict(r)) for r in rows]
+
+    async def reset_session(
+        self,
+        session_id: UUID,
+        *,
+        reason: str = "idle",
+    ) -> None:
+        """Mark a session as idle-reset.
+
+        The session's events, counters, and cursor are left untouched —
+        the user can come back and continue at any time.  A stale lease
+        is cleaned up and a ``SESSION_RESET`` event is appended.
+        """
+        async with self._sf() as db:
+            await db.execute(
+                text("DELETE FROM session_leases WHERE session_id = :sid"),
+                {"sid": session_id},
+            )
+            await db.commit()
+
+        await self.emit_event(
+            session_id,
+            EventType.SESSION_RESET,
+            {"reason": reason},
+        )
 
 
 # ---------------------------------------------------------------------------

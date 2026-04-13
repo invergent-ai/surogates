@@ -1,6 +1,6 @@
 # 14. Background Jobs
 
-Surogates includes two background jobs that run as Kubernetes CronJobs.
+Surogates includes three background jobs that run as Kubernetes CronJobs.
 
 ## `cleanup_sessions` -- Orphaned Bucket Sweep
 
@@ -47,6 +47,103 @@ spec:
 ```
 
 The job is idempotent -- running it multiple times has no side effects.
+
+## `reset_idle_sessions` -- Idle Session Reset with Memory Flush
+
+Detects sessions that have been inactive beyond a configurable threshold, runs a temporary LLM agent to review the conversation transcript and save important facts to memory, then tears down the sandbox pod. The session itself (events, counters, cursor) is left untouched -- the user can come back and continue at any time.
+
+### What It Does
+
+```
+1. Query PostgreSQL for sessions where updated_at exceeds idle threshold
+   (and/or crossed a daily boundary, depending on mode)
+2. Skip sessions with active harness leases (currently being processed)
+3. For each idle session (capped at 200 per run):
+   a. Load USER_MESSAGE, LLM_RESPONSE, CONTEXT_COMPACT events
+   b. Extract a user/assistant transcript (skip if < 4 messages)
+   c. Read current MEMORY.md and USER.md from disk (stale-overwrite guard)
+   d. Run a temporary LLM agent with only the memory tool enabled
+      - Agent reviews the transcript and saves important facts
+      - Max 8 iterations (configurable)
+   e. Persist memory files to TenantStorage (S3/Garage) for durability
+   f. Interrupt any running harness via Redis pub/sub
+   g. Tear down sandbox pod (K8s backend)
+   h. Emit SESSION_RESET event
+```
+
+### Configuration
+
+See [Appendix A: Configuration Reference](../appendices/configuration.md#session-reset-session_reset) for the full settings table.
+
+In `config.yaml`:
+
+```yaml
+session_reset:
+  enabled: true
+  mode: "idle"              # "daily", "idle", "both", or "none"
+  idle_minutes: 1440        # 24 hours of inactivity
+  at_hour: 4                # Hour for daily reset (0-23, only for "daily"/"both" mode)
+  flush_max_iterations: 8   # Max LLM iterations for the flush agent
+```
+
+Or via environment variables:
+
+```bash
+SUROGATES_SESSION_RESET_ENABLED=true
+SUROGATES_SESSION_RESET_MODE=idle
+SUROGATES_SESSION_RESET_IDLE_MINUTES=1440
+```
+
+### Usage
+
+```bash
+# Run manually
+uv run python -m surogates.jobs.reset_idle_sessions
+
+# Dry run (report what would be reset without resetting)
+uv run python -m surogates.jobs.reset_idle_sessions --dry-run
+```
+
+### Kubernetes CronJob
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: reset-idle-sessions
+  namespace: surogates
+spec:
+  schedule: "*/5 * * * *"    # every 5 minutes
+  concurrencyPolicy: Forbid  # prevent overlapping runs
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: reset
+            image: ghcr.io/invergent-ai/surogates:latest
+            command: ["python", "-m", "surogates.jobs.reset_idle_sessions"]
+            volumeMounts:
+            - name: tenant-assets
+              mountPath: /data/tenant-assets
+          volumes:
+          - name: tenant-assets
+            persistentVolumeClaim:
+              claimName: tenant-assets
+          restartPolicy: OnFailure
+```
+
+The job requires access to the same `tenant-assets` PersistentVolume as the worker pods (for reading/writing memory files), the database (for querying sessions and events), Redis (for interrupt signals), and an LLM API key (for the flush agent).
+
+### How the Memory Flush Works
+
+The flush is a mini agent loop, not a simple file copy:
+
+1. The conversation transcript (user + assistant messages only) is extracted from the event log
+2. A temporary LLM agent receives the transcript plus a structured prompt instructing it to save important facts
+3. Current memory state from disk is included in the prompt so the agent avoids overwriting newer entries
+4. The agent can call the `memory` tool (add/replace/remove entries in MEMORY.md and USER.md)
+5. After the agent finishes, memory files are copied to S3/Garage for durability
 
 ## `training_collector` -- Expert Training Data Export
 

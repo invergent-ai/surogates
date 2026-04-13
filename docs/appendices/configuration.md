@@ -106,6 +106,22 @@ Surogates is configured via a YAML file merged with environment variables. Envir
 | `saga.default_max_retries` | `SUROGATES_SAGA_DEFAULT_MAX_RETRIES` | `2` | Retries per step before marking as failed |
 | `saga.retry_delay` | `SUROGATES_SAGA_RETRY_DELAY` | `1.0` | Initial retry delay in seconds (exponential backoff) |
 
+## Session Reset (`session_reset`)
+
+| Key | Env Var | Default | Description |
+|---|---|---|---|
+| `session_reset.enabled` | `SUROGATES_SESSION_RESET_ENABLED` | `false` | Enable idle session reset with memory flush |
+| `session_reset.mode` | `SUROGATES_SESSION_RESET_MODE` | `idle` | Reset trigger: `idle`, `daily`, `both`, or `none` |
+| `session_reset.idle_minutes` | `SUROGATES_SESSION_RESET_IDLE_MINUTES` | `1440` | Minutes of inactivity before reset (24 hours) |
+| `session_reset.at_hour` | `SUROGATES_SESSION_RESET_AT_HOUR` | `4` | Hour for daily reset (0-23, only for `daily`/`both` mode) |
+| `session_reset.flush_max_iterations` | `SUROGATES_SESSION_RESET_FLUSH_MAX_ITERATIONS` | `8` | Max LLM iterations for the memory flush agent |
+| `session_reset.flush_max_retries` | `SUROGATES_SESSION_RESET_FLUSH_MAX_RETRIES` | `3` | Max retry attempts per session before skipping |
+| `session_reset.watcher_interval_seconds` | `SUROGATES_SESSION_RESET_WATCHER_INTERVAL_SECONDS` | `300` | CronJob recommended interval (informational) |
+| `session_reset.notify` | `SUROGATES_SESSION_RESET_NOTIFY` | `true` | Send user notification on auto-reset |
+| `session_reset.notify_exclude_channels` | `SUROGATES_SESSION_RESET_NOTIFY_EXCLUDE_CHANNELS` | `["webhook"]` | Channels that don't receive reset notifications |
+
+When a session is idle-reset, the conversation history, counters, and cursor are preserved -- the user can resume at any time. Only a `SESSION_RESET` event is appended, the sandbox pod is torn down, and memory is flushed to durable storage. See [Background Jobs -- reset_idle_sessions](../background-jobs/index.md#reset_idle_sessions----idle-session-reset-with-memory-flush) for details.
+
 ## Tenant Defaults
 
 | Key | Env Var | Default | Description |
@@ -152,6 +168,11 @@ storage:
 
 governance:
   enabled: true
+
+session_reset:
+  enabled: false
+  mode: "idle"
+  idle_minutes: 1440
 
 org_id: "c5ea6808-7545-4e30-9340-a96386378030"
 jwt_secret: "dev-secret-do-not-use-in-production"

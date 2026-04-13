@@ -263,6 +263,39 @@ class GovernanceSettings(BaseSettings):
     transparency: TransparencySettings = Field(default_factory=TransparencySettings)
 
 
+class SessionResetSettings(BaseSettings):
+    """Session idle reset policy.
+
+    When a session has been inactive beyond the configured threshold, the
+    platform runs a temporary LLM agent that reviews the conversation
+    transcript and saves important facts to memory, then tears down the
+    sandbox pod.  The session itself (events, counters, cursor) is left
+    untouched — the user can come back and continue at any time.
+
+    Ported from Hermes ``SessionResetPolicy``.
+
+    Modes:
+    - ``"idle"``: Reset after *idle_minutes* of inactivity.
+    - ``"daily"``: Reset at a specific hour each day.
+    - ``"both"``: Whichever triggers first (daily boundary OR idle timeout).
+    - ``"none"``: Never auto-reset.
+    """
+
+    model_config = {"env_prefix": "SUROGATES_SESSION_RESET_"}
+
+    enabled: bool = False
+    mode: Literal["idle", "daily", "both", "none"] = "idle"
+    at_hour: int = 4
+    idle_minutes: int = 1440
+    flush_max_iterations: int = 8
+    flush_max_retries: int = 3
+    watcher_interval_seconds: int = 300
+    notify: bool = True
+    notify_exclude_channels: list[str] = Field(
+        default_factory=lambda: ["webhook"],
+    )
+
+
 class SagaSettings(BaseSettings):
     """Saga orchestration settings."""
 
@@ -285,6 +318,7 @@ class Settings(BaseSettings):
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
     governance: GovernanceSettings = Field(default_factory=GovernanceSettings)
     saga: SagaSettings = Field(default_factory=SagaSettings)
+    session_reset: SessionResetSettings = Field(default_factory=SessionResetSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     slack: SlackSettings = Field(default_factory=SlackSettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)

@@ -39,6 +39,7 @@ class EventType(str, Enum):
     SESSION_RESUME = "session.resume"
     SESSION_COMPLETE = "session.complete"
     SESSION_FAIL = "session.fail"
+    SESSION_RESET = "session.reset"
 
     # Context management
     CONTEXT_COMPACT = "context.compact"
