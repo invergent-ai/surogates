@@ -5,8 +5,7 @@ memory (``MEMORY.md`` and ``USER.md``).  All endpoints are tenant-scoped
 via ``TenantContext``.
 
 Memory is stored in the tenant's S3 bucket (or local filesystem in dev)
-via ``StorageBackend``.  The entry format (``§``-delimited) matches the
-Hermes ``MemoryStore`` convention.
+via ``StorageBackend``.
 """
 
 from __future__ import annotations

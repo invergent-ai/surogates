@@ -61,6 +61,7 @@ class MessageEvent:
     content: str
     message_type: MessageType = MessageType.TEXT
     media_urls: list[str] = field(default_factory=list)
+    media_types: list[str] = field(default_factory=list)
     reply_to_message_id: str | None = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     raw_payload: dict[str, Any] = field(default_factory=dict)
@@ -73,6 +74,7 @@ class SendResult:
     success: bool
     message_id: str | None = None
     error: str | None = None
+    retryable: bool = False
 
 
 # ---------------------------------------------------------------------------

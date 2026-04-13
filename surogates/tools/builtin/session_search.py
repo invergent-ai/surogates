@@ -648,7 +648,7 @@ async def session_search(
 
 
 # ---------------------------------------------------------------------------
-# Tool schema (exact copy of Hermes description)
+# Tool schema
 # ---------------------------------------------------------------------------
 
 SESSION_SEARCH_SCHEMA = ToolSchema(

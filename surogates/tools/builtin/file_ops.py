@@ -451,7 +451,7 @@ def _tool_error(message: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool schemas — exact copies from Hermes
+# Tool schemas
 # ---------------------------------------------------------------------------
 
 READ_FILE_SCHEMA = ToolSchema(

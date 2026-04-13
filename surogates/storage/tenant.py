@@ -1,14 +1,13 @@
 """Tenant-aware storage helpers.
 
-Wraps ``StorageBackend`` with methods that understand the Hermes-compatible
-directory layout inside tenant buckets.  Used by API routes to read/write
-skills, memory, and workspace files without knowing the backend details.
+Wraps ``StorageBackend`` with methods that understand the directory layout inside tenant buckets.  
+Used by API routes to read/write skills, memory, and workspace files without knowing the backend details.
 
 Bucket naming:
 - ``tenant-{org_id}`` — org/user skills, memory, MCP config
 - ``session-{session_id}`` — workspace files
 
-Key layout inside tenant bucket (Hermes convention):
+Key layout inside tenant bucket:
 - ``shared/skills/{name}/SKILL.md``
 - ``shared/skills/{category}/{name}/SKILL.md``
 - ``users/{user_id}/skills/{name}/SKILL.md``
@@ -41,7 +40,7 @@ class TenantStorage:
     """Tenant-aware storage operations.
 
     Provides high-level methods for skills and memory that translate
-    between the Hermes directory convention and ``StorageBackend``
+    between the directory convention and ``StorageBackend``
     bucket/key calls.
     """
 

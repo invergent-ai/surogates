@@ -228,6 +228,33 @@ class SlackSettings(BaseSettings):
     reply_broadcast: bool = False
 
 
+class TelegramSettings(BaseSettings):
+    """Telegram channel adapter configuration."""
+
+    model_config = {"env_prefix": "SUROGATES_TELEGRAM_"}
+
+    bot_token: str = ""
+    webhook_url: str = ""           # empty = polling mode
+    webhook_port: int = 8443
+    webhook_secret: str = ""
+    require_mention: bool = False    # require @mention in group chats
+    free_response_chats: str = ""   # comma-separated chat IDs that skip mention gating
+    mention_patterns: str = ""      # comma-separated regex wake-word patterns
+    reply_to_mode: str = "first"    # "first", "all", "off"
+    reactions_enabled: bool = False  # emoji reactions on message lifecycle
+    per_user_groups: bool = True    # separate session per user in group chats
+    fallback_ips: str = ""          # comma-separated Telegram API fallback IPs
+    base_url: str = ""              # custom Bot API server URL
+    http_pool_size: int = 512
+    http_pool_timeout: float = 8.0
+    http_connect_timeout: float = 10.0
+    http_read_timeout: float = 20.0
+    http_write_timeout: float = 20.0
+    media_batch_delay: float = 0.8
+    text_batch_delay: float = 0.6
+    text_batch_split_delay: float = 2.0
+
+
 class GovernanceSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_GOVERNANCE_"}
 
@@ -260,6 +287,7 @@ class Settings(BaseSettings):
     saga: SagaSettings = Field(default_factory=SagaSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     slack: SlackSettings = Field(default_factory=SlackSettings)
+    telegram: TelegramSettings = Field(default_factory=TelegramSettings)
 
     # Paths — each individually configurable, each a separate K8s volume mount
     platform_skills_dir: str = "/etc/surogates/skills"

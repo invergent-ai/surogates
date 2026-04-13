@@ -319,7 +319,7 @@ async def _run_command(
 
 
 # ---------------------------------------------------------------------------
-# Tool description (verbatim from Hermes)
+# Tool description
 # ---------------------------------------------------------------------------
 
 TERMINAL_TOOL_DESCRIPTION = """Execute shell commands on a Linux environment. Filesystem usually persists between calls.

@@ -115,6 +115,14 @@ async def start_channel(channel_type: str, settings: Settings) -> None:
             session_factory=session_factory,
             redis_client=redis_client,
         )
+    elif channel_type == "telegram":
+        adapter = adapter_cls(
+            telegram_settings=settings.telegram,
+            delivery_service=delivery_service,
+            session_store=session_store,
+            session_factory=session_factory,
+            redis_client=redis_client,
+        )
     else:
         adapter = adapter_cls(
             settings={},

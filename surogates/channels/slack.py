@@ -1,9 +1,6 @@
 """Slack channel adapter — Socket Mode inbound + outbox delivery outbound.
 
-Ported from Hermes ``gateway/platforms/slack.py`` with adaptations for
-Surogates's event-sourced, multi-tenant architecture.
-
-Features (all from Hermes, preserved line-by-line):
+Features:
 - Socket Mode connection with multi-workspace support
 - DM and channel messages (mention-gated in channels)
 - Thread support with context fetching and caching
@@ -729,6 +726,7 @@ class SlackAdapter:
         # Step 11: File/media attachment processing.
         msg_type = MessageType.TEXT
         media_urls: list[str] = []
+        media_types: list[str] = []
 
         for file_info in event.get("files", []):
             mimetype = file_info.get("mimetype", "")
@@ -743,15 +741,19 @@ class SlackAdapter:
                 if mimetype.startswith("image/"):
                     path = await self._download_slack_file(url, ext, team_id=team_id)
                     media_urls.append(path)
+                    media_types.append(mimetype)
                     msg_type = MessageType.IMAGE
                 elif mimetype.startswith("audio/"):
                     path = await self._download_slack_file(url, ext, audio=True, team_id=team_id)
                     media_urls.append(path)
+                    media_types.append(mimetype)
                     msg_type = MessageType.AUDIO
                 elif ext in SUPPORTED_DOCUMENT_TYPES:
                     raw_bytes = await self._download_slack_file_bytes(url, team_id=team_id)
                     path = cache_document_from_bytes(raw_bytes, filename)
+                    doc_mime = SUPPORTED_DOCUMENT_TYPES[ext]
                     media_urls.append(path)
+                    media_types.append(doc_mime)
                     msg_type = MessageType.DOCUMENT
                     if ext in (".txt", ".md") and len(raw_bytes) <= 100_000:
                         file_text = raw_bytes.decode("utf-8", errors="replace")
@@ -810,6 +812,7 @@ class SlackAdapter:
             {
                 "content": text,
                 "media_urls": media_urls,
+                "media_types": media_types,
                 "source": {
                     "platform": "slack",
                     "chat_id": channel_id,

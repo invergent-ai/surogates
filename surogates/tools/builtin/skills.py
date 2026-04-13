@@ -53,7 +53,7 @@ def _parse_tags(tags_value: Any) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Schemas -- copied verbatim from Hermes
+# Schemas
 # ---------------------------------------------------------------------------
 
 SKILLS_LIST_SCHEMA = ToolSchema(

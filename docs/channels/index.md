@@ -5,9 +5,10 @@ There is no CLI. All user interaction happens through channels. A channel is an 
 ## Available Channels
 
 | Channel | Description |
-|---|---|---|
+|---|---|
 | **[Web](web.md)** | Browser-based chat UI with real-time streaming, session management, and workspace browsing |
 | **[Slack](slack.md)** | Socket Mode integration with DMs, @mentions, threading, file attachments, and multi-workspace support |
+| **[Telegram](telegram.md)** | Bot API integration with DMs, groups, forum topics, media handling, and fallback IP transport for restricted networks |
 
 ## Session Routing
 
