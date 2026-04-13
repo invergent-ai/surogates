@@ -7,7 +7,8 @@ Surogates is a multi-tenant, Kubernetes-native platform for running managed AI a
 The platform targets enterprise deployments of thousands of users, combining:
 
 - **Managed Agents architecture** (Anthropic) -- decoupled session, harness, and sandbox components with crash recovery and durable state.
-- **Microsoft Agent Governance Toolkit (AGT)** -- policy enforcement, MCP security scanning, and attribute-based access control.
+- **Policy enforcement and MCP security scanning** -- every tool call passes through governance before execution, with attribute-based access control.
+- **Saga-based rollback** -- multi-step tool chains are tracked automatically. If a step fails, completed steps are compensated in reverse order, restoring the workspace to a consistent state.
 
 Surogates is not a CLI tool or a library. It is a hosted service that runs inside your Kubernetes cluster and exposes agents exclusively through **channels** -- authenticated interfaces that users interact with from their browser or messaging platform.
 
@@ -42,6 +43,7 @@ Each component can fail or be replaced independently. The session log (an append
 | **Skill** | A reusable prompt-based behavior defined in a `SKILL.md` file. Skills are loaded from three layers (platform > org > user) with last-wins precedence. |
 | **Expert** | A skill backed by a fine-tuned small language model (SLM) instead of a prompt template. Experts run scoped mini-loops with restricted tool access. |
 | **Tool** | A capability the agent can invoke. Tools are either harness-local (memory, web search, skills) or sandbox-bound (terminal, file operations, code execution). Every tool call passes through governance before execution. |
+| **Saga** | A tracked sequence of tool calls with automatic rollback. When a step fails, previously completed steps are compensated in reverse order -- builtin tools via filesystem checkpoints, MCP tools via declared undo operations. |
 | **Lease** | An exclusive lock on a session. Only one worker can run a session's harness at a time. Leases have TTLs and are renewed during processing. If a worker crashes, the lease expires and another worker picks up. |
 | **Cursor** | The last fully-processed event ID for a session. On crash recovery, the new worker replays events after the cursor. |
 

@@ -56,3 +56,11 @@ class EventType(str, Enum):
 
     # Governance
     POLICY_DENIED = "policy.denied"
+
+    # Saga orchestration
+    SAGA_START = "saga.start"
+    SAGA_STEP_BEGIN = "saga.step_begin"
+    SAGA_STEP_COMMITTED = "saga.step_committed"
+    SAGA_STEP_FAILED = "saga.step_failed"
+    SAGA_COMPENSATE = "saga.compensate"
+    SAGA_COMPLETE = "saga.complete"

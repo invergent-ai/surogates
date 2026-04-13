@@ -236,6 +236,17 @@ class GovernanceSettings(BaseSettings):
     transparency: TransparencySettings = Field(default_factory=TransparencySettings)
 
 
+class SagaSettings(BaseSettings):
+    """Saga orchestration settings."""
+
+    model_config = {"env_prefix": "SUROGATES_SAGA_"}
+
+    enabled: bool = False
+    default_step_timeout: int = 300
+    default_max_retries: int = 2
+    retry_delay: float = 1.0
+
+
 class Settings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_"}
 
@@ -246,6 +257,7 @@ class Settings(BaseSettings):
     llm: LLMSettings = Field(default_factory=LLMSettings)
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
     governance: GovernanceSettings = Field(default_factory=GovernanceSettings)
+    saga: SagaSettings = Field(default_factory=SagaSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     slack: SlackSettings = Field(default_factory=SlackSettings)
 

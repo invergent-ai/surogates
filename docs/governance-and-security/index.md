@@ -89,6 +89,63 @@ Every MCP tool definition is scanned before registration:
 
 Tools that fail scanning are not registered. Scan results are logged for audit purposes.
 
+## Saga: Multi-Step Tool Chains with Automatic Rollback
+
+When the agent performs a sequence of tool calls that modify state (write files, run commands, call external APIs), a failure partway through can leave things in a broken state. The saga system tracks these multi-step operations and automatically rolls back completed steps if a later step fails.
+
+### How It Works
+
+```
+Agent writes 3 files, then runs a command that fails:
+
+  Step 1: write_file("config.yaml")    --> COMMITTED (checkpoint saved)
+  Step 2: write_file("main.py")        --> COMMITTED (checkpoint saved)
+  Step 3: write_file("test.py")        --> COMMITTED (checkpoint saved)
+  Step 4: terminal("python test.py")   --> FAILED
+
+  Automatic compensation (reverse order):
+  Step 3: restore checkpoint            --> file reverted
+  Step 2: restore checkpoint            --> file reverted
+  Step 1: restore checkpoint            --> file reverted
+```
+
+### Compensation Strategies
+
+| Tool Type | How It Rolls Back |
+|---|---|
+| **Builtin tools** (write_file, patch, terminal) | Restores a filesystem checkpoint taken before the tool executed |
+| **MCP tools** (external services) | Calls a declared undo tool (e.g., `delete_jira_ticket` to undo `create_jira_ticket`) |
+
+### Behavior
+
+- **Sequential execution**: When saga is active, tool calls are executed one at a time (no parallelization) to ensure deterministic ordering for rollback.
+- **Read-only tools are excluded**: Tools like `read_file`, `search_files`, `web_search`, and `skills_list` have no side effects and are not tracked by the saga.
+- **Crash recovery**: Saga state is reconstructed from the event log on harness restart. If the worker crashes mid-saga, the new worker can resume or compensate.
+- **Escalation**: If a compensation step itself fails (e.g., the undo tool errors), the saga enters an `escalated` state. An operator must intervene manually.
+
+### Configuration
+
+```yaml
+saga:
+  enabled: false              # disabled by default (opt-in)
+  default_step_timeout: 300   # max seconds per tool call
+  default_max_retries: 2      # retries per step before failing
+  retry_delay: 1.0            # initial retry delay (exponential backoff)
+```
+
+### Events
+
+The saga lifecycle is fully captured in the event log:
+
+| Event | When |
+|---|---|
+| `saga.start` | Saga created at session start |
+| `saga.step_begin` | Tool call registered and execution begins |
+| `saga.step_committed` | Tool call completed successfully |
+| `saga.step_failed` | Tool call failed |
+| `saga.compensate` | Rollback triggered (with reason and step count) |
+| `saga.complete` | Saga finished (normally or after compensation) |
+
 ## Audit Trail
 
 The events table IS the audit log. Every action is recorded:

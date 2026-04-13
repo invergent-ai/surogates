@@ -149,6 +149,8 @@ class AgentHarness:
         memory_manager: MemoryManager | None = None,
         sandbox_pool: SandboxPool | None = None,
         checkpoints_enabled: bool = False,
+        saga_enabled: bool = False,
+        saga_settings: Any | None = None,
         api_client: Any | None = None,
         default_model: str = "gpt-4o",
         session_factory: Any | None = None,
@@ -170,6 +172,12 @@ class AgentHarness:
         # to take filesystem snapshots before file-mutating operations.
         # The actual checkpoint logic runs inside the sandbox (not here).
         self._checkpoints_enabled = checkpoints_enabled
+
+        # Saga orchestration flag — when enabled, side-effecting tool
+        # calls are tracked as saga steps with automatic compensation
+        # on failure/interrupt/crash.
+        self._saga_enabled = saga_enabled
+        self._saga_settings = saga_settings
 
         # System prompt cache (shared across wake() calls for the same worker).
         self._system_prompt_cache: SystemPromptCache = (
@@ -346,7 +354,7 @@ class AgentHarness:
                 return
 
             # 11. Run the core LLM loop.
-            await self._run_loop(session, messages, system_prompt, lease, cost_tracker=cost_tracker)
+            await self._run_loop(session, messages, system_prompt, lease, cost_tracker=cost_tracker, all_events=all_events)
 
         except Exception:
             logger.exception("Harness crash for session %s", session_id)
@@ -386,6 +394,7 @@ class AgentHarness:
         lease: SessionLease,
         *,
         cost_tracker: SessionCostTracker | None = None,
+        all_events: list[Any] | None = None,
     ) -> None:
         """The core loop: call LLM -> process tool calls -> repeat until done.
 
@@ -398,6 +407,36 @@ class AgentHarness:
         - Invalid tool call recovery
         - Per-session cost tracking
         """
+        # --- Saga orchestrator ---
+        saga = None
+        if self._saga_enabled:
+            from surogates.governance.saga import SagaOrchestrator
+            saga_kwargs = {}
+            if self._saga_settings is not None:
+                saga_kwargs = {
+                    "default_step_timeout": self._saga_settings.default_step_timeout,
+                    "default_max_retries": self._saga_settings.default_max_retries,
+                    "retry_delay": self._saga_settings.retry_delay,
+                }
+            saga = SagaOrchestrator(**saga_kwargs)
+            # Reconstruct any in-progress saga from the event log.
+            if all_events:
+                saga_events = [
+                    e for e in all_events
+                    if str(e.type).startswith("saga.")
+                ]
+                if saga_events:
+                    saga.reconstruct_from_events(saga_events)
+            # Create a fresh saga for this wake cycle if none is active.
+            if not saga.active_sagas:
+                from surogates.governance.events import saga_start_event
+                new_saga = saga.create_saga(session.id)
+                await self._store.emit_event(
+                    session.id,
+                    EventType.SAGA_START,
+                    saga_start_event(new_saga.saga_id, str(session.id)),
+                )
+
         iteration = 0
         length_continuation_count = 0
         length_continuation_prefix = ""  # accumulated partial response across length retries
@@ -443,6 +482,10 @@ class AgentHarness:
             # --- Interrupt check at the top of each iteration ---
             if self._check_interrupt():
                 reason_msg = self._interrupt_message or "interrupted"
+                # Compensate active sagas before destroying the sandbox
+                # (compensation may need sandbox access).
+                if saga is not None and saga.active_sagas:
+                    await self._compensate_sagas(saga, session, "interrupt")
                 # Destroy the sandbox pod on interrupt.
                 if self._sandbox_pool is not None:
                     try:
@@ -949,6 +992,7 @@ class AgentHarness:
                 sandbox_pool=self._sandbox_pool,
                 api_client=self._api_client,
                 session_factory=self._session_factory,
+                saga=saga,
             )
 
             # 7a. Reset nudge counters when relevant tools are used
@@ -1054,6 +1098,109 @@ class AgentHarness:
         await self._request_final_summary(
             session, messages, system_prompt, lease, cost_tracker=cost_tracker,
         )
+
+        # --- Saga finalization ---
+        # Mark all active sagas as completed on normal loop exit.
+        if saga is not None:
+            await self._finalize_sagas(saga, session)
+
+    # ------------------------------------------------------------------
+    # Saga lifecycle helpers
+    # ------------------------------------------------------------------
+
+    async def _finalize_sagas(self, saga: Any, session: Any) -> None:
+        """Finalize all active sagas on normal loop completion.
+
+        Marks active sagas as COMPLETED and emits SAGA_COMPLETE events.
+        """
+        from surogates.governance.events import saga_complete_event
+        from surogates.governance.saga.state_machine import SagaState
+
+        for active in list(saga.active_sagas):
+            try:
+                active.transition(SagaState.COMPLETED)
+                await self._store.emit_event(
+                    session.id,
+                    EventType.SAGA_COMPLETE,
+                    saga_complete_event(
+                        active.saga_id,
+                        status="completed",
+                        steps_executed=len(active.steps),
+                    ),
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to finalize saga %s", active.saga_id, exc_info=True,
+                )
+
+    async def _compensate_sagas(self, saga: Any, session: Any, reason: str) -> None:
+        """Compensate all active sagas on interrupt/crash/failure.
+
+        Runs compensation for committed steps in reverse order and emits
+        SAGA_COMPENSATE events.  Checkpoint restores go through the
+        sandbox pool (same path as ``_checkpoint`` take/restore).
+        """
+        from functools import partial
+
+        from surogates.governance.events import saga_compensate_event
+        from surogates.governance.saga.compensator import compensate_step
+        from surogates.governance.saga.state_machine import SagaState
+
+        for active in list(saga.active_sagas):
+            # Guard against double-compensation: if a prior crash happened
+            # mid-compensation, reconstruction leaves the saga in
+            # COMPENSATING state.  Skip it — the committed steps that
+            # were already compensated are in terminal states and the
+            # remaining ones will be picked up by a future attempt.
+            if active.state == SagaState.COMPENSATING:
+                logger.warning(
+                    "Saga %s already compensating (prior crash?) — skipping",
+                    active.saga_id,
+                )
+                continue
+
+            try:
+                # Ensure the sandbox is still available for compensation
+                # (it may have been destroyed on a prior crash).
+                if self._sandbox_pool is not None:
+                    try:
+                        from surogates.sandbox.base import SandboxSpec
+                        sandbox_spec = getattr(self._tenant, "sandbox_spec", None) or SandboxSpec()
+                        await self._sandbox_pool.ensure(str(session.id), sandbox_spec)
+                    except Exception:
+                        logger.warning(
+                            "Cannot provision sandbox for saga compensation "
+                            "in session %s — marking saga as escalated",
+                            session.id,
+                        )
+                        active.transition(SagaState.ESCALATED)
+                        active.error = "Sandbox unavailable for compensation"
+                        continue
+
+                # Capture count before compensate() transitions steps
+                # away from COMMITTED (after which committed_steps is empty).
+                committed_count = len(active.committed_steps)
+                compensator = partial(
+                    compensate_step,
+                    sandbox_pool=self._sandbox_pool,
+                    session_id=str(session.id),
+                )
+                failed = await saga.compensate(active.saga_id, compensator)
+                failed_ids = [s.step_id for s in failed]
+                await self._store.emit_event(
+                    session.id,
+                    EventType.SAGA_COMPENSATE,
+                    saga_compensate_event(
+                        active.saga_id,
+                        steps_rolled_back=committed_count - len(failed),
+                        reason=reason,
+                        failed_steps=failed_ids if failed_ids else None,
+                    ),
+                )
+            except Exception:
+                logger.exception(
+                    "Saga compensation failed for %s", active.saga_id,
+                )
 
     # ------------------------------------------------------------------
     # Credential rotation and fallback (delegates to resilience module)

@@ -50,6 +50,7 @@ from surogates.tools.coerce import coerce_tool_args
 if TYPE_CHECKING:
     from redis.asyncio import Redis
 
+    from surogates.governance.saga.orchestrator import SagaOrchestrator
     from surogates.harness.budget import IterationBudget
     from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
     from surogates.sandbox.pool import SandboxPool
@@ -82,6 +83,23 @@ PATH_SCOPED_TOOLS: frozenset[str] = frozenset({
 })
 
 MAX_TOOL_WORKERS: int = 8
+
+# Read-only tools that never participate in saga tracking — they have no
+# side effects to compensate.
+SAGA_EXCLUDED_TOOLS: frozenset[str] = frozenset({
+    "clarify",
+    "list_files",
+    "read_file",
+    "file_read",
+    "search_files",
+    "session_search",
+    "skill_view",
+    "skills_list",
+    "todo",
+    "web_crawl",
+    "web_extract",
+    "web_search",
+})
 
 # Patterns that indicate a terminal command may modify/delete files.
 _DESTRUCTIVE_PATTERNS = re.compile(
@@ -207,9 +225,15 @@ async def execute_tool_calls(
     sandbox_pool: SandboxPool | None = None,
     api_client: Any | None = None,
     session_factory: Any | None = None,
+    saga: SagaOrchestrator | None = None,
 ) -> list[dict]:
-    """Execute tool calls, choosing parallel vs sequential."""
-    if should_parallelize(tool_calls):
+    """Execute tool calls, choosing parallel vs sequential.
+
+    When *saga* is active, execution is forced sequential regardless of
+    ``should_parallelize`` — compensation requires deterministic step
+    ordering.
+    """
+    if saga is None and should_parallelize(tool_calls):
         return await execute_tool_calls_concurrent(
             tool_calls,
             session=session,
@@ -241,6 +265,7 @@ async def execute_tool_calls(
         sandbox_pool=sandbox_pool,
         api_client=api_client,
         session_factory=session_factory,
+        saga=saga,
     )
 
 
@@ -260,6 +285,7 @@ async def execute_tool_calls_sequential(
     sandbox_pool: SandboxPool | None = None,
     api_client: Any | None = None,
     session_factory: Any | None = None,
+    saga: SagaOrchestrator | None = None,
 ) -> list[dict]:
     """Execute tool calls one at a time, emitting events for each."""
     results: list[dict] = []
@@ -284,6 +310,7 @@ async def execute_tool_calls_sequential(
             sandbox_pool=sandbox_pool,
             api_client=api_client,
             session_factory=session_factory,
+            saga=saga,
         )
         results.append(result_msg)
 
@@ -376,6 +403,7 @@ async def execute_single_tool(
     api_client: Any | None = None,
     session_factory: Any | None = None,
     _parent_trace: Any | None = None,
+    saga: SagaOrchestrator | None = None,
 ) -> dict:
     """Execute a single tool call: emit events, dispatch, return result message."""
     from surogates.trace import TraceContext, get_trace, new_span
@@ -462,11 +490,44 @@ async def execute_single_tool(
                 "content": result_content,
             }
 
+    # --- Saga step tracking ---
+    saga_step = None
+    _active_saga_id: str | None = None
+    if saga is not None and tool_name not in SAGA_EXCLUDED_TOOLS:
+        from surogates.governance.events import saga_step_event as _sse
+        from surogates.governance.saga.state_machine import StepState as _StepState
+
+        current = saga.current_saga
+        if current is not None:
+            _active_saga_id = current.saga_id
+            saga_step = saga.add_step(
+                _active_saga_id,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                arguments=tool_args,
+                checkpoint_hash=checkpoint_hash,
+            )
+            saga_step.transition(_StepState.EXECUTING)
+            await store.emit_event(
+                session.id,
+                EventType.SAGA_STEP_BEGIN,
+                _sse(
+                    _active_saga_id,
+                    saga_step.step_id,
+                    tool_name,
+                    _StepState.EXECUTING.value,
+                    tool_call_id=tool_call_id,
+                    arguments=sanitized_args,
+                    checkpoint_hash=checkpoint_hash,
+                ),
+            )
+
     # Execute the tool, capturing errors as results (never crash the loop).
     # SANDBOX tools are dispatched to the sandbox pod where the real Python
     # tool handlers run (the sandbox image includes the surogates package).
     # HARNESS tools run in-process in the worker.
     start = time.monotonic()
+    tool_failed = False
     try:
         from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
         location = TOOL_LOCATIONS.get(tool_name, ToolLocation.SANDBOX)
@@ -519,10 +580,12 @@ async def execute_single_tool(
                 session_factory=session_factory,
             )
     except KeyError:
+        tool_failed = True
         result_content = json.dumps({
             "error": f"Unknown tool: {tool_name}",
         })
     except Exception as exc:
+        tool_failed = True
         logger.exception(
             "Tool %s failed for session %s", tool_name, session.id,
         )
@@ -530,6 +593,27 @@ async def execute_single_tool(
             "error": f"Tool execution failed: {exc}",
         })
     elapsed_ms = int((time.monotonic() - start) * 1000)
+
+    # --- Saga step commit / fail ---
+    if saga_step is not None and _active_saga_id is not None:
+        if tool_failed:
+            saga_step.error = result_content
+            saga_step.transition(_StepState.FAILED)
+            await store.emit_event(
+                session.id,
+                EventType.SAGA_STEP_FAILED,
+                _sse(_active_saga_id, saga_step.step_id, tool_name,
+                     _StepState.FAILED.value, error=saga_step.error),
+            )
+        else:
+            saga_step.execute_result = result_content
+            saga_step.transition(_StepState.COMMITTED)
+            await store.emit_event(
+                session.id,
+                EventType.SAGA_STEP_COMMITTED,
+                _sse(_active_saga_id, saga_step.step_id, tool_name,
+                     _StepState.COMMITTED.value),
+            )
 
     # Subdirectory hints -- inject context discovered from new directories.
     if hint_tracker is not None:

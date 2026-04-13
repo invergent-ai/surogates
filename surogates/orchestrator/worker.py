@@ -243,6 +243,8 @@ async def run_worker(settings: Settings) -> None:
             api_client=harness_api_client,
             default_model=model_id,
             session_factory=session_factory,
+            saga_enabled=settings.saga.enabled,
+            saga_settings=settings.saga if settings.saga.enabled else None,
         )
 
     # 8. Orchestrator

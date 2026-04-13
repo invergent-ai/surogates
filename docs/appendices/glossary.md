@@ -18,6 +18,7 @@
 | **MCP Proxy** | A trusted service that sits between sandboxes and external MCP servers. It injects credentials from the vault so that the sandbox never sees secrets. |
 | **Orchestrator** | The Redis queue consumer that pulls session IDs and dispatches them to available harness instances. Handles retries with exponential backoff. |
 | **Org** | Organization. The top-level tenant boundary. Each org has its own users, skills, memory, credentials, MCP servers, and policies. |
+| **Saga** | A tracked sequence of tool calls with automatic rollback. When a step fails, previously completed steps are compensated in reverse order -- builtin tools via filesystem checkpoints, MCP tools via declared undo operations. Named after the [saga pattern](https://microservices.io/patterns/data/saga.html) from distributed systems. |
 | **Sandbox** | An isolated execution environment where the LLM's generated code runs. In development: a subprocess in a temp directory. In production: a dedicated K8s pod with s3fs-fuse workspace mount. Also called "the hands". |
 | **Session** | A conversation between a user and an agent. Backed by an append-only event log in PostgreSQL. Sessions survive crashes -- any worker can resume from the last event. |
 | **Session Source** | Metadata about where a message came from: platform, chat ID, chat type, user ID, thread ID. Used to route messages to the correct session. |

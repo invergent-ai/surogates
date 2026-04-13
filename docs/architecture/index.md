@@ -120,6 +120,29 @@ The sandbox runs the full `surogates` Python package. A `tool-executor` script a
 5. Session continues from where it left off
 ```
 
+## Saga: Automatic Rollback for Multi-Step Operations
+
+When the agent performs a sequence of state-changing tool calls (writing files, running commands, calling external APIs), a failure partway through can leave things inconsistent. The saga system solves this by tracking each step and automatically rolling back in reverse order if something goes wrong.
+
+```
+Forward execution:
+  Step 1: write_file("config.yaml")   --> committed (checkpoint saved)
+  Step 2: write_file("main.py")       --> committed (checkpoint saved)
+  Step 3: terminal("python test.py")  --> FAILED
+
+Automatic compensation (reverse order):
+  Step 2: restore checkpoint           --> main.py reverted
+  Step 1: restore checkpoint           --> config.yaml reverted
+```
+
+Two compensation strategies are used depending on the tool type:
+- **Builtin tools** (file writes, patches, commands): filesystem checkpoints are restored automatically.
+- **MCP tools** (external services): a declared undo tool is called (e.g., `delete_ticket` to undo `create_ticket`).
+
+Saga is opt-in (`saga.enabled: true` in config). When active, tool calls are forced sequential to ensure deterministic ordering for rollback. Read-only tools (search, list, view) are excluded from tracking. Saga state is reconstructed from the event log on crash recovery.
+
+See [Governance and Security](../governance-and-security/index.md#saga-multi-step-tool-chains-with-automatic-rollback) for configuration and details.
+
 ## Event-Driven Design
 
 The session log is the core abstraction. It is an append-only, monotonically sequenced event stream in PostgreSQL.

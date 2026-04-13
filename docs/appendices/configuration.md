@@ -97,6 +97,15 @@ Surogates is configured via a YAML file merged with environment variables. Envir
 | `governance.transparency.require_confirmation` | -- | `true` | Require user confirmation for AI-generated content |
 | `governance.transparency.emotion_recognition` | -- | `false` | Flag emotion recognition usage |
 
+## Saga (`saga`)
+
+| Key | Env Var | Default | Description |
+|---|---|---|---|
+| `saga.enabled` | `SUROGATES_SAGA_ENABLED` | `false` | Enable multi-step tool chain tracking with automatic rollback |
+| `saga.default_step_timeout` | `SUROGATES_SAGA_DEFAULT_STEP_TIMEOUT` | `300` | Max seconds per tool call step |
+| `saga.default_max_retries` | `SUROGATES_SAGA_DEFAULT_MAX_RETRIES` | `2` | Retries per step before marking as failed |
+| `saga.retry_delay` | `SUROGATES_SAGA_RETRY_DELAY` | `1.0` | Initial retry delay in seconds (exponential backoff) |
+
 ## Tenant Defaults
 
 | Key | Env Var | Default | Description |
