@@ -363,13 +363,16 @@ async def persist_memory_to_storage(
 # ---------------------------------------------------------------------------
 
 
-def _memory_dir_for_session(settings: Settings, org_id: UUID) -> Path:
-    """Return the memory directory for an org.
+def _memory_dir_for_session(settings: Settings, org_id: UUID, user_id: UUID) -> Path:
+    """Return the user-scoped memory directory for a session.
 
-    Matches the worker's convention: ``{tenant_assets_root}/{org_id}/memory``.
-    Note: this is per-org, not per-user — the worker uses the same path.
+    Matches ``TenantAssetManager.memory_dir()`` and the worker's convention:
+    ``{tenant_assets_root}/{org_id}/users/{user_id}/memories``.
     """
-    return Path(settings.tenant_assets_root) / str(org_id) / "memory"
+    return (
+        Path(settings.tenant_assets_root)
+        / str(org_id) / "users" / str(user_id) / "memories"
+    )
 
 
 async def flush_and_reset_session(
@@ -416,8 +419,8 @@ async def flush_and_reset_session(
         await session_store.reset_session(session_id, reason="idle_short_transcript")
         return True
 
-    # 3. Set up memory store pointing at the tenant's memory directory.
-    memory_dir = _memory_dir_for_session(settings, org_id)
+    # 3. Set up memory store pointing at the user-scoped memory directory.
+    memory_dir = _memory_dir_for_session(settings, org_id, user_id)
     memory_store = MemoryStore(memory_dir=memory_dir)
     memory_manager = MemoryManager(memory_store)
     memory_manager.initialize_all()

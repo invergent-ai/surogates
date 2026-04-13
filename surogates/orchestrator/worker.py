@@ -202,7 +202,9 @@ async def run_worker(settings: Settings) -> None:
 
         # Create MemoryStore + MemoryManager.
         from pathlib import Path
-        memory_dir = Path(tenant.asset_root) / "memory"
+        memory_dir = (
+            Path(tenant.asset_root) / "users" / str(session.user_id) / "memories"
+        )
         memory_store = MemoryStore(memory_dir=memory_dir)
         memory_manager = MemoryManager(memory_store)
 

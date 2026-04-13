@@ -406,9 +406,9 @@ class PromptBuilder:
                     parts.append("## User Preferences\n" + "\n".join(pref_lines))
                 return "# Memory\n\n" + "\n\n".join(parts)
 
-        # Fall back to direct file read (existing behaviour).
+        # Fall back to direct file read (user-scoped memory directory).
         asset_root = Path(self.tenant.asset_root)
-        memory_dir = asset_root / "memory"
+        memory_dir = asset_root / "users" / str(self.tenant.user_id) / "memories"
 
         fragments: list[str] = []
 

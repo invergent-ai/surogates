@@ -722,7 +722,7 @@ class TestFlushAndResetSession:
         session_store.reset_session = AsyncMock()
         session_store.emit_event = AsyncMock(return_value=1)
 
-        mem_dir = tmp_path / str(org_id) / "memory"
+        mem_dir = tmp_path / str(org_id) / "users" / str(session.user_id) / "memories"
         mem_dir.mkdir(parents=True)
 
         settings = MagicMock()

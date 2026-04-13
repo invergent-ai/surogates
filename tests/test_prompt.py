@@ -80,9 +80,12 @@ class TestPromptBuilderMemory:
     """Memory section loads from file."""
 
     def test_memory_section_loads_from_file(self, tmp_path: Path):
-        # Create the memory directory and file.
-        memory_dir = tmp_path / "memory"
-        memory_dir.mkdir()
+        # Create the user-scoped memory directory and file.
+        memory_dir = (
+            tmp_path / "users"
+            / "00000000-0000-0000-0000-000000000002" / "memories"
+        )
+        memory_dir.mkdir(parents=True)
         (memory_dir / "MEMORY.md").write_text(
             "The user prefers Python over Java.\n",
             encoding="utf-8",
