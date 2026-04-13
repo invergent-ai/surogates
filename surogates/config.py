@@ -112,7 +112,7 @@ class APISettings(BaseSettings):
     port: int = 8000
     workers: int = 1
     cors_origins: list[str] = Field(default_factory=lambda: ["*"])
-    web_url: str = ""  # Public URL for the web UI (used in pairing links, emails, etc.)
+    web_url: str = "https://surogates.k8s.localhost"  # Public URL for the web UI (used in pairing links, emails, etc.)
 
 
 class WorkerSettings(BaseSettings):

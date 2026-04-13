@@ -105,19 +105,24 @@ async def start_channel(channel_type: str, settings: Settings) -> None:
     delivery_service = DeliveryService(session_factory, redis_client)
     session_store = SessionStore(session_factory, redis=redis_client)
 
-    # Resolve channel-specific settings.
-    channel_settings: dict = {}
-    if channel_type == "slack":
-        channel_settings = settings.slack.model_dump()
-
     # Instantiate the adapter with full dependencies.
-    adapter = adapter_cls(
-        settings=channel_settings,
-        delivery_service=delivery_service,
-        session_store=session_store,
-        session_factory=session_factory,
-        redis_client=redis_client,
-    )
+    if channel_type == "slack":
+        adapter = adapter_cls(
+            slack_settings=settings.slack,
+            api_settings=settings.api,
+            delivery_service=delivery_service,
+            session_store=session_store,
+            session_factory=session_factory,
+            redis_client=redis_client,
+        )
+    else:
+        adapter = adapter_cls(
+            settings={},
+            delivery_service=delivery_service,
+            session_store=session_store,
+            session_factory=session_factory,
+            redis_client=redis_client,
+        )
 
     # Set up graceful shutdown.
     shutdown_event = asyncio.Event()

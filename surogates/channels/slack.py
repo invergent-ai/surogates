@@ -16,9 +16,11 @@ Features (all from Hermes, preserved line-by-line):
 - Markdown → Slack mrkdwn conversion
 - Assistant thread lifecycle events
 
-Requires:
-- ``SUROGATES_SLACK_BOT_TOKEN`` (xoxb-...) — comma-separated for multi-workspace
-- ``SUROGATES_SLACK_APP_TOKEN`` (xapp-...) — Socket Mode token
+Requires (via ``SlackSettings``):
+- ``bot_token`` (xoxb-...) — comma-separated for multi-workspace
+- ``app_token`` (xapp-...) — Socket Mode token
+
+Also uses ``APISettings.web_url`` for pairing links.
 """
 
 from __future__ import annotations
@@ -60,6 +62,7 @@ from surogates.channels.media import (
 )
 from surogates.channels.slack_format import markdown_to_mrkdwn, truncate_message
 from surogates.channels.source import SessionSource, build_session_key
+from surogates.config import APISettings, SlackSettings
 from surogates.session.events import EventType
 from surogates.session.store import SessionStore
 
@@ -80,19 +83,25 @@ class SlackAdapter:
     Requires two tokens:
     - ``SUROGATES_SLACK_BOT_TOKEN`` (xoxb-...) for API calls
     - ``SUROGATES_SLACK_APP_TOKEN`` (xapp-...) for Socket Mode connection
+
+    Configuration is provided via typed pydantic settings:
+    - ``SlackSettings`` for Slack-specific options (tokens, mention gating, etc.)
+    - ``APISettings`` for platform-wide values like ``web_url``.
     """
 
     MAX_MESSAGE_LENGTH = 39000  # Slack API allows 40,000 chars; leave margin
 
     def __init__(
         self,
-        settings: dict[str, Any],
+        slack_settings: SlackSettings,
+        api_settings: APISettings,
         delivery_service: DeliveryService,
         session_store: SessionStore,
         session_factory: async_sessionmaker[AsyncSession],
         redis_client: Redis,
     ) -> None:
-        self._settings = settings
+        self._slack_settings = slack_settings
+        self._api_settings = api_settings
         self._delivery = delivery_service
         self._session_store = session_store
         self._sf = session_factory
@@ -153,8 +162,8 @@ class SlackAdapter:
                 "slack-bolt not installed. Run: pip install slack-bolt"
             )
 
-        bot_token = self._settings.get("bot_token", "") or os.getenv("SUROGATES_SLACK_BOT_TOKEN", "")
-        app_token = self._settings.get("app_token", "") or os.getenv("SUROGATES_SLACK_APP_TOKEN", "")
+        bot_token = self._slack_settings.bot_token
+        app_token = self._slack_settings.app_token
 
         if not bot_token:
             raise RuntimeError("SUROGATES_SLACK_BOT_TOKEN not set")
@@ -290,7 +299,7 @@ class SlackAdapter:
             }
             if thread_ts:
                 kwargs["thread_ts"] = thread_ts
-                reply_broadcast = self._settings.get("reply_broadcast", False)
+                reply_broadcast = self._slack_settings.reply_broadcast
                 if reply_broadcast and i == 0:
                     kwargs["reply_broadcast"] = True
 
@@ -381,9 +390,7 @@ class SlackAdapter:
             # Rate limited — don't spam the user.
             return
 
-        base_url = os.getenv("SUROGATES_API_WEB_URL", "").rstrip("/")
-        if not base_url:
-            base_url = self._settings.get("web_url", "https://surogates.k8s.localhost").rstrip("/")
+        base_url = self._api_settings.web_url.rstrip("/")
 
         link = f"{base_url}/link?code={code}"
 
@@ -401,37 +408,19 @@ class SlackAdapter:
             logger.warning("[Slack] Failed to send pairing prompt: %s", exc)
 
     # ------------------------------------------------------------------
-    # Configuration getters
+    # Configuration helpers
     # ------------------------------------------------------------------
 
-    def _slack_require_mention(self) -> bool:
-        """Check whether @mention is required in channels."""
-        configured = self._settings.get("require_mention")
-        if configured is not None:
-            if isinstance(configured, str):
-                return configured.lower() not in ("false", "0", "no", "off")
-            return bool(configured)
-        return os.getenv("SUROGATES_SLACK_REQUIRE_MENTION", "true").lower() not in (
-            "false", "0", "no", "off",
-        )
+    def _free_response_channel_set(self) -> set[str]:
+        """Return channel IDs where @mention is NOT required.
 
-    def _slack_free_response_channels(self) -> set[str]:
-        """Return channel IDs where @mention is NOT required."""
-        configured = self._settings.get("free_response_channels", "")
-        if isinstance(configured, list):
-            return set(configured)
-        env = os.getenv("SUROGATES_SLACK_FREE_RESPONSE_CHANNELS", "")
-        raw = configured or env
+        ``SlackSettings.free_response_channels`` is a comma-separated
+        string; this helper splits it into a set for O(1) lookup.
+        """
+        raw = self._slack_settings.free_response_channels
         if not raw:
             return set()
         return {c.strip() for c in raw.split(",") if c.strip()}
-
-    def _slack_allow_bots(self) -> str:
-        """Return bot message policy: 'none', 'mentions', 'all'."""
-        return self._settings.get(
-            "allow_bots",
-            os.getenv("SUROGATES_SLACK_ALLOW_BOTS", "none"),
-        )
 
     # ------------------------------------------------------------------
     # Active session check
@@ -644,7 +633,7 @@ class SlackAdapter:
         # Step 2: Bot message filtering.
         user_id = event.get("user", "")
         bot_id = event.get("bot_id")
-        allow_bots = self._slack_allow_bots()
+        allow_bots = self._slack_settings.allow_bots
 
         if bot_id or event.get("subtype") == "bot_message":
             if allow_bots == "none":
@@ -697,9 +686,9 @@ class SlackAdapter:
 
         should_process = True
         if not is_dm and bot_uid:
-            if channel_id in self._slack_free_response_channels():
+            if channel_id in self._free_response_channel_set():
                 should_process = True
-            elif not self._slack_require_mention():
+            elif not self._slack_settings.require_mention:
                 should_process = True
             elif is_mentioned:
                 should_process = True
