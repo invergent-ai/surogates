@@ -1,0 +1,167 @@
+{{- $fullname := include "surogates.fullname" . -}}
+{{/* ── cleanup-sessions ─────────────────────────────────────────── */}}
+{{- if .Values.jobs.cleanupSessions.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $fullname }}-cleanup-sessions
+  labels:
+    {{- include "surogates.fullLabels" (dict "root" . "component" "job-cleanup") | nindent 4 }}
+spec:
+  schedule: {{ .Values.jobs.cleanupSessions.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            {{- include "surogates.fullLabels" (dict "root" . "component" "job-cleanup") | nindent 12 }}
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: cleanup
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["python", "-m", "surogates.jobs.cleanup_sessions"]
+              env:
+                - name: SUROGATES_DB_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $fullname }}-db
+                      key: url
+                - name: SUROGATES_STORAGE_BACKEND
+                  value: {{ .Values.storage.backend | quote }}
+                {{- if eq .Values.storage.backend "s3" }}
+                - name: SUROGATES_STORAGE_ENDPOINT
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $fullname }}-s3
+                      key: endpoint
+                - name: SUROGATES_STORAGE_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $fullname }}-s3
+                      key: access-key
+                - name: SUROGATES_STORAGE_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $fullname }}-s3
+                      key: secret-key
+                {{- end }}
+                - name: SUROGATES_LOG_LEVEL
+                  value: {{ .Values.logLevel | quote }}
+              resources:
+                {{- toYaml .Values.jobs.cleanupSessions.resources | nindent 16 }}
+---
+{{- end }}
+{{/* ── reset-idle-sessions ──────────────────────────────────────── */}}
+{{- if .Values.jobs.resetIdleSessions.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $fullname }}-reset-idle-sessions
+  labels:
+    {{- include "surogates.fullLabels" (dict "root" . "component" "job-reset") | nindent 4 }}
+spec:
+  schedule: {{ .Values.jobs.resetIdleSessions.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            {{- include "surogates.fullLabels" (dict "root" . "component" "job-reset") | nindent 12 }}
+        spec:
+          restartPolicy: OnFailure
+          {{- if eq .Values.sandbox.backend "kubernetes" }}
+          serviceAccountName: {{ $fullname }}-worker
+          {{- end }}
+          containers:
+            - name: reset
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["python", "-m", "surogates.jobs.reset_idle_sessions"]
+              env:
+                - name: SUROGATES_DB_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $fullname }}-db
+                      key: url
+                - name: SUROGATES_REDIS_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $fullname }}-redis
+                      key: url
+                - name: SUROGATES_STORAGE_BACKEND
+                  value: {{ .Values.storage.backend | quote }}
+                {{- if eq .Values.storage.backend "s3" }}
+                - name: SUROGATES_STORAGE_ENDPOINT
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $fullname }}-s3
+                      key: endpoint
+                - name: SUROGATES_STORAGE_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $fullname }}-s3
+                      key: access-key
+                - name: SUROGATES_STORAGE_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $fullname }}-s3
+                      key: secret-key
+                {{- end }}
+                - name: SUROGATES_LLM_MODEL
+                  value: {{ .Values.llm.model | quote }}
+                {{- if .Values.llm.baseUrl }}
+                - name: SUROGATES_LLM_BASE_URL
+                  value: {{ .Values.llm.baseUrl | quote }}
+                {{- end }}
+                {{- if .Values.llm.apiKey }}
+                - name: SUROGATES_LLM_API_KEY
+                  value: {{ .Values.llm.apiKey | quote }}
+                {{- end }}
+                - name: SUROGATES_SANDBOX_BACKEND
+                  value: {{ .Values.sandbox.backend | quote }}
+                {{- if eq .Values.sandbox.backend "kubernetes" }}
+                - name: SUROGATES_SANDBOX_K8S_NAMESPACE
+                  value: {{ default .Release.Namespace .Values.sandbox.k8sNamespace | quote }}
+                {{- end }}
+                {{- if .Values.org.id }}
+                - name: SUROGATES_ORG_ID
+                  value: {{ .Values.org.id | quote }}
+                {{- end }}
+                - name: SUROGATES_SESSION_RESET_ENABLED
+                  value: "true"
+                - name: SUROGATES_SESSION_RESET_MODE
+                  value: {{ .Values.sessionReset.mode | quote }}
+                - name: SUROGATES_SESSION_RESET_IDLE_MINUTES
+                  value: {{ .Values.sessionReset.idleMinutes | quote }}
+                - name: SUROGATES_SESSION_RESET_AT_HOUR
+                  value: {{ .Values.sessionReset.atHour | quote }}
+                - name: SUROGATES_SESSION_RESET_FLUSH_MAX_ITERATIONS
+                  value: {{ .Values.sessionReset.flushMaxIterations | quote }}
+                - name: SUROGATES_SESSION_RESET_FLUSH_MAX_RETRIES
+                  value: {{ .Values.sessionReset.flushMaxRetries | quote }}
+                - name: SUROGATES_SESSION_RESET_NOTIFY
+                  value: {{ .Values.sessionReset.notify | quote }}
+                - name: SUROGATES_SESSION_RESET_NOTIFY_EXCLUDE_CHANNELS
+                  value: {{ .Values.sessionReset.notifyExcludeChannels | quote }}
+                - name: SUROGATES_LOG_LEVEL
+                  value: {{ .Values.logLevel | quote }}
+              volumeMounts:
+                - name: tenant-assets
+                  mountPath: /data/tenant-assets
+              resources:
+                {{- toYaml .Values.jobs.resetIdleSessions.resources | nindent 16 }}
+          volumes:
+            - name: tenant-assets
+              persistentVolumeClaim:
+                claimName: {{ $fullname }}-tenant-assets
+{{- end }}

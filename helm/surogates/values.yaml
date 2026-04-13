@@ -117,6 +117,40 @@ ingress:
     # Empty = auto-generate as {release}-tls.
     secretName: ""
 
+# -- Background jobs (K8s CronJobs)
+jobs:
+  cleanupSessions:
+    enabled: true
+    schedule: "0 */6 * * *"    # every 6 hours
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+  resetIdleSessions:
+    enabled: false
+    schedule: "*/5 * * * *"    # every 5 minutes
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 512Mi
+
+# -- Session reset policy (only used when jobs.resetIdleSessions.enabled)
+sessionReset:
+  mode: "idle"                 # "idle", "daily", "both", "none"
+  idleMinutes: 1440            # 24 hours
+  atHour: 4                    # daily reset hour (0-23)
+  flushMaxIterations: 8
+  flushMaxRetries: 3
+  notify: true
+  notifyExcludeChannels: "webhook"
+
 # -- Platform config (contents mounted as ConfigMaps)
 # Each key becomes a file.  Leave empty to skip.
 platformSkills: {}
