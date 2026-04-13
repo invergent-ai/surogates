@@ -46,6 +46,7 @@ class ToolRuntime:
             clarify,
             code_execution,
             delegate,
+            expert,
             file_ops,
             memory,
             session_search,
@@ -69,6 +70,7 @@ class ToolRuntime:
             browser,
             clarify,
             code_execution,
+            expert,
         ]
 
         for mod in modules:

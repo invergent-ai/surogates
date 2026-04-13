@@ -48,5 +48,11 @@ class EventType(str, Enum):
     HARNESS_WAKE = "harness.wake"
     HARNESS_CRASH = "harness.crash"
 
+    # Expert delegation
+    EXPERT_DELEGATION = "expert.delegation"
+    EXPERT_RESULT = "expert.result"
+    EXPERT_FAILURE = "expert.failure"
+    EXPERT_OVERRIDE = "expert.override"
+
     # Governance
     POLICY_DENIED = "policy.denied"

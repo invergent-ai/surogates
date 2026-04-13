@@ -51,6 +51,7 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "delegate_task": ToolLocation.HARNESS,
     "todo": ToolLocation.HARNESS,
     "process": ToolLocation.HARNESS,
+    "consult_expert": ToolLocation.HARNESS,
     # Sandbox (code execution, file mutation, need isolation)
     "terminal": ToolLocation.SANDBOX,
     "execute_code": ToolLocation.SANDBOX,

@@ -34,15 +34,37 @@ PLATFORM_MCP_DIR = "/etc/surogates/mcp"
 
 EXCLUDED_SKILL_DIRS = frozenset((".git", ".github", ".hub"))
 
+# Expert status lifecycle constants.
+EXPERT_STATUS_DRAFT = "draft"
+EXPERT_STATUS_COLLECTING = "collecting"
+EXPERT_STATUS_ACTIVE = "active"
+EXPERT_STATUS_RETIRED = "retired"
+
+# Mapping from SKILL.md frontmatter keys to SkillDef field names.
+# Keys not in this map are ignored.
+_EXPERT_FRONTMATTER_MAP: dict[str, str] = {
+    "base_model": "expert_model",
+    "endpoint": "expert_endpoint",
+    "adapter": "expert_adapter",
+    "max_iterations": "expert_max_iterations",
+    "expert_status": "expert_status",
+}
+
 
 @dataclass(slots=True)
 class SkillDef:
-    """A loaded skill definition."""
+    """A loaded skill definition.
+
+    When ``type`` is ``"expert"``, the skill is backed by a fine-tuned
+    small language model (SLM) instead of a prompt template.  The base
+    LLM delegates to it via the ``consult_expert`` tool.
+    """
 
     name: str
     description: str
     content: str  # The SKILL.md body (everything after the frontmatter)
     source: str  # "platform", "org", "user"
+    type: str = "skill"  # "skill" (prompt-based) or "expert" (SLM-backed)
     category: str | None = None  # subdirectory grouping
     tags: list[str] | None = None  # metadata tags
     # Conditional activation fields (parsed from frontmatter).
@@ -50,6 +72,23 @@ class SkillDef:
     fallback_for_tools: list[str] | None = None  # show only when these tools are unavailable
     requires_tools: list[str] | None = None  # show only when these tools ARE available
     trigger: str | None = None  # trigger description
+    # Expert-specific fields (None/default for regular skills).
+    expert_model: str | None = None  # base model name (e.g. "qwen2.5-coder-7b")
+    expert_endpoint: str | None = None  # OpenAI-compatible inference URL
+    expert_adapter: str | None = None  # LoRA adapter path in tenant storage
+    expert_max_iterations: int = 10  # iteration budget for expert mini-loop
+    expert_status: str = EXPERT_STATUS_DRAFT  # draft → collecting → active → retired
+    expert_tools: list[str] | None = None  # tools the expert can use in its mini-loop
+
+    @property
+    def is_expert(self) -> bool:
+        """Return ``True`` if this skill is backed by a fine-tuned model."""
+        return self.type == "expert"
+
+    @property
+    def is_active_expert(self) -> bool:
+        """Return ``True`` if this is an active, usable expert."""
+        return self.is_expert and self.expert_status == EXPERT_STATUS_ACTIVE
 
 
 @dataclass(slots=True)
@@ -235,18 +274,7 @@ class ResourceLoader:
                     category = _get_category_from_path(skill_md, directory)
 
                     skills.append(
-                        SkillDef(
-                            name=name,
-                            description=parsed["description"],
-                            content=parsed["content"],
-                            source=source,
-                            category=category,
-                            tags=parsed.get("tags"),
-                            platforms=parsed.get("platforms"),
-                            fallback_for_tools=parsed.get("fallback_for_tools"),
-                            requires_tools=parsed.get("requires_tools"),
-                            trigger=parsed.get("trigger"),
-                        )
+                        _build_skill_def(parsed, source, category),
                     )
                 except Exception:
                     logger.exception("Failed to load skill from %s", skill_md)
@@ -267,17 +295,7 @@ class ResourceLoader:
                     continue
                 seen_names.add(name)
                 skills.append(
-                    SkillDef(
-                        name=name,
-                        description=parsed["description"],
-                        content=parsed["content"],
-                        source=source,
-                        tags=parsed.get("tags"),
-                        platforms=parsed.get("platforms"),
-                        fallback_for_tools=parsed.get("fallback_for_tools"),
-                        requires_tools=parsed.get("requires_tools"),
-                        trigger=parsed.get("trigger"),
-                    )
+                    _build_skill_def(parsed, source),
                 )
             except Exception:
                 logger.exception("Failed to load skill from %s", entry)
@@ -370,6 +388,42 @@ class ResourceLoader:
 # ------------------------------------------------------------------
 
 
+def _build_skill_def(
+    parsed: dict[str, Any],
+    source: str,
+    category: str | None = None,
+) -> SkillDef:
+    """Construct a :class:`SkillDef` from parsed frontmatter data."""
+    max_iter = parsed.get("expert_max_iterations")
+    if max_iter is not None:
+        try:
+            max_iter = int(max_iter)
+        except (TypeError, ValueError):
+            max_iter = 10
+    else:
+        max_iter = 10
+
+    return SkillDef(
+        name=parsed["name"],
+        description=parsed["description"],
+        content=parsed["content"],
+        source=source,
+        type=parsed.get("type", "skill"),
+        category=category,
+        tags=parsed.get("tags"),
+        platforms=parsed.get("platforms"),
+        fallback_for_tools=parsed.get("fallback_for_tools"),
+        requires_tools=parsed.get("requires_tools"),
+        trigger=parsed.get("trigger"),
+        expert_model=parsed.get("expert_model"),
+        expert_endpoint=parsed.get("expert_endpoint"),
+        expert_adapter=parsed.get("expert_adapter"),
+        expert_max_iterations=max_iter,
+        expert_status=str(parsed.get("expert_status", EXPERT_STATUS_DRAFT)),
+        expert_tools=parsed.get("expert_tools"),
+    )
+
+
 def _parse_skill_frontmatter(
     text: str,
     fallback_name: str,
@@ -440,6 +494,25 @@ def _parse_skill_frontmatter(
             trigger = fm.get("trigger")
             if trigger:
                 result["trigger"] = str(trigger)
+
+            # Skill type: "skill" (default) or "expert" (SLM-backed).
+            skill_type = fm.get("type")
+            if skill_type and str(skill_type).lower() in ("expert", "skill"):
+                result["type"] = str(skill_type).lower()
+
+            # Expert-specific fields (only meaningful when type=expert).
+            for fm_key, field_name in _EXPERT_FRONTMATTER_MAP.items():
+                val = fm.get(fm_key)
+                if val is not None:
+                    result[field_name] = val
+
+            # Expert tools list (tools the expert can use in its mini-loop).
+            expert_tools = fm.get("tools")
+            if expert_tools:
+                if isinstance(expert_tools, str):
+                    result["expert_tools"] = [t.strip() for t in expert_tools.split(",")]
+                elif isinstance(expert_tools, list):
+                    result["expert_tools"] = [str(t) for t in expert_tools]
 
     return result
 
@@ -523,3 +596,36 @@ def _parse_mcp_server(name: str, cfg: dict[str, Any]) -> MCPServerDef:
         env=cfg.get("env", {}),
         timeout=cfg.get("timeout", 120),
     )
+
+
+def update_frontmatter_field(content: str, key: str, value: str) -> str:
+    """Update or insert a field in the YAML frontmatter of a SKILL.md.
+
+    If *key* already exists in the frontmatter, its value is replaced.
+    If not, the key is appended before the closing ``---``.
+
+    Returns the original content unchanged if no frontmatter delimiters
+    are found.
+    """
+    import re
+
+    stripped = content.strip()
+    if not stripped.startswith("---"):
+        return content
+
+    end_match = re.search(r"\n---\s*(\n|$)", stripped[3:])
+    if not end_match:
+        return content
+
+    fm_start = 3
+    fm_end = end_match.start() + 3
+    frontmatter = stripped[fm_start:fm_end]
+    after_fm = stripped[fm_end:]
+
+    pattern = re.compile(rf"^({re.escape(key)}\s*:).*$", re.MULTILINE)
+    if pattern.search(frontmatter):
+        new_fm = pattern.sub(rf"\1 {value}", frontmatter)
+    else:
+        new_fm = frontmatter.rstrip() + f"\n{key}: {value}"
+
+    return f"---{new_fm}{after_fm}"

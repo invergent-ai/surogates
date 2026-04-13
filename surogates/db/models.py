@@ -400,6 +400,13 @@ class Credential(Base):
 
 
 class Skill(Base):
+    """Skill definition -- prompt-based (type='skill') or SLM-backed (type='expert').
+
+    Expert skills delegate to a fine-tuned small language model via the
+    ``consult_expert`` tool.  The ``expert_*`` columns are only meaningful
+    when ``type == 'expert'``.
+    """
+
     __tablename__ = "skills"
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -413,6 +420,9 @@ class Skill(Base):
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    type: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="skill"
+    )
     content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     config: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default="{}"
@@ -422,6 +432,20 @@ class Skill(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=func.now()
+    )
+
+    # Expert-specific columns (NULL for regular skills).
+    expert_model: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    expert_endpoint: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    expert_adapter: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    expert_config: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    expert_status: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, server_default="draft"
+    )
+    expert_stats: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
     )
 
     # Relationships

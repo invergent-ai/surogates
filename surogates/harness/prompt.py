@@ -230,6 +230,15 @@ SKILLS_GUIDANCE: str = (
     "Skills that aren't maintained become liabilities."
 )
 
+EXPERT_GUIDANCE: str = (
+    "Specialised expert models are available via the `consult_expert` tool. "
+    "Each expert is fine-tuned on this organisation's data for a specific task. "
+    "When a task falls squarely within an expert's specialty, delegate to it — "
+    "experts are faster and cheaper than doing it yourself. "
+    "Review the expert's result before presenting it to the user; you can "
+    "accept, modify, or discard it."
+)
+
 TOOL_USE_ENFORCEMENT_GUIDANCE: str = (
     "# Tool-use enforcement\n"
     "You MUST use your tools to take action — do not describe what you would do "
@@ -348,6 +357,8 @@ class PromptBuilder:
             parts.append(SESSION_SEARCH_GUIDANCE)
         if "skill_manage" in self._available_tools:
             parts.append(SKILLS_GUIDANCE)
+        if "consult_expert" in self._available_tools:
+            parts.append(EXPERT_GUIDANCE)
 
         # Tool-use enforcement for models that tend to skip tools.
         if self._available_tools:
@@ -425,25 +436,71 @@ class PromptBuilder:
         return "# Memory\n\n" + "\n\n".join(fragments)
 
     def _skills_section(self) -> str:
-        """Index available skills with descriptions."""
+        """Index available skills and experts with descriptions."""
         if not self.skills:
             return ""
 
-        lines: list[str] = ["# Available Skills"]
+        regular_skills: list[str] = []
+        expert_lines: list[str] = []
+
+        from surogates.tools.loader import SkillDef
+
         for skill in self.skills:
-            name: str = skill.get("name", "unnamed") if isinstance(skill, dict) else str(skill)
-            desc: str = skill.get("description", "") if isinstance(skill, dict) else ""
-            trigger: str = skill.get("trigger", "") if isinstance(skill, dict) else ""
+            if isinstance(skill, dict):
+                name = skill.get("name", "unnamed")
+                desc = skill.get("description", "")
+                trigger = skill.get("trigger", "")
+                skill_type = skill.get("type", "skill")
+                expert_tools = skill.get("expert_tools") or []
+                expert_stats = skill.get("expert_stats") or {}
+            elif isinstance(skill, SkillDef):
+                name = skill.name
+                desc = skill.description
+                trigger = skill.trigger or ""
+                skill_type = skill.type
+                expert_tools = skill.expert_tools or []
+                expert_stats = {}
+            else:
+                name = str(skill)
+                desc = ""
+                trigger = ""
+                skill_type = "skill"
+                expert_tools = []
+                expert_stats = {}
 
             safe_desc = self._sanitise(desc, f"skill:{name}")
-            entry = f"- **{name}**"
-            if safe_desc:
-                entry += f": {safe_desc}"
-            if trigger:
-                entry += f" (trigger: {trigger})"
-            lines.append(entry)
 
-        return "\n".join(lines)
+            if skill_type == "expert":
+                entry = f"- **{name}**"
+                if safe_desc:
+                    entry += f" — {safe_desc}"
+                total_uses = expert_stats.get("total_uses", 0)
+                total_successes = expert_stats.get("total_successes", 0)
+                if total_uses > 0:
+                    rate = (total_successes / total_uses) * 100
+                    entry += f"\n  Success rate: {rate:.0f}% ({total_uses} uses)."
+                if expert_tools:
+                    entry += f"\n  Tools: {', '.join(expert_tools)}"
+                expert_lines.append(entry)
+            else:
+                entry = f"- **{name}**"
+                if safe_desc:
+                    entry += f": {safe_desc}"
+                if trigger:
+                    entry += f" (trigger: {trigger})"
+                regular_skills.append(entry)
+
+        sections: list[str] = []
+        if regular_skills:
+            sections.append("# Available Skills\n" + "\n".join(regular_skills))
+        if expert_lines:
+            sections.append(
+                "# Available Experts\n"
+                "Use `consult_expert` to delegate tasks to these specialised models.\n"
+                + "\n".join(expert_lines)
+            )
+
+        return "\n\n".join(sections)
 
     def _context_section(self) -> str:
         """Timestamp, model info, platform hints."""
