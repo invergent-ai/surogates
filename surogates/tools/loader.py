@@ -1,13 +1,17 @@
 """Resource loader for skills, tools, and MCP server configurations.
 
-Merges resources from three layers with increasing precedence:
+Merges resources from four layers with increasing precedence:
 
 1. **Platform** -- baked into the container image at well-known paths.
-2. **Org (shared)** -- stored under the tenant's shared asset root.
-3. **User** -- stored under the tenant's per-user asset root.
+2. **User files** -- stored under the tenant's per-user asset root
+   (managed by end users via the agent's ``skill_manage`` tool).
+3. **Org DB** -- ``skills`` / ``mcp_servers`` table rows where
+   ``user_id IS NULL`` (managed by org admin via API).
+4. **User DB** -- ``skills`` / ``mcp_servers`` table rows where
+   ``user_id`` matches (managed by org admin via API).
 
-When the same resource name appears in multiple layers, the higher-
-precedence layer wins.
+Org admin overrides (DB layers) are final -- end users cannot override
+them via bucket files.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +38,13 @@ PLATFORM_MCP_DIR = "/etc/surogates/mcp"
 
 
 EXCLUDED_SKILL_DIRS = frozenset((".git", ".github", ".hub"))
+
+# Skill source layer constants.
+SKILL_SOURCE_PLATFORM = "platform"
+SKILL_SOURCE_USER = "user"
+SKILL_SOURCE_ORG = "org"
+SKILL_SOURCE_ORG_DB = "org_db"
+SKILL_SOURCE_USER_DB = "user_db"
 
 # Expert status lifecycle constants.
 EXPERT_STATUS_DRAFT = "draft"
@@ -63,7 +75,7 @@ class SkillDef:
     name: str
     description: str
     content: str  # The SKILL.md body (everything after the frontmatter)
-    source: str  # "platform", "org", "user"
+    source: str  # "platform", "user", "org_db", "user_db"
     type: str = "skill"  # "skill" (prompt-based) or "expert" (SLM-backed)
     category: str | None = None  # subdirectory grouping
     tags: list[str] | None = None  # metadata tags
@@ -133,34 +145,62 @@ class ResourceLoader:
     # Skills
     # ------------------------------------------------------------------
 
-    def load_skills(self, tenant: Any) -> list[SkillDef]:
-        """Merge skills from platform + org shared + user layers.
+    async def load_skills(
+        self,
+        tenant: Any,
+        db_session: Any | None = None,
+    ) -> list[SkillDef]:
+        """Merge skills from all four layers.
+
+        Layer precedence (lowest → highest):
+
+        1. Platform filesystem (``/etc/surogates/skills/``)
+        2. User bucket files (``tenant-{org}/users/{user}/skills/``)
+        3. Org-wide DB rows (``skills`` table, ``user_id IS NULL``)
+        4. User-specific DB rows (``skills`` table, ``user_id = ?``)
+
+        Org admin overrides (DB layers) are final.
 
         Parameters
         ----------
         tenant:
             A :class:`~surogates.tenant.context.TenantContext` instance.
-
-        Returns
-        -------
-        list[SkillDef]
-            Deduplicated by name.  User layer wins over org, which wins
-            over platform.
+        db_session:
+            An optional ``AsyncSession``.  When provided, layers 3 and 4
+            are loaded from the database.  When ``None`` the method falls
+            back to the legacy 3-layer filesystem merge.
         """
         asset_root = Path(tenant.asset_root)
         org_id = str(tenant.org_id)
         user_id = str(tenant.user_id)
 
-        org_skills_dir = str(asset_root / org_id / "shared" / "skills")
         user_skills_dir = str(
             asset_root / org_id / "users" / user_id / "skills"
         )
 
-        platform = self._load_skills_from_dir(self._platform_skills_dir, "platform")
-        org = self._load_skills_from_dir(org_skills_dir, "org")
-        user = self._load_skills_from_dir(user_skills_dir, "user")
+        # Layer 1: platform filesystem
+        platform = self._load_skills_from_dir(
+            self._platform_skills_dir, SKILL_SOURCE_PLATFORM,
+        )
 
-        return self._merge(platform, org, user)
+        # Layer 2: user bucket files
+        user_files = self._load_skills_from_dir(user_skills_dir, SKILL_SOURCE_USER)
+
+        if db_session is not None:
+            # Layer 3: org-wide DB entries
+            org_db = await self._load_skills_from_db(
+                db_session, tenant.org_id, user_id=None, source=SKILL_SOURCE_ORG_DB,
+            )
+            # Layer 4: user-specific DB entries
+            user_db = await self._load_skills_from_db(
+                db_session, tenant.org_id, tenant.user_id, source=SKILL_SOURCE_USER_DB,
+            )
+            return self._merge(platform, user_files, org_db, user_db)
+
+        # Fallback: legacy 3-layer filesystem merge (no DB).
+        org_skills_dir = str(asset_root / org_id / "shared" / "skills")
+        org_files = self._load_skills_from_dir(org_skills_dir, SKILL_SOURCE_ORG)
+        return self._merge(platform, org_files, user_files)
 
     # ------------------------------------------------------------------
     # Conditional skill filtering
@@ -359,33 +399,119 @@ class ResourceLoader:
         return servers
 
     # ------------------------------------------------------------------
+    # DB loading
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _load_skills_from_db(
+        session: Any,
+        org_id: UUID,
+        user_id: UUID | None,
+        source: str,
+    ) -> list[SkillDef]:
+        """Load enabled skills from the ``skills`` table.
+
+        Parameters
+        ----------
+        session:
+            An ``AsyncSession`` (SQLAlchemy).
+        org_id:
+            Organisation to filter by.
+        user_id:
+            ``None`` for org-wide rows, or a specific user UUID.
+        source:
+            Value for :attr:`SkillDef.source` (``"org_db"`` or ``"user_db"``).
+        """
+        from sqlalchemy import select
+        from surogates.db.models import Skill
+
+        stmt = (
+            select(Skill)
+            .where(Skill.org_id == org_id)
+            .where(Skill.enabled.is_(True))
+        )
+        if user_id is None:
+            stmt = stmt.where(Skill.user_id.is_(None))
+        else:
+            stmt = stmt.where(Skill.user_id == user_id)
+
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+        skills: list[SkillDef] = []
+        for row in rows:
+            try:
+                skills.append(_skill_from_db_row(row, source))
+            except Exception:
+                logger.warning("Skipping malformed DB skill %s", row.name, exc_info=True)
+        return skills
+
+    # ------------------------------------------------------------------
     # Merge logic
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _merge(
-        platform: list[SkillDef | MCPServerDef],
-        org: list[SkillDef | MCPServerDef],
-        user: list[SkillDef | MCPServerDef],
-    ) -> list[Any]:
-        """Layer precedence: user > org > platform.
+    def _merge(*layers: list[SkillDef | MCPServerDef]) -> list[Any]:
+        """Merge layers with last-wins-by-name precedence.
 
-        Items with the same ``name`` in a higher layer replace those in a
-        lower layer.
+        Layers are given in ascending priority order: the last layer's
+        items override earlier ones with the same ``name``.
         """
         merged: dict[str, Any] = {}
-        for item in platform:
-            merged[item.name] = item
-        for item in org:
-            merged[item.name] = item
-        for item in user:
-            merged[item.name] = item
+        for layer in layers:
+            for item in layer:
+                merged[item.name] = item
         return list(merged.values())
 
 
 # ------------------------------------------------------------------
 # Private helpers
 # ------------------------------------------------------------------
+
+
+def _skill_from_db_row(row: Any, source: str) -> SkillDef:
+    """Convert a :class:`~surogates.db.models.Skill` ORM row to a :class:`SkillDef`.
+
+    DB columns supply the primary fields.  Optional activation and expert
+    fields (``trigger``, ``tags``, ``platforms``, ``expert_tools``, etc.)
+    are stored in the ``config`` JSONB column.
+
+    The ``content`` column may contain the full ``SKILL.md`` text
+    including frontmatter; we reuse :func:`_parse_skill_frontmatter` to
+    extract the body consistently.
+    """
+    cfg = row.config or {}
+
+    # Reuse the canonical frontmatter parser to extract the body.
+    parsed = _parse_skill_frontmatter(row.content or "", row.name)
+    body = parsed["content"]
+
+    # DB columns are authoritative for name/description/type; cfg JSONB
+    # supplies activation and expert-loop metadata.
+    return _build_skill_def(
+        {
+            "name": row.name,
+            "description": row.description or "",
+            "content": body,
+            "type": row.type or "skill",
+            "category": cfg.get("category"),
+            "tags": cfg.get("tags"),
+            "platforms": cfg.get("platforms"),
+            "fallback_for_tools": cfg.get("fallback_for_tools"),
+            "requires_tools": cfg.get("requires_tools"),
+            "trigger": cfg.get("trigger"),
+            "expert_model": row.expert_model,
+            "expert_endpoint": row.expert_endpoint,
+            "expert_adapter": row.expert_adapter,
+            "expert_max_iterations": (
+                row.expert_config.get("max_iterations", 10)
+                if row.expert_config else 10
+            ),
+            "expert_status": row.expert_status or EXPERT_STATUS_DRAFT,
+            "expert_tools": cfg.get("expert_tools"),
+        },
+        source=source,
+        category=cfg.get("category"),
+    )
 
 
 def _build_skill_def(

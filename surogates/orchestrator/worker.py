@@ -242,6 +242,7 @@ async def run_worker(settings: Settings) -> None:
             sandbox_pool=sandbox_pool,
             api_client=harness_api_client,
             default_model=model_id,
+            session_factory=session_factory,
         )
 
     # 8. Orchestrator

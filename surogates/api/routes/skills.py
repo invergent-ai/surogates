@@ -199,7 +199,7 @@ async def list_skills(
     tenant: TenantContext = Depends(get_current_tenant),
     type: str | None = None,
 ) -> SkillListResponse:
-    """List available skills from all layers (platform, org, user).
+    """List available skills from all layers (platform, user files, org DB, user DB).
 
     Returns lightweight summaries suitable for the frontend
     slash-command menu.
@@ -210,60 +210,27 @@ async def list_skills(
         Optional filter: ``"skill"`` for regular skills, ``"expert"``
         for expert skills, or ``None`` (default) for all.
     """
-    ts = _get_tenant_storage(request, tenant)
-    await ts.ensure_bucket()
+    from surogates.tools.loader import ResourceLoader
 
-    # S3-backed skills (org + user layers).
-    s3_skills = await ts.list_all_skills()
+    loader = ResourceLoader()
+    session_factory = request.app.state.session_factory
+    async with session_factory() as db_session:
+        all_skills = await loader.load_skills(tenant, db_session=db_session)
 
     summaries: list[SkillSummary] = []
-    seen_names: set[str] = set()
-
-    for entry in s3_skills:
-        name = entry["name"]
-        seen_names.add(name)
-        try:
-            content = await ts.read_skill(entry["key_prefix"])
-            meta = _parse_frontmatter(content, name)
-            skill_type = meta.get("type", "skill")
-
-            if type is not None and skill_type != type:
-                continue
-
-            summary = SkillSummary(
-                name=meta.get("name", name),
-                description=meta.get("description", ""),
-                type=skill_type,
-                category=meta.get("category"),
-                trigger=meta.get("trigger"),
-            )
-            if skill_type == "expert":
-                _populate_expert_summary(summary, meta=meta)
-            summaries.append(summary)
-        except (KeyError, Exception):
-            logger.warning("Failed to read skill %s", name, exc_info=True)
-
-    # Platform skills (container filesystem, read-only).
-    from surogates.tools.loader import ResourceLoader
-    loader = ResourceLoader()
-    platform_skills = loader._load_skills_from_dir(
-        loader._platform_skills_dir, "platform",
-    )
-    for skill in platform_skills:
-        if skill.name not in seen_names:
-            skill_type = skill.type
-            if type is not None and skill_type != type:
-                continue
-            summary = SkillSummary(
-                name=skill.name,
-                description=skill.description,
-                type=skill_type,
-                category=skill.category,
-                trigger=skill.trigger,
-            )
-            if skill.is_expert:
-                _populate_expert_summary(summary, skill=skill)
-            summaries.append(summary)
+    for skill in all_skills:
+        if type is not None and skill.type != type:
+            continue
+        summary = SkillSummary(
+            name=skill.name,
+            description=skill.description,
+            type=skill.type,
+            category=skill.category,
+            trigger=skill.trigger,
+        )
+        if skill.is_expert:
+            _populate_expert_summary(summary, skill=skill)
+        summaries.append(summary)
 
     summaries.sort(key=lambda s: (s.category or "", s.name))
     return SkillListResponse(skills=summaries, total=len(summaries))
@@ -276,52 +243,39 @@ async def view_skill(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> SkillDetail:
     """View full skill content and linked files listing."""
-    ts = _get_tenant_storage(request, tenant)
-    existing = await ts.skill_exists(name)
+    from surogates.tools.loader import ResourceLoader
 
-    if not existing:
-        # Check platform skills.
-        from surogates.tools.loader import ResourceLoader
-        loader = ResourceLoader()
-        platform_skills = loader._load_skills_from_dir(
-            loader._platform_skills_dir, "platform",
-        )
-        skill_def = next((s for s in platform_skills if s.name == name), None)
-        if skill_def:
-            detail = SkillDetail(
-                name=skill_def.name,
-                description=skill_def.description,
-                type=skill_def.type,
-                content=skill_def.content,
-                category=skill_def.category,
-                tags=skill_def.tags,
-                trigger=skill_def.trigger,
-                source="platform",
-            )
-            if skill_def.is_expert:
-                _populate_expert_detail(detail, skill=skill_def)
-            return detail
+    loader = ResourceLoader()
+    session_factory = request.app.state.session_factory
+    async with session_factory() as db_session:
+        all_skills = await loader.load_skills(tenant, db_session=db_session)
+
+    skill_def = next((s for s in all_skills if s.name == name), None)
+    if skill_def is None:
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
 
-    content = await ts.read_skill(existing["key_prefix"])
-    meta = _parse_frontmatter(content, name)
-    files = await ts.list_skill_files(existing["key_prefix"])
-    # Filter out SKILL.md itself.
-    linked = [f for f in files if f != "SKILL.md"]
-
     detail = SkillDetail(
-        name=meta.get("name", name),
-        description=meta.get("description", ""),
-        type=meta.get("type", "skill"),
-        content=content,
-        category=meta.get("category"),
-        tags=meta.get("tags"),
-        trigger=meta.get("trigger"),
-        source=existing["layer"],
-        linked_files=linked,
+        name=skill_def.name,
+        description=skill_def.description,
+        type=skill_def.type,
+        content=skill_def.content,
+        category=skill_def.category,
+        tags=skill_def.tags,
+        trigger=skill_def.trigger,
+        source=skill_def.source,
     )
-    if meta.get("type") == "expert":
-        _populate_expert_detail(detail, meta=meta)
+    if skill_def.is_expert:
+        _populate_expert_detail(detail, skill=skill_def)
+
+    # For file-based user skills, list linked files from the skill directory.
+    from surogates.tools.loader import SKILL_SOURCE_USER
+    if skill_def.source == SKILL_SOURCE_USER:
+        ts = _get_tenant_storage(request, tenant)
+        existing = await ts.skill_exists(name)
+        if existing:
+            files = await ts.list_skill_files(existing["key_prefix"])
+            detail.linked_files = [f for f in files if f != "SKILL.md"]
+
     return detail
 
 

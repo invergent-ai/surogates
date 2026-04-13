@@ -124,6 +124,23 @@ def register(registry: ToolRegistry) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shared helper
+# ---------------------------------------------------------------------------
+
+
+async def _load_all_skills(tenant: Any, **kwargs: Any) -> list:
+    """Load skills from all layers, using DB when a session factory is available."""
+    from surogates.tools.loader import ResourceLoader
+
+    loader = ResourceLoader()
+    session_factory = kwargs.get("session_factory")
+    if session_factory is not None:
+        async with session_factory() as db_session:
+            return await loader.load_skills(tenant, db_session=db_session)
+    return await loader.load_skills(tenant)
+
+
+# ---------------------------------------------------------------------------
 # skills_list handler
 # ---------------------------------------------------------------------------
 
@@ -147,10 +164,7 @@ async def _skills_list_handler(
     if tenant is None:
         return json.dumps({"error": "No tenant context available"})
 
-    from surogates.tools.loader import ResourceLoader
-
-    loader = ResourceLoader()
-    skills = loader.load_skills(tenant)
+    skills = await _load_all_skills(tenant, **kwargs)
 
     category_filter = arguments.get("category")
 
@@ -220,10 +234,9 @@ async def _skill_view_handler(
             ensure_ascii=False,
         )
 
-    from surogates.tools.loader import ResourceLoader, PLATFORM_SKILLS_DIR
+    from surogates.tools.loader import PLATFORM_SKILLS_DIR
 
-    loader = ResourceLoader()
-    skills = loader.load_skills(tenant)
+    skills = await _load_all_skills(tenant, **kwargs)
 
     # Find the requested skill by name
     matching_skill = None

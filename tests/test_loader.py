@@ -95,7 +95,8 @@ class TestLoadSkillsFromDir:
 class TestMergePrecedence:
     """User > org > platform precedence."""
 
-    def test_user_overrides_org_and_platform(self, tmp_path: Path):
+    @pytest.mark.asyncio
+    async def test_user_overrides_org_and_platform(self, tmp_path: Path):
         org_id = "00000000-0000-0000-0000-000000000001"
         user_id = "00000000-0000-0000-0000-000000000002"
 
@@ -129,7 +130,7 @@ class TestMergePrecedence:
         )
 
         tenant = _make_tenant(str(tmp_path / "assets"))
-        skills = loader.load_skills(tenant)
+        skills = await loader.load_skills(tenant)
 
         # Only one skill named "shared", and it should be the user version.
         shared_skills = [s for s in skills if s.name == "shared"]

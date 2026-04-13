@@ -206,6 +206,7 @@ async def execute_tool_calls(
     hint_tracker: SubdirectoryHintTracker | None = None,
     sandbox_pool: SandboxPool | None = None,
     api_client: Any | None = None,
+    session_factory: Any | None = None,
 ) -> list[dict]:
     """Execute tool calls, choosing parallel vs sequential."""
     if should_parallelize(tool_calls):
@@ -223,6 +224,7 @@ async def execute_tool_calls(
             hint_tracker=hint_tracker,
             sandbox_pool=sandbox_pool,
             api_client=api_client,
+            session_factory=session_factory,
         )
     return await execute_tool_calls_sequential(
         tool_calls,
@@ -238,6 +240,7 @@ async def execute_tool_calls(
         hint_tracker=hint_tracker,
         sandbox_pool=sandbox_pool,
         api_client=api_client,
+        session_factory=session_factory,
     )
 
 
@@ -256,6 +259,7 @@ async def execute_tool_calls_sequential(
     hint_tracker: SubdirectoryHintTracker | None = None,
     sandbox_pool: SandboxPool | None = None,
     api_client: Any | None = None,
+    session_factory: Any | None = None,
 ) -> list[dict]:
     """Execute tool calls one at a time, emitting events for each."""
     results: list[dict] = []
@@ -279,6 +283,7 @@ async def execute_tool_calls_sequential(
             hint_tracker=hint_tracker,
             sandbox_pool=sandbox_pool,
             api_client=api_client,
+            session_factory=session_factory,
         )
         results.append(result_msg)
 
@@ -300,6 +305,7 @@ async def execute_tool_calls_concurrent(
     hint_tracker: SubdirectoryHintTracker | None = None,
     sandbox_pool: SandboxPool | None = None,
     api_client: Any | None = None,
+    session_factory: Any | None = None,
 ) -> list[dict]:
     """Execute tool calls concurrently using asyncio.gather.
 
@@ -340,6 +346,7 @@ async def execute_tool_calls_concurrent(
                 hint_tracker=hint_tracker,
                 sandbox_pool=sandbox_pool,
                 api_client=api_client,
+                session_factory=session_factory,
                 _parent_trace=parent_trace,
             )
 
@@ -367,6 +374,7 @@ async def execute_single_tool(
     hint_tracker: SubdirectoryHintTracker | None = None,
     sandbox_pool: SandboxPool | None = None,
     api_client: Any | None = None,
+    session_factory: Any | None = None,
     _parent_trace: Any | None = None,
 ) -> dict:
     """Execute a single tool call: emit events, dispatch, return result message."""
@@ -508,6 +516,7 @@ async def execute_single_tool(
                 sandbox_pool=sandbox_pool,
                 workspace_path=workspace_path,
                 api_client=api_client,
+                session_factory=session_factory,
             )
     except KeyError:
         result_content = json.dumps({

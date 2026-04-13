@@ -42,39 +42,45 @@ You are a code reviewer. When asked to review code:
 
 The body text after the frontmatter is the skill's prompt content. It is injected into the system prompt or provided as context when the skill is activated.
 
-## 3-Layer Loading
+## 4-Layer Loading
 
-Skills are loaded from three layers with last-wins precedence:
+Skills are loaded from four layers. Higher layers override lower layers by name:
 
 ```
-Layer 1: Platform  /etc/surogates/skills/     (baked into container image)
-Layer 2: Org       tenant-{org_id}/shared/skills/  (org-wide, Garage bucket)
-Layer 3: User      tenant-{org_id}/users/{user_id}/skills/  (user-specific)
+Layer 1: Platform      /etc/surogates/skills/                              (lowest priority)
+Layer 2: User files    tenant-{org_id}/users/{user_id}/skills/
+Layer 3: Org (DB)      skills table, org-wide
+Layer 4: User (DB)     skills table, user-specific                         (highest priority)
 ```
 
-Skills are merged from all three layers at session start. Higher layers win by name -- if a user-scoped skill has the same name as a platform skill, the user version takes precedence. Setting `enabled: false` in a higher layer excludes the skill entirely.
+| Layer | Who manages it | How | Priority |
+|---|---|---|---|
+| Platform | Platform operator | Bakes `SKILL.md` files into the container image | Lowest |
+| User files | End user | Through the agent's `skill_manage` tool during a session | |
+| Org (DB) | Org admin | `POST /v1/skills` via the API | |
+| User (DB) | Org admin | `POST /v1/skills` with `user_id` via the API | Highest |
+
+Org admin overrides are final -- an end user cannot override a skill that the org admin has set. This ensures the org admin retains control over what skills are available and how they behave. Setting `enabled: false` in a higher layer disables the skill entirely.
 
 ### Directory Layout
 
+File-based skills (platform and user files) follow this directory structure:
+
 ```
-platform/skills/
+/etc/surogates/skills/                        # Platform (baked into container)
   code_reviewer/
     SKILL.md
   security_audit/
     SKILL.md
 
-tenant-{org_id}/shared/skills/
-  sql_helper/
-    SKILL.md
-  company_style/
-    SKILL.md
-
-tenant-{org_id}/users/{user_id}/skills/
+tenant-{org_id}/users/{user_id}/skills/       # User files (Garage bucket)
   my_custom_skill/
     SKILL.md
 ```
 
 Each skill lives in its own directory (named after the skill) containing a `SKILL.md` file and optional supporting files.
+
+Org-wide and user-specific admin skills are stored in the database, not as files.
 
 ## Skill CRUD via API
 
@@ -88,9 +94,9 @@ Skills can be managed through the REST API or through the `skill_manage` tool (a
 | `PUT /v1/skills/{id}` | Update a skill |
 | `DELETE /v1/skills/{id}` | Delete a skill |
 
-The agent can also manage skills via the `skill_manage` tool during a session. This is how users create, edit, and delete skills through conversation.
+The agent can also manage skills via the `skill_manage` tool during a session. This is how end users create, edit, and delete skills through conversation.
 
-Skills created via the API or tool are written to the tenant's Garage bucket in the user's or shared skill directory.
+Skills created by an org admin via the API are stored in the database. Skills created by end users via the agent are written to the tenant's Garage bucket.
 
 ## Skill Validation Rules
 

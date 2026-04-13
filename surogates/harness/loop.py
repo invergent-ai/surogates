@@ -151,6 +151,7 @@ class AgentHarness:
         checkpoints_enabled: bool = False,
         api_client: Any | None = None,
         default_model: str = "gpt-4o",
+        session_factory: Any | None = None,
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
@@ -163,6 +164,7 @@ class AgentHarness:
         self._redis: Redis | None = redis_client
         self._sandbox_pool: SandboxPool | None = sandbox_pool
         self._api_client = api_client
+        self._session_factory = session_factory
 
         # Checkpoint flag — when enabled, the harness tells the sandbox
         # to take filesystem snapshots before file-mutating operations.
@@ -946,6 +948,7 @@ class AgentHarness:
                 hint_tracker=hint_tracker,
                 sandbox_pool=self._sandbox_pool,
                 api_client=self._api_client,
+                session_factory=self._session_factory,
             )
 
             # 7a. Reset nudge counters when relevant tools are used
