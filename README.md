@@ -8,6 +8,8 @@ The platform is **model-agnostic**, allowing you to use your preferred LLM provi
 
 This makes Surogates more **resilient, scalable, and secure** than existing open agent frameworks, and a better fit **for enterprise use cases**. 
 
+Read the [docs](docs/index.md).
+
 
 ![Surogates Web Chat UI](assets/webui.webp)
 
