@@ -54,6 +54,11 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["surogates*"]
 
+[tool.setuptools.package-data]
+# Bundle the built web SPA so the API image can serve it from the
+# installed package location (site-packages/surogates/web/dist).
+surogates = ["web/dist/**/*"]
+
 [tool.setuptools_scm]
 fallback_version = "0.0.0"
 

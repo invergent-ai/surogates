@@ -32,21 +32,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Python dependencies ─────────────────────────────────────────────
+# ── Python dependencies + SPA install ───────────────────────────────
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /opt/surogates
 COPY pyproject.toml ./
 COPY surogates/ ./surogates/
 
+# Place the built SPA inside the package tree *before* installing, so
+# setuptools bundles it into site-packages via package-data (declared
+# in pyproject.toml).  That way ``setup_frontend()`` finds it at
+# Path(__file__).parent.parent / "web" / "dist" regardless of cwd.
+COPY --from=web-build /build/dist ./surogates/web/dist
+
 RUN uv venv /opt/venv \
     && uv pip install --python /opt/venv/bin/python . \
     && uv pip install --python /opt/venv/bin/python uvloop
-
-# ── Web SPA ──────────────────────────────────────────────────────────
-# Bundled alongside the python package so create_app() can resolve it
-# via Path(__file__).parent.parent / "web" / "dist".
-COPY --from=web-build /build/dist /opt/surogates/surogates/web/dist
 
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
