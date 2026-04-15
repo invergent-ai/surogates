@@ -1,3 +1,4 @@
+{{- if .Values.api.enabled }}
 {{- $fullname := include "surogates.fullname" . -}}
 {{- $component := "api" -}}
 apiVersion: apps/v1
@@ -19,8 +20,8 @@ spec:
       serviceAccountName: {{ $fullname }}-api
       containers:
         - name: api
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "surogates.image" (dict "root" . "name" "api") | quote }}
+          imagePullPolicy: {{ include "surogates.imagePullPolicy" . }}
           command: ["surogates", "api"]
           ports:
             - name: http
@@ -110,3 +111,4 @@ spec:
     - name: http
       port: 8000
       targetPort: http
+{{- end }}

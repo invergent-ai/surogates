@@ -19,8 +19,8 @@ spec:
     spec:
       containers:
         - name: mcp-proxy
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "surogates.image" (dict "root" . "name" "api") | quote }}
+          imagePullPolicy: {{ include "surogates.imagePullPolicy" . }}
           command: ["surogates", "mcp-proxy"]
           ports:
             - name: http

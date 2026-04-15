@@ -155,22 +155,14 @@ install_garage() {
 # ---------------------------------------------------------------------------
 
 deploy_surogates() {
-    echo -e "${CYAN}Deploying Surogates resources...${NC}"
+    echo -e "${CYAN}Deploying Surogates chart (api/worker disabled — run locally)...${NC}"
+    "$HELM" upgrade --install surogates "${PROJECT_DIR}/helm/surogates" \
+        --namespace surogates --create-namespace \
+        -f "${SCRIPT_DIR}/surogates/values.yml"
 
-    # Namespace + secrets + ConfigMaps.
-    "$KUBECTL" apply -f "${SCRIPT_DIR}/surogates/namespace.yaml"
-    "$KUBECTL" apply -f "${SCRIPT_DIR}/surogates/secrets.yaml"
-    "$KUBECTL" apply -f "${SCRIPT_DIR}/surogates/configmaps.yaml"
-
-    # RBAC from production base manifests.
-    "$KUBECTL" apply -f "${PROJECT_DIR}/k8/base/worker-rbac.yaml"
-    "$KUBECTL" apply -f "${PROJECT_DIR}/k8/base/sandbox-rbac.yaml"
-
-    # Dev ingress route.
+    # Dev-only Traefik IngressRoute (the chart's nginx Ingress is disabled in
+    # values.yml; locally-running API is reached at surogates.k8s.localhost).
     "$KUBECTL" apply -f "${SCRIPT_DIR}/surogates/ingress.yaml"
-
-    echo -e "${GREEN}  Surogates namespace ready. Deploy workloads with:${NC}"
-    echo -e "${CYAN}    kubectl apply -k ${PROJECT_DIR}/k8/base/${NC}"
 }
 
 # ---------------------------------------------------------------------------

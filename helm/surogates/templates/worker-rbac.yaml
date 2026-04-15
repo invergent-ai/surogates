@@ -1,3 +1,4 @@
+{{- if .Values.worker.enabled }}
 {{- $fullname := include "surogates.fullname" . -}}
 apiVersion: v1
 kind: ServiceAccount
@@ -37,3 +38,4 @@ subjects:
   - kind: ServiceAccount
     name: {{ $fullname }}-worker
     namespace: {{ .Release.Namespace }}
+{{- end }}

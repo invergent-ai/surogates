@@ -77,3 +77,37 @@ Internal MCP proxy service URL.
 {{- define "surogates.mcpProxyUrl" -}}
 {{- printf "http://%s-mcp-proxy.%s.svc:8001" (include "surogates.fullname" .) .Release.Namespace }}
 {{- end }}
+
+{{/*
+Image reference — resolves {repository}:{tag} for a named image.
+
+Canonical defaults are baked into the chart; values.yaml entries are
+optional overrides (either full or partial: override just `tag` or just
+`repository`). Known names: "api", "worker", "s3fs".
+
+Usage: include "surogates.image" (dict "root" . "name" "api")
+*/}}
+{{- define "surogates.image" -}}
+{{- $defaults := dict
+  "api"    (dict "repository" "ghcr.io/invergent-ai/surogates-api"    "tag" "latest")
+  "worker" (dict "repository" "ghcr.io/invergent-ai/surogates-worker" "tag" "latest")
+  "s3fs"   (dict "repository" "ghcr.io/invergent-ai/surogates-s3fs"   "tag" "latest")
+-}}
+{{- $default := index $defaults .name -}}
+{{- if not $default -}}
+  {{- fail (printf "surogates.image: unknown image name %q" .name) -}}
+{{- end -}}
+{{- $images := default (dict) .root.Values.images -}}
+{{- $override := default (dict) (index $images .name) -}}
+{{- $repo := default $default.repository $override.repository -}}
+{{- $tag := default $default.tag $override.tag -}}
+{{- printf "%s:%s" $repo $tag -}}
+{{- end }}
+
+{{/*
+Image pull policy — `.Values.images.pullPolicy` with IfNotPresent default.
+*/}}
+{{- define "surogates.imagePullPolicy" -}}
+{{- $images := default (dict) .Values.images -}}
+{{- default "IfNotPresent" $images.pullPolicy -}}
+{{- end }}

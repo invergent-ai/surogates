@@ -1,3 +1,4 @@
+{{- if .Values.worker.enabled }}
 {{- $fullname := include "surogates.fullname" . -}}
 {{- $component := "worker" -}}
 apiVersion: apps/v1
@@ -19,8 +20,8 @@ spec:
       serviceAccountName: {{ $fullname }}-worker
       containers:
         - name: worker
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "surogates.image" (dict "root" . "name" "worker") | quote }}
+          imagePullPolicy: {{ include "surogates.imagePullPolicy" . }}
           command: ["surogates", "worker"]
           env:
             - name: SUROGATES_DB_URL
@@ -48,6 +49,10 @@ spec:
             {{- end }}
             - name: SUROGATES_SANDBOX_SRT_ENABLED
               value: {{ .Values.sandbox.srtEnabled | quote }}
+            {{- if eq .Values.sandbox.backend "kubernetes" }}
+            - name: SUROGATES_SANDBOX_K8S_S3FS_IMAGE
+              value: {{ include "surogates.image" (dict "root" . "name" "s3fs") | quote }}
+            {{- end }}
             - name: SUROGATES_WORKER_API_BASE_URL
               value: {{ include "surogates.apiServiceUrl" . | quote }}
             - name: SUROGATES_WORKER_USE_API_FOR_HARNESS_TOOLS
@@ -145,16 +150,10 @@ spec:
             {{- end }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
-          livenessProbe:
-            exec:
-              command: ["surogates", "health"]
-            initialDelaySeconds: 10
-            periodSeconds: 30
-          readinessProbe:
-            exec:
-              command: ["surogates", "health"]
-            initialDelaySeconds: 5
-            periodSeconds: 10
+          # No liveness/readiness probes: the worker does not accept
+          # inbound traffic (sessions arrive via Redis) and there is
+          # no ``surogates health`` subcommand.  Crashes are caught by
+          # the Deployment's restart policy.
       volumes:
         {{- if .Values.platformPolicies }}
         - name: platform-policies
@@ -181,3 +180,4 @@ spec:
           configMap:
             name: {{ $fullname }}-model-metadata
         {{- end }}
+{{- end }}

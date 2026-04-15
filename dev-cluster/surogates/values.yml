@@ -1,0 +1,42 @@
+# Demo-cluster overrides for the surogates Helm chart.
+#
+# The API, worker, mcp-proxy, and CronJobs run locally (outside the cluster)
+# against NodePort-exposed Postgres/Redis/Garage.  The chart only provisions
+# the namespace, RBAC, NetworkPolicy, and dev secrets so locally-running
+# processes can schedule sandbox pods into the cluster.
+agent:
+  slug: "surogates"
+  domain: "k8s.localhost"
+
+# Run these components locally, not in-cluster.
+api:
+  enabled: false
+worker:
+  enabled: false
+mcpProxy:
+  enabled: false
+ingress:
+  enabled: false
+autoscaling:
+  enabled: false
+jobs:
+  cleanupSessions:
+    enabled: false
+  resetIdleSessions:
+    enabled: false
+
+# Dev connection strings — consumed by CronJobs if re-enabled.  The locally
+# running API/worker read ~/.surogates/config.yaml instead.
+db:
+  url: "postgresql+asyncpg://surogates:surogates@surogates-db-postgresql.default.svc:5432/surogates"
+redis:
+  url: "redis://surogates-redis-master.default.svc:6379/0"
+
+auth:
+  jwtSecret: "dev-secret-do-not-use-in-production"
+
+sandbox:
+  backend: "kubernetes"
+  k8sNamespace: "surogates"
+
+logLevel: "DEBUG"

@@ -22,8 +22,8 @@ spec:
       serviceAccountName: {{ $fullname }}-api
       containers:
         - name: channel
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "surogates.image" (dict "root" . "name" "api") | quote }}
+          imagePullPolicy: {{ include "surogates.imagePullPolicy" . }}
           command: ["surogates", "channel", "slack"]
           env:
             - name: SUROGATES_DB_URL

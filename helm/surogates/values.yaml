@@ -5,11 +5,28 @@ agent:
   # Base domain.  Agent is reachable at {slug}.{domain}.
   domain: "k8s.local"
 
-# -- Container image
-image:
-  repository: ghcr.io/invergent-ai/surogates
-  tag: latest
-  pullPolicy: IfNotPresent
+# -- Container images
+#
+# Canonical defaults are baked into the chart; nothing here is required.
+# Each workload has its own image — they diverge in heavy dependencies:
+#   api     — pure Python (FastAPI). Reused by channel adapters and mcp-proxy.
+#   worker  — Python + Node + bubblewrap + srt (OS-level sandbox).
+#   s3fs    — s3fs-fuse sidecar injected into sandbox pods.
+#
+# Defaults (hardcoded in templates/_helpers.tpl):
+#   api     → ghcr.io/invergent-ai/surogates-api:latest
+#   worker  → ghcr.io/invergent-ai/surogates-worker:latest
+#   s3fs    → ghcr.io/invergent-ai/surogates-s3fs:latest
+#
+# Override only what you need (full or partial — just `tag` works):
+#   images:
+#     api:
+#       tag: v1.2.3
+#     worker:
+#       repository: ghcr.io/myorg/custom-worker
+#       tag: v1.2.3
+images: {}
+  # pullPolicy: IfNotPresent
 
 # -- Database
 db:
@@ -36,6 +53,8 @@ llm:
 
 # -- API server
 api:
+  # Disable when running the API process outside the cluster (e.g. local dev).
+  enabled: true
   replicas: 2
   resources:
     requests:
@@ -47,6 +66,8 @@ api:
 
 # -- Worker
 worker:
+  # Disable when running the worker process outside the cluster (e.g. local dev).
+  enabled: true
   replicas: 5
   concurrency: 50
   resources:
@@ -72,7 +93,6 @@ sandbox:
   k8sServiceAccount: "surogates-sandbox"
   k8sPodReadyTimeout: 60
   k8sExecutorPath: "/usr/local/bin/tool-executor"
-  k8sS3fsImage: "ghcr.io/invergent-ai/surogates-s3fs:latest"
   k8sS3Endpoint: ""
 
 # -- Storage (S3-compatible)

@@ -1,4 +1,4 @@
-{{- if .Values.autoscaling.enabled }}
+{{- if and .Values.autoscaling.enabled .Values.worker.enabled }}
 {{- $fullname := include "surogates.fullname" . -}}
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler

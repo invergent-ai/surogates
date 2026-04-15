@@ -23,8 +23,8 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: cleanup
-              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              image: {{ include "surogates.image" (dict "root" . "name" "api") | quote }}
+              imagePullPolicy: {{ include "surogates.imagePullPolicy" . }}
               command: ["python", "-m", "surogates.jobs.cleanup_sessions"]
               env:
                 - name: SUROGATES_DB_URL
@@ -84,8 +84,8 @@ spec:
           {{- end }}
           containers:
             - name: reset
-              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              image: {{ include "surogates.image" (dict "root" . "name" "worker") | quote }}
+              imagePullPolicy: {{ include "surogates.imagePullPolicy" . }}
               command: ["python", "-m", "surogates.jobs.reset_idle_sessions"]
               env:
                 - name: SUROGATES_DB_URL

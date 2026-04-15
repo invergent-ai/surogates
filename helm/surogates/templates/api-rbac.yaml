@@ -1,0 +1,9 @@
+{{- if .Values.api.enabled }}
+{{- $fullname := include "surogates.fullname" . -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-api
+  labels:
+    {{- include "surogates.fullLabels" (dict "root" . "component" "api") | nindent 4 }}
+{{- end }}
