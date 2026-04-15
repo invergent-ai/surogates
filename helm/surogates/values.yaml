@@ -130,7 +130,10 @@ channels:
 # -- Ingress
 ingress:
   enabled: true
-  className: nginx
+  # Leave empty to let the cluster's default IngressClass pick it up.
+  # Override (e.g. "traefik", "nginx") only when multiple controllers
+  # run and you need to target one explicitly.
+  className: ""
   annotations: {}
   tls:
     enabled: true

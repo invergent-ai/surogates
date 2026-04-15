@@ -44,15 +44,23 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# Paths that never require authentication.
+# Only API paths require authentication. Everything else (root, /assets/*,
+# and all SPA fallback routes served by ``setup_frontend``) is public so the
+# browser can load the app before the user signs in.
+_PROTECTED_PATH_PREFIXES: tuple[str, ...] = ("/v1/",)
+
+# API subpaths that are exempt from auth even though they live under /v1.
 _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
-    "/health",
     "/v1/auth/",
     "/v1/transparency",
-    "/docs",
-    "/redoc",
-    "/openapi.json",
 )
+
+
+def _is_public(path: str) -> bool:
+    """Return True when *path* should bypass the auth middleware."""
+    if not any(path.startswith(p) for p in _PROTECTED_PATH_PREFIXES):
+        return True
+    return any(path.startswith(p) for p in _PUBLIC_PATH_PREFIXES)
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -155,8 +163,9 @@ class _AuthMiddleware(BaseHTTPMiddleware):
     ) -> Response:
         path = request.url.path
 
-        # Skip authentication for public paths.
-        if any(path.startswith(prefix) for prefix in _PUBLIC_PATH_PREFIXES):
+        # Skip authentication for public paths (SPA routes, /assets/*,
+        # unauthenticated API endpoints).
+        if _is_public(path):
             return await call_next(request)
 
         # Extract token from Authorization header or ?token= query param.
@@ -237,7 +246,7 @@ def setup_auth_middleware(app: FastAPI, settings: Settings) -> None:
     ) -> Response:
         path = request.url.path
 
-        if any(path.startswith(prefix) for prefix in _PUBLIC_PATH_PREFIXES):
+        if _is_public(path):
             return await call_next(request)
 
         # Extract token from Authorization header or ?token= query param.
