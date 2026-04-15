@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import FastAPI
@@ -98,5 +99,16 @@ def create_app() -> FastAPI:
     app.include_router(transparency.router, prefix="/v1", tags=["transparency"])
     app.include_router(workspace.router, prefix="/v1", tags=["workspace"])
     app.include_router(admin.router, prefix="/v1/admin", tags=["admin"])
+
+    # --- frontend SPA ----------------------------------------------------
+    # The catch-all route must be registered LAST so it does not shadow
+    # the API routers above.
+    from surogates.api.frontend import setup_frontend
+
+    build_path = Path(__file__).resolve().parent.parent / "web" / "dist"
+    if setup_frontend(app, build_path):
+        logger.info("Frontend loaded from %s", build_path)
+    else:
+        logger.info("Frontend not found at %s (skipping SPA mount)", build_path)
 
     return app

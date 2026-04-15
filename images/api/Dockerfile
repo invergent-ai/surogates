@@ -1,13 +1,24 @@
 # Surogates API Gateway — production image
 #
-# Runs the FastAPI server (sessions, events SSE, auth, admin).
-# No sandbox runtime needed — the API never executes tools.
+# Runs the FastAPI server (sessions, events SSE, auth, admin) and serves
+# the built web SPA.
 #
 # Build:
-#   docker build -t ghcr.io/invergent-ai/surogates-api:latest -f k8/images/api/Dockerfile .
+#   docker build -t ghcr.io/invergent-ai/surogates-api:latest -f images/api/Dockerfile .
 #
 # The build context is the repository root.
 
+# ── Stage 1: Web SPA build ───────────────────────────────────────────
+FROM node:22-slim AS web-build
+
+WORKDIR /build
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+
+COPY web/ ./
+RUN npm run build
+
+# ── Stage 2: Final image ─────────────────────────────────────────────
 FROM python:3.12-slim
 
 LABEL org.opencontainers.image.title="surogates-api" \
@@ -31,6 +42,11 @@ COPY surogates/ ./surogates/
 RUN uv venv /opt/venv \
     && uv pip install --python /opt/venv/bin/python . \
     && uv pip install --python /opt/venv/bin/python uvloop
+
+# ── Web SPA ──────────────────────────────────────────────────────────
+# Bundled alongside the python package so create_app() can resolve it
+# via Path(__file__).parent.parent / "web" / "dist".
+COPY --from=web-build /build/dist /opt/surogates/surogates/web/dist
 
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
