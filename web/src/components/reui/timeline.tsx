@@ -1,6 +1,6 @@
 import {
   createContext,
-  HTMLAttributes,
+  type HTMLAttributes,
   useCallback,
   useContext,
   useState,
