@@ -136,17 +136,19 @@ class SessionStore:
         self,
         org_id: UUID,
         user_id: UUID,
+        agent_id: str,
         *,
         limit: int = 50,
         offset: int = 0,
     ) -> list[Session]:
-        """Return sessions for a user within an org, newest first."""
+        """Return sessions for a user within an org, scoped to one agent, newest first."""
         async with self._sf() as db:
             result = await db.execute(
                 select(SessionRow)
                 .where(
                     SessionRow.org_id == org_id,
                     SessionRow.user_id == user_id,
+                    SessionRow.agent_id == agent_id,
                     SessionRow.status != "archived",
                 )
                 .order_by(SessionRow.created_at.desc())
@@ -508,6 +510,7 @@ class SessionStore:
     async def find_idle_sessions(
         self,
         idle_minutes: int,
+        agent_id: str,
         *,
         daily_at_hour: int | None = None,
         mode: str = "idle",
@@ -557,13 +560,18 @@ class SessionStore:
             LEFT JOIN session_leases l
                 ON l.session_id = s.id AND l.expires_at > now()
             WHERE s.status IN ('active', 'idle')
+              AND s.agent_id = :agent_id
               AND l.session_id IS NULL
               AND {where_clause}
             ORDER BY s.updated_at ASC
             LIMIT :lim
         """
 
-        params: dict[str, Any] = {"idle_minutes": idle_minutes, "lim": limit}
+        params: dict[str, Any] = {
+            "idle_minutes": idle_minutes,
+            "agent_id": agent_id,
+            "lim": limit,
+        }
         if daily_at_hour is not None:
             params["at_hour"] = daily_at_hour
 

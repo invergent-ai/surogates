@@ -517,6 +517,7 @@ async def reset_idle_sessions(dry_run: bool = False) -> int:
     daily_at_hour = reset_cfg.at_hour if reset_cfg.mode in ("daily", "both") else None
     idle_sessions = await session_store.find_idle_sessions(
         idle_minutes=reset_cfg.idle_minutes,
+        agent_id=settings.agent_id,
         daily_at_hour=daily_at_hour,
         mode=reset_cfg.mode,
     )

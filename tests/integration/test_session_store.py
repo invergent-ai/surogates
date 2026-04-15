@@ -97,17 +97,19 @@ async def test_list_sessions(session_store, session_factory):
         ids.append(s.id)
 
     # Fetch all
-    sessions = await session_store.list_sessions(org_id, user_id)
+    sessions = await session_store.list_sessions(org_id, user_id, "test-agent")
     returned_ids = {s.id for s in sessions}
     assert all(sid in returned_ids for sid in ids)
 
     # Pagination: limit=2
-    page1 = await session_store.list_sessions(org_id, user_id, limit=2)
+    page1 = await session_store.list_sessions(
+        org_id, user_id, "test-agent", limit=2
+    )
     assert len(page1) == 2
 
     # Pagination: offset=2
     page2 = await session_store.list_sessions(
-        org_id, user_id, limit=10, offset=2
+        org_id, user_id, "test-agent", limit=10, offset=2
     )
     assert len(page2) >= 1
 

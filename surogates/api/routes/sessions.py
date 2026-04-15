@@ -80,9 +80,12 @@ def _get_session_store(request: Request) -> SessionStore:
 
 
 async def _get_session_for_tenant(
-    store: SessionStore, session_id: UUID, tenant: TenantContext
+    request: Request,
+    session_id: UUID,
+    tenant: TenantContext,
 ) -> Session:
-    """Fetch a session and verify it belongs to the tenant's org."""
+    """Fetch a session and verify it belongs to the tenant's org and this agent."""
+    store = _get_session_store(request)
     try:
         session = await store.get_session(session_id)
     except SessionNotFoundError:
@@ -91,7 +94,8 @@ async def _get_session_for_tenant(
             detail=f"Session {session_id} not found.",
         )
 
-    if session.org_id != tenant.org_id:
+    agent_id = request.app.state.settings.agent_id
+    if session.org_id != tenant.org_id or session.agent_id != agent_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
@@ -170,7 +174,7 @@ async def send_message(
 ) -> SendMessageResponse:
     """Send a user message to a session, triggering agent processing."""
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(store, session_id, tenant)
+    session = await _get_session_for_tenant(request, session_id, tenant)
 
     if session.status not in ("active", "idle", "failed", "paused"):
         raise HTTPException(
@@ -226,8 +230,7 @@ async def confirm_disclosure(
     enforcement is enabled.  Typically called by the frontend after
     showing the AI disclosure notice to the user.
     """
-    store = _get_session_store(request)
-    await _get_session_for_tenant(store, session_id, tenant)
+    await _get_session_for_tenant(request, session_id, tenant)
 
     governance = getattr(request.app.state, "governance_gate", None)
     if governance is not None:
@@ -241,8 +244,7 @@ async def get_session(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> Session:
     """Retrieve metadata for a single session."""
-    store = _get_session_store(request)
-    return await _get_session_for_tenant(store, session_id, tenant)
+    return await _get_session_for_tenant(request, session_id, tenant)
 
 
 @router.get("/sessions", response_model=ListSessionsResponse)
@@ -252,8 +254,9 @@ async def list_sessions(
     limit: int = 50,
     offset: int = 0,
 ) -> ListSessionsResponse:
-    """List the authenticated user's sessions (paginated, newest first)."""
+    """List the authenticated user's sessions for this agent, newest first."""
     store = _get_session_store(request)
+    settings = request.app.state.settings
 
     if limit < 1:
         limit = 1
@@ -265,6 +268,7 @@ async def list_sessions(
     sessions = await store.list_sessions(
         org_id=tenant.org_id,
         user_id=tenant.user_id,
+        agent_id=settings.agent_id,
         limit=limit,
         offset=offset,
     )
@@ -285,7 +289,7 @@ async def pause_session(
 ) -> Session:
     """Pause an active session."""
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(store, session_id, tenant)
+    session = await _get_session_for_tenant(request, session_id, tenant)
 
     if session.status not in ("active", "processing", "paused"):
         raise HTTPException(
@@ -319,7 +323,7 @@ async def resume_session(
 ) -> Session:
     """Resume a paused session."""
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(store, session_id, tenant)
+    session = await _get_session_for_tenant(request, session_id, tenant)
 
     if session.status != "paused":
         raise HTTPException(
@@ -348,7 +352,7 @@ async def delete_session(
 ) -> None:
     """Archive (soft-delete) a session and delete its workspace storage."""
     store = _get_session_store(request)
-    await _get_session_for_tenant(store, session_id, tenant)
+    await _get_session_for_tenant(request, session_id, tenant)
 
     await store.update_session_status(session_id, "archived")
 

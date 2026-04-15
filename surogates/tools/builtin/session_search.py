@@ -266,6 +266,7 @@ async def _list_recent_sessions(
     session_store: Any,
     org_id: UUID,
     user_id: UUID,
+    agent_id: str,
     limit: int,
     current_session_id: UUID | None = None,
 ) -> str:
@@ -274,6 +275,7 @@ async def _list_recent_sessions(
         sessions = await session_store.list_sessions(
             org_id=org_id,
             user_id=user_id,
+            agent_id=agent_id,
             limit=limit + 5,  # fetch extra to skip current
         )
 
@@ -355,6 +357,7 @@ async def session_search(
     session_store: Any = None,
     org_id: UUID | None = None,
     user_id: UUID | None = None,
+    agent_id: str = "",
     current_session_id: UUID | None = None,
     auxiliary_fn: Any | None = None,
 ) -> str:
@@ -386,13 +389,21 @@ async def session_search(
             "error": "Tenant context (org_id/user_id) not available.",
         })
 
+    # Search stays within the current session's agent — cross-agent history is
+    # not addressable.
+    if not agent_id:
+        return json.dumps({
+            "success": False,
+            "error": "agent_id is required to scope search to this agent.",
+        })
+
     limit = min(limit, 5)  # Cap at 5 sessions to avoid excessive LLM calls
 
     # Recent sessions mode: when query is empty, return metadata for recent sessions.
     # No LLM calls -- just DB queries for titles, previews, timestamps.
     if not query or not query.strip():
         return await _list_recent_sessions(
-            session_store, org_id, user_id, limit, current_session_id,
+            session_store, org_id, user_id, agent_id, limit, current_session_id,
         )
 
     query = query.strip()
@@ -447,6 +458,7 @@ async def session_search(
                     JOIN sessions s ON s.id = e.session_id
                     WHERE s.org_id = :org_id
                       AND s.user_id = :user_id
+                      AND s.agent_id = :agent_id
                       AND s.status != 'archived'
                       AND to_tsvector('english', COALESCE(e.data->>'content', '') || ' ' || COALESCE(e.data->>'result', ''))
                           @@ plainto_tsquery('english', :query)
@@ -458,6 +470,7 @@ async def session_search(
                     "query": query,
                     "org_id": org_id,
                     "user_id": user_id,
+                    "agent_id": agent_id,
                     "limit": 50,  # Get more matches to find unique sessions
                 }
 
@@ -740,6 +753,7 @@ async def _session_search_handler(
     tenant = kwargs.get("tenant", {})
     org_id = tenant.get("org_id") if isinstance(tenant, dict) else getattr(tenant, "org_id", None)
     user_id = tenant.get("user_id") if isinstance(tenant, dict) else getattr(tenant, "user_id", None)
+    agent_id = kwargs.get("agent_id", "")
     current_session_id = kwargs.get("session_id")
     auxiliary_fn = kwargs.get("auxiliary_fn")
 
@@ -758,6 +772,7 @@ async def _session_search_handler(
         session_store=store,
         org_id=org_id,
         user_id=user_id,
+        agent_id=agent_id,
         current_session_id=current_session_id,
         auxiliary_fn=auxiliary_fn,
     )

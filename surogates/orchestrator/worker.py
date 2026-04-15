@@ -167,6 +167,17 @@ async def run_worker(settings: Settings) -> None:
         )
     configured_org_id = UUID(settings.org_id)
 
+    # Resolve the agent_id from config (required).  Sessions belong to an
+    # agent; a worker refuses to process sessions that belong to a
+    # different agent.
+    if not settings.agent_id:
+        raise RuntimeError(
+            "SUROGATES_AGENT_ID is not set. Each worker instance serves "
+            "exactly one agent. Set agent_id in config.yaml or "
+            "SUROGATES_AGENT_ID env var."
+        )
+    configured_agent_id = settings.agent_id
+
     # 7. Harness factory -- creates a fully-wired AgentHarness for a given session.
     async def harness_factory(session_id: UUID) -> AgentHarness:
         """Build an AgentHarness with all dependencies injected.
@@ -175,6 +186,15 @@ async def run_worker(settings: Settings) -> None:
         """
         # Load session to get user_id.
         session = await session_store.get_session(session_id)
+
+        # Refuse to process sessions that belong to a different agent —
+        # defence-in-depth in case a foreign session id leaks into this
+        # worker's queue.
+        if session.agent_id != configured_agent_id:
+            raise RuntimeError(
+                f"session {session_id} belongs to agent {session.agent_id!r}, "
+                f"this worker serves agent {configured_agent_id!r}"
+            )
 
         # Load org + user from DB.
         from sqlalchemy import select as sa_select

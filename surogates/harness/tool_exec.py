@@ -569,6 +569,7 @@ async def execute_single_tool(
                 tool_name,
                 tool_args,
                 session_id=str(session.id),
+                agent_id=session.agent_id,
                 tenant=tenant,
                 session_store=store,
                 redis=redis,

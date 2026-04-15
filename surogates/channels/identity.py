@@ -113,6 +113,7 @@ async def get_or_create_channel_session(
         result = await db.execute(
             select(SessionRow)
             .where(SessionRow.user_id == user_id)
+            .where(SessionRow.agent_id == agent_id)
             .where(SessionRow.channel == channel)
             .where(SessionRow.status.in_(["active", "processing", "paused"]))
             .where(
