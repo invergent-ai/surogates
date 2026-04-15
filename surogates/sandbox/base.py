@@ -38,7 +38,7 @@ class Resource:
 class SandboxSpec:
     """Desired-state specification for provisioning a sandbox."""
 
-    image: str = "ghcr.io/invergent-ai/agent-sandbox:latest"
+    image: str = "ghcr.io/invergent-ai/surogates-agent-sandbox:latest"
     resources: list[Resource] = field(default_factory=list)
     cpu: str = "500m"
     memory: str = "512Mi"

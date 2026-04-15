@@ -5,9 +5,9 @@
 # with full feature parity.
 #
 # Build (from repo root):
-#   docker build -t ghcr.io/invergent-ai/agent-sandbox:latest -f images/sandbox/Dockerfile .
+#   docker build -t ghcr.io/invergent-ai/surogates-agent-sandbox:latest -f images/sandbox/Dockerfile .
 # Load into k3d cluster (optional, if using k3d):
-#   k3d image import ghcr.io/invergent-ai/agent-sandbox:latest -c surogates
+#   k3d image import ghcr.io/invergent-ai/surogates-agent-sandbox:latest -c surogates
 
 # ── Stage 1: Python dependencies ──────────────────────────────────────
 FROM python:3.12-slim AS python-deps
@@ -24,7 +24,7 @@ RUN uv venv /opt/venv \
 # ── Stage 2: Final image ─────────────────────────────────────────────
 FROM python:3.12-slim
 
-LABEL org.opencontainers.image.title="agent-sandbox" \
+LABEL org.opencontainers.image.title="surogates-agent-sandbox" \
       org.opencontainers.image.description="Surogates agent sandbox execution environment" \
       org.opencontainers.image.vendor="Invergent SA" \
       org.opencontainers.image.source="https://github.com/invergent-ai/surogates"

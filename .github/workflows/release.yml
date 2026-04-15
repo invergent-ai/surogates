@@ -42,7 +42,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [api, worker, sandbox, s3fs]
+        include:
+          - dir: api
+            name: surogates-api
+          - dir: worker
+            name: surogates-worker
+          - dir: sandbox
+            name: surogates-agent-sandbox
+          - dir: s3fs
+            name: surogates-s3fs
     steps:
       - uses: actions/checkout@v4
 
@@ -64,10 +72,10 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: images/${{ matrix.image }}/Dockerfile
+          file: images/${{ matrix.dir }}/Dockerfile
           push: true
           tags: |
-            ghcr.io/invergent-ai/surogates-${{ matrix.image }}:${{ steps.version.outputs.value }}
-            ghcr.io/invergent-ai/surogates-${{ matrix.image }}:latest
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+            ghcr.io/invergent-ai/${{ matrix.name }}:${{ steps.version.outputs.value }}
+            ghcr.io/invergent-ai/${{ matrix.name }}:latest
+          cache-from: type=gha,scope=${{ matrix.dir }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.dir }}

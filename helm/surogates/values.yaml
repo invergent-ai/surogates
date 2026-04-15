@@ -72,7 +72,7 @@ sandbox:
   k8sServiceAccount: "surogates-sandbox"
   k8sPodReadyTimeout: 60
   k8sExecutorPath: "/usr/local/bin/tool-executor"
-  k8sS3fsImage: "ghcr.io/invergent-ai/agent-sandbox-s3fs:latest"
+  k8sS3fsImage: "ghcr.io/invergent-ai/surogates-s3fs:latest"
   k8sS3Endpoint: ""
 
 # -- Storage (S3-compatible)

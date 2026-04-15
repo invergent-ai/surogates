@@ -177,7 +177,7 @@ class SandboxSettings(BaseSettings):
     k8s_service_account: str = "surogates-sandbox"
     k8s_pod_ready_timeout: int = 60
     k8s_executor_path: str = "/usr/local/bin/tool-executor"
-    k8s_s3fs_image: str = "ghcr.io/invergent-ai/agent-sandbox-s3fs:latest"
+    k8s_s3fs_image: str = "ghcr.io/invergent-ai/surogates-s3fs:latest"
     # In-cluster S3 endpoint for sandbox pods (they can't use the host NodePort).
     # If empty, falls back to storage.endpoint.
     k8s_s3_endpoint: str = ""

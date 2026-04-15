@@ -59,7 +59,7 @@ Surogates is configured via a YAML file merged with environment variables. Envir
 | `sandbox.backend` | `SUROGATES_SANDBOX_BACKEND` | `process` | Backend: `process` (dev) or `kubernetes` (prod) |
 | `sandbox.default_timeout` | `SUROGATES_SANDBOX_DEFAULT_TIMEOUT` | `300` | Default execution timeout (seconds) |
 | `sandbox.k8s_namespace` | `SUROGATES_SANDBOX_K8S_NAMESPACE` | `surogates` | K8s namespace for sandbox pods |
-| `sandbox.k8s_image` | `SUROGATES_SANDBOX_K8S_IMAGE` | `ghcr.io/invergent-ai/agent-sandbox:latest` | Sandbox container image |
+| `sandbox.k8s_image` | `SUROGATES_SANDBOX_K8S_IMAGE` | `ghcr.io/invergent-ai/surogates-agent-sandbox:latest` | Sandbox container image |
 | `sandbox.k8s_service_account` | `SUROGATES_SANDBOX_K8S_SERVICE_ACCOUNT` | `surogates-sandbox` | ServiceAccount for sandbox pods |
 | `sandbox.k8s_s3_endpoint` | `SUROGATES_SANDBOX_K8S_S3_ENDPOINT` | -- | In-cluster S3 endpoint for s3fs sidecar |
 | `sandbox.k8s_pod_ready_timeout` | `SUROGATES_SANDBOX_K8S_POD_READY_TIMEOUT` | `60` | Max wait for pod Ready (seconds) |
