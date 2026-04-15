@@ -47,8 +47,15 @@ dependencies = [
 ]
 scripts = { "surogates" = "surogates.cli.main:cli_main" }
 
+[build-system]
+requires = ["setuptools>=68", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
 [tool.setuptools.packages.find]
 include = ["surogates*"]
+
+[tool.setuptools_scm]
+fallback_version = "0.0.0"
 
 [tool.uv]
 prerelease = "allow"
