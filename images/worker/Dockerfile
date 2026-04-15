@@ -4,7 +4,7 @@
 # Runtime (srt) for OS-level process isolation via bubblewrap + seccomp.
 #
 # Build:
-#   docker build -t ghcr.io/invergent-ai/surogates:latest -f k8/images/worker/Dockerfile .
+#   docker build -t ghcr.io/invergent-ai/surogates:latest -f images/worker/Dockerfile .
 #
 # The build context is the repository root.
 
@@ -86,7 +86,7 @@ RUN groupadd --gid 1000 surogates \
 # ── Default srt sandbox config ──────────────────────────────────────
 # Restrictive defaults: write only to workspace, block secrets,
 # no network by default (tools use their own HTTP clients, not shell).
-COPY k8/images/worker/srt-settings.json /etc/surogates/srt-settings.json
+COPY images/worker/srt-settings.json /etc/surogates/srt-settings.json
 
 # ── Config mount points ─────────────────────────────────────────────
 # These directories are populated via K8s ConfigMap/Secret mounts.

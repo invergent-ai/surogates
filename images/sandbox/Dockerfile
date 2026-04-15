@@ -5,7 +5,7 @@
 # with full feature parity.
 #
 # Build (from repo root):
-#   docker build -t ghcr.io/invergent-ai/agent-sandbox:latest -f k8/images/sandbox/Dockerfile .
+#   docker build -t ghcr.io/invergent-ai/agent-sandbox:latest -f images/sandbox/Dockerfile .
 # Load into k3d cluster (optional, if using k3d):
 #   k3d image import ghcr.io/invergent-ai/agent-sandbox:latest -c surogates
 
@@ -45,7 +45,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1
 
 # ── Tool executor ───────────────────────────────────────────────────
-COPY k8/images/sandbox/tool-executor /usr/local/bin/tool-executor
+COPY images/sandbox/tool-executor /usr/local/bin/tool-executor
 RUN chmod +x /usr/local/bin/tool-executor
 
 # ── Non-root user ───────────────────────────────────────────────────
