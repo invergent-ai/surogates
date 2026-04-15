@@ -21,6 +21,7 @@ from surogates.harness.budget import IterationBudget
 from surogates.harness.context import ContextCompressor
 from surogates.harness.loop import AgentHarness
 from surogates.harness.prompt import PromptBuilder
+from surogates.health import infrastructure_readiness, start_health_server
 from surogates.memory.manager import MemoryManager
 from surogates.memory.store import MemoryStore
 from surogates.orchestrator.dispatcher import Orchestrator
@@ -259,6 +260,11 @@ async def run_worker(settings: Settings) -> None:
         poll_timeout=settings.worker.poll_timeout,
     )
 
+    health_server = await start_health_server(
+        settings.health_port,
+        lambda: infrastructure_readiness(redis_client, session_factory),
+    )
+
     # 9. Signal handling for graceful shutdown.
     loop = asyncio.get_running_loop()
 
@@ -281,6 +287,7 @@ async def run_worker(settings: Settings) -> None:
     finally:
         # Cleanup
         logger.info("Worker %s shutting down", worker_id)
+        await health_server.stop()
         await sandbox_pool.destroy_all()
         mcp_proxy.shutdown_all()
         if mcp_proxy_client is not None:

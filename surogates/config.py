@@ -342,6 +342,11 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
+    # Side-car health HTTP port for components that don't expose a
+    # public API (worker, channel adapters).  The API and mcp-proxy
+    # services serve /health on their primary port and ignore this.
+    health_port: int = 8080
+
 
 def load_settings() -> Settings:
     """Load settings from config file + environment variables.

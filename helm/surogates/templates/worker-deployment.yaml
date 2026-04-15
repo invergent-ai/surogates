@@ -121,6 +121,24 @@ spec:
                   fieldPath: metadata.name
             - name: SUROGATES_LOG_LEVEL
               value: {{ .Values.logLevel | quote }}
+            - name: SUROGATES_HEALTH_PORT
+              value: {{ .Values.healthPort | quote }}
+          ports:
+            - name: health
+              containerPort: {{ .Values.healthPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
           volumeMounts:
             {{- if .Values.platformPolicies }}
             - name: platform-policies
@@ -150,10 +168,6 @@ spec:
             {{- end }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
-          # No liveness/readiness probes: the worker does not accept
-          # inbound traffic (sessions arrive via Redis) and there is
-          # no ``surogates health`` subcommand.  Crashes are caught by
-          # the Deployment's restart policy.
       volumes:
         {{- if .Values.platformPolicies }}
         - name: platform-policies

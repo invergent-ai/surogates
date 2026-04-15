@@ -191,3 +191,8 @@ encryptionKey: ""
 
 # -- Logging
 logLevel: "INFO"
+
+# -- Side-car health HTTP port for worker and channel adapter pods.
+# The API and mcp-proxy services serve /health on their primary port
+# and ignore this value.
+healthPort: 8080

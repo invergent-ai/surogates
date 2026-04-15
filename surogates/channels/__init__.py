@@ -97,6 +97,7 @@ async def start_channel(channel_type: str, settings: Settings) -> None:
 
     from surogates.channels.delivery import DeliveryService
     from surogates.db.engine import async_engine_from_settings, async_session_factory
+    from surogates.health import infrastructure_readiness, start_health_server
     from surogates.session.store import SessionStore
 
     engine = async_engine_from_settings(settings.db)
@@ -132,6 +133,11 @@ async def start_channel(channel_type: str, settings: Settings) -> None:
             redis_client=redis_client,
         )
 
+    health_server = await start_health_server(
+        settings.health_port,
+        lambda: infrastructure_readiness(redis_client, session_factory),
+    )
+
     # Set up graceful shutdown.
     shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -149,6 +155,7 @@ async def start_channel(channel_type: str, settings: Settings) -> None:
         await shutdown_event.wait()
     finally:
         logger.info("Disconnecting %s adapter ...", channel_type)
+        await health_server.stop()
         try:
             await adapter.disconnect()
         except NotImplementedError:

@@ -65,6 +65,24 @@ spec:
               value: {{ .Values.channels.slack.replyBroadcast | quote }}
             - name: SUROGATES_LOG_LEVEL
               value: {{ .Values.logLevel | quote }}
+            - name: SUROGATES_HEALTH_PORT
+              value: {{ .Values.healthPort | quote }}
+          ports:
+            - name: health
+              containerPort: {{ .Values.healthPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
           resources:
             requests:
               cpu: 100m
