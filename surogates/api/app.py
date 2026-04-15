@@ -74,6 +74,7 @@ def create_app() -> FastAPI:
     configure_logging(level=settings.api.log_level if hasattr(settings.api, "log_level") else logging.INFO)
 
     # --- middleware -------------------------------------------------------
+    from surogates.api.middleware.api_prefix import StripApiPrefixMiddleware
     from surogates.api.middleware.auth import setup_auth_middleware
     from surogates.api.middleware.rate_limit import setup_rate_limit_middleware
     from surogates.api.middleware.tenant import setup_tenant_middleware
@@ -85,6 +86,11 @@ def create_app() -> FastAPI:
     setup_tenant_middleware(app, settings)
     setup_rate_limit_middleware(app, settings)
     setup_trace_middleware(app, settings)
+
+    # The /api prefix strip must be the OUTERMOST layer so every
+    # downstream middleware (auth, tenant, rate-limit, trace) and the
+    # router see the canonical /v1/... path.
+    app.add_middleware(StripApiPrefixMiddleware)
 
     # --- routes ----------------------------------------------------------
     from surogates.api.routes import admin, auth, events, health, memory, sessions, skills, tools, transparency, workspace

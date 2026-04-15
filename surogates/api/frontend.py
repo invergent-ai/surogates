@@ -38,9 +38,6 @@ def setup_frontend(app: FastAPI, build_path: Path) -> bool:
 
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
-        if full_path.startswith("api"):
-            return {"error": "API endpoint not found"}
-
         file_path = (build_path / full_path).resolve()
 
         if not file_path.is_relative_to(build_path.resolve()):
