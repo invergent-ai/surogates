@@ -113,6 +113,10 @@ async def _delegate_handler(
 
     parent_session_id = UUID(str(parent_session_id_str))
 
+    # Child inherits the parent's agent_id — delegation stays within the agent.
+    parent_session = await session_store.get_session(parent_session_id)
+    agent_id = parent_session.agent_id
+
     # Prepare the child's user message.
     user_content = goal
     if context:
@@ -131,6 +135,7 @@ async def _delegate_handler(
         child_session = await session_store.create_session(
             user_id=tenant.user_id,
             org_id=tenant.org_id,
+            agent_id=agent_id,
             channel="delegation",
             model=model_override,
             config={"max_iterations": child_iterations, "streaming": False},

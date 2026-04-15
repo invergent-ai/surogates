@@ -69,6 +69,8 @@ spec:
             - name: SUROGATES_ORG_ID
               value: {{ .Values.org.id | quote }}
             {{- end }}
+            - name: SUROGATES_AGENT_ID
+              value: {{ include "surogates.agentId" . | quote }}
             - name: SUROGATES_LOG_LEVEL
               value: {{ .Values.logLevel | quote }}
           {{- if .Values.platformSkills }}

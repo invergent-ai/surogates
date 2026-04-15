@@ -22,6 +22,7 @@ class Session(BaseModel):
     id: UUID
     user_id: UUID
     org_id: UUID
+    agent_id: str
     channel: str
     status: str
     title: str | None = None

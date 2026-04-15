@@ -332,6 +332,7 @@ class Settings(BaseSettings):
 
     # Identity
     org_id: str = ""  # the org this agent instance belongs to
+    agent_id: str = ""  # the agent this instance serves (sessions belong to an agent)
     worker_id: str = ""  # set from K8s downward API (pod name)
     jwt_secret: str = "change-me-in-production"
     encryption_key: str = ""  # Fernet key for credential vault

@@ -34,7 +34,7 @@ async def _create_session_and_event(session_store, session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     session = await session_store.create_session(
-        user_id=user_id, org_id=org_id
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
     )
     event_id = await session_store.emit_event(
         session.id, EventType.USER_MESSAGE, {"content": "test"}

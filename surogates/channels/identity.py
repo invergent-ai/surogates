@@ -72,6 +72,7 @@ async def get_or_create_channel_session(
     session_key: str,
     user_id: UUID,
     org_id: UUID,
+    agent_id: str,
     channel: str,
     config: dict,
     session_factory: async_sessionmaker[AsyncSession],
@@ -90,8 +91,9 @@ async def get_or_create_channel_session(
         The async Redis client for enqueuing to the work queue.
     session_key:
         Deterministic routing key from ``build_session_key()``.
-    user_id, org_id:
-        The resolved Surogates user and org.
+    user_id, org_id, agent_id:
+        The resolved Surogates user, org, and the agent this session
+        belongs to (``Settings.agent_id``).
     channel:
         Channel name (e.g. ``"slack"``, ``"teams"``).
     config:
@@ -133,6 +135,7 @@ async def get_or_create_channel_session(
         session_id=session_id,
         user_id=user_id,
         org_id=org_id,
+        agent_id=agent_id,
         channel=channel,
         model=model,
         config=merged_config,

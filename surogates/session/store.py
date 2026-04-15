@@ -75,6 +75,7 @@ class SessionStore:
         session_id: UUID | None = None,
         user_id: UUID,
         org_id: UUID,
+        agent_id: str,
         channel: str = "web",
         model: str | None = None,
         config: dict | None = None,
@@ -84,11 +85,16 @@ class SessionStore:
 
         If *session_id* is provided it is used as the primary key;
         otherwise a random UUID is generated.
+
+        *agent_id* identifies the agent this session belongs to (the agent
+        is the server-side identity this worker instance serves, sourced
+        from ``Settings.agent_id``).
         """
         row = SessionRow(
             id=session_id or uuid.uuid4(),
             user_id=user_id,
             org_id=org_id,
+            agent_id=agent_id,
             channel=channel,
             status="active",
             model=model,

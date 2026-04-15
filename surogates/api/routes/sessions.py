@@ -143,6 +143,7 @@ async def create_session(
         session_id=session_id,
         user_id=tenant.user_id,
         org_id=tenant.org_id,
+        agent_id=settings.agent_id,
         channel="web",
         model=model,
         config=config,

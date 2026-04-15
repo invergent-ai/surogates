@@ -96,6 +96,7 @@ class SlackAdapter:
         session_store: SessionStore,
         session_factory: async_sessionmaker[AsyncSession],
         redis_client: Redis,
+        agent_id: str,
     ) -> None:
         self._slack_settings = slack_settings
         self._api_settings = api_settings
@@ -103,6 +104,7 @@ class SlackAdapter:
         self._session_store = session_store
         self._sf = session_factory
         self._redis = redis_client
+        self._agent_id = agent_id
         self._pairing = PairingStore(redis=redis_client)
 
         # Slack SDK objects.
@@ -789,6 +791,7 @@ class SlackAdapter:
             session_key=session_key,
             user_id=identity.user_id,
             org_id=identity.org_id,
+            agent_id=self._agent_id,
             channel="slack",
             config={
                 "slack_channel_id": channel_id,

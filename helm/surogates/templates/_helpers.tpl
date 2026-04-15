@@ -6,6 +6,14 @@ Fullname — the release name, which is the agent slug.
 {{- end }}
 
 {{/*
+Agent identifier persisted on every session (Settings.agent_id → sessions.agent_id).
+Falls back to the agent slug when agent.id is unset.
+*/}}
+{{- define "surogates.agentId" -}}
+{{- default .Values.agent.slug .Values.agent.id }}
+{{- end }}
+
+{{/*
 Chart label value.
 */}}
 {{- define "surogates.chart" -}}

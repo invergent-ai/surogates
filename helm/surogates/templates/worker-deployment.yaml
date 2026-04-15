@@ -111,6 +111,14 @@ spec:
             - name: SUROGATES_ORG_ID
               value: {{ .Values.org.id | quote }}
             {{- end }}
+            - name: SUROGATES_AGENT_ID
+              value: {{ include "surogates.agentId" . | quote }}
+            {{- with .Values.tools }}
+            {{- if .tavilyApiKey }}
+            - name: TAVILY_API_KEY
+              value: {{ .tavilyApiKey | quote }}
+            {{- end }}
+            {{- end }}
             - name: SUROGATES_WORKER_ID
               valueFrom:
                 fieldRef:

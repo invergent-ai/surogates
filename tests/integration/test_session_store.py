@@ -28,6 +28,7 @@ async def test_create_session(session_store, session_factory):
     session = await session_store.create_session(
         user_id=user_id,
         org_id=org_id,
+        agent_id="test-agent",
         channel="web",
         model="gpt-4o",
         config={"system": "You are helpful."},
@@ -52,7 +53,7 @@ async def test_get_session(session_store, session_factory):
     user_id = await create_user(session_factory, org_id)
 
     created = await session_store.create_session(
-        user_id=user_id, org_id=org_id
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
     )
     fetched = await session_store.get_session(created.id)
 
@@ -74,7 +75,7 @@ async def test_update_session_status(session_store, session_factory):
     user_id = await create_user(session_factory, org_id)
 
     session = await session_store.create_session(
-        user_id=user_id, org_id=org_id
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
     )
     assert session.status == "active"
 
@@ -91,7 +92,7 @@ async def test_list_sessions(session_store, session_factory):
     ids = []
     for _ in range(3):
         s = await session_store.create_session(
-            user_id=user_id, org_id=org_id
+            user_id=user_id, org_id=org_id, agent_id="test-agent"
         )
         ids.append(s.id)
 
@@ -121,7 +122,7 @@ async def test_emit_event(session_store, session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     session = await session_store.create_session(
-        user_id=user_id, org_id=org_id
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
     )
 
     event_id = await session_store.emit_event(
@@ -144,7 +145,7 @@ async def test_emit_event_increments_message_count(session_store, session_factor
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     session = await session_store.create_session(
-        user_id=user_id, org_id=org_id
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
     )
 
     await session_store.emit_event(
@@ -160,7 +161,7 @@ async def test_emit_event_increments_tool_call_count(session_store, session_fact
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     session = await session_store.create_session(
-        user_id=user_id, org_id=org_id
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
     )
 
     await session_store.emit_event(
@@ -176,7 +177,7 @@ async def test_get_events_after_cursor(session_store, session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     session = await session_store.create_session(
-        user_id=user_id, org_id=org_id
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
     )
 
     event_ids = []
@@ -200,7 +201,7 @@ async def test_get_events_with_type_filter(session_store, session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     session = await session_store.create_session(
-        user_id=user_id, org_id=org_id
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
     )
 
     await session_store.emit_event(
@@ -230,7 +231,7 @@ async def test_lease_acquire(session_store, session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     session = await session_store.create_session(
-        user_id=user_id, org_id=org_id
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
     )
 
     lease = await session_store.try_acquire_lease(
@@ -248,7 +249,7 @@ async def test_lease_acquire_fails_when_held(session_store, session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     session = await session_store.create_session(
-        user_id=user_id, org_id=org_id
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
     )
 
     lease1 = await session_store.try_acquire_lease(
@@ -267,7 +268,7 @@ async def test_lease_acquire_steals_expired(session_store, session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     session = await session_store.create_session(
-        user_id=user_id, org_id=org_id
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
     )
 
     # Acquire with a very short TTL
@@ -292,7 +293,7 @@ async def test_lease_renew(session_store, session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     session = await session_store.create_session(
-        user_id=user_id, org_id=org_id
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
     )
 
     lease = await session_store.try_acquire_lease(
@@ -321,7 +322,7 @@ async def test_lease_release(session_store, session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     session = await session_store.create_session(
-        user_id=user_id, org_id=org_id
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
     )
 
     lease = await session_store.try_acquire_lease(
@@ -349,7 +350,7 @@ async def test_harness_cursor(session_store, session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     session = await session_store.create_session(
-        user_id=user_id, org_id=org_id
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
     )
 
     # Initial cursor should be 0
@@ -383,7 +384,7 @@ async def test_pending_events(session_store, session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     session = await session_store.create_session(
-        user_id=user_id, org_id=org_id
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
     )
 
     event_ids = []
@@ -413,7 +414,7 @@ async def test_advance_cursor_requires_lease(session_store, session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     session = await session_store.create_session(
-        user_id=user_id, org_id=org_id
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
     )
 
     eid = await session_store.emit_event(

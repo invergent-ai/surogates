@@ -142,12 +142,14 @@ class TelegramAdapter:
         session_store: SessionStore,
         session_factory: async_sessionmaker[AsyncSession],
         redis_client: Redis,
+        agent_id: str,
     ) -> None:
         self._settings = telegram_settings
         self._delivery = delivery_service
         self._session_store = session_store
         self._session_factory = session_factory
         self._redis = redis_client
+        self._agent_id = agent_id
 
         self._app: Optional[Application] = None
         self._bot: Optional[Bot] = None
@@ -1855,6 +1857,7 @@ class TelegramAdapter:
                 session_key=session_key,
                 user_id=identity.user_id,
                 org_id=identity.org_id,
+                agent_id=self._agent_id,
                 channel="telegram",
                 config={
                     "chat_id": source.chat_id,

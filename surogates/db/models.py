@@ -158,6 +158,7 @@ class Session(Base):
     __table_args__ = (
         Index("idx_sessions_user", "user_id"),
         Index("idx_sessions_org", "org_id"),
+        Index("idx_sessions_agent", "agent_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -169,6 +170,7 @@ class Session(Base):
     org_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
     )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
     channel: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="web"
     )
