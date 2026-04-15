@@ -5,7 +5,7 @@
 # sharing an emptyDir volume with Bidirectional mount propagation.
 #
 # Build:
-#   docker build -t ghcr.io/invergent-ai/s3fs-fuse:latest -f images/s3fs/Dockerfile .
+#   docker build -t ghcr.io/invergent-ai/surogates-s3fs:latest -f images/s3fs/Dockerfile .
 #
 # Requires privileged security context for FUSE.
 

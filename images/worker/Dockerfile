@@ -4,7 +4,7 @@
 # Runtime (srt) for OS-level process isolation via bubblewrap + seccomp.
 #
 # Build:
-#   docker build -t ghcr.io/invergent-ai/surogates:latest -f images/worker/Dockerfile .
+#   docker build -t ghcr.io/invergent-ai/surogates-worker:latest -f images/worker/Dockerfile .
 #
 # The build context is the repository root.
 
