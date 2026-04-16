@@ -43,6 +43,14 @@ spec:
               value: {{ .Values.worker.concurrency | quote }}
             - name: SUROGATES_SANDBOX_BACKEND
               value: {{ .Values.sandbox.backend | quote }}
+            - name: SUROGATES_SANDBOX_DEFAULT_CPU
+              value: {{ .Values.sandbox.resources.requests.cpu | quote }}
+            - name: SUROGATES_SANDBOX_DEFAULT_MEMORY
+              value: {{ .Values.sandbox.resources.requests.memory | quote }}
+            - name: SUROGATES_SANDBOX_DEFAULT_CPU_LIMIT
+              value: {{ .Values.sandbox.resources.limits.cpu | quote }}
+            - name: SUROGATES_SANDBOX_DEFAULT_MEMORY_LIMIT
+              value: {{ .Values.sandbox.resources.limits.memory | quote }}
             {{- if eq .Values.sandbox.backend "kubernetes" }}
             - name: SUROGATES_SANDBOX_K8S_NAMESPACE
               value: {{ default .Release.Namespace .Values.sandbox.k8sNamespace | quote }}

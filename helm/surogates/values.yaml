@@ -91,6 +91,13 @@ autoscaling:
 sandbox:
   backend: "process"
   srtEnabled: false
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
   k8sNamespace: ""
   k8sServiceAccount: "surogates-sandbox"
   k8sPodReadyTimeout: 60

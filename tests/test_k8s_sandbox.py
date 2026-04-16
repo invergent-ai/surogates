@@ -36,6 +36,8 @@ class TestBuildPodManifest:
             image="test-image:latest",
             cpu="250m",
             memory="256Mi",
+            cpu_limit="1",
+            memory_limit="512Mi",
             env={"FOO": "bar"},
         )
         pod = sandbox._build_pod_manifest("abc123", "sandbox-abc123", "secret-abc", spec)
@@ -52,7 +54,9 @@ class TestBuildPodManifest:
         assert sandbox_container.name == "sandbox"
         assert sandbox_container.image == "test-image:latest"
         assert sandbox_container.resources.requests["cpu"] == "250m"
-        assert sandbox_container.resources.limits["memory"] == "256Mi"
+        assert sandbox_container.resources.requests["memory"] == "256Mi"
+        assert sandbox_container.resources.limits["cpu"] == "1"
+        assert sandbox_container.resources.limits["memory"] == "512Mi"
 
         s3fs_container = pod.spec.containers[1]
         assert s3fs_container.name == "s3fs"

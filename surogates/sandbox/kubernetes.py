@@ -270,7 +270,10 @@ class K8sSandbox:
             command=["sleep", "infinity"],
             resources=client.V1ResourceRequirements(
                 requests={"cpu": spec.cpu, "memory": spec.memory},
-                limits={"cpu": spec.cpu, "memory": spec.memory},
+                limits={
+                    "cpu": spec.cpu_limit,
+                    "memory": spec.memory_limit,
+                },
             ),
             env=env_vars,
             volume_mounts=[

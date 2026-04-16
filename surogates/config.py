@@ -175,8 +175,10 @@ class SandboxSettings(BaseSettings):
     backend: Literal["process", "kubernetes"] = "process"
     runtime_url: str = "http://sandbox-runtime:8080"
     default_timeout: int = 300
-    default_cpu: str = "500m"
-    default_memory: str = "512Mi"
+    default_cpu: str = "1"
+    default_memory: str = "1Gi"
+    default_cpu_limit: str = "2"
+    default_memory_limit: str = "2Gi"
     srt_enabled: bool = False
     srt_settings_dir: str = "/tmp/surogates/srt"
 

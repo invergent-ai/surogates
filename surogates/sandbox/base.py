@@ -36,12 +36,20 @@ class Resource:
 
 @dataclass(slots=True)
 class SandboxSpec:
-    """Desired-state specification for provisioning a sandbox."""
+    """Desired-state specification for provisioning a sandbox.
+
+    ``cpu`` / ``memory`` are Kubernetes *requests* (guaranteed minimum).
+    ``cpu_limit`` / ``memory_limit`` are Kubernetes *limits* (burst ceiling).
+    Separating them lets the sandbox burst above its request when the node
+    has spare capacity, while keeping the scheduler honest about placement.
+    """
 
     image: str = "ghcr.io/invergent-ai/surogates-agent-sandbox:latest"
     resources: list[Resource] = field(default_factory=list)
-    cpu: str = "500m"
-    memory: str = "512Mi"
+    cpu: str = "1"
+    memory: str = "1Gi"
+    cpu_limit: str = "2"
+    memory_limit: str = "2Gi"
     timeout: int = 300
     env: dict[str, str] = field(default_factory=dict)
 
