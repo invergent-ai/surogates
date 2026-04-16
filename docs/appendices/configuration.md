@@ -58,6 +58,10 @@ Surogates is configured via a YAML file merged with environment variables. Envir
 |---|---|---|---|
 | `sandbox.backend` | `SUROGATES_SANDBOX_BACKEND` | `process` | Backend: `process` (dev) or `kubernetes` (prod) |
 | `sandbox.default_timeout` | `SUROGATES_SANDBOX_DEFAULT_TIMEOUT` | `300` | Default execution timeout (seconds) |
+| `sandbox.default_cpu` | `SUROGATES_SANDBOX_DEFAULT_CPU` | `1` | K8s CPU request for sandbox pods |
+| `sandbox.default_memory` | `SUROGATES_SANDBOX_DEFAULT_MEMORY` | `1Gi` | K8s memory request for sandbox pods |
+| `sandbox.default_cpu_limit` | `SUROGATES_SANDBOX_DEFAULT_CPU_LIMIT` | `2` | K8s CPU limit (burst ceiling) for sandbox pods |
+| `sandbox.default_memory_limit` | `SUROGATES_SANDBOX_DEFAULT_MEMORY_LIMIT` | `2Gi` | K8s memory limit (burst ceiling) for sandbox pods |
 | `sandbox.k8s_namespace` | `SUROGATES_SANDBOX_K8S_NAMESPACE` | `surogates` | K8s namespace for sandbox pods |
 | `sandbox.k8s_image` | `SUROGATES_SANDBOX_K8S_IMAGE` | `ghcr.io/invergent-ai/surogates-agent-sandbox:latest` | Sandbox container image |
 | `sandbox.k8s_service_account` | `SUROGATES_SANDBOX_K8S_SERVICE_ACCOUNT` | `surogates-sandbox` | ServiceAccount for sandbox pods |
