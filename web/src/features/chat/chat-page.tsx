@@ -1,7 +1,7 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
 import { ChatThread } from "@/components/chat/chat-thread";
 import { SessionSidebar } from "@/components/navbar";
@@ -14,6 +14,8 @@ import {
   getTransparencyConfig,
   type TransparencyConfig,
 } from "@/api/transparency";
+
+const PRE_SESSION_KEY = "__pre_session__";
 
 export function ChatPage() {
   const navigate = useNavigate();
@@ -70,15 +72,21 @@ export function ChatPage() {
   const [disclosureState, setDisclosureState] = useState<
     Record<string, "accepted" | "declined">
   >({});
+  // Ref tracks pre-session acceptance so handleSend can read it without
+  // closing over the full disclosureState record.
+  const preSessionAccepted = useRef(false);
 
   const sessionId = params.sessionId ?? activeSessionId;
   const { messages, isRunning, tokenUsage } = useSessionRuntime(sessionId);
 
-  // Show disclosure banner for new sessions.
-  const sessionDisclosure = sessionId ? disclosureState[sessionId] : undefined;
+  // Show disclosure banner when transparency is enabled and the user has not
+  // yet accepted.  This covers two states:
+  //   1. No session yet (landing screen) — keyed by PRE_SESSION_KEY
+  //   2. New session with zero messages — keyed by session id
+  const disclosureKey = sessionId ?? PRE_SESSION_KEY;
+  const sessionDisclosure = disclosureState[disclosureKey];
   const needsDisclosure = !!(
     transparencyConfig?.enabled &&
-    sessionId &&
     messages.length === 0 &&
     !sessionDisclosure
   );
@@ -105,6 +113,15 @@ export function ChatPage() {
       try {
         if (!sessionId) {
           const session = await sessionsApi.createSession({});
+          // Confirm disclosure on the backend now that we have a session id.
+          // Non-blocking: failure must not prevent the message from being sent.
+          if (preSessionAccepted.current) {
+            try {
+              await sessionsApi.confirmDisclosure(session.id);
+            } catch (err) {
+              console.error("Failed to confirm disclosure:", err);
+            }
+          }
           await sessionsApi.sendMessage(session.id, text);
           setActiveSession(session.id);
           void fetchSessions();
@@ -142,14 +159,13 @@ export function ChatPage() {
   );
 
   const handleDisclosureConfirmed = useCallback(() => {
-    if (!sessionId) return;
-    setDisclosureState((prev) => ({ ...prev, [sessionId]: "accepted" }));
-  }, [sessionId]);
+    if (disclosureKey === PRE_SESSION_KEY) preSessionAccepted.current = true;
+    setDisclosureState((prev) => ({ ...prev, [disclosureKey]: "accepted" }));
+  }, [disclosureKey]);
 
   const handleDisclosureDeclined = useCallback(() => {
-    if (!sessionId) return;
-    setDisclosureState((prev) => ({ ...prev, [sessionId]: "declined" }));
-  }, [sessionId]);
+    setDisclosureState((prev) => ({ ...prev, [disclosureKey]: "declined" }));
+  }, [disclosureKey]);
 
   // ── Render ────────────────────────────────────────────────────────
 
@@ -157,7 +173,7 @@ export function ChatPage() {
     <div className="flex h-screen w-full overflow-hidden">
       <SessionSidebar />
       <main className="flex-1 flex flex-col overflow-hidden relative">
-        {needsDisclosure && sessionId && (
+        {needsDisclosure && (
           <div className="absolute inset-x-0 top-0 z-30 p-4 flex justify-center">
             <TransparencyBanner
               sessionId={sessionId}

@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // EU AI Act Art. 13/50 transparency disclosure banner.
-// Shown when a new session is created. The user must accept before
-// the agent can execute tools. Declining disables the session.
+// Shown on the landing screen (before any session exists) or when a
+// new session has zero messages. The user must accept before the
+// agent can execute tools. Declining disables interaction.
 //
 import { useState } from "react";
 import { ShieldCheckIcon } from "lucide-react";
@@ -55,7 +56,7 @@ const DISCLOSURE_TEXT: Record<TransparencyLevel, { body: string; legal: string }
 };
 
 interface TransparencyBannerProps {
-  sessionId: string;
+  sessionId?: string;
   level: TransparencyLevel;
   onConfirmed: () => void;
   onDeclined: () => void;
@@ -74,7 +75,11 @@ export function TransparencyBanner({
   const handleAccept = async () => {
     setConfirming(true);
     try {
-      await sessionsApi.confirmDisclosure(sessionId);
+      // When no session exists yet (pre-session state), accept locally.
+      // The backend confirmation is deferred until the session is created.
+      if (sessionId) {
+        await sessionsApi.confirmDisclosure(sessionId);
+      }
       onConfirmed();
     } catch (err) {
       console.error("Failed to confirm disclosure:", err);
