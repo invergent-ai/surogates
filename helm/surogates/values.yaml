@@ -130,6 +130,12 @@ channels:
     replyBroadcast: false
 
 # -- Ingress
+# -- Agent-specific environment variables (governance, saga, etc.)
+# Injected into worker and API pods.  Keys are env-var names, values
+# are their string values.  Populated by the platform from the agent's
+# persisted env_vars when deploying via Helm.
+extraEnv: {}
+
 # -- Tool-specific secrets (env vars on the worker Deployment)
 # Only keys with non-empty values are emitted.
 tools:

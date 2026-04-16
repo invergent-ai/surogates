@@ -1,37 +1,127 @@
 # 15. Operations
 
-## Health Checks and Metrics
+## Health Checks
 
-### Health Endpoint
+Every component exposes two unauthenticated health endpoints: a **liveness** probe and a **readiness** probe.
 
-`GET /health` (no auth required) checks all critical dependencies:
+### Liveness — `GET /health`
 
-```
+Returns `200 {"status": "ok"}` unconditionally if the process is running. No dependency checks. Kubernetes uses this to detect hung or deadlocked processes and restart them.
+
+### Readiness — `GET /health/ready`
+
+Verifies that infrastructure dependencies (PostgreSQL and Redis) are reachable before the pod accepts traffic. Runs a `SELECT 1` against the database and a `PING` against Redis in parallel.
+
+Returns `200` when both checks pass:
+
+```json
 {
-  "status": "healthy",
-  "components": {
-    "database": "ok",       // PostgreSQL connection pool
-    "redis": "ok",          // Redis ping
-    "storage": "ok"         // S3/Garage reachable
+  "status": "ok",
+  "checks": {
+    "database": "ok",
+    "redis": "ok"
   }
 }
 ```
 
-Use this for Kubernetes readiness and liveness probes:
+Returns `503` when any check fails:
+
+```json
+{
+  "status": "degraded",
+  "checks": {
+    "database": "ok",
+    "redis": "error: ConnectionError(...)"
+  }
+}
+```
+
+### How Each Component Serves Health
+
+| Component | Transport | Port | Implementation |
+|---|---|---|---|
+| API server | FastAPI routes on its primary HTTP server | `8000` | `surogates/api/routes/health.py` — uses `request.app.state` to access DB session factory and Redis |
+| Worker | Side-car `HealthServer` (Starlette/uvicorn) | `healthPort` (default `8080`) | `surogates/health/server.py` — standalone HTTP server started alongside the orchestrator loop |
+| Channel adapters | Side-car `HealthServer` (Starlette/uvicorn) | `healthPort` (default `8080`) | Same as worker — started alongside the channel adapter event loop |
+| MCP proxy | Primary HTTP server | `8001` | `/health` only (no `/health/ready` yet) |
+
+The worker and channel adapters do not serve HTTP normally, so they spin up a lightweight side-car `HealthServer` on a dedicated port. The API server and MCP proxy serve health endpoints on their primary port.
+
+### Helm Chart Probe Configuration
+
+The Helm chart configures probes for all deployments:
+
+**API server** (`api-deployment.yaml`):
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: http           # 8000
+  initialDelaySeconds: 5
+  periodSeconds: 10
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http           # 8000
+  initialDelaySeconds: 10
+  periodSeconds: 30
+```
+
+**Worker** (`worker-deployment.yaml`):
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: health         # healthPort (default 8080)
+  initialDelaySeconds: 5
+  periodSeconds: 10
+livenessProbe:
+  httpGet:
+    path: /health
+    port: health         # healthPort (default 8080)
+  initialDelaySeconds: 10
+  periodSeconds: 30
+```
+
+**Channel adapters** (e.g. `channel-slack.yaml`):
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: health         # healthPort (default 8080)
+  initialDelaySeconds: 5
+  periodSeconds: 10
+livenessProbe:
+  httpGet:
+    path: /health
+    port: health         # healthPort (default 8080)
+  initialDelaySeconds: 10
+  periodSeconds: 30
+```
+
+**MCP proxy** (`mcp-proxy-deployment.yaml`):
 
 ```yaml
 readinessProbe:
   httpGet:
     path: /health
-    port: 8000
+    port: http           # 8001
+  initialDelaySeconds: 3
   periodSeconds: 10
-
 livenessProbe:
   httpGet:
     path: /health
-    port: 8000
-  periodSeconds: 30
+    port: http           # 8001
+  initialDelaySeconds: 5
+  periodSeconds: 15
 ```
+
+### Configuration
+
+The side-car health port is set via the `healthPort` Helm value (default `8080`) and passed to the worker and channel adapter processes as `SUROGATES_HEALTH_PORT`. The API server and MCP proxy ignore this value since they serve health on their primary HTTP port.
 
 ### Prometheus Metrics
 
