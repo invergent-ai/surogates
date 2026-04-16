@@ -108,3 +108,20 @@ def reset_config_cache() -> None:
     """Force re-read of config on next access (for testing)."""
     global _config_passthrough
     _config_passthrough = None
+
+
+def get_sandbox_env() -> dict[str, str]:
+    """Return env vars from the worker that should be injected into sandbox pods.
+
+    Only includes skill-registered or config-based passthrough vars.
+    API keys (TAVILY_API_KEY, etc.) are intentionally excluded — the
+    sandbox runs untrusted LLM-generated code.  Tools that need API
+    keys (web_search, etc.) are routed to the worker via the harness,
+    not executed inside the sandbox.
+    """
+    result: dict[str, str] = {}
+    for key in get_all_passthrough():
+        val = os.environ.get(key)
+        if val:
+            result[key] = val
+    return result

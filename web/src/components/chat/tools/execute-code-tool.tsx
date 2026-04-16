@@ -63,7 +63,7 @@ export function ExecuteCodeToolBlock({ tc }: { tc: ToolCallInfo }) {
 
   return (
     <Sandbox>
-      <SandboxHeader state={state} title="execute_code" />
+      <SandboxHeader state={state} title="Run code" />
       <SandboxContent>
         <SandboxTabs defaultValue="code">
           <SandboxTabsBar>
@@ -73,28 +73,32 @@ export function ExecuteCodeToolBlock({ tc }: { tc: ToolCallInfo }) {
             </SandboxTabsList>
           </SandboxTabsBar>
           <SandboxTabContent value="code">
-            <CodeBlock
-              className="border-0"
-              code={result.code}
-              language="python"
-            >
-              <CodeBlockCopyButton
-                className="absolute top-2 right-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
-                size="sm"
-              />
-            </CodeBlock>
+            <div className="max-h-60 overflow-auto">
+              <CodeBlock
+                className="border-0"
+                code={result.code}
+                language="python"
+              >
+                <CodeBlockCopyButton
+                  className="absolute top-2 right-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+                  size="sm"
+                />
+              </CodeBlock>
+            </div>
           </SandboxTabContent>
           <SandboxTabContent value="output">
-            <CodeBlock
-              className="border-0"
-              code={result.output || (isRunning ? "Running..." : "(no output)")}
-              language="log"
-            >
-              <CodeBlockCopyButton
-                className="absolute top-2 right-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
-                size="sm"
-              />
-            </CodeBlock>
+            <div className="max-h-60 overflow-auto">
+              <CodeBlock
+                className="border-0"
+                code={result.output || (isRunning ? "Running..." : "(no output)")}
+                language="log"
+              >
+                <CodeBlockCopyButton
+                  className="absolute top-2 right-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+                  size="sm"
+                />
+              </CodeBlock>
+            </div>
           </SandboxTabContent>
         </SandboxTabs>
       </SandboxContent>

@@ -59,9 +59,8 @@ logger = logging.getLogger(__name__)
 # Concurrency classification constants live in tool_exec (single source of
 # truth for all tool execution policy).  Import here for use by the executor.
 from surogates.harness.tool_exec import (  # noqa: E402 — after TYPE_CHECKING block
-    CONCURRENCY_SAFE_TOOLS,
     SIBLING_ABORT_TOOLS,
-    is_concurrency_safe,
+    is_parallelizable,
 )
 
 
@@ -83,7 +82,7 @@ class TrackedTool:
     """A tool call being tracked by the streaming executor."""
 
     tool_call: dict[str, Any]
-    is_concurrency_safe: bool = False
+    is_parallelizable: bool = False
     status: ToolStatus = ToolStatus.QUEUED
     task: asyncio.Task[None] | None = None
     result: dict[str, Any] | None = None
@@ -176,9 +175,10 @@ class StreamingToolExecutor:
         fn = tool_call.get("function", {})
         tool_name = fn.get("name", "")
 
+        parallel = is_parallelizable(tool_name)
         tracked = TrackedTool(
             tool_call=tool_call,
-            is_concurrency_safe=is_concurrency_safe(tool_name),
+            is_parallelizable=parallel,
         )
         self._tracked.append(tracked)
 
@@ -233,10 +233,10 @@ class StreamingToolExecutor:
     def stats(self) -> dict[str, Any]:
         """Return execution statistics for logging and telemetry."""
         completed = [t for t in self._tracked if t.status == ToolStatus.COMPLETED]
-        concurrent_count = sum(1 for t in self._tracked if t.is_concurrency_safe)
+        concurrent_count = sum(1 for t in self._tracked if t.is_parallelizable)
         overlapped = sum(
             1 for t in self._tracked
-            if t.is_concurrency_safe and t.status == ToolStatus.COMPLETED
+            if t.is_parallelizable and t.status == ToolStatus.COMPLETED
         )
         return {
             "total": len(self._tracked),
@@ -269,7 +269,7 @@ class StreamingToolExecutor:
         executing = [t for t in self._tracked if t.status == ToolStatus.EXECUTING]
         if not executing:
             return True
-        if tool.is_concurrency_safe and all(t.is_concurrency_safe for t in executing):
+        if tool.is_parallelizable and all(t.is_parallelizable for t in executing):
             return True
         return False
 
@@ -357,11 +357,11 @@ class StreamingToolExecutor:
             if tool.status != ToolStatus.QUEUED:
                 continue
             if not self._can_execute(tool):
-                if not tool.is_concurrency_safe:
+                if not tool.is_parallelizable:
                     break  # Non-concurrent tool blocks the queue
                 continue
             self._start_execution(tool)
-            if not tool.is_concurrency_safe:
+            if not tool.is_parallelizable:
                 break  # Non-concurrent tool runs alone
 
 

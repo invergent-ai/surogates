@@ -106,6 +106,25 @@ PATH_SCOPED_TOOLS: frozenset[str] = frozenset({
     "write_file",
 })
 
+# Sandbox tools that are safe to run in parallel.  These execute as
+# independent operations in the sandbox pod — no shared mutable state
+# beyond the filesystem (which the LLM is responsible for coordinating).
+SANDBOX_PARALLEL_TOOLS: frozenset[str] = frozenset({
+    "terminal",
+    "execute_code",
+    "browser_navigate",
+})
+
+# All tools that can run concurrently — read-only tools plus sandbox tools
+# that are independent operations.  Used by both `should_parallelize` and
+# the streaming executor.
+PARALLEL_TOOLS: frozenset[str] = CONCURRENCY_SAFE_TOOLS | SANDBOX_PARALLEL_TOOLS
+
+
+def is_parallelizable(tool_name: str) -> bool:
+    """Return ``True`` if *tool_name* can run concurrently with other parallelizable tools."""
+    return tool_name in PARALLEL_TOOLS
+
 MAX_TOOL_WORKERS: int = 8
 
 # Read-only tools that never participate in saga tracking — they have no
@@ -157,6 +176,14 @@ def is_destructive_command(cmd: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _all_concurrency_safe(tool_calls: list[dict[str, Any]]) -> bool:
+    """Return ``True`` if every tool call in the batch is concurrency-safe."""
+    return all(
+        is_concurrency_safe(tc.get("function", {}).get("name", ""))
+        for tc in tool_calls
+    )
+
+
 def should_parallelize(tool_calls: list[dict[str, Any]]) -> bool:
     """Decide whether a batch of tool calls can be executed concurrently.
 
@@ -165,6 +192,7 @@ def should_parallelize(tool_calls: list[dict[str, Any]]) -> bool:
     - Any tool in ``NEVER_PARALLEL_TOOLS`` -> sequential.
     - All tools in ``CONCURRENCY_SAFE_TOOLS`` -> parallel.
     - Tools in ``PATH_SCOPED_TOOLS`` -> parallel only if paths don't overlap.
+    - All tools are sandbox-executable (terminal, execute_code, file ops) -> parallel.
     - Otherwise -> sequential.
     """
     if len(tool_calls) <= 1:
@@ -179,17 +207,13 @@ def should_parallelize(tool_calls: list[dict[str, Any]]) -> bool:
     if any(n in NEVER_PARALLEL_TOOLS for n in names):
         return False
 
-    # All tools are known-safe?
-    if all(n in CONCURRENCY_SAFE_TOOLS for n in names):
+    # All tools are parallelizable (read-only + sandbox)?
+    if all(n in PARALLEL_TOOLS for n in names):
         return True
 
-    # All tools are path-scoped?  Check for overlapping paths.
-    if all(n in PATH_SCOPED_TOOLS for n in names):
-        return paths_do_not_overlap(tool_calls)
-
-    # Mixed bag of safe + path-scoped with no overlap is also OK.
-    safe_or_path = CONCURRENCY_SAFE_TOOLS | PATH_SCOPED_TOOLS
-    if all(n in safe_or_path for n in names):
+    # Path-scoped tools can run in parallel if paths don't overlap.
+    all_parallel_or_path = PARALLEL_TOOLS | PATH_SCOPED_TOOLS
+    if all(n in all_parallel_or_path for n in names):
         return paths_do_not_overlap(
             [tc for tc in tool_calls
              if tc.get("function", {}).get("name", "") in PATH_SCOPED_TOOLS],
@@ -253,11 +277,15 @@ async def execute_tool_calls(
 ) -> list[dict]:
     """Execute tool calls, choosing parallel vs sequential.
 
-    When *saga* is active, execution is forced sequential regardless of
-    ``should_parallelize`` — compensation requires deterministic step
-    ordering.
+    When *saga* is active, parallel execution is restricted to
+    concurrency-safe (read-only) tools only — side-effecting tools
+    must run sequentially so saga compensation has deterministic step
+    ordering.  Read-only tools have no side effects to compensate,
+    so they can still benefit from parallelism.
     """
-    if saga is None and should_parallelize(tool_calls):
+    if should_parallelize(tool_calls) and (
+        saga is None or _all_concurrency_safe(tool_calls)
+    ):
         return await execute_tool_calls_concurrent(
             tool_calls,
             session=session,
@@ -565,6 +593,13 @@ async def execute_single_tool(
                 sandbox_spec.resources.append(
                     Resource(source_ref=f"s3://{ws_bucket}", mount_path="/workspace"),
                 )
+            # Pass through skill-declared env vars to the sandbox pod.
+            # Only matters at provisioning time — env is baked into the pod spec.
+            if not sandbox_spec.env.get("_passthrough_done"):
+                from surogates.tools.utils.env_passthrough import get_sandbox_env
+                for k, v in get_sandbox_env().items():
+                    sandbox_spec.env.setdefault(k, v)
+                sandbox_spec.env["_passthrough_done"] = "1"
             await sandbox_pool.ensure(str(session.id), sandbox_spec)
             # Dispatch to the sandbox pod — runs the real Python tool handler
             # inside the sandbox via tool-executor.
@@ -603,6 +638,7 @@ async def execute_single_tool(
                 workspace_path=workspace_path,
                 api_client=api_client,
                 session_factory=session_factory,
+                tools=tools,
             )
     except KeyError:
         tool_failed = True

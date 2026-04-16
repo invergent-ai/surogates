@@ -18,6 +18,7 @@ import traceback
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID
 
+from surogates.config import INTERRUPT_CHANNEL_PREFIX
 from surogates.session.events import EventType
 
 if TYPE_CHECKING:
@@ -73,6 +74,12 @@ class Orchestrator:
         """
         harness = self._active_harnesses.get(session_id)
         if harness is None:
+            logger.error(
+                "Cannot interrupt session %s: no active harness on this worker "
+                "(active sessions: %s)",
+                session_id,
+                list(self._active_harnesses.keys()),
+            )
             return False
         harness.interrupt(message or "Session paused by user")
         logger.info("Interrupted harness for session %s", session_id)
@@ -256,19 +263,24 @@ class Orchestrator:
     async def _listen_for_interrupts(self) -> None:
         """Subscribe to Redis pub/sub for session interrupt signals.
 
-        The API server publishes to ``surogates:interrupt:{session_id}``
+        The API server publishes to ``{INTERRUPT_CHANNEL_PREFIX}:{session_id}``
         when a session is paused.  This listener delivers the signal to
         the running harness on this worker.
         """
         import json as _json
 
         pubsub = self.redis.pubsub()
-        await pubsub.psubscribe("surogates:interrupt:*")
-        logger.debug("Interrupt listener subscribed to surogates:interrupt:*")
+        await pubsub.psubscribe(f"{INTERRUPT_CHANNEL_PREFIX}:*")
+        logger.info("Interrupt listener subscribed to %s:*", INTERRUPT_CHANNEL_PREFIX)
 
         try:
             async for message in pubsub.listen():
-                if message["type"] != "pmessage":
+                # The worker Redis uses decode_responses=False, so
+                # message fields (type, channel, data) are bytes.
+                msg_type = message["type"]
+                if isinstance(msg_type, bytes):
+                    msg_type = msg_type.decode()
+                if msg_type != "pmessage":
                     continue
                 try:
                     channel = message["channel"]
@@ -284,9 +296,15 @@ class Orchestrator:
                     payload = _json.loads(data) if data else {}
                     reason = payload.get("reason", "interrupted")
 
-                    self.interrupt_session(session_id, reason)
+                    delivered = self.interrupt_session(session_id, reason)
+                    if not delivered:
+                        logger.warning(
+                            "Interrupt for session %s could not be delivered "
+                            "(no active harness on this worker)",
+                            session_id,
+                        )
                 except Exception:
-                    logger.debug(
+                    logger.warning(
                         "Failed to process interrupt message: %s",
                         message,
                         exc_info=True,
@@ -294,5 +312,5 @@ class Orchestrator:
         except asyncio.CancelledError:
             pass
         finally:
-            await pubsub.punsubscribe("surogates:interrupt:*")
+            await pubsub.punsubscribe(f"{INTERRUPT_CHANNEL_PREFIX}:*")
             await pubsub.aclose()

@@ -115,13 +115,21 @@ class APISettings(BaseSettings):
     web_url: str = "https://surogates.k8s.localhost"  # Public URL for the web UI (used in pairing links, emails, etc.)
 
 
+# Default Redis key for the session work queue.  Importable by any module
+# that needs to enqueue or dequeue sessions without instantiating settings.
+WORK_QUEUE_KEY: str = "surogates:work_queue"
+
+# Default Redis channel prefix for session interrupts.
+INTERRUPT_CHANNEL_PREFIX: str = "surogates:interrupt"
+
+
 class WorkerSettings(BaseSettings):
     """Worker process configuration."""
 
     model_config = {"env_prefix": "SUROGATES_WORKER_"}
 
     concurrency: int = 50
-    queue_name: str = "surogates:work_queue"
+    queue_name: str = WORK_QUEUE_KEY
     poll_timeout: int = 5
     workspace_path: str = "/tmp/surogates/workspaces"
     api_base_url: str = "http://localhost:8000"

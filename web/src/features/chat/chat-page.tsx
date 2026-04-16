@@ -77,7 +77,7 @@ export function ChatPage() {
   const preSessionAccepted = useRef(false);
 
   const sessionId = params.sessionId ?? activeSessionId;
-  const { messages, isRunning, tokenUsage } = useSessionRuntime(sessionId);
+  const { messages, isRunning, tokenUsage, forceStop } = useSessionRuntime(sessionId);
 
   // Show disclosure banner when transparency is enabled and the user has not
   // yet accepted.  This covers two states:
@@ -141,13 +141,14 @@ export function ChatPage() {
 
   const handleStop = useCallback(async () => {
     if (sessionId) {
+      forceStop();
       try {
         await sessionsApi.pauseSession(sessionId);
       } catch (err) {
         console.error("Failed to stop session:", err);
       }
     }
-  }, [sessionId]);
+  }, [sessionId, forceStop]);
 
   const fetchWorkspaceFile = useAppStore((s) => s.fetchWorkspaceFile);
   const handleFileSelect = useCallback(

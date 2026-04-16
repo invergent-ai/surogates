@@ -279,6 +279,16 @@ class AgentHarness:
         # 1. Fetch session metadata.
         session = await self._store.get_session(session_id)
 
+        # Bail out if the session was already paused/completed/failed before
+        # this wake cycle — prevents re-running a session the user stopped.
+        if session.status in ("paused", "completed", "failed"):
+            logger.info(
+                "Session %s: status is '%s', skipping wake",
+                session_id,
+                session.status,
+            )
+            return
+
         # Honour per-session streaming config.
         if not session.config.get("streaming", True):
             self._streaming_enabled = False
@@ -373,6 +383,19 @@ class AgentHarness:
                     "Failed to emit HARNESS_CRASH event for session %s",
                     session_id,
                 )
+            # Notify parent if this is a worker session.
+            if session.parent_id is not None:
+                from surogates.harness.worker_notify import notify_parent_on_failure
+                try:
+                    await notify_parent_on_failure(
+                        session_store=self._store,
+                        worker_session_id=session_id,
+                        parent_session_id=session.parent_id,
+                        error=traceback.format_exc()[-500:],
+                        redis=self._redis,
+                    )
+                except Exception:
+                    logger.debug("Failed to notify parent on crash", exc_info=True)
             raise
         finally:
             # 10. Always release the lease.
@@ -545,7 +568,28 @@ class AgentHarness:
             )
 
             # 2. Call the LLM with retry (streaming or non-streaming).
-            tool_schemas = self._tools.get_schemas()
+            # Tool filtering:
+            # - Coordinator sessions get all tools (soft mode — can delegate
+            #   or do work directly).
+            # - Worker sessions see all tools except coordinator tools
+            #   (prevents recursive spawning).
+            # - Normal sessions (no coordinator flag) also exclude coordinator
+            #   tools — they're useless without the coordinator prompt and
+            #   would confuse the LLM.
+            # - Sessions with explicit allowed_tools get exactly those.
+            tool_filter: set[str] | None = None
+            if session.config.get("coordinator"):
+                # Coordinator: all tools, no restrictions.
+                tool_filter = None
+            elif session.config.get("allowed_tools"):
+                tool_filter = set(session.config["allowed_tools"])
+            else:
+                from surogates.tools.builtin.coordinator import WORKER_EXCLUDED_TOOLS
+                excluded = set(session.config.get("excluded_tools") or [])
+                excluded.update(WORKER_EXCLUDED_TOOLS)
+                tool_filter = self._tools.tool_names - excluded
+
+            tool_schemas = self._tools.get_schemas(names=tool_filter)
 
             # Build the message list: system → prefill → memory → conversation.
             # Each message is cleaned for API compatibility: internal-only fields are stripped, reasoning
@@ -599,11 +643,12 @@ class AgentHarness:
             # starts executing concurrency-safe (read-only) tools as their
             # tool_use blocks complete during LLM streaming, overlapping
             # tool execution with LLM generation for lower latency.
-            # Disabled when saga is active (requires deterministic ordering)
-            # or when streaming is off.
+            # The executor is safe to use even with saga because it only
+            # starts read-only tools during streaming — non-concurrent
+            # (side-effecting) tools stay queued until get_all_results().
             streaming_executor: StreamingToolExecutor | None = None
             on_tool_call_cb: Callable[[dict[str, Any]], None] | None = None
-            if self._streaming_enabled and saga is None:
+            if self._streaming_enabled:
                 streaming_executor = StreamingToolExecutor(
                     session=session,
                     lease=lease,
@@ -1513,6 +1558,24 @@ class AgentHarness:
                 if compacted is not None:
                     messages = list(compacted)
 
+            # Worker coordination events — injected as synthetic user
+            # messages so the coordinator LLM sees worker results.
+            elif etype == EventType.WORKER_COMPLETE.value:
+                worker_id = event.data.get("worker_id", "?")
+                result = event.data.get("result", "")
+                messages.append({
+                    "role": "user",
+                    "content": f"[Worker {worker_id} completed]\n{result}",
+                })
+
+            elif etype == EventType.WORKER_FAILED.value:
+                worker_id = event.data.get("worker_id", "?")
+                error = event.data.get("error", "unknown error")
+                messages.append({
+                    "role": "user",
+                    "content": f"[Worker {worker_id} failed: {error}]",
+                })
+
             # LLM_THINKING and LLM_DELTA are intentionally skipped.
 
         # Strip stale budget warnings from replayed tool results.
@@ -1875,6 +1938,23 @@ class AgentHarness:
             EventType.SESSION_COMPLETE,
             complete_data,
         )
+
+        # Notify parent session if this is a worker (child) session.
+        if session.parent_id is not None:
+            from surogates.harness.worker_notify import notify_parent_on_completion
+            try:
+                await notify_parent_on_completion(
+                    session_store=self._store,
+                    worker_session_id=session.id,
+                    parent_session_id=session.parent_id,
+                    redis=self._redis,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to notify parent %s of worker %s completion",
+                    session.parent_id, session.id,
+                    exc_info=True,
+                )
 
         # Advance cursor to the latest event.
         cursor_target = through_event_id if through_event_id is not None else event_id

@@ -11,6 +11,7 @@ import { TodoToolBlock } from "./tools/todo-tool";
 import { ExecuteCodeToolBlock } from "./tools/execute-code-tool";
 import { SessionSearchBlock, WebToolBlock } from "./tools/oneliner-tools";
 import { ReadFileBlock, WriteFileBlock, PatchBlock, SearchFilesBlock, ListFilesBlock } from "./tools/file-tools";
+import { ProcessToolBlock } from "./tools/process-tool";
 import { DefaultToolBlock } from "./tools/default-tool";
 
 export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSelect?: (path: string) => void }) {
@@ -46,6 +47,9 @@ export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSe
 
     case "list_files":
       return <ListFilesBlock tc={tc} />;
+
+    case "process":
+      return <ProcessToolBlock tc={tc} />;
 
     default:
       return <DefaultToolBlock tc={tc} />;

@@ -26,7 +26,15 @@ def _configure_logging(level: str) -> None:
         stream=sys.stderr,
     )
     # Silence noisy third-party loggers.
-    for name in ("uvicorn.access", "httpcore", "httpx", "hpack", "sse_starlette"):
+    for name in (
+        "uvicorn.access",
+        "httpcore",
+        "httpx",
+        "hpack",
+        "openai",
+        "sse_starlette",
+        "kubernetes_asyncio"
+    ):
         logging.getLogger(name).setLevel(logging.WARNING)
 
 

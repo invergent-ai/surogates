@@ -55,6 +55,11 @@ class EventType(str, Enum):
     EXPERT_FAILURE = "expert.failure"
     EXPERT_OVERRIDE = "expert.override"
 
+    # Worker coordination (coordinator mode)
+    WORKER_SPAWNED = "worker.spawned"
+    WORKER_COMPLETE = "worker.complete"
+    WORKER_FAILED = "worker.failed"
+
     # Governance
     POLICY_DENIED = "policy.denied"
 

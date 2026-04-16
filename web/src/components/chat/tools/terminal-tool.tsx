@@ -18,6 +18,16 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import type { ToolCallInfo } from "@/hooks/use-session-runtime";
 
+function CommandInputBlock({ command }: { command: string }) {
+  return (
+    <div className="group/in flex items-start gap-2 bg-background text-muted-foreground px-3 pt-2 font-mono text-sm leading-relaxed max-h-20 overflow-auto">
+      <span className="shrink-0 select-none text-emerald-600">IN</span>
+      <pre className="whitespace-pre-wrap wrap-break-word text-foreground/90 flex-1">{command}</pre>
+      <CopyButton text={command} />
+    </div>
+  );
+}
+
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -121,13 +131,7 @@ function TerminalToolResult({ result, isRunning }: { result: TerminalResult; isR
             <span className="font-semibold text-foreground shrink-0">Bash</span>
           </div>
         </TerminalHeader>
-        {result.command && (
-          <div className="group/in flex items-start gap-2 bg-background text-muted-foreground px-3 pt-2 font-mono text-sm leading-relaxed">
-            <span className="shrink-0 select-none text-emerald-600">IN</span>
-            <pre className="whitespace-pre-wrap wrap-break-word text-foreground/90 flex-1">{result.command}</pre>
-            <CopyButton text={result.command} />
-          </div>
-        )}
+        {result.command && <CommandInputBlock command={result.command} />}
         <div
           ref={contentRef}
           role="button"
@@ -140,7 +144,7 @@ function TerminalToolResult({ result, isRunning }: { result: TerminalResult; isR
           )}
         >
           {(output || !isRunning) && (
-            <div className="flex gap-2 text-muted-foreground">
+            <div className="flex gap-2 text-foreground/90">
               <span className="shrink-0 select-none text-sky-600">OUT</span>
               <pre className="whitespace-pre-wrap wrap-break-word">
                 {output || <span className="text-muted-foreground/60">(no output)</span>}
@@ -188,13 +192,23 @@ export function TerminalToolBlock({ tc }: { tc: ToolCallInfo }) {
   }
 
   if (isRunning) {
+    let command = "";
+    try {
+      const parsedArgs = JSON.parse(tc.args);
+      command = parsedArgs?.command ?? "";
+    } catch { /* ignore */ }
+
     return (
       <Terminal output="" isStreaming className="w-full text-sm">
         <TerminalHeader>
-          <div className="flex items-center gap-1.5 min-w-0 text-sm">
+          <div className="flex items-center gap-1.5 min-w-0 text-sm font-mono">
             <span className="font-semibold text-foreground shrink-0">Bash</span>
           </div>
         </TerminalHeader>
+        {command && <CommandInputBlock command={command} />}
+        <div className="px-3 py-2 bg-background font-mono text-sm">
+          <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-foreground" />
+        </div>
       </Terminal>
     );
   }

@@ -172,6 +172,37 @@ def make_skipped_tool_result(
 
 
 # ---------------------------------------------------------------------------
+# Final response extraction (shared by delegate_task and worker_notify)
+# ---------------------------------------------------------------------------
+
+
+def extract_final_response(
+    events: list[Any],
+    fallback: str = "(no response produced)",
+) -> str:
+    """Extract the last LLM response content from a list of session events.
+
+    Scans *events* in reverse for the last ``LLM_RESPONSE`` event and
+    returns its ``message.content``.  Returns *fallback* if no response
+    is found.
+
+    Used by :mod:`~surogates.tools.builtin.delegate` and
+    :mod:`~surogates.harness.worker_notify` to retrieve a child
+    session's final output.
+    """
+    from surogates.session.events import EventType
+
+    for event in reversed(events):
+        if event.type == EventType.LLM_RESPONSE.value:
+            message = event.data.get("message", {})
+            content = message.get("content")
+            if content:
+                return str(content)
+
+    return fallback
+
+
+# ---------------------------------------------------------------------------
 # Content type coercion
 # ---------------------------------------------------------------------------
 

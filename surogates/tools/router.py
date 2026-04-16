@@ -52,6 +52,10 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "todo": ToolLocation.HARNESS,
     "process": ToolLocation.HARNESS,
     "consult_expert": ToolLocation.HARNESS,
+    # Coordinator tools (session management, no isolation needed)
+    "spawn_worker": ToolLocation.HARNESS,
+    "send_worker_message": ToolLocation.HARNESS,
+    "stop_worker": ToolLocation.HARNESS,
     # Sandbox (code execution, file mutation, need isolation)
     "terminal": ToolLocation.SANDBOX,
     "execute_code": ToolLocation.SANDBOX,

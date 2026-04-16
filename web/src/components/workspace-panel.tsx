@@ -40,12 +40,17 @@ const TEXT_EXTENSIONS = new Set([
   ".c", ".cpp", ".h", ".lock", ".gitignore", ".dockerignore", ".editorconfig",
 ]);
 
+const IMAGE_EXTENSIONS = new Set([
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico",
+  ".avif", ".tiff", ".tif",
+]);
+
 const SKELETON_WIDTHS = [75, 60, 90, 65, 80, 70, 85, 55];
 
-function isTextLike(name: string): boolean {
+function isViewable(name: string): boolean {
   const dot = name.lastIndexOf(".");
   const ext = dot >= 0 ? name.slice(dot).toLowerCase() : "";
-  return TEXT_EXTENSIONS.has(ext);
+  return TEXT_EXTENSIONS.has(ext) || IMAGE_EXTENSIONS.has(ext);
 }
 
 // Collect all directory paths for default expansion (depth < 2).
@@ -95,7 +100,7 @@ function RenderEntries({
           );
         }
 
-        const textLike = isTextLike(entry.name);
+        const viewable = isViewable(entry.name);
 
         return (
           <FileTreeFile
@@ -111,7 +116,7 @@ function RenderEntries({
               </span>
             )}
             <div className="flex items-center gap-0 opacity-0 group-hover:opacity-100 transition-opacity shrink-0 ml-1">
-              {textLike && (
+              {viewable && (
                 <button
                   type="button"
                   className="p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
@@ -316,7 +321,7 @@ export function WorkspacePanel({ sessionId }: { sessionId: string | null }) {
   return (
     <aside
       className={cn(
-        "bg-card border-line border-muted flex flex-col overflow-hidden z-10 relative",
+        "bg-card border border-muted-foreground/20 flex flex-col overflow-hidden z-10 relative",
       )}
       style={{ width, minWidth: MIN_WIDTH, maxWidth: MAX_WIDTH }}
     >

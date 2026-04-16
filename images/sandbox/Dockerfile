@@ -40,9 +40,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # ── Python virtualenv ────────────────────────────────────────────────
 COPY --from=python-deps /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH" \
+
+# Enable user site-packages so `pip install` packages are visible.
+# Venvs disable this by default; removing the flag re-enables it.
+RUN sed -i 's/include-system-site-packages = false/include-system-site-packages = true/' /opt/venv/pyvenv.cfg \
+    || true
+
+# PYTHONUSERBASE → /workspace/.local so pip installs persist on the
+# s3fs-mounted workspace (not the ephemeral home dir).
+ENV PATH="/workspace/.local/bin:/opt/venv/bin:$PATH" \
+    PYTHONUSERBASE="/workspace/.local" \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_USER=1
 
 # ── Tool executor ───────────────────────────────────────────────────
 COPY images/sandbox/tool-executor /usr/local/bin/tool-executor

@@ -23,7 +23,7 @@ export type SandboxRootProps = ComponentProps<typeof Collapsible>;
 export const Sandbox = ({ className, ...props }: SandboxRootProps) => (
   <Collapsible
     className={cn(
-      "not-prose group mb-4 w-full overflow-hidden rounded-md border",
+      "not-prose group mb-4 w-full overflow-hidden rounded-md border border-foreground/20",
       className
     )}
     defaultOpen

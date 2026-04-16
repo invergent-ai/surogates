@@ -150,10 +150,10 @@ async def _delegate_handler(
             {"content": user_content},
         )
 
-        # 3. Enqueue the child session to Redis (if available).
+        # 3. Enqueue the child session to the work queue (if available).
         if redis is not None:
-            queue_key = "surogates:task_queue"
-            await redis.lpush(queue_key, str(child_id))
+            from surogates.config import WORK_QUEUE_KEY
+            await redis.zadd(WORK_QUEUE_KEY, {str(child_id): 0})
 
         # 4. Poll the child session's events until completion or timeout.
         result_text = await _poll_child_completion(
@@ -200,8 +200,11 @@ async def _poll_child_completion(
 
         for event in events:
             if event.type == EventType.SESSION_COMPLETE.value:
-                # Find the last LLM_RESPONSE event and extract its content.
-                return _extract_final_response(events)
+                from surogates.harness.message_utils import extract_final_response
+                return extract_final_response(
+                    events,
+                    fallback=json.dumps({"error": "No response found in child session"}),
+                )
 
             if event.type == EventType.SESSION_FAIL.value:
                 error_data = event.data
@@ -212,15 +215,3 @@ async def _poll_child_completion(
         await asyncio.sleep(poll_interval)
 
     return json.dumps({"error": "Delegation timed out"})
-
-
-def _extract_final_response(events: list) -> str:
-    """Extract the last LLM response content from a list of events."""
-    for event in reversed(events):
-        if event.type == EventType.LLM_RESPONSE.value:
-            message = event.data.get("message", {})
-            content = message.get("content")
-            if content:
-                return str(content)
-
-    return json.dumps({"error": "No response found in child session"})

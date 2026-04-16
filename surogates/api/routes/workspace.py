@@ -8,6 +8,7 @@ display a workspace panel alongside the chat thread.  Works with both
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import mimetypes
 import os
@@ -60,6 +61,16 @@ _TEXT_NAMES = frozenset({
     "AGENTS.md", "CLAUDE.md", ".cursorrules",
 })
 
+# Extensions considered "image" for in-browser viewing (served as base64).
+_IMAGE_EXTENSIONS = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico",
+    ".avif", ".tiff", ".tif",
+})
+
+# Maximum raw bytes for image files served inline as base64.
+_MAX_IMAGE_BYTES = 10_000_000  # 10 MB
+
+
 # Directories to skip when building the tree.
 _SKIP_DIRS = frozenset({
     ".git", ".hg", ".svn", "node_modules", "__pycache__", ".mypy_cache",
@@ -93,12 +104,18 @@ class WorkspaceTreeResponse(BaseModel):
 
 
 class FileContentResponse(BaseModel):
-    """Content of a single workspace file."""
+    """Content of a single workspace file.
+
+    For text files ``encoding`` is ``"utf-8"`` (default) and ``content``
+    contains the raw text.  For image files ``encoding`` is ``"base64"``
+    and ``content`` holds the base64-encoded bytes.
+    """
 
     path: str
     content: str
     size: int
     mime_type: str | None = None
+    encoding: Literal["utf-8", "base64"] = "utf-8"
     truncated: bool = False
 
 
@@ -175,6 +192,12 @@ def _is_text_key(key: str) -> bool:
     if mime and mime.startswith("text/"):
         return True
     return False
+
+
+def _is_image_key(key: str) -> bool:
+    """Heuristic: is this key an image file we can display inline?"""
+    ext = PurePosixPath(key).suffix.lower()
+    return ext in _IMAGE_EXTENSIONS
 
 
 def _should_skip_dir(dirname: str) -> bool:
@@ -294,10 +317,10 @@ async def get_workspace_file(
     storage = _get_storage(request)
     bucket = await _get_session_bucket(store, session_id, tenant)
 
-    if not await storage.exists(bucket, path):
-        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    is_text = _is_text_key(path)
+    is_image = _is_image_key(path)
 
-    if not _is_text_key(path):
+    if not is_text and not is_image:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail="Binary files cannot be viewed in the workspace panel.",
@@ -309,16 +332,34 @@ async def get_workspace_file(
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
     size = len(data)
+    mime, _ = mimetypes.guess_type(path)
+
+    if is_image:
+        if size > _MAX_IMAGE_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Image too large to preview ({size} bytes, limit {_MAX_IMAGE_BYTES}).",
+            )
+        content = base64.b64encode(data).decode("ascii")
+        return FileContentResponse(
+            path=path,
+            content=content,
+            size=size,
+            mime_type=mime or "application/octet-stream",
+            encoding="base64",
+            truncated=False,
+        )
+
+    # Text file path.
     truncated = size > _MAX_READ_BYTES
     content = data[:_MAX_READ_BYTES].decode("utf-8", errors="replace")
-
-    mime, _ = mimetypes.guess_type(path)
 
     return FileContentResponse(
         path=path,
         content=content,
         size=size,
         mime_type=mime,
+        encoding="utf-8",
         truncated=truncated,
     )
 

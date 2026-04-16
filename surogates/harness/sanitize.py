@@ -228,27 +228,33 @@ def deduplicate_tool_calls(tool_calls: list[dict]) -> list[dict]:
 
 _MAX_DELEGATE_CALLS: int = 5
 
+_DELEGATION_TOOL_NAMES: frozenset[str] = frozenset({
+    "delegate_task",
+    "spawn_worker",
+})
+
 
 def cap_delegate_calls(
     tool_calls: list[dict],
     max_delegates: int = _MAX_DELEGATE_CALLS,
 ) -> list[dict]:
-    """Cap the number of delegate_task calls in a single turn.
+    """Cap the number of delegation calls in a single turn.
 
-    Preserves all non-delegate calls. Truncates excess delegates.
+    Limits both ``delegate_task`` and ``spawn_worker`` calls to prevent
+    unbounded fan-out.  Preserves all non-delegation calls.
     """
     delegates: list[dict] = []
     others: list[dict] = []
     for tc in tool_calls:
         fn = tc.get("function", {})
-        if fn.get("name") == "delegate_task":
+        if fn.get("name") in _DELEGATION_TOOL_NAMES:
             delegates.append(tc)
         else:
             others.append(tc)
 
     if len(delegates) > max_delegates:
         logger.warning(
-            "Capping delegate_task calls from %d to %d",
+            "Capping delegation calls from %d to %d",
             len(delegates), max_delegates,
         )
         delegates = delegates[:max_delegates]

@@ -69,12 +69,20 @@ function messageToEntries(
   const hasContent = !!(msg.content && msg.content !== msg.reasoning);
   const isStreaming = msg.status === "streaming" && isLast;
 
-  if (msg.reasoning) {
+  // When tool calls are present, the content text is just a preamble
+  // ("I'll run both tasks in parallel...") — fold it into reasoning
+  // instead of showing it as a separate text block.
+  const effectiveReasoning = hasToolCalls && hasContent
+    ? (msg.reasoning ? msg.reasoning + "\n" + msg.content : msg.content)
+    : msg.reasoning;
+  const effectiveHasContent = hasContent && !hasToolCalls;
+
+  if (effectiveReasoning) {
     entries.push({
       kind: "reasoning",
       key: `${msg.id}-reasoning`,
-      reasoning: msg.reasoning,
-      isStreaming: isStreaming && !hasContent && !hasToolCalls,
+      reasoning: effectiveReasoning,
+      isStreaming: isStreaming && !effectiveHasContent && !hasToolCalls,
     });
   }
 
@@ -84,12 +92,21 @@ function messageToEntries(
     }
   }
 
-  if (hasContent) {
+  if (effectiveHasContent) {
     entries.push({ kind: "text", key: `${msg.id}-text`, content: msg.content });
   }
 
-  if (isStreaming && !hasContent && !hasToolCalls && !msg.reasoning) {
+  // Show "Working on it..." shimmer when:
+  // 1. Initial thinking — streaming with nothing yet (no content, tools, or reasoning)
+  // 2. Between tool rounds — all tool calls completed but session is
+  //    still running (waiting for the next LLM response after tool results)
+  const allToolsDone = hasToolCalls && msg.toolCalls!.every(
+    (tc) => tc.status !== "running",
+  );
+  if (isStreaming && !effectiveHasContent && !hasToolCalls && !effectiveReasoning) {
     entries.push({ kind: "thinking", key: `${msg.id}-thinking` });
+  } else if (isStreaming && allToolsDone && !effectiveHasContent) {
+    entries.push({ kind: "thinking", key: `${msg.id}-thinking-next` });
   }
 
   return entries;
@@ -183,7 +200,7 @@ function TimelineEntryItem({
         <TimelineIndicator className="size-2 border-none bg-primary animate-pulse" />
       </TimelineHeader>
       <TimelineContent>
-        <Shimmer duration={1.5} className="text-sm">Working on it...</Shimmer>
+        <Shimmer duration={5} className="text-sm text-foreground">Working on it...</Shimmer>
       </TimelineContent>
     </TimelineItem>
   );
@@ -203,10 +220,10 @@ function AssistantGroup({
   onFileSelect?: (path: string) => void;
 }) {
   const entries: TimelineEntry[] = [];
-  for (const msg of messages) {
-    const isLast = messages.indexOf(msg) === messages.length - 1
+  for (let i = 0; i < messages.length; i++) {
+    const isLast = i === messages.length - 1
       && lastGlobalIndex === totalMessages - 1;
-    entries.push(...messageToEntries(msg, isLast));
+    entries.push(...messageToEntries(messages[i], isLast));
   }
 
   return (
@@ -278,7 +295,7 @@ export function ChatThread({
               {isRunning && messages.length > 0 && messages[messages.length - 1].role === "user" && (
                 <Message from="assistant">
                   <MessageContent>
-                    <Shimmer duration={1.5} className="text-sm">Working on it...</Shimmer>
+                    <Shimmer duration={5} className="text-sm">Working on it...</Shimmer>
                   </MessageContent>
                 </Message>
               )}

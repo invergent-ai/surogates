@@ -563,19 +563,34 @@ async def _execute_code_handler(
         child_env["SUROGATES_RPC_SOCKET"] = sock_path
         child_env["PYTHONDONTWRITEBYTECODE"] = "1"
 
+        # Make packages installed via `pip install --user` in the workspace
+        # visible to the child process.  The terminal tool runs pip in
+        # /workspace which writes to /workspace/.local — set PYTHONUSERBASE
+        # so the child's site-packages picks them up.
+        workspace_path: str = kwargs.get("workspace_path", "")
+        if workspace_path:
+            child_env["PYTHONUSERBASE"] = os.path.join(workspace_path, ".local")
+            # Also add .local/bin to PATH for console_scripts entry points.
+            local_bin = os.path.join(workspace_path, ".local", "bin")
+            child_env["PATH"] = local_bin + os.pathsep + child_env.get("PATH", "")
+
         # Ensure the surogates root is importable in the sandbox so
         # repo-root modules are available to child scripts.
         _surogates_root = os.path.dirname(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         )
         _existing_pp = child_env.get("PYTHONPATH", "")
-        child_env["PYTHONPATH"] = _surogates_root + (
-            os.pathsep + _existing_pp if _existing_pp else ""
+        child_env["PYTHONPATH"] = os.pathsep.join(
+            p for p in [tmpdir, _surogates_root, _existing_pp] if p
         )
 
+        # Run in the workspace so files the script creates (charts, data,
+        # etc.) land in /workspace, not a throwaway temp directory.
+        run_cwd = workspace_path or tmpdir
+
         proc = subprocess.Popen(
-            [sys.executable, "script.py"],
-            cwd=tmpdir,
+            [sys.executable, os.path.join(tmpdir, "script.py")],
+            cwd=run_cwd,
             env=child_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

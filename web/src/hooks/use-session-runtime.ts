@@ -6,6 +6,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { getAuthToken } from "@/features/auth";
+import { getSession } from "@/api/sessions";
 
 export interface ChatMessage {
   id: string;
@@ -80,6 +81,9 @@ export function useSessionRuntime(sessionId: string | null) {
   // Ref to the latest connect function so onerror can call it without
   // a circular declaration dependency.
   const connectRef = useRef<() => void>(() => {});
+  // When true, the session is in a terminal state (paused/completed/failed)
+  // per the DB.  Prevents replayed SSE events from flipping isRunning back.
+  const terminalRef = useRef<boolean>(false);
 
   const applyEvent = useCallback(
     (type: string, eventId: number, data: Record<string, unknown>) => {
@@ -103,36 +107,45 @@ export function useSessionRuntime(sessionId: string | null) {
           }
 
           case "llm.delta": {
-            hadDeltasRef.current = true;
+            const deltaContent = (data.content as string) ?? "";
+            const deltaReasoning = (data.reasoning as string) ?? "";
+            if (deltaContent) hadDeltasRef.current = true;
+
             const lastIdx = findLastAssistantIndex(next);
             const lastMsg = lastIdx >= 0 ? next[lastIdx] : null;
+            const hasUserAfter = lastIdx >= 0 && hasUserAfterIndex(next, lastIdx);
+            const allToolsDoneDelta = lastMsg?.toolCalls?.length &&
+              lastMsg.toolCalls.every((tc) => tc.status !== "running");
             // Append to the current message only if it's streaming,
-            // doesn't already have tool calls, AND there's no user
-            // message after it (which means a new turn started).
-            const hasUserAfter = lastIdx >= 0 && next.slice(lastIdx + 1).some(
-              (m) => m.role === "user",
-            );
+            // doesn't already have completed tool calls, AND there's no
+            // user message after it (which means a new turn started).
             const canAppend = !!(
               lastMsg &&
               lastMsg.status === "streaming" &&
-              !(lastMsg.toolCalls && lastMsg.toolCalls.length > 0) &&
+              !allToolsDoneDelta &&
               !hasUserAfter
             );
             if (canAppend) {
               next[lastIdx] = {
                 ...lastMsg!,
-                content: lastMsg!.content + ((data.content as string) ?? ""),
+                content: deltaContent
+                  ? lastMsg!.content + deltaContent
+                  : lastMsg!.content,
+                reasoning: deltaReasoning
+                  ? (lastMsg!.reasoning ?? "") + deltaReasoning
+                  : lastMsg!.reasoning,
               };
             } else {
               next.push({
                 id: `evt-${eventId}`,
                 role: "assistant",
-                content: (data.content as string) ?? "",
+                content: deltaContent,
+                reasoning: deltaReasoning || undefined,
                 createdAt: new Date(),
                 status: "streaming",
               });
             }
-            setIsRunning(true);
+            if (!terminalRef.current) setIsRunning(true);
             break;
           }
 
@@ -154,11 +167,11 @@ export function useSessionRuntime(sessionId: string | null) {
             // Reset for next turn.
             hadDeltasRef.current = false;
 
-            const prevAssistant = findLastAssistant(next);
+            const idx = findLastAssistantIndex(next);
+            const prevAssistant = idx >= 0 ? next[idx] : undefined;
             const prevHasTools = !!(
               prevAssistant?.toolCalls && prevAssistant.toolCalls.length > 0
             );
-            const idx = findLastAssistantIndex(next);
 
             if (useDeltaContent && idx >= 0) {
               // Deltas already delivered content. Just update status
@@ -230,42 +243,61 @@ export function useSessionRuntime(sessionId: string | null) {
           }
 
           case "llm.thinking": {
+            const reasoningText =
+              (data.reasoning as string) ?? (data.content as string) ?? "";
             const thinkIdx = findLastAssistantIndex(next);
-            if (thinkIdx >= 0) {
-              const prev = next[thinkIdx];
+            const prev = thinkIdx >= 0 ? next[thinkIdx] : null;
+
+            // If the last assistant message already has completed tool
+            // calls, this thinking belongs to a NEW LLM iteration (the
+            // model is reasoning about tool results).  Start a fresh
+            // assistant message so the reasoning appears after the tools,
+            // not inside the previous message.
+            const allToolsDone = prev?.toolCalls?.length &&
+              prev.toolCalls.every((tc) => tc.status !== "running");
+            const hasUserAfter = thinkIdx >= 0 && hasUserAfterIndex(next, thinkIdx);
+
+            if (!prev || allToolsDone || hasUserAfter) {
+              next.push({
+                id: `evt-${eventId}`,
+                role: "assistant",
+                content: "",
+                reasoning: reasoningText,
+                createdAt: new Date(),
+                status: "streaming",
+              });
+            } else {
               next[thinkIdx] = {
                 ...prev,
-                reasoning:
-                  (prev.reasoning ?? "") +
-                  ((data.reasoning as string) ??
-                    (data.content as string) ??
-                    ""),
+                reasoning: (prev.reasoning ?? "") + reasoningText,
               };
             }
-            setIsRunning(true);
+            if (!terminalRef.current) setIsRunning(true);
             break;
           }
 
           case "tool.call": {
-            let assistant = findLastAssistant(next);
-            const assistantIdx = findLastAssistantIndex(next);
-            const userAfterAssistant = assistantIdx >= 0 && next.slice(assistantIdx + 1).some(
-              (m) => m.role === "user",
-            );
-            if (!assistant || assistant.status === "complete" || userAfterAssistant) {
-              assistant = {
+            const tcIdx = findLastAssistantIndex(next);
+            let tcAssistant = tcIdx >= 0 ? next[tcIdx] : null;
+            const userAfterAssistant = tcIdx >= 0 && hasUserAfterIndex(next, tcIdx);
+            if (!tcAssistant || tcAssistant.status === "complete" || userAfterAssistant) {
+              tcAssistant = {
                 id: `evt-${eventId}-tc`,
                 role: "assistant",
                 content: "",
                 createdAt: new Date(),
                 status: "streaming",
               };
-              next.push(assistant);
+              next.push(tcAssistant);
+            } else {
+              // Create a new reference so React detects the change.
+              tcAssistant = { ...tcAssistant };
+              next[tcIdx] = tcAssistant;
             }
-            assistant.toolCalls = assistant.toolCalls ?? [];
+            const existingCalls = tcAssistant.toolCalls ?? [];
             // Deduplicate — skip if this tool_call_id already exists.
             const tcId = (data.tool_call_id as string) ?? `tc-${eventId}`;
-            if (!assistant.toolCalls.some((t) => t.id === tcId)) {
+            if (!existingCalls.some((t) => t.id === tcId)) {
               const entry: ToolCallInfo = {
                 id: tcId,
                 toolName:
@@ -281,31 +313,64 @@ export function useSessionRuntime(sessionId: string | null) {
               if (data.checkpoint_hash) {
                 entry.checkpointHash = data.checkpoint_hash as string;
               }
-              assistant.toolCalls.push(entry);
+              tcAssistant.toolCalls = [...existingCalls, entry];
             }
-            setIsRunning(true);
+            if (!terminalRef.current) setIsRunning(true);
             break;
           }
 
           case "tool.result": {
-            const assistant = findLastAssistant(next);
-            const tc = assistant?.toolCalls?.find(
-              (t) => t.id === (data.tool_call_id as string),
-            );
-            if (tc) {
+            const targetId = data.tool_call_id as string;
+            // Search backwards — the tool call may not be on the last
+            // assistant message (streaming tool executor emits tool.call
+            // before llm.response, which can create a new message).
+            let matchIdx = -1;
+            for (let i = next.length - 1; i >= 0; i--) {
+              if (
+                next[i].role === "assistant" &&
+                next[i].toolCalls?.some((t) => t.id === targetId)
+              ) {
+                matchIdx = i;
+                break;
+              }
+            }
+            if (matchIdx >= 0) {
+              const matchMsg = next[matchIdx];
               const resultContent =
                 (data.content as string) ?? (data.result as string);
-              tc.result =
+              const formattedResult =
                 typeof resultContent === "string"
                   ? resultContent
                   : JSON.stringify(resultContent ?? null);
-              tc.status = "complete";
+              next[matchIdx] = {
+                ...matchMsg,
+                toolCalls: matchMsg.toolCalls!.map((t) =>
+                  t.id === targetId
+                    ? { ...t, result: formattedResult, status: "complete" as const }
+                    : t,
+                ),
+              };
             }
             break;
           }
 
           case "harness.wake":
           case "llm.request": {
+            if (!terminalRef.current) {
+              setIsRunning(true);
+            }
+            break;
+          }
+
+          case "harness.crash": {
+            // Crash is NOT terminal — the orchestrator retries (up to 3x).
+            // Keep isRunning=true so the shimmer stays visible during retries.
+            // Only session.fail (after retries exhausted) is the terminal signal.
+            break;
+          }
+
+          case "session.resume": {
+            terminalRef.current = false;
             setIsRunning(true);
             break;
           }
@@ -313,8 +378,8 @@ export function useSessionRuntime(sessionId: string | null) {
           case "session.pause":
           case "session.complete":
           case "session.fail":
-          case "session.done":
-          case "harness.crash": {
+          case "session.done": {
+            terminalRef.current = true;
             const doneIdx = findLastAssistantIndex(next);
             if (doneIdx >= 0 && next[doneIdx].status === "streaming") {
               // Mark any running tool calls as complete/error.
@@ -330,10 +395,7 @@ export function useSessionRuntime(sessionId: string | null) {
               next[doneIdx] = {
                 ...next[doneIdx],
                 toolCalls: finalTools,
-                status:
-                  type === "session.fail" || type === "harness.crash"
-                    ? "error"
-                    : "complete",
+                status: type === "session.fail" ? "error" : "complete",
               };
             }
             setIsRunning(false);
@@ -355,10 +417,14 @@ export function useSessionRuntime(sessionId: string | null) {
           }
 
           case "policy.denied": {
-            const assistant = findLastAssistant(next);
-            if (assistant) {
-              assistant.content += `\n\n**Policy denied**: ${(data.reason as string) ?? "Action blocked by governance policy."}`;
-              assistant.status = "error";
+            const policyIdx = findLastAssistantIndex(next);
+            if (policyIdx >= 0) {
+              const policyMsg = next[policyIdx];
+              next[policyIdx] = {
+                ...policyMsg,
+                content: policyMsg.content + `\n\n**Policy denied**: ${(data.reason as string) ?? "Action blocked by governance policy."}`,
+                status: "error",
+              };
             }
             setIsRunning(false);
             break;
@@ -429,12 +495,29 @@ export function useSessionRuntime(sessionId: string | null) {
     lastEventIdRef.current = 0;
     sessionDoneRef.current = false;
     hadDeltasRef.current = false;
+    terminalRef.current = false;
     setMessages([]);
     setIsRunning(false);
     setTokenUsage(EMPTY_USAGE);
     connect();
 
+    // Fetch session status to set terminalRef.  If the session is
+    // already paused/completed/failed, this prevents replayed SSE
+    // events from flipping isRunning back to true.
+    let cancelled = false;
+    getSession(sessionId)
+      .then((session) => {
+        if (cancelled) return;
+        const status = session.status as string;
+        if (status === "paused" || status === "completed" || status === "failed") {
+          terminalRef.current = true;
+          setIsRunning(false);
+        }
+      })
+      .catch(() => {});
+
     return () => {
+      cancelled = true;
       const es = esRef.current;
       esRef.current = null;
       es?.close();
@@ -442,14 +525,30 @@ export function useSessionRuntime(sessionId: string | null) {
   }, [sessionId, connect]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  return { messages, isRunning, tokenUsage };
-}
+  const forceStop = useCallback(() => {
+    terminalRef.current = true;
+    setIsRunning(false);
+    // Mark the last streaming assistant message as complete so the UI
+    // doesn't show a dangling shimmer.
+    setMessages((prev) => {
+      const idx = findLastAssistantIndex(prev);
+      if (idx < 0 || prev[idx].status !== "streaming") return prev;
+      const next = [...prev];
+      const msg = prev[idx];
+      next[idx] = {
+        ...msg,
+        status: "complete",
+        toolCalls: msg.toolCalls?.map((tc) =>
+          tc.status === "running"
+            ? { ...tc, status: "complete" as const, result: tc.result ?? "[interrupted]" }
+            : tc,
+        ),
+      };
+      return next;
+    });
+  }, []);
 
-function findLastAssistant(msgs: ChatMessage[]): ChatMessage | undefined {
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if (msgs[i].role === "assistant") return msgs[i];
-  }
-  return undefined;
+  return { messages, isRunning, tokenUsage, forceStop };
 }
 
 function findLastAssistantIndex(msgs: ChatMessage[]): number {
@@ -457,4 +556,11 @@ function findLastAssistantIndex(msgs: ChatMessage[]): number {
     if (msgs[i].role === "assistant") return i;
   }
   return -1;
+}
+
+function hasUserAfterIndex(msgs: ChatMessage[], idx: number): boolean {
+  for (let i = idx + 1; i < msgs.length; i++) {
+    if (msgs[i].role === "user") return true;
+  }
+  return false;
 }

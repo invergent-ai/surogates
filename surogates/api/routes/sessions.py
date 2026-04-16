@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
+from surogates.config import INTERRUPT_CHANNEL_PREFIX
 from surogates.session.events import EventType
 from surogates.session.models import Session
 from surogates.session.store import SessionNotFoundError, SessionStore
@@ -308,7 +309,7 @@ async def pause_session(
     redis = request.app.state.redis
     import json as _json
     await redis.publish(
-        f"surogates:interrupt:{session_id}",
+        f"{INTERRUPT_CHANNEL_PREFIX}:{session_id}",
         _json.dumps({"reason": "paused by user"}),
     )
 
@@ -360,7 +361,7 @@ async def delete_session(
     redis = request.app.state.redis
     import json as _json
     await redis.publish(
-        f"surogates:interrupt:{session_id}",
+        f"{INTERRUPT_CHANNEL_PREFIX}:{session_id}",
         _json.dumps({"reason": "session deleted"}),
     )
 

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from surogates.config import Settings, load_settings
+from surogates.config import INTERRUPT_CHANNEL_PREFIX, Settings, load_settings
 from surogates.db.engine import async_engine_from_settings, async_session_factory
 from surogates.memory.manager import MemoryManager
 from surogates.memory.store import MemoryStore
@@ -463,7 +463,7 @@ async def flush_and_reset_session(
     #    The harness's finally block destroys the sandbox pod on interrupt.
     try:
         await redis_client.publish(
-            f"surogates:interrupt:{session_id}",
+            f"{INTERRUPT_CHANNEL_PREFIX}:{session_id}",
             json.dumps({"reason": "session_reset_idle"}).encode(),
         )
     except Exception as e:

@@ -75,6 +75,7 @@ async def main() -> None:
             tool_name,
             tool_args,
             workspace_path=workspace,
+            tools=registry,
         )
         duration = time.monotonic() - start
 

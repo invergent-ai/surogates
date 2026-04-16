@@ -874,6 +874,13 @@ async def call_llm_streaming_inner(
         )
         if reasoning_text:
             reasoning_parts.append(reasoning_text)
+            # Emit LLM_DELTA event for reasoning so the frontend can
+            # stream reasoning content incrementally (same as text deltas).
+            await store.emit_event(
+                session.id,
+                EventType.LLM_DELTA,
+                {"reasoning": reasoning_text, "iteration": iteration},
+            )
 
         # Text content delta.
         text_delta = getattr(delta, "content", None)

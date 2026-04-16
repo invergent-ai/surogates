@@ -25,7 +25,7 @@ from surogates.harness.streaming_executor import (
 from surogates.harness.tool_exec import (
     CONCURRENCY_SAFE_TOOLS,
     SIBLING_ABORT_TOOLS,
-    is_concurrency_safe,
+    is_parallelizable,
 )
 
 
@@ -114,7 +114,7 @@ def _make_executor(**overrides: Any) -> StreamingToolExecutor:
 
 
 class TestConcurrencyClassification:
-    """Tests for is_concurrency_safe and the CONCURRENCY_SAFE_TOOLS set."""
+    """Tests for is_parallelizable and the CONCURRENCY_SAFE_TOOLS set."""
 
     def test_read_only_tools_are_safe(self) -> None:
         safe_tools = [
@@ -123,19 +123,23 @@ class TestConcurrencyClassification:
             "web_search", "web_extract", "web_crawl", "todo",
         ]
         for name in safe_tools:
-            assert is_concurrency_safe(name), f"{name} should be concurrency-safe"
+            assert is_parallelizable(name), f"{name} should be concurrency-safe"
 
-    def test_write_tools_are_not_safe(self) -> None:
-        unsafe_tools = [
-            "write_file", "patch", "terminal", "execute_code",
+    def test_write_tools_are_not_parallelizable(self) -> None:
+        non_parallel_tools = [
+            "write_file", "patch",
             "memory", "skill_manage", "delegate_task", "clarify",
-            "browser_navigate",
         ]
-        for name in unsafe_tools:
-            assert not is_concurrency_safe(name), f"{name} should NOT be concurrency-safe"
+        for name in non_parallel_tools:
+            assert not is_parallelizable(name), f"{name} should NOT be parallelizable"
+
+    def test_sandbox_tools_are_parallelizable(self) -> None:
+        sandbox_parallel = ["terminal", "execute_code", "browser_navigate"]
+        for name in sandbox_parallel:
+            assert is_parallelizable(name), f"{name} should be parallelizable"
 
     def test_unknown_tool_is_not_safe(self) -> None:
-        assert not is_concurrency_safe("unknown_tool_xyz")
+        assert not is_parallelizable("unknown_tool_xyz")
 
     def test_sibling_abort_tools(self) -> None:
         assert "terminal" in SIBLING_ABORT_TOOLS
@@ -362,8 +366,8 @@ class TestConcurrencyGate:
         tc1 = _make_tool_call("read_file", call_id="tc_1")
         tc2 = _make_tool_call("search_files", call_id="tc_2")
 
-        tracked1 = TrackedTool(tool_call=tc1, is_concurrency_safe=True)
-        tracked2 = TrackedTool(tool_call=tc2, is_concurrency_safe=True)
+        tracked1 = TrackedTool(tool_call=tc1, is_parallelizable=True)
+        tracked2 = TrackedTool(tool_call=tc2, is_parallelizable=True)
 
         executor._tracked.append(tracked1)
         tracked1.status = ToolStatus.EXECUTING
@@ -378,8 +382,8 @@ class TestConcurrencyGate:
         tc1 = _make_tool_call("read_file", call_id="tc_1")
         tc2 = _make_tool_call("write_file", call_id="tc_2")
 
-        tracked1 = TrackedTool(tool_call=tc1, is_concurrency_safe=True)
-        tracked2 = TrackedTool(tool_call=tc2, is_concurrency_safe=False)
+        tracked1 = TrackedTool(tool_call=tc1, is_parallelizable=True)
+        tracked2 = TrackedTool(tool_call=tc2, is_parallelizable=False)
 
         executor._tracked.append(tracked1)
         tracked1.status = ToolStatus.EXECUTING
@@ -394,8 +398,8 @@ class TestConcurrencyGate:
         tc1 = _make_tool_call("write_file", call_id="tc_1")
         tc2 = _make_tool_call("read_file", call_id="tc_2")
 
-        tracked1 = TrackedTool(tool_call=tc1, is_concurrency_safe=False)
-        tracked2 = TrackedTool(tool_call=tc2, is_concurrency_safe=True)
+        tracked1 = TrackedTool(tool_call=tc1, is_parallelizable=False)
+        tracked2 = TrackedTool(tool_call=tc2, is_parallelizable=True)
 
         executor._tracked.append(tracked1)
         tracked1.status = ToolStatus.EXECUTING
@@ -408,7 +412,7 @@ class TestConcurrencyGate:
         executor._sibling_aborted = True
 
         tc = _make_tool_call("read_file")
-        tracked = TrackedTool(tool_call=tc, is_concurrency_safe=True)
+        tracked = TrackedTool(tool_call=tc, is_parallelizable=True)
         assert executor._can_execute(tracked) is False
 
     def test_discarded_blocks_all(self) -> None:
@@ -417,7 +421,7 @@ class TestConcurrencyGate:
         executor._discarded = True
 
         tc = _make_tool_call("read_file")
-        tracked = TrackedTool(tool_call=tc, is_concurrency_safe=True)
+        tracked = TrackedTool(tool_call=tc, is_parallelizable=True)
         assert executor._can_execute(tracked) is False
 
     def test_interrupt_blocks_all(self) -> None:
@@ -425,7 +429,7 @@ class TestConcurrencyGate:
         executor = _make_executor(interrupt_check=lambda: True)
 
         tc = _make_tool_call("read_file")
-        tracked = TrackedTool(tool_call=tc, is_concurrency_safe=True)
+        tracked = TrackedTool(tool_call=tc, is_parallelizable=True)
         assert executor._can_execute(tracked) is False
 
 
@@ -871,5 +875,5 @@ class TestCanonicalImport:
     def test_streaming_executor_reexports_from_tool_exec(self) -> None:
         from surogates.harness import streaming_executor as se
         from surogates.harness import tool_exec as te
-        assert se.CONCURRENCY_SAFE_TOOLS is te.CONCURRENCY_SAFE_TOOLS
-        assert se.is_concurrency_safe is te.is_concurrency_safe
+        assert se.SIBLING_ABORT_TOOLS is te.SIBLING_ABORT_TOOLS
+        assert se.is_parallelizable is te.is_parallelizable
