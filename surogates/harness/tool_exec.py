@@ -67,13 +67,37 @@ logger = logging.getLogger(__name__)
 
 NEVER_PARALLEL_TOOLS: frozenset[str] = frozenset({"clarify", "delegate_task"})
 
-PARALLEL_SAFE_TOOLS: frozenset[str] = frozenset({
+# Read-only tools that are safe to execute concurrently with each other
+# and with ongoing LLM streaming.  These tools have no side effects —
+# executing them speculatively during streaming is always harmless.
+# Also used by :func:`should_parallelize` as the set of tools that can
+# always run in parallel (superset of the former ``CONCURRENCY_SAFE_TOOLS``).
+CONCURRENCY_SAFE_TOOLS: frozenset[str] = frozenset({
     "file_read",
     "read_file",
+    "search_files",
+    "list_files",
     "session_search",
     "skills_list",
+    "skill_view",
     "web_search",
+    "web_extract",
+    "web_crawl",
+    "todo",
 })
+
+# Tools whose errors should abort all sibling concurrent executions.
+# Terminal and code execution errors often indicate an environment
+# problem that makes sibling tool results unreliable.
+SIBLING_ABORT_TOOLS: frozenset[str] = frozenset({
+    "terminal",
+    "execute_code",
+})
+
+
+def is_concurrency_safe(tool_name: str) -> bool:
+    """Return ``True`` if *tool_name* can safely execute during streaming."""
+    return tool_name in CONCURRENCY_SAFE_TOOLS
 
 PATH_SCOPED_TOOLS: frozenset[str] = frozenset({
     "file_read",
@@ -139,7 +163,7 @@ def should_parallelize(tool_calls: list[dict[str, Any]]) -> bool:
     Rules:
     - Single tool call -> sequential (no benefit from parallelism).
     - Any tool in ``NEVER_PARALLEL_TOOLS`` -> sequential.
-    - All tools in ``PARALLEL_SAFE_TOOLS`` -> parallel.
+    - All tools in ``CONCURRENCY_SAFE_TOOLS`` -> parallel.
     - Tools in ``PATH_SCOPED_TOOLS`` -> parallel only if paths don't overlap.
     - Otherwise -> sequential.
     """
@@ -156,7 +180,7 @@ def should_parallelize(tool_calls: list[dict[str, Any]]) -> bool:
         return False
 
     # All tools are known-safe?
-    if all(n in PARALLEL_SAFE_TOOLS for n in names):
+    if all(n in CONCURRENCY_SAFE_TOOLS for n in names):
         return True
 
     # All tools are path-scoped?  Check for overlapping paths.
@@ -164,7 +188,7 @@ def should_parallelize(tool_calls: list[dict[str, Any]]) -> bool:
         return paths_do_not_overlap(tool_calls)
 
     # Mixed bag of safe + path-scoped with no overlap is also OK.
-    safe_or_path = PARALLEL_SAFE_TOOLS | PATH_SCOPED_TOOLS
+    safe_or_path = CONCURRENCY_SAFE_TOOLS | PATH_SCOPED_TOOLS
     if all(n in safe_or_path for n in names):
         return paths_do_not_overlap(
             [tc for tc in tool_calls

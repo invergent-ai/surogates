@@ -150,13 +150,24 @@ def reconstruct_message_from_deltas(
     return message
 
 
-def make_skipped_tool_result(tc: dict[str, Any]) -> dict:
-    """Return a synthetic tool result for a skipped (interrupted) call."""
+def make_skipped_tool_result(
+    tc: dict[str, Any],
+    reason: str = "skipped due to interrupt",
+) -> dict:
+    """Return a synthetic tool result for a tool that did not execute.
+
+    *reason* is included in the result content so the LLM understands
+    why the tool produced no output.  Common reasons:
+
+    - ``"skipped due to interrupt"`` (default) — the harness was interrupted.
+    - ``"cancelled (sibling error)"`` — a sibling tool's error triggered
+      abort of concurrent executions.
+    """
     tool_call_id = tc.get("id", "")
     return {
         "role": "tool",
         "tool_call_id": tool_call_id,
-        "content": "[skipped due to interrupt]",
+        "content": f"[{reason}]",
     }
 
 

@@ -218,6 +218,7 @@ async def call_llm_with_retry(
     set_streaming_enabled: Callable[[bool], None],
     compress_context: Callable[..., Any] | None = None,
     context_compressor: Any | None = None,
+    on_tool_call_complete: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Call the LLM with retry, backoff, rate-limit handling, and credential rotation.
 
@@ -235,6 +236,16 @@ async def call_llm_with_retry(
     - Generic Anthropic 400 heuristic for large sessions
     - Non-retryable client error detection (401/403/404/422) with fallback
     - SSE stream-drop detection and guidance
+
+    Parameters
+    ----------
+    on_tool_call_complete:
+        Optional callback fired each time a complete tool_use block is
+        detected during streaming.  Receives the tool call dict
+        ``{"id": ..., "type": "function", "function": {"name": ..., "arguments": ...}}``.
+        Used by :class:`~surogates.harness.streaming_executor.StreamingToolExecutor`
+        to start executing concurrency-safe tools before the full LLM
+        response has finished streaming.
 
     Returns ``(assistant_message_dict, usage_data_dict)``.
     """
@@ -259,6 +270,7 @@ async def call_llm_with_retry(
                     store=store,
                     interrupt_check=interrupt_check,
                     set_streaming_enabled=set_streaming_enabled,
+                    on_tool_call_complete=on_tool_call_complete,
                 )
             else:
                 result = await call_llm_non_streaming(
@@ -662,6 +674,7 @@ async def call_llm_streaming(
     store: SessionStore,
     interrupt_check: Callable[[], bool],
     set_streaming_enabled: Callable[[bool], None],
+    on_tool_call_complete: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Call the LLM with ``stream=True``, emit deltas, return full message + usage.
 
@@ -676,6 +689,7 @@ async def call_llm_streaming(
             llm_client=llm_client,
             store=store,
             interrupt_check=interrupt_check,
+            on_tool_call_complete=on_tool_call_complete,
         )
     except Exception as exc:
         logger.warning(
@@ -702,6 +716,7 @@ async def call_llm_streaming_inner(
     llm_client: AsyncOpenAI,
     store: SessionStore,
     interrupt_check: Callable[[], bool] | None = None,
+    on_tool_call_complete: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Inner streaming implementation.
 
@@ -712,6 +727,14 @@ async def call_llm_streaming_inner(
     If *interrupt_check* is provided and returns ``True`` during streaming,
     the HTTP stream is cancelled via ``response.close()`` and whatever has
     been accumulated so far is returned as a partial response.
+
+    If *on_tool_call_complete* is provided, it is called each time a
+    complete tool_use block is detected during streaming.  A tool block
+    is considered complete when a higher-index tool call begins or when
+    the stream ends.  This enables the
+    :class:`~surogates.harness.streaming_executor.StreamingToolExecutor`
+    to start executing concurrency-safe tools before the full response
+    is available.
     """
     # Inject prompt cache extra_body for cacheable models.
     final_kwargs = dict(create_kwargs)
@@ -750,6 +773,13 @@ async def call_llm_streaming_inner(
 
     # Reasoning content from streaming deltas (DeepSeek, Qwen, Moonshot).
     reasoning_parts: list[str] = []
+
+    # Streaming tool execution: track which tool call slots have been
+    # notified to the on_tool_call_complete callback.  A slot is
+    # considered complete when a higher-index slot appears (the LLM
+    # generates tool calls sequentially).
+    _notified_slots: set[int] = set()
+    _highest_known_slot: int = -1
 
     # Usage data from the stream (some providers include it in the
     # final chunk via ``stream_options``).
@@ -898,6 +928,30 @@ async def call_llm_streaming_inner(
                         entry["function"]["name"] += fn_delta.name
                     if fn_delta.arguments:
                         entry["function"]["arguments"] += fn_delta.arguments
+
+                # Streaming tool execution: when a new higher-index slot
+                # appears, all lower-index slots are fully formed.  Fire
+                # the callback so the StreamingToolExecutor can start
+                # executing concurrency-safe tools immediately.
+                if on_tool_call_complete is not None and idx > _highest_known_slot:
+                    for prev_slot in sorted(tool_calls_acc):
+                        if prev_slot < idx and prev_slot not in _notified_slots:
+                            prev_entry = tool_calls_acc[prev_slot]
+                            if prev_entry["function"]["name"]:
+                                _notified_slots.add(prev_slot)
+                                on_tool_call_complete(prev_entry)
+                    _highest_known_slot = idx
+
+    # Notify any remaining tool call slots that haven't been reported yet.
+    # This covers the last tool call in the batch (no higher index follows)
+    # and the case where only a single tool call was generated.
+    if on_tool_call_complete is not None:
+        for slot in sorted(tool_calls_acc):
+            if slot not in _notified_slots:
+                entry = tool_calls_acc[slot]
+                if entry["function"]["name"]:
+                    _notified_slots.add(slot)
+                    on_tool_call_complete(entry)
 
     # Reconstruct the complete assistant message.
     assistant_message = reconstruct_message_from_deltas(

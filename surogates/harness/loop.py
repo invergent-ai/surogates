@@ -49,6 +49,7 @@ from surogates.harness.sanitize import (
     strip_budget_warnings,
 )
 from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
+from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.tool_exec import execute_tool_calls
 from surogates.session.events import EventType
 
@@ -594,6 +595,33 @@ class AgentHarness:
             if tool_schemas:
                 create_kwargs["tools"] = tool_schemas
 
+            # Create a streaming tool executor when eligible.  The executor
+            # starts executing concurrency-safe (read-only) tools as their
+            # tool_use blocks complete during LLM streaming, overlapping
+            # tool execution with LLM generation for lower latency.
+            # Disabled when saga is active (requires deterministic ordering)
+            # or when streaming is off.
+            streaming_executor: StreamingToolExecutor | None = None
+            on_tool_call_cb: Callable[[dict[str, Any]], None] | None = None
+            if self._streaming_enabled and saga is None:
+                streaming_executor = StreamingToolExecutor(
+                    session=session,
+                    lease=lease,
+                    store=self._store,
+                    tools=self._tools,
+                    tenant=self._tenant,
+                    interrupt_check=self._check_interrupt,
+                    redis=self._redis,
+                    budget=self._budget,
+                    memory_manager=self._memory_manager,
+                    hint_tracker=hint_tracker,
+                    sandbox_pool=self._sandbox_pool,
+                    api_client=self._api_client,
+                    session_factory=self._session_factory,
+                    saga=saga,
+                )
+                on_tool_call_cb = streaming_executor.add_tool
+
             try:
                 assistant_message, usage_data = await call_llm_with_retry(
                     session=session,
@@ -611,6 +639,7 @@ class AgentHarness:
                         session, messages, system_prompt, lease,
                     ),
                     context_compressor=self._compressor,
+                    on_tool_call_complete=on_tool_call_cb,
                 )
             except Exception as exc:
                 logger.exception(
@@ -652,6 +681,8 @@ class AgentHarness:
                         "Session %s: incomplete REASONING_SCRATCHPAD, retrying (%d/2)",
                         session.id, incomplete_scratchpad_retries,
                     )
+                    if streaming_executor is not None:
+                        streaming_executor.discard()
                     self._budget.refund()
                     continue
                 logger.warning(
@@ -682,6 +713,8 @@ class AgentHarness:
                             "role": "user",
                             "content": "Please provide your actual response based on the reasoning above.",
                         })
+                    if streaming_executor is not None:
+                        streaming_executor.discard()
                     self._budget.refund()
                     continue
                 # Exhausted retries — try content-with-tools fallback.
@@ -793,6 +826,8 @@ class AgentHarness:
                 messages.append(assistant_message)
                 messages.append({"role": "user", "content": _LENGTH_CONTINUATION_PROMPT})
                 length_continuation_count += 1
+                if streaming_executor is not None:
+                    streaming_executor.discard()
                 continue  # re-enter the loop
 
             # If we had accumulated a prefix, prepend it to the final content.
@@ -882,57 +917,71 @@ class AgentHarness:
                 )
                 return
 
-            # 5a. Invalid JSON retry — if ALL tool calls have unparseable JSON,
-            # retry the API call instead of sending error results.
-            # The model often fixes its JSON on a second attempt.
-            all_json_invalid = tool_calls_raw and all(
-                not _is_valid_json_args(tc) for tc in tool_calls_raw
+            # Determine whether to use the streaming executor for this turn.
+            # The executor is used when it has tools (i.e., streaming was
+            # active and tool blocks were detected during the stream).
+            use_streaming_exec = (
+                streaming_executor is not None
+                and streaming_executor.has_tools
             )
-            if all_json_invalid and invalid_json_retries < 3:
-                invalid_json_retries += 1
-                logger.warning(
-                    "Session %s: all %d tool calls have invalid JSON args, "
-                    "retrying API call (%d/3)",
-                    session.id, len(tool_calls_raw), invalid_json_retries,
+
+            # 5a. Invalid JSON retry — if ALL tool calls have unparseable
+            # JSON, retry the API call instead of sending error results.
+            # When the streaming executor is active, skip this — the
+            # executor's execute_single_tool handles parse errors naturally.
+            if not use_streaming_exec:
+                all_json_invalid = tool_calls_raw and all(
+                    not _is_valid_json_args(tc) for tc in tool_calls_raw
                 )
-                self._budget.refund()  # don't count this iteration
-                continue  # re-enter the loop without appending anything
-            invalid_json_retries = 0  # reset on a turn with valid args
+                if all_json_invalid and invalid_json_retries < 3:
+                    invalid_json_retries += 1
+                    logger.warning(
+                        "Session %s: all %d tool calls have invalid JSON args, "
+                        "retrying API call (%d/3)",
+                        session.id, len(tool_calls_raw), invalid_json_retries,
+                    )
+                    self._budget.refund()  # don't count this iteration
+                    continue  # re-enter the loop without appending anything
+                invalid_json_retries = 0  # reset on a turn with valid args
 
             # 5b. Deduplicate tool calls and cap delegate_task calls.
             tool_calls_raw = deduplicate_tool_calls(tool_calls_raw)
             tool_calls_raw = cap_delegate_calls(tool_calls_raw)
             assistant_message["tool_calls"] = tool_calls_raw
 
-            # 5c. Invalid tool call recovery -- check for unknown tools
+            # 5c. Invalid tool call recovery — check for unknown tools
             # or malformed JSON before executing (with fuzzy name repair).
-            invalid_calls = self._find_invalid_tool_calls(tool_calls_raw)
-            if invalid_calls:
-                consecutive_invalid_tool_calls += 1
-                if consecutive_invalid_tool_calls >= _MAX_CONSECUTIVE_INVALID_TOOL_CALLS:
-                    logger.error(
-                        "Session %s: aborting after %d consecutive invalid tool calls",
-                        session.id, consecutive_invalid_tool_calls,
-                    )
-                    await self._complete_session(
-                        session, messages, lease, reason="invalid_tool_calls",
-                        through_event_id=event_id,
-                        cost_tracker=cost_tracker,
-                    )
-                    return
+            # Skipped when the streaming executor is active because some
+            # tools may have already started executing during streaming.
+            # Invalid calls get natural error results from execute_single_tool.
+            if not use_streaming_exec:
+                invalid_calls = self._find_invalid_tool_calls(tool_calls_raw)
+                if invalid_calls:
+                    consecutive_invalid_tool_calls += 1
+                    if consecutive_invalid_tool_calls >= _MAX_CONSECUTIVE_INVALID_TOOL_CALLS:
+                        logger.error(
+                            "Session %s: aborting after %d consecutive invalid tool calls",
+                            session.id, consecutive_invalid_tool_calls,
+                        )
+                        await self._complete_session(
+                            session, messages, lease, reason="invalid_tool_calls",
+                            through_event_id=event_id,
+                            cost_tracker=cost_tracker,
+                        )
+                        return
 
-                # Return helpful error messages without consuming budget.
-                self._budget.refund()
-                messages.append(assistant_message)
-                for tc, error_msg in invalid_calls:
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.get("id", ""),
-                        "content": error_msg,
-                    })
-                continue
-            else:
-                consecutive_invalid_tool_calls = 0
+                    # Return helpful error messages without consuming budget.
+                    self._budget.refund()
+                    messages.append(assistant_message)
+                    for tc, error_msg in invalid_calls:
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": error_msg,
+                        })
+                    continue
+                else:
+                    consecutive_invalid_tool_calls = 0
 
             # 6. Pop thinking-only prefill message(s) before appending
             # the tool-call assistant message (same rationale as the
@@ -947,53 +996,63 @@ class AgentHarness:
             # Append assistant message to the in-memory message list.
             messages.append(assistant_message)
 
-            # 7. Execute tool calls (sequential or parallel) with truncation.
+            # 7. Execute tool calls.
             # Checkpoint before file-mutating tools (write_file, patch).
             # The checkpoint hash is stashed on the tool call dict so
             # execute_single_tool can include it in the TOOL_CALL event,
             # enabling the web UI to offer per-tool-call rollback.
-            if self._checkpoints_enabled and self._sandbox_pool:
-                for tc in tool_calls_raw:
-                    fn = tc.get("function", {})
-                    tool_name = fn.get("name", "")
-                    if tool_name in ("write_file", "patch"):
-                        try:
-                            import json as _json
-                            args = _json.loads(fn.get("arguments", "{}"))
-                            file_path = args.get("path", "")
-                            if file_path:
-                                cp_input = _json.dumps({
-                                    "action": "take",
-                                    "reason": f"before {tool_name}",
-                                    "file_path": file_path,
-                                })
-                                cp_result = await self._sandbox_pool.execute(
-                                    str(session.id), "_checkpoint", cp_input,
-                                )
-                                cp_data = _json.loads(cp_result)
-                                cp_hash = cp_data.get("hash")
-                                if cp_hash:
-                                    tc["_checkpoint_hash"] = cp_hash
-                        except Exception:
-                            logger.debug("Checkpoint before %s failed", tool_name, exc_info=True)
+            await self._inject_checkpoint_hashes(tool_calls_raw, session)
 
-            tool_results = await execute_tool_calls(
-                tool_calls_raw,
-                session=session,
-                lease=lease,
-                store=self._store,
-                tools=self._tools,
-                tenant=self._tenant,
-                interrupt_check=self._check_interrupt,
-                redis=self._redis,
-                budget=self._budget,
-                memory_manager=self._memory_manager,
-                hint_tracker=hint_tracker,
-                sandbox_pool=self._sandbox_pool,
-                api_client=self._api_client,
-                session_factory=self._session_factory,
-                saga=saga,
-            )
+            if use_streaming_exec:
+                # ── Streaming executor path ──────────────────────────
+                # Some or all tools started executing during LLM streaming.
+                # Checkpoint hashes were injected above — non-concurrent
+                # tools (write_file, patch) are still QUEUED at this point
+                # because they are never concurrency-safe.
+
+                # Wait for all tools to complete (concurrent ones may
+                # already be done, sequential ones start now).
+                all_results = await streaming_executor.get_all_results()
+
+                # Filter results to match the deduped tool call list.
+                # Dedup is rare but possible — if a tool was deduped,
+                # its result is harmlessly discarded (read-only tools
+                # have no side effects).
+                valid_ids = {tc.get("id") for tc in tool_calls_raw}
+                tool_results = [
+                    r for r in all_results
+                    if r.get("tool_call_id") in valid_ids
+                ]
+
+                # Log streaming executor stats for observability.
+                stats = streaming_executor.stats
+                if stats["overlapped_with_streaming"] > 0:
+                    logger.info(
+                        "Session %s: streaming executor completed — "
+                        "%d/%d tools overlapped with streaming",
+                        session.id,
+                        stats["overlapped_with_streaming"],
+                        stats["total"],
+                    )
+            else:
+                # ── Existing path ────────────────────────────────────
+                tool_results = await execute_tool_calls(
+                    tool_calls_raw,
+                    session=session,
+                    lease=lease,
+                    store=self._store,
+                    tools=self._tools,
+                    tenant=self._tenant,
+                    interrupt_check=self._check_interrupt,
+                    redis=self._redis,
+                    budget=self._budget,
+                    memory_manager=self._memory_manager,
+                    hint_tracker=hint_tracker,
+                    sandbox_pool=self._sandbox_pool,
+                    api_client=self._api_client,
+                    session_factory=self._session_factory,
+                    saga=saga,
+                )
 
             # 7a. Reset nudge counters when relevant tools are used
             for tr_tc in tool_calls_raw:
@@ -1103,6 +1162,55 @@ class AgentHarness:
         # Mark all active sagas as completed on normal loop exit.
         if saga is not None:
             await self._finalize_sagas(saga, session)
+
+    # ------------------------------------------------------------------
+    # Checkpoint injection
+    # ------------------------------------------------------------------
+
+    async def _inject_checkpoint_hashes(
+        self,
+        tool_calls: list[dict[str, Any]],
+        session: Session,
+    ) -> None:
+        """Stash checkpoint hashes on file-mutating tool call dicts.
+
+        Before ``write_file`` or ``patch`` execute, a filesystem snapshot
+        is taken via the sandbox's ``_checkpoint`` command.  The resulting
+        hash is stored on the tool call dict so ``execute_single_tool``
+        can include it in the ``TOOL_CALL`` event, enabling per-tool-call
+        rollback from the web UI.
+
+        No-op when checkpoints are disabled or no sandbox is available.
+        """
+        if not self._checkpoints_enabled or self._sandbox_pool is None:
+            return
+
+        import json as _json
+
+        for tc in tool_calls:
+            fn = tc.get("function", {})
+            tool_name = fn.get("name", "")
+            if tool_name not in ("write_file", "patch"):
+                continue
+            try:
+                args = _json.loads(fn.get("arguments", "{}"))
+                file_path = args.get("path", "")
+                if not file_path:
+                    continue
+                cp_input = _json.dumps({
+                    "action": "take",
+                    "reason": f"before {tool_name}",
+                    "file_path": file_path,
+                })
+                cp_result = await self._sandbox_pool.execute(
+                    str(session.id), "_checkpoint", cp_input,
+                )
+                cp_data = _json.loads(cp_result)
+                cp_hash = cp_data.get("hash")
+                if cp_hash:
+                    tc["_checkpoint_hash"] = cp_hash
+            except Exception:
+                logger.debug("Checkpoint before %s failed", tool_name, exc_info=True)
 
     # ------------------------------------------------------------------
     # Saga lifecycle helpers
