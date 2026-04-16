@@ -16,7 +16,9 @@ COPY web/package.json web/package-lock.json ./
 RUN npm ci
 
 COPY web/ ./
-RUN npm run build
+# Skip tsc type-checking — Vite transpiles TS on its own.
+# Type errors are caught in CI / local `npm run build`, not at image build time.
+RUN npx vite build
 
 # ── Stage 2: Final image ─────────────────────────────────────────────
 FROM python:3.12-slim
