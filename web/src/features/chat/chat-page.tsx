@@ -177,7 +177,7 @@ export function ChatPage() {
         {needsDisclosure && (
           <div className="absolute inset-x-0 top-0 z-30 p-4 flex justify-center">
             <TransparencyBanner
-              sessionId={sessionId}
+              sessionId={sessionId ?? undefined}
               level={transparencyConfig?.level ?? "basic"}
               onConfirmed={handleDisclosureConfirmed}
               onDeclined={handleDisclosureDeclined}
