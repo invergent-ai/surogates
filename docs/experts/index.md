@@ -108,6 +108,49 @@ curl -X POST http://localhost:8000/v1/skills \
 
 The SKILL.md body becomes the expert's system prompt. Write it as instructions for the expert model, not the base LLM. Include domain rules, formatting requirements, and any conventions specific to your organisation.
 
+### Example: Code Reviewer Expert
+
+```markdown
+---
+name: code_reviewer
+description: Reviews Python code for bugs, security issues, and style violations
+type: expert
+
+base_model: qwen2.5-coder-7b
+endpoint: http://expert-pool.your-cluster.svc:8000/v1
+
+tools: [read_file, search_files, list_files]
+max_iterations: 15
+expert_status: draft
+---
+
+You are a Python code reviewer for this organisation. When given a file path
+or code snippet, perform a thorough review.
+
+## Review checklist
+
+1. **Correctness**: logic errors, off-by-one, unhandled edge cases
+2. **Security**: injection, path traversal, unsafe deserialization, secrets in code
+3. **Performance**: unnecessary allocations, N+1 queries, missing indexes
+4. **Style**: PEP 8, consistent naming, dead code, overly complex expressions
+
+## Rules
+
+- Read the file before reviewing. Never review code you haven't seen.
+- Use search_files to find related code when checking for consistency.
+- Report findings as a structured list: severity (critical/warning/info),
+  line number, description, suggested fix.
+- If the code is clean, say so briefly. Don't invent issues.
+- Focus on what matters. Don't nitpick formatting if there are logic bugs.
+```
+
+Place this at:
+```
+tenant-{org_id}/shared/skills/code_reviewer/SKILL.md
+```
+
+This example shows a different pattern from the sql_writer: it uses read-only tools (`read_file`, `search_files`, `list_files`) since a reviewer inspects code but doesn't modify it, and a higher `max_iterations: 15` to allow deeper exploration of related files.
+
 ### Frontmatter Reference
 
 | Field | Required | Default | Description |
