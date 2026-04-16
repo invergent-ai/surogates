@@ -71,6 +71,10 @@ spec:
             {{- end }}
             - name: SUROGATES_AGENT_ID
               value: {{ include "surogates.agentId" . | quote }}
+            {{- range $key, $value := .Values.extraEnv }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
             - name: SUROGATES_LOG_LEVEL
               value: {{ .Values.logLevel | quote }}
           {{- if .Values.platformSkills }}
