@@ -129,6 +129,24 @@ channels:
     replyInThread: true
     replyBroadcast: false
 
+  telegram:
+    enabled: false
+    botToken: ""
+    # Webhook mode (leave webhookUrl empty for long-polling mode)
+    webhookUrl: ""
+    webhookPort: 8443
+    webhookSecret: ""
+    # Bot behaviour
+    requireMention: false
+    freeResponseChats: ""
+    mentionPatterns: ""
+    replyToMode: "first"
+    reactionsEnabled: false
+    perUserGroups: true
+    # Network
+    fallbackIps: ""
+    baseUrl: ""
+
 # -- Ingress
 # -- Agent-specific environment variables (governance, saga, etc.)
 # Injected into worker and API pods.  Keys are env-var names, values

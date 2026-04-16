@@ -22,6 +22,9 @@ Components:
   {{- if .Values.channels.slack.enabled }}
   - Slack:       enabled
   {{- end }}
+  {{- if .Values.channels.telegram.enabled }}
+  - Telegram:    enabled{{- if .Values.channels.telegram.webhookUrl }} (webhook){{- else }} (polling){{- end }}
+  {{- end }}
 
 LLM: {{ .Values.llm.model }}
 Sandbox: {{ .Values.sandbox.backend }}

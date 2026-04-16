@@ -145,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_channel = sub.add_parser("channel", help="Start a channel adapter")
     p_channel.add_argument(
         "type",
-        choices=["slack"],
+        choices=["slack", "telegram"],
         help="Channel type to start",
     )
 

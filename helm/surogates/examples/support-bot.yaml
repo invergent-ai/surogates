@@ -30,6 +30,12 @@ channels:
     botToken: "xoxb-PLACEHOLDER"
     requireMention: true
     replyInThread: true
+  telegram:
+    enabled: true
+    botToken: "123456:ABC-DEF-PLACEHOLDER"
+    requireMention: false
+    replyToMode: "first"
+    perUserGroups: true
 
 ingress:
   enabled: true

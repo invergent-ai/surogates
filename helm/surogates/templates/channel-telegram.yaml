@@ -1,0 +1,118 @@
+{{- if .Values.channels.telegram.enabled }}
+{{- $fullname := include "surogates.fullname" . -}}
+{{- $component := "channel-telegram" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-channel-telegram
+  labels:
+    {{- include "surogates.fullLabels" (dict "root" . "component" $component) | nindent 4 }}
+    channel: telegram
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "surogates.componentSelector" (dict "root" . "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "surogates.fullLabels" (dict "root" . "component" $component) | nindent 8 }}
+        channel: telegram
+    spec:
+      serviceAccountName: {{ $fullname }}-api
+      containers:
+        - name: channel
+          image: {{ include "surogates.image" (dict "root" . "name" "api") | quote }}
+          imagePullPolicy: {{ include "surogates.imagePullPolicy" . }}
+          command: ["surogates", "channel", "telegram"]
+          env:
+            - name: SUROGATES_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-db
+                  key: url
+            - name: SUROGATES_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-redis
+                  key: url
+            - name: SUROGATES_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-jwt
+                  key: secret
+            - name: SUROGATES_TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-telegram
+                  key: bot-token
+            {{- if .Values.channels.telegram.webhookUrl }}
+            - name: SUROGATES_TELEGRAM_WEBHOOK_URL
+              value: {{ .Values.channels.telegram.webhookUrl | quote }}
+            - name: SUROGATES_TELEGRAM_WEBHOOK_PORT
+              value: {{ .Values.channels.telegram.webhookPort | quote }}
+            {{- if .Values.channels.telegram.webhookSecret }}
+            - name: SUROGATES_TELEGRAM_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-telegram
+                  key: webhook-secret
+            {{- end }}
+            {{- end }}
+            - name: SUROGATES_TELEGRAM_REQUIRE_MENTION
+              value: {{ .Values.channels.telegram.requireMention | quote }}
+            {{- if .Values.channels.telegram.freeResponseChats }}
+            - name: SUROGATES_TELEGRAM_FREE_RESPONSE_CHATS
+              value: {{ .Values.channels.telegram.freeResponseChats | quote }}
+            {{- end }}
+            {{- if .Values.channels.telegram.mentionPatterns }}
+            - name: SUROGATES_TELEGRAM_MENTION_PATTERNS
+              value: {{ .Values.channels.telegram.mentionPatterns | quote }}
+            {{- end }}
+            - name: SUROGATES_TELEGRAM_REPLY_TO_MODE
+              value: {{ .Values.channels.telegram.replyToMode | quote }}
+            - name: SUROGATES_TELEGRAM_REACTIONS_ENABLED
+              value: {{ .Values.channels.telegram.reactionsEnabled | quote }}
+            - name: SUROGATES_TELEGRAM_PER_USER_GROUPS
+              value: {{ .Values.channels.telegram.perUserGroups | quote }}
+            {{- if .Values.channels.telegram.fallbackIps }}
+            - name: SUROGATES_TELEGRAM_FALLBACK_IPS
+              value: {{ .Values.channels.telegram.fallbackIps | quote }}
+            {{- end }}
+            {{- if .Values.channels.telegram.baseUrl }}
+            - name: SUROGATES_TELEGRAM_BASE_URL
+              value: {{ .Values.channels.telegram.baseUrl | quote }}
+            {{- end }}
+            - name: SUROGATES_LOG_LEVEL
+              value: {{ .Values.logLevel | quote }}
+            - name: SUROGATES_HEALTH_PORT
+              value: {{ .Values.healthPort | quote }}
+          ports:
+            - name: health
+              containerPort: {{ .Values.healthPort }}
+              protocol: TCP
+            {{- if .Values.channels.telegram.webhookUrl }}
+            - name: webhook
+              containerPort: {{ .Values.channels.telegram.webhookPort }}
+              protocol: TCP
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+{{- end }}

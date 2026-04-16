@@ -37,6 +37,8 @@ mcpProxy:
 channels:
   slack:
     enabled: false
+  telegram:
+    enabled: false
 
 ingress:
   enabled: true
