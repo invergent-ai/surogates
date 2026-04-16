@@ -51,18 +51,14 @@ spec:
                 secretKeyRef:
                   name: {{ $fullname }}-slack
                   key: app-token
-            - name: SUROGATES_SLACK_REQUIRE_MENTION
-              value: {{ .Values.channels.slack.requireMention | quote }}
-            {{- if .Values.channels.slack.freeResponseChannels }}
-            - name: SUROGATES_SLACK_FREE_RESPONSE_CHANNELS
-              value: {{ .Values.channels.slack.freeResponseChannels | quote }}
+            - name: SUROGATES_AGENT_ID
+              value: {{ include "surogates.agentId" . | quote }}
+            - name: SUROGATES_API_WEB_URL
+              value: {{ printf "https://%s" (include "surogates.hostname" .) | quote }}
+            {{- range $key, $value := .Values.extraEnv }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
             {{- end }}
-            - name: SUROGATES_SLACK_ALLOW_BOTS
-              value: {{ .Values.channels.slack.allowBots | quote }}
-            - name: SUROGATES_SLACK_REPLY_IN_THREAD
-              value: {{ .Values.channels.slack.replyInThread | quote }}
-            - name: SUROGATES_SLACK_REPLY_BROADCAST
-              value: {{ .Values.channels.slack.replyBroadcast | quote }}
             - name: SUROGATES_LOG_LEVEL
               value: {{ .Values.logLevel | quote }}
             - name: SUROGATES_HEALTH_PORT

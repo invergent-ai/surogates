@@ -118,34 +118,18 @@ mcpProxy:
       memory: 1Gi
 
 # -- Channel adapters
+# Behavioral settings (requireMention, allowBots, replyInThread, etc.)
+# are injected via extraEnv — the same mechanism used for governance,
+# saga, and all other agent-specific configuration.
 channels:
   slack:
     enabled: false
     appToken: ""
     botToken: ""
-    requireMention: true
-    freeResponseChannels: ""
-    allowBots: "none"
-    replyInThread: true
-    replyBroadcast: false
 
   telegram:
     enabled: false
     botToken: ""
-    # Webhook mode (leave webhookUrl empty for long-polling mode)
-    webhookUrl: ""
-    webhookPort: 8443
-    webhookSecret: ""
-    # Bot behaviour
-    requireMention: false
-    freeResponseChats: ""
-    mentionPatterns: ""
-    replyToMode: "first"
-    reactionsEnabled: false
-    perUserGroups: true
-    # Network
-    fallbackIps: ""
-    baseUrl: ""
 
 # -- Ingress
 # -- Agent-specific environment variables (governance, saga, etc.)

@@ -46,42 +46,13 @@ spec:
                 secretKeyRef:
                   name: {{ $fullname }}-telegram
                   key: bot-token
-            {{- if .Values.channels.telegram.webhookUrl }}
-            - name: SUROGATES_TELEGRAM_WEBHOOK_URL
-              value: {{ .Values.channels.telegram.webhookUrl | quote }}
-            - name: SUROGATES_TELEGRAM_WEBHOOK_PORT
-              value: {{ .Values.channels.telegram.webhookPort | quote }}
-            {{- if .Values.channels.telegram.webhookSecret }}
-            - name: SUROGATES_TELEGRAM_WEBHOOK_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $fullname }}-telegram
-                  key: webhook-secret
-            {{- end }}
-            {{- end }}
-            - name: SUROGATES_TELEGRAM_REQUIRE_MENTION
-              value: {{ .Values.channels.telegram.requireMention | quote }}
-            {{- if .Values.channels.telegram.freeResponseChats }}
-            - name: SUROGATES_TELEGRAM_FREE_RESPONSE_CHATS
-              value: {{ .Values.channels.telegram.freeResponseChats | quote }}
-            {{- end }}
-            {{- if .Values.channels.telegram.mentionPatterns }}
-            - name: SUROGATES_TELEGRAM_MENTION_PATTERNS
-              value: {{ .Values.channels.telegram.mentionPatterns | quote }}
-            {{- end }}
-            - name: SUROGATES_TELEGRAM_REPLY_TO_MODE
-              value: {{ .Values.channels.telegram.replyToMode | quote }}
-            - name: SUROGATES_TELEGRAM_REACTIONS_ENABLED
-              value: {{ .Values.channels.telegram.reactionsEnabled | quote }}
-            - name: SUROGATES_TELEGRAM_PER_USER_GROUPS
-              value: {{ .Values.channels.telegram.perUserGroups | quote }}
-            {{- if .Values.channels.telegram.fallbackIps }}
-            - name: SUROGATES_TELEGRAM_FALLBACK_IPS
-              value: {{ .Values.channels.telegram.fallbackIps | quote }}
-            {{- end }}
-            {{- if .Values.channels.telegram.baseUrl }}
-            - name: SUROGATES_TELEGRAM_BASE_URL
-              value: {{ .Values.channels.telegram.baseUrl | quote }}
+            - name: SUROGATES_AGENT_ID
+              value: {{ include "surogates.agentId" . | quote }}
+            - name: SUROGATES_API_WEB_URL
+              value: {{ printf "https://%s" (include "surogates.hostname" .) | quote }}
+            {{- range $key, $value := .Values.extraEnv }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
             {{- end }}
             - name: SUROGATES_LOG_LEVEL
               value: {{ .Values.logLevel | quote }}
@@ -91,11 +62,6 @@ spec:
             - name: health
               containerPort: {{ .Values.healthPort }}
               protocol: TCP
-            {{- if .Values.channels.telegram.webhookUrl }}
-            - name: webhook
-              containerPort: {{ .Values.channels.telegram.webhookPort }}
-              protocol: TCP
-            {{- end }}
           livenessProbe:
             httpGet:
               path: /health
