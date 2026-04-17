@@ -464,6 +464,24 @@ class Skill(Base):
 
 class McpServer(Base):
     __tablename__ = "mcp_servers"
+    __table_args__ = (
+        # Partial unique indexes enforce at-most-one registration per
+        # (org, user, name) scope.  Split in two because PostgreSQL
+        # treats NULLs as distinct in a standard UNIQUE constraint
+        # (prior to "UNIQUE NULLS NOT DISTINCT" in PG 15+).
+        Index(
+            "uq_mcp_servers_org_name",
+            "org_id", "name",
+            unique=True,
+            postgresql_where=text("user_id IS NULL"),
+        ),
+        Index(
+            "uq_mcp_servers_org_user_name",
+            "org_id", "user_id", "name",
+            unique=True,
+            postgresql_where=text("user_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4

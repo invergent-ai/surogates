@@ -37,6 +37,14 @@ export function formatArgs(args: string): string {
   }
 }
 
+export function parseArgs<T = Record<string, unknown>>(args: string): T | null {
+  try {
+    return JSON.parse(args) as T;
+  } catch {
+    return null;
+  }
+}
+
 export function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) + "\n... (truncated)" : s;
 }

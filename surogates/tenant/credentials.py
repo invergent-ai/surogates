@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from surogates.db.models import Credential
 
@@ -51,10 +51,13 @@ class CredentialVault:
         name: str,
         value: str,
         user_id: UUID | None = None,
-    ) -> UUID:
+    ) -> tuple[UUID, bool]:
         """Encrypt *value* and store (or update) the named credential.
 
-        Returns the credential's UUID primary key.
+        Returns ``(credential_id, created)`` where ``created`` is
+        ``True`` for a fresh insert and ``False`` when an existing row
+        was replaced.  Callers use the flag to distinguish 201 vs 200
+        responses without a second round trip.
         """
         encrypted = self._fernet.encrypt(value.encode("utf-8"))
 
@@ -65,19 +68,17 @@ class CredentialVault:
                 )
                 if existing is not None:
                     existing.value_enc = encrypted
-                    credential_id = existing.id
-                else:
-                    credential = Credential(
-                        org_id=org_id,
-                        user_id=user_id,
-                        name=name,
-                        value_enc=encrypted,
-                    )
-                    session.add(credential)
-                    await session.flush()
-                    credential_id = credential.id
+                    return existing.id, False
 
-        return credential_id
+                credential = Credential(
+                    org_id=org_id,
+                    user_id=user_id,
+                    name=name,
+                    value_enc=encrypted,
+                )
+                session.add(credential)
+                await session.flush()
+                return credential.id, True
 
     async def retrieve(
         self,
@@ -132,6 +133,43 @@ class CredentialVault:
             )
             result = await session.execute(stmt)
             return list(result.scalars().all())
+
+    async def list_all(
+        self,
+        user_id: UUID | None = None,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> tuple[list[tuple[UUID, UUID | None, str]], int]:
+        """Platform-wide credential listing (admin use).
+
+        Returns ``(rows, total)`` where rows are ``(org_id, user_id,
+        name)`` tuples.  Plaintext is never loaded — only metadata.
+        ``user_id`` filters to a specific user when supplied; pass
+        ``None`` to include every row regardless of scope.
+        """
+        async with self._session_factory() as session:
+            base = select(Credential)
+            if user_id is not None:
+                base = base.where(Credential.user_id == user_id)
+
+            count_stmt = select(func.count()).select_from(base.subquery())
+            total = (await session.execute(count_stmt)).scalar_one()
+
+            page_stmt = (
+                select(
+                    Credential.org_id, Credential.user_id, Credential.name,
+                )
+                .order_by(Credential.org_id, Credential.name)
+                .limit(limit)
+                .offset(offset)
+            )
+            if user_id is not None:
+                page_stmt = page_stmt.where(Credential.user_id == user_id)
+
+            rows = (await session.execute(page_stmt)).all()
+
+        return [(oid, uid, name) for (oid, uid, name) in rows], total
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -53,7 +53,10 @@ class EventType(str, Enum):
     EXPERT_DELEGATION = "expert.delegation"
     EXPERT_RESULT = "expert.result"
     EXPERT_FAILURE = "expert.failure"
-    EXPERT_OVERRIDE = "expert.override"
+    # User feedback on an expert.result — rates the expert's output.
+    # Emitted by POST /v1/sessions/{id}/events/{event_id}/feedback.
+    EXPERT_ENDORSE = "expert.endorse"     # thumbs-up
+    EXPERT_OVERRIDE = "expert.override"   # thumbs-down
 
     # Worker coordination (coordinator mode)
     WORKER_SPAWNED = "worker.spawned"

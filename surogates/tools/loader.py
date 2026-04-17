@@ -20,15 +20,22 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any
 from uuid import UUID
+
+
+class MCPTransport(str, Enum):
+    """Supported MCP transport kinds."""
+
+    STDIO = "stdio"
+    HTTP = "http"
 
 logger = logging.getLogger(__name__)
 
 # Well-known platform volume paths (overridable via constructor).
 PLATFORM_SKILLS_DIR = "/etc/surogates/skills"
-PLATFORM_TOOLS_DIR = "/etc/surogates/tools"
 PLATFORM_MCP_DIR = "/etc/surogates/mcp"
 
 
@@ -108,7 +115,7 @@ class MCPServerDef:
     """Configuration for a single MCP server."""
 
     name: str
-    transport: str  # "stdio" or "http"
+    transport: MCPTransport = MCPTransport.STDIO
     command: str | None = None
     args: list[str] = field(default_factory=list)
     url: str | None = None
@@ -715,7 +722,7 @@ def _parse_mcp_server(name: str, cfg: dict[str, Any]) -> MCPServerDef:
     """Build an :class:`MCPServerDef` from a raw config dict."""
     return MCPServerDef(
         name=name,
-        transport=cfg.get("transport", "stdio"),
+        transport=MCPTransport(cfg.get("transport", MCPTransport.STDIO.value)),
         command=cfg.get("command"),
         args=cfg.get("args", []),
         url=cfg.get("url"),

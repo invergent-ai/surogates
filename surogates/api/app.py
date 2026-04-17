@@ -15,8 +15,27 @@ from surogates.config import load_settings
 from surogates.db.engine import async_engine_from_settings, async_session_factory
 from surogates.session.store import SessionStore
 from surogates.storage.backend import create_backend
+from surogates.tenant.credentials import CredentialVault
 
 logger = logging.getLogger(__name__)
+
+
+def _build_vault(encryption_key: str, session_factory) -> CredentialVault | None:
+    """Return a ``CredentialVault``, or ``None`` if the key is missing
+    or malformed — a bad key must not crash startup."""
+    if not encryption_key:
+        logger.warning("SUROGATES_ENCRYPTION_KEY not set; credential vault disabled.")
+        return None
+    try:
+        return CredentialVault(
+            session_factory, encryption_key=encryption_key.encode("utf-8"),
+        )
+    except ValueError:
+        logger.error(
+            "SUROGATES_ENCRYPTION_KEY is not a valid Fernet key; "
+            "credential vault disabled.",
+        )
+        return None
 
 
 @asynccontextmanager
@@ -31,6 +50,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.redis = Redis.from_url(settings.redis.url)
     app.state.session_store = SessionStore(app.state.session_factory, redis=app.state.redis)
     app.state.storage = create_backend(settings)
+
+    app.state.credential_vault = _build_vault(
+        settings.encryption_key, app.state.session_factory,
+    )
 
     from surogates.channels.pairing import PairingStore
     app.state.pairing_store = PairingStore(redis=app.state.redis)
@@ -93,18 +116,35 @@ def create_app() -> FastAPI:
     app.add_middleware(StripApiPrefixMiddleware)
 
     # --- routes ----------------------------------------------------------
-    from surogates.api.routes import admin, auth, events, health, memory, sessions, skills, tools, transparency, workspace
+    from surogates.api.routes import (
+        admin,
+        admin_credentials,
+        admin_mcp,
+        auth,
+        events,
+        feedback,
+        health,
+        memory,
+        sessions,
+        skills,
+        tools,
+        transparency,
+        workspace,
+    )
 
     app.include_router(health.router, tags=["health"])
     app.include_router(auth.router, prefix="/v1", tags=["auth"])
     app.include_router(sessions.router, prefix="/v1", tags=["sessions"])
     app.include_router(events.router, prefix="/v1", tags=["events"])
+    app.include_router(feedback.router, prefix="/v1", tags=["feedback"])
     app.include_router(tools.router, prefix="/v1", tags=["tools"])
     app.include_router(skills.router, prefix="/v1", tags=["skills"])
     app.include_router(memory.router, prefix="/v1", tags=["memory"])
     app.include_router(transparency.router, prefix="/v1", tags=["transparency"])
     app.include_router(workspace.router, prefix="/v1", tags=["workspace"])
     app.include_router(admin.router, prefix="/v1/admin", tags=["admin"])
+    app.include_router(admin_mcp.router, prefix="/v1/admin", tags=["admin"])
+    app.include_router(admin_credentials.router, prefix="/v1/admin", tags=["admin"])
 
     # --- frontend SPA ----------------------------------------------------
     # The catch-all route must be registered LAST so it does not shadow

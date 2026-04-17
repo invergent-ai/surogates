@@ -41,8 +41,9 @@ async def test_store_and_retrieve(vault, session_factory):
     """Store a credential, retrieve it, verify decrypted value matches."""
     org_id = await create_org(session_factory)
 
-    cred_id = await vault.store(org_id, "api-key", "sk-secret-12345")
+    cred_id, created = await vault.store(org_id, "api-key", "sk-secret-12345")
     assert cred_id is not None
+    assert created is True
 
     value = await vault.retrieve(org_id, "api-key")
     assert value == "sk-secret-12345"
@@ -99,10 +100,12 @@ async def test_store_updates_existing(vault, session_factory):
     """Storing a credential with an existing name updates the value."""
     org_id = await create_org(session_factory)
 
-    await vault.store(org_id, "rotating-key", "value-v1")
+    _, created = await vault.store(org_id, "rotating-key", "value-v1")
+    assert created is True
     assert await vault.retrieve(org_id, "rotating-key") == "value-v1"
 
-    await vault.store(org_id, "rotating-key", "value-v2")
+    _, created_again = await vault.store(org_id, "rotating-key", "value-v2")
+    assert created_again is False
     assert await vault.retrieve(org_id, "rotating-key") == "value-v2"
 
 

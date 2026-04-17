@@ -25,6 +25,14 @@ export interface ToolCallInfo {
   result?: string;
   status: "running" | "complete" | "error";
   checkpointHash?: string;
+  // Populated for consult_expert tool calls when the expert.result
+  // event lands.  The id references the expert.result event and is
+  // used to submit thumbs-up/thumbs-down feedback.
+  expertResultEventId?: number;
+  // Current user feedback on this expert's output.  Set when an
+  // EXPERT_ENDORSE or EXPERT_OVERRIDE event arrives (either live or
+  // on session replay).
+  expertFeedback?: { rating: "up" | "down"; reason?: string };
 }
 
 export interface TokenUsage {
@@ -56,6 +64,9 @@ const LISTENED_EVENTS = [
   "context.compact",
   "policy.denied",
   "stream.timeout",
+  "expert.result",
+  "expert.endorse",
+  "expert.override",
 ] as const;
 
 const EMPTY_USAGE: TokenUsage = {
@@ -416,6 +427,60 @@ export function useSessionRuntime(sessionId: string | null) {
             break;
           }
 
+          case "expert.result": {
+            // Attach this expert.result event id to the most recent
+            // consult_expert tool call so the UI can later submit
+            // feedback keyed to this specific event.
+            const tcMatch = findLatestConsultExpertCall(next);
+            if (tcMatch) {
+              const { msgIdx, toolId } = tcMatch;
+              const msg = next[msgIdx];
+              next[msgIdx] = {
+                ...msg,
+                toolCalls: msg.toolCalls?.map((t) =>
+                  t.id === toolId
+                    ? { ...t, expertResultEventId: eventId }
+                    : t,
+                ),
+              };
+            }
+            break;
+          }
+
+          case "expert.endorse":
+          case "expert.override": {
+            // Apply prior feedback when replaying a session, or reflect
+            // the caller's own click once the server has persisted it.
+            const resultEventId = data.expert_result_event_id as
+              | number
+              | undefined;
+            if (resultEventId == null) break;
+            const rating: "up" | "down" = type === "expert.endorse" ? "up" : "down";
+            const reason = (data.reason as string | undefined) ?? undefined;
+            for (let i = next.length - 1; i >= 0; i--) {
+              const msg = next[i];
+              if (!msg.toolCalls) continue;
+              const hit = msg.toolCalls.find(
+                (t) => t.expertResultEventId === resultEventId,
+              );
+              if (!hit) continue;
+              if (
+                hit.expertFeedback?.rating === rating &&
+                hit.expertFeedback?.reason === reason
+              ) break;
+              next[i] = {
+                ...msg,
+                toolCalls: msg.toolCalls.map((t) =>
+                  t.expertResultEventId === resultEventId
+                    ? { ...t, expertFeedback: { rating, reason } }
+                    : t,
+                ),
+              };
+              break;
+            }
+            break;
+          }
+
           case "policy.denied": {
             const policyIdx = findLastAssistantIndex(next);
             if (policyIdx >= 0) {
@@ -563,4 +628,27 @@ function hasUserAfterIndex(msgs: ChatMessage[], idx: number): boolean {
     if (msgs[i].role === "user") return true;
   }
   return false;
+}
+
+// Locate the most recent consult_expert tool call across all assistant
+// messages.  Used to attach an expert.result event id to the tool call
+// that triggered it (expert.result is emitted inside the expert's
+// mini-loop, before the consult_expert tool.result arrives).
+function findLatestConsultExpertCall(
+  msgs: ChatMessage[],
+): { msgIdx: number; toolId: string } | null {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const msg = msgs[i];
+    if (!msg.toolCalls) continue;
+    for (let j = msg.toolCalls.length - 1; j >= 0; j--) {
+      const tc = msg.toolCalls[j];
+      if (
+        tc.toolName === "consult_expert" &&
+        tc.expertResultEventId === undefined
+      ) {
+        return { msgIdx: i, toolId: tc.id };
+      }
+    }
+  }
+  return null;
 }

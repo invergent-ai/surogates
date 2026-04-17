@@ -311,6 +311,57 @@ class SessionStore:
                 session_id, exc,
             )
 
+    async def get_event_by_id(
+        self,
+        session_id: UUID,
+        event_id: int,
+    ) -> Event | None:
+        """Return a single event by id, scoped to the given session.
+
+        Returns ``None`` if no event with that id exists for the session —
+        used by callers that need to validate an event reference (e.g. the
+        feedback endpoint verifying a user rated a real ``expert.result``).
+        """
+        stmt = select(EventRow).where(
+            EventRow.session_id == session_id, EventRow.id == event_id,
+        )
+        async with self._sf() as db:
+            result = await db.execute(stmt)
+            row = result.scalar_one_or_none()
+        return Event.model_validate(row) if row is not None else None
+
+    async def find_user_expert_feedback(
+        self,
+        session_id: UUID,
+        target_event_id: int,
+        user_id: UUID,
+    ) -> Event | None:
+        """Return an existing EXPERT_ENDORSE or EXPERT_OVERRIDE event
+        emitted by ``user_id`` on ``target_event_id`` for this session.
+
+        Used to enforce per-user idempotency on the feedback endpoint
+        without scanning every feedback event in the session.  Matching
+        uses JSONB text extraction so it benefits from a B-tree index on
+        ``(session_id, type, (data->>'expert_result_event_id'),
+        (data->>'rated_by_user_id'))``.
+        """
+        stmt = (
+            select(EventRow)
+            .where(
+                EventRow.session_id == session_id,
+                EventRow.type.in_(
+                    [EventType.EXPERT_ENDORSE.value, EventType.EXPERT_OVERRIDE.value],
+                ),
+                EventRow.data["expert_result_event_id"].astext == str(target_event_id),
+                EventRow.data["rated_by_user_id"].astext == str(user_id),
+            )
+            .limit(1)
+        )
+        async with self._sf() as db:
+            result = await db.execute(stmt)
+            row = result.scalar_one_or_none()
+        return Event.model_validate(row) if row is not None else None
+
     async def get_events(
         self,
         session_id: UUID,

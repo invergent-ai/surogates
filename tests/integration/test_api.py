@@ -8,10 +8,12 @@ from uuid import UUID
 
 import pytest
 import pytest_asyncio
+from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
 
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
+from surogates.tenant.credentials import CredentialVault
 
 from .conftest import create_org, create_user
 
@@ -45,6 +47,11 @@ async def app(session_factory, redis_client, pg_url, redis_url):
 
     from surogates.storage.backend import create_backend
     application.state.storage = create_backend(application.state.settings)
+
+    # Vault for /v1/admin/credentials and MCP credential refs.
+    application.state.credential_vault = CredentialVault(
+        session_factory, Fernet.generate_key()
+    )
 
     return application
 
@@ -348,3 +355,539 @@ async def test_tenant_isolation(client: AsyncClient, session_factory):
         headers={"Authorization": f"Bearer {token_b}"},
     )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Admin -- MCP servers
+# ---------------------------------------------------------------------------
+
+
+async def test_admin_create_mcp_server_stdio(client: AsyncClient, session_factory):
+    """POST /v1/admin/mcp-servers registers a stdio MCP server."""
+    org_id, _, token, _ = await _create_test_tenant(session_factory)
+
+    resp = await client.post(
+        "/v1/admin/mcp-servers",
+        json={
+            "org_id": str(org_id),
+            "name": "github",
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-github"],
+            "credential_refs": [
+                {"name": "GITHUB_TOKEN", "env": "GITHUB_PERSONAL_ACCESS_TOKEN"}
+            ],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 201, resp.text
+    data = resp.json()
+    assert data["name"] == "github"
+    assert data["transport"] == "stdio"
+    assert data["command"] == "npx"
+    assert data["args"] == ["-y", "@modelcontextprotocol/server-github"]
+    assert data["enabled"] is True
+    assert "id" in data
+
+
+async def test_admin_create_mcp_server_http_requires_url(
+    client: AsyncClient, session_factory
+):
+    """http transport without 'url' is rejected."""
+    org_id, _, token, _ = await _create_test_tenant(session_factory)
+
+    resp = await client.post(
+        "/v1/admin/mcp-servers",
+        json={
+            "org_id": str(org_id),
+            "name": "remote-mcp",
+            "transport": "http",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+    assert "url" in resp.json()["detail"].lower()
+
+
+async def test_admin_create_mcp_server_stdio_requires_command(
+    client: AsyncClient, session_factory
+):
+    """stdio transport without 'command' is rejected."""
+    org_id, _, token, _ = await _create_test_tenant(session_factory)
+
+    resp = await client.post(
+        "/v1/admin/mcp-servers",
+        json={
+            "org_id": str(org_id),
+            "name": "bad-stdio",
+            "transport": "stdio",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+
+
+async def test_admin_create_mcp_server_duplicate(client: AsyncClient, session_factory):
+    """Registering the same name twice at the same scope returns 409."""
+    org_id, _, token, _ = await _create_test_tenant(session_factory)
+    payload = {
+        "org_id": str(org_id),
+        "name": "dup-server",
+        "transport": "stdio",
+        "command": "echo",
+    }
+
+    resp1 = await client.post(
+        "/v1/admin/mcp-servers",
+        json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp1.status_code == 201
+
+    resp2 = await client.post(
+        "/v1/admin/mcp-servers",
+        json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp2.status_code == 409
+
+
+async def test_admin_list_mcp_servers(client: AsyncClient, session_factory):
+    """Non-admin tenants see only their own org's MCP servers."""
+    org_a, _, token_a, _ = await _create_test_tenant(
+        session_factory, permissions={"admin"}
+    )
+    await client.post(
+        "/v1/admin/mcp-servers",
+        json={
+            "org_id": str(org_a),
+            "name": "org-a-server",
+            "transport": "stdio",
+            "command": "echo",
+        },
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+
+    _, _, token_b, _ = await _create_test_tenant(
+        session_factory, permissions={"sessions:read"}
+    )
+    resp = await client.get(
+        "/v1/admin/mcp-servers",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert resp.status_code == 200
+    names = {s["name"] for s in resp.json()["servers"]}
+    assert "org-a-server" not in names
+
+
+async def test_admin_update_mcp_server(client: AsyncClient, session_factory):
+    """PUT updates fields and re-validates transport/command."""
+    org_id, _, token, _ = await _create_test_tenant(session_factory)
+    create_resp = await client.post(
+        "/v1/admin/mcp-servers",
+        json={
+            "org_id": str(org_id),
+            "name": "updatable",
+            "transport": "stdio",
+            "command": "npx",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    server_id = create_resp.json()["id"]
+
+    resp = await client.put(
+        f"/v1/admin/mcp-servers/{server_id}",
+        json={"enabled": False, "timeout": 60},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["enabled"] is False
+    assert data["timeout"] == 60
+
+
+async def test_admin_delete_mcp_server(client: AsyncClient, session_factory):
+    """DELETE removes the registration."""
+    org_id, _, token, _ = await _create_test_tenant(session_factory)
+    create_resp = await client.post(
+        "/v1/admin/mcp-servers",
+        json={
+            "org_id": str(org_id),
+            "name": "to-delete",
+            "transport": "stdio",
+            "command": "echo",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    server_id = create_resp.json()["id"]
+
+    resp = await client.delete(
+        f"/v1/admin/mcp-servers/{server_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 204
+
+    get_resp = await client.get(
+        f"/v1/admin/mcp-servers/{server_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert get_resp.status_code == 404
+
+
+async def test_admin_mcp_cross_org_forbidden(client: AsyncClient, session_factory):
+    """Non-admin cannot register servers for a foreign org."""
+    org_a, _, _, _ = await _create_test_tenant(session_factory)
+    _, _, token_b, _ = await _create_test_tenant(
+        session_factory, permissions={"sessions:read"}
+    )
+
+    resp = await client.post(
+        "/v1/admin/mcp-servers",
+        json={
+            "org_id": str(org_a),
+            "name": "sneaky",
+            "transport": "stdio",
+            "command": "echo",
+        },
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Admin -- Credentials vault
+# ---------------------------------------------------------------------------
+
+
+async def test_admin_create_credential(client: AsyncClient, session_factory):
+    """POST /v1/admin/credentials stores an encrypted credential."""
+    org_id, _, token, _ = await _create_test_tenant(session_factory)
+
+    resp = await client.post(
+        "/v1/admin/credentials",
+        json={
+            "org_id": str(org_id),
+            "name": "GITHUB_TOKEN",
+            "value": "ghp_secret_value_12345",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 201, resp.text
+    data = resp.json()
+    assert data["name"] == "GITHUB_TOKEN"
+    assert data["org_id"] == str(org_id)
+    # Plaintext is NEVER echoed back.
+    assert "value" not in data
+
+
+async def test_admin_list_credentials(client: AsyncClient, session_factory):
+    """GET /v1/admin/credentials lists names only, never values."""
+    org_id, _, token, _ = await _create_test_tenant(session_factory)
+    for name in ("API_KEY", "DB_PASSWORD"):
+        await client.post(
+            "/v1/admin/credentials",
+            json={"org_id": str(org_id), "name": name, "value": "secret"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    resp = await client.get(
+        "/v1/admin/credentials",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    names = {c["name"] for c in resp.json()["credentials"]}
+    assert {"API_KEY", "DB_PASSWORD"}.issubset(names)
+
+
+async def test_admin_delete_credential(client: AsyncClient, session_factory):
+    """DELETE removes the credential; subsequent delete returns 404."""
+    org_id, _, token, _ = await _create_test_tenant(session_factory)
+    await client.post(
+        "/v1/admin/credentials",
+        json={"org_id": str(org_id), "name": "TEMP", "value": "burn-me"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    resp = await client.delete(
+        f"/v1/admin/credentials?org_id={org_id}&name=TEMP",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 204
+
+    resp2 = await client.delete(
+        f"/v1/admin/credentials?org_id={org_id}&name=TEMP",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp2.status_code == 404
+
+
+async def test_admin_credentials_cross_org_forbidden(
+    client: AsyncClient, session_factory
+):
+    """Non-admin cannot write credentials for a foreign org."""
+    org_a, _, _, _ = await _create_test_tenant(session_factory)
+    _, _, token_b, _ = await _create_test_tenant(
+        session_factory, permissions={"sessions:read"}
+    )
+
+    resp = await client.post(
+        "/v1/admin/credentials",
+        json={"org_id": str(org_a), "name": "STEAL", "value": "x"},
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_admin_credentials_cross_user_forbidden(
+    client: AsyncClient, session_factory
+):
+    """Non-admin cannot touch another user's credentials in the same org."""
+    org_id, victim_user_id, _, _ = await _create_test_tenant(
+        session_factory, permissions={"sessions:read"}
+    )
+    attacker_user_id = uuid.uuid4()
+    await create_user(
+        session_factory, org_id,
+        user_id=attacker_user_id,
+        email=f"attacker-{attacker_user_id}@test.com",
+    )
+    attacker_token = create_access_token(
+        org_id, attacker_user_id, {"sessions:read"},
+    )
+
+    create_resp = await client.post(
+        "/v1/admin/credentials",
+        json={
+            "org_id": str(org_id),
+            "user_id": str(victim_user_id),
+            "name": "VICTIM_TOKEN",
+            "value": "overwrite",
+        },
+        headers={"Authorization": f"Bearer {attacker_token}"},
+    )
+    assert create_resp.status_code == 403
+
+    list_resp = await client.get(
+        f"/v1/admin/credentials?user_id={victim_user_id}",
+        headers={"Authorization": f"Bearer {attacker_token}"},
+    )
+    assert list_resp.status_code == 403
+
+    delete_resp = await client.delete(
+        f"/v1/admin/credentials?org_id={org_id}"
+        f"&user_id={victim_user_id}&name=VICTIM_TOKEN",
+        headers={"Authorization": f"Bearer {attacker_token}"},
+    )
+    assert delete_resp.status_code == 403
+
+
+async def test_admin_mcp_cross_user_forbidden(
+    client: AsyncClient, session_factory
+):
+    """Non-admin cannot touch another user's MCP server in the same org."""
+    org_id, victim_user_id, _, _ = await _create_test_tenant(session_factory)
+    attacker_user_id = uuid.uuid4()
+    await create_user(
+        session_factory, org_id,
+        user_id=attacker_user_id,
+        email=f"attacker-{attacker_user_id}@test.com",
+    )
+    attacker_token = create_access_token(
+        org_id, attacker_user_id, {"sessions:read"},
+    )
+
+    resp = await client.post(
+        "/v1/admin/mcp-servers",
+        json={
+            "org_id": str(org_id),
+            "user_id": str(victim_user_id),
+            "name": "malicious",
+            "transport": "stdio",
+            "command": "/bin/attacker",
+        },
+        headers={"Authorization": f"Bearer {attacker_token}"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_admin_credential_roundtrip_via_vault(
+    client: AsyncClient, session_factory, app
+):
+    """Ciphertext stored via the API decrypts to the original plaintext."""
+    org_id, _, token, _ = await _create_test_tenant(session_factory)
+
+    resp = await client.post(
+        "/v1/admin/credentials",
+        json={
+            "org_id": str(org_id),
+            "name": "ROUNDTRIP",
+            "value": "s3cr3t-v4lu3",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 201
+
+    plaintext = await app.state.credential_vault.retrieve(org_id, "ROUNDTRIP")
+    assert plaintext == "s3cr3t-v4lu3"
+
+
+async def test_admin_credential_upsert_returns_200_on_update(
+    client: AsyncClient, session_factory
+):
+    """First POST returns 201; subsequent POST to same name returns 200."""
+    org_id, _, token, _ = await _create_test_tenant(session_factory)
+
+    resp1 = await client.post(
+        "/v1/admin/credentials",
+        json={"org_id": str(org_id), "name": "ROTATE", "value": "v1"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp1.status_code == 201
+
+    resp2 = await client.post(
+        "/v1/admin/credentials",
+        json={"org_id": str(org_id), "name": "ROTATE", "value": "v2"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp2.status_code == 200
+
+
+async def test_admin_credentials_503_when_vault_disabled(
+    client: AsyncClient, session_factory, app
+):
+    """Endpoints return 503 when the credential vault isn't provisioned."""
+    _, _, token, _ = await _create_test_tenant(session_factory)
+    original = app.state.credential_vault
+    app.state.credential_vault = None
+    try:
+        resp = await client.get(
+            "/v1/admin/credentials",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 503
+    finally:
+        app.state.credential_vault = original
+
+
+async def test_admin_mcp_update_http_requires_url(
+    client: AsyncClient, session_factory
+):
+    """PUT re-validates transport/command/url pairing."""
+    org_id, _, token, _ = await _create_test_tenant(session_factory)
+
+    # Create a stdio server first.
+    create_resp = await client.post(
+        "/v1/admin/mcp-servers",
+        json={
+            "org_id": str(org_id),
+            "name": "to-flip",
+            "transport": "stdio",
+            "command": "echo",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    server_id = create_resp.json()["id"]
+
+    resp = await client.put(
+        f"/v1/admin/mcp-servers/{server_id}",
+        json={"transport": "http"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+    assert "url" in resp.json()["detail"].lower()
+
+
+async def test_admin_mcp_user_id_must_belong_to_org(
+    client: AsyncClient, session_factory
+):
+    """Creating a user-scoped server for a user in a different org returns 404."""
+    _, _, token, _ = await _create_test_tenant(session_factory)
+    foreign_org_id = await create_org(session_factory)
+    foreign_user_id = await create_user(session_factory, foreign_org_id)
+
+    # Admin permission lets the caller target the foreign org directly —
+    # this call should succeed, proving the FK check only bites when
+    # user_id is presented outside its true org.
+    resp = await client.post(
+        "/v1/admin/mcp-servers",
+        json={
+            "org_id": str(foreign_org_id),
+            "user_id": str(foreign_user_id),
+            "name": "foreign-scope",
+            "transport": "stdio",
+            "command": "echo",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 201
+
+    unrelated_user_id = await create_user(session_factory, await create_org(session_factory))
+    resp = await client.post(
+        "/v1/admin/mcp-servers",
+        json={
+            "org_id": str(foreign_org_id),
+            "user_id": str(unrelated_user_id),
+            "name": "wrong-org-user",
+            "transport": "stdio",
+            "command": "echo",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 404
+
+
+async def test_admin_mcp_duplicate_user_scope_409(
+    client: AsyncClient, session_factory
+):
+    """Registering the same name twice at user scope returns 409."""
+    org_id, user_id, token, _ = await _create_test_tenant(session_factory)
+    payload = {
+        "org_id": str(org_id),
+        "user_id": str(user_id),
+        "name": "dup-user",
+        "transport": "stdio",
+        "command": "echo",
+    }
+    resp1 = await client.post(
+        "/v1/admin/mcp-servers", json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp1.status_code == 201
+
+    resp2 = await client.post(
+        "/v1/admin/mcp-servers", json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp2.status_code == 409
+
+
+async def test_admin_mcp_list_cross_org_for_admin(
+    client: AsyncClient, session_factory
+):
+    """Platform admin can filter list by org_id."""
+    org_a, _, _, _ = await _create_test_tenant(session_factory)
+    org_b, _, _, _ = await _create_test_tenant(session_factory)
+    _, _, admin_token, _ = await _create_test_tenant(
+        session_factory, permissions={"admin"}
+    )
+
+    for oid, name in [(org_a, "a-server"), (org_b, "b-server")]:
+        await client.post(
+            "/v1/admin/mcp-servers",
+            json={
+                "org_id": str(oid),
+                "name": name,
+                "transport": "stdio",
+                "command": "echo",
+            },
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+
+    resp = await client.get(
+        f"/v1/admin/mcp-servers?org_id={org_a}",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200
+    names = {s["name"] for s in resp.json()["servers"]}
+    assert "a-server" in names
+    assert "b-server" not in names
