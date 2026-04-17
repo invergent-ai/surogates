@@ -8,7 +8,7 @@ Settings are loaded from two sources, merged in this order:
 Environment variables **always take precedence** over config file values.
 
 In Kubernetes, the config file is typically mounted from a ConfigMap.
-All other paths (tenant assets, skills, tools, MCP, policies) are
+All other paths (tenant assets, skills, MCP, policies) are
 individually configurable — there is no single "home directory".
 """
 
@@ -335,10 +335,8 @@ class Settings(BaseSettings):
 
     # Paths — each individually configurable, each a separate K8s volume mount
     platform_skills_dir: str = "/etc/surogates/skills"
-    platform_tools_dir: str = "/etc/surogates/tools"
     platform_mcp_dir: str = "/etc/surogates/mcp"
     tenant_assets_root: str = "/data/tenant-assets"
-    model_metadata_path: str = "/etc/surogates/model-metadata.json"
 
     # Identity
     org_id: str = ""  # the org this agent instance belongs to

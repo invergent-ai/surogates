@@ -200,9 +200,7 @@ sessionReset:
 # Each key becomes a file.  Leave empty to skip.
 platformSkills: {}
 platformPolicies: {}
-platformTools: {}
 platformMcp: {}
-modelMetadata: {}
 
 # -- Org identity
 org:

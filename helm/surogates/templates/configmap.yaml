@@ -27,20 +27,6 @@ data:
   {{- end }}
 ---
 {{- end }}
-{{- if .Values.platformTools }}
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ $fullname }}-platform-tools
-  labels:
-    {{- include "surogates.labels" . | nindent 4 }}
-data:
-  {{- range $key, $value := .Values.platformTools }}
-  {{ $key }}: |
-    {{- $value | nindent 4 }}
-  {{- end }}
----
-{{- end }}
 {{- if .Values.platformMcp }}
 apiVersion: v1
 kind: ConfigMap
@@ -54,17 +40,4 @@ data:
     {{- $value | nindent 4 }}
   {{- end }}
 ---
-{{- end }}
-{{- if .Values.modelMetadata }}
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ $fullname }}-model-metadata
-  labels:
-    {{- include "surogates.labels" . | nindent 4 }}
-data:
-  {{- range $key, $value := .Values.modelMetadata }}
-  {{ $key }}: |
-    {{- $value | nindent 4 }}
-  {{- end }}
 {{- end }}

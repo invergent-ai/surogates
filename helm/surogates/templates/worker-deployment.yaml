@@ -170,20 +170,9 @@ spec:
               mountPath: /etc/surogates/skills
               readOnly: true
             {{- end }}
-            {{- if .Values.platformTools }}
-            - name: platform-tools
-              mountPath: /etc/surogates/tools
-              readOnly: true
-            {{- end }}
             {{- if .Values.platformMcp }}
             - name: platform-mcp
               mountPath: /etc/surogates/mcp
-              readOnly: true
-            {{- end }}
-            {{- if .Values.modelMetadata }}
-            - name: model-metadata
-              mountPath: /etc/surogates/model-metadata.json
-              subPath: model-metadata.json
               readOnly: true
             {{- end }}
           resources:
@@ -199,19 +188,9 @@ spec:
           configMap:
             name: {{ $fullname }}-platform-skills
         {{- end }}
-        {{- if .Values.platformTools }}
-        - name: platform-tools
-          configMap:
-            name: {{ $fullname }}-platform-tools
-        {{- end }}
         {{- if .Values.platformMcp }}
         - name: platform-mcp
           configMap:
             name: {{ $fullname }}-platform-mcp
-        {{- end }}
-        {{- if .Values.modelMetadata }}
-        - name: model-metadata
-          configMap:
-            name: {{ $fullname }}-model-metadata
         {{- end }}
 {{- end }}
