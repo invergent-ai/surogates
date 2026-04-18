@@ -57,6 +57,7 @@ class SkillSummary(BaseModel):
     type: str = "skill"
     category: str | None = None
     trigger: str | None = None
+    source: str = "platform"  # "platform", "org", or "user"
     # Expert-specific fields (only present when type="expert").
     expert_status: str | None = None
     expert_endpoint: str | None = None
@@ -255,6 +256,20 @@ def _parse_frontmatter(content: str, fallback_name: str) -> dict[str, Any]:
     return _parse_skill_frontmatter(content, fallback_name)
 
 
+def _normalize_source(source: str) -> str:
+    """Collapse DB-backed source variants to the filesystem-layer name.
+
+    The loader distinguishes ``org``/``org_db`` and ``user``/``user_db`` so
+    merge precedence is deterministic, but API consumers only care about the
+    tenancy layer, not the storage backend.
+    """
+    if source == "org_db":
+        return "org"
+    if source == "user_db":
+        return "user"
+    return source
+
+
 def _populate_expert_summary(
     summary: SkillSummary,
     *,
@@ -347,6 +362,7 @@ async def list_skills(
             type=skill.type,
             category=skill.category,
             trigger=skill.trigger,
+            source=_normalize_source(skill.source),
         )
         if skill.is_expert:
             _populate_expert_summary(summary, skill=skill)
@@ -394,7 +410,7 @@ async def view_skill(
         category=skill_def.category,
         tags=skill_def.tags,
         trigger=skill_def.trigger,
-        source=skill_def.source,
+        source=_normalize_source(skill_def.source),
     )
     if skill_def.is_expert:
         _populate_expert_detail(detail, skill=skill_def)

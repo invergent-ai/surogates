@@ -3,7 +3,7 @@
 //
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { PlusIcon, MessageSquareIcon, LogOutIcon, TrashIcon, SunIcon, MoonIcon, SettingsIcon } from "lucide-react";
+import { PlusIcon, MessageSquareIcon, LogOutIcon, TrashIcon, SunIcon, MoonIcon, SettingsIcon, BookOpenIcon } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useAppStore } from "@/stores/app-store";
 import { logout } from "@/api/auth";
@@ -80,6 +80,17 @@ export function SessionSidebar() {
         >
           <PlusIcon className="w-4 h-4" />
           {!collapsed && "New session"}
+        </Button>
+        <Button
+          variant="ghost"
+          onClick={() => void navigate({ to: "/skills" })}
+          className={cn(
+            "w-full gap-2 mt-1",
+            collapsed ? "justify-center px-0" : "justify-start",
+          )}
+        >
+          <BookOpenIcon className="w-4 h-4" />
+          {!collapsed && "Skills"}
         </Button>
       </div>
 
