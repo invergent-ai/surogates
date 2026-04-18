@@ -102,8 +102,11 @@ class TestBuildExpandedMessage:
         # The API route prepends the preamble to ``content``; this helper
         # must surface it verbatim rather than re-adding its own.
         body_with_preamble = (
-            "> This skill is staged at `/workspace/.skills/arxiv`. "
-            "All relative paths in this document resolve against that directory.\n\n"
+            "> **Skill staging.** This skill's files live at "
+            "`/workspace/.skills/arxiv/` inside the sandbox.  The sandbox "
+            "working directory is `/workspace`, NOT the skill directory, "
+            "so every relative path that appears below MUST be prefixed "
+            "with `/workspace/.skills/arxiv/`.\n\n"
             "# arXiv\nbody."
         )
         msg = build_expanded_message(
@@ -111,7 +114,7 @@ class TestBuildExpandedMessage:
         )
         assert "/workspace/.skills/arxiv" in msg
         # No duplicated staging guidance from this helper itself.
-        assert msg.count("staged at") == 1
+        assert msg.count("Skill staging") == 1
 
 
 # ---------------------------------------------------------------------------

@@ -150,16 +150,25 @@ def _get_skill_stager(request: Request) -> SkillStager:
 
 
 def _staging_preamble(skill_name: str, staged_at: str) -> str:
-    """Return a one-line preamble that orients the LLM to the staged path.
+    """Return a directive preamble that tells the LLM how to address staged files.
 
-    Prepending this to the SKILL.md body means authors can continue to write
-    relative paths (``scripts/foo.py``) without knowing about staging — the
-    LLM resolves those paths against ``staged_at``.
+    Prepending this to the SKILL.md body lets authors write relative paths
+    (``scripts/foo.py``) without knowing about staging.  The preamble is
+    phrased as a direct instruction (not a passive statement) because the
+    sandbox CWD is ``/workspace``, not the skill directory -- the LLM must
+    actively prepend ``staged_at`` to every relative path the skill body
+    mentions or the command will fail with "No such file or directory".
     """
+    base = staged_at.rstrip("/")
     return (
-        f"> This skill is staged at `{staged_at}`. "
-        f"All relative paths in this document (e.g. `scripts/...`, "
-        f"`assets/...`) resolve against that directory.\n\n"
+        f"> **Skill staging.** This skill's files live at `{base}/` "
+        f"inside the sandbox.  The sandbox working directory is "
+        f"`/workspace`, NOT the skill directory, so every relative path "
+        f"that appears below MUST be prefixed with `{base}/` when you "
+        f"invoke it.  For example, `scripts/foo.py` in this document "
+        f"means `{base}/scripts/foo.py` on the command line; "
+        f"`assets/template.pptx` means `{base}/assets/template.pptx`. "
+        f"Do not `cd` into the skill directory -- prefix the paths.\n\n"
     )
 
 

@@ -364,9 +364,14 @@ class TestStageSkillForSessionHelper:
         from surogates.api.routes.skills import _staging_preamble
 
         preamble = _staging_preamble("pptx_builder", "/workspace/.skills/pptx_builder/")
-        assert "/workspace/.skills/pptx_builder/" in preamble
+        base = "/workspace/.skills/pptx_builder"  # rstrip("/")
+        assert f"{base}/" in preamble
         assert preamble.endswith("\n\n")
-        assert "relative paths" in preamble.lower()
+        # Directive wording, not passive -- the LLM is told to PREPEND paths.
+        assert "MUST be prefixed" in preamble
+        assert "`/workspace`" in preamble  # names the sandbox CWD explicitly
+        # A worked example keeps relative->absolute substitution concrete.
+        assert f"{base}/scripts/foo.py" in preamble
 
 
 # =========================================================================
