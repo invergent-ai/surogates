@@ -61,6 +61,7 @@ def _make_session(
         id=session_id or uuid4(),
         user_id=UUID("00000000-0000-0000-0000-000000000002"),
         org_id=UUID("00000000-0000-0000-0000-000000000001"),
+        agent_id="test-agent",
         channel="web",
         status=status,
         config={},

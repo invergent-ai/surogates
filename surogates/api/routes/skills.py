@@ -8,17 +8,26 @@ Skills are stored on a ``StorageBackend`` (local filesystem in dev,
 MinIO/S3 in production).  Platform skills (baked into the container
 image at ``/etc/surogates/skills/``) are read-only and included in
 list/view responses.
+
+``GET /skills/{name}`` and ``GET /skills/{name}/file`` accept an
+optional ``session_id`` query parameter.  When supplied, the skill's
+supporting files (``scripts/``, ``assets/``, ``templates/``,
+``references/``) are auto-staged into ``session-{session_id}/.skills/
+{name}/`` so the sandbox can execute scripts and read binary assets
+directly at ``{workspace_path}/.skills/{name}/``.
 """
 
 from __future__ import annotations
 
 import logging
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from surogates.storage.tenant import TenantStorage
+from surogates.storage.skill_staging import SkillStager, has_stageable_assets
+from surogates.storage.tenant import TenantStorage, tenant_bucket
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 from surogates.tools.builtin.skill_validation import (
@@ -71,6 +80,10 @@ class SkillDetail(BaseModel):
     trigger: str | None = None
     source: str  # "platform", "org", "user"
     linked_files: list[str] = Field(default_factory=list)
+    #: Workspace-visible directory where supporting files have been staged,
+    #: populated only when ``session_id`` was supplied and the skill has
+    #: stageable assets (scripts/, assets/, templates/, references/).
+    staged_at: str | None = None
     # Expert-specific fields.
     expert_model: str | None = None
     expert_endpoint: str | None = None
@@ -121,6 +134,113 @@ def _get_tenant_storage(request: Request, tenant: TenantContext) -> TenantStorag
         org_id=tenant.org_id,
         user_id=tenant.user_id,
     )
+
+
+def _get_skill_stager(request: Request) -> SkillStager:
+    """Create a ``SkillStager`` bound to the request's storage backend.
+
+    Threads the app-wide Redis client through so concurrent staging calls
+    for the same ``(session_id, skill_name)`` are serialised across
+    worker replicas.  When Redis is not wired (tests / dev without a
+    broker), the stager falls back to an in-process ``asyncio.Lock``.
+    """
+    redis = getattr(request.app.state, "redis", None)
+    return SkillStager(backend=request.app.state.storage, redis=redis)
+
+
+def _staging_preamble(skill_name: str, staged_at: str) -> str:
+    """Return a one-line preamble that orients the LLM to the staged path.
+
+    Prepending this to the SKILL.md body means authors can continue to write
+    relative paths (``scripts/foo.py``) without knowing about staging — the
+    LLM resolves those paths against ``staged_at``.
+    """
+    return (
+        f"> This skill is staged at `{staged_at}`. "
+        f"All relative paths in this document (e.g. `scripts/...`, "
+        f"`assets/...`) resolve against that directory.\n\n"
+    )
+
+
+async def _authorize_session_for_staging(
+    request: Request,
+    tenant: TenantContext,
+    session_id: UUID,
+) -> None:
+    """Verify *session_id* belongs to the tenant before staging into its bucket.
+
+    Staging writes to the ``session-{session_id}`` bucket; without this
+    check any authenticated user could pollute another tenant's sessions
+    or trigger arbitrary bucket creation with forged UUIDs.  Raises
+    ``HTTPException(404)`` with a generic message for both the not-found
+    and wrong-tenant cases to avoid leaking session existence.
+    """
+    from surogates.api.routes.sessions import _get_session_for_tenant
+
+    # Delegates to the sessions helper — matches the authorization model
+    # used by every other session-scoped endpoint (events, workspace, etc.).
+    await _get_session_for_tenant(request, session_id, tenant)
+
+
+async def _stage_skill_for_session(
+    request: Request,
+    tenant: TenantContext,
+    skill_def: Any,
+    session_id: UUID,
+    linked_files: list[str] | dict[str, list[str]] | None,
+) -> str | None:
+    """Auto-stage a skill into the session bucket when it has assets to stage.
+
+    Returns the workspace-visible ``staged_at`` path on success, or ``None``
+    when the skill has nothing to stage (no supporting files, or DB-only).
+
+    The caller is responsible for authorizing the session against the
+    tenant via :func:`_authorize_session_for_staging` before calling this
+    function.
+    """
+    from surogates.tools.loader import (
+        SKILL_SOURCE_ORG,
+        SKILL_SOURCE_PLATFORM,
+        SKILL_SOURCE_USER,
+    )
+
+    if not has_stageable_assets(linked_files):
+        return None
+
+    stager = _get_skill_stager(request)
+
+    if skill_def.source == SKILL_SOURCE_PLATFORM:
+        from surogates.tools.loader import ResourceLoader
+
+        loader = ResourceLoader()
+        source_dir = loader.resolve_platform_skill_dir(skill_def.name)
+        if source_dir is None:
+            logger.warning(
+                "Cannot stage platform skill '%s': source directory not found",
+                skill_def.name,
+            )
+            return None
+        return await stager.stage_from_filesystem(
+            session_id=session_id,
+            skill_name=skill_def.name,
+            source_dir=source_dir,
+        )
+
+    if skill_def.source in (SKILL_SOURCE_USER, SKILL_SOURCE_ORG):
+        ts = _get_tenant_storage(request, tenant)
+        existing = await ts.skill_exists(skill_def.name)
+        if not existing:
+            return None
+        return await stager.stage_from_tenant_bucket(
+            session_id=session_id,
+            skill_name=skill_def.name,
+            tenant_bucket_name=tenant_bucket(tenant.org_id),
+            source_prefix=existing["key_prefix"],
+        )
+
+    # DB-backed skills have no linked files beyond what is in the content
+    # column itself, so there is nothing to stage.
+    return None
 
 
 def _raise_validation(err: str | None) -> None:
@@ -241,9 +361,21 @@ async def view_skill(
     name: str,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    session_id: UUID | None = None,
 ) -> SkillDetail:
-    """View full skill content and linked files listing."""
-    from surogates.tools.loader import ResourceLoader
+    """View full skill content and linked files listing.
+
+    When ``session_id`` is provided and the skill has supporting files,
+    the skill tree is auto-staged into ``session-{session_id}/.skills/
+    {name}/`` and a ``staged_at`` workspace path is returned.  A one-line
+    preamble is prepended to ``content`` so the LLM can resolve relative
+    paths (``scripts/foo.py``) against the staged directory.
+    """
+    from surogates.tools.loader import (
+        ResourceLoader,
+        SKILL_SOURCE_PLATFORM,
+        SKILL_SOURCE_USER,
+    )
 
     loader = ResourceLoader()
     session_factory = request.app.state.session_factory
@@ -267,14 +399,37 @@ async def view_skill(
     if skill_def.is_expert:
         _populate_expert_detail(detail, skill=skill_def)
 
-    # For file-based user skills, list linked files from the skill directory.
-    from surogates.tools.loader import SKILL_SOURCE_USER
+    # Populate linked_files from the skill's source layer.
     if skill_def.source == SKILL_SOURCE_USER:
         ts = _get_tenant_storage(request, tenant)
         existing = await ts.skill_exists(name)
         if existing:
             files = await ts.list_skill_files(existing["key_prefix"])
             detail.linked_files = [f for f in files if f != "SKILL.md"]
+    elif skill_def.source == SKILL_SOURCE_PLATFORM:
+        source_dir = loader.resolve_platform_skill_dir(name)
+        if source_dir is not None:
+            detail.linked_files = [
+                f.relative_to(source_dir).as_posix()
+                for f in sorted(source_dir.rglob("*"))
+                if f.is_file() and f.name != "SKILL.md"
+            ]
+
+    # Auto-stage the skill tree when a session is specified and there are
+    # files beyond SKILL.md itself.  Authorize first: the session must
+    # belong to this tenant before we write into its bucket.
+    if session_id is not None:
+        await _authorize_session_for_staging(request, tenant, session_id)
+        staged_at = await _stage_skill_for_session(
+            request=request,
+            tenant=tenant,
+            skill_def=skill_def,
+            session_id=session_id,
+            linked_files=detail.linked_files,
+        )
+        if staged_at is not None:
+            detail.staged_at = staged_at
+            detail.content = _staging_preamble(name, staged_at) + detail.content
 
     return detail
 
@@ -285,10 +440,83 @@ async def read_skill_file(
     path: str,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    session_id: UUID | None = None,
 ) -> dict[str, Any]:
-    """Read a linked file from a skill directory."""
+    """Read a linked file from a skill directory.
+
+    When ``session_id`` is provided and the file is binary, the skill tree
+    is auto-staged and the response points the caller at the staged
+    workspace path instead of returning a placeholder.  Text files are
+    always returned inline regardless of ``session_id``.
+
+    Platform skills (filesystem-backed) are supported in addition to
+    tenant-bucket-backed user/org skills.
+    """
     _raise_validation(validate_file_path(path))
 
+    from surogates.tools.loader import ResourceLoader, SKILL_SOURCE_PLATFORM
+
+    # Authorize the session up-front: any redirect-to-staged path writes
+    # into the session bucket, so ownership must be verified even though
+    # the caller may only be reading a text file in the end.
+    if session_id is not None:
+        await _authorize_session_for_staging(request, tenant, session_id)
+
+    loader = ResourceLoader()
+    session_factory = request.app.state.session_factory
+    async with session_factory() as db_session:
+        all_skills = await loader.load_skills(tenant, db_session=db_session)
+    skill_def = next((s for s in all_skills if s.name == name), None)
+    if skill_def is None:
+        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
+
+    async def _redirect_to_staged(skill_def_to_stage: Any) -> dict[str, Any] | None:
+        """Stage the skill and return a redirect response, or ``None``."""
+        if session_id is None:
+            return None
+        staged_at = await _stage_skill_for_session(
+            request=request,
+            tenant=tenant,
+            skill_def=skill_def_to_stage,
+            session_id=session_id,
+            linked_files=[path],  # forces stageable_assets to be True
+        )
+        if staged_at is None:
+            return None
+        stager = _get_skill_stager(request)
+        return {
+            "file_path": path,
+            "binary": True,
+            "staged_at": staged_at,
+            "staged_file_path": stager.staged_file_path(session_id, name, path),
+            "content": None,
+            "hint": (
+                f"File is available in the sandbox at "
+                f"`{stager.staged_file_path(session_id, name, path)}`."
+            ),
+        }
+
+    # Platform skills live on the filesystem — read them directly.
+    if skill_def.source == SKILL_SOURCE_PLATFORM:
+        source_dir = loader.resolve_platform_skill_dir(name)
+        if source_dir is None:
+            raise HTTPException(status_code=404, detail=f"Skill '{name}' source not found.")
+        target = source_dir / path
+        if not target.is_file() or not _is_within(target, source_dir):
+            raise HTTPException(
+                status_code=404,
+                detail=f"File '{path}' not found in skill '{name}'.",
+            )
+        try:
+            content = target.read_text(encoding="utf-8")
+            return {"file_path": path, "content": content, "binary": False}
+        except UnicodeDecodeError:
+            redirect = await _redirect_to_staged(skill_def)
+            if redirect is not None:
+                return redirect
+            return {"file_path": path, "content": "[Binary file]", "binary": True}
+
+    # Tenant-bucket-backed skills (user / org-shared).
     ts = _get_tenant_storage(request, tenant)
     existing = await ts.skill_exists(name)
     if not existing:
@@ -301,7 +529,21 @@ async def read_skill_file(
         content = await ts.read_skill_file(existing["key_prefix"], path)
         return {"file_path": path, "content": content, "binary": False}
     except UnicodeDecodeError:
+        redirect = await _redirect_to_staged(skill_def)
+        if redirect is not None:
+            return redirect
         return {"file_path": path, "content": "[Binary file]", "binary": True}
+
+
+def _is_within(child: Any, parent: Any) -> bool:
+    """Return True if resolved *child* is inside resolved *parent*.
+
+    Guards the platform-skill file reader against path-traversal inputs.
+    """
+    try:
+        return child.resolve().is_relative_to(parent.resolve())
+    except (OSError, ValueError):
+        return False
 
 
 @router.post("/skills", response_model=SkillActionResponse, status_code=status.HTTP_201_CREATED)

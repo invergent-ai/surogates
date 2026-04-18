@@ -69,6 +69,84 @@ class TestViewSkill:
         assert result["success"] is True
         assert result["name"] == "my-skill"
 
+    async def test_view_skill_forwards_session_id(self, mock_transport):
+        """When constructed with a session_id, it is sent as a query parameter."""
+        handlers, transport = mock_transport
+        captured: list[httpx.Request] = []
+
+        class CapturingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                captured.append(request)
+                return httpx.Response(
+                    200, json={"name": "s", "content": "c", "staged_at": "/workspace/.skills/s/"},
+                )
+
+        client = HarnessAPIClient(
+            base_url="http://test",
+            token="t",
+            session_id="abc-123",
+        )
+        client._client = httpx.AsyncClient(
+            base_url="http://test",
+            transport=CapturingTransport(),
+            headers={"Authorization": "Bearer t"},
+        )
+
+        result = json.loads(await client.view_skill("s"))
+        assert result["staged_at"] == "/workspace/.skills/s/"
+        assert captured, "expected the client to make a request"
+        assert captured[0].url.params.get("session_id") == "abc-123"
+
+    async def test_view_skill_file_forwards_session_id(self, mock_transport):
+        """``file_path`` requests also forward ``session_id``."""
+        captured: list[httpx.Request] = []
+
+        class CapturingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                captured.append(request)
+                return httpx.Response(
+                    200,
+                    json={
+                        "file_path": "assets/t.pptx",
+                        "binary": True,
+                        "staged_at": "/workspace/.skills/s/",
+                        "staged_file_path": "/workspace/.skills/s/assets/t.pptx",
+                    },
+                )
+
+        client = HarnessAPIClient(
+            base_url="http://test", token="t", session_id="sess-9",
+        )
+        client._client = httpx.AsyncClient(
+            base_url="http://test",
+            transport=CapturingTransport(),
+            headers={"Authorization": "Bearer t"},
+        )
+
+        result = json.loads(await client.view_skill("s", file_path="assets/t.pptx"))
+        assert result["staged_file_path"] == "/workspace/.skills/s/assets/t.pptx"
+        assert captured[0].url.params.get("session_id") == "sess-9"
+        assert captured[0].url.params.get("path") == "assets/t.pptx"
+
+    async def test_view_skill_omits_session_id_when_unset(self, mock_transport):
+        """Without a session_id, no query param is sent (legacy behaviour)."""
+        captured: list[httpx.Request] = []
+
+        class CapturingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                captured.append(request)
+                return httpx.Response(200, json={"name": "s", "content": "c"})
+
+        client = HarnessAPIClient(base_url="http://test", token="t")
+        client._client = httpx.AsyncClient(
+            base_url="http://test",
+            transport=CapturingTransport(),
+            headers={"Authorization": "Bearer t"},
+        )
+
+        await client.view_skill("s")
+        assert "session_id" not in captured[0].url.params
+
 
 class TestCreateSkill:
     async def test_create(self, client_with_transport):

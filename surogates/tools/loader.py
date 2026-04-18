@@ -142,11 +142,43 @@ class ResourceLoader:
 
     def __init__(
         self,
-        platform_skills_dir: str = PLATFORM_SKILLS_DIR,
-        platform_mcp_dir: str = PLATFORM_MCP_DIR,
+        platform_skills_dir: str | None = None,
+        platform_mcp_dir: str | None = None,
     ) -> None:
-        self._platform_skills_dir = platform_skills_dir
-        self._platform_mcp_dir = platform_mcp_dir
+        # Resolve defaults lazily so runtime monkey-patching of the module
+        # constants (used by tests) takes effect.
+        self._platform_skills_dir = (
+            platform_skills_dir if platform_skills_dir is not None
+            else PLATFORM_SKILLS_DIR
+        )
+        self._platform_mcp_dir = (
+            platform_mcp_dir if platform_mcp_dir is not None
+            else PLATFORM_MCP_DIR
+        )
+
+    # ------------------------------------------------------------------
+    # Platform skill directory resolution
+    # ------------------------------------------------------------------
+
+    def resolve_platform_skill_dir(self, name: str) -> Path | None:
+        """Return the on-disk directory for a platform skill, or ``None``.
+
+        Searches ``{platform_skills_dir}/{name}/SKILL.md`` and
+        ``{platform_skills_dir}/{category}/{name}/SKILL.md`` layouts.
+        """
+        root = Path(self._platform_skills_dir)
+        if not root.is_dir():
+            return None
+        direct = root / name / "SKILL.md"
+        if direct.is_file():
+            return direct.parent
+        for sub in root.iterdir():
+            if not sub.is_dir() or sub.name in EXCLUDED_SKILL_DIRS:
+                continue
+            candidate = sub / name / "SKILL.md"
+            if candidate.is_file():
+                return candidate.parent
+        return None
 
     # ------------------------------------------------------------------
     # Skills

@@ -249,6 +249,7 @@ async def run_worker(settings: Settings) -> None:
             harness_api_client = HarnessAPIClient(
                 base_url=settings.worker.api_base_url,
                 token=token,
+                session_id=str(session.id),
             )
 
         return AgentHarness(

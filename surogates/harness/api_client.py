@@ -28,6 +28,12 @@ class HarnessAPIClient:
         Session-scoped JWT for authentication.
     timeout:
         Request timeout in seconds.
+    session_id:
+        The session this client is scoped to.  Forwarded as a
+        ``session_id`` query parameter on skill-view endpoints so the API
+        server can auto-stage supporting files into the session's
+        workspace bucket.  Required for staging to take effect; omitted
+        means skills view as text only (legacy behaviour).
     """
 
     def __init__(
@@ -35,12 +41,14 @@ class HarnessAPIClient:
         base_url: str,
         token: str,
         timeout: float = 30.0,
+        session_id: str | None = None,
     ) -> None:
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             headers={"Authorization": f"Bearer {token}"},
             timeout=timeout,
         )
+        self._session_id = session_id
 
     async def close(self) -> None:
         """Close the underlying HTTP client."""
@@ -100,11 +108,19 @@ class HarnessAPIClient:
         }, ensure_ascii=False)
 
     async def view_skill(self, name: str, file_path: str | None = None) -> str:
-        """View a skill's content or a linked file.  Returns JSON string."""
+        """View a skill's content or a linked file.  Returns JSON string.
+
+        Forwards the client's ``session_id`` (if set) to the API so that
+        supporting files get auto-staged into the session workspace.
+        """
+        params: dict[str, Any] = {}
+        if self._session_id is not None:
+            params["session_id"] = self._session_id
         if file_path:
-            data = await self._get(f"/v1/skills/{name}/file", params={"path": file_path})
+            params["path"] = file_path
+            data = await self._get(f"/v1/skills/{name}/file", params=params)
         else:
-            data = await self._get(f"/v1/skills/{name}")
+            data = await self._get(f"/v1/skills/{name}", params=params or None)
         return json.dumps({"success": True, **data}, ensure_ascii=False)
 
     async def create_skill(

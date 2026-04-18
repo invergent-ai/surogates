@@ -78,8 +78,14 @@ SKILL_VIEW_SCHEMA = ToolSchema(
         "as well as scripts and templates. Load a skill's full content or access "
         "its linked files (references, templates, scripts). First call returns "
         "SKILL.md content plus a 'linked_files' dict showing available "
-        "references/templates/scripts. To access those, call again with file_path "
-        "parameter."
+        "references/templates/scripts.\n\n"
+        "When a skill has supporting files, its entire tree is automatically "
+        "staged into the sandbox workspace and the response includes a "
+        "'staged_at' absolute path. Relative paths in SKILL.md (e.g. "
+        "'scripts/build.py', 'assets/template.pptx') resolve against that "
+        "directory — run scripts and read assets from there via the "
+        "terminal/file tools. You do NOT need to follow up with "
+        "skill_view(..., file_path=...) just to ferry bytes into the sandbox."
     ),
     parameters={
         "type": "object",
@@ -92,8 +98,9 @@ SKILL_VIEW_SCHEMA = ToolSchema(
                 "type": "string",
                 "description": (
                     "OPTIONAL: Path to a linked file within the skill "
-                    "(e.g., 'references/api.md', 'templates/config.yaml', "
-                    "'scripts/validate.py'). Omit to get the main SKILL.md content."
+                    "(e.g., 'references/api.md'). Prefer reading staged files "
+                    "directly from 'staged_at'; use file_path only when you "
+                    "want the text inline in your tool result."
                 ),
             },
         },
