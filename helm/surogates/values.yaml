@@ -196,9 +196,47 @@ sessionReset:
   notify: true
   notifyExcludeChannels: "webhook"
 
-# -- Platform config (contents mounted as ConfigMaps)
-# Each key becomes a file.  Leave empty to skip.
-platformSkills: {}
+# -- Platform skills
+#
+# Each skill lives in its own lakeFS repository and is downloaded by an
+# init container on the API pod at startup using `lakectl fs download`.
+# Skills can include binary assets (templates, PDFs, fonts) — lakeFS is
+# git-like but backed by object storage, so there is no size or
+# content-type limit.
+#
+# Entries:
+#   name: directory name used under /etc/surogates/skills/{name}
+#   repo: lakeFS repository name (bare — no scheme, no host)
+#   ref:  branch, tag, or commit SHA (optional — defaults to "main")
+#
+# Pin to a tag or commit SHA in production; unpinned branch refs drift
+# and hurt reproducibility across pod restarts.
+platformSkills: []
+#   - name: pptx_builder
+#     repo: pptx-builder-skill
+#     ref: v1.2.0
+#   - name: sql_writer
+#     repo: sql-writer-skill
+#     ref: main
+
+# -- Auth for lakeFS-backed platform-skill repositories
+#
+# `endpoint` is the lakeFS server URL (e.g. https://lakefs.example.com).
+# `credentialsSecretRef` names a Secret with two keys:
+#   - access-key-id
+#   - secret-access-key
+# Both become LAKECTL_CREDENTIALS_* env vars inside the init container.
+#
+# `image` must ship `lakectl` on the PATH.  The default is the internal
+# `surogate-hub` image which also carries other operator tooling.
+platformSkillsAuth:
+  endpoint: ""
+  credentialsSecretRef: ""
+  image: "ghcr.io/invergent-ai/surogate-hub:latest"
+
+# -- Platform policies and MCP config (still ConfigMap-mounted)
+# Each key becomes a file.  Leave empty to skip.  These are small text
+# configs, so the ConfigMap size limit is not a concern.
 platformPolicies: {}
 platformMcp: {}
 

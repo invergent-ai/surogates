@@ -1,18 +1,10 @@
 {{- $fullname := include "surogates.fullname" . -}}
-{{- if .Values.platformSkills }}
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ $fullname }}-platform-skills
-  labels:
-    {{- include "surogates.labels" . | nindent 4 }}
-data:
-  {{- range $key, $value := .Values.platformSkills }}
-  {{ $key }}: |
-    {{- $value | nindent 4 }}
-  {{- end }}
----
-{{- end }}
+{{- /*
+  Platform skills are no longer a ConfigMap — they're cloned from per-skill
+  git repos by an init container (see api-deployment.yaml).  ConfigMaps
+  can't carry binary assets (templates, fonts, PDFs) and have a 1 MiB
+  ceiling; init-container clone has neither limit.
+*/ -}}
 {{- if .Values.platformPolicies }}
 apiVersion: v1
 kind: ConfigMap

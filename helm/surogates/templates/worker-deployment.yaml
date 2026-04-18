@@ -165,11 +165,6 @@ spec:
               mountPath: /etc/surogates/policies
               readOnly: true
             {{- end }}
-            {{- if .Values.platformSkills }}
-            - name: platform-skills
-              mountPath: /etc/surogates/skills
-              readOnly: true
-            {{- end }}
             {{- if .Values.platformMcp }}
             - name: platform-mcp
               mountPath: /etc/surogates/mcp
@@ -182,11 +177,6 @@ spec:
         - name: platform-policies
           configMap:
             name: {{ $fullname }}-platform-policies
-        {{- end }}
-        {{- if .Values.platformSkills }}
-        - name: platform-skills
-          configMap:
-            name: {{ $fullname }}-platform-skills
         {{- end }}
         {{- if .Values.platformMcp }}
         - name: platform-mcp
