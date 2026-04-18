@@ -330,29 +330,34 @@ class SessionStore:
             row = result.scalar_one_or_none()
         return Event.model_validate(row) if row is not None else None
 
-    async def find_user_expert_feedback(
+    async def find_user_feedback_on_event(
         self,
         session_id: UUID,
         target_event_id: int,
         user_id: UUID,
     ) -> Event | None:
-        """Return an existing EXPERT_ENDORSE or EXPERT_OVERRIDE event
-        emitted by ``user_id`` on ``target_event_id`` for this session.
+        """Return an existing feedback event emitted by ``user_id`` on
+        ``target_event_id`` for this session.
 
-        Used to enforce per-user idempotency on the feedback endpoint
-        without scanning every feedback event in the session.  Matching
-        uses JSONB text extraction so it benefits from a B-tree index on
-        ``(session_id, type, (data->>'expert_result_event_id'),
+        Covers all three feedback event types — ``EXPERT_ENDORSE``,
+        ``EXPERT_OVERRIDE`` and ``USER_FEEDBACK`` — so the feedback
+        endpoint enforces per-user idempotency regardless of what kind
+        of assistant turn is being rated.  Matching uses JSONB text
+        extraction on ``data->>'target_event_id'`` so it benefits from a
+        B-tree index on ``(session_id, type, (data->>'target_event_id'),
         (data->>'rated_by_user_id'))``.
         """
+        feedback_types = [
+            EventType.EXPERT_ENDORSE.value,
+            EventType.EXPERT_OVERRIDE.value,
+            EventType.USER_FEEDBACK.value,
+        ]
         stmt = (
             select(EventRow)
             .where(
                 EventRow.session_id == session_id,
-                EventRow.type.in_(
-                    [EventType.EXPERT_ENDORSE.value, EventType.EXPERT_OVERRIDE.value],
-                ),
-                EventRow.data["expert_result_event_id"].astext == str(target_event_id),
+                EventRow.type.in_(feedback_types),
+                EventRow.data["target_event_id"].astext == str(target_event_id),
                 EventRow.data["rated_by_user_id"].astext == str(user_id),
             )
             .limit(1)

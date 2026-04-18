@@ -272,6 +272,13 @@ class GovernanceSettings(BaseSettings):
     enabled: bool = True
     transparency: TransparencySettings = Field(default_factory=TransparencySettings)
 
+    # When True, every allowed tool call also emits a ``policy.allowed``
+    # event into the session log.  Off by default because it doubles
+    # event volume (each ``tool.call`` is already an implicit allow);
+    # enable when a complete governance decision trail is required for
+    # compliance audit.
+    log_allowed: bool = False
+
 
 class SessionResetSettings(BaseSettings):
     """Session idle reset policy.

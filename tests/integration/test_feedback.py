@@ -1,8 +1,10 @@
-"""Integration tests for the expert-feedback endpoint.
+"""Integration tests for the feedback endpoint.
 
 Covers ``POST /v1/sessions/{session_id}/events/{event_id}/feedback`` —
 the endpoint the web chat UI hits when a user clicks thumbs-up or
-thumbs-down on an expert's output.
+thumbs-down on an assistant turn.  Expert results and regular LLM
+responses both flow through this endpoint; experts emit dedicated
+EXPERT_ENDORSE / EXPERT_OVERRIDE events, responses emit USER_FEEDBACK.
 """
 
 from __future__ import annotations
@@ -137,7 +139,7 @@ async def test_thumbs_up_emits_endorse(
     assert len(events) == 1
     data = events[0].data
     assert data["expert"] == "sql_writer"
-    assert data["expert_result_event_id"] == expert_event_id
+    assert data["target_event_id"] == expert_event_id
     assert data["rating"] == "up"
     assert data["rated_by_user_id"] == str(user_id)
 
@@ -171,10 +173,10 @@ async def test_thumbs_down_emits_override_with_reason(
 # ---------------------------------------------------------------------------
 
 
-async def test_feedback_on_non_expert_result_rejected(
+async def test_feedback_on_unsupported_event_type_rejected(
     client: AsyncClient, session_factory, session_store
 ):
-    """Rating a non-expert.result event returns 400."""
+    """Rating an event that is neither expert.result nor llm.response returns 400."""
     _, _, token = await _create_test_tenant(session_factory)
 
     create_resp = await client.post(
@@ -197,7 +199,125 @@ async def test_feedback_on_non_expert_result_rejected(
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 400
-    assert "expert.result" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert "expert.result" in detail
+    assert "llm.response" in detail
+
+
+# ---------------------------------------------------------------------------
+# llm.response feedback → USER_FEEDBACK
+# ---------------------------------------------------------------------------
+
+
+async def _seed_llm_response(
+    client: AsyncClient,
+    session_store: SessionStore,
+    token: str,
+) -> tuple[str, int]:
+    """Create a session and seed an llm.response.  Returns (session_id, event_id)."""
+    create_resp = await client.post(
+        "/v1/sessions",
+        json={"model": "gpt-4o"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert create_resp.status_code == 201
+    session_id = create_resp.json()["id"]
+
+    event_id = await session_store.emit_event(
+        UUID(session_id),
+        EventType.LLM_RESPONSE,
+        {
+            "message": {"role": "assistant", "content": "the answer is 42"},
+            "model": "gpt-4o",
+            "input_tokens": 5,
+            "output_tokens": 6,
+        },
+    )
+    return session_id, event_id
+
+
+async def test_thumbs_up_on_llm_response_emits_user_feedback(
+    client: AsyncClient, session_factory, session_store,
+):
+    """POST feedback with rating=up on an llm.response emits USER_FEEDBACK."""
+    _, user_id, token = await _create_test_tenant(session_factory)
+    session_id, response_event_id = await _seed_llm_response(
+        client, session_store, token,
+    )
+
+    resp = await client.post(
+        f"/v1/sessions/{session_id}/events/{response_event_id}/feedback",
+        json={"rating": "up"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["event_type"] == EventType.USER_FEEDBACK.value
+
+    events = await session_store.get_events(
+        UUID(session_id), types=[EventType.USER_FEEDBACK],
+    )
+    assert len(events) == 1
+    data = events[0].data
+    assert data["target_event_id"] == response_event_id
+    assert data["rating"] == "up"
+    assert data["rated_by_user_id"] == str(user_id)
+
+
+async def test_llm_response_feedback_is_idempotent_per_user(
+    client: AsyncClient, session_factory, session_store,
+):
+    """A user who rates the same llm.response twice gets the first feedback back."""
+    _, _, token = await _create_test_tenant(session_factory)
+    session_id, response_event_id = await _seed_llm_response(
+        client, session_store, token,
+    )
+
+    first = await client.post(
+        f"/v1/sessions/{session_id}/events/{response_event_id}/feedback",
+        json={"rating": "up"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert first.status_code == 201
+    first_event_id = first.json()["event_id"]
+
+    second = await client.post(
+        f"/v1/sessions/{session_id}/events/{response_event_id}/feedback",
+        json={"rating": "down"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert second.status_code == 201
+    assert second.json()["event_id"] == first_event_id
+    assert second.json()["event_type"] == EventType.USER_FEEDBACK.value
+
+    events = await session_store.get_events(
+        UUID(session_id), types=[EventType.USER_FEEDBACK],
+    )
+    assert len(events) == 1
+    assert events[0].data["rating"] == "up"
+
+
+async def test_llm_response_feedback_reason_is_recorded(
+    client: AsyncClient, session_factory, session_store,
+):
+    """Optional reason text survives on USER_FEEDBACK."""
+    _, _, token = await _create_test_tenant(session_factory)
+    session_id, response_event_id = await _seed_llm_response(
+        client, session_store, token,
+    )
+
+    resp = await client.post(
+        f"/v1/sessions/{session_id}/events/{response_event_id}/feedback",
+        json={"rating": "down", "reason": "hallucinated the date"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 201
+
+    events = await session_store.get_events(
+        UUID(session_id), types=[EventType.USER_FEEDBACK],
+    )
+    assert len(events) == 1
+    assert events[0].data["reason"] == "hallucinated the date"
 
 
 async def test_feedback_on_missing_event_returns_404(

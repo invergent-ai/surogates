@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from surogates.governance.events import (
-    mcp_scan_event,
     policy_denied_event,
-    rug_pull_event,
     saga_compensate_event,
     saga_complete_event,
     saga_start_event,
@@ -37,9 +35,7 @@ __all__ = [
     "ScanResult",
     "StepState",
     "compensate_step",
-    "mcp_scan_event",
     "policy_denied_event",
-    "rug_pull_event",
     "saga_compensate_event",
     "saga_complete_event",
     "saga_start_event",

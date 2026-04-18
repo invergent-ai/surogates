@@ -36,6 +36,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from surogates.audit import AuditStore, AuditType, credential_access_event
 from surogates.db.models import McpServer
 from surogates.tenant.credentials import CredentialVault
 from surogates.tools.loader import ResourceLoader
@@ -49,6 +50,7 @@ async def load_mcp_configs(
     session_factory: async_sessionmaker[AsyncSession],
     vault: CredentialVault,
     platform_mcp_dir: str,
+    audit_store: AuditStore | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Load, merge, and credential-resolve MCP server configs.
 
@@ -57,6 +59,11 @@ async def load_mcp_configs(
 
     Merge precedence: platform < org-wide < user-specific.
     Disabled servers are excluded.
+
+    When *audit_store* is provided every credential lookup emits a
+    ``credential.access`` entry to the tenant audit log.  When it is
+    ``None`` resolution proceeds silently (useful in tests and local
+    dev).
     """
     # 1. Platform configs from filesystem.
     platform_configs = _load_platform_configs(platform_mcp_dir)
@@ -76,7 +83,8 @@ async def load_mcp_configs(
         if credential_refs:
             resolve_tasks.append(
                 _resolve_credentials_safe(
-                    server_name, config, credential_refs, vault, org_id, user_id,
+                    server_name, config, credential_refs, vault, org_id,
+                    user_id, audit_store,
                 )
             )
 
@@ -93,10 +101,14 @@ async def _resolve_credentials_safe(
     vault: CredentialVault,
     org_id: UUID,
     user_id: UUID,
+    audit_store: AuditStore | None,
 ) -> None:
     """Wrapper that catches and logs credential resolution failures."""
     try:
-        await _resolve_credentials(config, credential_refs, vault, org_id, user_id)
+        await _resolve_credentials(
+            config, credential_refs, vault, org_id, user_id,
+            server_name, audit_store,
+        )
     except Exception:
         logger.exception(
             "Failed to resolve credentials for MCP server %s", server_name,
@@ -171,22 +183,31 @@ async def _resolve_credentials(
     vault: CredentialVault,
     org_id: UUID,
     user_id: UUID,
+    server_name: str,
+    audit_store: AuditStore | None,
 ) -> None:
     """Resolve credential references and inject into the config.
 
     For each ref, tries the user-scoped credential first, then falls
-    back to the org-scoped credential.
+    back to the org-scoped credential.  Each lookup is recorded in the
+    tenant audit log when *audit_store* is provided.
     """
     transport = config.get("transport", "stdio")
     env = config.setdefault("env", {})
     headers = config.setdefault("headers", {})
+    consumer = f"mcp_server:{server_name}"
 
     for ref in credential_refs:
         if isinstance(ref, str):
             # Simple string: credential name maps to env var (stdio)
             # or Authorization header (http).
             name = ref
-            value = await _retrieve_credential(vault, org_id, user_id, name)
+            value, scope = await _retrieve_credential(
+                vault, org_id, user_id, name,
+            )
+            await _emit_credential_access(
+                audit_store, org_id, user_id, name, consumer, scope,
+            )
             if value is None:
                 logger.warning(
                     "Credential %r not found for org %s", name, org_id,
@@ -203,7 +224,12 @@ async def _resolve_credentials(
             if not name:
                 continue
 
-            value = await _retrieve_credential(vault, org_id, user_id, name)
+            value, scope = await _retrieve_credential(
+                vault, org_id, user_id, name,
+            )
+            await _emit_credential_access(
+                audit_store, org_id, user_id, name, consumer, scope,
+            )
             if value is None:
                 logger.warning(
                     "Credential %r not found for org %s", name, org_id,
@@ -225,12 +251,42 @@ async def _retrieve_credential(
     org_id: UUID,
     user_id: UUID,
     name: str,
-) -> str | None:
-    """Retrieve a credential, trying user-scoped first then org-scoped."""
+) -> tuple[str | None, str]:
+    """Retrieve a credential; returns ``(value, scope)``.
+
+    ``scope`` is ``"user"`` when the user's personal vault supplied the
+    value, ``"org"`` when it came from the org-wide vault, and
+    ``"missing"`` when neither had the credential.
+    """
     # User-scoped first.
     value = await vault.retrieve(org_id, name, user_id=user_id)
     if value is not None:
-        return value
+        return value, "user"
 
     # Fall back to org-scoped.
-    return await vault.retrieve(org_id, name, user_id=None)
+    value = await vault.retrieve(org_id, name, user_id=None)
+    if value is not None:
+        return value, "org"
+
+    return None, "missing"
+
+
+async def _emit_credential_access(
+    audit_store: AuditStore | None,
+    org_id: UUID,
+    user_id: UUID,
+    name: str,
+    consumer: str,
+    scope: str,
+) -> None:
+    """Record a credential.access entry when the audit store is wired."""
+    if audit_store is None:
+        return
+    await audit_store.emit(
+        org_id=org_id,
+        user_id=user_id,
+        type=AuditType.CREDENTIAL_ACCESS,
+        data=credential_access_event(
+            name, consumer=consumer, scope=scope, found=scope != "missing",
+        ),
+    )

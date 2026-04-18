@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 
+from surogates.audit import AuditStore
 from surogates.config import load_settings
 from surogates.db.engine import async_engine_from_settings, async_session_factory
 from surogates.session.store import SessionStore
@@ -49,6 +50,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.session_factory = async_session_factory(engine)
     app.state.redis = Redis.from_url(settings.redis.url)
     app.state.session_store = SessionStore(app.state.session_factory, redis=app.state.redis)
+    app.state.audit_store = AuditStore(app.state.session_factory)
     app.state.storage = create_backend(settings)
 
     app.state.credential_vault = _build_vault(

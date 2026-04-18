@@ -233,10 +233,33 @@ class Session(Base):
 
 
 class Event(Base):
+    """Append-only event log row.
+
+    ``org_id`` and ``user_id`` are denormalized from the owning session so
+    audit queries can filter by tenant without joining ``sessions``.  They
+    are populated automatically by the ``events_populate_tenant`` trigger
+    (see ``surogates/db/observability.sql``) when a row is inserted with
+    these columns NULL — callers never need to set them explicitly.
+    """
+
     __tablename__ = "events"
     __table_args__ = (
         Index("idx_events_session", "session_id", "id"),
         Index("idx_events_trace", "trace_id"),
+        # Cross-session audit: tenant + type + time.
+        Index(
+            "idx_events_audit_type_time",
+            "org_id", "type", "created_at",
+            postgresql_using="btree",
+        ),
+        # Per-user activity: "top tools for user X in last week".
+        Index(
+            "idx_events_audit_user_time",
+            "org_id", "user_id", "type", "created_at",
+            postgresql_using="btree",
+        ),
+        # Session-internal filtering by type (e.g. all tool.call in session).
+        Index("idx_events_session_type", "session_id", "type"),
     )
 
     id: Mapped[int] = mapped_column(
@@ -244,6 +267,14 @@ class Event(Base):
     )
     session_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=False
+    )
+    # Denormalized from sessions for cheap tenant-scoped audit queries.
+    # Populated by trigger on insert; nullable so trigger can do the work.
+    org_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=True
+    )
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
     type: Mapped[str] = mapped_column(Text, nullable=False)
     data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=True)
@@ -460,6 +491,54 @@ class Skill(Base):
 # ---------------------------------------------------------------------------
 # MCP Servers
 # ---------------------------------------------------------------------------
+
+
+class AuditLog(Base):
+    """Tenant-scoped audit log for events that are not bound to a session.
+
+    Complements the ``events`` table (which is session-scoped and carries
+    the full conversation trail).  ``audit_log`` holds decisions that
+    happen outside the session lifecycle: authentication outcomes, MCP
+    tool safety scans, credential vault accesses.
+
+    External audit and compliance tooling queries both tables directly;
+    the UI typically joins them on ``org_id`` / ``user_id`` to build a
+    complete activity timeline.
+    """
+
+    __tablename__ = "audit_log"
+    __table_args__ = (
+        Index(
+            "idx_audit_log_org_type_time",
+            "org_id", "type", "created_at",
+            postgresql_using="btree",
+        ),
+        Index(
+            "idx_audit_log_type_time",
+            "type", "created_at",
+            postgresql_using="btree",
+        ),
+        Index("idx_audit_log_user_time", "user_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
+    )
+    # Nullable: some audit events are org-scoped without a specific user
+    # (e.g. MCP tool scan on platform-wide server definitions).
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    type: Mapped[str] = mapped_column(Text, nullable=False)
+    data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=True)
+    trace_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    span_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now()
+    )
 
 
 class McpServer(Base):

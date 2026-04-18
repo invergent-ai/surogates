@@ -44,12 +44,20 @@ class Event(BaseModel):
     ``id`` is ``None`` before the event has been persisted (i.e. before the
     database assigns a ``BIGSERIAL`` value).  ``trace_id`` and ``span_id``
     link the event to a distributed trace for end-to-end observability.
+
+    ``org_id`` and ``user_id`` are denormalized from the owning session
+    (populated by a DB trigger on insert) so observability consumers can
+    filter by tenant at the events table directly.  They are ``None``
+    before persistence and for events inserted outside the normal path
+    (should not happen in practice).
     """
 
     model_config = {"from_attributes": True}
 
     id: int | None = None
     session_id: UUID
+    org_id: UUID | None = None
+    user_id: UUID | None = None
     type: str
     data: dict = Field(default_factory=dict)
     trace_id: str | None = None

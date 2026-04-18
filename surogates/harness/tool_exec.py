@@ -274,6 +274,7 @@ async def execute_tool_calls(
     api_client: Any | None = None,
     session_factory: Any | None = None,
     saga: SagaOrchestrator | None = None,
+    log_policy_allowed: bool = False,
 ) -> list[dict]:
     """Execute tool calls, choosing parallel vs sequential.
 
@@ -301,6 +302,7 @@ async def execute_tool_calls(
             sandbox_pool=sandbox_pool,
             api_client=api_client,
             session_factory=session_factory,
+            log_policy_allowed=log_policy_allowed,
         )
     return await execute_tool_calls_sequential(
         tool_calls,
@@ -318,6 +320,7 @@ async def execute_tool_calls(
         api_client=api_client,
         session_factory=session_factory,
         saga=saga,
+        log_policy_allowed=log_policy_allowed,
     )
 
 
@@ -338,6 +341,7 @@ async def execute_tool_calls_sequential(
     api_client: Any | None = None,
     session_factory: Any | None = None,
     saga: SagaOrchestrator | None = None,
+    log_policy_allowed: bool = False,
 ) -> list[dict]:
     """Execute tool calls one at a time, emitting events for each."""
     results: list[dict] = []
@@ -363,6 +367,7 @@ async def execute_tool_calls_sequential(
             api_client=api_client,
             session_factory=session_factory,
             saga=saga,
+            log_policy_allowed=log_policy_allowed,
         )
         results.append(result_msg)
 
@@ -385,6 +390,7 @@ async def execute_tool_calls_concurrent(
     sandbox_pool: SandboxPool | None = None,
     api_client: Any | None = None,
     session_factory: Any | None = None,
+    log_policy_allowed: bool = False,
 ) -> list[dict]:
     """Execute tool calls concurrently using asyncio.gather.
 
@@ -427,6 +433,7 @@ async def execute_tool_calls_concurrent(
                 api_client=api_client,
                 session_factory=session_factory,
                 _parent_trace=parent_trace,
+                log_policy_allowed=log_policy_allowed,
             )
 
     # Spawn each task in its own context copy so new_span() calls
@@ -456,8 +463,15 @@ async def execute_single_tool(
     session_factory: Any | None = None,
     _parent_trace: Any | None = None,
     saga: SagaOrchestrator | None = None,
+    log_policy_allowed: bool = False,
 ) -> dict:
-    """Execute a single tool call: emit events, dispatch, return result message."""
+    """Execute a single tool call: emit events, dispatch, return result message.
+
+    When *log_policy_allowed* is True, every governance check that passes
+    also emits a ``policy.allowed`` event.  Off by default because each
+    successful ``tool.call`` is already an implicit allow; enable for
+    compliance audits that require an explicit per-decision record.
+    """
     from surogates.trace import TraceContext, get_trace, new_span
 
     # Each tool call gets its own child span for fine-grained tracing.
@@ -504,7 +518,10 @@ async def execute_single_tool(
 
     # Workspace sandbox check — enforced at the governance layer before
     # the tool is dispatched.  Uses AGT ExecutionSandbox for path
-    # containment (symlink resolution, is_relative_to).
+    # containment (symlink resolution, is_relative_to).  Emits a
+    # ``policy.denied`` event on failure; emits ``policy.allowed`` on
+    # success only when ``governance.log_allowed`` is enabled.
+    from surogates.governance.events import policy_denied_event
     from surogates.governance.policy import GovernanceGate, _PATH_ARGUMENT_MAP
     path_keys = _PATH_ARGUMENT_MAP.get(tool_name)
     if workspace_path and path_keys:
@@ -517,6 +534,12 @@ async def execute_single_tool(
                 "Workspace sandbox blocked %s for session %s: %s",
                 tool_name, session.id, decision.reason,
             )
+            await store.emit_event(
+                session.id,
+                EventType.POLICY_DENIED,
+                policy_denied_event(tool_name, decision.reason or ""),
+            )
+
             result_content = json.dumps({
                 "error": f"Blocked: {decision.reason}",
             })
@@ -541,6 +564,17 @@ async def execute_single_tool(
                 "tool_call_id": tool_call_id,
                 "content": result_content,
             }
+
+        if log_policy_allowed:
+            await store.emit_event(
+                session.id,
+                EventType.POLICY_ALLOWED,
+                {
+                    "tool": tool_name,
+                    "check": "workspace_sandbox",
+                    "timestamp": time.time(),
+                },
+            )
 
     # --- Saga step tracking ---
     saga_step = None

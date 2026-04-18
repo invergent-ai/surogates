@@ -203,6 +203,14 @@ class MCPGovernance:
             return False
         return stored == _fingerprint(tool_def)
 
+    def has_fingerprint(self, tool_name: str) -> bool:
+        """Return True when *tool_name* has been previously registered."""
+        return tool_name in self._fingerprints
+
+    def get_fingerprint(self, tool_name: str) -> str | None:
+        """Return the stored SHA-256 fingerprint for *tool_name*, or None."""
+        return self._fingerprints.get(tool_name)
+
     # ------------------------------------------------------------------
     # Bulk operations
     # ------------------------------------------------------------------

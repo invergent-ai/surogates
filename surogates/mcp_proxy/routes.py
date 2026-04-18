@@ -83,6 +83,7 @@ async def _ensure_tenant_connected(
         session_factory=request.app.state.session_factory,
         vault=request.app.state.vault,
         platform_mcp_dir=request.app.state.platform_mcp_dir,
+        audit_store=getattr(request.app.state, "audit_store", None),
     )
 
     if not configs:

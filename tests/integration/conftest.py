@@ -23,6 +23,7 @@ from testcontainers.redis import RedisContainer
 
 import bcrypt as _bcrypt
 
+from surogates.db.engine import apply_observability_ddl
 from surogates.db.models import Base
 from surogates.session.store import SessionStore
 
@@ -83,6 +84,7 @@ async def engine(pg_url):
 
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await apply_observability_ddl(conn)
 
     yield eng
 

@@ -8,6 +8,7 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI
 
+from surogates.audit import AuditStore
 from surogates.db.engine import async_engine_from_settings, async_session_factory
 from surogates.mcp_proxy.config import load_proxy_settings
 from surogates.mcp_proxy.pool import ConnectionPool
@@ -38,10 +39,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         app.state.vault = _NoOpVault()
 
-    # Connection pool.
+    # Audit substrate.  Each pool entry gets its own
+    # :class:`MCPGovernance` instance for tenant-scoped fingerprints.
+    app.state.audit_store = AuditStore(app.state.session_factory)
+
+    # Connection pool.  Scan + audit wired in so every MCP tool
+    # advertised to an agent has a safety scan recorded.
     pool = ConnectionPool(
         idle_timeout=settings.idle_connection_timeout,
         max_per_org=settings.max_connections_per_org,
+        governance_enabled=True,
+        audit_store=app.state.audit_store,
     )
     app.state.pool = pool
     pool.start_eviction_loop()

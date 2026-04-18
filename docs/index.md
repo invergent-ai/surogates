@@ -97,8 +97,13 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - Sandbox network isolation (NetworkPolicy)
 - Credential vault (encrypted at rest, per-org/per-user)
 - Saga (multi-step tool chains with automatic rollback)
-- Audit trail (events table as audit log)
 - Rate limiting (per-org, per-user, sliding window)
+
+### [12a. Audit &amp; Observability](audit/index.md)
+- [Session event log](audit/events.md) -- every turn, tool call, policy decision, saga step inside a session
+- [Tenant audit log](audit/audit_log.md) -- auth, MCP scan, credential access (events with no session)
+- [SQL views](audit/views.md) -- typed projections for dashboards, audit queries, training data
+- Denormalization trigger, trace correlation, non-blocking emission, stability policy
 
 ### [13. Storage](storage/index.md)
 - StorageBackend protocol (`LocalBackend` / `S3Backend`)

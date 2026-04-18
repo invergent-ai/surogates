@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
@@ -16,6 +18,11 @@ if TYPE_CHECKING:
     from surogates.config import DatabaseSettings
 
 logger = logging.getLogger(__name__)
+
+# Path to the hand-rolled observability DDL (trigger + views).  Kept as
+# a SQL file rather than SQLAlchemy DDL objects because the views contain
+# PostgreSQL-specific constructs (recursive CTEs, LATERAL joins, plpgsql).
+OBSERVABILITY_SQL_PATH = Path(__file__).with_name("observability.sql")
 
 # Suppress noisy CancelledError logs from the connection pool when SSE
 # clients disconnect mid-query.  These are harmless — the pool discards
@@ -54,12 +61,33 @@ def async_session_factory(
     )
 
 
-def run_migrations(db_settings: DatabaseSettings) -> None:
-    """Create all tables from SQLAlchemy ORM metadata.
+async def apply_observability_ddl(conn: AsyncConnection) -> None:
+    """Apply the observability trigger + views on an open connection.
 
-    For development and initial deployment this uses
-    ``Base.metadata.create_all`` which is idempotent (skips existing
-    tables).  A future version can wire Alembic for versioned migrations.
+    Reads :data:`OBSERVABILITY_SQL_PATH` and runs it through the
+    underlying asyncpg connection's simple-query protocol, which is the
+    only path that accepts a multi-statement script.  Every statement
+    in the file is idempotent (``CREATE OR REPLACE`` / ``DROP IF
+    EXISTS``) so it is safe to run on every startup.  Callers must
+    pass a connection already inside a transaction (e.g. ``async with
+    engine.begin() as conn``).
+    """
+    sql = OBSERVABILITY_SQL_PATH.read_text(encoding="utf-8")
+    # asyncpg's execute() accepts multi-statement scripts when called
+    # without parameters (simple query protocol).  SQLAlchemy's
+    # ``exec_driver_sql`` uses the extended protocol and rejects them.
+    raw = await conn.get_raw_connection()
+    await raw.driver_connection.execute(sql)
+
+
+def run_migrations(db_settings: DatabaseSettings) -> None:
+    """Create all tables and install observability DDL.
+
+    Uses ``Base.metadata.create_all`` (idempotent — skips existing
+    tables) for ORM-managed schema, then applies
+    :func:`apply_observability_ddl` for the trigger and views that sit
+    on top of the events table.  A future version can wire Alembic for
+    versioned migrations.
     """
     import asyncio
 
@@ -69,10 +97,11 @@ def run_migrations(db_settings: DatabaseSettings) -> None:
         engine = async_engine_from_settings(db_settings)
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await apply_observability_ddl(conn)
         await engine.dispose()
 
     asyncio.run(_create_all())
     logger.info(
-        "Database tables created/verified: %s",
+        "Database tables + observability DDL created/verified: %s",
         db_settings.url.rsplit("@", 1)[-1],
     )

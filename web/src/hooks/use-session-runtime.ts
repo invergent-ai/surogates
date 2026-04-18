@@ -451,7 +451,7 @@ export function useSessionRuntime(sessionId: string | null) {
           case "expert.override": {
             // Apply prior feedback when replaying a session, or reflect
             // the caller's own click once the server has persisted it.
-            const resultEventId = data.expert_result_event_id as
+            const resultEventId = data.target_event_id as
               | number
               | undefined;
             if (resultEventId == null) break;

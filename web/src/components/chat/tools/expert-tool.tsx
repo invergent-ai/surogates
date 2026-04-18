@@ -5,8 +5,9 @@
 // feedback buttons.  Thumbs-up posts immediately; thumbs-down opens a
 // comment form so the user can record why the response was
 // unsatisfactory.  Submission hits
-// POST /v1/sessions/{id}/events/{expert_result_event_id}/feedback which
-// emits EXPERT_ENDORSE or EXPERT_OVERRIDE into the event log.
+// POST /v1/sessions/{id}/events/{event_id}/feedback (where event_id
+// is the id of the expert.result turn being rated) which emits
+// EXPERT_ENDORSE or EXPERT_OVERRIDE into the event log.
 
 import { useState } from "react";
 import { ChevronRightIcon, ThumbsDownIcon, ThumbsUpIcon } from "lucide-react";

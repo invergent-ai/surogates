@@ -269,6 +269,7 @@ async def run_worker(settings: Settings) -> None:
             session_factory=session_factory,
             saga_enabled=settings.saga.enabled,
             saga_settings=settings.saga if settings.saga.enabled else None,
+            log_policy_allowed=settings.governance.log_allowed,
         )
 
     # 8. Orchestrator

@@ -64,7 +64,14 @@ class EventType(str, Enum):
     WORKER_FAILED = "worker.failed"
 
     # Governance
+    POLICY_ALLOWED = "policy.allowed"
     POLICY_DENIED = "policy.denied"
+
+    # General user feedback on an llm.response (not expert.result — that is
+    # rated via EXPERT_ENDORSE / EXPERT_OVERRIDE).  Emitted by the feedback
+    # endpoint and consumed by training-data selection to filter trajectories
+    # the user explicitly rated.
+    USER_FEEDBACK = "user.feedback"
 
     # Saga orchestration
     SAGA_START = "saga.start"

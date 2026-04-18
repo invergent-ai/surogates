@@ -1,12 +1,14 @@
-"""User feedback on expert responses.
+"""User feedback on model output.
 
-Exposes ``POST /v1/sessions/{session_id}/events/{event_id}/feedback`` so the
-web chat UI can record a thumbs-up (``EXPERT_ENDORSE``) or thumbs-down
-(``EXPERT_OVERRIDE``) on a prior ``expert.result`` event.
+Exposes ``POST /v1/sessions/{session_id}/events/{event_id}/feedback`` so
+the web chat UI can record a thumbs-up or thumbs-down on any of:
 
-The endpoint is event-scoped: the caller tells us which specific expert
-invocation they're rating by referencing its event id.  That makes the
-API idempotent per (user, event) and lets the training-data collector
+- an ``expert.result`` event → emits ``EXPERT_ENDORSE`` / ``EXPERT_OVERRIDE``
+- an ``llm.response`` event  → emits ``USER_FEEDBACK``
+
+The endpoint is event-scoped: the caller tells us which specific turn
+they're rating by referencing its event id.  That makes the API
+idempotent per (user, event) and lets the training-data selector
 correlate feedback to the trajectory it's labeling.
 """
 
@@ -58,19 +60,23 @@ def _get_session_store(request: Request) -> SessionStore:
     response_model=FeedbackResponse,
     status_code=status.HTTP_201_CREATED,
 )
-async def submit_expert_feedback(
+async def submit_feedback(
     session_id: UUID,
     event_id: int,
     body: FeedbackRequest,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> FeedbackResponse:
-    """Record a thumbs-up or thumbs-down on an ``expert.result`` event.
+    """Record a thumbs-up or thumbs-down on an assistant turn.
 
     Validates that the session belongs to the caller's org, that the
-    referenced event exists and is an ``expert.result``, and that the
-    caller has not already rated it.  On repeated calls from the same
-    user the stored event is returned unchanged.
+    referenced event exists and is either an ``expert.result`` or an
+    ``llm.response``, and that the caller has not already rated it.
+    On repeated calls from the same user the stored event is returned
+    unchanged.  Expert results emit ``EXPERT_ENDORSE``/``EXPERT_OVERRIDE``
+    (preserving the dedicated expert-feedback path that training and the
+    expert feedback loop depend on); regular LLM responses emit
+    ``USER_FEEDBACK``.
     """
     store = _get_session_store(request)
 
@@ -96,16 +102,20 @@ async def submit_expert_feedback(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Event {event_id} not found in session {session_id}.",
         )
-    if target.type != EventType.EXPERT_RESULT.value:
+
+    if target.type not in (
+        EventType.EXPERT_RESULT.value,
+        EventType.LLM_RESPONSE.value,
+    ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                "Feedback can only be submitted on 'expert.result' events; "
-                f"got '{target.type}'."
+                "Feedback can only be submitted on 'expert.result' or "
+                f"'llm.response' events; got '{target.type}'."
             ),
         )
 
-    prior = await store.find_user_expert_feedback(
+    prior = await store.find_user_feedback_on_event(
         session_id, event_id, tenant.user_id,
     )
     if prior is not None:
@@ -114,17 +124,21 @@ async def submit_expert_feedback(
             event_type=prior.type,
         )
 
-    event_type = (
-        EventType.EXPERT_ENDORSE
-        if body.rating == "up"
-        else EventType.EXPERT_OVERRIDE
-    )
     event_data: dict = {
-        "expert": (target.data or {}).get("expert", ""),
-        "expert_result_event_id": event_id,
+        "target_event_id": event_id,
         "rating": body.rating,
         "rated_by_user_id": str(tenant.user_id),
     }
+    if target.type == EventType.EXPERT_RESULT.value:
+        event_type = (
+            EventType.EXPERT_ENDORSE
+            if body.rating == "up"
+            else EventType.EXPERT_OVERRIDE
+        )
+        event_data["expert"] = (target.data or {}).get("expert", "")
+    else:  # LLM_RESPONSE
+        event_type = EventType.USER_FEEDBACK
+
     if body.reason:
         event_data["reason"] = body.reason
 

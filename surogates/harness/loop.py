@@ -155,6 +155,7 @@ class AgentHarness:
         api_client: Any | None = None,
         default_model: str = "gpt-4o",
         session_factory: Any | None = None,
+        log_policy_allowed: bool = False,
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
@@ -179,6 +180,12 @@ class AgentHarness:
         # on failure/interrupt/crash.
         self._saga_enabled = saga_enabled
         self._saga_settings = saga_settings
+
+        # Full governance decision trail — when True, every allowed tool
+        # call emits a ``policy.allowed`` event alongside the existing
+        # ``policy.denied`` on block.  Off by default (doubles audit
+        # volume); sourced from ``settings.governance.log_allowed``.
+        self._log_policy_allowed = log_policy_allowed
 
         # System prompt cache (shared across wake() calls for the same worker).
         self._system_prompt_cache: SystemPromptCache = (
@@ -664,6 +671,7 @@ class AgentHarness:
                     api_client=self._api_client,
                     session_factory=self._session_factory,
                     saga=saga,
+                    log_policy_allowed=self._log_policy_allowed,
                 )
                 on_tool_call_cb = streaming_executor.add_tool
 
@@ -1097,6 +1105,7 @@ class AgentHarness:
                     api_client=self._api_client,
                     session_factory=self._session_factory,
                     saga=saga,
+                    log_policy_allowed=self._log_policy_allowed,
                 )
 
             # 7a. Reset nudge counters when relevant tools are used

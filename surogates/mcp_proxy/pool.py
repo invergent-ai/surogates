@@ -19,6 +19,13 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
+from surogates.audit import (
+    AuditStore,
+    AuditType,
+    mcp_scan_event,
+    rug_pull_event,
+)
+from surogates.governance.mcp_scanner import MCPGovernance, _fingerprint
 from surogates.tools.mcp.client import (
     _MCP_AVAILABLE,
     _lock,
@@ -43,7 +50,14 @@ def _prefixed_name(org_id: UUID, user_id: UUID, server_name: str) -> str:
 
 @dataclass
 class PoolEntry:
-    """Tracks a tenant's MCP server set and its last-access time."""
+    """Tracks a tenant's MCP server set and its last-access time.
+
+    ``governance`` is the tenant-scoped :class:`MCPGovernance` instance
+    that holds this tenant's rug-pull fingerprints.  One per
+    ``(org_id, user_id)`` pool entry so fingerprints never leak across
+    tenants — a rug-pull in tenant A's server must not suppress a scan
+    in tenant B's differently-configured server with the same name.
+    """
 
     org_id: UUID
     user_id: UUID
@@ -53,6 +67,7 @@ class PoolEntry:
     tool_index: dict[str, tuple[str, str]] = field(default_factory=dict)
     sanitized_prefix: str = ""
     last_used: float = field(default_factory=time.monotonic)
+    governance: MCPGovernance | None = None
 
 
 class ConnectionPool:
@@ -64,18 +79,34 @@ class ConnectionPool:
         Seconds of inactivity before a tenant's connections are evicted.
     max_per_org:
         Maximum number of concurrent MCP connections per organisation.
+    governance_enabled:
+        When True, every advertised MCP tool is scanned for prompt
+        injection, hidden instructions, invisible Unicode, etc. — and
+        tracked for rug-pull mutations on reconnect.  Each pool entry
+        gets its own :class:`MCPGovernance` instance so fingerprints
+        are tenant-scoped.  Unsafe tools are filtered out of the
+        advertised schema set.
+    audit_store:
+        Optional :class:`AuditStore` that receives
+        ``policy.mcp_scan`` and ``policy.rug_pull`` entries per scanned
+        tool.  Has no effect when *governance_enabled* is False.
     """
 
     def __init__(
         self,
         idle_timeout: int = 300,
         max_per_org: int = 50,
+        *,
+        governance_enabled: bool = False,
+        audit_store: AuditStore | None = None,
     ) -> None:
         self._idle_timeout = idle_timeout
         self._max_per_org = max_per_org
         self._entries: dict[tuple[UUID, UUID], PoolEntry] = {}
         self._locks: dict[tuple[UUID, UUID], asyncio.Lock] = {}
         self._eviction_task: asyncio.Task | None = None
+        self._governance_enabled = governance_enabled
+        self._audit_store = audit_store
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -166,6 +197,13 @@ class ConnectionPool:
             clean_schemas: list[dict[str, Any]] = []
             tool_index: dict[str, tuple[str, str]] = {}
 
+            # Per-tenant MCPGovernance — fingerprints are keyed by
+            # (server, tool) within this instance, never shared with
+            # other tenants even when server names collide.
+            tenant_governance: MCPGovernance | None = (
+                MCPGovernance() if self._governance_enabled else None
+            )
+
             for schema in schemas:
                 clean = dict(schema)
                 raw_name = clean.get("name", "")
@@ -178,18 +216,45 @@ class ConnectionPool:
                 else:
                     clean_name = raw_name
 
-                clean_schemas.append(clean)
-
                 # Build reverse index for O(1) tool call routing.
                 # Find which prefixed server owns this tool.
+                owning_server_key: str | None = None
+                original_tool: str = ""
                 with _lock:
                     for server_key, server in _servers.items():
                         if hasattr(server, "_registered_tool_names") and raw_name in server._registered_tool_names:
                             safe_key = sanitize_mcp_name_component(server_key)
                             prefix = f"mcp_{safe_key}_"
                             original_tool = raw_name[len(prefix):] if raw_name.startswith(prefix) else raw_name
-                            tool_index[clean_name] = (server_key, original_tool)
+                            owning_server_key = server_key
                             break
+
+                # Governance scan — run before adding the tool to the
+                # advertised schema set so unsafe tools never reach the
+                # agent.  Skipped when governance is disabled on the pool.
+                if tenant_governance is not None:
+                    original_server = ""
+                    if owning_server_key is not None:
+                        # Strip the tenant prefix back off the server key.
+                        expected_prefix = f"{_tenant_prefix(org_id, user_id)}__"
+                        if owning_server_key.startswith(expected_prefix):
+                            original_server = owning_server_key[len(expected_prefix):]
+                        else:
+                            original_server = owning_server_key
+
+                    if not await self._scan_and_record(
+                        governance=tenant_governance,
+                        org_id=org_id,
+                        user_id=user_id,
+                        server_name=original_server,
+                        tool_name=original_tool or clean_name,
+                        schema=clean,
+                    ):
+                        continue  # unsafe or rug-pulled — exclude from advertised set
+
+                clean_schemas.append(clean)
+                if owning_server_key is not None:
+                    tool_index[clean_name] = (owning_server_key, original_tool)
 
             entry = PoolEntry(
                 org_id=org_id,
@@ -198,6 +263,7 @@ class ConnectionPool:
                 tool_schemas=clean_schemas,
                 tool_index=tool_index,
                 sanitized_prefix=tenant_pfx,
+                governance=tenant_governance,
             )
             self._entries[key] = entry
 
@@ -206,6 +272,88 @@ class ConnectionPool:
                 len(original_names), org_id, user_id, len(clean_schemas),
             )
             return clean_schemas
+
+    # ------------------------------------------------------------------
+    # Governance scan helper
+    # ------------------------------------------------------------------
+
+    async def _scan_and_record(
+        self,
+        *,
+        governance: MCPGovernance,
+        org_id: UUID,
+        user_id: UUID,
+        server_name: str,
+        tool_name: str,
+        schema: dict[str, Any],
+    ) -> bool:
+        """Scan *schema* for safety + rug-pull; return True if tool is safe.
+
+        *governance* is tenant-scoped (one instance per :class:`PoolEntry`)
+        so fingerprints never leak between tenants.  Emits a
+        ``policy.mcp_scan`` row for every scan and an additional
+        ``policy.rug_pull`` row when a previously-registered tool's
+        fingerprint has changed.  Unsafe or rug-pulled tools return
+        ``False`` and are excluded from the advertised schema set.
+        """
+        # MCPGovernance expects MCP-style tool_def with ``inputSchema``;
+        # schemas here are OpenAI-shaped with ``parameters``.  Adapt.
+        tool_def = {
+            "name": tool_name,
+            "description": schema.get("description", ""),
+            "inputSchema": schema.get("parameters") or {},
+            "_server_name": server_name,
+        }
+        qualified_name = f"{server_name}.{tool_name}"
+
+        # Rug-pull check — only meaningful when we've seen this tool
+        # before within the same tenant's governance instance.
+        if governance.has_fingerprint(qualified_name):
+            if not governance.check_rug_pull(qualified_name, tool_def):
+                if self._audit_store is not None:
+                    await self._audit_store.emit(
+                        org_id=org_id,
+                        user_id=user_id,
+                        type=AuditType.POLICY_RUG_PULL,
+                        data=rug_pull_event(
+                            server_name, tool_name,
+                            previous_fingerprint=(
+                                governance.get_fingerprint(qualified_name) or ""
+                            ),
+                            current_fingerprint=_fingerprint(tool_def),
+                        ),
+                    )
+                logger.warning(
+                    "Rug-pull detected for %s from server %s — tool excluded",
+                    tool_name, server_name,
+                )
+                return False
+
+        result = governance.scan_tool(tool_def)
+
+        if self._audit_store is not None:
+            await self._audit_store.emit(
+                org_id=org_id,
+                user_id=user_id,
+                type=AuditType.POLICY_MCP_SCAN,
+                data=mcp_scan_event(
+                    server_name, tool_name,
+                    safe=result.safe,
+                    threats=list(result.threats),
+                    severity=result.severity,
+                ),
+            )
+
+        if not result.safe:
+            logger.warning(
+                "Unsafe MCP tool %s from server %s [%s]: %s",
+                tool_name, server_name, result.severity,
+                "; ".join(result.threats),
+            )
+            return False
+
+        governance.register_fingerprint(qualified_name, tool_def)
+        return True
 
     # ------------------------------------------------------------------
     # Tool calling

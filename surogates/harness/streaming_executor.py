@@ -128,6 +128,7 @@ class StreamingToolExecutor:
         api_client: Any | None = None,
         session_factory: Any | None = None,
         saga: SagaOrchestrator | None = None,
+        log_policy_allowed: bool = False,
     ) -> None:
         self._session = session
         self._lease = lease
@@ -137,6 +138,7 @@ class StreamingToolExecutor:
         self._interrupt_check = interrupt_check
         self._redis = redis
         self._budget = budget
+        self._log_policy_allowed = log_policy_allowed
         self._memory_manager = memory_manager
         self._hint_tracker = hint_tracker
         self._sandbox_pool = sandbox_pool
@@ -304,6 +306,7 @@ class StreamingToolExecutor:
                 api_client=self._api_client,
                 session_factory=self._session_factory,
                 saga=self._saga,
+                log_policy_allowed=self._log_policy_allowed,
             )
             tool.result = result
             tool.errored = _is_error_result(result)

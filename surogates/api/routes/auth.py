@@ -10,6 +10,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy import select
 
+from surogates.audit import (
+    AuditStore,
+    AuditType,
+    auth_failed_event,
+    auth_login_event,
+    client_ip,
+)
 from surogates.db.models import ChannelIdentity, User
 from surogates.tenant.auth.database import DatabaseAuthProvider
 from surogates.tenant.auth.jwt import (
@@ -60,8 +67,17 @@ class AccessTokenResponse(BaseModel):
 
 @router.post("/auth/login", response_model=TokenResponse)
 async def login(body: LoginRequest, request: Request) -> TokenResponse:
-    """Authenticate a user and issue access + refresh tokens."""
+    """Authenticate a user and issue access + refresh tokens.
+
+    Every attempt — success or failure — is written to ``audit_log``
+    via :class:`AuditStore` so compliance tooling can query login
+    activity without scanning application logs.
+    """
     session_factory = request.app.state.session_factory
+    audit_store: AuditStore | None = getattr(
+        request.app.state, "audit_store", None,
+    )
+    source_ip = client_ip(request)
 
     # Use the request's org_id if provided, otherwise the server's configured org.
     org_id = body.org_id
@@ -80,6 +96,16 @@ async def login(body: LoginRequest, request: Request) -> TokenResponse:
     )
 
     if not result.authenticated or result.user_id is None:
+        if audit_store is not None:
+            await audit_store.emit(
+                org_id=org_id,
+                type=AuditType.AUTH_FAILED,
+                data=auth_failed_event(
+                    "password",
+                    result.error or "invalid credentials",
+                    source_ip=source_ip,
+                ),
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=result.error or "Invalid credentials.",
@@ -98,6 +124,14 @@ async def login(body: LoginRequest, request: Request) -> TokenResponse:
         org_id=org_id,
         user_id=user_id,
     )
+
+    if audit_store is not None:
+        await audit_store.emit(
+            org_id=org_id,
+            user_id=user_id,
+            type=AuditType.AUTH_LOGIN,
+            data=auth_login_event("password", source_ip=source_ip),
+        )
 
     return TokenResponse(
         access_token=access_token,
