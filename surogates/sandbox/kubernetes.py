@@ -26,7 +26,11 @@ from kubernetes_asyncio import client, config, watch
 from kubernetes_asyncio.client import ApiException
 from kubernetes_asyncio.stream import WsApiClient
 
-from surogates.sandbox.base import SandboxSpec, SandboxStatus
+from surogates.sandbox.base import (
+    SandboxSpec,
+    SandboxStatus,
+    SandboxUnavailableError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +135,9 @@ class K8sSandbox:
         except ApiException as exc:
             logger.error("Failed to create sandbox pod %s: %s", pod_name, exc)
             await self._delete_secret_safe(api, secret_name)
-            raise RuntimeError(f"Failed to create sandbox pod: {exc}") from exc
+            raise SandboxUnavailableError(
+                self._classify_create_pod_failure(exc),
+            ) from exc
 
         entry = _PodEntry(
             sandbox_id=sandbox_id,
@@ -146,16 +152,20 @@ class K8sSandbox:
         try:
             await self._wait_for_ready(api, pod_name)
             entry.status = SandboxStatus.RUNNING
-        except Exception:
+        except Exception as exc:
             logger.error("Sandbox pod %s failed to become ready", pod_name, exc_info=True)
             await self._destroy_entry(api, entry)
-            raise
+            raise SandboxUnavailableError(
+                f"Sandbox pod {pod_name} failed to become ready: {exc}",
+            ) from exc
 
         logger.info("Provisioned K8s sandbox %s (pod %s)", sandbox_id, pod_name)
         return sandbox_id
 
     async def execute(self, sandbox_id: str, name: str, input: str) -> str:
         """Execute a command in the sandbox pod via K8s exec API."""
+        import aiohttp
+
         entry = self._get_entry(sandbox_id)
         api = await self._get_api()
 
@@ -176,6 +186,21 @@ class K8sSandbox:
                 truncated=False,
                 timed_out=True,
             )
+        except (
+            aiohttp.WSServerHandshakeError,
+            aiohttp.ClientConnectionError,
+            ApiException,
+        ) as exc:
+            # WS handshake / connection failure means the exec endpoint
+            # itself is unreachable -- typically pod missing, RBAC
+            # misconfiguration, or the cluster is down.  Every subsequent
+            # sandbox tool will fail identically; raise so the harness
+            # can surface a single "sandbox unavailable" result.
+            logger.error("Sandbox exec infra failure in pod %s: %s", entry.pod_name, exc)
+            entry.status = SandboxStatus.FAILED
+            raise SandboxUnavailableError(
+                self._classify_exec_failure(entry.pod_name, exc),
+            ) from exc
         except Exception as exc:
             logger.error("Sandbox exec failed in pod %s: %s", entry.pod_name, exc)
             entry.status = SandboxStatus.FAILED
@@ -539,6 +564,42 @@ class K8sSandbox:
             return self._pods[sandbox_id]
         except KeyError:
             raise ValueError(f"Unknown sandbox: {sandbox_id}") from None
+
+    @staticmethod
+    def _classify_create_pod_failure(exc: ApiException) -> str:
+        """Map a pod-create ApiException into a human-readable reason.
+
+        The body is a K8s Status JSON; pull ``message`` and prefix with the
+        most common diagnoses so the LLM-facing text reads as a triage
+        rather than a stack trace.
+        """
+        try:
+            body = json.loads(exc.body) if exc.body else {}
+            message = body.get("message", str(exc))
+        except (json.JSONDecodeError, TypeError):
+            message = str(exc)
+
+        if exc.status == 403:
+            return f"Sandbox pod creation forbidden by Kubernetes RBAC: {message}"
+        if exc.status == 404:
+            return f"Sandbox namespace or referenced resource missing: {message}"
+        if exc.status == 409:
+            return f"Sandbox pod name conflict: {message}"
+        return f"Sandbox pod creation failed (HTTP {exc.status}): {message}"
+
+    @staticmethod
+    def _classify_exec_failure(pod_name: str, exc: BaseException) -> str:
+        """Map an exec-time WS / API failure into a human-readable reason."""
+        status = getattr(exc, "status", None)
+        if status == 401:
+            return f"Sandbox exec unauthorized for pod {pod_name} (worker token rejected)."
+        if status == 403:
+            return f"Sandbox exec forbidden for pod {pod_name} (worker SA missing pods/exec permission)."
+        if status == 404:
+            return f"Sandbox pod {pod_name} not found (likely terminated or never created)."
+        if isinstance(exc, ApiException):
+            return f"Sandbox exec failed for pod {pod_name} (HTTP {exc.status}): {exc.reason}"
+        return f"Sandbox exec connection failed for pod {pod_name}: {exc}"
 
     @staticmethod
     def _result_json(

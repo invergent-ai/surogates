@@ -174,3 +174,113 @@ class TestStatusUnknown:
     async def test_status_unknown(self, sandbox: K8sSandbox):
         result = await sandbox.status("nonexistent")
         assert result == SandboxStatus.TERMINATED
+
+
+class TestFailureClassification:
+    """provision/execute infra failures raise SandboxUnavailableError with
+    a triage-friendly reason rather than leaking raw stack traces."""
+
+    def test_classify_create_pod_403_extracts_message(
+        self, sandbox: K8sSandbox,
+    ):
+        from kubernetes_asyncio.client import ApiException
+        from surogates.sandbox.kubernetes import K8sSandbox as KS
+
+        exc = ApiException(status=403, reason="Forbidden")
+        exc.body = json.dumps({
+            "message": 'serviceaccount "surogates-sandbox" not found',
+        })
+        reason = KS._classify_create_pod_failure(exc)
+        assert "RBAC" in reason
+        assert "surogates-sandbox" in reason
+
+    def test_classify_create_pod_404_namespace(
+        self, sandbox: K8sSandbox,
+    ):
+        from kubernetes_asyncio.client import ApiException
+        from surogates.sandbox.kubernetes import K8sSandbox as KS
+
+        exc = ApiException(status=404, reason="Not Found")
+        exc.body = json.dumps({"message": 'namespace "missing" not found'})
+        reason = KS._classify_create_pod_failure(exc)
+        assert "missing" in reason
+        assert "404" not in reason  # 404 is summarized, not raw
+
+    def test_classify_create_pod_unknown_status_includes_code(
+        self, sandbox: K8sSandbox,
+    ):
+        from kubernetes_asyncio.client import ApiException
+        from surogates.sandbox.kubernetes import K8sSandbox as KS
+
+        exc = ApiException(status=500, reason="Internal")
+        exc.body = json.dumps({"message": "etcd timeout"})
+        reason = KS._classify_create_pod_failure(exc)
+        assert "500" in reason
+        assert "etcd timeout" in reason
+
+    def test_classify_exec_403_calls_out_pod_exec_permission(
+        self, sandbox: K8sSandbox,
+    ):
+        from surogates.sandbox.kubernetes import K8sSandbox as KS
+
+        class _FakeWsErr(Exception):
+            status = 403
+
+        reason = KS._classify_exec_failure("sandbox-abc", _FakeWsErr())
+        assert "sandbox-abc" in reason
+        assert "pods/exec" in reason
+
+    def test_classify_exec_404_says_pod_missing(
+        self, sandbox: K8sSandbox,
+    ):
+        from surogates.sandbox.kubernetes import K8sSandbox as KS
+
+        class _FakeWsErr(Exception):
+            status = 404
+
+        reason = KS._classify_exec_failure("sandbox-xyz", _FakeWsErr())
+        assert "sandbox-xyz" in reason
+        assert "not found" in reason.lower()
+
+    async def test_provision_pod_create_403_raises_sandbox_unavailable(
+        self, sandbox: K8sSandbox,
+    ):
+        from kubernetes_asyncio.client import ApiException
+        from surogates.sandbox.base import SandboxUnavailableError
+
+        api = AsyncMock()
+        body = json.dumps({"message": 'serviceaccount "x" not found'})
+        api.create_namespaced_pod.side_effect = ApiException(
+            status=403, reason="Forbidden",
+        )
+        api.create_namespaced_pod.side_effect.body = body
+        api.delete_namespaced_secret = AsyncMock()
+        api.create_namespaced_secret = AsyncMock()
+        sandbox._api = api
+
+        with pytest.raises(SandboxUnavailableError) as ctx:
+            await sandbox.provision(SandboxSpec())
+        assert "RBAC" in str(ctx.value)
+
+
+class TestSandboxUnavailableResult:
+    """The shared result helper yields a recognisable error envelope."""
+
+    def test_envelope_shape(self):
+        from surogates.sandbox.base import sandbox_unavailable_result
+
+        out = json.loads(
+            sandbox_unavailable_result(
+                "Pod creation forbidden", tools_affected=["terminal"],
+            )
+        )
+        assert out["error"] == "sandbox_unavailable"
+        assert out["reason"] == "Pod creation forbidden"
+        assert out["tools_affected"] == ["terminal"]
+        assert "Do not retry sandbox tools" in out["guidance"]
+
+    def test_omits_tools_affected_when_unset(self):
+        from surogates.sandbox.base import sandbox_unavailable_result
+
+        out = json.loads(sandbox_unavailable_result("x"))
+        assert "tools_affected" not in out

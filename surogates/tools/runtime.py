@@ -41,10 +41,21 @@ class ToolRuntime:
         function that calls ``registry.register(...)`` for each tool it
         provides.
         """
+        # Two builtins are intentionally NOT registered:
+        #
+        # - ``code_execution`` (``execute_code``): ``terminal`` plus inline
+        #   ``python3 -c "..."`` covers every real use case, and exposing
+        #   both tempts the LLM to retry the same logic via a different
+        #   tool when one fails (observed with sandbox-provisioning errors).
+        # - ``browser`` (``browser_navigate``): stub only — the schema
+        #   advertises a capability the sandbox image (no Playwright /
+        #   Chromium) cannot fulfil, so every call would fail.  Use
+        #   ``web_search`` / ``web_extract`` / ``web_crawl`` instead.
+        #
+        # Both module files are preserved on disk so they can be
+        # reinstated later without re-porting work.
         from surogates.tools.builtin import (
-            browser,
             clarify,
-            code_execution,
             coordinator,
             delegate,
             expert,
@@ -68,9 +79,7 @@ class ToolRuntime:
             terminal,  # also registers the 'process' tool
             session_search,
             todo,
-            browser,
             clarify,
-            code_execution,
             expert,
             coordinator,
         ]

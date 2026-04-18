@@ -6,8 +6,9 @@ Each subagent gets an independent budget capped at
 ``delegation.max_total`` (default 90) — this means total
 iterations across parent + subagents can exceed the parent's cap.
 
-``execute_code`` (programmatic tool calling) iterations are refunded via
-:meth:`refund` so they don't eat into the budget.
+Iterations spent on tools that nest internal LLM calls (e.g. delegated
+sub-agents) can be refunded via :meth:`refund` so they don't eat into
+the parent budget.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ class IterationBudget:
             return True
 
     def refund(self) -> None:
-        """Give back one iteration (e.g. for execute_code turns)."""
+        """Give back one iteration."""
         with self._lock:
             if self._used > 0:
                 self._used -= 1

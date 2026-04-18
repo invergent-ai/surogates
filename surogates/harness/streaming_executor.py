@@ -7,8 +7,8 @@ latency — especially valuable when sandbox tools require K8s pod
 provisioning (5-30s) that can happen during streaming.
 
 The executor maintains strict insertion-order result delivery and implements
-a sibling abort mechanism: errors from ``terminal`` or ``execute_code``
-cancel all concurrently-running sibling tools.
+a sibling abort mechanism: errors from ``terminal`` cancel all
+concurrently-running sibling tools.
 
 Concurrency rules:
 - Concurrency-safe tools can run in parallel with each other.
@@ -331,8 +331,8 @@ class StreamingToolExecutor:
             tool.status = ToolStatus.COMPLETED
             tool.completed_at = time.monotonic()
 
-            # Environment failures (terminal, execute_code) likely affect
-            # all concurrent work — cancel siblings to avoid stale results.
+            # Environment failures (terminal) likely affect all
+            # concurrent work — cancel siblings to avoid stale results.
             if tool.errored:
                 fn_name = tool.tool_call.get("function", {}).get("name", "")
                 if fn_name in SIBLING_ABORT_TOOLS:

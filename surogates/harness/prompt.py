@@ -127,7 +127,7 @@ OPENAI_MODEL_EXECUTION_GUIDANCE: str = (
     "\n"
     "<mandatory_tool_use>\n"
     "NEVER answer these from memory or mental computation — ALWAYS use a tool:\n"
-    "- Arithmetic, math, calculations → use terminal or execute_code\n"
+    "- Arithmetic, math, calculations → use terminal (e.g. python3 -c)\n"
     "- Hashes, encodings, checksums → use terminal (e.g. sha256sum, base64)\n"
     "- Current time, date, timezone → use terminal (e.g. date)\n"
     "- System state: OS, CPU, memory, disk, ports, processes → use terminal\n"

@@ -134,7 +134,7 @@ class TestConcurrencyClassification:
             assert not is_parallelizable(name), f"{name} should NOT be parallelizable"
 
     def test_sandbox_tools_are_parallelizable(self) -> None:
-        sandbox_parallel = ["terminal", "execute_code", "browser_navigate"]
+        sandbox_parallel = ["terminal"]
         for name in sandbox_parallel:
             assert is_parallelizable(name), f"{name} should be parallelizable"
 
@@ -143,7 +143,6 @@ class TestConcurrencyClassification:
 
     def test_sibling_abort_tools(self) -> None:
         assert "terminal" in SIBLING_ABORT_TOOLS
-        assert "execute_code" in SIBLING_ABORT_TOOLS
         assert "read_file" not in SIBLING_ABORT_TOOLS
 
 

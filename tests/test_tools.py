@@ -258,8 +258,8 @@ class TestToolRouterLocationResolution:
         gate = GovernanceGate()
         router = ToolRouter(reg, pool, gate)
 
-        for tool_name in ("terminal", "execute_code", "read_file", "write_file",
-                          "patch", "search_files", "list_files", "browser_navigate"):
+        for tool_name in ("terminal", "read_file", "write_file",
+                          "patch", "search_files", "list_files"):
             assert router.resolve_location(tool_name) == ToolLocation.SANDBOX, (
                 f"{tool_name} should resolve to SANDBOX"
             )

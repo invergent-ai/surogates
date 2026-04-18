@@ -99,7 +99,7 @@ sandbox:
       cpu: "2"
       memory: 2Gi
   k8sNamespace: ""
-  k8sServiceAccount: "surogates-sandbox"
+  k8sServiceAccount: ""  # defaults to "{{ fullname }}-sandbox" — the SA sandbox-rbac.yaml creates
   k8sPodReadyTimeout: 60
   k8sExecutorPath: "/usr/local/bin/tool-executor"
   k8sS3Endpoint: ""

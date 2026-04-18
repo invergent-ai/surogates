@@ -54,6 +54,8 @@ spec:
             {{- if eq .Values.sandbox.backend "kubernetes" }}
             - name: SUROGATES_SANDBOX_K8S_NAMESPACE
               value: {{ default .Release.Namespace .Values.sandbox.k8sNamespace | quote }}
+            - name: SUROGATES_SANDBOX_K8S_SERVICE_ACCOUNT
+              value: {{ default (printf "%s-sandbox" $fullname) .Values.sandbox.k8sServiceAccount | quote }}
             {{- end }}
             - name: SUROGATES_SANDBOX_SRT_ENABLED
               value: {{ .Values.sandbox.srtEnabled | quote }}

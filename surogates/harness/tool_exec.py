@@ -87,11 +87,10 @@ CONCURRENCY_SAFE_TOOLS: frozenset[str] = frozenset({
 })
 
 # Tools whose errors should abort all sibling concurrent executions.
-# Terminal and code execution errors often indicate an environment
-# problem that makes sibling tool results unreliable.
+# A terminal error often signals an environment problem that makes
+# sibling tool results unreliable.
 SIBLING_ABORT_TOOLS: frozenset[str] = frozenset({
     "terminal",
-    "execute_code",
 })
 
 
@@ -111,8 +110,6 @@ PATH_SCOPED_TOOLS: frozenset[str] = frozenset({
 # beyond the filesystem (which the LLM is responsible for coordinating).
 SANDBOX_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "terminal",
-    "execute_code",
-    "browser_navigate",
 })
 
 # All tools that can run concurrently — read-only tools plus sandbox tools
@@ -192,7 +189,7 @@ def should_parallelize(tool_calls: list[dict[str, Any]]) -> bool:
     - Any tool in ``NEVER_PARALLEL_TOOLS`` -> sequential.
     - All tools in ``CONCURRENCY_SAFE_TOOLS`` -> parallel.
     - Tools in ``PATH_SCOPED_TOOLS`` -> parallel only if paths don't overlap.
-    - All tools are sandbox-executable (terminal, execute_code, file ops) -> parallel.
+    - All tools are sandbox-executable (terminal, file ops) -> parallel.
     - Otherwise -> sequential.
     """
     if len(tool_calls) <= 1:
@@ -681,12 +678,33 @@ async def execute_single_tool(
         })
     except Exception as exc:
         tool_failed = True
-        logger.exception(
-            "Tool %s failed for session %s", tool_name, session.id,
+        # SandboxUnavailableError is the infra-level failure class --
+        # provision/exec failed for a reason that affects every
+        # sandbox-routed tool.  Surface a recognisable result so the LLM
+        # stops dispatching the rest of the sandbox tool zoo.
+        from surogates.sandbox.base import (
+            SandboxUnavailableError,
+            sandbox_unavailable_result,
         )
-        result_content = json.dumps({
-            "error": f"Tool execution failed: {exc}",
-        })
+        if isinstance(exc, SandboxUnavailableError):
+            from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
+            affected = sorted(
+                t for t, loc in TOOL_LOCATIONS.items()
+                if loc == ToolLocation.SANDBOX
+            )
+            logger.error(
+                "Sandbox unavailable for session %s: %s", session.id, exc.reason,
+            )
+            result_content = sandbox_unavailable_result(
+                exc.reason, tools_affected=affected,
+            )
+        else:
+            logger.exception(
+                "Tool %s failed for session %s", tool_name, session.id,
+            )
+            result_content = json.dumps({
+                "error": f"Tool execution failed: {exc}",
+            })
     elapsed_ms = int((time.monotonic() - start) * 1000)
 
     # --- Saga step commit / fail ---

@@ -336,7 +336,7 @@ class TestOrchestratorExecuteStep:
         saga = orch.create_saga(uuid4())
         step = orch.add_step(
             saga.saga_id,
-            tool_name="execute_code",
+            tool_name="terminal",
             tool_call_id="tc1",
             arguments={},
             timeout_seconds=1,

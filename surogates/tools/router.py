@@ -58,13 +58,11 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "stop_worker": ToolLocation.HARNESS,
     # Sandbox (code execution, file mutation, need isolation)
     "terminal": ToolLocation.SANDBOX,
-    "execute_code": ToolLocation.SANDBOX,
     "read_file": ToolLocation.SANDBOX,
     "write_file": ToolLocation.SANDBOX,
     "patch": ToolLocation.SANDBOX,
     "search_files": ToolLocation.SANDBOX,
     "list_files": ToolLocation.SANDBOX,
-    "browser_navigate": ToolLocation.SANDBOX,
 }
 
 

@@ -17,9 +17,12 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["create", "delete", "get", "list", "watch"]
+  # kubernetes-asyncio's WsApiClient calls connect_GET_namespaced_pod_exec
+  # which is verb=get; kubectl exec (POST) is verb=create.  Grant both so
+  # whichever client the worker uses works.
   - apiGroups: [""]
     resources: ["pods/exec"]
-    verbs: ["create"]
+    verbs: ["create", "get"]
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create", "delete", "get"]

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Build and push all Surogates container images to GHCR.
+# Build all Surogates container images and upload them to k3d.
 #
 # Usage:
-#   ./images/build.sh              # build + push all, tag "latest"
-#   ./images/build.sh 0.4.1        # build + push all, tag "0.4.1" + "latest"
-#   ./images/build.sh 0.4.1 sandbox  # build + push only sandbox
+#   ./images/build.sh              # build all, tag "latest"
+#   ./images/build.sh 0.4.1        # build all, tag "0.4.1" + "latest"
+#   ./images/build.sh 0.4.1 sandbox  # build only sandbox
 #
 # Mirrors the matrix in .github/workflows/release.yml.
 
@@ -43,12 +43,6 @@ for dir in "${!IMAGES[@]}"; do
     "${tags[@]}" \
     --file "$REPO_ROOT/images/$dir/Dockerfile" \
     "$REPO_ROOT"
-
-  echo "Pushing $full ..."
-  docker push "$full:latest"
-  if [[ "$VERSION" != "latest" ]]; then
-    docker push "$full:$VERSION"
-  fi
 
   echo "Importing $full:latest into k3d cluster ..."
   k3d image import "$full:latest" -c surogate
