@@ -200,11 +200,17 @@ WHERE org_id = $1
 
 ## `v_session_messages`
 
-The message-shaped subset of `events` — user messages, LLM responses,
-tool calls/results, expert delegation/outcome, user feedback.
-Context-engineering events (`context.compact`, `harness.wake`,
-`session.*`) and governance decisions are intentionally excluded;
-they have their own dedicated views.
+The message-shaped subset of `events` — user messages, skill
+invocations, LLM responses, tool calls/results, expert
+delegation/outcome, user feedback.  Context-engineering events
+(`context.compact`, `harness.wake`, `session.*`) and governance
+decisions are intentionally excluded; they have their own dedicated
+views.
+
+`skill.invoked` rows are surfaced here as inline markers between the
+user's `/<skill> args...` message and the LLM response, the same way
+`expert.delegation` is surfaced for `consult_expert`.  The original
+`/<skill>` text remains in the preceding `user.message`.
 
 Training-data exporters and chat-log renderers read this view to get
 the events that matter for reconstructing the conversation.

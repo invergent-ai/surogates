@@ -516,7 +516,11 @@ async def test_session_messages_includes_conversation_events(
     )
 
     await session_store.emit_event(
-        session.id, EventType.USER_MESSAGE, {"content": "hi"},
+        session.id, EventType.USER_MESSAGE, {"content": "/arxiv cuda"},
+    )
+    await session_store.emit_event(
+        session.id, EventType.SKILL_INVOKED,
+        {"skill": "arxiv", "raw_message": "/arxiv cuda", "staged_at": None},
     )
     await session_store.emit_event(
         session.id, EventType.LLM_RESPONSE,
@@ -543,7 +547,7 @@ async def test_session_messages_includes_conversation_events(
         ).mappings().all()
 
     types = [r["type"] for r in rows]
-    assert types == ["user.message", "llm.response"]
+    assert types == ["user.message", "skill.invoked", "llm.response"]
 
 
 # ---------------------------------------------------------------------------

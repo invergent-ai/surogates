@@ -280,6 +280,7 @@ FROM events e
 JOIN sessions s ON s.id = e.session_id
 WHERE e.type IN (
     'user.message',
+    'skill.invoked',
     'llm.response',
     'tool.call',
     'tool.result',
