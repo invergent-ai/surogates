@@ -48,6 +48,7 @@ from surogates.harness.sanitize import (
     deduplicate_tool_calls,
     strip_budget_warnings,
 )
+from surogates.harness.slash_skill import expand_slash_skill
 from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
 from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.tool_exec import execute_tool_calls
@@ -370,6 +371,46 @@ class AgentHarness:
             if last_user_content == "/clear":
                 await self._handle_clear_command(session, lease)
                 return
+
+            # 10b. Eager /<skill> expansion -- see slash_skill.expand_slash_skill.
+            if last_user_content.startswith("/"):
+                expansion = await expand_slash_skill(
+                    text=last_user_content,
+                    tools=self._tools,
+                    tenant=self._tenant,
+                    session_id=str(session.id),
+                    api_client=self._api_client,
+                    session_factory=self._session_factory,
+                )
+                if expansion is not None:
+                    expanded_text, skill_name, staged_at = expansion
+                    last_user["content"] = expanded_text
+                    # Suppress duplicate audit events on crash-recovery wakes.
+                    # skill_view itself is idempotent (staging short-circuits via
+                    # an exists() check), but the SKILL_INVOKED event log row is
+                    # not -- so guard it by scanning prior events.
+                    already_emitted = any(
+                        e.type == EventType.SKILL_INVOKED.value
+                        and e.data.get("raw_message") == last_user_content
+                        for e in all_events
+                    )
+                    if not already_emitted:
+                        try:
+                            await self._store.emit_event(
+                                session.id,
+                                EventType.SKILL_INVOKED,
+                                {
+                                    "skill": skill_name,
+                                    "raw_message": last_user_content,
+                                    "staged_at": staged_at,
+                                },
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Failed to emit SKILL_INVOKED audit event "
+                                "for session %s skill=%s",
+                                session.id, skill_name,
+                            )
 
             # 11. Run the core LLM loop.
             await self._run_loop(session, messages, system_prompt, lease, cost_tracker=cost_tracker, all_events=all_events)

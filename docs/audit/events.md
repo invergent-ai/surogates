@@ -154,6 +154,22 @@ backend-specific diagnostics (pod name, phase, etc.).
 
 `memory.update` — `MEMORY.md` or `USER.md` was mutated by the agent.
 
+### Skill invocation
+
+`skill.invoked` — the harness eagerly expanded a `/<skill> args...` user
+message by calling `skill_view` server-side and inlining the skill body
+into the message the LLM sees.  The original `/<skill> args...` text
+remains in the preceding `user.message` event; this row records which
+skill was resolved and where its supporting files were staged.  Emitted
+at most once per user message — crash-recovery wakes that re-expand the
+same message do not re-emit.
+
+| key | type | notes |
+|---|---|---|
+| `skill` | string | Resolved skill name. |
+| `raw_message` | string | Verbatim user text (e.g. `/arxiv cuda training llm 2026`). |
+| `staged_at` | string \| null | Sandbox path where supporting files were staged, or `null` when the skill has no assets / dev path. |
+
 ### Expert delegation
 
 `expert.delegation` — base LLM called `consult_expert`.

@@ -45,6 +45,11 @@ class EventType(str, Enum):
     CONTEXT_COMPACT = "context.compact"
     MEMORY_UPDATE = "memory.update"
 
+    # Skill invocation via slash-command (e.g. user typed "/arxiv ...").
+    # Recorded so the audit log shows the user's intent and which skill the
+    # harness eagerly inlined before the LLM saw the message.
+    SKILL_INVOKED = "skill.invoked"
+
     # Harness lifecycle
     HARNESS_WAKE = "harness.wake"
     HARNESS_CRASH = "harness.crash"
