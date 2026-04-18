@@ -120,6 +120,33 @@ spec:
             {{- end }}
             - name: SUROGATES_AGENT_ID
               value: {{ include "surogates.agentId" . | quote }}
+            # LLM model is consumed by the API at session-create time
+            # (POST /v1/sessions stores ``settings.llm.model`` on the
+            # session row, which the worker then uses to dispatch).
+            # Without this, ``LLMSettings.model`` falls back to its
+            # Pydantic default and every session is created with the
+            # wrong model regardless of what the worker is configured
+            # to use.
+            - name: SUROGATES_LLM_MODEL
+              value: {{ .Values.llm.model | quote }}
+            {{- if .Values.llm.provider }}
+            - name: SUROGATES_LLM_PROVIDER
+              value: {{ .Values.llm.provider | quote }}
+            {{- end }}
+            {{- if .Values.llm.baseUrl }}
+            - name: SUROGATES_LLM_BASE_URL
+              value: {{ .Values.llm.baseUrl | quote }}
+            {{- end }}
+            {{- if .Values.llm.apiKey }}
+            - name: SUROGATES_LLM_API_KEY
+              value: {{ .Values.llm.apiKey | quote }}
+            {{- end }}
+            - name: SUROGATES_LLM_TEMPERATURE
+              value: {{ .Values.llm.temperature | quote }}
+            {{- if .Values.llm.maxTokens }}
+            - name: SUROGATES_LLM_MAX_TOKENS
+              value: {{ .Values.llm.maxTokens | quote }}
+            {{- end }}
             {{- range $key, $value := .Values.extraEnv }}
             - name: {{ $key }}
               value: {{ $value | quote }}

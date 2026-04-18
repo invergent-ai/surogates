@@ -13,6 +13,7 @@ import { SessionSearchBlock, WebToolBlock } from "./tools/oneliner-tools";
 import { ReadFileBlock, WriteFileBlock, PatchBlock, SearchFilesBlock, ListFilesBlock } from "./tools/file-tools";
 import { ProcessToolBlock } from "./tools/process-tool";
 import { ExpertToolBlock } from "./tools/expert-tool";
+import { SkillsListBlock, SkillViewBlock } from "./tools/skill-tools";
 import { DefaultToolBlock } from "./tools/default-tool";
 
 export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSelect?: (path: string) => void }) {
@@ -54,6 +55,12 @@ export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSe
 
     case "consult_expert":
       return <ExpertToolBlock tc={tc} />;
+
+    case "skills_list":
+      return <SkillsListBlock tc={tc} />;
+
+    case "skill_view":
+      return <SkillViewBlock tc={tc} />;
 
     default:
       return <DefaultToolBlock tc={tc} />;

@@ -176,6 +176,87 @@ class TestStatusUnknown:
         assert result == SandboxStatus.TERMINATED
 
 
+class TestStatusReadFailures:
+    """``status()`` must not flap to FAILED on transient API errors --
+    that triggers the pool destroy/reprovision loop on a healthy pod."""
+
+    async def test_404_marks_terminated_and_evicts_entry(
+        self, sandbox: K8sSandbox,
+    ):
+        from kubernetes_asyncio.client import ApiException
+        entry = _PodEntry(
+            sandbox_id="sid", pod_name="pod-x", secret_name="sec-x",
+            namespace="test-ns", spec=SandboxSpec(),
+            status=SandboxStatus.RUNNING,
+        )
+        sandbox._pods["sid"] = entry
+        api = AsyncMock()
+        api.read_namespaced_pod.side_effect = ApiException(status=404, reason="Not Found")
+        sandbox._api = api
+
+        result = await sandbox.status("sid")
+        assert result == SandboxStatus.TERMINATED
+        assert "sid" not in sandbox._pods  # evicted
+
+    async def test_403_returns_cached_status_not_failed(
+        self, sandbox: K8sSandbox,
+    ):
+        # Reproduces the destroy/reprovision loop bug: a transient
+        # status-read 403 should NOT flap a healthy pod to FAILED.
+        from kubernetes_asyncio.client import ApiException
+        entry = _PodEntry(
+            sandbox_id="sid", pod_name="pod-x", secret_name="sec-x",
+            namespace="test-ns", spec=SandboxSpec(),
+            status=SandboxStatus.RUNNING,
+        )
+        sandbox._pods["sid"] = entry
+        api = AsyncMock()
+        api.read_namespaced_pod.side_effect = ApiException(status=403, reason="Forbidden")
+        sandbox._api = api
+
+        result = await sandbox.status("sid")
+        assert result == SandboxStatus.RUNNING  # cached, NOT FAILED
+        assert "sid" in sandbox._pods  # still tracked
+
+    async def test_500_returns_cached_status_not_failed(
+        self, sandbox: K8sSandbox,
+    ):
+        from kubernetes_asyncio.client import ApiException
+        entry = _PodEntry(
+            sandbox_id="sid", pod_name="pod-x", secret_name="sec-x",
+            namespace="test-ns", spec=SandboxSpec(),
+            status=SandboxStatus.PENDING,
+        )
+        sandbox._pods["sid"] = entry
+        api = AsyncMock()
+        api.read_namespaced_pod.side_effect = ApiException(status=500, reason="Server Error")
+        sandbox._api = api
+
+        result = await sandbox.status("sid")
+        assert result == SandboxStatus.PENDING
+
+    async def test_uses_pods_not_pods_status_endpoint(
+        self, sandbox: K8sSandbox,
+    ):
+        # Worker RBAC grants ``pods`` (verb=get) but not ``pods/status``;
+        # this asserts we call the cheaper-RBAC endpoint.
+        entry = _PodEntry(
+            sandbox_id="sid", pod_name="pod-x", secret_name="sec-x",
+            namespace="test-ns", spec=SandboxSpec(),
+        )
+        sandbox._pods["sid"] = entry
+        pod = MagicMock()
+        pod.status.phase = "Running"
+        pod.status.conditions = [MagicMock(type="Ready", status="True")]
+        api = AsyncMock()
+        api.read_namespaced_pod.return_value = pod
+        sandbox._api = api
+
+        await sandbox.status("sid")
+        api.read_namespaced_pod.assert_called_once_with("pod-x", "test-ns")
+        api.read_namespaced_pod_status.assert_not_called()
+
+
 class TestFailureClassification:
     """provision/execute infra failures raise SandboxUnavailableError with
     a triage-friendly reason rather than leaking raw stack traces."""

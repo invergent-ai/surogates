@@ -10,12 +10,18 @@ import { getSession } from "@/api/sessions";
 
 export interface ChatMessage {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   content: string;
   createdAt: Date;
   status: "complete" | "streaming" | "error";
   toolCalls?: ToolCallInfo[];
   reasoning?: string;
+  // Set on system-role markers emitted by harness-side events that belong
+  // in the chat timeline but aren't user/LLM turns (e.g. ``skill.invoked``
+  // when a slash command expanded a skill).  Renderers branch on this
+  // discriminator instead of parsing ``content``.
+  systemKind?: "skill_invoked";
+  systemMeta?: Record<string, unknown>;
 }
 
 export interface ToolCallInfo {
@@ -62,6 +68,7 @@ const LISTENED_EVENTS = [
   "harness.wake",
   "harness.crash",
   "context.compact",
+  "skill.invoked",
   "policy.denied",
   "stream.timeout",
   "expert.result",
@@ -113,6 +120,25 @@ export function useSessionRuntime(sessionId: string | null) {
               content: (data.content as string) ?? "",
               createdAt: new Date(),
               status: "complete",
+            });
+            break;
+          }
+
+          case "skill.invoked": {
+            // Marker row between the user's `/<skill> args` message and the
+            // assistant's response — surfaces the eager expansion the
+            // harness performed so the user sees which skill was loaded.
+            next.push({
+              id: `evt-${eventId}`,
+              role: "system",
+              content: (data.skill as string) ?? "",
+              createdAt: new Date(),
+              status: "complete",
+              systemKind: "skill_invoked",
+              systemMeta: {
+                skill: data.skill,
+                staged_at: data.staged_at,
+              },
             });
             break;
           }

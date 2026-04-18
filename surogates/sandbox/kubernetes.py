@@ -224,14 +224,28 @@ class K8sSandbox:
         logger.info("Destroyed K8s sandbox %s (pod %s)", sandbox_id, entry.pod_name)
 
     async def status(self, sandbox_id: str) -> SandboxStatus:
-        """Check the current status of the sandbox pod."""
+        """Check the current status of the sandbox pod.
+
+        Uses ``read_namespaced_pod`` (resource ``pods``) rather than
+        ``read_namespaced_pod_status`` (resource ``pods/status``) so the
+        worker only needs ``get`` on ``pods`` -- one fewer RBAC entry to
+        keep in sync.
+
+        On any non-404 API error (transient network failure, momentary
+        RBAC misconfiguration) the cached status is returned instead of
+        ``FAILED``.  Returning ``FAILED`` on a status-read error would
+        cause :class:`SandboxPool` to destroy the (still healthy) pod
+        and reprovision -- a tight loop that wastes K8s churn and
+        produces nothing.  A 404 is the only signal that the pod is
+        truly gone.
+        """
         entry = self._pods.get(sandbox_id)
         if entry is None:
             return SandboxStatus.TERMINATED
 
         api = await self._get_api()
         try:
-            pod = await api.read_namespaced_pod_status(entry.pod_name, self._namespace)
+            pod = await api.read_namespaced_pod(entry.pod_name, self._namespace)
             new_status = self._map_pod_status(pod)
             entry.status = new_status
             return new_status
@@ -239,8 +253,11 @@ class K8sSandbox:
             if exc.status == 404:
                 self._pods.pop(sandbox_id, None)
                 return SandboxStatus.TERMINATED
-            logger.error("Failed to read pod status for %s: %s", entry.pod_name, exc)
-            return SandboxStatus.FAILED
+            logger.warning(
+                "Status check for pod %s failed (HTTP %s); trusting "
+                "cached status %s", entry.pod_name, exc.status, entry.status,
+            )
+            return entry.status
 
     # ------------------------------------------------------------------
     # Pod manifest builder

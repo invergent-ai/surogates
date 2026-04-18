@@ -54,7 +54,8 @@ type TimelineEntry =
   | { kind: "reasoning"; key: string; reasoning: string; isStreaming: boolean }
   | { kind: "tool"; key: string; tc: ToolCallInfo }
   | { kind: "text"; key: string; content: string }
-  | { kind: "thinking"; key: string };
+  | { kind: "thinking"; key: string }
+  | { kind: "skill_invoked"; key: string; skill: string; stagedAt: string | null };
 
 /**
  * Flatten an assistant message into a list of timeline entries
@@ -64,6 +65,21 @@ function messageToEntries(
   msg: ChatMessageType,
   isLast: boolean,
 ): TimelineEntry[] {
+  // System markers (skill.invoked, ...) become their own timeline entry --
+  // a single row with a green dot + label, threaded into the assistant's
+  // vertical timeline above its first reasoning/tool-call entry.
+  if (msg.role === "system") {
+    if (msg.systemKind === "skill_invoked") {
+      return [{
+        kind: "skill_invoked",
+        key: msg.id,
+        skill: (msg.systemMeta?.skill as string) ?? msg.content,
+        stagedAt: (msg.systemMeta?.staged_at as string | null | undefined) ?? null,
+      }];
+    }
+    return [];
+  }
+
   const entries: TimelineEntry[] = [];
   const hasToolCalls = !!(msg.toolCalls && msg.toolCalls.length > 0);
   const hasContent = !!(msg.content && msg.content !== msg.reasoning);
@@ -112,26 +128,84 @@ function messageToEntries(
   return entries;
 }
 
-/** A run of consecutive messages grouped by role. */
+/** A run of consecutive messages grouped by role.
+ *
+ * System markers (``skill.invoked``) are folded into the *following*
+ * assistant group as leading messages, so they render as the first item
+ * of the assistant's vertical timeline alongside its reasoning and tool
+ * calls -- not as a floating row outside the timeline.  Trailing system
+ * markers (no assistant turn yet) get their own ``system`` group.
+ */
 interface MessageGroup {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   messages: ChatMessageType[];
   lastGlobalIndex: number;
 }
 
 function groupMessages(messages: ChatMessageType[]): MessageGroup[] {
   const groups: MessageGroup[] = [];
+  let pendingSystem: { msg: ChatMessageType; index: number }[] = [];
+
+  const drainPendingAsOrphans = () => {
+    for (const { msg, index } of pendingSystem) {
+      groups.push({ role: "system", messages: [msg], lastGlobalIndex: index });
+    }
+    pendingSystem = [];
+  };
+
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
-    const prev = groups[groups.length - 1];
-    if (prev && prev.role === msg.role && msg.role === "assistant") {
-      prev.messages.push(msg);
-      prev.lastGlobalIndex = i;
-    } else {
-      groups.push({ role: msg.role, messages: [msg], lastGlobalIndex: i });
+
+    if (msg.role === "system") {
+      pendingSystem.push({ msg, index: i });
+      continue;
     }
+
+    if (msg.role === "assistant") {
+      const prev = groups[groups.length - 1];
+      if (prev && prev.role === "assistant" && pendingSystem.length === 0) {
+        prev.messages.push(msg);
+        prev.lastGlobalIndex = i;
+      } else {
+        const folded = pendingSystem.map((p) => p.msg);
+        pendingSystem = [];
+        groups.push({
+          role: "assistant",
+          messages: [...folded, msg],
+          lastGlobalIndex: i,
+        });
+      }
+      continue;
+    }
+
+    // user — drain any orphan system markers (no assistant followed),
+    // then push the user turn as its own group.
+    drainPendingAsOrphans();
+    groups.push({ role: "user", messages: [msg], lastGlobalIndex: i });
   }
+
+  drainPendingAsOrphans();
   return groups;
+}
+
+// ── Orphan system marker (no following assistant yet) ───────────────
+//
+// Rendered only when a ``skill.invoked`` event arrives but the LLM has
+// not yet produced an assistant turn to attach it to.  The normal case
+// folds the marker into the assistant timeline below.
+
+function OrphanSystemMarker({ message }: { message: ChatMessageType }) {
+  if (message.systemKind !== "skill_invoked") return null;
+  const skill = (message.systemMeta?.skill as string) ?? message.content;
+  return (
+    <div className="my-2 flex items-center gap-2 px-4 text-xs text-muted-foreground font-mono">
+      <span className="size-2 rounded-full bg-emerald-500" />
+      <span>
+        <span className="font-semibold text-foreground">Skill</span> 
+        <span className="text-muted-foreground truncate">{skill}</span>
+      </span>
+    </div>
+  );
 }
 
 // ── Timeline entry renderer ──────────────────────────────────────────
@@ -187,6 +261,30 @@ function TimelineEntryItem({
         </TimelineHeader>
         <TimelineContent>
           <MessageResponse>{entry.content}</MessageResponse>
+        </TimelineContent>
+      </TimelineItem>
+    );
+  }
+
+  if (entry.kind === "skill_invoked") {
+    return (
+      <TimelineItem step={step}>
+        <TimelineHeader>
+          <TimelineSeparator style={{ backgroundColor: "var(--color-border)" }} />
+          <TimelineIndicator className="size-2 border-none bg-emerald-500" />
+        </TimelineHeader>
+        <TimelineContent>
+          <div className="flex items-center gap-1.5 py-1 text-sm font-mono">
+            <span className="font-semibold text-foreground">Skill</span>
+            <span className="text-muted-foreground truncate">
+              {entry.skill}
+            </span>
+            {entry.stagedAt && (
+              <span className="text-xs text-muted-foreground/70 font-mono">
+                staged at {entry.stagedAt}
+              </span>
+            )}
+          </div>
         </TimelineContent>
       </TimelineItem>
     );
@@ -280,6 +378,11 @@ export function ChatThread({
                       onFileSelect={onFileSelect}
                     />
                   );
+                }
+
+                if (group.role === "system") {
+                  const msg = group.messages[0];
+                  return <OrphanSystemMarker key={msg.id} message={msg} />;
                 }
 
                 return (
