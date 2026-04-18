@@ -222,15 +222,26 @@ platformSkills: []
 # -- Auth for lakeFS-backed platform-skill repositories
 #
 # `endpoint` is the lakeFS server URL (e.g. https://lakefs.example.com).
-# `credentialsSecretRef` names a Secret with two keys:
-#   - access-key-id
-#   - secret-access-key
-# Both become LAKECTL_CREDENTIALS_* env vars inside the init container.
+#
+# Credentials can be supplied two ways:
+#
+#   1. Inline (recommended for platform-managed releases): set
+#      `accessKeyId` and `secretAccessKey`.  The chart renders a
+#      `{release}-lakefs` Secret and the init container consumes it.
+#
+#   2. BYO Secret: leave the inline fields empty and set
+#      `credentialsSecretRef` to the name of a pre-existing Secret
+#      carrying `access-key-id` / `secret-access-key`.
+#
+# Both paths result in LAKECTL_CREDENTIALS_* env vars on the init
+# container.
 #
 # `image` must ship `lakectl` on the PATH.  The default is the internal
 # `surogate-hub` image which also carries other operator tooling.
 platformSkillsAuth:
   endpoint: ""
+  accessKeyId: ""
+  secretAccessKey: ""
   credentialsSecretRef: ""
   image: "ghcr.io/invergent-ai/surogate-hub:latest"
 

@@ -19,6 +19,10 @@ spec:
     spec:
       serviceAccountName: {{ $fullname }}-api
       {{- if .Values.platformSkills }}
+      {{- if not (or .Values.platformSkillsAuth.accessKeyId .Values.platformSkillsAuth.credentialsSecretRef) }}
+      {{- fail "platformSkillsAuth: either accessKeyId (inline) or credentialsSecretRef (BYO) is required when platformSkills is non-empty" }}
+      {{- end }}
+      {{- $lakefsSecret := .Values.platformSkillsAuth.credentialsSecretRef | default (printf "%s-lakefs" $fullname) }}
       initContainers:
         # Download each platform skill from its lakeFS repository into
         # the shared emptyDir volume.  Runs to completion before the
@@ -40,21 +44,24 @@ spec:
               echo ">> Platform skills ready:"
               ls -la /skills
           env:
-            # All three variables are required by lakectl.  Surfacing them
-            # via `required` helpers so a misconfigured chart fails at
-            # `helm template` time instead of at pod-start with an
-            # opaque "authentication failed" from the lakeFS server.
+            # endpoint is surfaced via `required` so a misconfigured
+            # chart fails at `helm template` time instead of at pod-start
+            # with an opaque "authentication failed" from the lakeFS
+            # server.  Credentials resolve from either the inline Secret
+            # (rendered by secrets.yaml from platformSkillsAuth.accessKeyId
+            # / secretAccessKey) or a pre-existing BYO Secret named by
+            # platformSkillsAuth.credentialsSecretRef.
             - name: LAKECTL_SERVER_ENDPOINT_URL
               value: {{ required "platformSkillsAuth.endpoint is required when platformSkills is non-empty" .Values.platformSkillsAuth.endpoint | quote }}
             - name: LAKECTL_CREDENTIALS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
-                  name: {{ required "platformSkillsAuth.credentialsSecretRef is required when platformSkills is non-empty" .Values.platformSkillsAuth.credentialsSecretRef | quote }}
+                  name: {{ $lakefsSecret | quote }}
                   key: access-key-id
             - name: LAKECTL_CREDENTIALS_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ required "platformSkillsAuth.credentialsSecretRef is required when platformSkills is non-empty" .Values.platformSkillsAuth.credentialsSecretRef | quote }}
+                  name: {{ $lakefsSecret | quote }}
                   key: secret-access-key
           volumeMounts:
             - name: platform-skills
