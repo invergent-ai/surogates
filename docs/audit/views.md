@@ -19,6 +19,7 @@ query, because the view's column list stays fixed.
 | [`v_policy_denials`](#v_policy_denials) | `policy.denied` | Every denial with session context. |
 | [`v_expert_outcomes`](#v_expert_outcomes) | `expert.delegation` ⨝ `expert.result`/`.failure` ⨝ feedback | Expert invocations with outcome + user rating. |
 | [`v_response_feedback`](#v_response_feedback) | `llm.response` ⨝ `user.feedback` | Model turns with their thumbs. |
+| [`v_skill_trajectories`](#v_skill_trajectories) | `skill.invoked` ⨝ next trajectory boundary | Per-invocation labeled trajectories for bootstrapping new experts. |
 | [`v_session_messages`](#v_session_messages) | Chronological subset of `events` | Message-shaped events only (strips lifecycle). |
 | [`v_training_candidates`](#v_training_candidates) | `sessions` + aggregate flags | Per-session quality signals for training data selection. |
 
@@ -195,6 +196,54 @@ WHERE org_id = $1
   AND feedback_rating = 'down'
   AND feedback_at > now() - interval '7 days';
 ```
+
+---
+
+## `v_skill_trajectories`
+
+One row per `skill.invoked` event with the id range of its trajectory
+— the user's `/<skill> args` message, the `skill.invoked` marker, and
+the assistant turns + tool exchanges that answered it.  Feeds the
+**bootstrap path** for new experts: graduate a prompt-based skill into
+a fine-tuned SLM by distilling every labeled invocation of that skill.
+The skill is the class label.
+
+`trajectory_end_event_id` is the id of the first event that closes the
+trajectory — next `user.message`, next `skill.invoked`, or a session
+terminal event (`session.complete` / `session.fail`).  `NULL` means the
+trajectory runs to the end of the session's event stream (session
+still active, or answered-but-never-followed-up).
+
+| Column | Type |
+|---|---|
+| `skill_event_id` | bigint |
+| `session_id`, `org_id`, `user_id` | UUID |
+| `agent_id`, `skill` | text |
+| `raw_message` | text |
+| `staged_at` | text (nullable) |
+| `invoked_at` | timestamptz |
+| `trajectory_end_event_id` | bigint (nullable) |
+| `trajectory_end_type` | text (nullable) |
+
+```sql
+-- All trajectories of skill X that landed a full reply (not cut short
+-- by an immediate follow-up user message).  Drop tainted sessions.
+SELECT st.skill_event_id, st.session_id, st.raw_message
+FROM v_skill_trajectories st
+JOIN v_training_candidates tc USING (session_id)
+WHERE st.org_id = $1
+  AND st.skill = $2
+  AND NOT tc.had_policy_denial
+  AND NOT tc.had_crash
+  AND NOT tc.had_expert_override
+  AND tc.status = 'completed';
+```
+
+Prefer `TrainingDataCollector.collect_for_skill(...)` in
+[`surogates/jobs/training_collector.py`](../../surogates/jobs/training_collector.py)
+over hand-built SQL — it walks the trajectory for each row in this
+view, shapes the events into OpenAI fine-tuning JSONL
+(`{role, content, tool_calls?}`), and handles the quality filters.
 
 ---
 

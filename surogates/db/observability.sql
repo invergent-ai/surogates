@@ -294,6 +294,52 @@ WHERE e.type IN (
 
 
 -- ----------------------------------------------------------------------------
+-- v_skill_trajectories -- one row per skill.invoked event with the
+-- event-id range that makes up the user-ask -> assistant-answer
+-- trajectory.  Feeds the bootstrap path for new experts: graduate a
+-- prompt-based skill into a fine-tuned SLM by distilling the
+-- trajectories of its `/<skill> args` invocations.
+--
+-- ``trajectory_end_event_id`` is the id of the first event that closes
+-- the trajectory (next user.message, next skill.invoked, or a session
+-- terminal event).  ``NULL`` means the trajectory runs to the end of
+-- the session's event stream.  Trajectory content is the event range
+-- ``skill_event_id < id < COALESCE(trajectory_end_event_id, +inf)``.
+-- ----------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW v_skill_trajectories AS
+SELECT
+    si.id                              AS skill_event_id,
+    si.session_id,
+    si.org_id,
+    si.user_id,
+    s.agent_id,
+    si.data->>'skill'                  AS skill,
+    si.data->>'raw_message'            AS raw_message,
+    si.data->>'staged_at'              AS staged_at,
+    si.created_at                      AS invoked_at,
+    boundary.id                        AS trajectory_end_event_id,
+    boundary.type                      AS trajectory_end_type
+FROM events si
+JOIN sessions s ON s.id = si.session_id
+LEFT JOIN LATERAL (
+    SELECT b.id, b.type
+    FROM events b
+    WHERE b.session_id = si.session_id
+      AND b.id > si.id
+      AND b.type IN (
+          'user.message',
+          'skill.invoked',
+          'session.complete',
+          'session.fail'
+      )
+    ORDER BY b.id ASC
+    LIMIT 1
+) boundary ON true
+WHERE si.type = 'skill.invoked';
+
+
+-- ----------------------------------------------------------------------------
 -- v_response_feedback -- each llm.response joined with its user.feedback
 -- (if any).  Drives training-data selection for ordinary chat turns the
 -- same way v_expert_outcomes drives expert training.

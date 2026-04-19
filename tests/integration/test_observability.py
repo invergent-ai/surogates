@@ -841,3 +841,100 @@ async def test_training_candidates_thumbs_signals(
     assert by_id[up_sess.id]["had_response_thumbs_down"] is False
     assert by_id[down_sess.id]["had_response_thumbs_up"] is False
     assert by_id[down_sess.id]["had_response_thumbs_down"] is True
+
+
+# ---------------------------------------------------------------------------
+# v_skill_trajectories
+# ---------------------------------------------------------------------------
+
+
+async def test_skill_trajectories_projects_boundary(
+    session_store, session_factory,
+):
+    """Each skill.invoked row carries the id of the first closing event."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+    )
+
+    await session_store.emit_event(
+        session.id, EventType.USER_MESSAGE,
+        {"content": "/sql_writer find users"},
+    )
+    skill_id = await session_store.emit_event(
+        session.id, EventType.SKILL_INVOKED,
+        {"skill": "sql_writer",
+         "raw_message": "/sql_writer find users",
+         "staged_at": None},
+    )
+    # Assistant answer — inside the trajectory, NOT a boundary.
+    await session_store.emit_event(
+        session.id, EventType.LLM_RESPONSE,
+        {"message": {"role": "assistant", "content": "SELECT..."},
+         "model": "gpt-4o", "input_tokens": 1, "output_tokens": 1},
+    )
+    # Next user turn — this IS the boundary.
+    boundary_id = await session_store.emit_event(
+        session.id, EventType.USER_MESSAGE, {"content": "thanks"},
+    )
+
+    async with session_factory() as db:
+        row = (
+            await db.execute(
+                text(
+                    "SELECT skill_event_id, skill, raw_message, "
+                    "trajectory_end_event_id, trajectory_end_type "
+                    "FROM v_skill_trajectories WHERE session_id = :sid"
+                ),
+                {"sid": session.id},
+            )
+        ).mappings().one()
+
+    assert row["skill_event_id"] == skill_id
+    assert row["skill"] == "sql_writer"
+    assert row["raw_message"] == "/sql_writer find users"
+    assert row["trajectory_end_event_id"] == boundary_id
+    assert row["trajectory_end_type"] == "user.message"
+
+
+async def test_skill_trajectories_null_boundary_when_session_ongoing(
+    session_store, session_factory,
+):
+    """A skill invocation with no subsequent boundary event leaves end NULL."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+    )
+
+    await session_store.emit_event(
+        session.id, EventType.USER_MESSAGE,
+        {"content": "/sql_writer pending"},
+    )
+    await session_store.emit_event(
+        session.id, EventType.SKILL_INVOKED,
+        {"skill": "sql_writer",
+         "raw_message": "/sql_writer pending",
+         "staged_at": None},
+    )
+    # Only an assistant turn — no boundary event.
+    await session_store.emit_event(
+        session.id, EventType.LLM_RESPONSE,
+        {"message": {"role": "assistant", "content": "..."},
+         "model": "gpt-4o", "input_tokens": 1, "output_tokens": 1},
+    )
+
+    async with session_factory() as db:
+        row = (
+            await db.execute(
+                text(
+                    "SELECT trajectory_end_event_id, trajectory_end_type "
+                    "FROM v_skill_trajectories WHERE session_id = :sid"
+                ),
+                {"sid": session.id},
+            )
+        ).mappings().one()
+
+    assert row["trajectory_end_event_id"] is None
+    assert row["trajectory_end_type"] is None

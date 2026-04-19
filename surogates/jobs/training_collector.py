@@ -9,9 +9,12 @@ Sources of training data:
 
 1. **Expert delegations** -- successful ``consult_expert`` invocations
    (``expert.delegation`` followed by ``expert.result``, with no
-   subsequent ``expert.override`` in the session).
-2. **Base LLM trajectories** -- recurring task patterns that an admin
-   has tagged as distillation targets for a specific expert.
+   subsequent ``expert.override`` in the session).  Use this to
+   *improve* an existing expert.
+2. **Skill invocations** -- ``skill.invoked`` followed by the base
+   LLM's actual answer.  Use this to *bootstrap* a new expert from a
+   prompt-based skill that users are already invoking with
+   ``/<skill> args``.  The skill is the class label.
 """
 
 from __future__ import annotations
@@ -25,6 +28,23 @@ from uuid import UUID
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_skill_prefix(raw_message: str, skill_name: str) -> str:
+    """Remove the leading ``/<skill_name>`` from *raw_message*.
+
+    Returns the user's natural-language ask with the slash-command
+    stripped.  When the message does not start with the expected
+    prefix, returns it unchanged (callers may still get usable input
+    if the user pasted the skill elsewhere).  Empty result falls back
+    to the full raw message so the caller can still decide whether to
+    keep the trajectory.
+    """
+    prefix = f"/{skill_name}"
+    if raw_message.startswith(prefix):
+        rest = raw_message[len(prefix):].lstrip()
+        return rest or raw_message
+    return raw_message
 
 
 class TrainingExample:
@@ -244,6 +264,159 @@ class TrainingDataCollector:
                 return None
 
         return None
+
+    async def collect_for_skill(
+        self,
+        skill_name: str,
+        org_id: UUID,
+        *,
+        since: datetime | None = None,
+        exclude_tainted: bool = True,
+    ) -> list[TrainingExample]:
+        """Bootstrap-path: extract trajectories from ``skill.invoked`` events.
+
+        Graduates a prompt-based skill into a fine-tuned SLM (an
+        "expert") by walking every ``skill.invoked`` in *org_id* for
+        *skill_name*, collecting the base LLM's reply span (assistant
+        turns, tool calls, tool results) up to the next trajectory
+        boundary (next user message, next skill invocation, or session
+        terminal event).
+
+        Each invocation is its own class label — the user invoked
+        ``/<skill> args``, so the subsequent answer is by definition
+        "what the skill should do".  Use :meth:`collect_for_expert`
+        instead once the expert is active and the base LLM is
+        delegating to it.
+
+        Parameters
+        ----------
+        skill_name:
+            The skill to bootstrap.  The future expert will live at
+            ``shared/skills/<skill_name>/`` so the training data lands
+            in the same place (``training/``).
+        org_id:
+            The organisation UUID (scopes the query).
+        since:
+            Only include invocations recorded after this timestamp.
+            Defaults to all time.
+        exclude_tainted:
+            When True (default), sessions with ``policy.denied``,
+            ``harness.crash``, ``saga.compensate``, or
+            ``expert.override`` events are skipped entirely.
+        """
+        invocations = await self._session_store.find_skill_invocations(
+            org_id, skill_name, since=since,
+        )
+        if not invocations:
+            logger.info(
+                "No skill.invoked events for skill '%s' in org %s",
+                skill_name, org_id,
+            )
+            return []
+
+        # Group invocations by session so each session's events are
+        # loaded (and tainted-check runs) at most once.
+        by_session: dict[UUID, list[Any]] = {}
+        for inv in invocations:
+            by_session.setdefault(inv.session_id, []).append(inv)
+
+        examples: list[TrainingExample] = []
+        skipped_tainted = 0
+
+        for session_id, session_invocations in by_session.items():
+            if exclude_tainted:
+                if await self._session_store.session_has_taint(session_id):
+                    skipped_tainted += 1
+                    continue
+
+            events = await self._session_store.get_events(session_id)
+            events_by_id = {e.id: i for i, e in enumerate(events)}
+
+            for inv in session_invocations:
+                start_idx = events_by_id.get(inv.id)
+                if start_idx is None:
+                    continue
+                example = self._collect_skill_trajectory(
+                    events, start_idx, skill_name, session_id, inv,
+                )
+                if example is not None:
+                    examples.append(example)
+
+        logger.info(
+            "Collected %d training examples for skill '%s' "
+            "(%d invocations, %d tainted sessions skipped)",
+            len(examples), skill_name, len(invocations), skipped_tainted,
+        )
+        return examples
+
+    def _collect_skill_trajectory(
+        self,
+        events: list[Any],
+        start_idx: int,
+        skill_name: str,
+        session_id: UUID,
+        skill_event: Any,
+    ) -> TrainingExample | None:
+        """Walk events from a ``skill.invoked`` through its trajectory.
+
+        Returns a :class:`TrainingExample` when a complete trajectory
+        is found (at least one assistant response with content).  The
+        trajectory ends at the first of: next ``user.message``, next
+        ``skill.invoked``, ``session.complete`` or ``session.fail``.
+        """
+        raw_message = skill_event.data.get("raw_message", "")
+        user_text = _strip_skill_prefix(raw_message, skill_name)
+        if not user_text:
+            return None
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": user_text},
+        ]
+        has_final_assistant_content = False
+
+        for i in range(start_idx + 1, len(events)):
+            event = events[i]
+            etype = event.type
+
+            if etype in (
+                EventType.USER_MESSAGE.value,
+                EventType.SKILL_INVOKED.value,
+                EventType.SESSION_COMPLETE.value,
+                EventType.SESSION_FAIL.value,
+            ):
+                break  # trajectory boundary
+
+            if etype == EventType.LLM_RESPONSE.value:
+                msg = event.data.get("message")
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get("role") != "assistant":
+                    continue
+                # Copy the assistant message as-is; its ``tool_calls``
+                # (if any) are already in the OpenAI-compatible shape.
+                messages.append(dict(msg))
+                if msg.get("content"):
+                    has_final_assistant_content = True
+
+            elif etype == EventType.TOOL_RESULT.value:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": event.data.get("tool_call_id", ""),
+                    "content": str(event.data.get("content", ""))[:10_000],
+                })
+            # ``tool.call`` is intentionally skipped — the same tool
+            # call is already present inline on the preceding
+            # ``llm.response`` message's ``tool_calls`` field.
+
+        if not has_final_assistant_content:
+            return None
+
+        return TrainingExample(
+            messages=messages,
+            session_id=session_id,
+            expert_name=skill_name,
+            created_at=getattr(skill_event, "created_at", None),
+        )
 
     async def export_jsonl(
         self,

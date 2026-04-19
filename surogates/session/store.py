@@ -330,6 +330,57 @@ class SessionStore:
             row = result.scalar_one_or_none()
         return Event.model_validate(row) if row is not None else None
 
+    async def find_skill_invocations(
+        self,
+        org_id: UUID,
+        skill_name: str,
+        *,
+        since: datetime | None = None,
+    ) -> list[Event]:
+        """Return every ``skill.invoked`` event for *skill_name* in *org_id*.
+
+        Ordered by event id ascending.  Used by the training-data
+        collector's bootstrap path — each invocation is a labeled
+        trajectory: "what the base LLM does when this skill fires."
+        Filters via the ``events.org_id`` denormalized column so the
+        query never joins ``sessions``.
+        """
+        stmt = (
+            select(EventRow)
+            .where(
+                EventRow.org_id == org_id,
+                EventRow.type == EventType.SKILL_INVOKED.value,
+                EventRow.data["skill"].astext == skill_name,
+            )
+            .order_by(EventRow.id.asc())
+        )
+        if since is not None:
+            stmt = stmt.where(EventRow.created_at >= since)
+        async with self._sf() as db:
+            result = await db.execute(stmt)
+            rows = result.scalars().all()
+        return [Event.model_validate(r) for r in rows]
+
+    async def session_has_taint(self, session_id: UUID) -> bool:
+        """True if the session has any quality-taint event.
+
+        Matches the taint flags in ``v_training_candidates``:
+        ``policy.denied``, ``harness.crash``, ``saga.compensate``, or
+        ``expert.override``.  The training-data collector skips tainted
+        sessions when ``exclude_tainted=True``.
+        """
+        stmt = text(
+            "SELECT EXISTS ("
+            "  SELECT 1 FROM events"
+            "  WHERE session_id = :sid"
+            "    AND type IN ('policy.denied', 'harness.crash', "
+            "                 'saga.compensate', 'expert.override')"
+            ")"
+        )
+        async with self._sf() as db:
+            result = await db.execute(stmt, {"sid": session_id})
+            return bool(result.scalar())
+
     async def find_user_feedback_on_event(
         self,
         session_id: UUID,

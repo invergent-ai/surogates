@@ -215,8 +215,12 @@ curl "http://localhost:8000/v1/skills/sql_writer/file?path=training/dataset_2026
 
 ### Training Data Sources
 
-1. **Successful `consult_expert` invocations**: sessions where the expert completed its task and the user did not override or redo the work.
-2. **Base LLM trajectories**: Recurring patterns that an admin has marked as distillation targets.
+The collector has two modes — pick based on whether the expert already exists.
+
+1. **Bootstrap (`collect_for_skill`)**: walks `skill.invoked` events.  Each `/<skill> args` a user has typed is a labeled trajectory — the skill name is the class label — so the base LLM's reply span becomes a training example.  Use this to **graduate** a prompt-based skill into a fine-tuned SLM.  Requires only that the skill has been invoked a few dozen times by real users.
+2. **Improve (`collect_for_expert`)**: walks `expert.delegation` → tool calls → `expert.result` chains.  Only usable once the expert is active and the base LLM is actually delegating to it via `consult_expert`.  Use this to **improve** an existing expert on the tasks it's already handling.
+
+Both modes filter tainted sessions by default (skip sessions with `policy.denied`, `harness.crash`, `saga.compensate`, or `expert.override`).  See [`v_skill_trajectories`](../audit/views.md#v_skill_trajectories) and [`v_expert_outcomes`](../audit/views.md#v_expert_outcomes) for the SQL views each mode reads.
 
 ### Export Format
 
