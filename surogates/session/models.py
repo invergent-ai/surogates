@@ -20,7 +20,9 @@ class Session(BaseModel):
     model_config = {"from_attributes": True}
 
     id: UUID
-    user_id: UUID
+    # Null when the session is owned by a service account (channel="api").
+    user_id: UUID | None = None
+    service_account_id: UUID | None = None
     org_id: UUID
     agent_id: str
     channel: str
@@ -28,6 +30,7 @@ class Session(BaseModel):
     title: str | None = None
     model: str | None = None
     config: dict = Field(default_factory=dict)
+    idempotency_key: str | None = None
     parent_id: UUID | None = None
     message_count: int = 0
     tool_call_count: int = 0

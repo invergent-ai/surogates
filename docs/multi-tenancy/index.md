@@ -8,13 +8,16 @@ Surogates is multi-tenant from the ground up. Every request is scoped to an orga
 Org (organization)
  |
  +-- Users
- |    +-- Channel Identities (Slack user, web login)
+ |    +-- Channel Identities (Slack user, Telegram user, web login)
  |    +-- Sessions
  |    +-- Skills (user-scoped)
  |    +-- Memory (user-scoped)
  |
+ +-- Service Accounts (API-channel API keys, no user identity)
+ |    +-- Sessions (channel="api")
+ |
  +-- Skills (org-wide)
- +-- Memory (org-wide)
+ +-- Memory (org-wide; also used by API-channel sessions)
  +-- MCP Servers
  +-- Credentials (API keys, tokens)
  +-- Config (auth provider, model defaults, limits)
@@ -63,8 +66,30 @@ Surogates issues its own JWTs regardless of the upstream auth provider. The flow
 **Access tokens** are short-lived (default 30 minutes, HS256).
 **Refresh tokens** are long-lived (default 24 hours).
 **Sandbox tokens** are session-scoped (1 hour, used for S3 access only).
+**Service-account session tokens** are session-scoped JWTs minted by the worker for API-channel sessions (default 1 year); carry `service_account_id` + `session_id`, no user identity.
 
-Each token carries the org ID, user ID, permissions, token type, and expiry timestamp.
+Each token carries the org ID, permissions, token type, and expiry timestamp.
+
+## Service Accounts (Programmatic Access)
+
+Interactive users sign in with a JWT. Non-interactive clients -- synthetic-data pipelines, batch jobs, scheduled workloads -- authenticate with an **org-scoped service-account token** instead. Tokens have the prefix `surg_sk_` and are issued by an admin:
+
+```
+POST /v1/admin/service-accounts
+Authorization: Bearer <admin-jwt>
+
+{"org_id": "00000000-...", "name": "dataset-gen-v1"}
+```
+
+The raw token is returned **once** in the response; only a SHA-256 hash is persisted, so the plaintext is not recoverable. Tokens are long-lived until revoked via `DELETE /v1/admin/service-accounts/{id}`.
+
+**Path restriction.** Service-account tokens may only authenticate requests under `/v1/api/*`. Presenting one anywhere else yields 403. Conversely, the `/v1/api/*` routes reject interactive JWTs, so the two principal types stay cleanly separated.
+
+**Revocation.** Revoking an SA invalidates every outstanding token. The auth layer caches resolutions for 60 seconds, so the process that performed the revoke applies it immediately while peer processes converge within the cache TTL.
+
+**No permissions.** SA tokens carry no `admin`/`sessions:*` permissions; access is scoped entirely by org membership and the `/v1/api/*` path prefix.
+
+See [Channels / API](../channels/api.md) for the submission endpoints and [Appendix B](../appendices/api-reference.md) for the admin CRUD.
 
 ## Tenant Context
 

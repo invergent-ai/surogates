@@ -73,13 +73,15 @@ class SessionStore:
         self,
         *,
         session_id: UUID | None = None,
-        user_id: UUID,
+        user_id: UUID | None,
         org_id: UUID,
         agent_id: str,
         channel: str = "web",
         model: str | None = None,
         config: dict | None = None,
         parent_id: UUID | None = None,
+        service_account_id: UUID | None = None,
+        idempotency_key: str | None = None,
     ) -> Session:
         """Create a new session and return its Pydantic representation.
 
@@ -89,6 +91,15 @@ class SessionStore:
         *agent_id* identifies the agent this session belongs to (the agent
         is the server-side identity this worker instance serves, sourced
         from ``Settings.agent_id``).
+
+        Exactly one of *user_id* or *service_account_id* should be set —
+        the first for interactive users, the second for service-account
+        (``channel="api"``) sessions.  Callers are responsible for
+        maintaining that invariant; the store does not enforce it.
+
+        *idempotency_key* is optional; when supplied, a unique-constraint
+        violation on ``(org_id, idempotency_key)`` lets callers detect
+        retries of the same logical request.
         """
         row = SessionRow(
             id=session_id or uuid.uuid4(),
@@ -100,6 +111,8 @@ class SessionStore:
             model=model,
             config=config or {},
             parent_id=parent_id,
+            service_account_id=service_account_id,
+            idempotency_key=idempotency_key,
         )
         async with self._sf() as db:
             db.add(row)
@@ -107,6 +120,28 @@ class SessionStore:
             db.add(SessionCursor(session_id=row.id, harness_cursor=0))
             await db.commit()
             await db.refresh(row)
+        return Session.model_validate(row)
+
+    async def get_session_by_idempotency_key(
+        self,
+        org_id: UUID,
+        idempotency_key: str,
+    ) -> Session | None:
+        """Return the existing session for *(org_id, idempotency_key)*, if any.
+
+        Used by the fire-and-forget prompt API to short-circuit retries
+        without creating duplicate sessions.
+        """
+        async with self._sf() as db:
+            result = await db.execute(
+                select(SessionRow).where(
+                    SessionRow.org_id == org_id,
+                    SessionRow.idempotency_key == idempotency_key,
+                )
+            )
+            row = result.scalar_one_or_none()
+        if row is None:
+            return None
         return Session.model_validate(row)
 
     async def get_session(self, session_id: UUID) -> Session:
@@ -381,35 +416,51 @@ class SessionStore:
             result = await db.execute(stmt, {"sid": session_id})
             return bool(result.scalar())
 
-    async def find_user_feedback_on_event(
+    async def find_feedback_on_event(
         self,
         session_id: UUID,
         target_event_id: int,
-        user_id: UUID,
+        *,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
     ) -> Event | None:
-        """Return an existing feedback event emitted by ``user_id`` on
-        ``target_event_id`` for this session.
+        """Return an existing feedback event emitted by the given principal
+        on ``target_event_id`` for this session.
+
+        Exactly one of ``user_id`` or ``service_account_id`` must be set
+        — the first for human raters (web / Slack feedback), the second
+        for automated judges submitting through the API channel.
 
         Covers all three feedback event types — ``EXPERT_ENDORSE``,
-        ``EXPERT_OVERRIDE`` and ``USER_FEEDBACK`` — so the feedback
-        endpoint enforces per-user idempotency regardless of what kind
-        of assistant turn is being rated.  Matching uses JSONB text
-        extraction on ``data->>'target_event_id'`` so it benefits from a
-        B-tree index on ``(session_id, type, (data->>'target_event_id'),
-        (data->>'rated_by_user_id'))``.
+        ``EXPERT_OVERRIDE`` and ``USER_FEEDBACK`` — so the endpoint
+        enforces per-principal idempotency regardless of what kind of
+        assistant turn is being rated.
         """
         feedback_types = [
             EventType.EXPERT_ENDORSE.value,
             EventType.EXPERT_OVERRIDE.value,
             EventType.USER_FEEDBACK.value,
         ]
+        if user_id is not None:
+            principal_clause = (
+                EventRow.data["rated_by_user_id"].astext == str(user_id)
+            )
+        elif service_account_id is not None:
+            principal_clause = (
+                EventRow.data["rated_by_service_account_id"].astext
+                == str(service_account_id)
+            )
+        else:
+            raise ValueError(
+                "find_feedback_on_event requires user_id or service_account_id"
+            )
         stmt = (
             select(EventRow)
             .where(
                 EventRow.session_id == session_id,
                 EventRow.type.in_(feedback_types),
                 EventRow.data["target_event_id"].astext == str(target_event_id),
-                EventRow.data["rated_by_user_id"].astext == str(user_id),
+                principal_clause,
             )
             .limit(1)
         )

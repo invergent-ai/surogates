@@ -157,7 +157,7 @@ class TestMemoryPrefetchPaths:
         user_id = UUID("22222222-2222-2222-2222-222222222222")
 
         # Create user memory
-        user_mem_dir = tmp_path / f"users/{user_id}/memories"
+        user_mem_dir = tmp_path / f"users/{user_id}/memory"
         user_mem_dir.mkdir(parents=True)
         (user_mem_dir / "MEMORY.md").write_text("User memory content")
 
@@ -165,8 +165,8 @@ class TestMemoryPrefetchPaths:
         from pathlib import Path
 
         for subdir in (
-            f"users/{user_id}/memories",
-            "shared/memories",
+            f"users/{user_id}/memory",
+            "shared/memory",
         ):
             memory_path = Path(tmp_path) / subdir / "MEMORY.md"
             if memory_path.is_file():
@@ -183,7 +183,7 @@ class TestMemoryPrefetchPaths:
         user_id = UUID("22222222-2222-2222-2222-222222222222")
 
         # Only shared memory exists
-        shared_dir = tmp_path / "shared/memories"
+        shared_dir = tmp_path / "shared/memory"
         shared_dir.mkdir(parents=True)
         (shared_dir / "MEMORY.md").write_text("Shared memory")
 
@@ -191,8 +191,8 @@ class TestMemoryPrefetchPaths:
 
         content = None
         for subdir in (
-            f"users/{user_id}/memories",
-            "shared/memories",
+            f"users/{user_id}/memory",
+            "shared/memory",
         ):
             memory_path = Path(tmp_path) / subdir / "MEMORY.md"
             if memory_path.is_file():
@@ -210,8 +210,8 @@ class TestMemoryPrefetchPaths:
 
         content = None
         for subdir in (
-            f"users/{user_id}/memories",
-            "shared/memories",
+            f"users/{user_id}/memory",
+            "shared/memory",
         ):
             memory_path = Path(tmp_path) / subdir / "MEMORY.md"
             if memory_path.is_file():

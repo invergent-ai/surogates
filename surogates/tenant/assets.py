@@ -1,16 +1,16 @@
-"""Ttenant asset directory manager.
+"""Tenant asset directory manager.
 
 Every organisation (and optionally each user within it) gets an isolated
-directory tree for memories, skills, MCP configs, and tools.  This module
+directory tree for memory, skills, MCP configs, and tools.  This module
 creates and resolves those paths.
 
 Directory layout under ``base_path``::
 
-    {base}/{org_id}/shared/memories/
+    {base}/{org_id}/shared/memory/
     {base}/{org_id}/shared/skills/
     {base}/{org_id}/shared/mcp/
     {base}/{org_id}/shared/tools/
-    {base}/{org_id}/users/{user_id}/memories/
+    {base}/{org_id}/users/{user_id}/memory/
     {base}/{org_id}/users/{user_id}/skills/
     {base}/{org_id}/users/{user_id}/mcp/
     {base}/{org_id}/users/{user_id}/tools/
@@ -24,7 +24,7 @@ from uuid import UUID
 
 __all__ = ["TenantAssetManager"]
 
-_SUBDIRS = ("memories", "skills", "mcp", "tools")
+_SUBDIRS = ("memory", "skills", "mcp", "tools")
 
 
 class TenantAssetManager:
@@ -70,9 +70,9 @@ class TenantAssetManager:
     # ------------------------------------------------------------------
 
     def memory_dir(self, org_id: UUID, user_id: UUID) -> str:
-        """Return the user-scoped memories directory."""
+        """Return the user-scoped memory directory."""
         return str(
-            self._base / str(org_id) / "users" / str(user_id) / "memories"
+            self._base / str(org_id) / "users" / str(user_id) / "memory"
         )
 
     def skills_dir(self, org_id: UUID, user_id: UUID | None = None) -> str:

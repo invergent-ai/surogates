@@ -69,6 +69,9 @@ class Org(Base):
     mcp_servers: Mapped[list[McpServer]] = relationship(
         back_populates="org", lazy="raise"
     )
+    service_accounts: Mapped[list[ServiceAccount]] = relationship(
+        back_populates="org", lazy="raise"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -159,13 +162,30 @@ class Session(Base):
         Index("idx_sessions_user", "user_id"),
         Index("idx_sessions_org", "org_id"),
         Index("idx_sessions_agent", "agent_id"),
+        Index("idx_sessions_service_account", "service_account_id"),
+        # Partial unique index: each (org, idempotency_key) is unique when
+        # the key is present.  Supports fire-and-forget `POST /v1/api/prompts`
+        # retries by making a duplicate insert fail fast with IntegrityError.
+        Index(
+            "uq_sessions_idempotency",
+            "org_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    # Nullable: API-channel sessions are owned by a service account, not a user.
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    service_account_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("service_accounts.id"),
+        nullable=True,
     )
     org_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
@@ -182,6 +202,7 @@ class Session(Base):
     config: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default="{}"
     )
+    idempotency_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     parent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=True
     )
@@ -208,8 +229,13 @@ class Session(Base):
     )
 
     # Relationships
-    user: Mapped[User] = relationship(back_populates="sessions", lazy="raise")
+    user: Mapped[Optional[User]] = relationship(
+        back_populates="sessions", lazy="raise"
+    )
     org: Mapped[Org] = relationship(back_populates="sessions", lazy="raise")
+    service_account: Mapped[Optional[ServiceAccount]] = relationship(
+        back_populates="sessions", lazy="raise"
+    )
     parent: Mapped[Optional[Session]] = relationship(
         remote_side=[id], lazy="raise"
     )
@@ -394,6 +420,51 @@ class DeliveryCursor(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+# ---------------------------------------------------------------------------
+# Service Accounts
+# ---------------------------------------------------------------------------
+
+
+class ServiceAccount(Base):
+    """Org-scoped API key for programmatic access.
+
+    Synthetic data pipelines and other non-interactive clients authenticate
+    with a bearer token issued from this table.  The raw token is returned
+    once on creation and only a SHA-256 hash is persisted.
+    """
+
+    __tablename__ = "service_accounts"
+    __table_args__ = (
+        Index("idx_service_accounts_org", "org_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    # SHA-256 hex digest of the raw token.  Unique so token lookups are
+    # constant-time regardless of how many service accounts exist.
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # First characters of the token for display (e.g. ``surg_sk_abcd…``).
+    token_prefix: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now()
+    )
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+
+    # Relationships
+    org: Mapped[Org] = relationship(
+        back_populates="service_accounts", lazy="raise"
+    )
+    sessions: Mapped[list[Session]] = relationship(
+        back_populates="service_account", lazy="raise"
     )
 
 

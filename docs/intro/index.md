@@ -2,7 +2,7 @@
 
 ## What is Surogates?
 
-Surogates is a multi-tenant, Kubernetes-native platform for running managed AI agents at scale. It provides the infrastructure for long-horizon agents to operate on behalf of users through messaging channels -- a custom web chat UI and Slack.
+Surogates is a multi-tenant, Kubernetes-native platform for running managed AI agents at scale. It provides the infrastructure for long-horizon agents to operate on behalf of users through channels -- a custom web chat UI, Slack, Telegram, and a programmatic API channel for non-interactive workloads (synthetic-data pipelines, batch jobs).
 
 The platform targets enterprise deployments of thousands of users, combining:
 
@@ -51,7 +51,7 @@ Each component can fail or be replaced independently. The session log (an append
 
 ### Channels-Only
 
-There is no CLI, no TUI, no local agent. All user interaction happens through channels. The web chat UI is a browser-based SPA that talks to the REST API. Slack uses an adapter process that normalizes platform events into the internal API. Channels are first-class, not an afterthought.
+There is no CLI, no TUI, no local agent. All interaction happens through channels. The web chat UI is a browser-based SPA that talks to the REST API. Slack and Telegram use adapter processes that normalize platform events into the internal API. The [API channel](../channels/api.md) is the programmatic equivalent for non-interactive clients -- synthetic-data pipelines submit prompts via `POST /v1/api/prompts` with a service-account token and read results back from the database. Channels are first-class, not an afterthought.
 
 ### Kubernetes-Native
 

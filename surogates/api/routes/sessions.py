@@ -85,7 +85,15 @@ async def _get_session_for_tenant(
     session_id: UUID,
     tenant: TenantContext,
 ) -> Session:
-    """Fetch a session and verify it belongs to the tenant's org and this agent."""
+    """Fetch a session and verify it belongs to the tenant's org and this agent.
+
+    Also enforces session-scoped JWTs (the worker-minted
+    ``service_account_session`` token type) — such a context may only
+    touch the one session its token was minted for.  All failure
+    modes — missing, wrong org, wrong agent, cross-session — collapse
+    into the same 404 so callers cannot probe session existence across
+    scopes.
+    """
     store = _get_session_store(request)
     try:
         session = await store.get_session(session_id)
@@ -96,7 +104,9 @@ async def _get_session_for_tenant(
         )
 
     agent_id = request.app.state.settings.agent_id
-    if session.org_id != tenant.org_id or session.agent_id != agent_id:
+    if session.agent_id != agent_id or not tenant.owns_session(
+        session.org_id, session_id
+    ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",

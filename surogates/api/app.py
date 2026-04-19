@@ -122,11 +122,13 @@ def create_app() -> FastAPI:
         admin,
         admin_credentials,
         admin_mcp,
+        admin_service_accounts,
         auth,
         events,
         feedback,
         health,
         memory,
+        prompts,
         sessions,
         skills,
         tools,
@@ -139,14 +141,21 @@ def create_app() -> FastAPI:
     app.include_router(sessions.router, prefix="/v1", tags=["sessions"])
     app.include_router(events.router, prefix="/v1", tags=["events"])
     app.include_router(feedback.router, prefix="/v1", tags=["feedback"])
+    # Service-account feedback (automated judges from the API channel)
+    # reaches the same handler through the SA-token path prefix.
+    app.include_router(feedback.router, prefix="/v1/api", tags=["feedback"])
     app.include_router(tools.router, prefix="/v1", tags=["tools"])
     app.include_router(skills.router, prefix="/v1", tags=["skills"])
     app.include_router(memory.router, prefix="/v1", tags=["memory"])
+    app.include_router(prompts.router, prefix="/v1", tags=["prompts"])
     app.include_router(transparency.router, prefix="/v1", tags=["transparency"])
     app.include_router(workspace.router, prefix="/v1", tags=["workspace"])
     app.include_router(admin.router, prefix="/v1/admin", tags=["admin"])
     app.include_router(admin_mcp.router, prefix="/v1/admin", tags=["admin"])
     app.include_router(admin_credentials.router, prefix="/v1/admin", tags=["admin"])
+    app.include_router(
+        admin_service_accounts.router, prefix="/v1/admin", tags=["admin"]
+    )
 
     # --- frontend SPA ----------------------------------------------------
     # The catch-all route must be registered LAST so it does not shadow

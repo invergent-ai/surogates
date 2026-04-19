@@ -160,6 +160,11 @@ The training collector extracts successful conversation trajectories from the ev
 4. Write to tenant-{org_id}/shared/skills/{expert}/training/
 ```
 
+Sessions from every channel (web, Slack, Telegram, API) are considered
+training candidates.  Synthetic-data pipelines that submit prompts via
+`POST /v1/api/prompts` feed successful trajectories back into expert
+fine-tuning exactly like human-driven sessions.
+
 ### Usage
 
 ```bash

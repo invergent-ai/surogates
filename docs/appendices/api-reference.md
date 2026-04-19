@@ -4,7 +4,10 @@ The REST API serves two roles: the web channel interface (browser SPA talks dire
 
 Base URL: `/v1`
 
-All endpoints require JWT authentication unless noted otherwise. The JWT is sent as `Authorization: Bearer <token>`.
+All endpoints require authentication unless noted otherwise. Two token types are accepted:
+
+- **JWT access tokens** (`Authorization: Bearer eyJ...`) -- for interactive users. Required on everything except `/v1/api/*`.
+- **Service-account tokens** (`Authorization: Bearer surg_sk_...`) -- for programmatic clients. Accepted **only** on `/v1/api/*`; refused elsewhere. See [Service-Account Admin CRUD](#service-accounts-admin).
 
 ## Auth Endpoints
 
@@ -323,6 +326,112 @@ Add an MCP server configuration.
 
 Remove an MCP server.
 
+## Feedback (API Channel)
+
+Service-account clients — typically an automated judge grading pipeline
+output — record feedback against an `llm.response` or `expert.result`
+event through the same handler that serves the web UI, mounted under
+the `/v1/api/*` prefix so SA tokens can reach it.
+
+### `POST /v1/api/sessions/{session_id}/events/{event_id}/feedback`
+
+**Request:**
+```json
+{
+  "rating": "up",
+  "score": 0.87,
+  "criteria": {"correctness": 0.9, "relevance": 0.85},
+  "rationale": "Matches the reference; arithmetic is correct."
+}
+```
+
+- `rating` (required, `"up"` or `"down"`) — binary bucket used by
+  training-data selectors.
+- `score` (optional, `0.0-1.0`) — numeric grade when the principal is a
+  judge; ignored by bucket-oriented selectors.
+- `criteria` (optional dict of string → float) — per-axis grades.
+- `rationale` (optional, max 10,000 chars) — free-form text the judge
+  produced.
+- `reason` (optional, max 500 chars) — the shorter, human-UI-friendly
+  explanation; interchangeable with `rationale` on the server side.
+
+**Response (201):**
+```json
+{
+  "event_id": 42,
+  "event_type": "user.feedback",
+  "source": "judge"
+}
+```
+
+`source` is `"judge"` when the caller presented a service-account token
+and `"user"` when the caller presented an interactive JWT.  Stored on
+the event's JSONB payload so downstream training-data selection and
+dashboards can weight the two independently.
+
+**Idempotency.** Dedupe is keyed on `(session_id, event_id, principal)`
+where `principal` is the caller's `user_id` for JWT callers and
+`service_account_id` for SA callers.  A retry from the same principal
+returns the original feedback event unchanged; feedback from a user
+and from a judge on the same turn coexist as two independent events.
+
+## Prompts (API Channel)
+
+Fire-and-forget prompt submission for non-interactive clients. Requires a service-account token. Results are read back from the `events` table by `session_id`. See [Channels / API](../channels/api.md) for the end-to-end pipeline workflow.
+
+### `POST /v1/api/prompts`
+
+Submit a single prompt.
+
+**Request:**
+```json
+{
+  "prompt": "Write a haiku about distributed systems.",
+  "idempotency_key": "dataset-42/row-1337",
+  "metadata": {"dataset_id": "ds_123", "row_index": 1337}
+}
+```
+
+- `prompt` (required, max 200,000 chars).
+- `idempotency_key` (optional, max 200 chars) -- two submissions with the same key + org resolve to the same session; the second returns `deduplicated: true` and enqueues no new work.
+- `metadata` (optional dict) -- stored on `sessions.config['pipeline_metadata']`; the pipeline joins results back to its dataset via this field.
+
+**Response (202):**
+```json
+{
+  "session_id": "8f...",
+  "event_id": 42,
+  "deduplicated": false,
+  "error": null
+}
+```
+
+### `POST /v1/api/prompts:batch`
+
+Submit up to 100 prompts in one round-trip. Each entry is processed independently; partial failures surface per-slot, not as a whole-request 500 (unless every entry fails).
+
+**Request:**
+```json
+{
+  "prompts": [
+    {"prompt": "...", "idempotency_key": "row-1"},
+    {"prompt": "...", "idempotency_key": "row-2"}
+  ]
+}
+```
+
+**Response (202):**
+```json
+{
+  "results": [
+    {"session_id": "...", "event_id": 1, "deduplicated": false, "error": null},
+    {"session_id": "...", "event_id": 2, "deduplicated": true, "error": null}
+  ]
+}
+```
+
+Input order is preserved so the caller can zip results back to its input rows.
+
 ## Admin
 
 These endpoints require admin permissions.
@@ -346,6 +455,43 @@ Create a user in an organization.
 ### `POST /v1/admin/orgs/{id}/channels/slack`
 
 Install the Slack bot for an organization.
+
+### Service Accounts (Admin) {#service-accounts-admin}
+
+Issue and revoke service-account tokens that authenticate the API channel. All endpoints require the `admin` permission. Tokens have the prefix `surg_sk_`; the raw value is returned once on creation and is not recoverable.
+
+#### `POST /v1/admin/service-accounts`
+
+Issue a new token.
+
+**Request:**
+```json
+{"org_id": "00000000-...", "name": "dataset-gen-v1"}
+```
+
+**Response (201):**
+```json
+{
+  "id": "uuid",
+  "org_id": "00000000-...",
+  "name": "dataset-gen-v1",
+  "token_prefix": "surg_sk_abcd1234",
+  "created_at": "2025-01-01T00:00:00Z",
+  "last_used_at": null,
+  "revoked_at": null,
+  "token": "surg_sk_<44 chars>"
+}
+```
+
+Store the `token` immediately -- only the `token_prefix` is persisted afterwards.
+
+#### `GET /v1/admin/service-accounts?org_id={id}`
+
+List service accounts for an org. `token` is never returned.
+
+#### `DELETE /v1/admin/service-accounts/{id}`
+
+Revoke a service account. Immediate in the revoking process; peer API/worker processes converge within 60 seconds (the in-memory auth cache's TTL). A second delete on the same id returns 404.
 
 ## Health and Metrics
 

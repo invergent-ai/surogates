@@ -196,7 +196,6 @@ async def run_worker(settings: Settings) -> None:
                 f"this worker serves agent {configured_agent_id!r}"
             )
 
-        # Load org + user from DB.
         from sqlalchemy import select as sa_select
         from surogates.db.models import Org, User
 
@@ -204,9 +203,12 @@ async def run_worker(settings: Settings) -> None:
             org_row = (await db.execute(
                 sa_select(Org).where(Org.id == configured_org_id)
             )).scalar_one_or_none()
-            user_row = (await db.execute(
-                sa_select(User).where(User.id == session.user_id)
-            )).scalar_one_or_none()
+            if session.user_id is not None:
+                user_row = (await db.execute(
+                    sa_select(User).where(User.id == session.user_id)
+                )).scalar_one_or_none()
+            else:
+                user_row = None
 
         tenant = TenantContext(
             org_id=configured_org_id,
@@ -215,17 +217,26 @@ async def run_worker(settings: Settings) -> None:
             user_preferences=user_row.preferences if user_row else {},
             permissions=frozenset(),
             asset_root=f"{settings.tenant_assets_root}/{configured_org_id}",
+            service_account_id=session.service_account_id,
         )
 
         model_id = settings.llm.model or "gpt-4o"
         budget = IterationBudget(max_total=90)
         compressor = ContextCompressor(model_id)
 
-        # Create MemoryStore + MemoryManager.
+        # User-scoped memory dir for interactive sessions, org-shared
+        # memory dir for service-account sessions (no per-user context
+        # to carry forward).
         from pathlib import Path
-        memory_dir = (
-            Path(tenant.asset_root) / "users" / str(session.user_id) / "memories"
-        )
+        if session.user_id is not None:
+            memory_dir = (
+                Path(tenant.asset_root)
+                / "users"
+                / str(session.user_id)
+                / "memory"
+            )
+        else:
+            memory_dir = Path(tenant.asset_root) / "shared" / "memory"
         memory_store = MemoryStore(memory_dir=memory_dir)
         memory_manager = MemoryManager(memory_store)
 
@@ -233,19 +244,41 @@ async def run_worker(settings: Settings) -> None:
             tenant, memory_manager=memory_manager, session=session,
         )
 
-        # Create API client for harness tools when enabled.
+        # Interactive sessions get a regular user access token;
+        # service-account sessions get a short-lived session-scoped SA
+        # token so the harness can reach /v1/skills and /v1/memory on
+        # their behalf.
         harness_api_client = None
         if settings.worker.use_api_for_harness_tools:
             from surogates.harness.api_client import HarnessAPIClient
-            # Use the session user's JWT token for authentication.
-            # In production, the orchestrator would issue a session-scoped
-            # token.  For now, reuse the worker's own credentials.
-            from surogates.tenant.auth.jwt import create_access_token
-            token = create_access_token(
-                org_id=tenant.org_id,
-                user_id=tenant.user_id,
-                permissions=set(tenant.permissions) or {"sessions:read", "sessions:write", "tools:read"},
+            from surogates.tenant.auth.jwt import (
+                create_access_token,
+                create_service_account_session_token,
             )
+
+            if tenant.user_id is not None:
+                token = create_access_token(
+                    org_id=tenant.org_id,
+                    user_id=tenant.user_id,
+                    permissions=set(tenant.permissions) or {
+                        "sessions:read", "sessions:write", "tools:read",
+                    },
+                )
+            elif session.service_account_id is not None:
+                token = create_service_account_session_token(
+                    org_id=tenant.org_id,
+                    service_account_id=session.service_account_id,
+                    session_id=session.id,
+                )
+            else:
+                # Session has neither user_id nor service_account_id —
+                # create_session enforces the invariant that one is set,
+                # so this branch is unreachable in normal operation.
+                raise RuntimeError(
+                    f"session {session.id} has no principal; "
+                    "cannot mint harness API token"
+                )
+
             harness_api_client = HarnessAPIClient(
                 base_url=settings.worker.api_base_url,
                 token=token,

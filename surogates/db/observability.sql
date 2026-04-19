@@ -32,6 +32,68 @@ CREATE INDEX IF NOT EXISTS idx_events_audit_user_time
 CREATE INDEX IF NOT EXISTS idx_events_session_type
     ON events (session_id, type);
 
+-- Backing index for ``SessionStore.find_feedback_on_event`` — the
+-- feedback dedupe query filters on (session_id, type, target_event_id,
+-- and either rated_by_user_id or rated_by_service_account_id).  Without
+-- this expression index the query re-evaluates ``data->>`` on every row
+-- of (session_id, type), which turns into a hot-path seq-scan once a
+-- judge starts grading pipeline output at steady state.
+CREATE INDEX IF NOT EXISTS idx_events_feedback_dedupe
+    ON events (
+        session_id,
+        type,
+        (data->>'target_event_id'),
+        (data->>'rated_by_user_id'),
+        (data->>'rated_by_service_account_id')
+    )
+    WHERE type IN ('user.feedback', 'expert.endorse', 'expert.override');
+
+
+-- ----------------------------------------------------------------------------
+-- Service accounts — API-channel auth (programmatic clients).
+--
+-- ``Base.metadata.create_all`` creates this table on fresh databases.  The
+-- CREATE here is the retrofit for existing deployments that pre-date the
+-- table.  ``IF NOT EXISTS`` makes both paths a no-op after the first run.
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS service_accounts (
+    id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id        uuid NOT NULL REFERENCES orgs(id),
+    name          text NOT NULL,
+    token_hash    text NOT NULL UNIQUE,
+    token_prefix  text NOT NULL,
+    created_at    timestamp NOT NULL DEFAULT now(),
+    last_used_at  timestamp,
+    revoked_at    timestamp
+);
+
+CREATE INDEX IF NOT EXISTS idx_service_accounts_org
+    ON service_accounts (org_id);
+
+
+-- ----------------------------------------------------------------------------
+-- Sessions — retrofits for the API channel.
+--
+-- ``user_id`` becomes nullable (API-channel sessions are owned by a service
+-- account, not a user).  ``service_account_id`` points at the owning SA
+-- when set.  ``idempotency_key`` lets the fire-and-forget
+-- ``POST /v1/api/prompts`` endpoint dedupe retries via a partial unique
+-- index.  Each statement is guarded so re-running the DDL is a no-op.
+-- ----------------------------------------------------------------------------
+
+ALTER TABLE sessions
+    ALTER COLUMN user_id DROP NOT NULL,
+    ADD COLUMN IF NOT EXISTS service_account_id uuid REFERENCES service_accounts(id),
+    ADD COLUMN IF NOT EXISTS idempotency_key    text;
+
+CREATE INDEX IF NOT EXISTS idx_sessions_service_account
+    ON sessions (service_account_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_idempotency
+    ON sessions (org_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+
 
 -- ----------------------------------------------------------------------------
 -- Tenant denormalization trigger
@@ -229,6 +291,13 @@ SELECT
     fb.type                                       AS feedback_type,
     fb.data->>'rating'                            AS feedback_rating,
     fb.data->>'reason'                            AS feedback_reason,
+    -- `source` defaults to 'user' for rows predating the discriminator.
+    COALESCE(fb.data->>'source', 'user')          AS feedback_source,
+    fb.data->>'rated_by_user_id'                  AS rated_by_user_id,
+    fb.data->>'rated_by_service_account_id'       AS rated_by_service_account_id,
+    NULLIF(fb.data->>'score', '')::float          AS feedback_score,
+    fb.data->'criteria'                           AS feedback_criteria,
+    fb.data->>'rationale'                         AS feedback_rationale,
     fb.created_at                                 AS feedback_at
 FROM events d
 LEFT JOIN LATERAL (
@@ -359,6 +428,12 @@ SELECT
     fb.data->>'rating'                               AS feedback_rating,
     fb.data->>'reason'                               AS feedback_reason,
     fb.data->>'rated_by_user_id'                     AS rated_by_user_id,
+    fb.data->>'rated_by_service_account_id'          AS rated_by_service_account_id,
+    -- `source` defaults to 'user' for rows predating the discriminator.
+    COALESCE(fb.data->>'source', 'user')             AS feedback_source,
+    NULLIF(fb.data->>'score', '')::float             AS feedback_score,
+    fb.data->'criteria'                              AS feedback_criteria,
+    fb.data->>'rationale'                            AS feedback_rationale,
     fb.created_at                                    AS feedback_at
 FROM events r
 JOIN sessions s ON s.id = r.session_id

@@ -62,7 +62,12 @@ def _get_session_store(request: Request) -> SessionStore:
 async def _verify_session_access(
     store: SessionStore, session_id: UUID, tenant: TenantContext
 ) -> None:
-    """Raise 404 if the session does not exist or does not belong to the tenant."""
+    """Raise 404 if the session does not exist or does not belong to the tenant.
+
+    Session-scoped service-account JWTs are additionally restricted to
+    the single session they were minted for — see
+    :meth:`TenantContext.covers_session`.
+    """
     try:
         session = await store.get_session(session_id)
     except SessionNotFoundError:
@@ -70,7 +75,7 @@ async def _verify_session_access(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
-    if session.org_id != tenant.org_id:
+    if not tenant.owns_session(session.org_id, session_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
@@ -103,7 +108,7 @@ async def stream_events(
         session_check = await store.get_session(session_id)
     except SessionNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
-    if session_check.org_id != tenant.org_id:
+    if not tenant.owns_session(session_check.org_id, session_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
 
     if session_check and session_check.status in _TERMINAL_STATUSES:

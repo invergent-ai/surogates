@@ -4,7 +4,8 @@
 |---|---|
 | **ABAC** | Attribute-Based Access Control. Policy rules that evaluate attributes of the user, session, tool arguments, or environment to make access decisions. Example: "allow `refund_user` only if `amount < 1000`". |
 | **AGT** | Agent Governance Toolkit. Microsoft's open-source library for agent policy enforcement, MCP security scanning, and capability modeling. Surogates uses AGT's `PolicyEngine`, `MCPSecurityScanner`, and `CapabilityModel`. |
-| **Channel** | The user-facing interface. Surogates has no CLI. Users interact through channels: the web chat UI and Slack. Each channel has an adapter that normalizes platform messages into the internal API. |
+| **API Channel** | The programmatic channel. Non-interactive clients (synthetic-data pipelines, batch jobs) submit prompts via `POST /v1/api/prompts` with a service-account token. Sessions have `channel="api"` and no user identity; results are read directly from the `events` table. |
+| **Channel** | The user-facing interface. Surogates has no CLI. Users interact through channels: web, Slack, Telegram, and the API channel for programmatic clients. Each has an adapter (or, for web/API, a REST endpoint set) that normalizes inbound messages into the internal API. |
 | **Channel Identity** | A mapping between a platform-specific user ID (e.g., Slack user `U03ABCDEF`) and an internal Surogates user. Enables cross-channel session sharing. |
 | **Cursor** | The last fully-processed event ID for a session. Used for crash recovery -- the new worker replays events after the cursor. Also used by SSE clients to resume event streams without data loss. |
 | **Delivery Outbox** | A PostgreSQL table that acts as a durable queue for outbound messages. Channel adapters claim rows, send messages, and mark them as delivered. Redis nudges are a latency optimization, not the source of truth. |
@@ -20,6 +21,7 @@
 | **Org** | Organization. The top-level tenant boundary. Each org has its own users, skills, memory, credentials, MCP servers, and policies. |
 | **Saga** | A tracked sequence of tool calls with automatic rollback. When a step fails, previously completed steps are compensated in reverse order -- builtin tools via filesystem checkpoints, MCP tools via declared undo operations. Named after the [saga pattern](https://microservices.io/patterns/data/saga.html) from distributed systems. |
 | **Sandbox** | An isolated execution environment where the LLM's generated code runs. In development: a subprocess in a temp directory. In production: a dedicated K8s pod with s3fs-fuse workspace mount. Also called "the hands". |
+| **Service Account** | An org-scoped principal used by non-interactive clients to authenticate against the API channel. Issued by an admin via `POST /v1/admin/service-accounts`; produces a long-lived `surg_sk_...` bearer token that is accepted only on `/v1/api/*` routes and carries no user identity. |
 | **Session** | A conversation between a user and an agent. Backed by an append-only event log in PostgreSQL. Sessions survive crashes -- any worker can resume from the last event. |
 | **Session Source** | Metadata about where a message came from: platform, chat ID, chat type, user ID, thread ID. Used to route messages to the correct session. |
 | **Skill** | A reusable, prompt-based behavior defined in a `SKILL.md` file. Skills are loaded from three layers (platform > org > user) with last-wins precedence. |

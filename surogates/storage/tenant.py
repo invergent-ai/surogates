@@ -42,13 +42,24 @@ class TenantStorage:
     Provides high-level methods for skills and memory that translate
     between the directory convention and ``StorageBackend``
     bucket/key calls.
+
+    *user_id* may be ``None`` for service-account sessions (channel
+    ``"api"``) which have no per-user storage scope.  In that case
+    memory operations route to ``shared/memory/*`` and skill writes
+    land in the org-shared layer.  Listing skills still surfaces both
+    layers; only the user-scoped one is empty by construction.
     """
 
-    def __init__(self, backend: StorageBackend, org_id: UUID, user_id: UUID) -> None:
+    def __init__(
+        self,
+        backend: StorageBackend,
+        org_id: UUID,
+        user_id: UUID | None,
+    ) -> None:
         self._backend = backend
         self._bucket = tenant_bucket(org_id)
         self._org_id = str(org_id)
-        self._user_id = str(user_id)
+        self._user_id = str(user_id) if user_id is not None else None
 
     # ── Bucket lifecycle ────────────────────────────────────────────
 
@@ -59,39 +70,98 @@ class TenantStorage:
 
     # ── Skills (user layer) ─────────────────────────────────────────
 
+    def _shared_skill_key(self, name: str, category: str | None = None) -> str:
+        """Build the key prefix for an org-shared skill directory."""
+        if category:
+            return f"shared/skills/{category}/{name}"
+        return f"shared/skills/{name}"
+
     def _user_skill_key(self, name: str, category: str | None = None) -> str:
-        """Build the key prefix for a user skill directory."""
+        """Build the key prefix for a user-scoped skill directory.
+
+        Raises ``ValueError`` when there is no user scope (service-account
+        sessions); callers must pick :meth:`_shared_skill_key` explicitly
+        in that case.
+        """
+        if self._user_id is None:
+            raise ValueError(
+                "_user_skill_key requires a user-scoped TenantStorage; "
+                "use _shared_skill_key for service-account contexts."
+            )
         if category:
             return f"users/{self._user_id}/skills/{category}/{name}"
         return f"users/{self._user_id}/skills/{name}"
+
+    def _default_skill_write_key(
+        self, name: str, category: str | None = None
+    ) -> str:
+        """Return the key prefix where new skills from this context land.
+
+        User-scoped contexts write into their ``users/{uid}/`` subtree;
+        service-account contexts have no per-user scope and land in
+        ``shared/``.  Kept as an explicit helper so ``write_skill``
+        reads straight rather than relying on an implicit fallback.
+        """
+        if self._user_id is None:
+            return self._shared_skill_key(name, category)
+        return self._user_skill_key(name, category)
+
+    async def _iter_user_skills(self) -> list[tuple[str, str]]:
+        """Yield ``(skill_name, key_prefix)`` for every user-layer SKILL.md.
+
+        Returns an empty list when this storage has no user scope
+        (service-account sessions) so callers can loop over the result
+        without repeating the ``_user_id is None`` guard.  Both
+        category-bare and category-nested layouts are recognised:
+        ``users/{uid}/skills/{name}/SKILL.md`` and
+        ``users/{uid}/skills/{category}/{name}/SKILL.md``.
+        """
+        if self._user_id is None:
+            return []
+        prefix = f"users/{self._user_id}/skills/"
+        keys = await self._backend.list_keys(self._bucket, prefix=prefix)
+        found: list[tuple[str, str]] = []
+        for key in keys:
+            if not key.endswith("/SKILL.md"):
+                continue
+            parts = key.split("/")
+            skill_name = parts[-2]
+            key_prefix = "/".join(parts[:-1])
+            found.append((skill_name, key_prefix))
+        return found
 
     async def skill_exists(self, name: str) -> dict[str, Any] | None:
         """Find a skill by name across user, org-shared, and platform layers.
 
         Returns ``{"key_prefix": str, "layer": str}`` or ``None``.
-        """
-        # User layer
-        user_prefix = f"users/{self._user_id}/skills/"
-        user_keys = await self._backend.list_keys(self._bucket, prefix=user_prefix)
-        for key in user_keys:
-            parts = key.split("/")
-            # users/{uid}/skills/{name}/SKILL.md or users/{uid}/skills/{cat}/{name}/SKILL.md
-            if parts[-1] == "SKILL.md":
-                skill_name = parts[-2]
-                if skill_name == name:
-                    prefix = "/".join(parts[:-1])
-                    return {"key_prefix": prefix, "layer": "user"}
 
-        # Org-shared layer
-        shared_prefix = "shared/skills/"
-        shared_keys = await self._backend.list_keys(self._bucket, prefix=shared_prefix)
+        The bare-category layout (``{layer}/skills/{name}/SKILL.md``) is
+        probed directly via :meth:`StorageBackend.exists` so the common
+        case avoids listing every key under the layer.  The nested
+        ``{layer}/skills/{category}/{name}/`` layout still requires a
+        listing walk.
+        """
+        if self._user_id is not None:
+            user_prefix = self._user_skill_key(name)
+            if await self._backend.exists(self._bucket, f"{user_prefix}/SKILL.md"):
+                return {"key_prefix": user_prefix, "layer": "user"}
+
+        shared_prefix = self._shared_skill_key(name)
+        if await self._backend.exists(self._bucket, f"{shared_prefix}/SKILL.md"):
+            return {"key_prefix": shared_prefix, "layer": "org"}
+
+        # Fall back to a listing walk for the category-nested layout.
+        for skill_name, key_prefix in await self._iter_user_skills():
+            if skill_name == name:
+                return {"key_prefix": key_prefix, "layer": "user"}
+
+        shared_keys = await self._backend.list_keys(
+            self._bucket, prefix="shared/skills/",
+        )
         for key in shared_keys:
             parts = key.split("/")
-            if parts[-1] == "SKILL.md":
-                skill_name = parts[-2]
-                if skill_name == name:
-                    prefix = "/".join(parts[:-1])
-                    return {"key_prefix": prefix, "layer": "org"}
+            if parts[-1] == "SKILL.md" and parts[-2] == name:
+                return {"key_prefix": "/".join(parts[:-1]), "layer": "org"}
 
         return None
 
@@ -100,8 +170,14 @@ class TenantStorage:
         return await self._backend.read_text(self._bucket, f"{key_prefix}/SKILL.md")
 
     async def write_skill(self, name: str, content: str, category: str | None = None) -> str:
-        """Write a new skill.  Returns the key prefix."""
-        key_prefix = self._user_skill_key(name, category)
+        """Write a new skill and return its key prefix.
+
+        Scope follows the owning context: user-scoped contexts write to
+        ``users/{uid}/skills/...``; service-account contexts write to
+        ``shared/skills/...`` because they have no per-user scope.  See
+        :meth:`_default_skill_write_key`.
+        """
+        key_prefix = self._default_skill_write_key(name, category)
         await self._backend.write_text(self._bucket, f"{key_prefix}/SKILL.md", content)
         return key_prefix
 
@@ -144,19 +220,17 @@ class TenantStorage:
 
         Returns a list of dicts with ``name``, ``key_prefix``, ``layer``.
         Does NOT include platform skills (those are on the container filesystem).
+        Service-account sessions see the shared layer only.
         """
         skills: dict[str, dict[str, Any]] = {}
 
-        # User layer (highest precedence)
-        user_prefix = f"users/{self._user_id}/skills/"
-        user_keys = await self._backend.list_keys(self._bucket, prefix=user_prefix)
-        for key in user_keys:
-            if key.endswith("/SKILL.md"):
-                parts = key.split("/")
-                name = parts[-2]
-                if name not in skills:
-                    prefix = "/".join(parts[:-1])
-                    skills[name] = {"name": name, "key_prefix": prefix, "layer": "user"}
+        # User layer (highest precedence).  Empty for service-account
+        # contexts, which collapses this block to a no-op loop.
+        for name, key_prefix in await self._iter_user_skills():
+            if name not in skills:
+                skills[name] = {
+                    "name": name, "key_prefix": key_prefix, "layer": "user",
+                }
 
         # Org-shared layer
         shared_prefix = "shared/skills/"
@@ -174,7 +248,14 @@ class TenantStorage:
     # ── Memory ──────────────────────────────────────────────────────
 
     def _memory_key(self, filename: str) -> str:
-        """Build key for a memory file."""
+        """Build key for a memory file.
+
+        Service-account sessions (no user scope) route to
+        ``shared/memory/{filename}`` — org-wide memory that persists
+        across every SA-submitted session for the tenant.
+        """
+        if self._user_id is None:
+            return f"shared/memory/{filename}"
         return f"users/{self._user_id}/memory/{filename}"
 
     async def read_memory_file(self, filename: str) -> str | None:

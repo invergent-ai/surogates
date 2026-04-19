@@ -31,10 +31,10 @@ Both files live in the tenant's storage bucket:
 
 ```
 tenant-{org_id}/
-  shared/memories/       # org-wide memory
+  shared/memory/       # org-wide memory
     MEMORY.md
     USER.md
-  users/{user_id}/memories/  # user-specific memory
+  users/{user_id}/memory/  # user-specific memory
     MEMORY.md
     USER.md
 ```

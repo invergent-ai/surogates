@@ -83,7 +83,7 @@ class TestPromptBuilderMemory:
         # Create the user-scoped memory directory and file.
         memory_dir = (
             tmp_path / "users"
-            / "00000000-0000-0000-0000-000000000002" / "memories"
+            / "00000000-0000-0000-0000-000000000002" / "memory"
         )
         memory_dir.mkdir(parents=True)
         (memory_dir / "MEMORY.md").write_text(

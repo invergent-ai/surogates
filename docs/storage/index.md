@@ -33,7 +33,7 @@ Each organization gets a Garage bucket containing asset directories:
 ```
 tenant-{org_id}/
   shared/                         # org-wide resources
-    memories/
+    memory/
       MEMORY.md
       USER.md
     skills/
@@ -48,7 +48,7 @@ tenant-{org_id}/
     tools/
       config.json
   users/{user_id}/                # per-user resources
-    memories/
+    memory/
       MEMORY.md
       USER.md
     skills/

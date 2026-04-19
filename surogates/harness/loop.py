@@ -1556,8 +1556,8 @@ class AgentHarness:
 
             # Try user-scoped memory first, fall back to org shared
             for subdir in (
-                f"users/{self._tenant.user_id}/memories",
-                "shared/memories",
+                f"users/{self._tenant.user_id}/memory",
+                "shared/memory",
             ):
                 memory_path = Path(memory_dir) / subdir / "MEMORY.md"
                 if memory_path.is_file():

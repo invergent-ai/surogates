@@ -7,7 +7,7 @@ Surogates follows the three-component model: decouple the brain from the hands, 
 ```
 +-----------------------------------------------------------------+
 |                     Channel Adapters                             |
-|         Web Chat UI (SPA)         |         Slack          |
+|  Web SPA   |   Slack   |   Telegram   |   API (service account) |
 +---------------+-------+---------+---------+------------+--------+
                 |
 +---------------v-------------------------------------------------+
@@ -109,6 +109,21 @@ The sandbox runs the full `surogates` Python package. A `tool-executor` script a
 4. Response delivery: adapter claims pending delivery_outbox rows for its channel
 5. Adapter formats payload -> sends via platform API -> marks row delivered
 ```
+
+### API Channel (Programmatic)
+
+```
+1. Pipeline: POST /v1/api/prompts with a service-account token (surg_sk_...)
+2. API Server: resolve service account -> create session (channel="api",
+   user_id=NULL) -> emit user.message event -> enqueue to Redis -> 202
+3. Worker: dequeue -> wake(session_id) -> harness loop -> events emitted
+4. Pipeline: reads results back from the `events` table keyed by session_id
+   (no streaming, no SSE). `sessions.status` indicates completion.
+```
+
+API-channel sessions never appear in the delivery outbox -- pipelines pull
+directly from PostgreSQL. See [Channels / API](../channels/api.md) for the
+request/response schema and idempotency semantics.
 
 ### Crash Recovery
 

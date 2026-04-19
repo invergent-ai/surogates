@@ -367,11 +367,11 @@ def _memory_dir_for_session(settings: Settings, org_id: UUID, user_id: UUID) -> 
     """Return the user-scoped memory directory for a session.
 
     Matches ``TenantAssetManager.memory_dir()`` and the worker's convention:
-    ``{tenant_assets_root}/{org_id}/users/{user_id}/memories``.
+    ``{tenant_assets_root}/{org_id}/users/{user_id}/memory``.
     """
     return (
         Path(settings.tenant_assets_root)
-        / str(org_id) / "users" / str(user_id) / "memories"
+        / str(org_id) / "users" / str(user_id) / "memory"
     )
 
 
@@ -393,6 +393,17 @@ async def flush_and_reset_session(
     user_id = session.user_id
     org_id = session.org_id
     reset_settings = settings.session_reset
+
+    # API-channel sessions are owned by a service account, not a user, and
+    # carry no per-user memory to flush.  Reset them in place without running
+    # the flush agent.
+    if user_id is None:
+        logger.info(
+            "Resetting service-account session %s (channel=%s) without memory flush",
+            session_id, session.channel,
+        )
+        await session_store.reset_session(session_id, reason="idle_service_account")
+        return True
 
     logger.info(
         "Flushing memory for session %s (user=%s, org=%s, last_active=%s)",

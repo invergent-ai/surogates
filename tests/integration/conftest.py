@@ -26,9 +26,30 @@ import bcrypt as _bcrypt
 from surogates.db.engine import apply_observability_ddl
 from surogates.db.models import Base
 from surogates.session.store import SessionStore
+from surogates.tenant.auth.service_account import _reset_caches as _reset_sa_caches
 
 # Ensure JWT secret is set for all integration tests.
 os.environ.setdefault("SUROGATES_JWT_SECRET", "integration-test-secret-key-1234")
+
+
+# ---------------------------------------------------------------------------
+# Global hygiene
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _sa_cache_reset():
+    """Clear the in-process service-account auth caches between tests.
+
+    The caches are module-level singletons, so one test's cached
+    resolution would otherwise bleed into the next and mask
+    correctness bugs (e.g. a revoked SA still accepted because a
+    prior test populated the cache).  Reset both before and after
+    so tests that deliberately warm the cache can do so without
+    depending on earlier test ordering.
+    """
+    _reset_sa_caches()
+    yield
+    _reset_sa_caches()
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +186,24 @@ async def create_user(
         )
         await db.commit()
     return uid
+
+
+async def issue_service_account_token(
+    session_factory,
+    org_id: UUID,
+    name: str = "pipeline",
+):
+    """Create a service account and return its raw bearer token.
+
+    Returns the :class:`IssuedServiceAccount` record — callers need
+    ``.token`` for the ``Authorization: Bearer`` header and ``.id`` as
+    the expected service-account id in assertions.
+    """
+    from surogates.tenant.auth.service_account import ServiceAccountStore
+
+    return await ServiceAccountStore(session_factory).create(
+        org_id=org_id, name=name,
+    )
 
 
 @pytest_asyncio.fixture(loop_scope="session")

@@ -488,7 +488,7 @@ class PromptBuilder:
 
         # Fall back to direct file read (user-scoped memory directory).
         asset_root = Path(self.tenant.asset_root)
-        memory_dir = asset_root / "users" / str(self.tenant.user_id) / "memories"
+        memory_dir = asset_root / "users" / str(self.tenant.user_id) / "memory"
 
         fragments: list[str] = []
 

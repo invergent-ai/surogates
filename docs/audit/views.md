@@ -11,6 +11,12 @@ External consumers should prefer views over raw JSONB queries — adding
 new keys to an event's JSONB payload never breaks a view-backed
 query, because the view's column list stays fixed.
 
+**A note on `user_id`.** The column is `NULL` for every event in an
+API-channel session (sessions submitted via `POST /v1/api/prompts`,
+owned by a service account instead of a user).  Dashboards that group
+by `user_id` should also group by `channel` to avoid collapsing
+every service-account session into a single "unknown user" bucket.
+
 | View | Driven by | Purpose |
 |---|---|---|
 | [`v_session_tree`](#v_session_tree) | `sessions.parent_id` | Recursive ancestry for expert-delegation subtrees. |

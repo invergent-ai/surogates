@@ -44,13 +44,13 @@ def tmp_asset_root(tmp_path: Path) -> Path:
 
     Layout::
 
-        {tmp}/ORG_ID/shared/{memories,skills,mcp,tools}/
-        {tmp}/ORG_ID/users/USER_ID/{memories,skills,mcp,tools}/
+        {tmp}/ORG_ID/shared/{memory,skills,mcp,tools}/
+        {tmp}/ORG_ID/users/USER_ID/{memory,skills,mcp,tools}/
     """
     org_id = "00000000-0000-0000-0000-000000000001"
     user_id = "00000000-0000-0000-0000-000000000002"
 
-    subdirs = ("memories", "skills", "mcp", "tools")
+    subdirs = ("memory", "skills", "mcp", "tools")
     shared_root = tmp_path / org_id / "shared"
     user_root = tmp_path / org_id / "users" / user_id
 

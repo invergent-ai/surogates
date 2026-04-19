@@ -115,6 +115,53 @@ class TestJWT:
         # Should expire ~7 days from now.
         assert payload["exp"] > time.time() + 6 * 86400
 
+    def test_service_account_session_token_roundtrip(self):
+        """Minting + decoding an SA session token preserves all claims."""
+        from uuid import uuid4
+
+        from surogates.tenant.auth.jwt import create_service_account_session_token
+
+        org_id = uuid4()
+        sa_id = uuid4()
+        session_id = uuid4()
+        token = create_service_account_session_token(org_id, sa_id, session_id)
+        payload = decode_token(token)
+
+        assert payload["type"] == "service_account_session"
+        assert payload["org_id"] == str(org_id)
+        assert payload["service_account_id"] == str(sa_id)
+        assert payload["session_id"] == str(session_id)
+        # No user identity for SA sessions — must not have been stuffed
+        # in as None to satisfy the claim validator.
+        assert "user_id" not in payload
+
+    def test_access_token_missing_user_id_rejected(self):
+        """Human-identity tokens without a user_id claim must 401.
+
+        The decode_token refactor made user_id optional for SA session
+        tokens only; ``access``/``refresh``/``sandbox`` still require it.
+        This test locks that requirement in against future changes.
+        """
+        import time as _time
+
+        from jose import jwt as _jwt
+
+        from surogates.tenant.auth.jwt import _get_secret
+
+        now = int(_time.time())
+        payload = {
+            "sub": "u",
+            "org_id": str(uuid4()),
+            # user_id deliberately omitted.
+            "permissions": [],
+            "type": "access",
+            "iat": now,
+            "exp": now + 60,
+        }
+        token = _jwt.encode(payload, _get_secret(), algorithm="HS256")
+        with pytest.raises(InvalidTokenError, match="user_id"):
+            decode_token(token)
+
 
 # =========================================================================
 # TenantAssetManager
@@ -146,7 +193,7 @@ class TestTenantAssetManager:
 
         org_str = str(org_id)
         user_str = str(user_id)
-        for subdir in ("memories", "skills", "mcp", "tools"):
+        for subdir in ("memory", "skills", "mcp", "tools"):
             shared = tmp_path / org_str / "shared" / subdir
             assert shared.is_dir(), f"Missing: {shared}"
             user_dir = tmp_path / org_str / "users" / user_str / subdir
@@ -167,7 +214,7 @@ class TestTenantAssetManager:
         org_id = UUID("00000000-0000-0000-0000-000000000001")
         user_id = UUID("00000000-0000-0000-0000-000000000002")
         mem = mgr.memory_dir(org_id, user_id)
-        assert "memories" in mem
+        assert mem.endswith("/memory")
         assert str(user_id) in mem
 
     def test_skills_dir_shared(self, tmp_path: Path):

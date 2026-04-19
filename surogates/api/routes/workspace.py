@@ -166,7 +166,7 @@ async def _get_session_bucket(
             detail=f"Session {session_id} not found.",
         )
 
-    if session.org_id != tenant.org_id:
+    if not tenant.owns_session(session.org_id, session_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",

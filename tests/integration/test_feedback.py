@@ -431,3 +431,184 @@ async def test_feedback_cross_tenant_returns_404(
         headers={"Authorization": f"Bearer {intruder_token}"},
     )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Judge feedback (service-account clients on the API channel)
+# ---------------------------------------------------------------------------
+
+
+async def test_jwt_rejected_on_api_feedback_route(
+    client: AsyncClient, session_factory, session_store,
+):
+    """Interactive JWTs cannot hit the /v1/api/ mount of the feedback route.
+
+    The /v1/api/ prefix is the programmatic surface — only service-account
+    tokens belong there.  A user JWT reaches the handler through the
+    /v1/ mount instead.
+    """
+    _, _, jwt_token = await _create_test_tenant(session_factory)
+    session_id, expert_event_id = await _create_session_with_expert_result(
+        client, session_store, jwt_token,
+    )
+
+    resp = await client.post(
+        f"/v1/api/sessions/{session_id}/events/{expert_event_id}/feedback",
+        json={"rating": "up"},
+        headers={"Authorization": f"Bearer {jwt_token}"},
+    )
+    assert resp.status_code == 403
+    assert "service-account" in resp.json()["detail"].lower()
+
+
+async def test_judge_feedback_via_api_channel_emits_source_judge(
+    client: AsyncClient, session_factory, session_store,
+):
+    """A service-account judge submits rich feedback via /v1/api/... and the
+    event carries source='judge' plus the numeric score/criteria payload.
+    """
+    from .conftest import issue_service_account_token
+
+    org_id = await create_org(session_factory)
+    user_id = uuid.uuid4()
+    await create_user(session_factory, org_id, user_id=user_id)
+
+    # Seed a session + llm.response that the judge will rate.
+    sess = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="", channel="api",
+    )
+    response_event_id = await session_store.emit_event(
+        sess.id,
+        EventType.LLM_RESPONSE,
+        {
+            "message": {"role": "assistant", "content": "42"},
+            "model": "gpt-4o", "input_tokens": 1, "output_tokens": 1,
+        },
+    )
+
+    # Judge presents an SA bearer token.
+    issued = await issue_service_account_token(
+    session_factory, org_id, "eval-judge-v1",
+    )
+
+    resp = await client.post(
+        f"/v1/api/sessions/{sess.id}/events/{response_event_id}/feedback",
+        json={
+            "rating": "up",
+            "score": 0.87,
+            "criteria": {"correctness": 0.9, "relevance": 0.85},
+            "rationale": "Matches the reference; arithmetic is correct.",
+        },
+        headers={"Authorization": f"Bearer {issued.token}"},
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["source"] == "judge"
+    assert body["event_type"] == EventType.USER_FEEDBACK.value
+
+    events = await session_store.get_events(
+        sess.id, types=[EventType.USER_FEEDBACK],
+    )
+    assert len(events) == 1
+    data = events[0].data
+    assert data["source"] == "judge"
+    assert data["rated_by_service_account_id"] == str(issued.id)
+    assert "rated_by_user_id" not in data
+    assert data["score"] == 0.87
+    assert data["criteria"] == {"correctness": 0.9, "relevance": 0.85}
+    assert data["rationale"].startswith("Matches the reference")
+
+
+async def test_judge_feedback_dedupe_is_per_service_account(
+    client: AsyncClient, session_factory, session_store,
+):
+    """A judge that retries the same submission gets the first event back."""
+    from .conftest import issue_service_account_token
+
+    org_id = await create_org(session_factory)
+    user_id = uuid.uuid4()
+    await create_user(session_factory, org_id, user_id=user_id)
+
+    sess = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="", channel="api",
+    )
+    response_event_id = await session_store.emit_event(
+        sess.id,
+        EventType.LLM_RESPONSE,
+        {
+            "message": {"role": "assistant", "content": "..."},
+            "model": "gpt-4o", "input_tokens": 1, "output_tokens": 1,
+        },
+    )
+    issued = await issue_service_account_token(
+    session_factory, org_id, "eval-judge",
+    )
+    headers = {"Authorization": f"Bearer {issued.token}"}
+    url = f"/v1/api/sessions/{sess.id}/events/{response_event_id}/feedback"
+
+    first = await client.post(url, json={"rating": "up"}, headers=headers)
+    assert first.status_code == 201
+    first_event_id = first.json()["event_id"]
+
+    second = await client.post(url, json={"rating": "down"}, headers=headers)
+    assert second.status_code == 201
+    assert second.json()["event_id"] == first_event_id
+
+    events = await session_store.get_events(
+        sess.id, types=[EventType.USER_FEEDBACK],
+    )
+    assert len(events) == 1
+    assert events[0].data["rating"] == "up"
+
+
+async def test_judge_and_user_feedback_coexist_on_same_event(
+    client: AsyncClient, session_factory, session_store,
+):
+    """A judge and a user rating the same event both emit independent feedback."""
+    from .conftest import issue_service_account_token
+
+    org_id, user_id, jwt_token = await _create_test_tenant(session_factory)
+
+    # Re-use the JWT-owned session so the JWT caller's request passes the
+    # org-scope check, and seed an llm.response inside it.
+    create_resp = await client.post(
+        "/v1/sessions",
+        json={"model": "gpt-4o"},
+        headers={"Authorization": f"Bearer {jwt_token}"},
+    )
+    session_id = create_resp.json()["id"]
+    response_event_id = await session_store.emit_event(
+        UUID(session_id),
+        EventType.LLM_RESPONSE,
+        {
+            "message": {"role": "assistant", "content": "..."},
+            "model": "gpt-4o", "input_tokens": 1, "output_tokens": 1,
+        },
+    )
+
+    issued = await issue_service_account_token(
+    session_factory, org_id, "eval-judge",
+    )
+
+    user_resp = await client.post(
+        f"/v1/sessions/{session_id}/events/{response_event_id}/feedback",
+        json={"rating": "up"},
+        headers={"Authorization": f"Bearer {jwt_token}"},
+    )
+    assert user_resp.status_code == 201
+    assert user_resp.json()["source"] == "user"
+
+    judge_resp = await client.post(
+        f"/v1/api/sessions/{session_id}/events/{response_event_id}/feedback",
+        json={"rating": "down", "score": 0.1},
+        headers={"Authorization": f"Bearer {issued.token}"},
+    )
+    assert judge_resp.status_code == 201
+    assert judge_resp.json()["source"] == "judge"
+    assert judge_resp.json()["event_id"] != user_resp.json()["event_id"]
+
+    events = await session_store.get_events(
+        UUID(session_id), types=[EventType.USER_FEEDBACK],
+    )
+    sources = [e.data["source"] for e in events]
+    assert sorted(sources) == ["judge", "user"]
