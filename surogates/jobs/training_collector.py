@@ -30,6 +30,14 @@ from surogates.session.events import EventType
 logger = logging.getLogger(__name__)
 
 
+_SKILL_TRAJECTORY_BOUNDARY: frozenset[str] = frozenset({
+    EventType.USER_MESSAGE.value,
+    EventType.SKILL_INVOKED.value,
+    EventType.SESSION_COMPLETE.value,
+    EventType.SESSION_FAIL.value,
+})
+
+
 def _strip_skill_prefix(raw_message: str, skill_name: str) -> str:
     """Remove the leading ``/<skill_name>`` from *raw_message*.
 
@@ -302,7 +310,12 @@ class TrainingDataCollector:
         exclude_tainted:
             When True (default), sessions with ``policy.denied``,
             ``harness.crash``, ``saga.compensate``, or
-            ``expert.override`` events are skipped entirely.
+            ``expert.override`` events are skipped entirely, and any
+            individual trajectory whose assistant response received a
+            ``user.feedback`` with ``rating: "down"`` is rejected.
+            Per-trajectory granularity is intentional: one thumbs-down
+            on an unrelated response in the same session should not
+            poison sibling invocations with their own class labels.
         """
         invocations = await self._session_store.find_skill_invocations(
             org_id, skill_name, since=since,
@@ -322,6 +335,7 @@ class TrainingDataCollector:
 
         examples: list[TrainingExample] = []
         skipped_tainted = 0
+        skipped_thumbs_down = 0
 
         for session_id, session_invocations in by_session.items():
             if exclude_tainted:
@@ -332,20 +346,37 @@ class TrainingDataCollector:
             events = await self._session_store.get_events(session_id)
             events_by_id = {e.id: i for i, e in enumerate(events)}
 
+            # Scanned once per session so every trajectory can share it.
+            down_rated_response_ids: set[int] = set()
+            if exclude_tainted:
+                for e in events:
+                    if e.type != EventType.USER_FEEDBACK.value:
+                        continue
+                    if e.data.get("rating") != "down":
+                        continue
+                    target = e.data.get("target_event_id")
+                    if isinstance(target, int):
+                        down_rated_response_ids.add(target)
+
             for inv in session_invocations:
                 start_idx = events_by_id.get(inv.id)
                 if start_idx is None:
                     continue
-                example = self._collect_skill_trajectory(
+                example, rejected_thumbs_down = self._collect_skill_trajectory(
                     events, start_idx, skill_name, session_id, inv,
+                    down_rated_response_ids=down_rated_response_ids,
                 )
-                if example is not None:
+                if rejected_thumbs_down:
+                    skipped_thumbs_down += 1
+                elif example is not None:
                     examples.append(example)
 
         logger.info(
             "Collected %d training examples for skill '%s' "
-            "(%d invocations, %d tainted sessions skipped)",
-            len(examples), skill_name, len(invocations), skipped_tainted,
+            "(%d invocations, %d tainted sessions skipped, "
+            "%d trajectories skipped for thumbs-down)",
+            len(examples), skill_name, len(invocations),
+            skipped_tainted, skipped_thumbs_down,
         )
         return examples
 
@@ -356,18 +387,28 @@ class TrainingDataCollector:
         skill_name: str,
         session_id: UUID,
         skill_event: Any,
-    ) -> TrainingExample | None:
+        *,
+        down_rated_response_ids: set[int] | None = None,
+    ) -> tuple[TrainingExample | None, bool]:
         """Walk events from a ``skill.invoked`` through its trajectory.
 
-        Returns a :class:`TrainingExample` when a complete trajectory
-        is found (at least one assistant response with content).  The
-        trajectory ends at the first of: next ``user.message``, next
-        ``skill.invoked``, ``session.complete`` or ``session.fail``.
+        Returns ``(example, rejected_thumbs_down)``.  ``example`` is a
+        :class:`TrainingExample` when a complete trajectory is found
+        (at least one assistant response with content), otherwise
+        ``None``.  ``rejected_thumbs_down`` is ``True`` iff the
+        trajectory was dropped because an ``llm.response`` within it
+        received a judge thumbs-down (id in *down_rated_response_ids*);
+        a down-rated assistant turn is the wrong class label for
+        *skill_name* and must not be exported.
+
+        The trajectory ends at the first of: next ``user.message``,
+        next ``skill.invoked``, ``session.complete`` or
+        ``session.fail``.
         """
         raw_message = skill_event.data.get("raw_message", "")
         user_text = _strip_skill_prefix(raw_message, skill_name)
         if not user_text:
-            return None
+            return None, False
 
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": user_text},
@@ -378,15 +419,15 @@ class TrainingDataCollector:
             event = events[i]
             etype = event.type
 
-            if etype in (
-                EventType.USER_MESSAGE.value,
-                EventType.SKILL_INVOKED.value,
-                EventType.SESSION_COMPLETE.value,
-                EventType.SESSION_FAIL.value,
-            ):
-                break  # trajectory boundary
+            if etype in _SKILL_TRAJECTORY_BOUNDARY:
+                break
 
             if etype == EventType.LLM_RESPONSE.value:
+                if (
+                    down_rated_response_ids
+                    and event.id in down_rated_response_ids
+                ):
+                    return None, True
                 msg = event.data.get("message")
                 if not isinstance(msg, dict):
                     continue
@@ -409,14 +450,15 @@ class TrainingDataCollector:
             # ``llm.response`` message's ``tool_calls`` field.
 
         if not has_final_assistant_content:
-            return None
+            return None, False
 
-        return TrainingExample(
+        example = TrainingExample(
             messages=messages,
             session_id=session_id,
             expert_name=skill_name,
             created_at=getattr(skill_event, "created_at", None),
         )
+        return example, False
 
     async def export_jsonl(
         self,

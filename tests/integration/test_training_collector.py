@@ -246,6 +246,75 @@ async def test_collect_for_skill_excludes_tainted_session(
     assert {e.session_id for e in all_examples} == {clean.id, tainted.id}
 
 
+async def test_collect_for_skill_excludes_trajectory_with_thumbs_down(
+    session_store, session_factory,
+):
+    """A ``user.feedback`` rating=down on an LLM response in a trajectory
+    rejects that trajectory only — sibling invocations in the same session
+    still yield training examples.
+
+    Regression: ``session_has_taint`` only checks ``policy.denied`` and
+    friends, so the judge's thumbs-down verdicts used to pass the filter
+    and poison the training set with negative class labels.
+    """
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+    )
+
+    # First invocation: rated down — should be excluded.
+    await session_store.emit_event(
+        session.id, EventType.USER_MESSAGE,
+        {"content": "/sql_writer bad query"},
+    )
+    await session_store.emit_event(
+        session.id, EventType.SKILL_INVOKED,
+        {"skill": "sql_writer", "raw_message": "/sql_writer bad query",
+         "staged_at": None},
+    )
+    bad_response_id = await session_store.emit_event(
+        session.id, EventType.LLM_RESPONSE,
+        {
+            "message": {"role": "assistant", "content": "SELECT 1;"},
+            "model": "gpt-4o",
+            "input_tokens": 1,
+            "output_tokens": 1,
+        },
+    )
+    await session_store.emit_event(
+        session.id, EventType.USER_FEEDBACK,
+        {
+            "target_event_id": bad_response_id,
+            "rating": "down",
+            "source": "service_account",
+            "rated_by_service_account_id": "00000000-0000-0000-0000-000000000001",
+            "reason": "query missed the WHERE clause",
+        },
+    )
+
+    # Second invocation: untouched — should survive.
+    await _seed_skill_invocation(
+        session_store, session.id,
+        raw_message="/sql_writer good query",
+        assistant_content="SELECT * FROM users;",
+    )
+
+    collector = TrainingDataCollector(session_store=session_store)
+    examples = await collector.collect_for_skill("sql_writer", org_id)
+
+    assert len(examples) == 1
+    assert examples[0].messages[0]["content"] == "good query"
+    assert examples[0].messages[-1]["content"] == "SELECT * FROM users;"
+
+    # With exclude_tainted=False the rejected trajectory comes back.
+    all_examples = await collector.collect_for_skill(
+        "sql_writer", org_id, exclude_tainted=False,
+    )
+    asks = sorted(ex.messages[0]["content"] for ex in all_examples)
+    assert asks == ["bad query", "good query"]
+
+
 async def test_collect_for_skill_skips_trajectory_with_no_final_assistant(
     session_store, session_factory,
 ):
