@@ -1988,6 +1988,14 @@ class AgentHarness:
             EventType.SESSION_COMPLETE,
             complete_data,
         )
+        try:
+            await self._store.update_session_status(session.id, "completed")
+        except Exception:
+            logger.warning(
+                "Failed to update session status to completed for %s",
+                session.id,
+                exc_info=True,
+            )
 
         # Notify parent session if this is a worker (child) session.
         if session.parent_id is not None:
