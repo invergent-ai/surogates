@@ -3,13 +3,14 @@
 //
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { PlusIcon, MessageSquareIcon, LogOutIcon, TrashIcon, SunIcon, MoonIcon, SettingsIcon, BookOpenIcon } from "lucide-react";
+import { PlusIcon, MessageSquareIcon, LogOutIcon, TrashIcon, SunIcon, MoonIcon, SettingsIcon, BookOpenIcon, UsersIcon } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useAppStore } from "@/stores/app-store";
 import { logout } from "@/api/auth";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { formatDistanceToNow } from "date-fns";
+import { SessionTreePanel } from "@/features/sessions/session-tree-panel";
 
 export function SessionSidebar() {
   const navigate = useNavigate();
@@ -92,6 +93,17 @@ export function SessionSidebar() {
           <BookOpenIcon className="w-4 h-4" />
           {!collapsed && "Skills"}
         </Button>
+        <Button
+          variant="ghost"
+          onClick={() => void navigate({ to: "/agents" })}
+          className={cn(
+            "w-full gap-2 mt-1",
+            collapsed ? "justify-center px-0" : "justify-start",
+          )}
+        >
+          <UsersIcon className="w-4 h-4" />
+          {!collapsed && "Sub-agents"}
+        </Button>
       </div>
 
       {/* Session list */}
@@ -149,6 +161,11 @@ export function SessionSidebar() {
           </div>
         )}
       </div>
+
+      {/* Sub-agent tree for the active session. */}
+      {!collapsed && activeSessionId && (
+        <SessionTreePanel sessionId={activeSessionId} hideRoot />
+      )}
 
       {/* Footer */}
       <div className={cn("border-t border-line", collapsed ? "py-2" : "p-3")}>

@@ -29,6 +29,7 @@ from surogates.session.store import SessionStore
 from surogates.tenant.context import TenantContext
 from surogates.sandbox.pool import SandboxPool
 from surogates.sandbox.process import ProcessSandbox
+from surogates.tools.loader import ResourceLoader
 from surogates.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
@@ -114,7 +115,6 @@ async def run_worker(settings: Settings) -> None:
     else:
         # Dev mode: connect directly to MCP servers.
         mcp_servers: dict[str, dict] = {}
-        from surogates.tools.loader import ResourceLoader
         try:
             platform_loader = ResourceLoader(platform_mcp_dir=settings.platform_mcp_dir)
             for server_def in platform_loader._load_mcp_from_dir(settings.platform_mcp_dir):
@@ -240,8 +240,34 @@ async def run_worker(settings: Settings) -> None:
         memory_store = MemoryStore(memory_dir=memory_dir)
         memory_manager = MemoryManager(memory_store)
 
+        # Load the tenant's sub-agent catalog so the PromptBuilder can
+        # render an "Available Sub-Agents" block in coordinator prompts.
+        # The active sub-agent (when ``session.config.agent_type`` is set)
+        # is resolved separately at wake-time by the harness and pushed
+        # to the builder via ``set_agent_def``.  Non-coordinator sessions
+        # don't render the block, so skip the load entirely.
+        available_agents: list = []
+        if session.config.get("coordinator"):
+            agent_loader = ResourceLoader(
+                platform_agents_dir=getattr(settings, "platform_agents_dir", None),
+            )
+            try:
+                async with session_factory() as _db:
+                    available_agents = await agent_loader.load_agents(
+                        tenant, db_session=_db,
+                    )
+            except Exception:
+                logger.debug(
+                    "Failed to load sub-agent catalog for tenant %s",
+                    tenant.org_id, exc_info=True,
+                )
+                available_agents = []
+
         prompt_builder = PromptBuilder(
-            tenant, memory_manager=memory_manager, session=session,
+            tenant,
+            memory_manager=memory_manager,
+            session=session,
+            available_agents=available_agents,
         )
 
         # Interactive sessions get a regular user access token;

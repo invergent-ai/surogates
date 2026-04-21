@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 import { authFetch } from "./auth";
-import type { Session, SessionCreateRequest } from "@/types/session";
+import type {
+  Session,
+  SessionChildrenResponse,
+  SessionCreateRequest,
+  SessionTreeResponse,
+} from "@/types/session";
 
 export interface SessionListResponse {
   sessions: Session[];
@@ -93,4 +98,35 @@ export async function resumeSession(sessionId: string): Promise<void> {
     { method: "POST" },
   );
   if (!response.ok) throw new Error("Failed to resume session");
+}
+
+/**
+ * Stop a sub-agent / delegation child session.  Routes to the pause
+ * endpoint today because pause already publishes the interrupt
+ * signal and flips the child's status, but the UI vocabulary stays
+ * "stop" so a future divergence (e.g. a terminal ``completed`` state
+ * distinct from ``paused``) doesn't need a frontend rename.
+ */
+export async function stopSession(sessionId: string): Promise<void> {
+  return pauseSession(sessionId);
+}
+
+export async function getSessionTree(
+  sessionId: string,
+): Promise<SessionTreeResponse> {
+  const response = await authFetch(
+    `/api/v1/sessions/${sessionId}/tree`,
+  );
+  if (!response.ok) throw new Error("Failed to fetch session tree");
+  return (await response.json()) as SessionTreeResponse;
+}
+
+export async function getSessionChildren(
+  sessionId: string,
+): Promise<SessionChildrenResponse> {
+  const response = await authFetch(
+    `/api/v1/sessions/${sessionId}/children`,
+  );
+  if (!response.ok) throw new Error("Failed to fetch session children");
+  return (await response.json()) as SessionChildrenResponse;
 }

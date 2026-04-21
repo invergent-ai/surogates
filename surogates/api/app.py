@@ -123,6 +123,7 @@ def create_app() -> FastAPI:
         admin_credentials,
         admin_mcp,
         admin_service_accounts,
+        agents,
         auth,
         events,
         feedback,
@@ -146,6 +147,7 @@ def create_app() -> FastAPI:
     app.include_router(feedback.router, prefix="/v1/api", tags=["feedback"])
     app.include_router(tools.router, prefix="/v1", tags=["tools"])
     app.include_router(skills.router, prefix="/v1", tags=["skills"])
+    app.include_router(agents.router, prefix="/v1", tags=["agents"])
     app.include_router(memory.router, prefix="/v1", tags=["memory"])
     app.include_router(prompts.router, prefix="/v1", tags=["prompts"])
     app.include_router(transparency.router, prefix="/v1", tags=["transparency"])

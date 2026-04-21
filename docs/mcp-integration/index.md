@@ -1,4 +1,4 @@
-# 11. MCP Integration
+# 12. MCP Integration
 
 The Model Context Protocol (MCP) allows agents to use external tools hosted by third-party servers. Surogates includes a full MCP client, a credential-injecting proxy, and security scanning for MCP tool definitions.
 

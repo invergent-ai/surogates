@@ -531,10 +531,117 @@ class GovernanceGate:
             transparency=transparency,
         )
 
+    def with_profile(self, profile: dict[str, Any]) -> GovernanceGate:
+        """Return a new :class:`GovernanceGate` narrowed by *profile*.
+
+        Composition semantics (principle of least privilege):
+
+        * ``allowed_tools``: intersected with the base allowlist when the
+          base is set, otherwise taken as the new allowlist.
+        * ``denied_tools``: unioned with the base denylist.
+        * ``egress``: the profile's rules are appended to the base rules;
+          ``default_action`` falls back to the base when the profile does
+          not specify one.
+        * ``enabled``: inherited from the base; the profile cannot
+          re-enable a disabled base gate.
+
+        The returned gate is **frozen** -- policy profiles are per-session
+        overlays and must not be mutated mid-request.  This method does
+        not mutate ``self``.
+        """
+        base_allowed = self._engine.state_permissions.get(
+            _DEFAULT_ROLE, set(),
+        ) if self._has_allow_list else None
+
+        profile_allowed = profile.get("allowed_tools") or None
+        profile_denied = profile.get("denied_tools") or []
+
+        # Allowed: intersect when the base has an allowlist.
+        if base_allowed is not None and profile_allowed is not None:
+            new_allowed = set(base_allowed) & set(profile_allowed)
+        elif profile_allowed is not None:
+            new_allowed = set(profile_allowed)
+        elif base_allowed is not None:
+            new_allowed = set(base_allowed)
+        else:
+            new_allowed = None
+
+        # Denied: union.
+        new_denied = set(self._denied_tools)
+        new_denied.update(profile_denied)
+
+        # Egress: narrow semantics -- the composed default is the
+        # stricter of base-vs-profile (``deny`` always beats ``allow``)
+        # and profile rules are appended to the base so neither side can
+        # loosen the posture unilaterally.
+        new_egress: EgressPolicy | None = None
+        profile_egress = profile.get("egress") or {}
+        profile_rules = profile_egress.get("rules") or []
+        profile_default = profile_egress.get("default_action")
+
+        if self._egress_policy is not None or profile_rules:
+            base_default = (
+                getattr(self._egress_policy, "default_action", None)
+                if self._egress_policy is not None else None
+            )
+            composed_default = _strictest_egress_default(
+                base_default, profile_default,
+            )
+
+            new_egress = EgressPolicy(default_action=composed_default)
+            base_rules = (
+                getattr(self._egress_policy, "rules", None) or []
+                if self._egress_policy is not None else []
+            )
+            for rule in base_rules:
+                # AGT EgressRule exposes domain/ports/protocol/action as
+                # public attrs.  Copy ports by value so the composed
+                # policy cannot leak mutations back into the base.
+                new_egress.add_rule(
+                    domain=getattr(rule, "domain", ""),
+                    ports=list(getattr(rule, "ports", [443])),
+                    protocol=getattr(rule, "protocol", "tcp"),
+                    action=getattr(rule, "action", "allow"),
+                )
+            for rule in profile_rules:
+                new_egress.add_rule(
+                    domain=rule.get("domain", ""),
+                    ports=list(rule.get("ports", [443])),
+                    protocol=rule.get("protocol", "tcp"),
+                    action=rule.get("action", "allow"),
+                )
+
+        composed = GovernanceGate(
+            allowed_tools=new_allowed if new_allowed is not None else None,
+            denied_tools=new_denied if new_denied else None,
+            enabled=self._enabled,
+            egress_policy=new_egress,
+            transparency=self._transparency,
+        )
+        composed.freeze()
+        return composed
+
 
 # ------------------------------------------------------------------
 # File loading helpers
 # ------------------------------------------------------------------
+
+
+def _strictest_egress_default(base: str | None, profile: str | None) -> str:
+    """Return the stricter of two egress default actions.
+
+    ``deny`` is stricter than ``allow``; unknown / missing values fall
+    back to ``deny`` so a misspelled profile cannot accidentally loosen
+    the base's posture.  Used by :meth:`GovernanceGate.with_profile`
+    to compose a new default-action under narrowing semantics.
+    """
+    candidates = [v for v in (base, profile) if v]
+    if not candidates:
+        return "deny"
+    if any(v == "deny" for v in candidates):
+        return "deny"
+    # Every candidate must be "allow" for the composed default to be allow.
+    return "allow" if all(v == "allow" for v in candidates) else "deny"
 
 
 def _load_policy_dir(directory: Path) -> dict[str, Any] | None:

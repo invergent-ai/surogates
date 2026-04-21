@@ -66,7 +66,17 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - Skill CRUD via API
 - Skill validation rules
 
-### [9. Experts](experts/index.md)
+### [9. Sub-Agents](sub-agents/index.md)
+- What is a sub-agent? (declarative agent type as a child session)
+- Sub-agents vs. skills vs. experts (when to use which)
+- `AGENT.md` format and frontmatter
+- 4-layer loading (platform > user FS > org DB > user DB)
+- Spawning with `spawn_worker` / `delegate_task` and `agent_type`
+- Governance policy profile composition (narrowing semantics)
+- "Running" panel + session tree endpoints
+- Web UI library page and REST API reference
+
+### [10. Experts](experts/index.md)
 - What is an expert? (fine-tuned SLM as a skill)
 - Define an expert (`SKILL.md` with type: expert)
 - Collect training data from the event log
@@ -76,7 +86,7 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - Feedback tracking and auto-disable
 - API reference
 
-### [10. Memory](memory/index.md)
+### [11. Memory](memory/index.md)
 - Memory system overview
 - `MEMORY.md` / `USER.md` format (section-delimited entries)
 - MemoryStore (frozen snapshots, security scanning, dedup)
@@ -84,7 +94,7 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - MemoryManager (builtin + external providers, prefetch fencing)
 - API-mediated access (worker -> API server -> tenant bucket)
 
-### [11. MCP Integration](mcp-integration/index.md)
+### [12. MCP Integration](mcp-integration/index.md)
 - MCP client (stdio + HTTP transport)
 - Auto-reconnect and sampling
 - OAuth 2.1 PKCE for MCP servers
@@ -92,7 +102,7 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - MCP server configuration (platform + org + user layers)
 - MCP security scanning (poisoning, rug-pull, invisible unicode)
 
-### [12. Governance and Security](governance-and-security/index.md)
+### [13. Governance and Security](governance-and-security/index.md)
 - Policy engine (AGT PolicyEngine, allow-list, ABAC)
 - MCP security scanner (tool poisoning, SHA-256 fingerprinting)
 - Policy immutability (freeze per session)
@@ -102,23 +112,23 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - Saga (multi-step tool chains with automatic rollback)
 - Rate limiting (per-org, per-user, sliding window)
 
-### [12a. Audit &amp; Observability](audit/index.md)
+### [13a. Audit &amp; Observability](audit/index.md)
 - [Session event log](audit/events.md) -- every turn, tool call, policy decision, saga step inside a session
 - [Tenant audit log](audit/audit_log.md) -- auth, MCP scan, credential access (events with no session)
 - [SQL views](audit/views.md) -- typed projections for dashboards, audit queries, training data
 - Denormalization trigger, trace correlation, non-blocking emission, stability policy
 
-### [13. Storage](storage/index.md)
+### [14. Storage](storage/index.md)
 - StorageBackend protocol (`LocalBackend` / `S3Backend`)
 - Tenant asset roots (bucket layout, directory conventions)
 - Session workspace buckets (lifecycle, s3fs-fuse mount)
 - Bucket security model (session-scoped vs. tenant-wide)
 
-### [14. Background Jobs](background-jobs/index.md)
+### [15. Background Jobs](background-jobs/index.md)
 - `cleanup_sessions` -- orphaned bucket sweep
 - `training_collector` -- expert training data export
 
-### [15. Operations](operations/index.md)
+### [16. Operations](operations/index.md)
 - Health checks and metrics
 - HPA configuration and scaling strategy
 - Monitoring active sessions

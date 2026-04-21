@@ -158,6 +158,70 @@ Saga is opt-in (`saga.enabled: true` in config). When active, tool calls are for
 
 See [Governance and Security](../governance-and-security/index.md#saga-multi-step-tool-chains-with-automatic-rollback) for configuration and details.
 
+## Sub-Agents: Child Sessions as First-Class Agents
+
+A sub-agent is a **child session spawned by a coordinator** that runs through the same harness loop with a scoped preset (system prompt, tool filter, model override, iteration cap, governance policy profile). Every sub-agent is a real `Session` row with its own event log, lease, and cursor — crash recovery and observability work identically to root sessions.
+
+```
+Coordinator session                         Child session (sub-agent)
+   |                                             |
+   |  spawn_worker(goal, agent_type=             |
+   |               "code-reviewer")              |
+   |  creates Session(parent_id=coord.id,        |
+   |                  config.agent_type=...)     |
+   |  enqueues child_id to Redis                 |
+   |  emits worker.spawned event                 |
+   |-------------------------------------------->|
+   |                                             |  any worker dequeues
+   |                                             |  wake() resolves agent_type
+   |                                             |  applies preset to session.config
+   |                                             |  runs full LLM loop
+   |                                             |
+   |  worker.complete event (into parent log)    |
+   |<--------------------------------------------|
+   |  re-enqueue parent so it wakes              |
+```
+
+Children share everything about the tenant — skills, MCP servers, experts, memory — with the parent. The sub-agent's preset only scopes the per-session identity: which tools are visible to the child's LLM, which model responds, how many iterations it may run, and which governance profile narrows its allowed tool surface.
+
+| Dimension | Scoping |
+|---|---|
+| Tenant (org_id, user_id) | Inherited from parent |
+| Skill catalog | Shared (tenant-wide) |
+| MCP server pool | Shared (tenant-wide) |
+| Memory (MEMORY.md / USER.md) | Shared (tenant-wide) |
+| System prompt identity | Scoped per sub-agent |
+| Tool allowlist / denylist | Scoped per sub-agent |
+| Model | Scoped per sub-agent |
+| Iteration budget | Scoped per sub-agent (clamped at 30) |
+| Governance policy profile | Scoped per sub-agent (narrows tenant base) |
+| Event log | Scoped per child (own Session row) |
+| Workspace bucket | Scoped per child (own `session-{child_id}`) |
+
+### Resolution
+
+The shared helper `resolve_agent_by_name(name, tenant)` runs in two places:
+
+1. **Spawn time** — `spawn_worker` / `delegate_task` handlers use it to validate `agent_type=<name>` and reject unknown or disabled types with a clear JSON error (no child created).
+2. **Wake time** — the harness re-resolves when a child's session picks up, so an admin can update an AGENT.md and the new version applies on the next wake without re-spawning.
+
+Both paths go through the same function to prevent drift.
+
+### Session Ancestry
+
+A session's `parent_id` column threads the whole coordinator → worker → sub-worker chain. The `v_session_tree` recursive SQL view exposes the full descendant graph with root, depth, and ancestor path, and powers the `GET /v1/sessions/{id}/tree` + `/children` endpoints that drive the "Running" panel in the web UI.
+
+### Governance Profile Composition
+
+Sub-agents can declare an optional `policy_profile` that **narrows** (never widens) the tenant's base governance gate for the duration of the child session:
+
+- `allowed_tools` is intersected with the base allowlist.
+- `denied_tools` is unioned with the base denylist.
+- Egress defaults pick the stricter action (`deny` always beats `allow`).
+- The composed gate is frozen at creation.
+
+See [Sub-Agents](../sub-agents/index.md) for the full preset format, REST API, and UI walkthrough.
+
 ## Event-Driven Design
 
 The session log is the core abstraction. It is an append-only, monotonically sequenced event stream in PostgreSQL.

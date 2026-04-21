@@ -129,9 +129,9 @@ Create, update, and delete skills. Includes validation (name, frontmatter, conte
 
 Per-session todo list for tracking progress on multi-step tasks.
 
-### `delegate_task` -- Sub-Agent Delegation
+### `delegate_task` / `spawn_worker` -- Sub-Agent Delegation
 
-Spawn a child session for parallel or scoped work.
+Spawn a child session for parallel or scoped work.  Pass an optional `agent_type=<name>` to apply a pre-configured [sub-agent](../sub-agents/index.md) preset (system prompt, tool filter, model, iteration cap, policy profile).  `delegate_task` blocks until the child completes; `spawn_worker` returns immediately with a worker ID and the result flows back as a `worker.complete` event in the parent's log.
 
 ### `clarify` -- Interactive Clarification
 

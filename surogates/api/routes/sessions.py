@@ -5,8 +5,11 @@ from __future__ import annotations
 import logging
 from uuid import UUID, uuid4
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from sqlalchemy import text as _sql_text
 
 from surogates.config import INTERRUPT_CHANNEL_PREFIX
 from surogates.session.events import EventType
@@ -62,6 +65,39 @@ class SendMessageResponse(BaseModel):
 class ListSessionsResponse(BaseModel):
     sessions: list[Session]
     total: int
+
+
+class SessionTreeNode(BaseModel):
+    """One node in the session tree -- a session plus its lineage metadata."""
+
+    id: UUID
+    parent_id: UUID | None = None
+    root_session_id: UUID
+    depth: int
+    agent_id: str
+    agent_type: str | None = None  # from session.config.agent_type
+    channel: str
+    status: str
+    title: str | None = None
+    model: str | None = None
+    message_count: int = 0
+    tool_call_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class SessionTreeResponse(BaseModel):
+    nodes: list[SessionTreeNode]
+    total: int
+
+
+class SessionChildrenResponse(BaseModel):
+    children: list[SessionTreeNode]
+    total: int
+
+
+# Safety cap on tree depth to keep responses bounded.
+_MAX_TREE_NODES: int = 200
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +292,123 @@ async def get_session(
 ) -> Session:
     """Retrieve metadata for a single session."""
     return await _get_session_for_tenant(request, session_id, tenant)
+
+
+def _tree_node_from_row(row: dict) -> SessionTreeNode:
+    """Convert a ``v_session_tree``-joined row into a :class:`SessionTreeNode`.
+
+    Promotes ``session.config["agent_type"]`` to a first-class field so
+    the UI can render sub-agent badges without a second round-trip.
+    """
+    return SessionTreeNode(
+        id=row["session_id"],
+        parent_id=row.get("parent_id"),
+        root_session_id=row["root_session_id"],
+        depth=row["depth"],
+        agent_id=row["agent_id"],
+        agent_type=row["config"].get("agent_type"),
+        channel=row["channel"],
+        status=row["status"],
+        title=row.get("title"),
+        model=row.get("model"),
+        message_count=row["message_count"],
+        tool_call_count=row["tool_call_count"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/tree", response_model=SessionTreeResponse,
+)
+async def get_session_tree(
+    session_id: UUID,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> SessionTreeResponse:
+    """Return the full recursive descendant tree rooted at *session_id*.
+
+    The response contains the session itself plus every sub-agent /
+    delegation child, up to :data:`_MAX_TREE_NODES` to keep payloads
+    bounded.  Authorization: the root session must belong to this
+    tenant and agent.  Children inherit the root's tenant (enforced by
+    ``sessions.org_id`` constraints at session creation time), so no
+    per-child authorization is needed.
+
+    Each node carries the session's ``agent_type`` when set (via
+    ``session.config.agent_type``) so the frontend can display badges
+    for sub-agent types without extra lookups.
+    """
+    await _get_session_for_tenant(request, session_id, tenant)
+
+    session_factory = request.app.state.session_factory
+    agent_id = request.app.state.settings.agent_id
+
+    async with session_factory() as db:
+        result = await db.execute(
+            _sql_text(
+                "SELECT t.*, s.config, s.message_count, s.tool_call_count "
+                "FROM v_session_tree t "
+                "JOIN sessions s ON s.id = t.session_id "
+                "WHERE t.root_session_id = :sid "
+                "AND s.org_id = :org_id "
+                "AND s.agent_id = :agent_id "
+                "ORDER BY t.depth, t.created_at "
+                "LIMIT :limit"
+            ),
+            {
+                "sid": session_id,
+                "org_id": tenant.org_id,
+                "agent_id": agent_id,
+                "limit": _MAX_TREE_NODES,
+            },
+        )
+        nodes = [_tree_node_from_row(dict(r._mapping)) for r in result]
+
+    return SessionTreeResponse(nodes=nodes, total=len(nodes))
+
+
+@router.get(
+    "/sessions/{session_id}/children",
+    response_model=SessionChildrenResponse,
+)
+async def get_session_children(
+    session_id: UUID,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> SessionChildrenResponse:
+    """Return the direct children (one level) of a session.
+
+    Useful for incrementally expanding the session tree in the UI
+    without fetching the full descendant subtree up-front.
+    Authorization: the parent session must belong to this tenant and
+    agent; child rows inherit tenancy.
+    """
+    await _get_session_for_tenant(request, session_id, tenant)
+
+    session_factory = request.app.state.session_factory
+    agent_id = request.app.state.settings.agent_id
+
+    async with session_factory() as db:
+        result = await db.execute(
+            _sql_text(
+                "SELECT t.*, s.config, s.message_count, s.tool_call_count "
+                "FROM v_session_tree t "
+                "JOIN sessions s ON s.id = t.session_id "
+                "WHERE t.parent_id = :sid "
+                "AND s.org_id = :org_id "
+                "AND s.agent_id = :agent_id "
+                "ORDER BY s.created_at"
+            ),
+            {
+                "sid": session_id,
+                "org_id": tenant.org_id,
+                "agent_id": agent_id,
+            },
+        )
+        children = [_tree_node_from_row(dict(r._mapping)) for r in result]
+
+    return SessionChildrenResponse(children=children, total=len(children))
 
 
 @router.get("/sessions", response_model=ListSessionsResponse)

@@ -52,6 +52,31 @@ def _sa_cache_reset():
     _reset_sa_caches()
 
 
+@pytest_asyncio.fixture(autouse=True, loop_scope="session")
+async def _flush_rate_limit_keys(redis_client):
+    """Clear the API rate-limit Redis keys between integration tests.
+
+    The production rate limiter derives its Redis key from the first 32
+    characters of the JWT, which for HS256 tokens is always the same
+    algorithm/typ header.  Combined with the session-scoped Redis
+    container this bucket is effectively shared across every test in
+    the module, and once the suite exceeds 120 requests/minute every
+    subsequent test fails with 429.
+
+    Flushing ``surogates:rate:*`` before each test gives each one a
+    fresh budget without touching other Redis state.  Reuses the
+    session-scoped ``redis_client`` so we don't open a fresh TCP
+    connection per test.
+    """
+    try:
+        keys = [k async for k in redis_client.scan_iter(match="surogates:rate:*")]
+        if keys:
+            await redis_client.unlink(*keys)
+    except Exception:
+        pass
+    yield
+
+
 # ---------------------------------------------------------------------------
 # Containers -- started once, shared across all tests
 # ---------------------------------------------------------------------------

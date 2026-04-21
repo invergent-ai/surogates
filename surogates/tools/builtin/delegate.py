@@ -59,6 +59,15 @@ _DELEGATE_SCHEMA = ToolSchema(
                     "Optional model override for the sub-agent"
                 ),
             },
+            "agent_type": {
+                "type": "string",
+                "description": (
+                    "Optional name of a pre-configured sub-agent type. "
+                    "Applies that type's system prompt, tool filter, model, "
+                    "and iteration cap to the child session.  Explicit "
+                    "'model' wins over the agent type's preset."
+                ),
+            },
         },
         "required": ["goal"],
         "additionalProperties": False,
@@ -96,6 +105,7 @@ async def _delegate_handler(
     tenant = kwargs.get("tenant")
     parent_session_id_str = kwargs.get("session_id")
     budget = kwargs.get("budget")
+    session_factory = kwargs.get("session_factory")
 
     if session_store is None:
         return json.dumps({"error": "session_store not available for delegation"})
@@ -107,11 +117,27 @@ async def _delegate_handler(
     goal: str = arguments.get("goal", "")
     context: str = arguments.get("context", "")
     model_override: str | None = arguments.get("model")
+    agent_type: str | None = arguments.get("agent_type")
 
     if not goal:
         return json.dumps({"error": "goal is required"})
 
     parent_session_id = UUID(str(parent_session_id_str))
+
+    # Resolve the sub-agent type (if specified) — unknown or disabled
+    # types are a hard error so the caller sees the failure.
+    agent_def: Any | None = None
+    if agent_type:
+        from surogates.harness.agent_resolver import resolve_agent_by_name
+        agent_def = await resolve_agent_by_name(
+            agent_type, tenant, session_factory=session_factory,
+        )
+        if agent_def is None:
+            return json.dumps({
+                "error": (
+                    f"Unknown or disabled agent_type: {agent_type!r}."
+                ),
+            })
 
     # Child inherits the parent's agent_id — delegation stays within the agent.
     parent_session = await session_store.get_session(parent_session_id)
@@ -123,12 +149,36 @@ async def _delegate_handler(
         user_content = f"{goal}\n\n## Context\n{context}"
 
     # Check budget -- cap iterations for the child.
+    # Agent def's max_iterations further narrows the cap when smaller.
     child_iterations = min(
         _CHILD_MAX_ITERATIONS,
         budget.remaining if budget else _CHILD_MAX_ITERATIONS,
     )
+    if agent_def is not None and agent_def.max_iterations is not None:
+        child_iterations = min(child_iterations, agent_def.max_iterations)
     if child_iterations <= 0:
         return json.dumps({"error": "iteration budget exhausted; cannot delegate"})
+
+    # Model: explicit argument wins over agent def's preset.
+    if model_override is None and agent_def is not None and agent_def.model:
+        model_override = agent_def.model
+
+    # Build the child's config — agent def supplies tool filter and
+    # policy profile presets; explicit fields (none at the delegate
+    # schema today) would win if present.
+    child_config: dict[str, Any] = {
+        "max_iterations": child_iterations,
+        "streaming": False,
+    }
+    if agent_type:
+        child_config["agent_type"] = agent_type
+    if agent_def is not None:
+        if agent_def.tools:
+            child_config["allowed_tools"] = list(agent_def.tools)
+        if agent_def.disallowed_tools and "allowed_tools" not in child_config:
+            child_config["excluded_tools"] = list(agent_def.disallowed_tools)
+        if agent_def.policy_profile:
+            child_config["policy_profile"] = agent_def.policy_profile
 
     try:
         # 1. Create the child session.
@@ -138,7 +188,7 @@ async def _delegate_handler(
             agent_id=agent_id,
             channel="delegation",
             model=model_override,
-            config={"max_iterations": child_iterations, "streaming": False},
+            config=child_config,
             parent_id=parent_session_id,
         )
         child_id = child_session.id

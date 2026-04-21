@@ -66,6 +66,7 @@ class Org(Base):
         back_populates="org", lazy="raise"
     )
     skills: Mapped[list[Skill]] = relationship(back_populates="org", lazy="raise")
+    agents: Mapped[list[Agent]] = relationship(back_populates="org", lazy="raise")
     mcp_servers: Mapped[list[McpServer]] = relationship(
         back_populates="org", lazy="raise"
     )
@@ -117,6 +118,7 @@ class User(Base):
         back_populates="user", lazy="raise"
     )
     skills: Mapped[list[Skill]] = relationship(back_populates="user", lazy="raise")
+    agents: Mapped[list[Agent]] = relationship(back_populates="user", lazy="raise")
     mcp_servers: Mapped[list[McpServer]] = relationship(
         back_populates="user", lazy="raise"
     )
@@ -556,6 +558,63 @@ class Skill(Base):
     org: Mapped[Org] = relationship(back_populates="skills", lazy="raise")
     user: Mapped[Optional[User]] = relationship(
         back_populates="skills", lazy="raise"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sub-agent types
+# ---------------------------------------------------------------------------
+
+
+class Agent(Base):
+    """Declarative sub-agent type -- preset bundle of system prompt, tool
+    filter, model, iteration cap, and governance policy profile.
+
+    A sub-agent type is referenced by name when the coordinator spawns
+    a child session (``session.config.agent_type = <name>``).  The child
+    harness resolves the :class:`Agent` row at wake-time and applies the
+    preset to its loop.  Sub-agents inherit the parent's skills, MCP
+    servers, experts, tenant memory, and workspace; this table only
+    carries the per-type presets.
+
+    ``config`` JSONB holds:
+        - ``tools`` (list[str] | None)          -- allowlist
+        - ``disallowed_tools`` (list[str] | None) -- denylist
+        - ``model`` (str | None)                -- model override
+        - ``max_iterations`` (int | None)       -- iteration cap
+        - ``policy_profile`` (str | None)       -- governance profile name
+        - ``category`` (str | None)             -- subdirectory grouping
+        - ``tags`` (list[str] | None)           -- metadata tags
+    """
+
+    __tablename__ = "agents"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
+    )
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    system_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    config: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now()
+    )
+
+    # Relationships
+    org: Mapped[Org] = relationship(back_populates="agents", lazy="raise")
+    user: Mapped[Optional[User]] = relationship(
+        back_populates="agents", lazy="raise"
     )
 
 

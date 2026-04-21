@@ -168,6 +168,51 @@ Resume a paused session.
 
 Delete a session and its resources (events, workspace bucket).
 
+### `GET /v1/sessions/{id}/tree`
+
+Return the recursive descendant tree rooted at the session (up to 200 nodes). Each node carries its `agent_type` pulled from `session.config` so the UI can render sub-agent badges without a second round-trip.
+
+**Response (200):**
+```json
+{
+  "nodes": [
+    {
+      "id": "uuid",
+      "parent_id": null,
+      "root_session_id": "uuid",
+      "depth": 0,
+      "agent_id": "acme-main",
+      "agent_type": null,
+      "channel": "web",
+      "status": "active",
+      "title": null,
+      "model": "claude-sonnet-4-6",
+      "message_count": 12,
+      "tool_call_count": 5,
+      "created_at": "2026-04-20T10:00:00Z",
+      "updated_at": "2026-04-20T10:05:00Z"
+    },
+    {
+      "id": "uuid-child",
+      "parent_id": "uuid",
+      "root_session_id": "uuid",
+      "depth": 1,
+      "agent_type": "code-reviewer",
+      "channel": "worker",
+      "status": "completed",
+      ...
+    }
+  ],
+  "total": 2
+}
+```
+
+Authorization filters on `org_id` and `agent_id`, so descendants that somehow belonged to a different tenant would not leak.
+
+### `GET /v1/sessions/{id}/children`
+
+Direct children (one level) of the session. Same node shape as `/tree`, filtered to `parent_id = :id`.
+
 ## Events (SSE Streaming)
 
 ### `GET /v1/sessions/{id}/events`
@@ -255,6 +300,104 @@ These endpoints are only valid for skills with `type=expert`:
 | `GET /v1/skills/{id}/training-data/{dataset_id}` | Download JSONL dataset |
 | `POST /v1/skills/{id}/activate` | Set `expert_status` to `active` (requires endpoint) |
 | `POST /v1/skills/{id}/retire` | Set `expert_status` to `retired` |
+
+## Sub-Agents
+
+Declarative agent types referenced by coordinators as `spawn_worker(agent_type=<name>)`. See [Sub-Agents](../sub-agents/index.md) for the full concept and lifecycle.
+
+### `GET /v1/agents`
+
+List all sub-agent types visible to the current tenant (merged: platform FS + user bucket + org DB + user DB).
+
+**Response (200):**
+```json
+{
+  "agents": [
+    {
+      "name": "code-reviewer",
+      "description": "Reviews code for correctness and security",
+      "source": "user",
+      "category": "review",
+      "model": "claude-sonnet-4-6",
+      "max_iterations": 20,
+      "policy_profile": "read_only",
+      "enabled": true
+    }
+  ],
+  "total": 1
+}
+```
+
+`source` is one of `platform` (built-in), `org` (shared with the organization), or `user` (private). DB-overlay entries collapse to the same three values for the UI — the underlying `org_db` / `user_db` distinction is preserved server-side for precedence.
+
+### `GET /v1/agents/{name}`
+
+Full sub-agent definition.
+
+**Response (200):**
+```json
+{
+  "name": "code-reviewer",
+  "description": "Reviews code for correctness and security",
+  "source": "user",
+  "system_prompt": "You are a senior code reviewer...",
+  "tools": ["read_file", "search_files", "terminal"],
+  "disallowed_tools": ["write_file", "patch"],
+  "model": "claude-sonnet-4-6",
+  "max_iterations": 20,
+  "policy_profile": "read_only",
+  "category": "review",
+  "tags": ["security", "quality"],
+  "enabled": true
+}
+```
+
+`system_prompt` is the AGENT.md body (everything after the YAML frontmatter).
+
+### `POST /v1/agents`
+
+Create a new user-scoped sub-agent. Writes an AGENT.md file to the caller's bucket at `tenant-{org_id}/users/{user_id}/agents/{name}/AGENT.md`.
+
+**Request:**
+```json
+{
+  "name": "code-reviewer",
+  "content": "---\nname: code-reviewer\ndescription: Reviews code\ntools: [read_file, search_files]\nmodel: claude-sonnet-4-6\nmax_iterations: 20\n---\nYou are a code reviewer...",
+  "category": "review"
+}
+```
+
+The `name` field in the request body **must match** the `name:` key in the AGENT.md frontmatter — a mismatch returns `422` because it would otherwise produce a ghost agent whose storage path disagrees with its catalog listing.
+
+**Response (201):**
+```json
+{
+  "success": true,
+  "message": "Sub-agent 'code-reviewer' created.",
+  "category": "review"
+}
+```
+
+### `PUT /v1/agents/{name}`
+
+Replace the full AGENT.md content of an existing user-scoped sub-agent.
+
+**Request:**
+```json
+{
+  "content": "---\nname: code-reviewer\n...\n---\nUpdated body..."
+}
+```
+
+The frontmatter `name:` must still equal the path `name`.
+
+### `DELETE /v1/agents/{name}`
+
+Delete a user-scoped sub-agent. Platform and org-DB agents are read-only via this endpoint; use admin tooling for DB-overlay management.
+
+**Response: 204 No Content.**
+
+Coordinators that reference the deleted `agent_type` by name will receive a clear JSON error from `spawn_worker` / `delegate_task` on the next attempted spawn — no silent fallback.
 
 ## Memory
 

@@ -16,11 +16,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from surogates.harness.model_metadata import get_model_info
+from surogates.tools.loader import AGENT_SOURCE_PLATFORM
 
 if TYPE_CHECKING:
     from surogates.memory.manager import MemoryManager
     from surogates.session.models import Session
     from surogates.tenant.context import TenantContext
+    from surogates.tools.loader import AgentDef
 
 logger = logging.getLogger(__name__)
 
@@ -367,12 +369,39 @@ class PromptBuilder:
         memory_manager: MemoryManager | None = None,
         session: Session | None = None,
         available_tools: set[str] | None = None,
+        agent_def: AgentDef | None = None,
+        available_agents: list[AgentDef] | None = None,
     ) -> None:
         self.tenant = tenant
         self.skills: list = skills or []
         self._available_tools: set[str] = available_tools or set()
         self._memory_manager: MemoryManager | None = memory_manager
         self._session: Session | None = session
+        # Active sub-agent type for the current session, or None when
+        # the session runs with the default identity.  When set, the
+        # agent def's system_prompt body replaces the org-level
+        # personality/custom_instructions in the identity section.
+        self._agent_def: AgentDef | None = agent_def
+        # Catalog of enabled sub-agent types for the tenant.  Filtered
+        # once at construction because disabled agents never render and
+        # the list is immutable for the lifetime of the builder.
+        self._available_agents: list[AgentDef] = [
+            a for a in (available_agents or []) if a.enabled
+        ]
+        # Cached rendered "# Available Sub-Agents" block.  The catalog
+        # is immutable per builder and every description flows through
+        # the regex injection scanner, so rendering once and reusing
+        # across turns saves N×turns regex scans per wake cycle.
+        self._available_agents_section_cache: str | None = None
+
+    def set_agent_def(self, agent_def: AgentDef | None) -> None:
+        """Set or clear the active sub-agent type for the current session.
+
+        Called by the harness after :func:`~surogates.harness.agent_resolver.resolve_agent_def`
+        so the identity section and other builder output reflects the
+        resolved agent type.  Pass ``None`` to restore default behaviour.
+        """
+        self._agent_def = agent_def
 
     # ------------------------------------------------------------------
     # Public API
@@ -382,14 +411,15 @@ class PromptBuilder:
         """Assemble the full system prompt.
 
         Layers:
-        1. Agent identity (SOUL.md or default)
+        1. Agent identity (sub-agent body if active, otherwise org config or default)
         2. Tool-aware behavioral guidance (memory, session_search, skills)
         3. Tool-use enforcement (model-specific)
         4. Memory (frozen snapshot)
         5. Skills index
-        6. Context files (AGENTS.md, .cursorrules)
-        7. Timestamp, model info, platform hint
-        8. Model-specific execution guidance (OpenAI, Google)
+        6. Available sub-agents (coordinator sessions only)
+        7. Context files (AGENTS.md, .cursorrules)
+        8. Timestamp, model info, platform hint
+        9. Model-specific execution guidance (OpenAI, Google)
         """
         sections: list[str] = []
         sections.append(self._identity_section())
@@ -399,6 +429,7 @@ class PromptBuilder:
 
         sections.append(self._memory_section())
         sections.append(self._skills_section())
+        sections.append(self._available_agents_section())
         sections.append(self._context_files_section())
         sections.append(self._context_section())
 
@@ -451,7 +482,28 @@ class PromptBuilder:
         return "\n\n".join(parts)
 
     def _identity_section(self) -> str:
-        """Agent identity from org config or default."""
+        """Agent identity.
+
+        When an active sub-agent type is set (``self._agent_def``), the
+        agent def's ``system_prompt`` body replaces the org-level
+        personality and custom_instructions.  The identity header
+        switches to the agent name so the LLM knows which type it is.
+        Platform-sourced agents are trusted; org/user-sourced agent
+        bodies go through the injection scanner.
+        """
+        if self._agent_def is not None:
+            agent = self._agent_def
+            body = agent.system_prompt or ""
+            if agent.source != AGENT_SOURCE_PLATFORM:
+                body = self._sanitise(body, f"agent:{agent.name}")
+
+            parts = [f"# Identity\nYou are **{agent.name}**."]
+            if agent.description:
+                parts.append(agent.description)
+            if body.strip():
+                parts.append(body)
+            return "\n\n".join(p for p in parts if p)
+
         org_cfg = self.tenant.org_config
 
         agent_name: str = org_cfg.get("agent_name", "Surogate")
@@ -471,6 +523,52 @@ class PromptBuilder:
             safe = self._sanitise(custom_instructions, "custom_instructions")
             parts.append(safe)
         return "\n\n".join(parts)
+
+    def _available_agents_section(self) -> str:
+        """Render an "# Available Sub-Agents" block for coordinator sessions.
+
+        Memoized after the first call because the agent catalog is
+        immutable per builder and rendering runs regex injection scans
+        on every description.  Returns the empty string when the
+        session is not a coordinator or when no agents are configured.
+        """
+        if self._session is None:
+            return ""
+        if not self._session.config.get("coordinator"):
+            return ""
+        if not self._available_agents:
+            return ""
+
+        if self._available_agents_section_cache is not None:
+            return self._available_agents_section_cache
+
+        lines: list[str] = []
+        for agent in self._available_agents:
+            safe_desc = self._sanitise(
+                agent.description or "", f"agent:{agent.name}",
+            )
+            entry = f"- **{agent.name}**"
+            if safe_desc:
+                entry += f" — {safe_desc}"
+            if agent.tools:
+                entry += f"\n  Tools: {', '.join(agent.tools)}"
+            if agent.model:
+                entry += f"\n  Model: {agent.model}"
+            lines.append(entry)
+
+        if not lines:
+            self._available_agents_section_cache = ""
+            return ""
+
+        rendered = (
+            "# Available Sub-Agents\n"
+            "Pass ``agent_type=<name>`` to ``spawn_worker`` or "
+            "``delegate_task`` to use one of these pre-configured sub-agent types. "
+            "Each sub-agent runs with its own system prompt, tool filter, and model.\n"
+            + "\n".join(lines)
+        )
+        self._available_agents_section_cache = rendered
+        return rendered
 
     def _memory_section(self) -> str:
         """Load memory from MemoryManager frozen snapshot (if available) or fall back to file read."""

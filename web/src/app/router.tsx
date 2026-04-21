@@ -9,6 +9,7 @@ import { chatRoute, chatSessionRoute } from "./routes/chat";
 import { Route as linkRoute } from "./routes/link";
 import { Route as settingsRoute } from "./routes/settings";
 import { Route as skillsRoute } from "./routes/skills";
+import { Route as agentsRoute } from "./routes/agents";
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
@@ -16,6 +17,7 @@ const routeTree = rootRoute.addChildren([
   linkRoute,
   settingsRoute,
   skillsRoute,
+  agentsRoute,
   chatRoute.addChildren([chatSessionRoute]),
 ]);
 

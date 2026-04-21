@@ -1,4 +1,4 @@
-# 12. Governance and Security
+# 13. Governance and Security
 
 Surogates enforces security at every layer: policy-based tool governance, MCP security scanning, three-component trust isolation, network policies, encrypted credentials, and audit logging.
 

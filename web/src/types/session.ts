@@ -53,4 +53,34 @@ export type EventType =
   | "context.compact"
   | "memory.update"
   | "harness.wake"
-  | "harness.crash";
+  | "harness.crash"
+  | "worker.spawned"
+  | "worker.complete"
+  | "worker.failed";
+
+export interface SessionTreeNode {
+  id: string;
+  parent_id: string | null;
+  root_session_id: string;
+  depth: number;
+  agent_id: string;
+  agent_type: string | null;
+  channel: string;
+  status: "active" | "paused" | "completed" | "failed";
+  title: string | null;
+  model: string | null;
+  message_count: number;
+  tool_call_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SessionTreeResponse {
+  nodes: SessionTreeNode[];
+  total: number;
+}
+
+export interface SessionChildrenResponse {
+  children: SessionTreeNode[];
+  total: number;
+}

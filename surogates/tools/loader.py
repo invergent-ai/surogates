@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 # Well-known platform volume paths (overridable via constructor).
 PLATFORM_SKILLS_DIR = "/etc/surogates/skills"
 PLATFORM_MCP_DIR = "/etc/surogates/mcp"
+PLATFORM_AGENTS_DIR = "/etc/surogates/agents"
 
 
 # ------------------------------------------------------------------
@@ -45,6 +46,7 @@ PLATFORM_MCP_DIR = "/etc/surogates/mcp"
 
 
 EXCLUDED_SKILL_DIRS = frozenset((".git", ".github", ".hub"))
+EXCLUDED_AGENT_DIRS = frozenset((".git", ".github"))
 
 # Skill source layer constants.
 SKILL_SOURCE_PLATFORM = "platform"
@@ -52,6 +54,24 @@ SKILL_SOURCE_USER = "user"
 SKILL_SOURCE_ORG = "org"
 SKILL_SOURCE_ORG_DB = "org_db"
 SKILL_SOURCE_USER_DB = "user_db"
+
+# Agent source layer constants -- mirror the skill layers.
+AGENT_SOURCE_PLATFORM = "platform"
+AGENT_SOURCE_USER = "user"
+AGENT_SOURCE_ORG = "org"
+AGENT_SOURCE_ORG_DB = "org_db"
+AGENT_SOURCE_USER_DB = "user_db"
+
+# Recognised AGENT.md frontmatter keys.  Anything outside this set is
+# logged as a typo/unknown warning by ``_parse_agent_frontmatter`` so an
+# admin who writes ``disallow_tools`` or ``max_iteration`` sees feedback
+# instead of silently running an unconstrained agent.
+_KNOWN_AGENT_FRONTMATTER_KEYS: frozenset[str] = frozenset({
+    "name", "description",
+    "tools", "disallowed_tools",
+    "model", "max_iterations", "policy_profile",
+    "category", "tags", "enabled",
+})
 
 # Expert status lifecycle constants.
 EXPERT_STATUS_DRAFT = "draft"
@@ -111,6 +131,36 @@ class SkillDef:
 
 
 @dataclass(slots=True)
+class AgentDef:
+    """A loaded sub-agent type definition.
+
+    A sub-agent type is a declarative bundle of (system prompt, tool
+    allowlist/denylist, model override, iteration cap, policy profile).
+    When a coordinator session spawns a worker with ``agent_type=<name>``,
+    a child ``Session`` is created and these fields are applied to its
+    config.  The child inherits skills, MCP servers, experts, tenant
+    memory, and workspace from the parent tenant.
+
+    The ``system_prompt`` field is the AGENT.md body (everything after
+    the YAML frontmatter).  When the child session wakes, this body
+    replaces the default identity section of the system prompt.
+    """
+
+    name: str
+    description: str
+    system_prompt: str  # AGENT.md body (everything after the frontmatter)
+    source: str  # "platform", "user", "org", "org_db", "user_db"
+    tools: list[str] | None = None  # allowlist of tool names (None = inherit)
+    disallowed_tools: list[str] | None = None  # denylist (removed from inherited)
+    model: str | None = None  # optional model override for the child session
+    max_iterations: int | None = None  # optional cap on the child's iteration budget
+    policy_profile: str | None = None  # named governance profile to apply
+    enabled: bool = True
+    category: str | None = None  # subdirectory grouping
+    tags: list[str] | None = None  # metadata tags
+
+
+@dataclass(slots=True)
 class MCPServerDef:
     """Configuration for a single MCP server."""
 
@@ -129,8 +179,8 @@ class MCPServerDef:
 
 
 class ResourceLoader:
-    """Loads skills and MCP server configs from platform volumes and
-    tenant asset roots.
+    """Loads skills, MCP server configs, and sub-agent types from platform
+    volumes and tenant asset roots.
 
     Parameters
     ----------
@@ -138,12 +188,15 @@ class ResourceLoader:
         Path to the platform-level skills directory.
     platform_mcp_dir:
         Path to the platform-level MCP config directory.
+    platform_agents_dir:
+        Path to the platform-level sub-agent types directory.
     """
 
     def __init__(
         self,
         platform_skills_dir: str | None = None,
         platform_mcp_dir: str | None = None,
+        platform_agents_dir: str | None = None,
     ) -> None:
         # Resolve defaults lazily so runtime monkey-patching of the module
         # constants (used by tests) takes effect.
@@ -154,6 +207,10 @@ class ResourceLoader:
         self._platform_mcp_dir = (
             platform_mcp_dir if platform_mcp_dir is not None
             else PLATFORM_MCP_DIR
+        )
+        self._platform_agents_dir = (
+            platform_agents_dir if platform_agents_dir is not None
+            else PLATFORM_AGENTS_DIR
         )
 
     # ------------------------------------------------------------------
@@ -303,6 +360,182 @@ class ResourceLoader:
         return self._merge(platform, org, user)
 
     # ------------------------------------------------------------------
+    # Sub-agent types
+    # ------------------------------------------------------------------
+
+    def resolve_platform_agent_dir(self, name: str) -> Path | None:
+        """Return the on-disk directory for a platform sub-agent, or ``None``.
+
+        Searches ``{platform_agents_dir}/{name}/AGENT.md`` and
+        ``{platform_agents_dir}/{category}/{name}/AGENT.md`` layouts.
+        """
+        root = Path(self._platform_agents_dir)
+        if not root.is_dir():
+            return None
+        direct = root / name / "AGENT.md"
+        if direct.is_file():
+            return direct.parent
+        for sub in root.iterdir():
+            if not sub.is_dir() or sub.name in EXCLUDED_AGENT_DIRS:
+                continue
+            candidate = sub / name / "AGENT.md"
+            if candidate.is_file():
+                return candidate.parent
+        return None
+
+    async def load_agents(
+        self,
+        tenant: Any,
+        db_session: Any | None = None,
+    ) -> list[AgentDef]:
+        """Merge sub-agent types from all four layers.
+
+        Layer precedence (lowest → highest):
+
+        1. Platform filesystem (``/etc/surogates/agents/``)
+        2. User bucket files (``tenant-{org}/users/{user}/agents/``)
+        3. Org-wide DB rows (``agents`` table, ``user_id IS NULL``)
+        4. User-specific DB rows (``agents`` table, ``user_id = ?``)
+
+        Org admin overrides (DB layers) are final -- end users cannot
+        override them via bucket files.
+
+        Parameters
+        ----------
+        tenant:
+            A :class:`~surogates.tenant.context.TenantContext` instance.
+        db_session:
+            An optional ``AsyncSession``.  When provided, layers 3 and 4
+            are loaded from the database.  When ``None`` the method
+            falls back to the legacy 3-layer filesystem merge.
+        """
+        asset_root = Path(tenant.asset_root)
+        org_id = str(tenant.org_id)
+        user_id = str(tenant.user_id)
+
+        user_agents_dir = str(
+            asset_root / org_id / "users" / user_id / "agents"
+        )
+
+        # Layer 1: platform filesystem
+        platform = self._load_agents_from_dir(
+            self._platform_agents_dir, AGENT_SOURCE_PLATFORM,
+        )
+
+        # Layer 2: user bucket files
+        user_files = self._load_agents_from_dir(
+            user_agents_dir, AGENT_SOURCE_USER,
+        )
+
+        if db_session is not None:
+            # Layer 3: org-wide DB entries
+            org_db = await self._load_agents_from_db(
+                db_session, tenant.org_id, user_id=None,
+                source=AGENT_SOURCE_ORG_DB,
+            )
+            # Layer 4: user-specific DB entries
+            user_db = await self._load_agents_from_db(
+                db_session, tenant.org_id, tenant.user_id,
+                source=AGENT_SOURCE_USER_DB,
+            )
+            return self._merge(platform, user_files, org_db, user_db)
+
+        # Fallback: legacy 3-layer filesystem merge (no DB).
+        org_agents_dir = str(asset_root / org_id / "shared" / "agents")
+        org_files = self._load_agents_from_dir(
+            org_agents_dir, AGENT_SOURCE_ORG,
+        )
+        return self._merge(platform, org_files, user_files)
+
+    def load_policy_profile(
+        self,
+        tenant: Any,
+        name: str,
+    ) -> dict[str, Any] | None:
+        """Load a named policy profile as a raw config dict.
+
+        Profiles are YAML or JSON files stored under
+        ``agents/policies/<name>.{yaml,yml,json}`` at the platform and org
+        layers.  The profile schema mirrors the top-level governance config:
+
+        * ``allowed_tools: list[str]``  -- narrows the base allowlist
+        * ``denied_tools: list[str]``   -- additive denylist
+        * ``egress``: see :meth:`GovernanceGate.from_config` -- appended to
+          the base egress rules
+        * ``enabled: bool``             -- rarely used; overrides base
+
+        Precedence: platform < org.  When a key exists in both layers the
+        org value wins (mirrors the ``from_config`` merge semantics).
+        Returns ``None`` when no matching profile file exists.
+        """
+        layers: list[dict[str, Any]] = []
+
+        platform_file = _find_policy_profile_file(
+            Path(self._platform_agents_dir) / "policies", name,
+        )
+        if platform_file is not None:
+            try:
+                data = _load_data_file(platform_file)
+                if isinstance(data, dict):
+                    layers.append(data)
+            except Exception:
+                logger.exception(
+                    "Failed to load platform policy profile %s", platform_file,
+                )
+
+        asset_root = Path(tenant.asset_root)
+        org_id = str(tenant.org_id)
+        org_policies_dir = (
+            asset_root / org_id / "shared" / "agents" / "policies"
+        )
+        org_file = _find_policy_profile_file(org_policies_dir, name)
+        if org_file is not None:
+            try:
+                data = _load_data_file(org_file)
+                if isinstance(data, dict):
+                    layers.append(data)
+            except Exception:
+                logger.exception(
+                    "Failed to load org policy profile %s", org_file,
+                )
+
+        if not layers:
+            return None
+
+        # Merge: last layer wins for scalar fields; tool lists are unioned.
+        merged: dict[str, Any] = {}
+        allowed: set[str] = set()
+        denied: set[str] = set()
+        egress_rules: list[dict[str, Any]] = []
+        egress_default: str | None = None
+        for layer in layers:
+            for key, value in layer.items():
+                if key == "allowed_tools" and isinstance(value, list):
+                    allowed.update(value)
+                elif key == "denied_tools" and isinstance(value, list):
+                    denied.update(value)
+                elif key == "egress" and isinstance(value, dict):
+                    rules = value.get("rules")
+                    if isinstance(rules, list):
+                        egress_rules.extend(rules)
+                    if "default_action" in value:
+                        egress_default = value.get("default_action")
+                else:
+                    merged[key] = value
+        if allowed:
+            merged["allowed_tools"] = sorted(allowed)
+        if denied:
+            merged["denied_tools"] = sorted(denied)
+        if egress_rules or egress_default:
+            egress: dict[str, Any] = {}
+            if egress_rules:
+                egress["rules"] = egress_rules
+            if egress_default:
+                egress["default_action"] = egress_default
+            merged["egress"] = egress
+        return merged
+
+    # ------------------------------------------------------------------
     # Skills parsing
     # ------------------------------------------------------------------
 
@@ -380,6 +613,72 @@ class ResourceLoader:
                 logger.exception("Failed to load skill from %s", entry)
 
         return skills
+
+    # ------------------------------------------------------------------
+    # Sub-agent parsing
+    # ------------------------------------------------------------------
+
+    def _load_agents_from_dir(self, path: str, source: str) -> list[AgentDef]:
+        """Load sub-agent types from *path*.
+
+        Expected layout::
+
+            agents/
+            ├── code-reviewer/
+            │   └── AGENT.md
+            ├── category/
+            │   └── experiment-runner/
+            │       └── AGENT.md
+            └── db-reader.md          # flat layout (legacy)
+
+        If no frontmatter is present the directory name (or filename
+        minus extension) is used as the agent name.
+        """
+        directory = Path(path)
+        if not directory.is_dir():
+            return []
+
+        agents: list[AgentDef] = []
+        seen_names: set[str] = set()
+
+        # Walk for AGENT.md files (directory-based layout).
+        for root, dirs, files in os.walk(directory):
+            dirs[:] = [d for d in dirs if d not in EXCLUDED_AGENT_DIRS]
+            if "AGENT.md" in files:
+                agent_md = Path(root) / "AGENT.md"
+                try:
+                    text = agent_md.read_text(encoding="utf-8")
+                    parsed = _parse_agent_frontmatter(text, agent_md.parent.name)
+                    name = parsed["name"]
+                    if name in seen_names:
+                        continue
+                    seen_names.add(name)
+
+                    category = _get_category_from_path(agent_md, directory)
+                    agents.append(_build_agent_def(parsed, source, category))
+                except Exception:
+                    logger.exception("Failed to load agent from %s", agent_md)
+
+        # Flat .md files at the top level (legacy layout).
+        for entry in sorted(directory.iterdir()):
+            if not entry.is_file():
+                continue
+            if not entry.name.lower().endswith(".md"):
+                continue
+            if entry.name == "AGENT.md":
+                continue
+            try:
+                text = entry.read_text(encoding="utf-8")
+                parsed = _parse_agent_frontmatter(text, entry.stem)
+                name = parsed["name"]
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
+                agents.append(_build_agent_def(parsed, source))
+            except Exception:
+                logger.exception("Failed to load agent from %s", entry)
+
+        return agents
 
     # ------------------------------------------------------------------
     # MCP config parsing
@@ -484,12 +783,55 @@ class ResourceLoader:
                 logger.warning("Skipping malformed DB skill %s", row.name, exc_info=True)
         return skills
 
+    @staticmethod
+    async def _load_agents_from_db(
+        session: Any,
+        org_id: UUID,
+        user_id: UUID | None,
+        source: str,
+    ) -> list[AgentDef]:
+        """Load enabled sub-agent types from the ``agents`` table.
+
+        Parameters
+        ----------
+        session:
+            An ``AsyncSession`` (SQLAlchemy).
+        org_id:
+            Organisation to filter by.
+        user_id:
+            ``None`` for org-wide rows, or a specific user UUID.
+        source:
+            Value for :attr:`AgentDef.source` (``"org_db"`` or ``"user_db"``).
+        """
+        from sqlalchemy import select
+        from surogates.db.models import Agent
+
+        stmt = (
+            select(Agent)
+            .where(Agent.org_id == org_id)
+            .where(Agent.enabled.is_(True))
+        )
+        if user_id is None:
+            stmt = stmt.where(Agent.user_id.is_(None))
+        else:
+            stmt = stmt.where(Agent.user_id == user_id)
+
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+        agents: list[AgentDef] = []
+        for row in rows:
+            try:
+                agents.append(_agent_from_db_row(row, source))
+            except Exception:
+                logger.warning("Skipping malformed DB agent %s", row.name, exc_info=True)
+        return agents
+
     # ------------------------------------------------------------------
     # Merge logic
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _merge(*layers: list[SkillDef | MCPServerDef]) -> list[Any]:
+    def _merge(*layers: list[SkillDef | MCPServerDef | AgentDef]) -> list[Any]:
         """Merge layers with last-wins-by-name precedence.
 
         Layers are given in ascending priority order: the last layer's
@@ -551,6 +893,158 @@ def _skill_from_db_row(row: Any, source: str) -> SkillDef:
         source=source,
         category=cfg.get("category"),
     )
+
+
+def _agent_from_db_row(row: Any, source: str) -> AgentDef:
+    """Convert a :class:`~surogates.db.models.Agent` ORM row to an :class:`AgentDef`.
+
+    DB columns supply ``name``, ``description``, ``system_prompt``, and
+    ``enabled``.  The ``config`` JSONB column supplies the remaining
+    fields: ``tools``, ``disallowed_tools``, ``model``,
+    ``max_iterations``, ``policy_profile``, ``category``, ``tags``.
+    """
+    cfg = row.config or {}
+
+    max_iter = cfg.get("max_iterations")
+    if max_iter is not None:
+        try:
+            max_iter = int(max_iter)
+        except (TypeError, ValueError):
+            max_iter = None
+
+    tools = cfg.get("tools")
+    if isinstance(tools, str):
+        tools = [t.strip() for t in tools.split(",") if t.strip()]
+    elif isinstance(tools, list):
+        tools = [str(t) for t in tools]
+    else:
+        tools = None
+
+    disallowed = cfg.get("disallowed_tools")
+    if isinstance(disallowed, str):
+        disallowed = [t.strip() for t in disallowed.split(",") if t.strip()]
+    elif isinstance(disallowed, list):
+        disallowed = [str(t) for t in disallowed]
+    else:
+        disallowed = None
+
+    tags = cfg.get("tags")
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+    elif isinstance(tags, list):
+        tags = [str(t).strip() for t in tags if t]
+    else:
+        tags = None
+
+    return AgentDef(
+        name=row.name,
+        description=row.description or "",
+        system_prompt=row.system_prompt or "",
+        source=source,
+        tools=tools,
+        disallowed_tools=disallowed,
+        model=cfg.get("model"),
+        max_iterations=max_iter,
+        policy_profile=cfg.get("policy_profile"),
+        enabled=bool(row.enabled),
+        category=cfg.get("category"),
+        tags=tags,
+    )
+
+
+def _build_agent_def(
+    parsed: dict[str, Any],
+    source: str,
+    category: str | None = None,
+) -> AgentDef:
+    """Construct an :class:`AgentDef` from parsed frontmatter data."""
+    max_iter = parsed.get("max_iterations")
+    if max_iter is not None:
+        try:
+            max_iter = int(max_iter)
+        except (TypeError, ValueError):
+            max_iter = None
+
+    enabled = parsed.get("enabled", True)
+    if isinstance(enabled, str):
+        enabled = enabled.strip().lower() not in ("false", "0", "no", "off")
+
+    return AgentDef(
+        name=parsed["name"],
+        description=parsed["description"],
+        system_prompt=parsed["system_prompt"],
+        source=source,
+        tools=parsed.get("tools"),
+        disallowed_tools=parsed.get("disallowed_tools"),
+        model=parsed.get("model"),
+        max_iterations=max_iter,
+        policy_profile=parsed.get("policy_profile"),
+        enabled=bool(enabled),
+        category=category or parsed.get("category"),
+        tags=parsed.get("tags"),
+    )
+
+
+def _parse_agent_frontmatter(
+    text: str,
+    fallback_name: str,
+) -> dict[str, Any]:
+    """Extract YAML frontmatter and body from an AGENT.md file.
+
+    Returns a dict with keys: ``name``, ``description``, ``system_prompt``,
+    and optional ``tools``, ``disallowed_tools``, ``model``,
+    ``max_iterations``, ``policy_profile``, ``category``, ``tags``,
+    ``enabled``.
+    """
+    result: dict[str, Any] = {
+        "name": fallback_name,
+        "description": "",
+        "system_prompt": text,
+    }
+
+    stripped = text.strip()
+    if stripped.startswith("---"):
+        end_idx = stripped.find("---", 3)
+        if end_idx != -1:
+            frontmatter_text = stripped[3:end_idx].strip()
+            result["system_prompt"] = stripped[end_idx + 3:].strip()
+
+            fm = _parse_yaml_or_simple(frontmatter_text)
+            result["name"] = fm.get("name", fallback_name)
+            result["description"] = fm.get("description", "")
+
+            # List-valued fields: accept YAML lists or comma-separated strings.
+            for key in ("tools", "disallowed_tools", "tags"):
+                val = fm.get(key)
+                if val:
+                    if isinstance(val, str):
+                        result[key] = [
+                            v.strip() for v in val.split(",") if v.strip()
+                        ]
+                    elif isinstance(val, list):
+                        result[key] = [str(v).strip() for v in val if v]
+
+            # Scalar fields.
+            for key in ("model", "policy_profile", "category"):
+                val = fm.get(key)
+                if val:
+                    result[key] = str(val)
+
+            if "max_iterations" in fm:
+                result["max_iterations"] = fm.get("max_iterations")
+
+            if "enabled" in fm:
+                result["enabled"] = fm.get("enabled")
+
+            unknown = set(fm.keys()) - _KNOWN_AGENT_FRONTMATTER_KEYS
+            if unknown:
+                logger.warning(
+                    "AGENT.md %r: unknown frontmatter keys %s -- ignored. "
+                    "Check for typos (e.g. 'disallow_tools' vs 'disallowed_tools').",
+                    fallback_name, sorted(unknown),
+                )
+
+    return result
 
 
 def _build_skill_def(
@@ -702,8 +1196,18 @@ def _parse_yaml_or_simple(text: str) -> dict[str, Any]:
     """Parse YAML frontmatter, falling back to a simple ``key: value``
     line parser if PyYAML is unavailable.
 
-    Values that are lists are preserved as lists; scalars are coerced to
-    strings.
+    Preserves native Python types where the YAML parser returns them:
+
+    * ``list`` / ``dict`` pass through untouched.
+    * ``bool`` / ``int`` / ``float`` pass through untouched so callers
+      like :func:`_build_agent_def` receive real booleans and numbers
+      rather than the strings ``"True"`` / ``"5"``.
+    * ``None`` keys are dropped so an empty value in the source (``tools:``)
+      cannot surface as the literal string ``"None"`` (which previously
+      parsed into a bogus one-element list ``["None"]``).
+    * Everything else is coerced to ``str`` for parser stability --
+      dates, tagged scalars, and similar would otherwise leak YAML
+      library types into the consumers.
     """
     try:
         import yaml  # type: ignore[import-untyped]
@@ -712,7 +1216,9 @@ def _parse_yaml_or_simple(text: str) -> dict[str, Any]:
         if isinstance(data, dict):
             result: dict[str, Any] = {}
             for k, v in data.items():
-                if isinstance(v, list):
+                if v is None:
+                    continue
+                if isinstance(v, (list, dict, bool, int, float)):
                     result[k] = v
                 else:
                     result[k] = str(v)
@@ -737,6 +1243,17 @@ def _load_data_file(path: Path) -> Any:
     if path.suffix in (".yaml", ".yml"):
         return _parse_yaml_data(text)
     return json.loads(text)
+
+
+def _find_policy_profile_file(directory: Path, name: str) -> Path | None:
+    """Find ``<name>.{yaml,yml,json}`` under *directory* or ``None``."""
+    if not directory.is_dir():
+        return None
+    for suffix in (".yaml", ".yml", ".json"):
+        candidate = directory / f"{name}{suffix}"
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _parse_yaml_data(text: str) -> Any:

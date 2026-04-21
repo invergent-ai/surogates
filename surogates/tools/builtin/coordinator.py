@@ -85,6 +85,17 @@ _SPAWN_WORKER_SCHEMA = ToolSchema(
                 "type": "string",
                 "description": "Optional model override for the worker",
             },
+            "agent_type": {
+                "type": "string",
+                "description": (
+                    "Optional name of a pre-configured sub-agent type. "
+                    "Applies that type's system prompt, tool filter, model, "
+                    "and iteration cap to the worker.  Consult the "
+                    "'# Available Sub-Agents' section of your system prompt "
+                    "for valid names.  Explicit 'tools' / 'model' arguments "
+                    "still win over the agent type's presets."
+                ),
+            },
         },
         "required": ["goal"],
         "additionalProperties": False,
@@ -194,6 +205,7 @@ async def _spawn_worker_handler(
     tenant = kwargs.get("tenant")
     parent_session_id_str = kwargs.get("session_id")
     budget = kwargs.get("budget")
+    session_factory = kwargs.get("session_factory")
 
     if session_store is None:
         return json.dumps({"error": "session_store not available"})
@@ -206,11 +218,29 @@ async def _spawn_worker_handler(
     context: str = arguments.get("context", "")
     model_override: str | None = arguments.get("model")
     tool_whitelist: list[str] | None = arguments.get("tools")
+    agent_type: str | None = arguments.get("agent_type")
 
     if not goal:
         return json.dumps({"error": "goal is required"})
 
     parent_session_id = UUID(str(parent_session_id_str))
+
+    # Resolve the sub-agent type (if specified) — unknown or disabled
+    # types are a hard error so the coordinator does not silently fall
+    # back to an unconfigured worker.
+    agent_def: Any | None = None
+    if agent_type:
+        from surogates.harness.agent_resolver import resolve_agent_by_name
+        agent_def = await resolve_agent_by_name(
+            agent_type, tenant, session_factory=session_factory,
+        )
+        if agent_def is None:
+            return json.dumps({
+                "error": (
+                    f"Unknown or disabled agent_type: {agent_type!r}. "
+                    f"Check the Available Sub-Agents list in your system prompt."
+                ),
+            })
 
     # Inherit the parent's agent_id.
     parent_session = await session_store.get_session(parent_session_id)
@@ -222,10 +252,13 @@ async def _spawn_worker_handler(
         user_content = f"{goal}\n\n## Context\n{context}"
 
     # Budget: worker gets a slice of the parent's remaining budget.
+    # Agent def's max_iterations further narrows the cap when smaller.
     child_iterations = min(
         _WORKER_MAX_ITERATIONS,
         budget.remaining if budget else _WORKER_MAX_ITERATIONS,
     )
+    if agent_def is not None and agent_def.max_iterations is not None:
+        child_iterations = min(child_iterations, agent_def.max_iterations)
     if child_iterations <= 0:
         return json.dumps({"error": "iteration budget exhausted; cannot spawn worker"})
 
@@ -234,19 +267,39 @@ async def _spawn_worker_handler(
         "max_iterations": child_iterations,
         "streaming": False,
     }
-    # Tool whitelist — stored in session config and enforced by the harness.
+    if agent_type:
+        worker_config["agent_type"] = agent_type
+    if agent_def is not None and agent_def.policy_profile:
+        worker_config["policy_profile"] = agent_def.policy_profile
+
+    # Tool whitelist — explicit LLM argument wins, then agent def, then default.
     if tool_whitelist is not None:
         # Strip coordinator-only tools from the whitelist.
         allowed = [t for t in tool_whitelist if t not in WORKER_EXCLUDED_TOOLS]
+        worker_config["allowed_tools"] = allowed
+    elif agent_def is not None and agent_def.tools:
+        allowed = [t for t in agent_def.tools if t not in WORKER_EXCLUDED_TOOLS]
         worker_config["allowed_tools"] = allowed
     else:
         # Default: exclude coordinator tools so workers cannot spawn sub-workers.
         worker_config["excluded_tools"] = list(WORKER_EXCLUDED_TOOLS)
 
+    # Agent def's denylist is additive when it supplies extra exclusions.
+    if agent_def is not None and agent_def.disallowed_tools:
+        existing = set(worker_config.get("excluded_tools") or [])
+        existing.update(agent_def.disallowed_tools)
+        # Only record excluded_tools when we are not in pure-allowlist mode.
+        if "allowed_tools" not in worker_config:
+            worker_config["excluded_tools"] = list(existing)
+
     # Inherit workspace path so the worker can access the same files.
     workspace_path = parent_session.config.get("workspace_path")
     if workspace_path:
         worker_config["workspace_path"] = workspace_path
+
+    # Model: explicit argument wins over agent def's preset.
+    if model_override is None and agent_def is not None and agent_def.model:
+        model_override = agent_def.model
 
     try:
         # 1. Create the child session.

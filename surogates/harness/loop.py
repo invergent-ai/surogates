@@ -22,6 +22,10 @@ import traceback
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID
 
+from surogates.harness.agent_resolver import (
+    apply_agent_def_to_session,
+    resolve_agent_def,
+)
 from surogates.harness.connection_health import cleanup_dead_connections
 from surogates.harness.cost_tracker import SessionCostTracker
 from surogates.harness.credentials import CredentialPool
@@ -296,6 +300,18 @@ class AgentHarness:
                 session.status,
             )
             return
+
+        # Resolve the sub-agent type (if any) and hydrate session config
+        # with its presets.  Mutation is scoped to this wake cycle only —
+        # the DB row is not modified.  The resolved def is also pushed to
+        # the prompt builder so the identity section reflects the active
+        # agent type.
+        active_agent_def = await resolve_agent_def(
+            session, self._tenant, session_factory=self._session_factory,
+        )
+        if active_agent_def is not None:
+            apply_agent_def_to_session(session, active_agent_def)
+        self._prompt.set_agent_def(active_agent_def)
 
         # Honour per-session streaming config.
         if not session.config.get("streaming", True):

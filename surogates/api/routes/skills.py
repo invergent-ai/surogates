@@ -26,6 +26,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
+from surogates.api.routes._shared import normalize_source, raise_validation
 from surogates.storage.skill_staging import SkillStager, has_stageable_assets
 from surogates.storage.tenant import TenantStorage, tenant_bucket
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -253,30 +254,10 @@ async def _stage_skill_for_session(
     return None
 
 
-def _raise_validation(err: str | None) -> None:
-    """Raise HTTP 422 if *err* is not None."""
-    if err:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=err)
-
-
 def _parse_frontmatter(content: str, fallback_name: str) -> dict[str, Any]:
     """Extract metadata from SKILL.md frontmatter."""
     from surogates.tools.loader import _parse_skill_frontmatter
     return _parse_skill_frontmatter(content, fallback_name)
-
-
-def _normalize_source(source: str) -> str:
-    """Collapse DB-backed source variants to the filesystem-layer name.
-
-    The loader distinguishes ``org``/``org_db`` and ``user``/``user_db`` so
-    merge precedence is deterministic, but API consumers only care about the
-    tenancy layer, not the storage backend.
-    """
-    if source == "org_db":
-        return "org"
-    if source == "user_db":
-        return "user"
-    return source
 
 
 def _populate_expert_summary(
@@ -371,7 +352,7 @@ async def list_skills(
             type=skill.type,
             category=skill.category,
             trigger=skill.trigger,
-            source=_normalize_source(skill.source),
+            source=normalize_source(skill.source),
         )
         if skill.is_expert:
             _populate_expert_summary(summary, skill=skill)
@@ -419,7 +400,7 @@ async def view_skill(
         category=skill_def.category,
         tags=skill_def.tags,
         trigger=skill_def.trigger,
-        source=_normalize_source(skill_def.source),
+        source=normalize_source(skill_def.source),
     )
     if skill_def.is_expert:
         _populate_expert_detail(detail, skill=skill_def)
@@ -477,7 +458,7 @@ async def read_skill_file(
     Platform skills (filesystem-backed) are supported in addition to
     tenant-bucket-backed user/org skills.
     """
-    _raise_validation(validate_file_path(path))
+    raise_validation(validate_file_path(path))
 
     from surogates.tools.loader import ResourceLoader, SKILL_SOURCE_PLATFORM
 
@@ -578,10 +559,10 @@ async def create_skill(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> SkillActionResponse:
     """Create a new user skill."""
-    _raise_validation(validate_name(body.name))
-    _raise_validation(validate_category(body.category))
-    _raise_validation(validate_frontmatter(body.content))
-    _raise_validation(validate_content_size(body.content))
+    raise_validation(validate_name(body.name))
+    raise_validation(validate_category(body.category))
+    raise_validation(validate_frontmatter(body.content))
+    raise_validation(validate_content_size(body.content))
 
     ts = _get_tenant_storage(request, tenant)
     await ts.ensure_bucket()
@@ -610,8 +591,8 @@ async def edit_skill(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> SkillActionResponse:
     """Replace the full SKILL.md content of an existing skill."""
-    _raise_validation(validate_frontmatter(body.content))
-    _raise_validation(validate_content_size(body.content))
+    raise_validation(validate_frontmatter(body.content))
+    raise_validation(validate_content_size(body.content))
 
     ts = _get_tenant_storage(request, tenant)
     existing = await ts.skill_exists(name)
@@ -643,7 +624,7 @@ async def patch_skill(
     file_key = body.file_path or "SKILL.md"
 
     if body.file_path:
-        _raise_validation(validate_file_path(body.file_path))
+        raise_validation(validate_file_path(body.file_path))
 
     # Read current content.
     try:
@@ -664,10 +645,10 @@ async def patch_skill(
         )
 
     new_content = content.replace(body.old_string, body.new_string)
-    _raise_validation(validate_content_size(new_content, label=file_key))
+    raise_validation(validate_content_size(new_content, label=file_key))
 
     if not body.file_path:
-        _raise_validation(validate_frontmatter(new_content))
+        raise_validation(validate_frontmatter(new_content))
         await ts.overwrite_skill(key_prefix, new_content)
     else:
         await ts.write_skill_file(key_prefix, body.file_path, new_content)
@@ -701,9 +682,9 @@ async def write_skill_file(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> SkillActionResponse:
     """Add or overwrite a supporting file within a skill directory."""
-    _raise_validation(validate_file_path(body.file_path))
-    _raise_validation(validate_content_size(body.file_content, label=body.file_path))
-    _raise_validation(validate_file_size(body.file_content))
+    raise_validation(validate_file_path(body.file_path))
+    raise_validation(validate_content_size(body.file_content, label=body.file_path))
+    raise_validation(validate_file_size(body.file_content))
 
     ts = _get_tenant_storage(request, tenant)
     existing = await ts.skill_exists(name)
@@ -726,7 +707,7 @@ async def remove_skill_file(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> None:
     """Remove a supporting file from a skill directory."""
-    _raise_validation(validate_file_path(path))
+    raise_validation(validate_file_path(path))
 
     ts = _get_tenant_storage(request, tenant)
     existing = await ts.skill_exists(name)
@@ -801,7 +782,7 @@ async def activate_expert(
     if body and body.endpoint:
         new_content = _update_frontmatter_field(new_content, "endpoint", body.endpoint)
 
-    _raise_validation(validate_frontmatter(new_content))
+    raise_validation(validate_frontmatter(new_content))
     await ts.overwrite_skill(existing["key_prefix"], new_content)
 
     return SkillActionResponse(

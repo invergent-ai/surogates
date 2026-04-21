@@ -10,13 +10,17 @@ Bucket naming:
 Key layout inside tenant bucket:
 - ``shared/skills/{name}/SKILL.md``
 - ``shared/skills/{category}/{name}/SKILL.md``
+- ``shared/agents/{name}/AGENT.md``
+- ``shared/agents/{category}/{name}/AGENT.md``
 - ``users/{user_id}/skills/{name}/SKILL.md``
+- ``users/{user_id}/agents/{name}/AGENT.md``
 - ``users/{user_id}/memory/MEMORY.md``
 - ``users/{user_id}/memory/USER.md``
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 from uuid import UUID
@@ -244,6 +248,140 @@ class TenantStorage:
                     skills[name] = {"name": name, "key_prefix": prefix, "layer": "org"}
 
         return list(skills.values())
+
+    # ── Sub-agent types ─────────────────────────────────────────────
+
+    def _shared_agent_key(self, name: str, category: str | None = None) -> str:
+        """Build the key prefix for an org-shared sub-agent directory."""
+        if category:
+            return f"shared/agents/{category}/{name}"
+        return f"shared/agents/{name}"
+
+    def _user_agent_key(self, name: str, category: str | None = None) -> str:
+        """Build the key prefix for a user-scoped sub-agent directory."""
+        if self._user_id is None:
+            raise ValueError(
+                "_user_agent_key requires a user-scoped TenantStorage; "
+                "use _shared_agent_key for service-account contexts."
+            )
+        if category:
+            return f"users/{self._user_id}/agents/{category}/{name}"
+        return f"users/{self._user_id}/agents/{name}"
+
+    def _default_agent_write_key(
+        self, name: str, category: str | None = None,
+    ) -> str:
+        """Where new sub-agents land: user scope when present, shared otherwise."""
+        if self._user_id is None:
+            return self._shared_agent_key(name, category)
+        return self._user_agent_key(name, category)
+
+    async def _iter_user_agents(self) -> list[tuple[str, str]]:
+        """Yield ``(agent_name, key_prefix)`` for every user-layer AGENT.md."""
+        if self._user_id is None:
+            return []
+        prefix = f"users/{self._user_id}/agents/"
+        keys = await self._backend.list_keys(self._bucket, prefix=prefix)
+        found: list[tuple[str, str]] = []
+        for key in keys:
+            if not key.endswith("/AGENT.md"):
+                continue
+            parts = key.split("/")
+            name = parts[-2]
+            key_prefix = "/".join(parts[:-1])
+            found.append((name, key_prefix))
+        return found
+
+    async def agent_exists(self, name: str) -> dict[str, Any] | None:
+        """Find a sub-agent by name across user and org-shared layers.
+
+        Returns ``{"key_prefix": str, "layer": str}`` or ``None``.  The
+        bare-category layout (``{layer}/agents/{name}/AGENT.md``) is
+        probed via :meth:`StorageBackend.exists` for the common case;
+        the nested ``{layer}/agents/{category}/{name}/`` layout needs
+        a listing walk.
+        """
+        if self._user_id is not None:
+            user_prefix = self._user_agent_key(name)
+            if await self._backend.exists(self._bucket, f"{user_prefix}/AGENT.md"):
+                return {"key_prefix": user_prefix, "layer": "user"}
+
+        shared_prefix = self._shared_agent_key(name)
+        if await self._backend.exists(self._bucket, f"{shared_prefix}/AGENT.md"):
+            return {"key_prefix": shared_prefix, "layer": "org"}
+
+        for agent_name, key_prefix in await self._iter_user_agents():
+            if agent_name == name:
+                return {"key_prefix": key_prefix, "layer": "user"}
+
+        shared_keys = await self._backend.list_keys(
+            self._bucket, prefix="shared/agents/",
+        )
+        for key in shared_keys:
+            parts = key.split("/")
+            if parts[-1] == "AGENT.md" and parts[-2] == name:
+                return {"key_prefix": "/".join(parts[:-1]), "layer": "org"}
+
+        return None
+
+    async def read_agent(self, key_prefix: str) -> str:
+        """Read an AGENT.md file."""
+        return await self._backend.read_text(
+            self._bucket, f"{key_prefix}/AGENT.md",
+        )
+
+    async def write_agent(
+        self, name: str, content: str, category: str | None = None,
+    ) -> str:
+        """Write a new sub-agent and return its key prefix."""
+        key_prefix = self._default_agent_write_key(name, category)
+        await self._backend.write_text(
+            self._bucket, f"{key_prefix}/AGENT.md", content,
+        )
+        return key_prefix
+
+    async def overwrite_agent(self, key_prefix: str, content: str) -> None:
+        """Overwrite an existing AGENT.md."""
+        await self._backend.write_text(
+            self._bucket, f"{key_prefix}/AGENT.md", content,
+        )
+
+    async def delete_agent(self, key_prefix: str) -> None:
+        """Delete all files under a sub-agent's key prefix in parallel."""
+        keys = await self._backend.list_keys(self._bucket, prefix=key_prefix)
+        await asyncio.gather(
+            *(self._backend.delete(self._bucket, k) for k in keys),
+        )
+
+    async def list_all_agents(self) -> list[dict[str, Any]]:
+        """List sub-agents across user and org-shared layers.
+
+        Returns entries with ``name``, ``key_prefix``, ``layer``.  Does
+        not include platform agents (those live on the container
+        filesystem).
+        """
+        agents: dict[str, dict[str, Any]] = {}
+
+        for name, key_prefix in await self._iter_user_agents():
+            if name not in agents:
+                agents[name] = {
+                    "name": name, "key_prefix": key_prefix, "layer": "user",
+                }
+
+        shared_keys = await self._backend.list_keys(
+            self._bucket, prefix="shared/agents/",
+        )
+        for key in shared_keys:
+            if key.endswith("/AGENT.md"):
+                parts = key.split("/")
+                name = parts[-2]
+                if name not in agents:
+                    prefix = "/".join(parts[:-1])
+                    agents[name] = {
+                        "name": name, "key_prefix": prefix, "layer": "org",
+                    }
+
+        return list(agents.values())
 
     # ── Memory ──────────────────────────────────────────────────────
 

@@ -156,7 +156,9 @@ class TestExpertFrontmatterParsing:
             "---\nBody\n"
         )
         parsed = _parse_skill_frontmatter(text, "fallback")
-        assert parsed["expert_max_iterations"] == "20"
+        # Native YAML int survives the parse; string form is accepted
+        # too by ``_build_skill_def``, which int()-coerces either way.
+        assert parsed["expert_max_iterations"] == 20
 
     def test_parse_expert_status(self):
         text = (

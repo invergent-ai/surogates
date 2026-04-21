@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 import { authFetch } from "./auth";
+import { parseError } from "./_errors";
 
 export type SkillKind = "skill" | "expert";
 export type SkillSource = "platform" | "org" | "user";
@@ -48,13 +49,6 @@ export interface SkillActionResponse {
   success: boolean;
   message: string;
   category: string | null;
-}
-
-async function parseError(response: Response, fallback: string): Promise<never> {
-  const payload = (await response.json().catch(() => null)) as {
-    detail?: string;
-  } | null;
-  throw new Error(payload?.detail ?? fallback);
 }
 
 export async function listSkills(options?: {

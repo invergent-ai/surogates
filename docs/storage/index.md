@@ -1,4 +1,4 @@
-# 13. Storage
+# 14. Storage
 
 Surogates uses S3-compatible object storage (Garage) for workspace files, skills, memory, and MCP configurations.
 

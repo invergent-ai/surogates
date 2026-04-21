@@ -1,4 +1,4 @@
-# 9. Experts
+# 10. Experts
 
 ## What is an Expert?
 
