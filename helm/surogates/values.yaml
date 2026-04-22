@@ -3,7 +3,7 @@ agent:
   # URL-safe slug — used in resource names, labels, and subdomain.
   slug: "default"
   # Base domain.  Agent is reachable at {slug}.{domain}.
-  domain: "k8s.local"
+  domain: "densemax.local"
   # Persisted on every session; falls back to slug when empty.
   id: "default"
 
