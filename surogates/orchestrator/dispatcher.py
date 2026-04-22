@@ -34,12 +34,14 @@ _MAX_RETRIES: int = 3
 # Base delay (seconds) for exponential back-off on retry.
 _BASE_RETRY_DELAY: float = 1.0
 
-# Default sorted-set key used as the work queue.
-_DEFAULT_QUEUE_KEY: str = "surogates:work_queue"
-
 
 class Orchestrator:
-    """Pulls session IDs from a Redis sorted-set and dispatches them to the agent harness."""
+    """Pulls session IDs from a Redis sorted-set and dispatches them to the agent harness.
+
+    The ``queue_key`` is per-agent (``surogates:work_queue:<agent_id>``) so that
+    multiple agents sharing a single Redis do not compete for each other's
+    sessions.  Callers build the key via :func:`surogates.config.agent_queue_key`.
+    """
 
     def __init__(
         self,
@@ -47,8 +49,8 @@ class Orchestrator:
         session_store: SessionStore,
         harness_factory: Callable[..., Any],
         *,
+        queue_key: str,
         max_concurrent: int = 50,
-        queue_key: str = _DEFAULT_QUEUE_KEY,
         poll_timeout: int = 5,
     ) -> None:
         self.redis = redis_client
@@ -84,14 +86,6 @@ class Orchestrator:
         harness.interrupt(message or "Session paused by user")
         logger.info("Interrupted harness for session %s", session_id)
         return True
-
-    async def enqueue(self, session_id: UUID, priority: float = 0) -> None:
-        """Add session to Redis sorted set work queue.
-
-        Lower *priority* values are dequeued first (``BZPOPMIN``).
-        """
-        await self.redis.zadd(self._queue_key, {str(session_id): priority})
-        logger.debug("Enqueued session %s with priority %s", session_id, priority)
 
     async def run(self) -> None:
         """Main worker loop.  Pull from queue, wake harness.  Runs forever.

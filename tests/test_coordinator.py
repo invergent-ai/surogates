@@ -99,8 +99,10 @@ class TestSpawnWorker:
         assert len(spawn_calls) == 1
         assert spawn_calls[0][0][0] == parent_id
 
-        # Enqueued to work_queue (not task_queue).
-        redis.zadd.assert_called_once_with("surogates:work_queue", {str(child_id): 0})
+        # Enqueued to the parent agent's work queue (not task_queue).
+        redis.zadd.assert_called_once_with(
+            "surogates:work_queue:agent-1", {str(child_id): 0},
+        )
 
     @pytest.mark.asyncio
     async def test_returns_immediately(self) -> None:
@@ -215,8 +217,10 @@ class TestSendWorkerMessage:
             for c in emit_calls
         )
 
-        # Worker re-enqueued.
-        redis.zadd.assert_called_once_with("surogates:work_queue", {str(worker_id): 0})
+        # Worker re-enqueued on its agent's queue.
+        redis.zadd.assert_called_once_with(
+            "surogates:work_queue:agent-test", {str(worker_id): 0},
+        )
 
     @pytest.mark.asyncio
     async def test_rejects_unowned_worker(self) -> None:
@@ -376,6 +380,7 @@ class TestWorkerNotification:
             session_store=store,
             worker_session_id=worker_id,
             parent_session_id=parent_id,
+            agent_id="agent-test",
             redis=redis,
         )
 
@@ -386,8 +391,10 @@ class TestWorkerNotification:
         assert "Auth bug fixed" in emit_call[0][2]["result"]
         assert emit_call[0][2]["worker_id"] == str(worker_id)
 
-        # Parent re-enqueued.
-        redis.zadd.assert_called_once_with("surogates:work_queue", {str(parent_id): 0})
+        # Parent re-enqueued on its agent's queue.
+        redis.zadd.assert_called_once_with(
+            "surogates:work_queue:agent-test", {str(parent_id): 0},
+        )
 
     @pytest.mark.asyncio
     async def test_notify_parent_on_failure(self) -> None:
@@ -404,6 +411,7 @@ class TestWorkerNotification:
             session_store=store,
             worker_session_id=worker_id,
             parent_session_id=parent_id,
+            agent_id="agent-test",
             error="LLM call failed: 429 rate limited",
             redis=redis,
         )
@@ -427,6 +435,7 @@ class TestWorkerNotification:
             session_store=store,
             worker_session_id=uuid4(),
             parent_session_id=uuid4(),
+            agent_id="agent-test",
         )
 
         result = store.emit_event.call_args[0][2]["result"]
@@ -647,8 +656,10 @@ class TestDelegateQueueFix:
             budget=IterationBudget(max_total=50),
         )
 
-        # Must use zadd to work_queue, NOT lpush to task_queue.
-        redis.zadd.assert_called_once_with("surogates:work_queue", {str(child_id): 0})
+        # Must use zadd to the parent agent's work_queue, NOT lpush to task_queue.
+        redis.zadd.assert_called_once_with(
+            "surogates:work_queue:agent-1", {str(child_id): 0},
+        )
         redis.lpush.assert_not_called()
 
 

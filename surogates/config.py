@@ -115,9 +115,40 @@ class APISettings(BaseSettings):
     web_url: str = "https://surogates.k8s.localhost"  # Public URL for the web UI (used in pairing links, emails, etc.)
 
 
-# Default Redis key for the session work queue.  Importable by any module
-# that needs to enqueue or dequeue sessions without instantiating settings.
+# Prefix for the per-agent session work queue.  The full key is
+# ``surogates:work_queue:<agent_id>`` — one queue per agent so that many
+# agents can share a single Redis without stealing each other's sessions.
 WORK_QUEUE_KEY: str = "surogates:work_queue"
+
+
+def agent_queue_key(agent_id: str) -> str:
+    """Return the Redis sorted-set key for *agent_id*'s work queue.
+
+    Every enqueue and dequeue of a session goes through this helper so the
+    shape of the key stays consistent across the API, channels, the
+    orchestrator worker, and inter-session notifications.
+    """
+    if not agent_id:
+        raise ValueError("agent_queue_key requires a non-empty agent_id")
+    return f"{WORK_QUEUE_KEY}:{agent_id}"
+
+
+async def enqueue_session(
+    redis: Any,
+    agent_id: str,
+    session_id: Any,
+    *,
+    priority: float = 0,
+) -> None:
+    """Enqueue *session_id* on *agent_id*'s work queue with ``ZADD``.
+
+    Single entry point used by every component that wakes a session — the
+    API, the channel adapters, the coordinator/delegate tools, and the
+    worker-notify helpers — so all enqueues share one key shape and one
+    priority convention.  Lower *priority* values are popped first.
+    """
+    await redis.zadd(agent_queue_key(agent_id), {str(session_id): priority})
+
 
 # Default Redis channel prefix for session interrupts.
 INTERRUPT_CHANNEL_PREFIX: str = "surogates:interrupt"
@@ -129,7 +160,6 @@ class WorkerSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_WORKER_"}
 
     concurrency: int = 50
-    queue_name: str = WORK_QUEUE_KEY
     poll_timeout: int = 5
     workspace_path: str = "/tmp/surogates/workspaces"
     api_base_url: str = "http://localhost:8000"

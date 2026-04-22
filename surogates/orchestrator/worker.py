@@ -331,13 +331,15 @@ async def run_worker(settings: Settings) -> None:
             log_policy_allowed=settings.governance.log_allowed,
         )
 
-    # 8. Orchestrator
+    # 8. Orchestrator — consumes from this agent's dedicated work queue.
+    from surogates.config import agent_queue_key
+    queue_key = agent_queue_key(configured_agent_id)
     orchestrator = Orchestrator(
         redis_client=redis_client,
         session_store=session_store,
         harness_factory=harness_factory,
         max_concurrent=settings.worker.concurrency,
-        queue_key=settings.worker.queue_name,
+        queue_key=queue_key,
         poll_timeout=settings.worker.poll_timeout,
     )
 
@@ -360,7 +362,7 @@ async def run_worker(settings: Settings) -> None:
         "Worker %s starting (concurrency=%d, queue=%s)",
         worker_id,
         settings.worker.concurrency,
-        settings.worker.queue_name,
+        queue_key,
     )
 
     try:

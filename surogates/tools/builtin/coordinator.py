@@ -25,7 +25,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from surogates.config import INTERRUPT_CHANNEL_PREFIX, WORK_QUEUE_KEY
+from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
@@ -331,9 +331,9 @@ async def _spawn_worker_handler(
             },
         )
 
-        # 4. Enqueue the child session to the work queue.
+        # 4. Enqueue the child session to its agent's work queue.
         if redis is not None:
-            await redis.zadd(WORK_QUEUE_KEY, {str(child_id): 0})
+            await enqueue_session(redis, agent_id, child_id)
 
         return json.dumps({
             "worker_id": str(child_id),
@@ -404,9 +404,11 @@ async def _send_worker_message_handler(
             {"content": message},
         )
 
-        # Re-enqueue the worker so it wakes up.
+        # Re-enqueue the worker on its agent's queue so it wakes up.
         if redis is not None:
-            await redis.zadd(WORK_QUEUE_KEY, {str(worker_id): 0})
+            await enqueue_session(
+                redis, worker_session.agent_id, worker_id,
+            )
 
         return json.dumps({
             "status": "sent",

@@ -16,6 +16,7 @@ import json
 import logging
 from typing import Any
 
+from surogates.config import enqueue_session
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
@@ -200,10 +201,9 @@ async def _delegate_handler(
             {"content": user_content},
         )
 
-        # 3. Enqueue the child session to the work queue (if available).
+        # 3. Enqueue the child session on its agent's work queue (if available).
         if redis is not None:
-            from surogates.config import WORK_QUEUE_KEY
-            await redis.zadd(WORK_QUEUE_KEY, {str(child_id): 0})
+            await enqueue_session(redis, agent_id, child_id)
 
         # 4. Poll the child session's events until completion or timeout.
         result_text = await _poll_child_completion(

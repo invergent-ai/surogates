@@ -20,6 +20,8 @@ from surogates.channels.base import MessageEvent, MessageType, SendResult
 from surogates.channels.dedup import MessageDeduplicator
 from surogates.channels.source import SessionSource, build_session_key
 
+from surogates.config import enqueue_session
+
 if TYPE_CHECKING:
     from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -91,9 +93,6 @@ CAPTION_LIMIT = 1024
 
 # Session map size limit before eviction.
 _SESSION_MAP_MAX = 10_000
-
-# Redis work queue key (shared with orchestrator/dispatcher).
-WORK_QUEUE_KEY = "surogates:work_queue"
 
 # Telegram error types — resolved once at import time, not per-call.
 try:
@@ -1901,7 +1900,7 @@ class TelegramAdapter:
         )
 
         # Enqueue to Redis work queue so the worker picks it up
-        await self._redis.zadd(WORK_QUEUE_KEY, {str(session_id): 0})
+        await enqueue_session(self._redis, self._agent_id, session_id)
 
         logger.info(
             "[telegram] Message from %s (%s) -> session %s",

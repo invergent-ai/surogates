@@ -59,7 +59,7 @@ from surogates.channels.media import (
 )
 from surogates.channels.slack_format import markdown_to_mrkdwn, truncate_message
 from surogates.channels.source import SessionSource, build_session_key
-from surogates.config import APISettings, SlackSettings
+from surogates.config import APISettings, SlackSettings, enqueue_session
 from surogates.session.events import EventType
 from surogates.session.store import SessionStore
 
@@ -826,7 +826,7 @@ class SlackAdapter:
             },
         )
 
-        await self._redis.zadd("surogates:work_queue", {str(session_id): 0})
+        await enqueue_session(self._redis, self._agent_id, session_id)
 
         if should_react:
             await self._remove_reaction(channel_id, ts, "eyes")

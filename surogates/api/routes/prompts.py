@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
-from surogates.config import WORK_QUEUE_KEY
+from surogates.config import enqueue_session
 from surogates.session.events import EventType
 from surogates.session.store import SessionStore
 from surogates.storage.tenant import session_bucket
@@ -216,8 +216,7 @@ async def _submit_one(
         {"content": body.prompt},
     )
 
-    redis = request.app.state.redis
-    await redis.zadd(WORK_QUEUE_KEY, {str(session.id): 0})
+    await enqueue_session(request.app.state.redis, session.agent_id, session.id)
 
     return PromptAccepted(session_id=session.id, event_id=event_id)
 

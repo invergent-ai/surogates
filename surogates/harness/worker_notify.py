@@ -15,7 +15,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from surogates.config import WORK_QUEUE_KEY
+from surogates.config import enqueue_session
 from surogates.session.events import EventType
 
 if TYPE_CHECKING:
@@ -35,13 +35,16 @@ async def notify_parent_on_completion(
     session_store: SessionStore,
     worker_session_id: UUID,
     parent_session_id: UUID,
+    agent_id: str,
     redis: Redis | None = None,
 ) -> None:
     """Emit a ``WORKER_COMPLETE`` event into the parent session and re-enqueue it.
 
     Extracts the last ``LLM_RESPONSE`` content from the worker's event log
     and includes it (truncated) in the notification so the coordinator LLM
-    can see what the worker produced.
+    can see what the worker produced.  ``agent_id`` is the parent's agent id
+    (the child inherits it, so either value works) and selects the
+    per-agent work queue.
     """
     try:
         from surogates.harness.message_utils import extract_final_response
@@ -60,7 +63,7 @@ async def notify_parent_on_completion(
 
         # Re-enqueue the parent so it wakes up.
         if redis is not None:
-            await redis.zadd(WORK_QUEUE_KEY, {str(parent_session_id): 0})
+            await enqueue_session(redis, agent_id, parent_session_id)
 
     except Exception:
         logger.exception(
@@ -75,10 +78,15 @@ async def notify_parent_on_failure(
     session_store: SessionStore,
     worker_session_id: UUID,
     parent_session_id: UUID,
+    agent_id: str,
     error: str,
     redis: Redis | None = None,
 ) -> None:
-    """Emit a ``WORKER_FAILED`` event into the parent session and re-enqueue it."""
+    """Emit a ``WORKER_FAILED`` event into the parent session and re-enqueue it.
+
+    ``agent_id`` selects the per-agent work queue so the parent wakes on the
+    same worker that owns its agent.
+    """
     try:
         await session_store.emit_event(
             parent_session_id,
@@ -90,7 +98,7 @@ async def notify_parent_on_failure(
         )
 
         if redis is not None:
-            await redis.zadd(WORK_QUEUE_KEY, {str(parent_session_id): 0})
+            await enqueue_session(redis, agent_id, parent_session_id)
 
     except Exception:
         logger.exception(

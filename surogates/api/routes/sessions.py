@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text as _sql_text
 
-from surogates.config import INTERRUPT_CHANNEL_PREFIX
+from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
 from surogates.session.models import Session
 from surogates.session.store import SessionNotFoundError, SessionStore
@@ -252,12 +252,8 @@ async def send_message(
         {"content": body.content},
     )
 
-    # Enqueue the session for processing.
-    redis = request.app.state.redis
-    await redis.zadd(
-        "surogates:work_queue",
-        {str(session_id): 0},  # priority 0
-    )
+    # Enqueue the session for processing on its agent's dedicated queue.
+    await enqueue_session(request.app.state.redis, session.agent_id, session_id)
 
     return SendMessageResponse(event_id=event_id)
 
@@ -499,8 +495,7 @@ async def resume_session(
     await store.update_session_status(session_id, "active")
 
     # Re-enqueue so the worker picks it up.
-    redis = request.app.state.redis
-    await redis.zadd("surogates:work_queue", {str(session_id): 0})
+    await enqueue_session(request.app.state.redis, session.agent_id, session_id)
 
     return await store.get_session(session_id)
 

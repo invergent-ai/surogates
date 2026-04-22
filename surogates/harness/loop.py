@@ -455,6 +455,7 @@ class AgentHarness:
                         session_store=self._store,
                         worker_session_id=session_id,
                         parent_session_id=session.parent_id,
+                        agent_id=session.agent_id,
                         error=traceback.format_exc()[-500:],
                         redis=self._redis,
                     )
@@ -1020,11 +1021,21 @@ class AgentHarness:
                     messages.pop()
 
                 messages.append(assistant_message)
-                await self._complete_session(
-                    session, messages, lease, reason="completed",
-                    through_event_id=event_id,
-                    cost_tracker=cost_tracker,
-                )
+                # A response without tool calls is the end of this turn.
+                # For sub-agent (delegated) sessions, this is also the end of
+                # the session — the parent is waiting on the final answer.
+                # For primary user sessions, the session stays 'active' so
+                # the user can send a follow-up message.
+                if session.parent_id is not None:
+                    await self._complete_session(
+                        session, messages, lease, reason="completed",
+                        through_event_id=event_id,
+                        cost_tracker=cost_tracker,
+                    )
+                else:
+                    await self._end_turn(
+                        session, lease, through_event_id=event_id,
+                    )
                 return
 
             # Determine whether to use the streaming executor for this turn.
@@ -1967,6 +1978,32 @@ class AgentHarness:
     # Session completion
     # ------------------------------------------------------------------
 
+    async def _end_turn(
+        self,
+        session: Session,
+        lease: SessionLease,
+        *,
+        through_event_id: int,
+    ) -> None:
+        """End the current turn of a primary session.
+
+        Advances the harness cursor to ``through_event_id`` so a future wake()
+        replays from the right point, and returns.  The session stays in its
+        current status (typically 'active') so the user can send a follow-up.
+        The sandbox pod, memory manager, and cost tracker are deliberately
+        left alive — they belong to the session, not the turn.  The lease is
+        released by the outer wake() finally block.
+        """
+        try:
+            await self._store.advance_harness_cursor(
+                session.id, through_event_id, lease.lease_token,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to advance cursor at end of turn for %s",
+                session.id,
+            )
+
     async def _complete_session(
         self,
         session: Session,
@@ -2021,6 +2058,7 @@ class AgentHarness:
                     session_store=self._store,
                     worker_session_id=session.id,
                     parent_session_id=session.parent_id,
+                    agent_id=session.agent_id,
                     redis=self._redis,
                 )
             except Exception:
