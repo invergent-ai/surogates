@@ -90,10 +90,10 @@ class SandboxSpec:
 
     image: str = "ghcr.io/invergent-ai/surogates-agent-sandbox:latest"
     resources: list[Resource] = field(default_factory=list)
-    cpu: str = "1"
-    memory: str = "1Gi"
-    cpu_limit: str = "2"
-    memory_limit: str = "2Gi"
+    cpu: str = "2"
+    memory: str = "4Gi"
+    cpu_limit: str = "4"
+    memory_limit: str = "8Gi"
     timeout: int = 300
     env: dict[str, str] = field(default_factory=dict)
 
