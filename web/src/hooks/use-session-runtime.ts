@@ -114,13 +114,29 @@ export function useSessionRuntime(sessionId: string | null) {
 
         switch (type) {
           case "user.message": {
-            next.push({
-              id: `evt-${eventId}`,
-              role: "user",
-              content: (data.content as string) ?? "",
-              createdAt: new Date(),
-              status: "complete",
-            });
+            const content = (data.content as string) ?? "";
+            // Reconcile with an optimistic echo, if any — handleSend appends a
+            // user message with id ``local-…`` before awaiting the POST so the
+            // UI reacts instantly.  When the authoritative SSE event arrives,
+            // swap the id rather than appending a duplicate.  The id-prefix
+            // plus content match tolerates out-of-order sends.
+            const localIdx = next.findIndex(
+              (m) =>
+                m.role === "user" &&
+                m.id.startsWith("local-") &&
+                m.content === content,
+            );
+            if (localIdx >= 0) {
+              next[localIdx] = { ...next[localIdx], id: `evt-${eventId}` };
+            } else {
+              next.push({
+                id: `evt-${eventId}`,
+                role: "user",
+                content,
+                createdAt: new Date(),
+                status: "complete",
+              });
+            }
             break;
           }
 
@@ -616,6 +632,45 @@ export function useSessionRuntime(sessionId: string | null) {
   }, [sessionId, connect]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  const markSending = useCallback((content: string) => {
+    // Optimistic echo: show the user's message and flip to "running" before
+    // the server round-trip completes.  applyEvent's user.message branch
+    // reconciles the local row with the authoritative event by id-prefix.
+    terminalRef.current = false;
+    setIsRunning(true);
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        role: "user",
+        content,
+        createdAt: new Date(),
+        status: "complete",
+      },
+    ]);
+  }, []);
+
+  const markSendError = useCallback((errorText: string) => {
+    // Send failed after markSending ran.  Mark the most recent un-acked
+    // local echo as errored and drop back to idle.
+    setIsRunning(false);
+    setMessages((prev) => {
+      for (let i = prev.length - 1; i >= 0; i--) {
+        const m = prev[i];
+        if (m.role === "user" && m.id.startsWith("local-")) {
+          const next = [...prev];
+          next[i] = {
+            ...m,
+            status: "error",
+            content: `${m.content}\n\n*Failed to send: ${errorText}*`,
+          };
+          return next;
+        }
+      }
+      return prev;
+    });
+  }, []);
+
   const forceStop = useCallback(() => {
     terminalRef.current = true;
     setIsRunning(false);
@@ -639,7 +694,14 @@ export function useSessionRuntime(sessionId: string | null) {
     });
   }, []);
 
-  return { messages, isRunning, tokenUsage, forceStop };
+  return {
+    messages,
+    isRunning,
+    tokenUsage,
+    forceStop,
+    markSending,
+    markSendError,
+  };
 }
 
 function findLastAssistantIndex(msgs: ChatMessage[]): number {

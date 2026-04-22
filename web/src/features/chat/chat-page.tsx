@@ -77,7 +77,14 @@ export function ChatPage() {
   const preSessionAccepted = useRef(false);
 
   const sessionId = params.sessionId ?? activeSessionId;
-  const { messages, isRunning, tokenUsage, forceStop } = useSessionRuntime(sessionId);
+  const {
+    messages,
+    isRunning,
+    tokenUsage,
+    forceStop,
+    markSending,
+    markSendError,
+  } = useSessionRuntime(sessionId);
 
   // Show disclosure banner when transparency is enabled and the user has not
   // yet accepted.  This covers two states:
@@ -110,11 +117,12 @@ export function ChatPage() {
   const handleSend = useCallback(
     async (text: string) => {
       if (sessionDeclined) return;
-      try {
-        if (!sessionId) {
+      // First message in a fresh session can't use the optimistic echo — the
+      // runtime hook isn't tracking any session yet.  Create → send →
+      // navigate; the SSE stream picks up once the new route mounts.
+      if (!sessionId) {
+        try {
           const session = await sessionsApi.createSession({});
-          // Confirm disclosure on the backend now that we have a session id.
-          // Non-blocking: failure must not prevent the message from being sent.
           if (preSessionAccepted.current) {
             try {
               await sessionsApi.confirmDisclosure(session.id);
@@ -129,14 +137,29 @@ export function ChatPage() {
             to: "/chat/$sessionId",
             params: { sessionId: session.id },
           });
-        } else {
-          await sessionsApi.sendMessage(sessionId, text);
+        } catch (err) {
+          console.error("Failed to send message:", err);
         }
+        return;
+      }
+
+      markSending(text);
+      try {
+        await sessionsApi.sendMessage(sessionId, text);
       } catch (err) {
         console.error("Failed to send message:", err);
+        markSendError(err instanceof Error ? err.message : "send failed");
       }
     },
-    [sessionId, sessionDeclined, setActiveSession, fetchSessions, navigate],
+    [
+      sessionId,
+      sessionDeclined,
+      setActiveSession,
+      fetchSessions,
+      navigate,
+      markSending,
+      markSendError,
+    ],
   );
 
   const handleStop = useCallback(async () => {
