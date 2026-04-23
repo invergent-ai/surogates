@@ -88,10 +88,16 @@ _LEASE_TTL_SECONDS: int = 60
 # Retry / resilience constants
 _MAX_LENGTH_CONTINUATIONS: int = 3
 _MAX_CONSECUTIVE_INVALID_TOOL_CALLS: int = 3
+_MAX_EMPTY_RESPONSE_RETRIES: int = 3
 _LENGTH_CONTINUATION_PROMPT: str = (
     "[System: Your previous response was truncated by the output "
     "length limit. Continue exactly where you left off. Do not "
     "restart or repeat prior text. Finish the answer directly.]"
+)
+_EMPTY_RESPONSE_NUDGE: str = (
+    "[System: Your previous response was empty. Please produce a real "
+    "answer to the user's request — either a tool call or visible "
+    "assistant text.]"
 )
 
 # ---------------------------------------------------------------------------
@@ -533,6 +539,7 @@ class AgentHarness:
         invalid_json_retries = 0  # API-level retries for malformed tool args
         thinking_prefill_retries = 0  # retries for thinking-only responses
         incomplete_scratchpad_retries = 0  # retries for unclosed REASONING_SCRATCHPAD
+        empty_response_retries = 0  # retries for empty LLM responses (no content, no tools, no reasoning)
         content_with_tools_cache = ContentWithToolsCache()
 
         # Subdirectory hint tracker -- discovers context files as the agent navigates.
@@ -1000,14 +1007,50 @@ class AgentHarness:
                             messages.append(interim_msg)
                             continue
 
-                        # Exhausted prefill attempts or no structured
-                        # reasoning -- mark response as "(empty)".
-                        assistant_message["content"] = "(empty)"
-                        logger.info(
-                            "Session %s: empty final response after %d "
-                            "thinking prefill retries",
-                            session.id, thinking_prefill_retries,
+                        # Truly empty response -- no content, no tool calls,
+                        # no structured reasoning.  Some models (observed
+                        # with gpt-5.4-mini) stall on complex asks like SVG
+                        # generation and return a 4-token no-op.  Retry a
+                        # few times with a nudge; if still empty, fail the
+                        # session so the UI's failure path engages.
+                        if empty_response_retries < _MAX_EMPTY_RESPONSE_RETRIES:
+                            empty_response_retries += 1
+                            logger.warning(
+                                "Session %s: empty LLM response, retrying "
+                                "(%d/%d)",
+                                session.id,
+                                empty_response_retries,
+                                _MAX_EMPTY_RESPONSE_RETRIES,
+                            )
+                            messages.append({
+                                "role": "user",
+                                "content": _EMPTY_RESPONSE_NUDGE,
+                            })
+                            continue
+
+                        logger.error(
+                            "Session %s: LLM returned empty response %d "
+                            "times; emitting session.fail",
+                            session.id, _MAX_EMPTY_RESPONSE_RETRIES,
                         )
+                        await self._store.emit_event(
+                            session.id,
+                            EventType.SESSION_FAIL,
+                            {
+                                "reason": "empty_llm_response",
+                                "attempts": _MAX_EMPTY_RESPONSE_RETRIES,
+                            },
+                        )
+                        try:
+                            await self._store.update_session_status(
+                                session.id, "failed",
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Failed to update session status to failed "
+                                "for %s", session.id, exc_info=True,
+                            )
+                        return
 
                 # Pop thinking-only prefill message(s) before appending
                 # the final response.  This avoids consecutive assistant
@@ -1037,6 +1080,11 @@ class AgentHarness:
                         session, lease, through_event_id=event_id,
                     )
                 return
+
+            # Response had tool calls, so it was not empty — reset the
+            # empty-response retry counter so each "empty spell" gets a
+            # fresh budget rather than accumulating across the session.
+            empty_response_retries = 0
 
             # Determine whether to use the streaming executor for this turn.
             # The executor is used when it has tools (i.e., streaming was

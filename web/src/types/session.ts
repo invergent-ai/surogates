@@ -56,7 +56,92 @@ export type EventType =
   | "harness.crash"
   | "worker.spawned"
   | "worker.complete"
-  | "worker.failed";
+  | "worker.failed"
+  | "artifact.created"
+  | "artifact.updated"
+  | "clarify.response";
+
+// ── Clarify tool ─────────────────────────────────────────────────────
+//
+// Shape of the `clarify` tool's JSON arguments (from tool.call events)
+// and the response payload submitted back through the respond endpoint.
+
+export interface ClarifyChoice {
+  label: string;
+  description?: string;
+}
+
+export interface ClarifyQuestion {
+  prompt: string;
+  choices?: ClarifyChoice[];
+  allow_other?: boolean;
+}
+
+export interface ClarifyArgs {
+  questions: ClarifyQuestion[];
+}
+
+export interface ClarifyAnswer {
+  question: string;
+  answer: string;
+  is_other: boolean;
+}
+
+export interface ClarifyResponsePayload {
+  tool_call_id: string;
+  responses: ClarifyAnswer[];
+}
+
+// ── Artifacts ───────────────────────────────────────────────────────
+
+export type ArtifactKind =
+  | "markdown"
+  | "table"
+  | "chart"
+  | "html"
+  | "svg";
+
+export interface ArtifactMeta {
+  artifact_id: string;
+  session_id: string;
+  name: string;
+  kind: ArtifactKind;
+  version: number;
+  size: number;
+  created_at: string;
+}
+
+export interface MarkdownArtifactSpec {
+  content: string;
+}
+
+export interface TableArtifactSpec {
+  columns: string[];
+  rows: Array<Record<string, unknown>>;
+  caption?: string | null;
+}
+
+export interface ChartArtifactSpec {
+  vega_lite: Record<string, unknown>;
+  caption?: string | null;
+}
+
+export interface HtmlArtifactSpec {
+  html: string;
+  caption?: string | null;
+}
+
+export interface SvgArtifactSpec {
+  svg: string;
+  caption?: string | null;
+}
+
+export type ArtifactPayload =
+  | { meta: ArtifactMeta; kind: "markdown"; spec: MarkdownArtifactSpec }
+  | { meta: ArtifactMeta; kind: "table"; spec: TableArtifactSpec }
+  | { meta: ArtifactMeta; kind: "chart"; spec: ChartArtifactSpec }
+  | { meta: ArtifactMeta; kind: "html"; spec: HtmlArtifactSpec }
+  | { meta: ArtifactMeta; kind: "svg"; spec: SvgArtifactSpec };
 
 export interface SessionTreeNode {
   id: string;

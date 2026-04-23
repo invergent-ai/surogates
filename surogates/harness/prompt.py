@@ -241,6 +241,80 @@ EXPERT_GUIDANCE: str = (
     "accept, modify, or discard it."
 )
 
+ARTIFACT_GUIDANCE: str = (
+    "# Artifacts\n"
+    "You can render inline artifacts in the chat via `create_artifact`. Five "
+    "kinds are supported: Vega-Lite **charts**, **tables**, standalone "
+    "**markdown** documents, sandboxed **HTML** previews, and inline **SVG** "
+    "images. Artifacts render at the point in the conversation where you call "
+    "the tool, in their own panel separate from the back-and-forth.\n"
+    "\n"
+    "## Rule of thumb\n"
+    "Ask yourself: *will the user want to copy, save, or refer back to this "
+    "content outside the conversation?* If yes → artifact. If no → inline.\n"
+    "\n"
+    "## Use an artifact for\n"
+    "- **Visual output** the user reads as a result: charts of trends, "
+    "comparison tables, dashboard-style summaries, diagrams. Returning these "
+    "as text in a code fence wastes the visual affordance.\n"
+    "- **Tabular data** the user will want to read as a table. Use an "
+    "artifact (not an inline markdown table) whenever ANY of the "
+    "following is true:\n"
+    "  - the table has 3 or more columns;\n"
+    "  - any cell contains code, multi-line text, or a long prose "
+    "    description that will wrap;\n"
+    "  - the user asked for a comparison, matrix, or reference chart "
+    "    they will want to save or export.\n"
+    "  Short 2-column lookups (e.g. `term → one-word definition`) can "
+    "  stay inline as markdown.\n"
+    "- **Standalone markdown documents** over ~20 lines or ~1500 characters "
+    "that the user will want to copy or save: reports, design notes, specs, "
+    "study guides, structured plans, one-pagers.\n"
+    "- **Interactive HTML demos, widgets, and single-file webpages** — "
+    "calculators, todo widgets, forms the user wants to try, CSS "
+    "demonstrations, small self-contained pages. HTML runs in a sandboxed "
+    "iframe (no same-origin, no forms, no top-level navigation). **This "
+    "case is an artifact, not a `write_file` call** — even when the user "
+    "says 'single file' or 'one HTML file'. The artifact panel is "
+    "self-contained and previewable in-thread; workspace files are not.\n"
+    "- **SVG diagrams and illustrations** — logos, flowcharts drawn by hand, "
+    "icon sketches, visual schematics.\n"
+    "- Content the user has said they will reference, edit, or reuse.\n"
+    "\n"
+    "## Don't use an artifact for\n"
+    "- Short answers or conversational replies — just reply in the message.\n"
+    "- Explanatory content where code or data is part of teaching a concept — "
+    "keep it in the message flow so the explanation stays readable.\n"
+    "- Files that belong on disk — use `write_file` instead; artifacts are "
+    "chat-embedded, not workspace files.\n"
+    "- Data the user asked for as copy-pasteable text (JSON, CSV, raw code) — "
+    "keep it as a code block in the message so they can copy it in place.\n"
+    "- One-off answers or small examples that clarify a point.\n"
+    "\n"
+    "## `create_artifact` vs `write_file`\n"
+    "This is the one place it's easy to get wrong. The user's phrasing "
+    "('single file', 'save to a file') does NOT decide it; the **intent** "
+    "does:\n"
+    "- `create_artifact` — the user wants to **see and interact with** the "
+    "output right here in the chat (a calculator to click, a chart to look "
+    "at, a document to read). The output's home is this conversation.\n"
+    "- `write_file` — the user is working on a **project on disk** and "
+    "wants this file added to or edited in the workspace so they can run, "
+    "import, or commit it. The output's home is a codebase.\n"
+    "When the user asks for 'a small HTML page', 'a calculator', 'a demo', "
+    "'a widget', 'an SVG logo', 'a chart of X' and there's no indication "
+    "of an ongoing project or codebase — it's an artifact. Use "
+    "`write_file` only when the conversation is clearly about editing a "
+    "specific project's files.\n"
+    "\n"
+    "## Rules\n"
+    "- **One artifact per response** unless the user explicitly asks for more.\n"
+    "- **Err on the side of not creating an artifact.** Overuse is jarring; "
+    "when in doubt, keep it inline.\n"
+    "- Pick a short, descriptive `name` — it becomes the artifact's title.\n"
+    "- Charts must supply Vega-Lite `data.values` inline; `data.url` is blocked."
+)
+
 COORDINATOR_GUIDANCE: str = """\
 # Worker Delegation
 
@@ -463,6 +537,8 @@ class PromptBuilder:
             parts.append(SKILLS_GUIDANCE)
         if "consult_expert" in self._available_tools:
             parts.append(EXPERT_GUIDANCE)
+        if "create_artifact" in self._available_tools:
+            parts.append(ARTIFACT_GUIDANCE)
 
         # Coordinator guidance — injected when the session is in coordinator mode.
         if (

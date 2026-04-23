@@ -34,11 +34,14 @@ import { ToolCallBlock } from "./tool-call-block";
 import { statusColorClass, effectiveStatus } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
 import { ChatComposer } from "./chat-composer";
+import { ArtifactBlock } from "./artifacts/artifact-block";
 import { cn } from "@/lib/utils";
 import { MessageSquareIcon } from "lucide-react";
 import type { ChatMessage as ChatMessageType, ToolCallInfo, TokenUsage } from "@/hooks/use-session-runtime";
+import type { ArtifactKind } from "@/types/session";
 
 interface ChatThreadProps {
+  sessionId: string | null;
   messages: ChatMessageType[];
   isRunning: boolean;
   onSend: (text: string) => void;
@@ -55,7 +58,15 @@ type TimelineEntry =
   | { kind: "tool"; key: string; tc: ToolCallInfo }
   | { kind: "text"; key: string; content: string }
   | { kind: "thinking"; key: string }
-  | { kind: "skill_invoked"; key: string; skill: string; stagedAt: string | null };
+  | { kind: "skill_invoked"; key: string; skill: string; stagedAt: string | null }
+  | {
+      kind: "artifact";
+      key: string;
+      artifactId: string;
+      name: string;
+      artifactKind: ArtifactKind;
+      version: number;
+    };
 
 /**
  * Flatten an assistant message into a list of timeline entries
@@ -75,6 +86,19 @@ function messageToEntries(
         key: msg.id,
         skill: (msg.systemMeta?.skill as string) ?? msg.content,
         stagedAt: (msg.systemMeta?.staged_at as string | null | undefined) ?? null,
+      }];
+    }
+    if (msg.systemKind === "artifact") {
+      const { artifactId, name, kind, version } = unpackArtifactMeta(
+        msg.systemMeta, msg.content,
+      );
+      return [{
+        kind: "artifact",
+        key: msg.id,
+        artifactId,
+        name,
+        artifactKind: kind,
+        version,
       }];
     }
     return [];
@@ -188,24 +212,58 @@ function groupMessages(messages: ChatMessageType[]): MessageGroup[] {
   return groups;
 }
 
+function unpackArtifactMeta(
+  systemMeta: Record<string, unknown> | undefined,
+  fallbackName: string,
+): { artifactId: string; name: string; kind: ArtifactKind; version: number } {
+  const meta = systemMeta ?? {};
+  return {
+    artifactId: (meta.artifact_id as string) ?? "",
+    name: (meta.name as string) ?? fallbackName,
+    kind: (meta.kind as ArtifactKind) ?? "markdown",
+    version: (meta.version as number) ?? 1,
+  };
+}
+
 // ── Orphan system marker (no following assistant yet) ───────────────
 //
-// Rendered only when a ``skill.invoked`` event arrives but the LLM has
-// not yet produced an assistant turn to attach it to.  The normal case
-// folds the marker into the assistant timeline below.
+// Rendered only when a system event arrives but the LLM has not yet
+// produced an assistant turn to fold it into.
 
-function OrphanSystemMarker({ message }: { message: ChatMessageType }) {
-  if (message.systemKind !== "skill_invoked") return null;
-  const skill = (message.systemMeta?.skill as string) ?? message.content;
-  return (
-    <div className="my-2 flex items-center gap-2 px-4 text-xs text-muted-foreground font-mono">
-      <span className="size-2 rounded-full bg-emerald-500" />
-      <span>
-        <span className="font-semibold text-foreground">Skill</span> 
-        <span className="text-muted-foreground truncate">{skill}</span>
-      </span>
-    </div>
-  );
+function OrphanSystemMarker({
+  message,
+  sessionId,
+}: {
+  message: ChatMessageType;
+  sessionId: string | null;
+}) {
+  if (message.systemKind === "skill_invoked") {
+    const skill = (message.systemMeta?.skill as string) ?? message.content;
+    return (
+      <div className="my-2 flex items-center gap-2 px-4 text-xs text-muted-foreground font-mono">
+        <span className="size-2 rounded-full bg-emerald-500" />
+        <span>
+          <span className="font-semibold text-foreground">Skill</span>
+          <span className="text-muted-foreground truncate">{skill}</span>
+        </span>
+      </div>
+    );
+  }
+
+  if (message.systemKind === "artifact" && sessionId) {
+    const unpacked = unpackArtifactMeta(message.systemMeta, message.content);
+    return (
+      <ArtifactBlock
+        sessionId={sessionId}
+        artifactId={unpacked.artifactId}
+        name={unpacked.name}
+        kind={unpacked.kind}
+        version={unpacked.version}
+      />
+    );
+  }
+
+  return null;
 }
 
 // ── Timeline entry renderer ──────────────────────────────────────────
@@ -213,10 +271,12 @@ function OrphanSystemMarker({ message }: { message: ChatMessageType }) {
 function TimelineEntryItem({
   entry,
   step,
+  sessionId,
   onFileSelect,
 }: {
   entry: TimelineEntry;
   step: number;
+  sessionId: string | null;
   onFileSelect?: (path: string) => void;
 }) {
   if (entry.kind === "reasoning") {
@@ -290,6 +350,28 @@ function TimelineEntryItem({
     );
   }
 
+  if (entry.kind === "artifact") {
+    return (
+      <TimelineItem step={step}>
+        <TimelineHeader>
+          <TimelineSeparator style={{ backgroundColor: "var(--color-border)" }} />
+          <TimelineIndicator className="size-2 border-none bg-sky-500" />
+        </TimelineHeader>
+        <TimelineContent>
+          {sessionId ? (
+            <ArtifactBlock
+              sessionId={sessionId}
+              artifactId={entry.artifactId}
+              name={entry.name}
+              kind={entry.artifactKind}
+              version={entry.version}
+            />
+          ) : null}
+        </TimelineContent>
+      </TimelineItem>
+    );
+  }
+
   // kind === "thinking"
   return (
     <TimelineItem step={step}>
@@ -310,11 +392,13 @@ function AssistantGroup({
   messages,
   lastGlobalIndex,
   totalMessages,
+  sessionId,
   onFileSelect,
 }: {
   messages: ChatMessageType[];
   lastGlobalIndex: number;
   totalMessages: number;
+  sessionId: string | null;
   onFileSelect?: (path: string) => void;
 }) {
   const entries: TimelineEntry[] = [];
@@ -333,6 +417,7 @@ function AssistantGroup({
               key={entry.key}
               entry={entry}
               step={i + 1}
+              sessionId={sessionId}
               onFileSelect={onFileSelect}
             />
           ))}
@@ -345,6 +430,7 @@ function AssistantGroup({
 // ── Main thread ──────────────────────────────────────────────────────
 
 export function ChatThread({
+  sessionId,
   messages,
   isRunning,
   onSend,
@@ -382,7 +468,13 @@ export function ChatThread({
 
                 if (group.role === "system") {
                   const msg = group.messages[0];
-                  return <OrphanSystemMarker key={msg.id} message={msg} />;
+                  return (
+                    <OrphanSystemMarker
+                      key={msg.id}
+                      message={msg}
+                      sessionId={sessionId}
+                    />
+                  );
                 }
 
                 return (
@@ -391,6 +483,7 @@ export function ChatThread({
                     messages={group.messages}
                     lastGlobalIndex={group.lastGlobalIndex}
                     totalMessages={messages.length}
+                    sessionId={sessionId}
                     onFileSelect={onFileSelect}
                   />
                 );

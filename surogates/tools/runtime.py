@@ -55,6 +55,7 @@ class ToolRuntime:
         # Both module files are preserved on disk so they can be
         # reinstated later without re-porting work.
         from surogates.tools.builtin import (
+            artifact,
             clarify,
             coordinator,
             delegate,
@@ -82,6 +83,7 @@ class ToolRuntime:
             clarify,
             expert,
             coordinator,
+            artifact,
         ]
 
         for mod in modules:

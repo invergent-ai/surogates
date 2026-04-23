@@ -491,9 +491,18 @@ READ_FILE_SCHEMA = ToolSchema(
 WRITE_FILE_SCHEMA = ToolSchema(
     name="write_file",
     description=(
-        "Write content to a file, completely replacing existing content. Use this "
-        "instead of echo/cat heredoc in terminal. Creates parent directories "
-        "automatically. OVERWRITES the entire file — use 'patch' for targeted edits."
+        "Write content to a file in the workspace, completely replacing "
+        "existing content. Use this instead of echo/cat heredoc in "
+        "terminal. Creates parent directories automatically. OVERWRITES "
+        "the entire file — use 'patch' for targeted edits.\n\n"
+        "Use `write_file` when the user is editing a project on disk — "
+        "adding to or modifying a codebase they will run, import, or "
+        "commit. If the user instead asks for a **standalone demo, "
+        "widget, single-file webpage, chart, diagram, or document** they "
+        "want to view and interact with in the chat (not on disk), call "
+        "`create_artifact` instead. Phrasing like 'single file' or 'one "
+        "HTML file' is NOT a signal to use `write_file` — a sandboxed "
+        "HTML artifact is also a single self-contained file."
     ),
     parameters={
         "type": "object",

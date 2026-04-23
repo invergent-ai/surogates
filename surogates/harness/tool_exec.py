@@ -670,6 +670,8 @@ async def execute_single_tool(
                 api_client=api_client,
                 session_factory=session_factory,
                 tools=tools,
+                tool_call_id=tool_call_id,
+                lease_token=lease.lease_token,
             )
     except KeyError:
         tool_failed = True

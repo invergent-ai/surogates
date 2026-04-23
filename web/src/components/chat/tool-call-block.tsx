@@ -14,6 +14,8 @@ import { ReadFileBlock, WriteFileBlock, PatchBlock, SearchFilesBlock, ListFilesB
 import { ProcessToolBlock } from "./tools/process-tool";
 import { ExpertToolBlock } from "./tools/expert-tool";
 import { SkillsListBlock, SkillViewBlock } from "./tools/skill-tools";
+import { ClarifyToolBlock } from "./tools/clarify-tool";
+import { ArtifactToolBlock } from "./tools/artifact-tool";
 import { DefaultToolBlock } from "./tools/default-tool";
 
 export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSelect?: (path: string) => void }) {
@@ -61,6 +63,12 @@ export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSe
 
     case "skill_view":
       return <SkillViewBlock tc={tc} />;
+
+    case "clarify":
+      return <ClarifyToolBlock tc={tc} />;
+
+    case "create_artifact":
+      return <ArtifactToolBlock tc={tc} />;
 
     default:
       return <DefaultToolBlock tc={tc} />;

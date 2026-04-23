@@ -18,9 +18,10 @@ export interface ChatMessage {
   reasoning?: string;
   // Set on system-role markers emitted by harness-side events that belong
   // in the chat timeline but aren't user/LLM turns (e.g. ``skill.invoked``
-  // when a slash command expanded a skill).  Renderers branch on this
-  // discriminator instead of parsing ``content``.
-  systemKind?: "skill_invoked";
+  // when a slash command expanded a skill, or ``artifact.created`` when the
+  // LLM produces an inline chart/table/markdown block).  Renderers branch
+  // on this discriminator instead of parsing ``content``.
+  systemKind?: "skill_invoked" | "artifact";
   systemMeta?: Record<string, unknown>;
 }
 
@@ -39,6 +40,14 @@ export interface ToolCallInfo {
   // EXPERT_ENDORSE or EXPERT_OVERRIDE event arrives (either live or
   // on session replay).
   expertFeedback?: { rating: "up" | "down"; reason?: string };
+  // Populated for `clarify` tool calls once the user submits through the
+  // widget (or during replay of a clarify.response event).  Locks the
+  // widget and renders the chosen answers inline.
+  clarifyAnswers?: Array<{
+    question: string;
+    answer: string;
+    is_other: boolean;
+  }>;
 }
 
 export interface TokenUsage {
@@ -74,6 +83,9 @@ const LISTENED_EVENTS = [
   "expert.result",
   "expert.endorse",
   "expert.override",
+  "artifact.created",
+  "artifact.updated",
+  "clarify.response",
 ] as const;
 
 const EMPTY_USAGE: TokenUsage = {
@@ -154,6 +166,29 @@ export function useSessionRuntime(sessionId: string | null) {
               systemMeta: {
                 skill: data.skill,
                 staged_at: data.staged_at,
+              },
+            });
+            break;
+          }
+
+          case "artifact.created":
+          case "artifact.updated": {
+            // Artifact metadata lands on the event log; the renderer
+            // fetches the payload on demand.  Rendered as a system row so
+            // it drops into the timeline at the point the LLM produced it.
+            next.push({
+              id: `evt-${eventId}`,
+              role: "system",
+              content: (data.name as string) ?? "",
+              createdAt: new Date(),
+              status: "complete",
+              systemKind: "artifact",
+              systemMeta: {
+                artifact_id: data.artifact_id,
+                name: data.name,
+                kind: data.kind,
+                version: data.version,
+                size: data.size,
               },
             });
             break;
@@ -518,6 +553,41 @@ export function useSessionRuntime(sessionId: string | null) {
                 toolCalls: msg.toolCalls.map((t) =>
                   t.expertResultEventId === resultEventId
                     ? { ...t, expertFeedback: { rating, reason } }
+                    : t,
+                ),
+              };
+              break;
+            }
+            break;
+          }
+
+          case "clarify.response": {
+            // User submitted answers to a clarify tool call.  Attach the
+            // answers to the matching tool call so the widget locks and
+            // shows them inline.  Live submits rely on this too -- the
+            // frontend re-renders the same shape whether it came from an
+            // optimistic POST or a replayed event.
+            const targetToolId = data.tool_call_id as string | undefined;
+            const responses = data.responses as
+              | Array<{ question: string; answer: string; is_other?: boolean }>
+              | undefined;
+            if (!targetToolId || !Array.isArray(responses)) break;
+            for (let i = next.length - 1; i >= 0; i--) {
+              const msg = next[i];
+              if (!msg.toolCalls) continue;
+              if (!msg.toolCalls.some((t) => t.id === targetToolId)) continue;
+              next[i] = {
+                ...msg,
+                toolCalls: msg.toolCalls.map((t) =>
+                  t.id === targetToolId
+                    ? {
+                        ...t,
+                        clarifyAnswers: responses.map((r) => ({
+                          question: r.question,
+                          answer: r.answer,
+                          is_other: Boolean(r.is_other),
+                        })),
+                      }
                     : t,
                 ),
               };

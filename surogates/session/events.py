@@ -78,6 +78,19 @@ class EventType(str, Enum):
     # the user explicitly rated.
     USER_FEEDBACK = "user.feedback"
 
+    # Artifacts — LLM-built inline content (charts, tables, markdown) stored
+    # in the session bucket and rendered in the chat thread.  Events carry
+    # metadata only; the payload is fetched on-demand via the artifacts API.
+    ARTIFACT_CREATED = "artifact.created"
+    ARTIFACT_UPDATED = "artifact.updated"
+
+    # Clarify — user's response to a `clarify` tool call.  Emitted by the
+    # clarify response endpoint when the user submits answers through the
+    # web widget.  The worker's clarify handler polls the event log for a
+    # matching ``tool_call_id`` and returns the responses to the LLM.
+    # Session replay uses this to re-lock the widget after a page reload.
+    CLARIFY_RESPONSE = "clarify.response"
+
     # Saga orchestration
     SAGA_START = "saga.start"
     SAGA_STEP_BEGIN = "saga.step_begin"

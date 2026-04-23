@@ -124,7 +124,9 @@ def create_app() -> FastAPI:
         admin_mcp,
         admin_service_accounts,
         agents,
+        artifacts,
         auth,
+        clarify,
         events,
         feedback,
         health,
@@ -152,6 +154,8 @@ def create_app() -> FastAPI:
     app.include_router(prompts.router, prefix="/v1", tags=["prompts"])
     app.include_router(transparency.router, prefix="/v1", tags=["transparency"])
     app.include_router(workspace.router, prefix="/v1", tags=["workspace"])
+    app.include_router(artifacts.router, prefix="/v1", tags=["artifacts"])
+    app.include_router(clarify.router, prefix="/v1", tags=["clarify"])
     app.include_router(admin.router, prefix="/v1/admin", tags=["admin"])
     app.include_router(admin_mcp.router, prefix="/v1/admin", tags=["admin"])
     app.include_router(admin_credentials.router, prefix="/v1/admin", tags=["admin"])

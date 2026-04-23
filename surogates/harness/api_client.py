@@ -227,6 +227,41 @@ class HarnessAPIClient:
         except httpx.HTTPStatusError as exc:
             return _error_response(exc)
 
+    # ------------------------------------------------------------------
+    # Artifacts
+    # ------------------------------------------------------------------
+
+    async def create_artifact(
+        self,
+        *,
+        name: str,
+        kind: str,
+        spec: dict[str, Any],
+    ) -> str:
+        """Create an artifact in the current session.  Returns JSON string.
+
+        Requires ``session_id`` to be set on the client (set by the
+        harness when wiring the per-session client).  The API server
+        emits an ``artifact.created`` event as part of the POST, so the
+        harness does not need to emit one itself.
+        """
+        if self._session_id is None:
+            return json.dumps({
+                "success": False,
+                "error": (
+                    "Artifacts require a session-scoped API client; "
+                    "session_id is not set."
+                ),
+            }, ensure_ascii=False)
+        try:
+            data = await self._post(
+                f"/v1/sessions/{self._session_id}/artifacts",
+                body={"name": name, "kind": kind, "spec": spec},
+            )
+            return json.dumps({"success": True, **data}, ensure_ascii=False)
+        except httpx.HTTPStatusError as exc:
+            return _error_response(exc)
+
 
 # ---------------------------------------------------------------------------
 # Helpers

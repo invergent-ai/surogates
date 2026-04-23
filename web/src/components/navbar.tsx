@@ -9,12 +9,19 @@ import { useAppStore } from "@/stores/app-store";
 import { logout } from "@/api/auth";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { formatDistanceToNow } from "date-fns";
 import { SessionTreePanel } from "@/features/sessions/session-tree-panel";
 
 export function SessionSidebar() {
   const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState(false);
+  // Per-action loading state: ``creating`` is a single flag for the
+  // single new-session button; ``deleting`` is a set because each
+  // session row has its own delete button and a user may click more
+  // than one while previous requests are in flight.
+  const [creating, setCreating] = useState(false);
+  const [deleting, setDeleting] = useState<Set<string>>(new Set());
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const setActiveSession = useAppStore((s) => s.setActiveSession);
@@ -24,9 +31,37 @@ export function SessionSidebar() {
   const { theme, setTheme } = useTheme();
 
   async function handleNewSession() {
-    const session = await createSession({});
-    if (session) {
-      void navigate({ to: "/chat/$sessionId", params: { sessionId: session.id } });
+    if (creating) return;
+    setCreating(true);
+    try {
+      const session = await createSession({});
+      if (session) {
+        void navigate({
+          to: "/chat/$sessionId",
+          params: { sessionId: session.id },
+        });
+      }
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function handleDeleteSession(sessionId: string) {
+    if (deleting.has(sessionId)) return;
+    setDeleting((prev) => {
+      const next = new Set(prev);
+      next.add(sessionId);
+      return next;
+    });
+    try {
+      await deleteSession(sessionId);
+    } finally {
+      setDeleting((prev) => {
+        if (!prev.has(sessionId)) return prev;
+        const next = new Set(prev);
+        next.delete(sessionId);
+        return next;
+      });
     }
   }
 
@@ -74,13 +109,18 @@ export function SessionSidebar() {
         <Button
           variant="outline"
           onClick={handleNewSession}
+          disabled={creating}
           className={cn(
             "w-full gap-2",
             collapsed ? "justify-center px-0" : "justify-start",
           )}
         >
-          <PlusIcon className="w-4 h-4" />
-          {!collapsed && "New session"}
+          {creating ? (
+            <Spinner className="w-4 h-4" />
+          ) : (
+            <PlusIcon className="w-4 h-4" />
+          )}
+          {!collapsed && (creating ? "Creating…" : "New session")}
         </Button>
         <Button
           variant="ghost"
@@ -114,21 +154,32 @@ export function SessionSidebar() {
           const time = formatDistanceToNow(new Date(session.updated_at), {
             addSuffix: true,
           });
+          const isDeleting = deleting.has(session.id);
 
           return (
             <div
               role="button"
               tabIndex={0}
               key={session.id}
+              aria-busy={isDeleting || undefined}
               className={cn(
-                "group flex items-center gap-2 w-full cursor-pointer transition-colors text-left",
+                "group flex items-center gap-2 w-full transition-colors text-left",
                 collapsed ? "justify-center py-2" : "px-3 py-2 my-px",
+                isDeleting
+                  ? "opacity-50 cursor-not-allowed"
+                  : "cursor-pointer",
                 isActive
                   ? "bg-line text-foreground border-l-2 border-l-primary"
                   : "bg-transparent text-subtle hover:bg-input hover:text-foreground border-l-2 border-l-transparent",
               )}
-              onClick={() => handleSelectSession(session.id)}
-              onKeyDown={(e) => { if (e.key === "Enter") handleSelectSession(session.id); }}
+              onClick={() => {
+                if (isDeleting) return;
+                handleSelectSession(session.id);
+              }}
+              onKeyDown={(e) => {
+                if (isDeleting) return;
+                if (e.key === "Enter") handleSelectSession(session.id);
+              }}
             >
               {collapsed ? (
                 <MessageSquareIcon className="w-4 h-4 shrink-0" />
@@ -142,13 +193,26 @@ export function SessionSidebar() {
                   </div>
                   <button
                     type="button"
-                    className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-destructive/10 hover:text-destructive transition-all"
+                    disabled={isDeleting}
+                    aria-label={
+                      isDeleting ? "Deleting session" : "Delete session"
+                    }
+                    className={cn(
+                      "p-1 rounded transition-all",
+                      isDeleting
+                        ? "opacity-100 text-destructive cursor-wait"
+                        : "opacity-0 group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive",
+                    )}
                     onClick={(e) => {
                       e.stopPropagation();
-                      void deleteSession(session.id);
+                      void handleDeleteSession(session.id);
                     }}
                   >
-                    <TrashIcon className="w-3.5 h-3.5" />
+                    {isDeleting ? (
+                      <Spinner className="w-3.5 h-3.5" />
+                    ) : (
+                      <TrashIcon className="w-3.5 h-3.5" />
+                    )}
                   </button>
                 </>
               )}
