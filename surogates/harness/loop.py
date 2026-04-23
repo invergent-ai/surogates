@@ -31,6 +31,7 @@ from surogates.harness.agent_resolver import (
 from surogates.harness.connection_health import cleanup_dead_connections
 from surogates.harness.cost_tracker import SessionCostTracker
 from surogates.harness.credentials import CredentialPool
+from surogates.harness.error_classify import classify_harness_error
 from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
 from surogates.harness.message_utils import coerce_message_content, make_skipped_tool_result
 from surogates.harness.prompt_cache import SystemPromptCache
@@ -544,8 +545,9 @@ class AgentHarness:
             # 11. Run the core LLM loop.
             await self._run_loop(session, messages, system_prompt, lease, cost_tracker=cost_tracker, all_events=all_events)
 
-        except Exception:
+        except Exception as _harness_exc:
             logger.exception("Harness crash for session %s", session_id)
+            info = classify_harness_error(_harness_exc)
             try:
                 await self._store.emit_event(
                     session_id,
@@ -553,6 +555,10 @@ class AgentHarness:
                     {
                         "worker_id": self._worker_id,
                         "error": traceback.format_exc()[-2000:],
+                        "error_category": info.category,
+                        "error_title": info.title,
+                        "error_detail": info.detail,
+                        "retryable": info.retryable,
                     },
                 )
             except Exception:
@@ -882,6 +888,7 @@ class AgentHarness:
                     session.id,
                     iteration,
                 )
+                info = classify_harness_error(exc)
                 await self._store.emit_event(
                     session.id,
                     EventType.HARNESS_CRASH,
@@ -889,6 +896,10 @@ class AgentHarness:
                         "worker_id": self._worker_id,
                         "error": f"LLM call failed: {exc}",
                         "iteration": iteration,
+                        "error_category": info.category,
+                        "error_title": info.title,
+                        "error_detail": info.detail,
+                        "retryable": info.retryable,
                     },
                 )
                 raise

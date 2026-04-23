@@ -509,6 +509,41 @@ async def resume_session(
     return await store.get_session(session_id)
 
 
+@router.post("/sessions/{session_id}/retry", response_model=Session)
+async def retry_session(
+    session_id: UUID,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> Session:
+    """Retry a failed (or paused) session.
+
+    The retry path re-enqueues the session for ``wake()``.  The harness
+    replays from the durable cursor, so the last user message is still
+    in scope and the LLM is called again — same code path as a normal
+    wake.  Emits ``SESSION_RESUME`` with ``source=user_retry`` so audit
+    queries can distinguish user-initiated retries from pause/resume
+    flows.
+    """
+    store = _get_session_store(request)
+    session = await _get_session_for_tenant(request, session_id, tenant)
+
+    if session.status not in ("failed", "paused"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot retry session in '{session.status}' state.",
+        )
+
+    await store.emit_event(
+        session_id,
+        EventType.SESSION_RESUME,
+        {"source": "user_retry"},
+    )
+    await store.update_session_status(session_id, "active")
+    await enqueue_session(request.app.state.redis, session.agent_id, session_id)
+
+    return await store.get_session(session_id)
+
+
 @router.delete(
     "/sessions/{session_id}",
     status_code=status.HTTP_204_NO_CONTENT,

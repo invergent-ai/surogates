@@ -6,7 +6,8 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { getAuthToken } from "@/features/auth";
-import { getSession } from "@/api/sessions";
+import { getSession, retrySession as retrySessionApi } from "@/api/sessions";
+import type { ErrorInfo } from "@/types/session";
 
 export interface ChatMessage {
   id: string;
@@ -19,10 +20,24 @@ export interface ChatMessage {
   // Set on system-role markers emitted by harness-side events that belong
   // in the chat timeline but aren't user/LLM turns (e.g. ``skill.invoked``
   // when a slash command expanded a skill, or ``artifact.created`` when the
-  // LLM produces an inline chart/table/markdown block).  Renderers branch
-  // on this discriminator instead of parsing ``content``.
-  systemKind?: "skill_invoked" | "artifact";
+  // LLM produces an inline chart/table/markdown block, or ``error`` when a
+  // session fail lands without a preceding assistant slot).  Renderers
+  // branch on this discriminator instead of parsing ``content``.
+  systemKind?: "skill_invoked" | "artifact" | "error";
   systemMeta?: Record<string, unknown>;
+  // Populated by ``harness.crash`` / ``session.fail`` payloads carrying
+  // the backend classifier's structured fields.  Drives the ErrorMessage
+  // component (title, collapsible detail, optional retry button).
+  errorInfo?: ErrorInfo;
+}
+
+// Transient status surfaced while the orchestrator is retrying after a
+// provider error.  Replaced on each ``harness.crash``, cleared on the
+// next ``llm.request`` / ``llm.response`` or on ``session.fail``.
+export interface RetryIndicator {
+  title: string;
+  detail: string;
+  attempt: number;
 }
 
 export interface ToolCallInfo {
@@ -102,6 +117,9 @@ export function useSessionRuntime(sessionId: string | null) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [tokenUsage, setTokenUsage] = useState<TokenUsage>(EMPTY_USAGE);
+  const [retryIndicator, setRetryIndicator] = useState<RetryIndicator | null>(
+    null,
+  );
   const esRef = useRef<EventSource | null>(null);
   const lastEventIdRef = useRef<number>(0);
   const sessionDoneRef = useRef<boolean>(false);
@@ -119,6 +137,43 @@ export function useSessionRuntime(sessionId: string | null) {
     (type: string, eventId: number, data: Record<string, unknown>) => {
       if (type === "session.done") {
         sessionDoneRef.current = true;
+      }
+
+      // Retry indicator state updates live OUTSIDE the setMessages
+      // reducer.  React StrictMode invokes reducer functions twice in
+      // dev; queuing functional setState calls from inside a reducer
+      // causes them to run twice, double-incrementing the attempt
+      // counter.  Keeping the retry indicator side-effect here ensures
+      // each crash bumps the counter exactly once.
+      switch (type) {
+        case "harness.wake":
+        case "llm.request":
+        case "llm.response":
+        case "session.resume":
+        case "session.pause":
+        case "session.complete":
+        case "session.fail":
+        case "session.done":
+          setRetryIndicator(null);
+          break;
+        case "harness.crash": {
+          const title =
+            typeof data.error_title === "string"
+              ? data.error_title
+              : "A transient error occurred, retrying…";
+          const detail =
+            typeof data.error_detail === "string"
+              ? data.error_detail
+              : typeof data.error === "string"
+                ? data.error
+                : "";
+          setRetryIndicator((prev) => ({
+            title,
+            detail,
+            attempt: (prev?.attempt ?? 0) + 1,
+          }));
+          break;
+        }
       }
 
       setMessages((prev) => {
@@ -446,8 +501,9 @@ export function useSessionRuntime(sessionId: string | null) {
           }
 
           case "harness.wake":
-          case "llm.request": {
-            if (!terminalRef.current) {
+          case "llm.request":
+          case "llm.response": {
+            if (type !== "llm.response" && !terminalRef.current) {
               setIsRunning(true);
             }
             break;
@@ -455,8 +511,10 @@ export function useSessionRuntime(sessionId: string | null) {
 
           case "harness.crash": {
             // Crash is NOT terminal — the orchestrator retries (up to 3x).
-            // Keep isRunning=true so the shimmer stays visible during retries.
-            // Only session.fail (after retries exhausted) is the terminal signal.
+            // Keep isRunning=true so the shimmer stays visible during
+            // retries.  The transient banner is driven by the retry
+            // indicator side-effect above this reducer.  Only
+            // ``session.fail`` (after retries exhausted) is terminal.
             break;
           }
 
@@ -471,6 +529,24 @@ export function useSessionRuntime(sessionId: string | null) {
           case "session.fail":
           case "session.done": {
             terminalRef.current = true;
+            const errorInfo: ErrorInfo | undefined =
+              type === "session.fail" && typeof data.error_category === "string"
+                ? {
+                    category: data.error_category as ErrorInfo["category"],
+                    title:
+                      typeof data.error_title === "string"
+                        ? data.error_title
+                        : "The session failed due to an internal error.",
+                    detail:
+                      typeof data.error_detail === "string"
+                        ? data.error_detail
+                        : typeof data.error === "string"
+                          ? data.error
+                          : "",
+                    retryable: Boolean(data.retryable),
+                  }
+                : undefined;
+
             const doneIdx = findLastAssistantIndex(next);
             if (doneIdx >= 0 && next[doneIdx].status === "streaming") {
               // Mark any running tool calls as complete/error.
@@ -487,7 +563,21 @@ export function useSessionRuntime(sessionId: string | null) {
                 ...next[doneIdx],
                 toolCalls: finalTools,
                 status: type === "session.fail" ? "error" : "complete",
+                errorInfo: errorInfo ?? next[doneIdx].errorInfo,
               };
+            } else if (type === "session.fail" && errorInfo) {
+              // No in-flight assistant slot — insert a standalone error
+              // bubble so the failure is visible instead of the shimmer
+              // silently stopping.
+              next.push({
+                id: `error-${eventId}`,
+                role: "system",
+                systemKind: "error",
+                content: "",
+                createdAt: new Date(),
+                status: "error",
+                errorInfo,
+              });
             }
             setIsRunning(false);
             break;
@@ -778,6 +868,29 @@ export function useSessionRuntime(sessionId: string | null) {
     });
   }, []);
 
+  /**
+   * User-initiated retry of a failed (or paused) session.  Calls the
+   * REST retry endpoint and lets the SSE stream drive the subsequent
+   * state transitions (session.resume → harness.wake → llm.request).
+   * Clears the retry indicator and terminal flag locally so the UI
+   * reflects the optimistic transition immediately; restores them on
+   * failure so the original error bubble remains intact and the
+   * caller can surface the rejection reason.
+   */
+  const retrySession = useCallback(async () => {
+    if (!sessionId) return;
+    terminalRef.current = false;
+    setRetryIndicator(null);
+    setIsRunning(true);
+    try {
+      await retrySessionApi(sessionId);
+    } catch (err) {
+      terminalRef.current = true;
+      setIsRunning(false);
+      throw err;
+    }
+  }, [sessionId]);
+
   const forceStop = useCallback(() => {
     terminalRef.current = true;
     setIsRunning(false);
@@ -805,7 +918,9 @@ export function useSessionRuntime(sessionId: string | null) {
     messages,
     isRunning,
     tokenUsage,
+    retryIndicator,
     forceStop,
+    retrySession,
     markSending,
     markSendError,
   };

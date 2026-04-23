@@ -81,7 +81,9 @@ export function ChatPage() {
     messages,
     isRunning,
     tokenUsage,
+    retryIndicator,
     forceStop,
+    retrySession,
     markSending,
     markSendError,
   } = useSessionRuntime(sessionId);
@@ -234,6 +236,8 @@ export function ChatPage() {
             onFileSelect={handleFileSelect}
             disabled={sessionDeclined}
             tokenUsage={tokenUsage}
+            retryIndicator={retryIndicator}
+            onRetry={retrySession}
           />
         )}
       </main>

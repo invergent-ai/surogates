@@ -101,6 +101,27 @@ export async function resumeSession(sessionId: string): Promise<void> {
 }
 
 /**
+ * Retry a failed (or paused) session.  The backend emits
+ * ``session.resume`` with ``source=user_retry``, flips the session
+ * status to ``active``, and re-enqueues the session on the worker
+ * queue.  The harness replays from the durable cursor so the last
+ * user message is still in scope.
+ */
+export async function retrySession(sessionId: string): Promise<Session> {
+  const response = await authFetch(
+    `/api/v1/sessions/${sessionId}/retry`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    const err = (await response.json().catch(() => null)) as {
+      detail?: string;
+    } | null;
+    throw new Error(err?.detail ?? "Failed to retry session");
+  }
+  return (await response.json()) as Session;
+}
+
+/**
  * Stop a sub-agent / delegation child session.  Routes to the pause
  * endpoint today because pause already publishes the interrupt
  * signal and flips the child's status, but the UI vocabulary stays

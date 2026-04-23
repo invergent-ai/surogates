@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID
 
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
+from surogates.harness.error_classify import classify_harness_error
 from surogates.session.events import EventType
 
 if TYPE_CHECKING:
@@ -247,6 +248,7 @@ class Orchestrator:
                     "All retries exhausted for session %s; emitting SESSION_FAIL",
                     session_id,
                 )
+                info = classify_harness_error(exc)
                 try:
                     await self.session_store.emit_event(
                         session_id,
@@ -256,6 +258,10 @@ class Orchestrator:
                             "error": str(exc),
                             "traceback": traceback.format_exc()[-2000:],
                             "attempts": _MAX_RETRIES,
+                            "error_category": info.category,
+                            "error_title": info.title,
+                            "error_detail": info.detail,
+                            "retryable": info.retryable,
                         },
                     )
                     await self.session_store.update_session_status(

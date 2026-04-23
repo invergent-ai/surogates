@@ -35,9 +35,16 @@ import { statusColorClass, effectiveStatus } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
 import { ChatComposer } from "./chat-composer";
 import { ArtifactBlock } from "./artifacts/artifact-block";
+import { ErrorMessage } from "./error-message";
 import { cn } from "@/lib/utils";
-import { MessageSquareIcon } from "lucide-react";
-import type { ChatMessage as ChatMessageType, ToolCallInfo, TokenUsage } from "@/hooks/use-session-runtime";
+import { AlertTriangle, ChevronDown, ChevronRight, MessageSquareIcon } from "lucide-react";
+import { useState } from "react";
+import type {
+  ChatMessage as ChatMessageType,
+  RetryIndicator,
+  ToolCallInfo,
+  TokenUsage,
+} from "@/hooks/use-session-runtime";
 import type { ArtifactKind } from "@/types/session";
 
 interface ChatThreadProps {
@@ -49,6 +56,12 @@ interface ChatThreadProps {
   onFileSelect?: (path: string) => void;
   disabled?: boolean;
   tokenUsage?: TokenUsage;
+  // Transient indicator shown during provider retries.  Cleared by the
+  // hook on the next successful llm.request/response or on session.fail.
+  retryIndicator?: RetryIndicator | null;
+  // User-initiated retry of a failed or paused session.  Called from the
+  // Retry button on standalone error bubbles.
+  onRetry?: () => Promise<void>;
 }
 
 // ── Timeline item types ──────────────────────────────────────────────
@@ -235,9 +248,11 @@ function unpackArtifactMeta(
 function OrphanSystemMarker({
   message,
   sessionId,
+  onRetry,
 }: {
   message: ChatMessageType;
   sessionId: string | null;
+  onRetry?: () => Promise<void>;
 }) {
   if (message.systemKind === "skill_invoked") {
     const skill = (message.systemMeta?.skill as string) ?? message.content;
@@ -262,6 +277,14 @@ function OrphanSystemMarker({
         kind={unpacked.kind}
         version={unpacked.version}
       />
+    );
+  }
+
+  if (message.systemKind === "error" && message.errorInfo) {
+    return (
+      <div className="mx-auto my-2 w-full max-w-4xl px-4">
+        <ErrorMessage errorInfo={message.errorInfo} onRetry={onRetry} />
+      </div>
     );
   }
 
@@ -396,12 +419,14 @@ function AssistantGroup({
   totalMessages,
   sessionId,
   onFileSelect,
+  onRetry,
 }: {
   messages: ChatMessageType[];
   lastGlobalIndex: number;
   totalMessages: number;
   sessionId: string | null;
   onFileSelect?: (path: string) => void;
+  onRetry?: () => Promise<void>;
 }) {
   const entries: TimelineEntry[] = [];
   for (let i = 0; i < messages.length; i++) {
@@ -409,6 +434,14 @@ function AssistantGroup({
       && lastGlobalIndex === totalMessages - 1;
     entries.push(...messageToEntries(messages[i], isLast));
   }
+
+  // Surface the classifier's error info inline below the timeline when
+  // the last assistant message in the group ended in error.
+  const tail = messages[messages.length - 1];
+  const showErrorInfo =
+    tail && tail.role === "assistant"
+      && tail.status === "error"
+      && !!tail.errorInfo;
 
   return (
     <Message from="assistant">
@@ -424,8 +457,46 @@ function AssistantGroup({
             />
           ))}
         </Timeline>
+        {showErrorInfo && (
+          <div className="mt-3">
+            <ErrorMessage errorInfo={tail.errorInfo!} onRetry={onRetry} />
+          </div>
+        )}
       </MessageContent>
     </Message>
+  );
+}
+
+// Transient banner shown above the composer while the orchestrator is
+// retrying after a provider error.  Collapsible for the raw detail.
+function RetryBanner({ indicator }: { indicator: RetryIndicator }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div
+      role="status"
+      className="flex flex-col gap-1 border-l-2 border-amber-500 bg-amber-500/5 px-3 py-2 text-xs"
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        className="flex items-center gap-2 text-left text-amber-600 hover:text-amber-700"
+        aria-expanded={open}
+      >
+        <AlertTriangle className="size-3 shrink-0" />
+        <span className="flex-1 truncate font-medium">{indicator.title}</span>
+        <span className="text-[10px] text-muted-foreground">
+          attempt {indicator.attempt}
+        </span>
+        {indicator.detail && (
+          open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />
+        )}
+      </button>
+      {open && indicator.detail && (
+        <pre className="mt-1 overflow-x-auto rounded-none bg-background p-2 font-mono text-[11px] whitespace-pre-wrap wrap-break-word text-muted-foreground">
+          {indicator.detail}
+        </pre>
+      )}
+    </div>
   );
 }
 
@@ -440,8 +511,29 @@ export function ChatThread({
   onFileSelect,
   disabled = false,
   tokenUsage,
+  retryIndicator,
+  onRetry,
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
+
+  // Retry is only actionable for the most recent unresolved failure.
+  // An error bubble (standalone system or inline assistant) is "active"
+  // only when it is the tail of the message list — anything after it
+  // (a new user message, a later successful turn, another failure)
+  // means the server-side state has moved on and clicking the older
+  // button would 409.  We resolve the active failure's id once here
+  // and pass onRetry only to the matching render site.
+  const activeFailureId = useMemo<string | null>(() => {
+    if (messages.length === 0) return null;
+    const tail = messages[messages.length - 1];
+    if (tail.role === "system" && tail.systemKind === "error" && tail.errorInfo) {
+      return tail.id;
+    }
+    if (tail.role === "assistant" && tail.status === "error" && tail.errorInfo) {
+      return tail.id;
+    }
+    return null;
+  }, [messages]);
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-card text-sm">
@@ -470,15 +562,24 @@ export function ChatThread({
 
                 if (group.role === "system") {
                   const msg = group.messages[0];
+                  const groupRetry =
+                    msg.id === activeFailureId ? onRetry : undefined;
                   return (
                     <OrphanSystemMarker
                       key={msg.id}
                       message={msg}
                       sessionId={sessionId}
+                      onRetry={groupRetry}
                     />
                   );
                 }
 
+                // Only the assistant group whose tail message is the
+                // active failure gets the onRetry callback; earlier
+                // failed turns render read-only.
+                const groupTail = group.messages[group.messages.length - 1];
+                const groupRetry =
+                  groupTail.id === activeFailureId ? onRetry : undefined;
                 return (
                   <AssistantGroup
                     key={group.messages[0].id}
@@ -487,6 +588,7 @@ export function ChatThread({
                     totalMessages={messages.length}
                     sessionId={sessionId}
                     onFileSelect={onFileSelect}
+                    onRetry={groupRetry}
                   />
                 );
               })}
@@ -504,6 +606,11 @@ export function ChatThread({
       </Conversation>
 
       <div className="mx-auto w-full max-w-4xl px-4 pb-4 pt-2">
+        {retryIndicator && (
+          <div className="mb-2">
+            <RetryBanner indicator={retryIndicator} />
+          </div>
+        )}
         <ChatComposer
           onSend={onSend}
           onStop={onStop}

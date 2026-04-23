@@ -92,6 +92,34 @@ export interface ClarifyResponsePayload {
   responses: ClarifyAnswer[];
 }
 
+// ── Error classification ────────────────────────────────────────────
+//
+// Structured error info attached to harness.crash and session.fail
+// events by the backend classifier (surogates/harness/error_classify.py).
+// The UI renders title + collapsible detail, and uses `retryable` to
+// gate the Retry button on failed-session error bubbles.
+
+export type ErrorCategory =
+  | "provider_error"
+  | "rate_limit"
+  | "auth_failed"
+  | "context_overflow"
+  | "network"
+  | "timeout"
+  | "invalid_response"
+  | "tool_error"
+  | "storage_error"
+  | "database_error"
+  | "governance_denied"
+  | "unknown";
+
+export interface ErrorInfo {
+  category: ErrorCategory;
+  title: string;
+  detail: string;
+  retryable: boolean;
+}
+
 // ── Artifacts ───────────────────────────────────────────────────────
 
 export type ArtifactKind =
