@@ -215,11 +215,11 @@ class TestArtifactStoreCreate:
         assert meta.version == 1
         assert meta.size > 0
         # meta.json exists
-        raw = await backend.read_text(bucket, f"artifacts/{meta.artifact_id}/meta.json")
+        raw = await backend.read_text(bucket, f"_artifacts/{meta.artifact_id}/meta.json")
         assert "chart1" in raw
         # v1 payload exists and contains the spec
         payload_raw = await backend.read_text(
-            bucket, f"artifacts/{meta.artifact_id}/v1.json",
+            bucket, f"_artifacts/{meta.artifact_id}/v1.json",
         )
         parsed = json.loads(payload_raw)
         assert parsed["kind"] == "markdown"
@@ -270,7 +270,7 @@ class TestArtifactStoreCreate:
             for i in range(m.MAX_ARTIFACTS_PER_SESSION)
         ]
         await backend.write_text(
-            bucket, "artifacts/index.json", json.dumps(fake_index),
+            bucket, "_artifacts/index.json", json.dumps(fake_index),
         )
         store = ArtifactStore(backend, session_id=session_id, bucket=bucket)
         with pytest.raises(ArtifactLimitError):
@@ -582,6 +582,40 @@ class TestFencePromoter:
         assert len(_derive_artifact_name("svg", [
             {"role": "user", "content": long},
         ])) == 80
+
+
+# =========================================================================
+# Workspace hides internal artifact storage
+# =========================================================================
+
+
+class TestWorkspaceHidesArtifacts:
+    """``artifacts/`` prefix is server-side storage, must not surface in the
+    workspace file browser nor be readable/writable through its API."""
+
+    def test_is_reserved_matches_artifacts_prefix(self):
+        from surogates.api.routes.workspace import _is_reserved
+        assert _is_reserved("_artifacts/abc/meta.json") is True
+        assert _is_reserved("_artifacts/index.json") is True
+        # A plain ``artifacts/`` path (no leading underscore) must NOT
+        # match — the underscore-prefix is the whole point of the rename.
+        assert _is_reserved("artifacts/abc.json") is False
+        # Files that merely start with the string must not match.
+        assert _is_reserved("_artifacts.md") is False
+        assert _is_reserved("src/_artifacts/logo.svg") is False
+        assert _is_reserved("notes.txt") is False
+
+    def test_validate_path_blocks_reserved_prefix(self):
+        from fastapi import HTTPException
+        from surogates.api.routes.workspace import _validate_path
+        with pytest.raises(HTTPException) as exc:
+            _validate_path("_artifacts/foo/meta.json")
+        assert exc.value.status_code == 403
+        # Normal paths still pass, including an ``artifacts/`` folder
+        # a user might legitimately have in their project.
+        _validate_path("src/main.py")
+        _validate_path("docs/README.md")
+        _validate_path("artifacts/my-thing.png")
 
 
 # =========================================================================

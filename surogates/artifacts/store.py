@@ -1,14 +1,19 @@
 """ArtifactStore — persistence for chat-embedded artifacts.
 
-Artifacts live in the session bucket under ``artifacts/{artifact_id}/``.
+Artifacts live in the session bucket under ``_artifacts/{artifact_id}/``.
+The leading underscore marks the directory as server-internal so the
+workspace file browser and REST layer can hide and reject access to it
+(see :data:`surogates.api.routes.workspace._RESERVED_PREFIXES`).
+
 Each version is a separate object so history is preserved; the newest
-version's metadata is tracked in ``artifacts/{artifact_id}/meta.json``.
-A session-level index at ``artifacts/index.json`` lists every artifact
-in creation order so the UI can enumerate them without listing keys.
+version's metadata is tracked in ``_artifacts/{artifact_id}/meta.json``.
+A session-level index at ``_artifacts/index.json`` lists every
+artifact in creation order so the UI can enumerate them without
+listing keys.
 
 Key layout inside the session bucket::
 
-    artifacts/
+    _artifacts/
     ├── index.json                        # ordered list of ArtifactMeta
     └── {artifact_id}/
         ├── meta.json                     # latest ArtifactMeta
@@ -38,8 +43,8 @@ from surogates.storage.backend import StorageBackend
 logger = logging.getLogger(__name__)
 
 
-_ARTIFACTS_PREFIX = "artifacts/"
-_INDEX_KEY = "artifacts/index.json"
+_ARTIFACTS_PREFIX = "_artifacts/"
+_INDEX_KEY = "_artifacts/index.json"
 
 
 class ArtifactLimitError(Exception):

@@ -79,6 +79,18 @@ _SKIP_DIRS = frozenset({
     "venv", ".venv", "env", ".env",
 })
 
+# Session-bucket key prefixes reserved for server-side storage.  The
+# leading underscore marks these as internal: artifact metadata and
+# payloads live under ``_artifacts/{id}/``.  Hidden from the workspace
+# tree and blocked from read/write/delete so users can't see or mutate
+# internal state through the file-browser panel.
+_RESERVED_PREFIXES: tuple[str, ...] = ("_artifacts/",)
+
+
+def _is_reserved(key: str) -> bool:
+    """Return True if ``key`` points into a reserved internal prefix."""
+    return any(key.startswith(p) for p in _RESERVED_PREFIXES)
+
 
 # ---------------------------------------------------------------------------
 # Response schemas
@@ -208,12 +220,17 @@ def _should_skip_dir(dirname: str) -> bool:
 
 
 def _validate_path(path: str) -> None:
-    """Reject path traversal attempts."""
+    """Reject path traversal and reserved-prefix access."""
     parts = PurePosixPath(path).parts
     if ".." in parts:
         raise HTTPException(status_code=403, detail="Path traversal not allowed.")
     if path.startswith("/"):
         raise HTTPException(status_code=403, detail="Absolute paths not allowed.")
+    if _is_reserved(path):
+        raise HTTPException(
+            status_code=403,
+            detail="This path is reserved for internal storage.",
+        )
 
 
 def _build_tree(keys: list[str]) -> list[FileEntry]:
@@ -291,8 +308,11 @@ async def get_workspace_tree(
     bucket = await _get_session_bucket(store, session_id, tenant)
 
     keys = await storage.list_keys(bucket)
-    entries = _build_tree(keys)
-    truncated = len(keys) >= _MAX_ENTRIES
+    # Drop keys living under reserved prefixes (artifact storage) so
+    # internal server-side files don't leak into the workspace browser.
+    visible_keys = [k for k in keys if not _is_reserved(k)]
+    entries = _build_tree(visible_keys)
+    truncated = len(visible_keys) >= _MAX_ENTRIES
 
     return WorkspaceTreeResponse(
         root=bucket,
