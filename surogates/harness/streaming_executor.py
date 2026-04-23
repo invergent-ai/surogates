@@ -40,6 +40,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from surogates.session.events import EventType
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -287,7 +289,16 @@ class StreamingToolExecutor:
         )
 
     async def _run_tool(self, tool: TrackedTool) -> None:
-        """Execute a single tool and update its state."""
+        """Execute a single tool and update its state.
+
+        On :class:`asyncio.CancelledError` (typically raised by
+        :meth:`_abort_siblings` after a peer fails), the cancellation
+        usually arrives *after* the call's ``TOOL_CALL`` event has been
+        emitted but *before* its ``TOOL_RESULT`` event.  We therefore
+        synthesise a skipped result and write it to the event log so the
+        UI, SSE consumers, and replay logic see a coherent
+        call/result pair instead of a permanently pending tool call.
+        """
         from surogates.harness.tool_exec import execute_single_tool
 
         try:
@@ -316,6 +327,7 @@ class StreamingToolExecutor:
                 tool.tool_call, reason="cancelled (sibling error)",
             )
             tool.errored = True
+            await self._emit_cancelled_result_event(tool)
         except Exception as exc:
             logger.exception(
                 "Streaming executor: tool %s failed",
@@ -340,6 +352,45 @@ class StreamingToolExecutor:
 
             # Start queued tools that can now execute.
             self._process_queue()
+
+    async def _emit_cancelled_result_event(self, tool: TrackedTool) -> None:
+        """Persist a ``TOOL_RESULT`` event for a cancelled sibling.
+
+        Called from the ``CancelledError`` handler in :meth:`_run_tool`.
+        Without this, the event log would contain a ``TOOL_CALL`` with no
+        matching ``TOOL_RESULT`` — leaving the UI stuck on
+        "Running command…" forever and breaking any consumer that pairs
+        calls with results.
+
+        Narrow race: if cancellation arrives *after*
+        :func:`execute_single_tool` has already written its own
+        ``TOOL_RESULT`` row but before the function returns, the same
+        ``tool_call_id`` will be written twice — once by the dispatch
+        path, once here.  Consumers must dedupe by ``tool_call_id``;
+        the duplicate-row outcome is preferable to the prior bug where
+        the call was permanently orphaned.
+        """
+        result = tool.result
+        try:
+            await self._store.emit_event(
+                self._session.id,
+                EventType.TOOL_RESULT,
+                {
+                    "tool_call_id": result.get("tool_call_id", ""),
+                    "name": tool.tool_call.get("function", {}).get("name", ""),
+                    "content": result.get("content", ""),
+                    "elapsed_ms": int(
+                        (time.monotonic() - tool.started_at) * 1000
+                    ) if tool.started_at else 0,
+                    "cancelled": True,
+                },
+            )
+        except Exception:
+            logger.warning(
+                "Failed to emit cancelled tool.result for session %s",
+                self._session.id,
+                exc_info=True,
+            )
 
     def _abort_siblings(self, failed_tool: TrackedTool) -> None:
         """Cancel all concurrently-executing sibling tools."""
@@ -374,12 +425,19 @@ class StreamingToolExecutor:
 
 
 def _is_error_result(result: dict[str, Any]) -> bool:
-    """Check if a tool result indicates an error."""
+    """Check if a tool result indicates an error.
+
+    Tools (notably ``terminal``) include an ``"error"`` key in their result
+    schema even on success, with value ``null`` or ``""``.  We must therefore
+    test for a truthy value, not mere key presence — otherwise every
+    successful terminal call would be misclassified as errored and trigger
+    sibling-abort against its concurrent peers.
+    """
     content = result.get("content", "")
     if isinstance(content, str):
         try:
             parsed = json.loads(content)
-            return isinstance(parsed, dict) and "error" in parsed
+            return isinstance(parsed, dict) and bool(parsed.get("error"))
         except (json.JSONDecodeError, TypeError):
             pass
     return False

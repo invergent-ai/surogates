@@ -164,6 +164,18 @@ class TestHelperFunctions:
         result = {"content": "file contents here"}
         assert _is_error_result(result) is False
 
+    def test_is_error_result_with_null_error_is_success(self) -> None:
+        """``terminal`` always emits ``"error": null`` on success — the
+        executor must not treat key presence as failure, otherwise every
+        successful terminal call triggers sibling abort and silently
+        cancels concurrent peers."""
+        result = {"content": json.dumps({"output": "ok", "exit_code": 0, "error": None})}
+        assert _is_error_result(result) is False
+
+    def test_is_error_result_with_empty_string_error_is_success(self) -> None:
+        result = {"content": json.dumps({"output": "ok", "error": ""})}
+        assert _is_error_result(result) is False
+
     def test_make_skipped_tool_result_with_reason(self) -> None:
         from surogates.harness.message_utils import make_skipped_tool_result
         tc = _make_tool_call("read_file", call_id="tc_123")
@@ -472,6 +484,72 @@ class TestSiblingAbort:
 
         assert len(results) == 1
         assert executor._sibling_aborted is True
+
+    @pytest.mark.asyncio
+    async def test_successful_terminal_does_not_abort_siblings(self) -> None:
+        """Two parallel ``terminal`` calls — a successful first call must
+        not cancel the second.  Regression for the bug where
+        ``_is_error_result`` treated mere presence of the ``"error"`` key
+        (always present in terminal's success schema with value ``null``)
+        as failure, triggering ``_abort_siblings`` and silently dropping
+        the second call's ``TOOL_RESULT`` event."""
+        async def mock_dispatch(name, args, **kwargs):
+            await asyncio.sleep(0.01)
+            return json.dumps({"output": "ok", "exit_code": 0, "error": None})
+
+        store = _make_store()
+        tools = _make_registry("terminal")
+        tools.dispatch = mock_dispatch
+
+        executor = _make_executor(store=store, tools=tools)
+        executor.add_tool(_make_tool_call("terminal", call_id="tc_1"))
+        executor.add_tool(_make_tool_call("terminal", call_id="tc_2"))
+
+        results = await executor.get_all_results()
+
+        assert len(results) == 2
+        assert executor._sibling_aborted is False
+        assert all("cancelled" not in (r.get("content") or "").lower() for r in results)
+
+    @pytest.mark.asyncio
+    async def test_aborted_sibling_emits_tool_result_event(self) -> None:
+        """When a real terminal error aborts a concurrent sibling, the
+        cancelled task must emit a ``TOOL_RESULT`` event so the event
+        log stays paired and SSE/UI consumers do not see a permanently
+        pending tool call."""
+        from surogates.session.events import EventType
+
+        async def mock_dispatch(name, args, **kwargs):
+            tcid = kwargs.get("tool_call_id", "")
+            if tcid == "tc_1":
+                await asyncio.sleep(0.01)
+                # Truthy "error" — real failure that should abort siblings.
+                return json.dumps({"output": "", "exit_code": 1, "error": "boom"})
+            await asyncio.sleep(0.5)
+            return json.dumps({"output": "ok", "error": None})
+
+        store = _make_store()
+        tools = _make_registry("terminal")
+        tools.dispatch = mock_dispatch
+
+        executor = _make_executor(store=store, tools=tools)
+        executor.add_tool(_make_tool_call("terminal", call_id="tc_1"))
+        executor.add_tool(_make_tool_call("terminal", call_id="tc_2"))
+
+        await executor.get_all_results()
+
+        assert executor._sibling_aborted is True
+
+        # The cancelled sibling must produce a tool.result event marked
+        # cancelled=True so the UI sees a coherent call/result pair
+        # instead of "Running command…" forever.
+        tool_result_calls = [
+            call for call in store.emit_event.call_args_list
+            if call.args[1] == EventType.TOOL_RESULT
+            and call.args[2].get("tool_call_id") == "tc_2"
+        ]
+        assert tool_result_calls, "cancelled sibling must emit a tool.result event"
+        assert tool_result_calls[-1].args[2].get("cancelled") is True
 
     @pytest.mark.asyncio
     async def test_read_file_error_does_not_abort_siblings(self) -> None:
