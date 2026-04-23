@@ -136,17 +136,19 @@ function messageToEntries(
     entries.push({ kind: "text", key: `${msg.id}-text`, content: msg.content });
   }
 
-  // Show "Working on it..." shimmer when:
-  // 1. Initial thinking — streaming with nothing yet (no content, tools, or reasoning)
-  // 2. Between tool rounds — all tool calls completed but session is
-  //    still running (waiting for the next LLM response after tool results)
-  const allToolsDone = hasToolCalls && msg.toolCalls!.every(
-    (tc) => tc.status !== "running",
+  // Show "Working on it..." shimmer whenever the turn is active but
+  // nothing visible is progressing:
+  //   - initial thinking before the first reasoning/tool/content arrives
+  //   - post-reasoning gap (reasoning has landed but the next tool or
+  //     content hasn't -- common between llm.response and tool.call, or
+  //     while the LLM is still composing the next iteration)
+  //   - between tool rounds once every tool call has completed
+  // A running tool call already shows its own shimmer, so skip then.
+  const hasRunningTool = hasToolCalls && msg.toolCalls!.some(
+    (tc) => tc.status === "running",
   );
-  if (isStreaming && !effectiveHasContent && !hasToolCalls && !effectiveReasoning) {
+  if (isStreaming && !effectiveHasContent && !hasRunningTool) {
     entries.push({ kind: "thinking", key: `${msg.id}-thinking` });
-  } else if (isStreaming && allToolsDone && !effectiveHasContent) {
-    entries.push({ kind: "thinking", key: `${msg.id}-thinking-next` });
   }
 
   return entries;

@@ -1,7 +1,7 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import {
   CheckCircle2Icon,
   ChevronDownIcon,
@@ -16,8 +16,6 @@ import { Shimmer } from "@/components/ai-elements/shimmer";
 import { cn } from "@/lib/utils";
 import type { ToolCallInfo } from "@/hooks/use-session-runtime";
 
-const AUTO_CLOSE_DELAY = 1000;
-const AUTO_OPEN_DELAY = 100;
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -98,34 +96,11 @@ interface TerminalBodyProps {
 }
 
 function TerminalCollapsible({ command, output, isRunning }: TerminalBodyProps) {
-  // Always start closed.  During session replay, tool.call arrives before
-  // tool.result, so the component briefly sees ``isRunning=true`` for every
-  // historical terminal call; opening on that flicker and then auto-closing
-  // 1s later makes replay look like the terminal is re-running.  The
-  // debounced effect below filters out sub-100ms flickers and still opens
-  // promptly for genuinely live tool calls.
+  // Terminal stays collapsed until the user clicks the trigger -- unlike
+  // Reasoning, the terminal's output is rarely scannable at a glance and
+  // auto-expanding every call floods the chat with noise.  The trigger
+  // still shows a shimmer while running so progress is visible.
   const [isOpen, setIsOpen] = useState(false);
-  const hasEverRunRef = useRef(false);
-  const [hasAutoClosed, setHasAutoClosed] = useState(false);
-
-  useEffect(() => {
-    if (!isRunning || isOpen) return;
-    const timer = setTimeout(() => {
-      hasEverRunRef.current = true;
-      setIsOpen(true);
-    }, AUTO_OPEN_DELAY);
-    return () => clearTimeout(timer);
-  }, [isRunning, isOpen]);
-
-  useEffect(() => {
-    if (hasEverRunRef.current && !isRunning && isOpen && !hasAutoClosed) {
-      const timer = setTimeout(() => {
-        setIsOpen(false);
-        setHasAutoClosed(true);
-      }, AUTO_CLOSE_DELAY);
-      return () => clearTimeout(timer);
-    }
-  }, [isRunning, isOpen, hasAutoClosed]);
 
   return (
     <Collapsible
@@ -136,9 +111,9 @@ function TerminalCollapsible({ command, output, isRunning }: TerminalBodyProps) 
       <CollapsibleTrigger className="group/trigger flex w-fit items-center gap-2 text-sm transition-colors">
         <span className="text-left">
           {isRunning ? (
-            <Shimmer as="span" duration={1}>Running terminal...</Shimmer>
+            <Shimmer as="span" duration={1}>Running command...</Shimmer>
           ) : (
-            <span className="font-semibold text-foreground">Terminal</span>
+            <span className="font-semibold text-foreground">Command result</span>
           )}
         </span>
         <ChevronDownIcon
