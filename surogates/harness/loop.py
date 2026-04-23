@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import traceback
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID
@@ -95,14 +96,62 @@ _LENGTH_CONTINUATION_PROMPT: str = (
     "restart or repeat prior text. Finish the answer directly.]"
 )
 _EMPTY_RESPONSE_NUDGE: str = (
-    "[System: Your previous response was empty. Please produce a real "
-    "answer to the user's request — either a tool call or visible "
-    "assistant text.]"
+    "[System: Your previous response was empty. Re-read the user's "
+    "request and act now. If the user asked for a visual or rendered "
+    "output (SVG, HTML, chart, table, markdown document), invoke "
+    "create_artifact — do NOT paste the content as a code fence.]"
 )
+
+# Fenced-block kinds the post-response promoter is willing to turn into
+# an artifact when the model emits one in place of a ``create_artifact``
+# call.  Keys are the fence language tags; values map to the artifact
+# ``kind`` and the spec key that carries the raw body.
+_PROMOTABLE_FENCES: dict[str, tuple[str, str]] = {
+    "svg": ("svg", "svg"),
+    "html": ("html", "html"),
+}
+
+# Precompiled regex that matches ``` + language-tag + body + ``` .  The
+# (?s) flag lets ``.`` match newlines inside the body.  Only matches
+# fences starting at line-begin to avoid misfires on inline backticks.
+_FENCE_RE = re.compile(
+    r"(?ms)^```([a-zA-Z0-9_-]+)\s*\n(.*?)^```\s*$"
+)
+
 
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+
+def _derive_artifact_name(kind: str, messages: list[dict]) -> str:
+    """Pick a human-readable name for an auto-promoted artifact.
+
+    Uses the most recent user message's first line (trimmed to a
+    reasonable length) so the artifact header says something like
+    "Draw a minimal SVG logo…" instead of a generic "SVG artifact".
+    Falls back to a kind-based default when no user message is
+    available or the extract is empty.
+    """
+    fallback = {
+        "svg": "SVG artifact",
+        "html": "HTML preview",
+    }.get(kind, "Artifact")
+
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content") or ""
+        if not isinstance(content, str):
+            continue
+        first_line = content.strip().splitlines()[0] if content.strip() else ""
+        # Strip surrounding quotes the frontend sometimes inherits from
+        # copy-pasted prompts.
+        first_line = first_line.strip(' "\'')
+        if first_line:
+            return first_line[:80]
+        break
+    return fallback
 
 
 def _is_valid_json_args(tc: dict) -> bool:
@@ -1064,6 +1113,18 @@ class AgentHarness:
                     messages.pop()
 
                 messages.append(assistant_message)
+
+                # If the model emitted an SVG / HTML as a fenced code
+                # block instead of calling ``create_artifact``, promote
+                # it into a real artifact so the user sees the rendered
+                # output alongside the source.  This fires only on the
+                # final, no-tool-calls response of the turn.
+                await self._promote_fenced_artifacts(
+                    session,
+                    (assistant_message.get("content") or ""),
+                    messages,
+                )
+
                 # A response without tool calls is the end of this turn.
                 # For sub-agent (delegated) sessions, this is also the end of
                 # the session — the parent is waiting on the final answer.
@@ -2021,6 +2082,67 @@ class AgentHarness:
         )
 
         await self._store.release_lease(session.id, lease.lease_token)
+
+    # ------------------------------------------------------------------
+    # Fenced-artifact promotion
+    # ------------------------------------------------------------------
+
+    async def _promote_fenced_artifacts(
+        self,
+        session: Session,
+        assistant_content: str,
+        messages: list[dict],
+    ) -> None:
+        """Auto-create an artifact when the LLM emits a render-worthy
+        fenced block instead of calling ``create_artifact``.
+
+        Some smaller models (``gpt-5.4-mini`` observed) prefer a
+        one-token ` ```svg ` fence over a multi-token tool call with an
+        escaped SVG payload, even when the system prompt explicitly
+        forbids it.  Rather than leave the user staring at raw source,
+        we parse the final assistant content for known render-capable
+        fences and promote the first one into an artifact via the API.
+
+        Only fires when:
+        - an API client is wired (``self._api_client``),
+        - the content contains at least one promotable fence (svg/html),
+        - the fence body parses as non-empty.
+
+        At most ONE artifact is created per response, matching the
+        guidance's one-artifact-per-response rule.  Failures are logged
+        but swallowed — a failed auto-promotion must not derail the
+        turn.
+        """
+        if self._api_client is None or not assistant_content:
+            return
+
+        match = _FENCE_RE.search(assistant_content)
+        while match is not None:
+            lang = match.group(1).lower()
+            mapping = _PROMOTABLE_FENCES.get(lang)
+            if mapping is None:
+                match = _FENCE_RE.search(assistant_content, match.end())
+                continue
+            body = match.group(2).strip()
+            if not body:
+                match = _FENCE_RE.search(assistant_content, match.end())
+                continue
+            kind, spec_key = mapping
+            name = _derive_artifact_name(kind, messages)
+            try:
+                await self._api_client.create_artifact(
+                    name=name, kind=kind, spec={spec_key: body},
+                )
+                logger.info(
+                    "Session %s: promoted ```%s fence to %s artifact",
+                    session.id, lang, kind,
+                )
+            except Exception:
+                logger.warning(
+                    "Session %s: failed to auto-promote ```%s fence",
+                    session.id, lang, exc_info=True,
+                )
+            return  # one artifact per response
 
     # ------------------------------------------------------------------
     # Session completion

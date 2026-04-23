@@ -526,6 +526,65 @@ class TestCreateArtifactHandler:
 
 
 # =========================================================================
+# Fenced-artifact promoter
+# =========================================================================
+
+
+class TestFencePromoter:
+    """Regex + kind mapping for auto-promoting ``` fences into artifacts."""
+
+    def test_matches_svg_fence(self):
+        from surogates.harness.loop import _FENCE_RE, _PROMOTABLE_FENCES
+        content = "Here you go:\n\n```svg\n<svg viewBox='0 0 10 10'/>\n```\n"
+        m = _FENCE_RE.search(content)
+        assert m is not None
+        assert m.group(1) == "svg"
+        assert m.group(1) in _PROMOTABLE_FENCES
+        assert "<svg" in m.group(2)
+
+    def test_matches_html_fence(self):
+        from surogates.harness.loop import _FENCE_RE, _PROMOTABLE_FENCES
+        content = "```html\n<!doctype html><p>hi</p>\n```"
+        m = _FENCE_RE.search(content)
+        assert m is not None
+        assert m.group(1) == "html"
+        assert m.group(1) in _PROMOTABLE_FENCES
+
+    def test_unrelated_code_fence_ignored(self):
+        # python / ts / shell fences are NOT promotable.
+        from surogates.harness.loop import _FENCE_RE, _PROMOTABLE_FENCES
+        content = "```python\nprint('hi')\n```"
+        m = _FENCE_RE.search(content)
+        assert m is not None
+        assert m.group(1) == "python"
+        assert m.group(1) not in _PROMOTABLE_FENCES
+
+    def test_derive_name_uses_last_user_message(self):
+        from surogates.harness.loop import _derive_artifact_name
+        messages = [
+            {"role": "user", "content": "first prompt"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": '"Draw a minimal SVG logo for Steam & Bean"'},
+        ]
+        assert _derive_artifact_name("svg", messages) == (
+            "Draw a minimal SVG logo for Steam & Bean"
+        )
+
+    def test_derive_name_falls_back_when_no_user(self):
+        from surogates.harness.loop import _derive_artifact_name
+        assert _derive_artifact_name("svg", []) == "SVG artifact"
+        assert _derive_artifact_name("html", []) == "HTML preview"
+        assert _derive_artifact_name("unknown", []) == "Artifact"
+
+    def test_derive_name_truncates_long_prompt(self):
+        from surogates.harness.loop import _derive_artifact_name
+        long = "a" * 200
+        assert len(_derive_artifact_name("svg", [
+            {"role": "user", "content": long},
+        ])) == 80
+
+
+# =========================================================================
 # PromptBuilder — ARTIFACT_GUIDANCE injection
 # =========================================================================
 
