@@ -1,0 +1,28 @@
+#!/bin/bash
+# pip → uv pip wrapper. uv is ~10-100x faster than pip for installs.
+#
+# The sandbox runs with PIP_USER=1 + PYTHONUSERBASE=/workspace/.local so that
+# agent-installed packages persist on the s3fs-mounted workspace across pod
+# restarts. uv pip does not honor PIP_USER and rejects --user, so for the
+# `install` subcommand we translate that intent into --target.
+set -e
+
+UV=/usr/local/bin/uv
+VENV_PY=/opt/venv/bin/python
+
+unset PIP_USER
+
+if [[ "${1:-}" == "install" ]]; then
+    shift
+    filtered=()
+    for arg in "$@"; do
+        [[ "$arg" == "--user" ]] && continue
+        filtered+=("$arg")
+    done
+    py_ver=$("$VENV_PY" -c 'import sys; print(f"python{sys.version_info.major}.{sys.version_info.minor}")')
+    target="${PYTHONUSERBASE:-/workspace/.local}/lib/$py_ver/site-packages"
+    mkdir -p "$target"
+    exec "$UV" pip install --python "$VENV_PY" --target "$target" "${filtered[@]}"
+fi
+
+exec "$UV" pip "$@" --python "$VENV_PY"

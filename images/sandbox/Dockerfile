@@ -19,7 +19,24 @@ COPY pyproject.toml ./
 COPY surogates/ ./surogates/
 
 RUN uv venv /opt/venv \
-    && uv pip install --python /opt/venv/bin/python .
+    && uv pip install --python /opt/venv/bin/python . \
+    && uv pip install --python /opt/venv/bin/python \
+        pandas \
+        numpy \
+        openpyxl \
+        xlsxwriter \
+        xlrd \
+        pyyaml \
+        python-dateutil \
+        requests \
+        httpx \
+        beautifulsoup4 \
+        lxml \
+        pillow \
+        matplotlib \
+        tabulate \
+        pypdf \
+        python-docx
 
 # ── Stage 2: Final image ─────────────────────────────────────────────
 FROM python:3.12-slim
@@ -45,6 +62,15 @@ COPY --from=python-deps /opt/venv /opt/venv
 # Venvs disable this by default; removing the flag re-enables it.
 RUN sed -i 's/include-system-site-packages = false/include-system-site-packages = true/' /opt/venv/pyvenv.cfg \
     || true
+
+# ── uv + pip wrapper ────────────────────────────────────────────────
+# Ship uv in the final image so `pip install` (via wrapper) is 10-100x
+# faster. The wrapper preserves PIP_USER persistence to /workspace/.local
+# by translating --user into uv's --target.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY images/sandbox/pip-wrapper /opt/venv/bin/pip
+RUN chmod +x /usr/local/bin/uv /opt/venv/bin/pip \
+    && ln -sf /opt/venv/bin/pip /opt/venv/bin/pip3
 
 # PYTHONUSERBASE → /workspace/.local so pip installs persist on the
 # s3fs-mounted workspace (not the ephemeral home dir).

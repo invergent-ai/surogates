@@ -44,9 +44,8 @@ for dir in "${!IMAGES[@]}"; do
     --file "$REPO_ROOT/images/$dir/Dockerfile" \
     "$REPO_ROOT"
 
-  echo "Importing $full:latest into k3d cluster ..."
-  k3d image import "$full:latest" -c surogate
-
+  docker push "$full:latest"
+  
   echo ""
 done
 

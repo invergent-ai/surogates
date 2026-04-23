@@ -2,31 +2,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 import { useEffect, useRef, useState } from "react";
-import { CheckCircle2Icon, CopyIcon } from "lucide-react";
 import {
-  Terminal,
-  TerminalHeader,
-} from "@/components/ai-elements/terminal";
-import { Button } from "@/components/ui/button";
+  CheckCircle2Icon,
+  ChevronDownIcon,
+  CopyIcon,
+} from "lucide-react";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { ScrollArea } from "@/components/ui/scroll-area";
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { Shimmer } from "@/components/ai-elements/shimmer";
 import { cn } from "@/lib/utils";
 import type { ToolCallInfo } from "@/hooks/use-session-runtime";
 
-function CommandInputBlock({ command }: { command: string }) {
-  return (
-    <div className="group/in flex items-start gap-2 bg-background text-muted-foreground px-3 pt-2 font-mono text-sm leading-relaxed max-h-20 overflow-auto">
-      <span className="shrink-0 select-none text-emerald-600">IN</span>
-      <pre className="whitespace-pre-wrap wrap-break-word text-foreground/90 flex-1">{command}</pre>
-      <CopyButton text={command} />
-    </div>
-  );
-}
+const AUTO_CLOSE_DELAY = 1000;
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -100,86 +90,90 @@ export function parseTerminalResult(
   }
 }
 
-const COLLAPSED_HEIGHT = 96;
+interface TerminalBodyProps {
+  command: string;
+  output: string;
+  isRunning: boolean;
+}
 
-function TerminalToolResult({ result, isRunning }: { result: TerminalResult; isRunning: boolean }) {
-  const output = result.output || result.error || "";
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const contentRef = useRef<HTMLDivElement>(null);
-  const [overflows, setOverflows] = useState(false);
+function TerminalCollapsible({ command, output, isRunning }: TerminalBodyProps) {
+  const [isOpen, setIsOpen] = useState(isRunning);
+  const hasEverRunRef = useRef(isRunning);
+  const [hasAutoClosed, setHasAutoClosed] = useState(false);
 
   useEffect(() => {
-    if (contentRef.current) {
-      setOverflows(contentRef.current.scrollHeight > COLLAPSED_HEIGHT);
+    if (isRunning) {
+      hasEverRunRef.current = true;
+      if (!isOpen) setIsOpen(true);
     }
-  }, [output]);
+  }, [isRunning, isOpen]);
 
-  const terminalContent = [
-    result.command && `${result.command}`,
-    output ? `\n${output}` : (!isRunning ? "\n(no output)" : ""),
-  ].filter(Boolean).join("");
+  useEffect(() => {
+    if (hasEverRunRef.current && !isRunning && isOpen && !hasAutoClosed) {
+      const timer = setTimeout(() => {
+        setIsOpen(false);
+        setHasAutoClosed(true);
+      }, AUTO_CLOSE_DELAY);
+      return () => clearTimeout(timer);
+    }
+  }, [isRunning, isOpen, hasAutoClosed]);
 
   return (
-    <>
-      <Terminal
-        output={terminalContent}
-        isStreaming={isRunning}
-        className="group/term relative w-full text-sm"
-      >
-        <TerminalHeader>
-          <div className="flex items-center gap-1.5 min-w-0 text-sm font-mono">
-            <span className="font-semibold text-foreground shrink-0">Bash</span>
-          </div>
-        </TerminalHeader>
-        {result.command && <CommandInputBlock command={result.command} />}
-        <div
-          ref={contentRef}
-          role="button"
-          tabIndex={0}
-          onClick={() => overflows && setDialogOpen(true)}
-          onKeyDown={(e) => { if (e.key === "Enter" && overflows) setDialogOpen(true); }}
-          className={cn(
-            "overflow-hidden px-3 py-2 bg-background font-mono text-sm leading-relaxed max-h-20",
-            overflows && "cursor-pointer",
+    <Collapsible
+      open={isOpen}
+      onOpenChange={setIsOpen}
+      className="not-prose w-full"
+    >
+      <CollapsibleTrigger className="group/trigger flex w-fit items-center gap-2 text-sm transition-colors">
+        <span className="text-left">
+          {isRunning ? (
+            <Shimmer as="span" duration={1}>Running terminal...</Shimmer>
+          ) : (
+            <span className="font-semibold text-foreground">Terminal</span>
           )}
-        >
-          {(output || !isRunning) && (
-            <div className="flex gap-2 text-foreground/90">
-              <span className="shrink-0 select-none text-sky-600">OUT</span>
-              <pre className="whitespace-pre-wrap wrap-break-word">
-                {output || <span className="text-muted-foreground/60">(no output)</span>}
-              </pre>
+        </span>
+        <ChevronDownIcon
+          className={cn(
+            "size-4 shrink-0 transition-transform",
+            isOpen ? "rotate-180" : "rotate-0",
+          )}
+        />
+      </CollapsibleTrigger>
+      <CollapsibleContent
+        className={cn(
+          "mt-2 overflow-hidden",
+          "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
+        )}
+      >
+        <div className="rounded-lg border border-border overflow-hidden">
+          {command && (
+            <div className="group/in flex items-start gap-2 bg-background text-muted-foreground px-3 py-2 font-mono text-sm leading-relaxed">
+              <span className="shrink-0 select-none text-emerald-600">IN</span>
+              <pre className="whitespace-pre-wrap wrap-break-word text-foreground/90 flex-1">{command}</pre>
+              <CopyButton text={command} />
             </div>
           )}
-          {isRunning && !output && (
-            <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-foreground" />
-          )}
-        </div>
-        {overflows && (
-          <Button
-            variant="outline"
-            size="xs"
-            onClick={() => setDialogOpen(true)}
-            className="absolute bottom-1.5 right-2 opacity-0 group-hover/term:opacity-100 transition-opacity backdrop-blur-sm"
+          <div
+            className={cn(
+              "px-3 py-2 bg-background font-mono text-sm leading-relaxed max-h-96 overflow-auto",
+              command && "border-t border-border",
+            )}
           >
-            Expand
-          </Button>
-        )}
-      </Terminal>
-
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="sm:max-w-[50vw] w-full h-[70vh] flex flex-col p-0 gap-0 overflow-hidden">
-          <DialogHeader className="px-4 py-3 border-b border-border shrink-0">
-            <DialogTitle>&nbsp;</DialogTitle>
-          </DialogHeader>
-          <ScrollArea className="flex-1 min-h-0">
-            <pre className="px-4 py-3 font-mono text-sm leading-relaxed whitespace-pre-wrap wrap-break-word">
-              {output || "(no output)"}
-            </pre>
-          </ScrollArea>
-        </DialogContent>
-      </Dialog>
-    </>
+            {(output || !isRunning) && (
+              <div className="flex gap-2 text-foreground/90">
+                <span className="shrink-0 select-none text-sky-600">OUT</span>
+                <pre className="whitespace-pre-wrap wrap-break-word flex-1">
+                  {output || <span className="text-muted-foreground/60">(no output)</span>}
+                </pre>
+              </div>
+            )}
+            {isRunning && !output && (
+              <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-foreground" />
+            )}
+          </div>
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 
@@ -188,7 +182,14 @@ export function TerminalToolBlock({ tc }: { tc: ToolCallInfo }) {
   const result = parseTerminalResult(tc.result, tc.args);
 
   if (result) {
-    return <TerminalToolResult result={result} isRunning={isRunning} />;
+    const output = result.output || result.error || "";
+    return (
+      <TerminalCollapsible
+        command={result.command}
+        output={output}
+        isRunning={isRunning}
+      />
+    );
   }
 
   if (isRunning) {
@@ -198,19 +199,7 @@ export function TerminalToolBlock({ tc }: { tc: ToolCallInfo }) {
       command = parsedArgs?.command ?? "";
     } catch { /* ignore */ }
 
-    return (
-      <Terminal output="" isStreaming className="w-full text-sm">
-        <TerminalHeader>
-          <div className="flex items-center gap-1.5 min-w-0 text-sm font-mono">
-            <span className="font-semibold text-foreground shrink-0">Bash</span>
-          </div>
-        </TerminalHeader>
-        {command && <CommandInputBlock command={command} />}
-        <div className="px-3 py-2 bg-background font-mono text-sm">
-          <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-foreground" />
-        </div>
-      </Terminal>
-    );
+    return <TerminalCollapsible command={command} output="" isRunning />;
   }
 
   return null;

@@ -444,7 +444,7 @@ export function ChatThread({
   return (
     <div className="flex h-full flex-col overflow-hidden bg-card text-sm">
       <Conversation className="relative flex-1 min-h-0">
-        <ConversationContent className="mx-auto max-w-4xl">
+        <ConversationContent className="mx-auto">
           {messages.length === 0 && !disabled ? (
             <ConversationEmptyState
               icon={<MessageSquareIcon className="size-6" />}
@@ -501,7 +501,7 @@ export function ChatThread({
         <ConversationScrollButton />
       </Conversation>
 
-      <div className="mx-auto w-full max-w-3xl px-4 pb-4 pt-2">
+      <div className="mx-auto w-full max-w-4xl px-4 pb-4 pt-2">
         <ChatComposer
           onSend={onSend}
           onStop={onStop}

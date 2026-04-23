@@ -16,6 +16,7 @@ any crash can be recovered by replaying the log.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -57,6 +58,7 @@ from surogates.harness.slash_skill import expand_slash_skill
 from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
 from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.tool_exec import execute_tool_calls
+from surogates.session import LeaseNotHeldError
 from surogates.session.events import EventType
 
 if TYPE_CHECKING:
@@ -79,12 +81,14 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-# Lease is renewed after this many LLM iterations to prevent expiry during
-# long-running loops.
-_LEASE_RENEWAL_INTERVAL: int = 3
-
 # Default TTL (seconds) for lease acquisition and renewal.
 _LEASE_TTL_SECONDS: int = 60
+
+# Renewal cadence.  Time-based (not iteration-based) so a long-running
+# iteration (e.g. slow LLM call, streaming fallback) cannot let the lease
+# expire and get stolen by another worker.  Must be well under
+# ``_LEASE_TTL_SECONDS`` so a single missed tick still leaves the lease alive.
+_LEASE_RENEWAL_INTERVAL_SECONDS: float = 20.0
 
 # Retry / resilience constants
 _MAX_LENGTH_CONTINUATIONS: int = 3
@@ -320,6 +324,51 @@ class AgentHarness:
         set_interrupt(False)
 
     # ------------------------------------------------------------------
+    # Lease renewal (background task)
+    # ------------------------------------------------------------------
+
+    async def _renew_lease_forever(
+        self,
+        session_id: UUID,
+        lease_token: UUID,
+    ) -> None:
+        """Periodically renew the session lease until cancelled.
+
+        Runs in parallel with :meth:`_run_loop`.  Uses a time-based cadence
+        (``_LEASE_RENEWAL_INTERVAL_SECONDS``) so a single long iteration
+        -- e.g. a slow LLM call or streaming-to-non-streaming fallback --
+        cannot let the lease expire.
+
+        If renewal fails because the lease no longer belongs to us
+        (:class:`LeaseNotHeldError`), another worker has taken over the
+        session.  Request an interrupt so the main loop exits cleanly
+        instead of racing against the new worker and writing duplicate
+        events.  Transient DB errors are retried on the next tick.
+        """
+        while True:
+            try:
+                await asyncio.sleep(_LEASE_RENEWAL_INTERVAL_SECONDS)
+                await self._store.renew_lease(
+                    session_id, lease_token, ttl_seconds=_LEASE_TTL_SECONDS,
+                )
+            except asyncio.CancelledError:
+                raise
+            except LeaseNotHeldError:
+                logger.warning(
+                    "Session %s: lease stolen by another worker, "
+                    "interrupting current loop",
+                    session_id,
+                )
+                self.interrupt("lease lost — another worker took over")
+                return
+            except Exception:
+                logger.debug(
+                    "Transient lease renewal failure for session %s",
+                    session_id,
+                    exc_info=True,
+                )
+
+    # ------------------------------------------------------------------
     # Entry point
     # ------------------------------------------------------------------
 
@@ -382,6 +431,14 @@ class AgentHarness:
                 session_id,
             )
             return
+
+        # Start the background lease renewal task alongside the main loop.
+        # Cancelled in the ``finally`` block below so the lease renews
+        # regardless of how long any single iteration takes.
+        renewal_task = asyncio.create_task(
+            self._renew_lease_forever(session_id, lease.lease_token),
+            name=f"lease-renewal-{session_id}",
+        )
 
         try:
             # 3. Retrieve the harness cursor and the full event history.
@@ -518,6 +575,13 @@ class AgentHarness:
                     logger.debug("Failed to notify parent on crash", exc_info=True)
             raise
         finally:
+            # Stop the background renewal task before touching the lease.
+            renewal_task.cancel()
+            try:
+                await renewal_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
             # 10. Always release the lease.
             try:
                 await self._store.release_lease(session_id, lease.lease_token)
@@ -1346,16 +1410,8 @@ class AgentHarness:
                 # Invalidate system prompt cache -- conversation shape changed.
                 self._system_prompt_cache.invalidate(session.id)
 
-            # 10. Renew lease periodically.
-            if iteration % _LEASE_RENEWAL_INTERVAL == 0:
-                try:
-                    await self._store.renew_lease(
-                        session.id, lease.lease_token, ttl_seconds=_LEASE_TTL_SECONDS,
-                    )
-                except Exception:
-                    logger.warning(
-                        "Failed to renew lease for session %s", session.id,
-                    )
+            # Lease renewal is handled by a background task started in
+            # ``wake()``; no per-iteration renewal needed here.
 
         # --- Post-loop skill nudge check ---
         should_review_skills = False
@@ -1991,8 +2047,7 @@ class AgentHarness:
                 "context_window": self._compressor.context_length,
             },
         )
-
-        await self._store.release_lease(session.id, lease.lease_token)
+        # Lease released by the outer wake() finally block.
 
     async def _handle_compress_command(
         self,
@@ -2027,7 +2082,7 @@ class AgentHarness:
                     },
                 },
             )
-            await self._store.release_lease(session.id, lease.lease_token)
+            # Lease released by the outer wake() finally block.
             return
 
         try:
@@ -2046,7 +2101,7 @@ class AgentHarness:
                     },
                 },
             )
-            await self._store.release_lease(session.id, lease.lease_token)
+            # Lease released by the outer wake() finally block.
             return
 
         compressed_count = len(compressed)
@@ -2080,8 +2135,7 @@ class AgentHarness:
                 "context_window": self._compressor.context_length,
             },
         )
-
-        await self._store.release_lease(session.id, lease.lease_token)
+        # Lease released by the outer wake() finally block.
 
     # ------------------------------------------------------------------
     # Fenced-artifact promotion
