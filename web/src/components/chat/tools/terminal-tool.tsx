@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils";
 import type { ToolCallInfo } from "@/hooks/use-session-runtime";
 
 const AUTO_CLOSE_DELAY = 1000;
+const AUTO_OPEN_DELAY = 100;
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -97,15 +98,23 @@ interface TerminalBodyProps {
 }
 
 function TerminalCollapsible({ command, output, isRunning }: TerminalBodyProps) {
-  const [isOpen, setIsOpen] = useState(isRunning);
-  const hasEverRunRef = useRef(isRunning);
+  // Always start closed.  During session replay, tool.call arrives before
+  // tool.result, so the component briefly sees ``isRunning=true`` for every
+  // historical terminal call; opening on that flicker and then auto-closing
+  // 1s later makes replay look like the terminal is re-running.  The
+  // debounced effect below filters out sub-100ms flickers and still opens
+  // promptly for genuinely live tool calls.
+  const [isOpen, setIsOpen] = useState(false);
+  const hasEverRunRef = useRef(false);
   const [hasAutoClosed, setHasAutoClosed] = useState(false);
 
   useEffect(() => {
-    if (isRunning) {
+    if (!isRunning || isOpen) return;
+    const timer = setTimeout(() => {
       hasEverRunRef.current = true;
-      if (!isOpen) setIsOpen(true);
-    }
+      setIsOpen(true);
+    }, AUTO_OPEN_DELAY);
+    return () => clearTimeout(timer);
   }, [isRunning, isOpen]);
 
   useEffect(() => {

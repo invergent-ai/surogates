@@ -476,14 +476,25 @@ class SessionStore:
         after: int | None = None,
         limit: int | None = None,
         types: list[EventType] | None = None,
+        exclude_types: list[EventType] | None = None,
     ) -> list[Event]:
-        """Read events from the append-only log, ordered by id ascending."""
+        """Read events from the append-only log, ordered by id ascending.
+
+        ``types`` restricts to the given event types; ``exclude_types`` drops
+        them (used by the SSE endpoint to skip llm.delta during replay —
+        pushing per-token chunks through the wire for a long conversation
+        makes the initial snapshot take many seconds).
+        """
         stmt = select(EventRow).where(EventRow.session_id == session_id)
 
         if after is not None:
             stmt = stmt.where(EventRow.id > after)
         if types:
             stmt = stmt.where(EventRow.type.in_([t.value for t in types]))
+        if exclude_types:
+            stmt = stmt.where(
+                EventRow.type.notin_([t.value for t in exclude_types])
+            )
 
         stmt = stmt.order_by(EventRow.id.asc())
 

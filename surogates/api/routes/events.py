@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from surogates.session.events import EventType
 from surogates.session.models import Event
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -133,6 +134,21 @@ async def stream_events(
     async def event_generator():  # noqa: ANN202
         cursor = after
         elapsed = 0.0
+        # Drop llm.delta events while draining the backlog.  Deltas are
+        # per-token chunks that exist only to animate live streaming; the
+        # corresponding llm.response carries the final content.  For a long
+        # conversation they can outnumber everything else 10:1, and pushing
+        # them through SSE during replay stretches the "streaming in" feel
+        # across seconds.  We filter at the SQL level (not just at yield
+        # time) so the rows never leave the database.  Once we catch up
+        # (first empty fetch), we switch to live mode and forward deltas
+        # unmodified.
+        in_replay = True
+        # Wide replay batch so catching up on a long conversation takes 1-2
+        # DB round-trips instead of hundreds.  Live polling uses the narrow
+        # batch since there's rarely more than a handful of pending events.
+        REPLAY_LIMIT = 5000
+        LIVE_LIMIT = 50
 
         # Subscribe to Redis channel for this session (if available).
         pubsub = None
@@ -157,9 +173,19 @@ async def stream_events(
                 # completes cleanly and the asyncpg connection returns to the
                 # pool instead of being terminated mid-statement (which SQLA
                 # logs as a noisy invalidation trace).
-                events = await asyncio.shield(
-                    store.get_events(session_id, after=cursor, limit=50)
-                )
+                if in_replay:
+                    events = await asyncio.shield(
+                        store.get_events(
+                            session_id,
+                            after=cursor,
+                            limit=REPLAY_LIMIT,
+                            exclude_types=[EventType.LLM_DELTA],
+                        )
+                    )
+                else:
+                    events = await asyncio.shield(
+                        store.get_events(session_id, after=cursor, limit=LIVE_LIMIT)
+                    )
 
                 for event in events:
                     yield {
@@ -171,6 +197,7 @@ async def stream_events(
                         cursor = event.id
 
                 if not events:
+                    in_replay = False
                     # No new events -- check if the session has terminated.
                     try:
                         session = await asyncio.shield(

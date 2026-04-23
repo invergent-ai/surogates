@@ -617,6 +617,38 @@ export function useSessionRuntime(sessionId: string | null) {
     [],
   );
 
+  // Queue SSE events and flush them in a single rAF tick.  Each browser
+  // ``message`` event is its own task, so without batching React renders
+  // once per event -- devastating when replaying a long conversation
+  // (hundreds of re-groups + autoscrolls back-to-back).  Draining the queue
+  // inside one sync function lets React 18 coalesce every setState in the
+  // burst into a single render.
+  const eventQueueRef = useRef<
+    Array<{ type: string; eventId: number; data: Record<string, unknown> }>
+  >([]);
+  const flushScheduledRef = useRef(false);
+
+  const flushEventQueue = useCallback(() => {
+    flushScheduledRef.current = false;
+    const queue = eventQueueRef.current;
+    if (queue.length === 0) return;
+    eventQueueRef.current = [];
+    for (const ev of queue) {
+      applyEvent(ev.type, ev.eventId, ev.data);
+    }
+  }, [applyEvent]);
+
+  const enqueueEvent = useCallback(
+    (type: string, eventId: number, data: Record<string, unknown>) => {
+      eventQueueRef.current.push({ type, eventId, data });
+      if (!flushScheduledRef.current) {
+        flushScheduledRef.current = true;
+        requestAnimationFrame(flushEventQueue);
+      }
+    },
+    [flushEventQueue],
+  );
+
   const connect = useCallback(() => {
     if (!sessionId) return;
 
@@ -641,7 +673,7 @@ export function useSessionRuntime(sessionId: string | null) {
         if (eventId > lastEventIdRef.current) {
           lastEventIdRef.current = eventId;
         }
-        applyEvent(eventType, eventId, data);
+        enqueueEvent(eventType, eventId, data);
       });
     }
 
@@ -654,7 +686,7 @@ export function useSessionRuntime(sessionId: string | null) {
         }, 3000);
       }
     };
-  }, [sessionId, applyEvent]);
+  }, [sessionId, enqueueEvent]);
 
   // Keep ref in sync with latest connect callback.
   useEffect(() => {
@@ -676,6 +708,8 @@ export function useSessionRuntime(sessionId: string | null) {
     sessionDoneRef.current = false;
     hadDeltasRef.current = false;
     terminalRef.current = false;
+    eventQueueRef.current = [];
+    flushScheduledRef.current = false;
     setMessages([]);
     setIsRunning(false);
     setTokenUsage(EMPTY_USAGE);
