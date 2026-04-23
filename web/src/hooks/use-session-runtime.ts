@@ -225,8 +225,11 @@ export function useSessionRuntime(sessionId: string | null) {
             const prevHasTools = !!(
               prevAssistant?.toolCalls && prevAssistant.toolCalls.length > 0
             );
+            // A user message after the last assistant means a new turn has
+            // started — never merge this response into that prior assistant.
+            const hasUserAfter = idx >= 0 && hasUserAfterIndex(next, idx);
 
-            if (useDeltaContent && idx >= 0) {
+            if (useDeltaContent && idx >= 0 && !hasUserAfter) {
               // Deltas already delivered content. Just update status
               // and move content to reasoning if tool calls follow.
               if (hasToolCalls) {
@@ -243,7 +246,7 @@ export function useSessionRuntime(sessionId: string | null) {
                   status: "complete",
                 };
               }
-            } else if (prevHasTools || !prevAssistant) {
+            } else if (prevHasTools || !prevAssistant || hasUserAfter) {
               // New turn (previous had tools or no previous message).
               next.push({
                 id: `evt-${eventId}`,

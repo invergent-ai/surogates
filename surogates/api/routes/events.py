@@ -103,16 +103,20 @@ async def stream_events(
     """
     store = _get_session_store(request)
 
-    # Single DB call for access check + terminal status check.
+    # Single DB call for access check + terminal status check.  Shielded so
+    # a fast client reconnect (which cancels this request) doesn't terminate
+    # the asyncpg connection mid-query.
     try:
-        session_check = await store.get_session(session_id)
+        session_check = await asyncio.shield(store.get_session(session_id))
     except SessionNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
     if not tenant.owns_session(session_check.org_id, session_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
 
     if session_check and session_check.status in _TERMINAL_STATUSES:
-        remaining = await store.get_events(session_id, after=after, limit=1)
+        remaining = await asyncio.shield(
+            store.get_events(session_id, after=after, limit=1)
+        )
         if not remaining:
             # Nothing left to deliver — close permanently.
             async def _terminal_generator():  # noqa: ANN202
@@ -149,7 +153,13 @@ async def stream_events(
                 if await request.is_disconnected():
                     return
 
-                events = await store.get_events(session_id, after=cursor, limit=50)
+                # Shield DB calls from cancellation so an in-flight query
+                # completes cleanly and the asyncpg connection returns to the
+                # pool instead of being terminated mid-statement (which SQLA
+                # logs as a noisy invalidation trace).
+                events = await asyncio.shield(
+                    store.get_events(session_id, after=cursor, limit=50)
+                )
 
                 for event in events:
                     yield {
@@ -163,7 +173,9 @@ async def stream_events(
                 if not events:
                     # No new events -- check if the session has terminated.
                     try:
-                        session = await store.get_session(session_id)
+                        session = await asyncio.shield(
+                            store.get_session(session_id)
+                        )
                     except SessionNotFoundError:
                         yield {
                             "event": "session.done",
