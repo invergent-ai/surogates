@@ -512,7 +512,7 @@ function ConfigPanel({ detail }: { detail: AgentDetail }) {
         {detail.model && (
           <>
             <dt className="text-faint">Model</dt>
-            <dd className="text-subtle font-mono text-xs truncate">
+            <dd className="text-subtle  text-xs truncate">
               {detail.model}
             </dd>
           </>
@@ -526,7 +526,7 @@ function ConfigPanel({ detail }: { detail: AgentDetail }) {
         {detail.policy_profile && (
           <>
             <dt className="text-faint">Policy profile</dt>
-            <dd className="text-subtle font-mono text-xs">
+            <dd className="text-subtle  text-xs">
               {detail.policy_profile}
             </dd>
           </>
@@ -636,7 +636,7 @@ function CreateAgentDialog({
                 value={content}
                 onChange={(e) => setContent(e.target.value)}
                 rows={18}
-                className="font-mono text-xs"
+                className=" text-xs"
                 required
               />
             </Field>
@@ -727,7 +727,7 @@ function EditAgentDialog({
                 value={content}
                 onChange={(e) => setContent(e.target.value)}
                 rows={20}
-                className="font-mono text-xs"
+                className=" text-xs"
                 required
               />
             </Field>

@@ -12,13 +12,8 @@ from surogates.harness.llm_call import (
     _should_use_developer_role,
     apply_developer_role,
 )
-from surogates.harness.prompt import (
-    GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
-    OPENAI_MODEL_EXECUTION_GUIDANCE,
-    PLATFORM_HINTS,
-    TOOL_USE_ENFORCEMENT_MODELS,
-    PromptBuilder,
-)
+from surogates.harness.prompt import PromptBuilder
+from surogates.harness.prompt_library import default_library
 from surogates.tenant.context import TenantContext
 from surogates.tools.loader import ResourceLoader, SkillDef
 
@@ -99,7 +94,9 @@ class TestPlatformHints:
         assert isinstance(prompt, str)
 
     def test_all_hints_are_strings(self):
-        for channel, hint in PLATFORM_HINTS.items():
+        platforms = default_library().platforms()
+        assert platforms, "at least one platform hint should be discoverable"
+        for channel, hint in platforms.items():
             assert isinstance(channel, str)
             assert isinstance(hint, str)
             assert len(hint) > 0

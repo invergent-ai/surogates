@@ -1,6 +1,9 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+@import "streamdown/styles.css";
+@import "tw-shimmer";
+@plugin "@toolwind/corner-shape";
 @import "@fontsource-variable/noto-sans";
 
 @custom-variant dark (&:is(.dark *));

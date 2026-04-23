@@ -54,13 +54,10 @@ from surogates.harness.model_metadata import (
     parse_context_limit_from_error,
 )
 from surogates.harness.prompt import (
-    DEVELOPER_ROLE_MODELS as _PROMPT_DEVELOPER_ROLE_MODELS,
-    GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
-    OPENAI_MODEL_EXECUTION_GUIDANCE,
-    PLATFORM_HINTS,
     TOOL_USE_ENFORCEMENT_MODELS,
     PromptBuilder,
 )
+from surogates.harness.prompt_library import PromptLibrary, default_library
 from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
 from surogates.harness.prompt_cache import (
     SystemPromptCache,
@@ -123,14 +120,13 @@ __all__ = [
     "CredentialPool",
     "DEVELOPER_ROLE_MODELS",
     "LEGACY_SUMMARY_PREFIX",
-    "GOOGLE_MODEL_OPERATIONAL_GUIDANCE",
     "IterationBudget",
     "MODEL_CATALOG",
     "ModelInfo",
-    "OPENAI_MODEL_EXECUTION_GUIDANCE",
-    "PLATFORM_HINTS",
     "PooledCredential",
     "PromptBuilder",
+    "PromptLibrary",
+    "default_library",
     "SessionCostTracker",
     "SUMMARY_PREFIX",
     "SubdirectoryHintTracker",

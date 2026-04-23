@@ -59,7 +59,7 @@ export function ArtifactHtml({ spec }: { spec: HtmlArtifactSpec }) {
       </div>
       <div className="flex items-center justify-between">
         {spec.caption ? <span>{spec.caption}</span> : <span />}
-        <div className="flex items-center gap-2 font-mono">
+        <div className="flex items-center gap-2 ">
           <button
             type="button"
             onClick={() => setZoom((z) => clamp(z - ZOOM_STEP))}

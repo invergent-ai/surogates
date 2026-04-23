@@ -21,6 +21,7 @@ from surogates.harness.budget import IterationBudget
 from surogates.harness.context import ContextCompressor
 from surogates.harness.loop import AgentHarness
 from surogates.harness.prompt import PromptBuilder
+from surogates.harness.prompt_library import default_library as default_prompt_library
 from surogates.health import infrastructure_readiness, start_health_server
 from surogates.memory.manager import MemoryManager
 from surogates.memory.store import MemoryStore
@@ -50,6 +51,12 @@ async def run_worker(settings: Settings) -> None:
     7. Handle SIGTERM/SIGINT for graceful shutdown.
     8. Run orchestrator.run().
     """
+
+    # 0. Prompt fragments -- validate up front so a missing or malformed
+    # fragment fails the readiness probe instead of crashing live sessions
+    # mid-turn.  Validated bodies stay cached so the agent loop never
+    # hits disk for prompt prose.
+    default_prompt_library().validate()
 
     # 1. Database
     engine = create_async_engine(
@@ -339,6 +346,7 @@ async def run_worker(settings: Settings) -> None:
         session_store=session_store,
         harness_factory=harness_factory,
         max_concurrent=settings.worker.concurrency,
+        agent_id=configured_agent_id,
         queue_key=queue_key,
         poll_timeout=settings.worker.poll_timeout,
     )

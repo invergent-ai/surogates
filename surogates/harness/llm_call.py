@@ -52,6 +52,13 @@ STREAM_STALE_TIMEOUT: float = float(
     os.environ.get("SUROGATES_STREAM_STALE_TIMEOUT", "180.0")
 )
 
+# Polling interval (seconds) used to wake up between chunk reads so the
+# stale-stream and interrupt checks run even when the upstream provider
+# stops sending bytes entirely.  Short enough that user-initiated stops
+# feel responsive; long enough that it doesn't burn CPU on a healthy
+# stream.
+STREAM_CHUNK_POLL_INTERVAL: float = 1.0
+
 # ---------------------------------------------------------------------------
 # Developer role routing
 # ---------------------------------------------------------------------------
@@ -791,163 +798,221 @@ async def call_llm_streaming_inner(
     # the stream is considered stale and will be cancelled.
     last_chunk_time: float = time.monotonic()
 
-    async for chunk in response:
-        # Stale stream detection -- cancel if no real data arrives.
-        now = time.monotonic()
-        if (now - last_chunk_time) > STREAM_STALE_TIMEOUT:
-            logger.warning(
-                "Stream stale for %.0fs (threshold %.0fs) — no chunks "
-                "received. Cancelling stream for session %s (iteration %d).",
-                now - last_chunk_time,
-                STREAM_STALE_TIMEOUT,
-                session.id,
-                iteration,
-            )
-            close_method = getattr(response, "aclose", None) or getattr(
-                response, "close", None
-            )
-            if close_method is not None:
-                try:
-                    result = close_method()
-                    if asyncio.iscoroutine(result):
-                        await result
-                except Exception:
-                    pass
-            interrupted = True
-            break
-        last_chunk_time = now
-        # Mid-stream interrupt check.
-        if interrupt_check is not None and interrupt_check():
-            logger.info(
-                "Mid-stream interrupt for session %s (iteration %d); "
-                "cancelling stream",
-                session.id,
-                iteration,
-            )
-            # Cancel the HTTP stream.
-            close_method = getattr(response, "aclose", None) or getattr(
-                response, "close", None
-            )
-            if close_method is not None:
-                try:
-                    result = close_method()
-                    if asyncio.iscoroutine(result):
-                        await result
-                except Exception:
-                    pass
-            interrupted = True
-            break
-        if not chunk.choices:
-            # Final chunk may carry usage without choices.
+    async def _close_stream() -> None:
+        close_method = getattr(response, "aclose", None) or getattr(
+            response, "close", None,
+        )
+        if close_method is None:
+            return
+        try:
+            result = close_method()
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            pass
+
+    # Watchdog: wakes up every ``STREAM_CHUNK_POLL_INTERVAL`` to check
+    # whether the stream has gone silent past ``STREAM_STALE_TIMEOUT``
+    # or whether the caller asked us to interrupt.  Uses a plain
+    # ``asyncio.Event`` to signal the main ``async for`` that it should
+    # stop -- closing the response forces the iterator to raise, which
+    # we catch outside.  We deliberately don't wrap ``__anext__`` in
+    # ``asyncio.wait_for``: cancelling an SDK's in-flight read can
+    # leave the underlying stream in a weird state, whereas closing
+    # the response is the SDK-sanctioned way to abort.
+    stop_reason: str | None = None
+    stop_event = asyncio.Event()
+
+    async def _watchdog() -> None:
+        nonlocal stop_reason
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait(), timeout=STREAM_CHUNK_POLL_INTERVAL,
+                )
+                return  # stop_event fired -- main loop already done
+            except asyncio.TimeoutError:
+                pass
+
+            now = time.monotonic()
+            if (now - last_chunk_time) > STREAM_STALE_TIMEOUT:
+                logger.warning(
+                    "Stream stale for %.0fs (threshold %.0fs) — no chunks "
+                    "received. Cancelling stream for session %s (iteration %d).",
+                    now - last_chunk_time,
+                    STREAM_STALE_TIMEOUT,
+                    session.id,
+                    iteration,
+                )
+                stop_reason = "stale"
+                await _close_stream()
+                return
+            if interrupt_check is not None and interrupt_check():
+                logger.info(
+                    "Mid-stream interrupt for session %s (iteration %d); "
+                    "cancelling stream",
+                    session.id,
+                    iteration,
+                )
+                stop_reason = "interrupt"
+                await _close_stream()
+                return
+
+    watchdog_task = asyncio.create_task(
+        _watchdog(), name=f"llm-stream-watchdog-{session.id}",
+    )
+
+    try:
+        async for chunk in response:
+            last_chunk_time = time.monotonic()
+            if stop_reason is not None:
+                interrupted = True
+                break
+            # Mid-stream interrupt check also runs on chunk-receive so a
+            # user who hits Stop during a healthy stream doesn't have to
+            # wait for the next watchdog tick.
+            if interrupt_check is not None and interrupt_check():
+                logger.info(
+                    "Mid-stream interrupt for session %s (iteration %d); "
+                    "cancelling stream",
+                    session.id,
+                    iteration,
+                )
+                await _close_stream()
+                interrupted = True
+                break
+            if not chunk.choices:
+                # Final chunk may carry usage without choices.
+                if hasattr(chunk, "usage") and chunk.usage:
+                    input_tokens = getattr(chunk.usage, "prompt_tokens", 0) or 0
+                    output_tokens = getattr(chunk.usage, "completion_tokens", 0) or 0
+                if hasattr(chunk, "model") and chunk.model:
+                    model = chunk.model
+                continue
+
+            choice = chunk.choices[0]
+            delta = choice.delta
+
+            if choice.finish_reason is not None:
+                finish_reason = choice.finish_reason
+
+            if hasattr(chunk, "model") and chunk.model:
+                model = chunk.model
+
+            # Usage from final chunk (OpenAI pattern).
             if hasattr(chunk, "usage") and chunk.usage:
                 input_tokens = getattr(chunk.usage, "prompt_tokens", 0) or 0
                 output_tokens = getattr(chunk.usage, "completion_tokens", 0) or 0
-            if hasattr(chunk, "model") and chunk.model:
-                model = chunk.model
-            continue
 
-        choice = chunk.choices[0]
-        delta = choice.delta
+            if delta is None:
+                continue
 
-        if choice.finish_reason is not None:
-            finish_reason = choice.finish_reason
+            # Role (usually arrives in the first chunk only).
+            if hasattr(delta, "role") and delta.role:
+                role = delta.role
 
-        if hasattr(chunk, "model") and chunk.model:
-            model = chunk.model
-
-        # Usage from final chunk (OpenAI pattern).
-        if hasattr(chunk, "usage") and chunk.usage:
-            input_tokens = getattr(chunk.usage, "prompt_tokens", 0) or 0
-            output_tokens = getattr(chunk.usage, "completion_tokens", 0) or 0
-
-        if delta is None:
-            continue
-
-        # Role (usually arrives in the first chunk only).
-        if hasattr(delta, "role") and delta.role:
-            role = delta.role
-
-        # Reasoning content delta (DeepSeek, Qwen, Moonshot, etc.)
-        reasoning_text = (
-            getattr(delta, "reasoning_content", None)
-            or getattr(delta, "reasoning", None)
-        )
-        if reasoning_text:
-            reasoning_parts.append(reasoning_text)
-            # Emit LLM_DELTA event for reasoning so the frontend can
-            # stream reasoning content incrementally (same as text deltas).
-            await store.emit_event(
-                session.id,
-                EventType.LLM_DELTA,
-                {"reasoning": reasoning_text, "iteration": iteration},
+            # Reasoning content delta (DeepSeek, Qwen, Moonshot, etc.)
+            reasoning_text = (
+                getattr(delta, "reasoning_content", None)
+                or getattr(delta, "reasoning", None)
             )
+            if reasoning_text:
+                reasoning_parts.append(reasoning_text)
+                # Emit LLM_DELTA event for reasoning so the frontend can
+                # stream reasoning content incrementally (same as text deltas).
+                await store.emit_event(
+                    session.id,
+                    EventType.LLM_DELTA,
+                    {"reasoning": reasoning_text, "iteration": iteration},
+                )
 
-        # Text content delta.
-        text_delta = getattr(delta, "content", None)
-        if text_delta:
-            content_parts.append(text_delta)
-            # Emit LLM_DELTA event.
-            await store.emit_event(
-                session.id,
-                EventType.LLM_DELTA,
-                {"content": text_delta, "iteration": iteration},
-            )
+            # Text content delta.
+            text_delta = getattr(delta, "content", None)
+            if text_delta:
+                content_parts.append(text_delta)
+                # Emit LLM_DELTA event.
+                await store.emit_event(
+                    session.id,
+                    EventType.LLM_DELTA,
+                    {"content": text_delta, "iteration": iteration},
+                )
 
-        # Tool call deltas.
-        # Ollama-compatible endpoints reuse index 0 for every tool call
-        # in a parallel batch, distinguishing them only by id.  Track
-        # the last seen id per raw index so we can detect a new tool
-        # call starting at the same index and redirect it to a fresh slot.
-        tc_deltas = getattr(delta, "tool_calls", None)
-        if tc_deltas:
-            for tc_delta in tc_deltas:
-                raw_idx = tc_delta.index if tc_delta.index is not None else 0
-                delta_id = getattr(tc_delta, "id", None) or ""
+            # Tool call deltas.
+            # Ollama-compatible endpoints reuse index 0 for every tool call
+            # in a parallel batch, distinguishing them only by id.  Track
+            # the last seen id per raw index so we can detect a new tool
+            # call starting at the same index and redirect it to a fresh slot.
+            tc_deltas = getattr(delta, "tool_calls", None)
+            if tc_deltas:
+                for tc_delta in tc_deltas:
+                    raw_idx = tc_delta.index if tc_delta.index is not None else 0
+                    delta_id = getattr(tc_delta, "id", None) or ""
 
-                if raw_idx not in _active_slot_by_idx:
-                    _active_slot_by_idx[raw_idx] = raw_idx
-                if (
-                    delta_id
-                    and raw_idx in _last_id_at_idx
-                    and delta_id != _last_id_at_idx[raw_idx]
-                ):
-                    new_slot = max(tool_calls_acc, default=-1) + 1
-                    _active_slot_by_idx[raw_idx] = new_slot
-                if delta_id:
-                    _last_id_at_idx[raw_idx] = delta_id
-                idx = _active_slot_by_idx[raw_idx]
+                    if raw_idx not in _active_slot_by_idx:
+                        _active_slot_by_idx[raw_idx] = raw_idx
+                    if (
+                        delta_id
+                        and raw_idx in _last_id_at_idx
+                        and delta_id != _last_id_at_idx[raw_idx]
+                    ):
+                        new_slot = max(tool_calls_acc, default=-1) + 1
+                        _active_slot_by_idx[raw_idx] = new_slot
+                    if delta_id:
+                        _last_id_at_idx[raw_idx] = delta_id
+                    idx = _active_slot_by_idx[raw_idx]
 
-                if idx not in tool_calls_acc:
-                    tool_calls_acc[idx] = {
-                        "id": getattr(tc_delta, "id", None) or "",
-                        "type": "function",
-                        "function": {
-                            "name": "",
-                            "arguments": "",
-                        },
-                    }
-                entry = tool_calls_acc[idx]
-                if tc_delta.id:
-                    entry["id"] = tc_delta.id
-                fn_delta = getattr(tc_delta, "function", None)
-                if fn_delta:
-                    if fn_delta.name:
-                        entry["function"]["name"] += fn_delta.name
-                    if fn_delta.arguments:
-                        entry["function"]["arguments"] += fn_delta.arguments
+                    if idx not in tool_calls_acc:
+                        tool_calls_acc[idx] = {
+                            "id": getattr(tc_delta, "id", None) or "",
+                            "type": "function",
+                            "function": {
+                                "name": "",
+                                "arguments": "",
+                            },
+                        }
+                    entry = tool_calls_acc[idx]
+                    if tc_delta.id:
+                        entry["id"] = tc_delta.id
+                    fn_delta = getattr(tc_delta, "function", None)
+                    if fn_delta:
+                        if fn_delta.name:
+                            entry["function"]["name"] += fn_delta.name
+                        if fn_delta.arguments:
+                            entry["function"]["arguments"] += fn_delta.arguments
 
-                # Streaming tool execution: when a new higher-index slot
-                # appears, all lower-index slots are fully formed.  Fire
-                # the callback so the StreamingToolExecutor can start
-                # executing concurrency-safe tools immediately.
-                if on_tool_call_complete is not None and idx > _highest_known_slot:
-                    for prev_slot in sorted(tool_calls_acc):
-                        if prev_slot < idx and prev_slot not in _notified_slots:
-                            prev_entry = tool_calls_acc[prev_slot]
-                            if prev_entry["function"]["name"]:
-                                _notified_slots.add(prev_slot)
-                                on_tool_call_complete(prev_entry)
-                    _highest_known_slot = idx
+                    # Streaming tool execution: when a new higher-index slot
+                    # appears, all lower-index slots are fully formed.  Fire
+                    # the callback so the StreamingToolExecutor can start
+                    # executing concurrency-safe tools immediately.
+                    if on_tool_call_complete is not None and idx > _highest_known_slot:
+                        for prev_slot in sorted(tool_calls_acc):
+                            if prev_slot < idx and prev_slot not in _notified_slots:
+                                prev_entry = tool_calls_acc[prev_slot]
+                                if prev_entry["function"]["name"]:
+                                    _notified_slots.add(prev_slot)
+                                    on_tool_call_complete(prev_entry)
+                        _highest_known_slot = idx
+    except Exception:
+        # The watchdog closed the stream (stale or interrupt) -- the
+        # SDK's iterator raises when the underlying response is closed
+        # mid-read.  We swallow only the close-induced error; any other
+        # exception propagates normally.
+        if stop_reason is None:
+            raise
+        interrupted = True
+    finally:
+        stop_event.set()
+        watchdog_task.cancel()
+        try:
+            await watchdog_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    # Some SDK iterators respond to ``aclose`` by returning cleanly
+    # (StopAsyncIteration) rather than raising.  When the watchdog
+    # triggered the close, surface it as an interruption regardless.
+    if stop_reason is not None:
+        interrupted = True
 
     # Notify any remaining tool call slots that haven't been reported yet.
     # This covers the last tool call in the batch (no higher index follows)

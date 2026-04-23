@@ -479,7 +479,7 @@ function SkillDetailView({
             {detail.linked_files.map((path) => (
               <li
                 key={path}
-                className="flex items-center gap-2 text-sm font-mono text-subtle"
+                className="flex items-center gap-2 text-sm  text-subtle"
               >
                 <FileTextIcon className="w-3.5 h-3.5 text-faint" />
                 {path}
@@ -550,7 +550,7 @@ function ExpertPanel({ detail }: { detail: SkillDetail }) {
         {detail.expert_model && (
           <>
             <dt className="text-faint">Base model</dt>
-            <dd className="text-subtle font-mono text-xs truncate">
+            <dd className="text-subtle  text-xs truncate">
               {detail.expert_model}
             </dd>
           </>
@@ -558,7 +558,7 @@ function ExpertPanel({ detail }: { detail: SkillDetail }) {
         {detail.expert_endpoint && (
           <>
             <dt className="text-faint">Endpoint</dt>
-            <dd className="text-subtle font-mono text-xs truncate">
+            <dd className="text-subtle  text-xs truncate">
               {detail.expert_endpoint}
             </dd>
           </>
@@ -675,7 +675,7 @@ function CreateSkillDialog({
                 value={content}
                 onChange={(e) => setContent(e.target.value)}
                 rows={14}
-                className="font-mono text-xs"
+                className=" text-xs"
                 placeholder={
                   "---\nname: my-skill\ndescription: What this skill does\n---\n\n# Instructions\n\nDescribe what the agent should do..."
                 }
@@ -764,7 +764,7 @@ function EditSkillDialog({
                 value={content}
                 onChange={(e) => setContent(e.target.value)}
                 rows={18}
-                className="font-mono text-xs"
+                className=" text-xs"
                 required
               />
             </Field>

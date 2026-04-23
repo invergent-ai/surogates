@@ -154,7 +154,7 @@ export const ContextContentHeader = ({
         <>
           <div className="flex items-center justify-between gap-3 text-xs">
             <p>{displayPct}</p>
-            <p className="font-mono text-muted-foreground">
+            <p className=" text-muted-foreground">
               {used} / {total}
             </p>
           </div>

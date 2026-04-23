@@ -118,7 +118,7 @@ export function ReadFileBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSe
   } catch { /* ignore */ }
 
   return (
-    <div className="flex items-center gap-1.5 text-sm font-mono">
+    <div className="flex items-center gap-1.5 text-sm ">
       <span className="font-semibold text-foreground">Read</span>
       <FileNameWithTooltip filePath={filePath} onFileSelect={onFileSelect} />
       {detail && <span className="text-muted-foreground ml-1">{detail}</span>}
@@ -136,7 +136,7 @@ export function WriteFileBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileS
   } catch { /* ignore */ }
 
   return (
-    <div className="flex items-center gap-1.5 text-sm font-mono">
+    <div className="flex items-center gap-1.5 text-sm ">
       <span className="font-semibold text-foreground">Write</span>
       <FileNameWithTooltip filePath={filePath} onFileSelect={onFileSelect} />
     </div>
@@ -173,7 +173,7 @@ export function PatchBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSelec
 
   return (
     <div className="space-y-1">
-      <div className="flex items-center gap-1.5 text-sm font-mono">
+      <div className="flex items-center gap-1.5 text-sm ">
         <span className="font-semibold text-foreground">Patch</span>
         <FileNameWithTooltip filePath={filePath} onFileSelect={onFileSelect} />
       </div>
@@ -214,7 +214,7 @@ export function PatchBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSelec
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="sm:max-w-[50vw] w-full h-[70vh] flex flex-col p-0 gap-0 overflow-hidden">
           <DialogHeader className="px-4 py-3 border-b border-border shrink-0">
-            <DialogTitle className="text-sm font-mono">Patch {fName}</DialogTitle>
+            <DialogTitle className="text-sm ">Patch {fName}</DialogTitle>
           </DialogHeader>
           <ScrollArea className="flex-1 min-h-0">
             <div className="p-4">
@@ -247,7 +247,7 @@ export function SearchFilesBlock({ tc }: { tc: ToolCallInfo }) {
 
   return (
     <div>
-      <div className="flex items-center gap-1.5 text-sm font-mono">
+      <div className="flex items-center gap-1.5 text-sm ">
         <span className="font-semibold text-foreground">Search</span>
         {pattern && <span className="text-muted-foreground truncate">&quot;{pattern}&quot;</span>}
         {path && path !== "." && (
@@ -256,7 +256,7 @@ export function SearchFilesBlock({ tc }: { tc: ToolCallInfo }) {
       </div>
       {count !== null && tc.status === "complete" && (
         <span className={cn(
-          "text-xs font-mono shrink-0",
+          "text-xs  shrink-0",
           count === 0 ? "text-muted-foreground/50" : "text-muted-foreground",
         )}>
           {count} result{count !== 1 ? "s" : ""}
@@ -281,7 +281,7 @@ export function ListFilesBlock({ tc }: { tc: ToolCallInfo }) {
 
   return (
     <div>
-      <div className="flex items-center gap-1.5 text-sm font-mono">
+      <div className="flex items-center gap-1.5 text-sm ">
         <span className="font-semibold text-foreground">List</span>
         {path && <span className="text-muted-foreground truncate">{displayPath(path)}</span>}
         {pattern && pattern !== "*" && (
@@ -290,7 +290,7 @@ export function ListFilesBlock({ tc }: { tc: ToolCallInfo }) {
       </div>
       {count !== null && tc.status === "complete" && (
         <span className={cn(
-          "text-xs font-mono shrink-0",
+          "text-xs  shrink-0",
           count === 0 ? "text-muted-foreground/50" : "text-muted-foreground",
         )}>
           {count} file{count !== 1 ? "s" : ""}

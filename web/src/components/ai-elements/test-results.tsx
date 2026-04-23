@@ -486,7 +486,7 @@ export const TestErrorStack = ({
 }: TestErrorStackProps) => (
   <pre
     className={cn(
-      "mt-2 overflow-auto font-mono text-red-600 text-xs dark:text-red-400",
+      "mt-2 overflow-auto  text-red-600 text-xs dark:text-red-400",
       className
     )}
     {...props}

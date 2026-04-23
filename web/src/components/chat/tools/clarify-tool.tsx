@@ -236,7 +236,7 @@ export function ClarifyToolBlock({ tc }: { tc: ToolCallInfo }) {
           disabled={!allAnswered || submitting}
           onClick={() => void handleSubmit()}
           className={cn(
-            "w-full rounded border border-border px-2 py-1.5 text-left text-sm font-mono",
+            "w-full rounded border border-border px-2 py-1.5 text-left text-sm ",
             "text-muted-foreground hover:bg-muted/40",
             "disabled:cursor-not-allowed disabled:opacity-60",
           )}

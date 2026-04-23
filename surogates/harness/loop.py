@@ -69,7 +69,7 @@ if TYPE_CHECKING:
     from surogates.harness.context import ContextCompressor
     from surogates.harness.prompt import PromptBuilder
     from surogates.memory.manager import MemoryManager
-    from surogates.sandbox.pool import SandboxPool
+    from surogates.sandbox.pool import SandboxPool, sandbox_session_key
     from surogates.session.models import Event, Session, SessionLease
     from surogates.session.store import SessionStore
     from surogates.tools.registry import ToolRegistry
@@ -717,7 +717,7 @@ class AgentHarness:
             if self._checkpoints_enabled and self._sandbox_pool:
                 try:
                     await self._sandbox_pool.execute(
-                        str(session.id), "_checkpoint",
+                        sandbox_session_key(session), "_checkpoint",
                         '{"action": "new_turn"}',
                     )
                 except (ValueError, Exception):
@@ -1490,7 +1490,7 @@ class AgentHarness:
                     "file_path": file_path,
                 })
                 cp_result = await self._sandbox_pool.execute(
-                    str(session.id), "_checkpoint", cp_input,
+                    sandbox_session_key(session), "_checkpoint", cp_input,
                 )
                 cp_data = _json.loads(cp_result)
                 cp_hash = cp_data.get("hash")
@@ -1561,7 +1561,7 @@ class AgentHarness:
                     try:
                         from surogates.sandbox.base import SandboxSpec
                         sandbox_spec = getattr(self._tenant, "sandbox_spec", None) or SandboxSpec()
-                        await self._sandbox_pool.ensure(str(session.id), sandbox_spec)
+                        await self._sandbox_pool.ensure(sandbox_session_key(session), sandbox_spec)
                     except Exception:
                         logger.warning(
                             "Cannot provision sandbox for saga compensation "
@@ -1578,7 +1578,7 @@ class AgentHarness:
                 compensator = partial(
                     compensate_step,
                     sandbox_pool=self._sandbox_pool,
-                    session_id=str(session.id),
+                    session_id=sandbox_session_key(session),
                 )
                 failed = await saga.compensate(active.saga_id, compensator)
                 failed_ids = [s.step_id for s in failed]

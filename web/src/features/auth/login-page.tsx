@@ -152,7 +152,7 @@ export function LoginPage() {
 
   const inputCls = (field: string, hasError = false) =>
     cn(
-      "w-full py-[11px] px-3.5 rounded-lg border font-mono text-sm text-foreground bg-input outline-none transition-all duration-200",
+      "w-full py-[11px] px-3.5 rounded-lg border  text-sm text-foreground bg-input outline-none transition-all duration-200",
       focusedField === field
         ? "border-primary/25 shadow-[0_0_0_3px_rgba(245,158,11,0.06)]"
         : hasError
@@ -161,7 +161,7 @@ export function LoginPage() {
     );
 
   return (
-    <div className="font-mono bg-background text-foreground h-screen flex flex-col items-center justify-center overflow-hidden text-sm leading-normal antialiased relative">
+    <div className=" bg-background text-foreground h-screen flex flex-col items-center justify-center overflow-hidden text-sm leading-normal antialiased relative">
       {/* animated grid */}
       <canvas
         ref={canvasRef}

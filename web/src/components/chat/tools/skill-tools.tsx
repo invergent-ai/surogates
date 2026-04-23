@@ -33,7 +33,7 @@ export function SkillsListBlock({ tc }: { tc: ToolCallInfo }) {
   }
 
   return (
-    <div className="flex items-center gap-1.5 text-sm font-mono">
+    <div className="flex items-center gap-1.5 text-sm ">
       <span className="font-semibold text-foreground">Skills List</span>
       <span className="text-muted-foreground truncate">{filter}</span>
       {summary && (
@@ -74,7 +74,7 @@ export function SkillViewBlock({ tc }: { tc: ToolCallInfo }) {
   }
 
   return (
-    <div className="flex items-center gap-1.5 text-sm font-mono">
+    <div className="flex items-center gap-1.5 text-sm ">
       <span className="font-semibold text-foreground">Skill View</span>
       <span className="text-muted-foreground truncate">{target}</span>
       {summary && (

@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import traceback
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID
 
-from surogates.config import INTERRUPT_CHANNEL_PREFIX
+from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
 
 if TYPE_CHECKING:
@@ -33,6 +34,14 @@ _MAX_RETRIES: int = 3
 
 # Base delay (seconds) for exponential back-off on retry.
 _BASE_RETRY_DELAY: float = 1.0
+
+# Orphan sweep cadence.  Must comfortably exceed the lease TTL (60s) and
+# the stream-stale timeout (180s) so slow-but-alive turns aren't
+# misidentified — 300s leaves a safe margin.  The sweep itself runs
+# every ``_ORPHAN_SWEEP_INTERVAL``; a session has to be idle for the
+# full ``_ORPHAN_STALE_SECONDS`` before it's considered orphaned.
+_ORPHAN_SWEEP_INTERVAL: float = 60.0
+_ORPHAN_STALE_SECONDS: int = 300
 
 
 class Orchestrator:
@@ -49,6 +58,7 @@ class Orchestrator:
         session_store: SessionStore,
         harness_factory: Callable[..., Any],
         *,
+        agent_id: str,
         queue_key: str,
         max_concurrent: int = 50,
         poll_timeout: int = 5,
@@ -57,6 +67,7 @@ class Orchestrator:
         self.session_store = session_store
         self.harness_factory = harness_factory
         self.semaphore = asyncio.Semaphore(max_concurrent)
+        self._agent_id = agent_id
         self._queue_key = queue_key
         self._poll_timeout = poll_timeout
         self._running = True
@@ -108,6 +119,16 @@ class Orchestrator:
             name="interrupt-listener",
         )
 
+        # Start the orphan sweeper.  Self-heals sessions abandoned by a
+        # dead worker (SIGKILL / OOM / debugger stop / pod eviction) —
+        # those paths never hit the in-process exception handler, so
+        # no ``HARNESS_CRASH`` or ``SESSION_FAIL`` lands naturally and
+        # the UI would otherwise sit on "Working on it..." forever.
+        orphan_sweeper_task = asyncio.create_task(
+            self._sweep_orphans_forever(),
+            name="orphan-sweeper",
+        )
+
         while self._running:
             try:
                 # BZPOPMIN returns (key, member, score) or None on timeout.
@@ -145,12 +166,13 @@ class Orchestrator:
             self._tasks.add(task)
             task.add_done_callback(self._task_done)
 
-        # Stop interrupt listener.
-        interrupt_task.cancel()
-        try:
-            await interrupt_task
-        except asyncio.CancelledError:
-            pass
+        # Stop background helpers.
+        for task in (interrupt_task, orphan_sweeper_task):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
         # Wait for in-flight tasks to drain.
         if self._tasks:
@@ -308,3 +330,64 @@ class Orchestrator:
         finally:
             await pubsub.punsubscribe(f"{INTERRUPT_CHANNEL_PREFIX}:*")
             await pubsub.aclose()
+
+    async def _sweep_orphans_forever(self) -> None:
+        """Periodically re-enqueue sessions abandoned by a dead worker.
+
+        The in-process retry path in :meth:`_process` only catches
+        exceptions raised *inside* a live harness.  If the worker itself
+        is hard-killed mid-turn (SIGKILL, OOM, pod eviction, debugger
+        stop), none of those handlers run: the lease expires naturally
+        on its TTL, no ``HARNESS_CRASH`` is ever emitted, and the
+        session sits at ``status='active'`` with a streaming last
+        message — the UI reads this as "still working" and never
+        escapes.
+
+        Every replica runs this sweeper on its own agent's sessions.
+        ``enqueue_session`` uses ``ZADD`` so concurrent replicas racing
+        on the same orphan de-duplicate naturally; the harness's
+        ``try_acquire_lease`` serializes actual execution.
+
+        A small random offset staggers the first tick across replicas
+        so a freshly-restarted cluster doesn't hit the DB in unison.
+        """
+        await asyncio.sleep(random.uniform(0, _ORPHAN_SWEEP_INTERVAL))
+
+        while self._running:
+            try:
+                orphans = await self.session_store.find_orphaned_sessions(
+                    stale_seconds=_ORPHAN_STALE_SECONDS,
+                    agent_id=self._agent_id,
+                )
+                for session in orphans:
+                    try:
+                        await self.session_store.emit_event(
+                            session.id,
+                            EventType.HARNESS_RECOVERED,
+                            {
+                                "recovered_by": "orchestrator_sweeper",
+                                "stale_seconds": _ORPHAN_STALE_SECONDS,
+                            },
+                        )
+                        await self.session_store.release_stale_lease(session.id)
+                        await enqueue_session(
+                            self.redis, session.agent_id, session.id,
+                        )
+                        logger.warning(
+                            "Recovered orphaned session %s — re-enqueued",
+                            session.id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to recover orphaned session %s",
+                            session.id,
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Orphan sweep failed; continuing")
+
+            try:
+                await asyncio.sleep(_ORPHAN_SWEEP_INTERVAL)
+            except asyncio.CancelledError:
+                return

@@ -147,7 +147,7 @@ function StatusBadge({ status, exitCode }: { status: string; exitCode?: number |
 function ProcessListView({ processes }: { processes: ProcessEntry[] }) {
   if (processes.length === 0) {
     return (
-      <div className="flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground font-mono">
+      <div className="flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground ">
         <ActivityIcon className="size-3.5 shrink-0" />
         No background processes
       </div>
@@ -159,7 +159,7 @@ function ProcessListView({ processes }: { processes: ProcessEntry[] }) {
       {processes.map((p) => (
         <div
           key={p.session_id}
-          className="flex items-start gap-3 px-3 py-1.5 font-mono text-sm"
+          className="flex items-start gap-3 px-3 py-1.5  text-sm"
         >
           <div className="flex flex-col gap-0.5 min-w-0 flex-1">
             <div className="flex items-center gap-2">
@@ -204,7 +204,7 @@ function ProcessPollView({ data }: { data: Record<string, unknown> }) {
 
   return (
     <div className="space-y-1">
-      <div className="flex items-center gap-2 px-3 pt-1.5 font-mono text-sm">
+      <div className="flex items-center gap-2 px-3 pt-1.5  text-sm">
         <StatusBadge status={status} exitCode={exitCode} />
         <span className="text-muted-foreground text-xs">{sessionId}</span>
         {pid != null && (
@@ -215,7 +215,7 @@ function ProcessPollView({ data }: { data: Record<string, unknown> }) {
         )}
       </div>
       {command && (
-        <pre className="px-3 font-mono text-xs text-foreground/80 whitespace-pre-wrap wrap-break-word">
+        <pre className="px-3  text-xs text-foreground/80 whitespace-pre-wrap wrap-break-word">
           {truncateCommand(command, 120)}
         </pre>
       )}
@@ -250,7 +250,7 @@ function ProcessLogView({ data }: { data: Record<string, unknown> }) {
   return (
     <>
       <div className="space-y-1">
-        <div className="flex items-center gap-2 px-3 pt-1.5 font-mono text-sm">
+        <div className="flex items-center gap-2 px-3 pt-1.5  text-sm">
           <StatusBadge status={status} />
           <span className="text-muted-foreground text-xs">{sessionId}</span>
           {totalLines != null && (
@@ -266,7 +266,7 @@ function ProcessLogView({ data }: { data: Record<string, unknown> }) {
           onClick={() => overflows && setDialogOpen(true)}
           onKeyDown={(e) => { if (e.key === "Enter" && overflows) setDialogOpen(true); }}
           className={cn(
-            "overflow-hidden px-3 py-1.5 font-mono text-xs leading-relaxed",
+            "overflow-hidden px-3 py-1.5  text-xs leading-relaxed",
             overflows && "cursor-pointer max-h-24",
           )}
         >
@@ -290,12 +290,12 @@ function ProcessLogView({ data }: { data: Record<string, unknown> }) {
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="sm:max-w-[50vw] w-full h-[70vh] flex flex-col p-0 gap-0 overflow-hidden">
           <DialogHeader className="px-4 py-3 border-b border-border shrink-0">
-            <DialogTitle className="font-mono text-sm">
+            <DialogTitle className=" text-sm">
               Process log — {sessionId}
             </DialogTitle>
           </DialogHeader>
           <ScrollArea className="flex-1 min-h-0">
-            <pre className="px-4 py-3 font-mono text-sm leading-relaxed whitespace-pre-wrap wrap-break-word">
+            <pre className="px-4 py-3  text-sm leading-relaxed whitespace-pre-wrap wrap-break-word">
               {output || "(empty)"}
             </pre>
           </ScrollArea>
@@ -315,7 +315,7 @@ function ProcessWaitView({ data }: { data: Record<string, unknown> }) {
 
   return (
     <div className="space-y-1">
-      <div className="flex items-center gap-2 px-3 pt-1.5 font-mono text-sm">
+      <div className="flex items-center gap-2 px-3 pt-1.5  text-sm">
         <StatusBadge status={status} exitCode={exitCode} />
         {note && (
           <span className="text-muted-foreground/60 text-xs">{note}</span>
@@ -335,7 +335,7 @@ function ProcessKillView({ data }: { data: Record<string, unknown> }) {
   const error = (data.error as string) ?? "";
 
   return (
-    <div className="flex items-center gap-2 px-3 py-1.5 font-mono text-sm">
+    <div className="flex items-center gap-2 px-3 py-1.5  text-sm">
       <StatusBadge status={status} exitCode={exitCode} />
       {sessionId && (
         <span className="text-muted-foreground text-xs">{sessionId}</span>
@@ -356,7 +356,7 @@ function ProcessStdinView({ action, data }: { action: string; data: Record<strin
 
   const ok = status === "ok";
   return (
-    <div className="flex items-center gap-2 px-3 py-1.5 font-mono text-sm">
+    <div className="flex items-center gap-2 px-3 py-1.5  text-sm">
       <span className={cn(
         "text-xs font-medium",
         ok ? "text-emerald-600 dark:text-emerald-400" : "text-red-500 dark:text-red-400",
@@ -374,7 +374,7 @@ function ProcessStdinView({ action, data }: { action: string; data: Record<strin
 
 function OutputPreview({ output }: { output: string }) {
   return (
-    <div className="px-3 py-1.5 font-mono text-xs leading-relaxed max-h-20 overflow-hidden">
+    <div className="px-3 py-1.5  text-xs leading-relaxed max-h-20 overflow-hidden">
       <div className="flex gap-2 text-muted-foreground">
         <span className="shrink-0 select-none text-sky-600">OUT</span>
         <pre className="whitespace-pre-wrap wrap-break-word text-foreground/70">
@@ -408,7 +408,7 @@ export function ProcessToolBlock({ tc }: { tc: ToolCallInfo }) {
     return (
       <Terminal output="" isStreaming className="w-full text-sm">
         <TerminalHeader>
-          <div className="flex items-center gap-1.5 min-w-0 text-sm font-mono">
+          <div className="flex items-center gap-1.5 min-w-0 text-sm ">
             <ActivityIcon className="size-3.5 shrink-0" />
             <span className="font-semibold text-foreground shrink-0">
               {actionLabel[action] ?? "Process"}
@@ -420,7 +420,7 @@ export function ProcessToolBlock({ tc }: { tc: ToolCallInfo }) {
             )}
           </div>
         </TerminalHeader>
-        <div className="px-3 py-2 bg-background font-mono text-sm flex items-center gap-2 text-muted-foreground">
+        <div className="px-3 py-2 bg-background  text-sm flex items-center gap-2 text-muted-foreground">
           <Loader2Icon className="size-3 animate-spin" />
           <span className="text-xs">
             {action === "wait" ? `Waiting${args.timeout ? ` (${args.timeout}s timeout)` : ""}...` : "(no output)"}
@@ -439,14 +439,14 @@ export function ProcessToolBlock({ tc }: { tc: ToolCallInfo }) {
     return (
       <Terminal output="" className="w-full text-sm">
         <TerminalHeader>
-          <div className="flex items-center gap-1.5 min-w-0 text-sm font-mono">
+          <div className="flex items-center gap-1.5 min-w-0 text-sm ">
             <ActivityIcon className="size-3.5 shrink-0" />
             <span className="font-semibold text-foreground shrink-0">
               {actionLabel[action] ?? "Process"}
             </span>
           </div>
         </TerminalHeader>
-        <div className="px-3 py-2 bg-background font-mono text-xs text-red-500 dark:text-red-400">
+        <div className="px-3 py-2 bg-background  text-xs text-red-500 dark:text-red-400">
           {resultError || resultStatus}
         </div>
       </Terminal>
@@ -477,7 +477,7 @@ export function ProcessToolBlock({ tc }: { tc: ToolCallInfo }) {
       break;
     default:
       content = (
-        <pre className="px-3 py-2 font-mono text-xs text-muted-foreground whitespace-pre-wrap">
+        <pre className="px-3 py-2  text-xs text-muted-foreground whitespace-pre-wrap">
           {JSON.stringify(result, null, 2)}
         </pre>
       );
@@ -486,7 +486,7 @@ export function ProcessToolBlock({ tc }: { tc: ToolCallInfo }) {
   return (
     <Terminal output="" className="w-full text-sm">
       <TerminalHeader>
-        <div className="flex items-center gap-1.5 min-w-0 text-sm font-mono">
+        <div className="flex items-center gap-1.5 min-w-0 text-sm ">
           <ActivityIcon className="size-3.5 shrink-0" />
           <span className="font-semibold text-foreground shrink-0">
             {actionLabel[action] ?? "Process"}

@@ -14,6 +14,7 @@ from redis.asyncio import Redis
 from surogates.audit import AuditStore
 from surogates.config import load_settings
 from surogates.db.engine import async_engine_from_settings, async_session_factory
+from surogates.harness.prompt_library import default_library as default_prompt_library
 from surogates.session.store import SessionStore
 from surogates.storage.backend import create_backend
 from surogates.tenant.credentials import CredentialVault
@@ -44,6 +45,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown resources."""
     # -- startup ----------------------------------------------------------
     settings = load_settings()
+
+    # Validate bundled prompt fragments up front so a missing or malformed
+    # file fails the readiness probe instead of crashing a live session.
+    # Bodies stay cached after validation, so production requests never
+    # hit disk for prompt prose.
+    default_prompt_library().validate()
+
     engine = async_engine_from_settings(settings.db)
 
     app.state.settings = settings

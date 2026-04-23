@@ -230,8 +230,17 @@ async def send_message(
         )
 
     # Reset failed/paused sessions back to active on new message.
+    # A ``SESSION_RESUME`` event must land too -- the web client's
+    # ``terminalRef`` latch stays set after *any* terminal event
+    # (session.pause / session.fail / session.complete / session.done)
+    # and suppresses the running indicators for every subsequent
+    # ``llm.delta`` / ``llm.thinking``.  Without the resume event the
+    # UI reports "stopped" while deltas for the new turn stream in,
+    # regardless of whether the previous terminal state was pause or
+    # fail.
     if session.status in ("failed", "paused"):
         await store.update_session_status(session_id, "active")
+        await store.emit_event(session_id, EventType.SESSION_RESUME, {})
 
     # Screen user message for prompt injection (AGT PromptInjectionDetector).
     injection_result = _get_injection_detector().detect(

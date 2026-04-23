@@ -79,7 +79,7 @@ export const SchemaDisplayMethod = ({
 
   return (
     <Badge
-      className={cn("font-mono text-xs", methodStyles[method], className)}
+      className={cn(" text-xs", methodStyles[method], className)}
       variant="secondary"
       {...props}
     >
@@ -105,7 +105,7 @@ export const SchemaDisplayPath = ({
 
   return (
     <span
-      className={cn("font-mono text-sm", className)}
+      className={cn(" text-sm", className)}
       // oxlint-disable-next-line eslint-plugin-react(no-danger)
       dangerouslySetInnerHTML={{ __html: children ?? highlightedPath }}
       {...props}
@@ -162,7 +162,7 @@ export const SchemaDisplayParameter = ({
 }: SchemaDisplayParameterProps) => (
   <div className={cn("px-4 py-3 pl-10", className)} {...props}>
     <div className="flex items-center gap-2">
-      <span className="font-mono text-sm">{name}</span>
+      <span className=" text-sm">{name}</span>
       <Badge className="text-xs" variant="outline">
         {type}
       </Badge>
@@ -246,7 +246,7 @@ export const SchemaDisplayProperty = ({
           style={{ paddingLeft }}
         >
           <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
-          <span className="font-mono text-sm">{name}</span>
+          <span className=" text-sm">{name}</span>
           <Badge className="text-xs" variant="outline">
             {type}
           </Badge>
@@ -298,7 +298,7 @@ export const SchemaDisplayProperty = ({
       <div className="flex items-center gap-2">
         {/* Spacer for alignment */}
         <span className="size-4" />
-        <span className="font-mono text-sm">{name}</span>
+        <span className=" text-sm">{name}</span>
         <Badge className="text-xs" variant="outline">
           {type}
         </Badge>
@@ -461,7 +461,7 @@ export const SchemaDisplayExample = ({
 }: SchemaDisplayExampleProps) => (
   <pre
     className={cn(
-      "mx-4 mb-4 overflow-auto rounded-md bg-muted p-4 font-mono text-sm",
+      "mx-4 mb-4 overflow-auto rounded-md bg-muted p-4  text-sm",
       className
     )}
     {...props}

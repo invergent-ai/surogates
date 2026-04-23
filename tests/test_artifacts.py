@@ -33,7 +33,8 @@ from surogates.artifacts.store import (
 )
 from surogates.storage.backend import LocalBackend
 from surogates.tools.builtin.artifact import _create_artifact_handler
-from surogates.harness.prompt import ARTIFACT_GUIDANCE, PromptBuilder
+from surogates.harness.prompt import PromptBuilder
+from surogates.harness.prompt_library import default_library
 from surogates.tenant.context import TenantContext
 
 
@@ -619,12 +620,12 @@ class TestWorkspaceHidesArtifacts:
 
 
 # =========================================================================
-# PromptBuilder — ARTIFACT_GUIDANCE injection
+# PromptBuilder — artifact guidance injection
 # =========================================================================
 
 
 class TestArtifactGuidance:
-    """ARTIFACT_GUIDANCE is injected only when create_artifact is available."""
+    """The artifact guidance fragment is injected only when create_artifact is available."""
 
     @pytest.fixture
     def tenant(self) -> TenantContext:
@@ -642,11 +643,13 @@ class TestArtifactGuidance:
             tenant=tenant,
             available_tools={"create_artifact", "memory"},
         )
-        assert ARTIFACT_GUIDANCE in pb._tool_guidance_section()
+        guidance = default_library().get("guidance/artifact")
+        assert guidance in pb._tool_guidance_section()
 
     def test_guidance_not_injected_without_tool(self, tenant):
         pb = PromptBuilder(
             tenant=tenant,
             available_tools={"memory"},
         )
-        assert ARTIFACT_GUIDANCE not in pb._tool_guidance_section()
+        guidance = default_library().get("guidance/artifact")
+        assert guidance not in pb._tool_guidance_section()

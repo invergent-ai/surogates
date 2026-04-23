@@ -46,7 +46,7 @@ export const PackageInfoName = ({
   return (
     <div className={cn("flex items-center gap-2", className)} {...props}>
       <PackageIcon className="size-4 text-muted-foreground" />
-      <span className="font-medium font-mono text-sm">{children ?? name}</span>
+      <span className="font-medium  text-sm">{children ?? name}</span>
     </div>
   );
 };
@@ -113,7 +113,7 @@ export const PackageInfoVersion = ({
   return (
     <div
       className={cn(
-        "mt-2 flex items-center gap-2 font-mono text-muted-foreground text-sm",
+        "mt-2 flex items-center gap-2  text-muted-foreground text-sm",
         className
       )}
       {...props}
@@ -231,8 +231,8 @@ export const PackageInfoDependency = ({
   >
     {children ?? (
       <>
-        <span className="font-mono text-muted-foreground">{name}</span>
-        {version && <span className="font-mono text-xs">{version}</span>}
+        <span className=" text-muted-foreground">{name}</span>
+        {version && <span className=" text-xs">{version}</span>}
       </>
     )}
   </div>

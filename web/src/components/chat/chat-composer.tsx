@@ -242,7 +242,7 @@ function ChatComposerInner({
                 }}
                 aria-label="Slash commands"
               >
-                <span className="text-xs font-mono font-bold">/</span>
+                <span className="text-xs  font-bold">/</span>
               </Button>
               {tokenUsage && tokenUsage.contextWindow > 0 && (
                 <Context
@@ -335,7 +335,7 @@ function ChatComposerInner({
                   onSelect={() => handleCommandSelect(cmd.value)}
                   className="grid grid-cols-[6rem_1fr] gap-2 [&_svg]:hidden"
                 >
-                  <span className="font-mono">{cmd.label}</span>
+                  <span className="">{cmd.label}</span>
                   <span className="text-muted-foreground">
                     {cmd.description}
                   </span>

@@ -176,7 +176,14 @@ class SessionStore:
         limit: int = 50,
         offset: int = 0,
     ) -> list[Session]:
-        """Return sessions for a user within an org, scoped to one agent, newest first."""
+        """Return top-level sessions for a user within an org, newest first.
+
+        Delegation children (``parent_id IS NOT NULL``) are excluded --
+        they belong under their parent in the session tree, not as
+        siblings in the main sidebar list.  The tree endpoint
+        (:func:`get_session_tree`) surfaces them when the parent is
+        opened.
+        """
         async with self._sf() as db:
             result = await db.execute(
                 select(SessionRow)
@@ -185,6 +192,7 @@ class SessionStore:
                     SessionRow.user_id == user_id,
                     SessionRow.agent_id == agent_id,
                     SessionRow.status != "archived",
+                    SessionRow.parent_id.is_(None),
                 )
                 .order_by(SessionRow.created_at.desc())
                 .limit(limit)
@@ -748,6 +756,84 @@ class SessionStore:
             result = await db.execute(text(query), params)
             rows = result.mappings().all()
         return [Session.model_validate(dict(r)) for r in rows]
+
+    async def release_stale_lease(self, session_id: UUID) -> bool:
+        """Delete a session's lease row only if it has already expired.
+
+        Unlike :meth:`release_lease`, this does not require the original
+        lease token — used by recovery sweepers that are cleaning up
+        after a dead worker.  The ``expires_at < now()`` guard prevents
+        accidentally kicking a legitimately-held lease if the sweeper
+        runs concurrently with a fresh wake().  Returns True if a row
+        was deleted.
+        """
+        async with self._sf() as db:
+            result = await db.execute(
+                text(
+                    "DELETE FROM session_leases "
+                    "WHERE session_id = :sid AND expires_at < now()"
+                ),
+                {"sid": session_id},
+            )
+            await db.commit()
+            return result.rowcount > 0
+
+    async def find_orphaned_sessions(
+        self,
+        *,
+        stale_seconds: int,
+        agent_id: str | None = None,
+        limit: int = 200,
+    ) -> list[Session]:
+        """Find sessions abandoned by a dead worker.
+
+        Returns sessions that are still ``active`` but whose lease either
+        expired or never existed, AND whose last event landed more than
+        ``stale_seconds`` ago.  These are the telltale signs of a worker
+        that was hard-killed mid-turn (SIGKILL, OOM, debugger stop, pod
+        eviction) — the harness's ``except`` / ``finally`` blocks never
+        ran, so no ``HARNESS_CRASH`` or ``SESSION_FAIL`` landed in the
+        event log and the session sits looking "running" to the UI
+        forever.
+
+        The ``stale_seconds`` threshold must exceed the LLM's longest
+        plausible inter-chunk gap (streaming thinking can pause for
+        tens of seconds on reasoning models) to avoid racing with
+        genuinely slow turns — callers should pick a value well above
+        both the lease TTL and the worker's stream-stale timeout.
+
+        Scoped to a single agent when ``agent_id`` is given so each
+        agent's sweeper runs independently; omit to scan platform-wide.
+
+        ``sessions.updated_at`` is the single staleness signal:
+        :func:`emit_event` bumps it on every event (see
+        ``_build_counter_update_clause``), so an idle ``updated_at``
+        is equivalent to "no events in the window" without the cost
+        of a LATERAL scan of the events table.
+        """
+        stmt = (
+            select(SessionRow)
+            .outerjoin(
+                LeaseRow,
+                (LeaseRow.session_id == SessionRow.id)
+                & (LeaseRow.expires_at > func.now()),
+            )
+            .where(
+                SessionRow.status == "active",
+                LeaseRow.session_id.is_(None),
+                SessionRow.updated_at
+                < func.now() - text(f"make_interval(secs => {int(stale_seconds)})"),
+            )
+            .order_by(SessionRow.updated_at.asc())
+            .limit(limit)
+        )
+        if agent_id:
+            stmt = stmt.where(SessionRow.agent_id == agent_id)
+
+        async with self._sf() as db:
+            result = await db.execute(stmt)
+            rows = result.scalars().all()
+        return [Session.model_validate(r) for r in rows]
 
     async def reset_session(
         self,

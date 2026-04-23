@@ -21,7 +21,7 @@ export function ArtifactToolBlock({ tc }: { tc: ToolCallInfo }) {
       : "Created";
 
   return (
-    <div className="flex items-center gap-1.5 text-sm font-mono">
+    <div className="flex items-center gap-1.5 text-sm ">
       <span className="font-semibold text-foreground">{label}</span>
       {args.name && (
         <span className="text-muted-foreground truncate">{args.name}</span>

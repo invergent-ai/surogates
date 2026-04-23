@@ -680,24 +680,26 @@ class TestPromptBuilderExpertGuidance:
         )
 
     def test_expert_guidance_injected_when_tool_available(self, tenant):
-        from surogates.harness.prompt import EXPERT_GUIDANCE, PromptBuilder
+        from surogates.harness.prompt import PromptBuilder
+        from surogates.harness.prompt_library import default_library
 
         pb = PromptBuilder(
             tenant=tenant,
             available_tools={"consult_expert", "memory"},
         )
         section = pb._tool_guidance_section()
-        assert EXPERT_GUIDANCE in section
+        assert default_library().get("guidance/expert") in section
 
     def test_expert_guidance_not_injected_without_tool(self, tenant):
-        from surogates.harness.prompt import EXPERT_GUIDANCE, PromptBuilder
+        from surogates.harness.prompt import PromptBuilder
+        from surogates.harness.prompt_library import default_library
 
         pb = PromptBuilder(
             tenant=tenant,
             available_tools={"memory"},
         )
         section = pb._tool_guidance_section()
-        assert EXPERT_GUIDANCE not in section
+        assert default_library().get("guidance/expert") not in section
 
     def test_skills_section_separates_experts_from_skills(self, tenant):
         from surogates.harness.prompt import PromptBuilder

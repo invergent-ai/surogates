@@ -17,7 +17,7 @@ export function SessionSearchBlock({ tc }: { tc: ToolCallInfo }) {
   } catch { /* ignore */ }
 
   return (
-    <div className="flex items-center gap-1.5 text-sm font-mono">
+    <div className="flex items-center gap-1.5 text-sm ">
       <span className="font-semibold text-foreground">Session Search</span>
       <span className="text-muted-foreground truncate">{query ? `"${query}"` : ""}</span>
     </div>
@@ -47,7 +47,7 @@ export function WebToolBlock({ tc }: { tc: ToolCallInfo }) {
   }[tc.toolName] ?? tc.toolName;
 
   return (
-    <div className="flex items-center gap-1.5 text-sm font-mono">
+    <div className="flex items-center gap-1.5 text-sm ">
       <span className="font-semibold text-foreground">{toolLabel}</span>
       <span className="text-muted-foreground truncate">{displayText}</span>
     </div>

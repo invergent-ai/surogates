@@ -258,7 +258,7 @@ export function SettingsPage() {
                               {PLATFORM_LABELS[ch.platform] ?? ch.platform}
                             </Badge>
                           </TableCell>
-                          <TableCell className="font-mono">
+                          <TableCell className="">
                             {ch.platform_user_id}
                           </TableCell>
                           <TableCell>

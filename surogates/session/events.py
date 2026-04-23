@@ -53,6 +53,13 @@ class EventType(str, Enum):
     # Harness lifecycle
     HARNESS_WAKE = "harness.wake"
     HARNESS_CRASH = "harness.crash"
+    # Emitted by the orchestrator's orphan sweeper when a session has
+    # been abandoned by a dead worker (no lease, no recent events).
+    # Distinct from HARNESS_CRASH because no exception was actually
+    # raised — the worker was hard-killed (SIGKILL, OOM, pod eviction,
+    # debugger stop) — so this event documents the gap in the log and
+    # triggers the dispatcher's retry path when the session re-wakes.
+    HARNESS_RECOVERED = "harness.recovered"
 
     # Expert delegation
     EXPERT_DELEGATION = "expert.delegation"

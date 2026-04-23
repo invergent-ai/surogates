@@ -242,7 +242,7 @@ function OrphanSystemMarker({
   if (message.systemKind === "skill_invoked") {
     const skill = (message.systemMeta?.skill as string) ?? message.content;
     return (
-      <div className="my-2 flex items-center gap-2 px-4 text-xs text-muted-foreground font-mono">
+      <div className="my-2 flex items-center gap-2 px-4 text-xs text-muted-foreground ">
         <span className="size-2 rounded-full bg-emerald-500" />
         <span>
           <span className="font-semibold text-foreground">Skill</span>
@@ -336,13 +336,13 @@ function TimelineEntryItem({
           <TimelineIndicator className="size-2 border-none bg-emerald-500" />
         </TimelineHeader>
         <TimelineContent>
-          <div className="flex items-center gap-1.5 py-1 text-sm font-mono">
+          <div className="flex items-center gap-1.5 py-1 text-sm ">
             <span className="font-semibold text-foreground">Skill</span>
             <span className="text-muted-foreground truncate">
               {entry.skill}
             </span>
             {entry.stagedAt && (
-              <span className="text-xs text-muted-foreground/70 font-mono">
+              <span className="text-xs text-muted-foreground/70 ">
                 staged at {entry.stagedAt}
               </span>
             )}

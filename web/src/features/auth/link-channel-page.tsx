@@ -203,7 +203,7 @@ export function LinkChannelPage() {
     : "";
 
   return (
-    <div className="font-mono bg-background text-foreground h-screen flex flex-col items-center justify-center overflow-hidden text-sm leading-normal antialiased relative">
+    <div className=" bg-background text-foreground h-screen flex flex-col items-center justify-center overflow-hidden text-sm leading-normal antialiased relative">
       {/* animated grid */}
       <canvas
         ref={canvasRef}

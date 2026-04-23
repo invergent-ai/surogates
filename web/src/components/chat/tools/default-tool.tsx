@@ -21,7 +21,6 @@ export function DefaultToolBlock({ tc }: { tc: ToolCallInfo }) {
         className={cn(
           "flex w-full items-center gap-1.5 rounded-md px-2 py-1",
           "text-sm text-muted-foreground hover:bg-muted/50 transition-colors",
-          "font-mono",
         )}
       >
         <ChevronRightIcon
@@ -34,7 +33,7 @@ export function DefaultToolBlock({ tc }: { tc: ToolCallInfo }) {
       </button>
 
       {expanded && (
-        <div className="ml-6 mt-0.5 space-y-1 text-sm font-mono">
+        <div className="ml-6 mt-0.5 space-y-1 text-sm ">
           <pre className="overflow-x-auto rounded bg-muted/40 px-2 py-1 text-muted-foreground whitespace-pre-wrap break-all">
             {formatArgs(tc.args)}
           </pre>

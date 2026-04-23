@@ -698,7 +698,7 @@ class TestSagaReadOnlyParallel:
 
 class TestCoordinatorPrompt:
     def test_coordinator_guidance_injected(self) -> None:
-        from surogates.harness.prompt import COORDINATOR_GUIDANCE, PromptBuilder
+        from surogates.harness.prompt import PromptBuilder
 
         session = _make_session(config={"coordinator": True})
         tenant = MagicMock()

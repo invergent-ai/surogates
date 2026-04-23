@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from surogates.sandbox.base import SandboxSpec, SandboxStatus
 
@@ -17,6 +17,35 @@ if TYPE_CHECKING:
     from surogates.sandbox.base import Sandbox
 
 logger = logging.getLogger(__name__)
+
+
+def sandbox_session_key(session: Any) -> str:
+    """Return the :class:`SandboxPool` key for *session*.
+
+    Delegation children share their root ancestor's sandbox — the
+    sub-agent is doing part of the parent's work, so giving it a fresh
+    empty workspace defeats the purpose.  Every child of a delegation
+    chain resolves to the *ultimate* root so parents, children, and
+    grandchildren all land on the same pool entry.
+
+    The resolution uses a cached ``sandbox_root_session_id`` that the
+    delegate tool stamps into the child's ``session.config`` at
+    creation time (O(1) lookup with no DB hop).  When the key is
+    absent — either because the session is a root, or because it was
+    created outside the delegate path — we fall back to
+    ``parent_id or session.id``, which covers single-level delegations
+    emitted before the root cache was introduced.
+
+    ``destroy_for_session`` still passes the child's own id (a no-op
+    against the pool when the child never provisioned its own
+    sandbox), so child cleanup leaves the shared workspace intact.
+    """
+    config = getattr(session, "config", None) or {}
+    root = config.get("sandbox_root_session_id")
+    if root:
+        return str(root)
+    parent = getattr(session, "parent_id", None)
+    return str(parent or session.id)
 
 
 class SandboxPool:

@@ -616,8 +616,12 @@ async def execute_single_tool(
         location = TOOL_LOCATIONS.get(tool_name, ToolLocation.SANDBOX)
 
         if location == ToolLocation.SANDBOX and sandbox_pool is not None:
-            # Lazily provision or reuse the session's sandbox.
+            # Lazily provision or reuse the session's sandbox.  Delegation
+            # children share the parent's sandbox (see
+            # :func:`sandbox_session_key`) so the sub-agent can see the
+            # files the parent already produced.
             from surogates.sandbox.base import SandboxSpec, Resource
+            from surogates.sandbox.pool import sandbox_session_key
             sandbox_spec = getattr(tenant, "sandbox_spec", None) or SandboxSpec()
             ws_bucket = session.config.get("workspace_bucket", "")
             if ws_bucket and not any(r.source_ref.startswith("s3://") for r in sandbox_spec.resources):
@@ -631,7 +635,8 @@ async def execute_single_tool(
                 for k, v in get_sandbox_env().items():
                     sandbox_spec.env.setdefault(k, v)
                 sandbox_spec.env["_passthrough_done"] = "1"
-            await sandbox_pool.ensure(str(session.id), sandbox_spec)
+            sandbox_owner = sandbox_session_key(session)
+            await sandbox_pool.ensure(sandbox_owner, sandbox_spec)
             # Dispatch to the sandbox pod — runs the real Python tool handler
             # inside the sandbox via tool-executor.
             if isinstance(tool_args, dict):
@@ -652,7 +657,7 @@ async def execute_single_tool(
             # _trace_context from args before dispatching to the handler.
             # It can use the values for its own structured logging.
             result_content = await sandbox_pool.execute(
-                str(session.id), tool_name, args_str,
+                sandbox_owner, tool_name, args_str,
             )
         else:
             result_content = await tools.dispatch(

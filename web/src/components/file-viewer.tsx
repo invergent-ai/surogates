@@ -84,7 +84,7 @@ export function FileViewer() {
         )}
 
         {file && !isImage && (
-          <pre className="p-3 text-[11px] leading-relaxed font-mono text-foreground whitespace-pre-wrap wrap-break-word">
+          <pre className="p-3 text-[11px] leading-relaxed  text-foreground whitespace-pre-wrap wrap-break-word">
             <code data-language={lang}>{file.content}</code>
           </pre>
         )}

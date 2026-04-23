@@ -166,11 +166,26 @@ async def _delegate_handler(
 
     # Build the child's config — agent def supplies tool filter and
     # policy profile presets; explicit fields (none at the delegate
-    # schema today) would win if present.
+    # schema today) would win if present.  The child inherits the
+    # parent's ``workspace_bucket`` so the sub-agent's sandbox mounts
+    # the same S3 workspace the parent has been writing to — without
+    # this, K8sSandbox gives the child a fresh empty bucket and the
+    # sub-agent can't see any of the files it was asked to work on.
+    # (ProcessSandbox shares via sandbox_session_key instead.)
     child_config: dict[str, Any] = {
         "max_iterations": child_iterations,
         "streaming": False,
     }
+    parent_ws_bucket = parent_session.config.get("workspace_bucket")
+    if parent_ws_bucket:
+        child_config["workspace_bucket"] = parent_ws_bucket
+    # Propagate the ultimate root of the delegation chain so
+    # grandchildren keep landing on the same sandbox as their
+    # grandparent.  Without this, every hop would re-root on its
+    # immediate parent and deep chains would fragment into separate
+    # sandboxes.  See :func:`sandbox_session_key` for the lookup side.
+    parent_root = parent_session.config.get("sandbox_root_session_id")
+    child_config["sandbox_root_session_id"] = str(parent_root or parent_session.id)
     if agent_type:
         child_config["agent_type"] = agent_type
     if agent_def is not None:

@@ -56,7 +56,7 @@ export const CommitHash = ({
   children,
   ...props
 }: CommitHashProps) => (
-  <span className={cn("font-mono text-xs", className)} {...props}>
+  <span className={cn(" text-xs", className)} {...props}>
     <GitCommitIcon className="mr-1 inline-block size-3" />
     {children}
   </span>
@@ -347,7 +347,7 @@ export const CommitFileStatus = ({
 }: CommitFileStatusProps) => (
   <span
     className={cn(
-      "font-medium font-mono text-xs",
+      "font-medium  text-xs",
       fileStatusStyles[status],
       className
     )}
@@ -376,7 +376,7 @@ export const CommitFilePath = ({
   children,
   ...props
 }: CommitFilePathProps) => (
-  <span className={cn("truncate font-mono text-xs", className)} {...props}>
+  <span className={cn("truncate  text-xs", className)} {...props}>
     {children}
   </span>
 );
@@ -390,7 +390,7 @@ export const CommitFileChanges = ({
 }: CommitFileChangesProps) => (
   <div
     className={cn(
-      "flex shrink-0 items-center gap-1 font-mono text-xs",
+      "flex shrink-0 items-center gap-1  text-xs",
       className
     )}
     {...props}

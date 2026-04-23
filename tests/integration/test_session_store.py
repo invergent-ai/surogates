@@ -428,3 +428,146 @@ async def test_advance_cursor_requires_lease(session_store, session_factory):
         await session_store.advance_harness_cursor(
             session.id, eid, fake_token
         )
+
+
+# ---------------------------------------------------------------------------
+# Orphan recovery
+# ---------------------------------------------------------------------------
+
+
+async def test_list_sessions_excludes_delegation_children(
+    session_store, session_factory,
+):
+    """Top-level list hides delegation children — they belong in the tree."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+
+    top = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+    )
+    child = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+        parent_id=top.id, channel="delegation",
+    )
+
+    listed = await session_store.list_sessions(
+        org_id=org_id, user_id=user_id, agent_id="test-agent",
+    )
+    listed_ids = {s.id for s in listed}
+    assert top.id in listed_ids
+    assert child.id not in listed_ids
+
+
+async def test_release_stale_lease_only_touches_expired(
+    session_store, session_factory,
+):
+    """release_stale_lease clears an expired row but refuses a live one."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+    )
+
+    # Live lease — release_stale_lease must NOT touch it.
+    live = await session_store.try_acquire_lease(
+        session.id, "worker-alive", ttl_seconds=30,
+    )
+    assert live is not None
+    assert await session_store.release_stale_lease(session.id) is False
+    # Live lease really still prevents anyone else from grabbing it.
+    assert await session_store.try_acquire_lease(
+        session.id, "worker-thief", ttl_seconds=30,
+    ) is None
+
+    # Replace with a short-lived lease and let it expire.
+    await session_store.release_lease(session.id, live.lease_token)
+    await session_store.try_acquire_lease(
+        session.id, "worker-alive", ttl_seconds=1,
+    )
+    await asyncio.sleep(1.5)
+
+    # Expired lease — release_stale_lease drops it, and a new acquire
+    # now succeeds with a fresh owner.
+    assert await session_store.release_stale_lease(session.id) is True
+    fresh = await session_store.try_acquire_lease(
+        session.id, "worker-new", ttl_seconds=30,
+    )
+    assert fresh is not None
+    assert fresh.owner_id == "worker-new"
+
+
+async def test_find_orphaned_sessions(session_store, session_factory):
+    """find_orphaned_sessions flags sessions whose worker died silently."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+
+    # Orphan: active, no lease, no events inside the stale window.  We
+    # backdate updated_at so the threshold test can use a small value.
+    orphan = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="agent-a",
+    )
+    await _backdate(session_factory, orphan.id, seconds=120)
+
+    # Not an orphan: has a live lease (healthy worker).
+    healthy = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="agent-a",
+    )
+    await _backdate(session_factory, healthy.id, seconds=120)
+    await session_store.try_acquire_lease(
+        healthy.id, "worker-live", ttl_seconds=60,
+    )
+
+    # Not an orphan: recently updated (worker probably still streaming).
+    recent = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="agent-a",
+    )
+
+    # Not an orphan: already terminal — don't re-queue completed work.
+    done = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="agent-a",
+    )
+    await session_store.update_session_status(done.id, "completed")
+    await _backdate(session_factory, done.id, seconds=120)
+
+    found = await session_store.find_orphaned_sessions(
+        stale_seconds=60, agent_id="agent-a",
+    )
+    found_ids = {s.id for s in found}
+    assert orphan.id in found_ids
+    assert healthy.id not in found_ids
+    assert recent.id not in found_ids
+    assert done.id not in found_ids
+
+    # Scoped by agent_id: orphan on a different agent is not returned.
+    other_orphan = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="agent-b",
+    )
+    await _backdate(session_factory, other_orphan.id, seconds=120)
+    found_a = await session_store.find_orphaned_sessions(
+        stale_seconds=60, agent_id="agent-a",
+    )
+    assert other_orphan.id not in {s.id for s in found_a}
+
+    # Without agent_id, both orphans appear.
+    found_all = await session_store.find_orphaned_sessions(stale_seconds=60)
+    found_all_ids = {s.id for s in found_all}
+    assert orphan.id in found_all_ids
+    assert other_orphan.id in found_all_ids
+
+
+async def _backdate(session_factory, session_id, *, seconds: int) -> None:
+    """Test helper: push a session's updated_at into the past.
+
+    Needed because the freshly-created row has ``updated_at = now()`` and
+    we can't wait the full stale window in a test run.
+    """
+    from sqlalchemy import text
+    async with session_factory() as db:
+        await db.execute(
+            text(
+                "UPDATE sessions SET updated_at = now() - "
+                "make_interval(secs => :s) WHERE id = :sid"
+            ),
+            {"s": seconds, "sid": session_id},
+        )
+        await db.commit()
