@@ -291,6 +291,47 @@ function OrphanSystemMarker({
   return null;
 }
 
+// ── Cancelled tool row (parallel-batch sibling-error cancellation) ──
+
+function cancelledToolLabel(toolName: string): string {
+  const map: Record<string, string> = {
+    terminal: "Command",
+    execute_code: "Execute Code",
+    read_file: "Read",
+    write_file: "Write",
+    patch: "Patch",
+    search_files: "Search Files",
+    list_files: "List Files",
+    web_search: "Web Search",
+    web_extract: "Web Fetch",
+    web_crawl: "Web Crawl",
+    session_search: "Session Search",
+    memory: "Memory",
+    todo: "Todo",
+    skills_list: "Skills",
+    skill_view: "Skill",
+    consult_expert: "Expert",
+    delegate_task: "Delegate",
+    clarify: "Clarify",
+    process: "Process",
+    create_artifact: "Artifact",
+  };
+  return map[toolName] ?? toolName;
+}
+
+function CancelledToolRow({ tc }: { tc: ToolCallInfo }) {
+  return (
+    <div className="flex items-center gap-1.5 text-sm">
+      <span className="font-semibold text-muted-foreground">
+        {cancelledToolLabel(tc.toolName)}
+      </span>
+      <span className="text-muted-foreground/70">
+        Cancelled
+      </span>
+    </div>
+  );
+}
+
 // ── Timeline entry renderer ──────────────────────────────────────────
 
 function TimelineEntryItem({
@@ -331,7 +372,11 @@ function TimelineEntryItem({
           />
         </TimelineHeader>
         <TimelineContent>
-          <ToolCallBlock tc={entry.tc} onFileSelect={onFileSelect} />
+          {entry.tc.cancelled ? (
+            <CancelledToolRow tc={entry.tc} />
+          ) : (
+            <ToolCallBlock tc={entry.tc} onFileSelect={onFileSelect} />
+          )}
         </TimelineContent>
       </TimelineItem>
     );

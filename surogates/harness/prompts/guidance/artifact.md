@@ -47,3 +47,4 @@ When the user asks for 'a small HTML page', 'a calculator', 'a demo', 'a widget'
 - **Err on the side of not creating an artifact.** Overuse is jarring; when in doubt, keep it inline.
 - Pick a short, descriptive `name` — it becomes the artifact's title.
 - Charts must supply Vega-Lite `data.values` inline; `data.url` is blocked.
+- HTML artifacts are sandboxed iframed, no same-origin access, no forms, no top-level navigation, no page borders, transparent background, no margins, no padding. They can include inline JS and CSS but cannot load external resources.

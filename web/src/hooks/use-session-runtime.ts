@@ -63,6 +63,10 @@ export interface ToolCallInfo {
     answer: string;
     is_other: boolean;
   }>;
+  // True when the parallel tool executor cancelled this call because a
+  // sibling in the same batch failed.  The tool handler never ran, so
+  // the renderer shows a compact cancelled row instead of a tool body.
+  cancelled?: boolean;
 }
 
 export interface TokenUsage {
@@ -488,11 +492,19 @@ export function useSessionRuntime(sessionId: string | null) {
                 typeof resultContent === "string"
                   ? resultContent
                   : JSON.stringify(resultContent ?? null);
+              const isCancelled =
+                data.cancelled === true ||
+                formattedResult === "[cancelled (sibling error)]";
               next[matchIdx] = {
                 ...matchMsg,
                 toolCalls: matchMsg.toolCalls!.map((t) =>
                   t.id === targetId
-                    ? { ...t, result: formattedResult, status: "complete" as const }
+                    ? {
+                        ...t,
+                        result: formattedResult,
+                        status: isCancelled ? ("error" as const) : ("complete" as const),
+                        cancelled: isCancelled || undefined,
+                      }
                     : t,
                 ),
               };

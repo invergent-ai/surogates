@@ -7,17 +7,26 @@
  * Map a tool-call status to a Tailwind background-color class for use
  * as a TimelineIndicator color.
  */
-export function statusColorClass(status: "running" | "complete" | "error"): string {
+export function statusColorClass(status: ToolStatus): string {
   if (status === "running") return "bg-primary animate-pulse";
   if (status === "error") return "bg-red-500";
+  if (status === "cancelled") return "bg-muted-foreground/40";
   return "bg-emerald-500";
 }
 
+export type ToolStatus = "running" | "complete" | "error" | "cancelled";
+
 /**
- * Derive the effective status from a tool call by inspecting the result
- * for error indicators (non-zero exit code, error field, blocked status).
+ * Derive the effective status from a tool call.  Cancelled siblings
+ * (parallel-batch cancellations) are distinguished from genuine errors
+ * so the timeline dot reads as muted rather than red.
  */
-export function effectiveStatus(tc: { status: "running" | "complete" | "error"; result?: string }): "running" | "complete" | "error" {
+export function effectiveStatus(tc: {
+  status: "running" | "complete" | "error";
+  result?: string;
+  cancelled?: boolean;
+}): ToolStatus {
+  if (tc.cancelled) return "cancelled";
   if (tc.status !== "complete" || !tc.result) return tc.status;
   try {
     const parsed = JSON.parse(tc.result);

@@ -6,7 +6,7 @@
 // renders; the event carries only metadata.
 
 import { lazy, Suspense, useEffect, useState } from "react";
-import { CheckIcon, CopyIcon, DownloadIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, DownloadIcon, Maximize2Icon } from "lucide-react";
 import {
   Artifact,
   ArtifactAction,
@@ -17,6 +17,13 @@ import {
   ArtifactTitle,
 } from "@/components/ai-elements/artifact";
 import { Shimmer } from "@/components/ai-elements/shimmer";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { getArtifact } from "@/api/artifacts";
 import type { ArtifactKind, ArtifactPayload } from "@/types/session";
 import { ArtifactMarkdown } from "./artifact-markdown";
@@ -65,6 +72,7 @@ export function ArtifactBlock({
   const [payload, setPayload] = useState<ArtifactPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -100,46 +108,70 @@ export function ArtifactBlock({
     downloadText(`${safeFilename(name)}.${extension}`, text, mime);
   };
 
+  const description = error ?? (payload ? KIND_LABEL[kind] : "Loading…");
+
   return (
-    <Artifact className="my-2 w-full border-border">
-      <ArtifactHeader>
-        <div className="flex min-w-0 flex-col">
-          <ArtifactTitle className="truncate">{name}</ArtifactTitle>
-          <ArtifactDescription>
-            {error ?? (payload ? KIND_LABEL[kind] : "Loading…")}
-          </ArtifactDescription>
-        </div>
-        <ArtifactActions>
-          <ArtifactAction
-            tooltip={copied ? "Copied!" : "Copy"}
-            label="Copy artifact"
-            icon={copied ? CheckIcon : CopyIcon}
-            disabled={!payload}
-            onClick={handleCopy}
-            className={copied ? "text-emerald-500 hover:text-emerald-500" : ""}
-          />
-          <ArtifactAction
-            tooltip="Download"
-            label="Download artifact"
-            icon={DownloadIcon}
-            disabled={!payload}
-            onClick={handleDownload}
-          />
-        </ArtifactActions>
-      </ArtifactHeader>
-      <ArtifactContent>
-        <ArtifactBody error={error} payload={payload} />
-      </ArtifactContent>
-    </Artifact>
+    <>
+      <Artifact className="my-2 w-full overflow-visible border-border">
+        <ArtifactHeader>
+          <div className="flex min-w-0 flex-col">
+            <ArtifactTitle className="truncate">{name}</ArtifactTitle>
+            <ArtifactDescription>{description}</ArtifactDescription>
+          </div>
+          <ArtifactActions>
+            <ArtifactAction
+              tooltip={copied ? "Copied!" : "Copy"}
+              label="Copy artifact"
+              icon={copied ? CheckIcon : CopyIcon}
+              disabled={!payload}
+              onClick={handleCopy}
+              className={
+                copied ? "text-emerald-500 hover:text-emerald-500" : ""
+              }
+            />
+            <ArtifactAction
+              tooltip="Download"
+              label="Download artifact"
+              icon={DownloadIcon}
+              disabled={!payload}
+              onClick={handleDownload}
+            />
+            <ArtifactAction
+              tooltip="Full screen"
+              label="Open artifact in full screen"
+              icon={Maximize2Icon}
+              disabled={!payload}
+              onClick={() => setExpanded(true)}
+            />
+          </ArtifactActions>
+        </ArtifactHeader>
+        <ArtifactContent className="p-0 overflow-visible">
+          <ArtifactBody error={error} payload={payload} />
+        </ArtifactContent>
+      </Artifact>
+      <Dialog open={expanded} onOpenChange={setExpanded}>
+        <DialogContent className="flex h-[95vh] w-[95vw] max-w-[95vw] flex-col gap-4 overflow-hidden p-6 sm:max-w-[95vw]">
+          <DialogHeader>
+            <DialogTitle className="truncate pr-10">{name}</DialogTitle>
+            <DialogDescription>{description}</DialogDescription>
+          </DialogHeader>
+          <div className="flex min-h-0 flex-1 flex-col overflow-auto">
+            <ArtifactBody error={error} payload={payload} fill />
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
 function ArtifactBody({
   error,
   payload,
+  fill = false,
 }: {
   error: string | null;
   payload: ArtifactPayload | null;
+  fill?: boolean;
 }) {
   if (error) {
     return <p className="text-sm text-destructive">{error}</p>;
@@ -169,7 +201,7 @@ function ArtifactBody({
         </Suspense>
       );
     case "html":
-      return <ArtifactHtml spec={payload.spec} />;
+      return <ArtifactHtml spec={payload.spec} fill={fill} />;
     case "svg":
       return <ArtifactSvg spec={payload.spec} />;
   }

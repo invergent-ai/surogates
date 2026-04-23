@@ -22,7 +22,13 @@ const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 2;
 const ZOOM_STEP = 0.1;
 
-export function ArtifactHtml({ spec }: { spec: HtmlArtifactSpec }) {
+export function ArtifactHtml({
+  spec,
+  fill = false,
+}: {
+  spec: HtmlArtifactSpec;
+  fill?: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
   const [zoom, setZoom] = useState(1);
 
@@ -31,30 +37,39 @@ export function ArtifactHtml({ spec }: { spec: HtmlArtifactSpec }) {
     Math.round(Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v)) * 100) / 100;
 
   return (
-    <div className="flex flex-col gap-2">
+    <div
+      className={cn(
+        "flex flex-col gap-2",
+        fill && "h-full min-h-0",
+      )}
+    >
       <div
-        className="w-full overflow-hidden rounded-md border border-border bg-white"
-        style={{ height: `${viewportHeight}px` }}
+        className={cn("w-full overflow-hidden", fill && "min-h-0 flex-1")}
+        style={fill ? undefined : { height: `${viewportHeight}px` }}
       >
         <iframe
           title="artifact-html"
           srcDoc={spec.html}
           sandbox="allow-scripts"
-          className={cn("border-0 bg-white")}
-          style={{
-            // Keep width at 100% so the HTML's responsive CSS doesn't
-            // reflow as the user zooms.  Browsers resolve percentage
-            // widths against the parent after zoom, so this stays full
-            // width regardless of zoom.  Pixel heights *are* scaled by
-            // zoom, so compensate: at zoom 0.5 we set 960px which
-            // renders as 480px (no empty space below), and the inner
-            // viewport gets 960px of vertical room to show more
-            // content.  At zoom 1.5 the inner viewport shrinks to
-            // 320px and the iframe's own scrollbar handles overflow.
-            width: "100%",
-            height: `${viewportHeight / zoom}px`,
-            zoom,
-          }}
+          className={cn("border-0", fill && "h-full w-full")}
+          style={
+            fill
+              ? { zoom }
+              : {
+                  // Keep width at 100% so the HTML's responsive CSS doesn't
+                  // reflow as the user zooms.  Browsers resolve percentage
+                  // widths against the parent after zoom, so this stays full
+                  // width regardless of zoom.  Pixel heights *are* scaled by
+                  // zoom, so compensate: at zoom 0.5 we set 960px which
+                  // renders as 480px (no empty space below), and the inner
+                  // viewport gets 960px of vertical room to show more
+                  // content.  At zoom 1.5 the inner viewport shrinks to
+                  // 320px and the iframe's own scrollbar handles overflow.
+                  width: "100%",
+                  height: `${viewportHeight / zoom}px`,
+                  zoom,
+                }
+          }
         />
       </div>
       <div className="flex items-center justify-between">
@@ -86,14 +101,18 @@ export function ArtifactHtml({ spec }: { spec: HtmlArtifactSpec }) {
           >
             +
           </button>
-          <span className="text-border">|</span>
-          <button
-            type="button"
-            onClick={() => setExpanded((v) => !v)}
-            className="hover:text-foreground"
-          >
-            {expanded ? "collapse" : "expand"}
-          </button>
+          {!fill && (
+            <>
+              <span className="text-border">|</span>
+              <button
+                type="button"
+                onClick={() => setExpanded((v) => !v)}
+                className="hover:text-foreground"
+              >
+                {expanded ? "collapse" : "expand"}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>
