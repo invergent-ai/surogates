@@ -17,6 +17,7 @@ import { SkillsListBlock, SkillViewBlock } from "./tools/skill-tools";
 import { ClarifyToolBlock } from "./tools/clarify-tool";
 import { ArtifactToolBlock } from "./tools/artifact-tool";
 import { DelegateToolBlock } from "./tools/delegate-tool";
+import { MemoryToolBlock } from "./tools/memory-tool";
 import { DefaultToolBlock } from "./tools/default-tool";
 
 export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSelect?: (path: string) => void }) {
@@ -73,6 +74,9 @@ export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSe
 
     case "delegate_task":
       return <DelegateToolBlock tc={tc} />;
+
+    case "memory":
+      return <MemoryToolBlock tc={tc} />;
 
     default:
       return <DefaultToolBlock tc={tc} />;
