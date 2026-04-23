@@ -58,6 +58,7 @@ from surogates.harness.slash_skill import expand_slash_skill
 from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
 from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.tool_exec import execute_tool_calls
+from surogates.harness.tool_schemas import filter_schemas_for_tenant
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import EventType
 
@@ -774,7 +775,10 @@ class AgentHarness:
                 excluded.update(WORKER_EXCLUDED_TOOLS)
                 tool_filter = self._tools.tool_names - excluded
 
-            tool_schemas = self._tools.get_schemas(names=tool_filter)
+            tool_schemas = filter_schemas_for_tenant(
+                self._tools.get_schemas(names=tool_filter),
+                has_agents=self._prompt.has_agents,
+            )
 
             # Build the message list: system → prefill → memory → conversation.
             # Each message is cleaned for API compatibility: internal-only fields are stripped, reasoning

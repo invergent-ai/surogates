@@ -106,6 +106,7 @@ class PromptBuilder:
         self._available_agents: list[AgentDef] = [
             a for a in (available_agents or []) if a.enabled
         ]
+        self.has_agents: bool = bool(self._available_agents)
         # Cached rendered "# Available Sub-Agents" block.  The catalog
         # is immutable per builder and every description flows through
         # the regex injection scanner, so rendering once and reusing
