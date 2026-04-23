@@ -22,7 +22,7 @@ from typing import Any, Optional
 from surogates.harness.model_metadata import (
     ModelInfo,
     estimate_tokens,
-    get_model_info,
+    resolve_model_info,
 )
 
 logger = logging.getLogger(__name__)
@@ -105,9 +105,29 @@ class ContextCompressor:
         summary_target_ratio: float = 0.20,
         quiet_mode: bool = False,
         summary_model_override: str | None = None,
+        base_url: str = "",
+        api_key: str = "",
+        model_overrides: dict[str, dict] | None = None,
     ) -> None:
         self._model_id = model_id
-        info: ModelInfo | None = get_model_info(model_id)
+        info: ModelInfo | None = resolve_model_info(
+            model_id,
+            base_url=base_url,
+            api_key=api_key,
+            overrides=model_overrides,
+        )
+        if info is None and not quiet_mode:
+            # Fallback is a correctness hazard — the compressor will
+            # under- or over-compact relative to the real window.  Warn
+            # so operators can add a config override rather than
+            # silently running with a default.
+            logger.warning(
+                "Model %r not found in the static catalog, provider /models "
+                "discovery, or config overrides — falling back to %d-token "
+                "context window.  Add llm.models.%s.context_window in "
+                "config.yaml to set the correct value.",
+                model_id, _DEFAULT_CONTEXT_WINDOW, model_id,
+            )
         self.context_length: int = info.context_window if info else _DEFAULT_CONTEXT_WINDOW
 
         self.threshold_percent = threshold_percent

@@ -193,6 +193,81 @@ def get_model_info(model_id: str) -> ModelInfo | None:
     return None
 
 
+def resolve_model_info(
+    model_id: str,
+    *,
+    base_url: str = "",
+    api_key: str = "",
+    overrides: dict[str, dict] | None = None,
+) -> ModelInfo | None:
+    """Resolve :class:`ModelInfo` using the full fallback chain.
+
+    Precedence (first match wins):
+
+    1. ``overrides`` — a ``{model_id: {context_window, max_output_tokens}}``
+       map sourced from operator config.  Applied on top of whatever the
+       catalog or provider reports, so operators can correct a single
+       field (e.g., context window) without re-stating pricing.
+    2. Static catalog (:data:`MODEL_CATALOG`) + its aliases.  Human-curated
+       pricing and capability flags.
+    3. Provider discovery via :mod:`surogates.harness.model_discovery` —
+       a one-shot lazy fetch of ``{base_url}/models`` that covers every
+       model the provider routes (OpenRouter, LM Studio, vLLM, etc.).
+
+    Returns ``None`` when every source comes up empty.  Callers are
+    expected to warn and fall back to a safe default; we don't fabricate
+    a :class:`ModelInfo` here because doing so hides the configuration
+    gap from the operator.
+    """
+    from dataclasses import replace
+
+    override = (overrides or {}).get(model_id)
+    base: ModelInfo | None = None
+
+    # 2. Static catalog first — it's the authoritative source for any
+    # model it knows about.  We still apply override fields (if any) on
+    # top, so operators can tweak without replacing the whole record.
+    base = get_model_info(model_id)
+
+    # 3. Provider discovery — only consulted when the static catalog
+    # misses.  Importing at call time keeps ``model_metadata`` usable
+    # without a transitive httpx dependency (tests / minimal runtimes).
+    if base is None and base_url:
+        from surogates.harness.model_discovery import discover_model
+        base = discover_model(model_id, base_url=base_url, api_key=api_key)
+
+    # 1. Apply override last so it wins over both sources above.
+    if override:
+        if base is None:
+            # Build a skeleton the override can layer onto.  Pricing
+            # defaults to 0.0 and capability flags default to the
+            # safest assumption (no tools / vision) — callers can
+            # override those explicitly if they care.
+            base = ModelInfo(
+                id=model_id,
+                context_window=0,
+                max_output_tokens=0,
+                input_cost_per_1k=0.0,
+                output_cost_per_1k=0.0,
+                supports_tools=True,
+                supports_vision=False,
+                supports_streaming=True,
+            )
+        updates: dict = {}
+        if "context_window" in override:
+            updates["context_window"] = int(override["context_window"])
+        if "max_output_tokens" in override:
+            updates["max_output_tokens"] = int(override["max_output_tokens"])
+        if "input_cost_per_1k" in override:
+            updates["input_cost_per_1k"] = float(override["input_cost_per_1k"])
+        if "output_cost_per_1k" in override:
+            updates["output_cost_per_1k"] = float(override["output_cost_per_1k"])
+        if updates:
+            base = replace(base, **updates)
+
+    return base
+
+
 # ---------------------------------------------------------------------------
 # Estimation helpers
 # ---------------------------------------------------------------------------

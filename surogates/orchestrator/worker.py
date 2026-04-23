@@ -229,7 +229,12 @@ async def run_worker(settings: Settings) -> None:
 
         model_id = settings.llm.model or "gpt-4o"
         budget = IterationBudget(max_total=90)
-        compressor = ContextCompressor(model_id)
+        compressor = ContextCompressor(
+            model_id,
+            base_url=settings.llm.base_url,
+            api_key=settings.llm.api_key,
+            model_overrides=settings.llm.models,
+        )
 
         # User-scoped memory dir for interactive sessions, org-shared
         # memory dir for service-account sessions (no per-user context

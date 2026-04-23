@@ -186,6 +186,19 @@ class LLMSettings(BaseSettings):
     # Configured via config.yaml only
     credential_pool: list[dict[str, Any]] = Field(default_factory=list)
 
+    # Per-model metadata overrides.  Keyed by model id; values are dicts
+    # accepting ``context_window`` and ``max_output_tokens``.  Takes
+    # precedence over both the static catalog and provider /models
+    # discovery, so operators have a deterministic escape hatch when a
+    # provider reports the wrong number or lists no pricing at all.
+    # Example (config.yaml):
+    #   llm:
+    #     models:
+    #       minimax/minimax-m2.7:
+    #         context_window: 204800
+    #         max_output_tokens: 4096
+    models: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
 
 class SandboxSettings(BaseSettings):
     """Sandbox execution environment configuration.
