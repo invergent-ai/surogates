@@ -653,3 +653,31 @@ class TestArtifactGuidance:
         )
         guidance = default_library().get("guidance/artifact")
         assert guidance not in pb._tool_guidance_section()
+
+    def test_worker_wires_registry_tool_names_into_builder(self, tenant):
+        """Regression: production worker must pass ``tool_registry.tool_names``
+        to PromptBuilder so tool-aware guidance fragments reach the system
+        prompt.  Until session cbf414ac…e1362a1 made it visible, the worker
+        constructed the builder with no ``available_tools`` and every
+        tool-gated guidance fragment (artifact, memory, skills, expert,
+        session_search, tool_use_enforcement) was silently dropped for
+        every model on every session.
+        """
+        from surogates.tools.registry import ToolRegistry
+        from surogates.tools.runtime import ToolRuntime
+
+        registry = ToolRegistry()
+        ToolRuntime(registry).register_builtins()
+        assert "create_artifact" in registry.tool_names, (
+            "registry must advertise create_artifact for this regression "
+            "test to be meaningful"
+        )
+
+        pb = PromptBuilder(
+            tenant=tenant,
+            available_tools=set(registry.tool_names),
+        )
+        section = pb._tool_guidance_section()
+        assert default_library().get("guidance/artifact") in section
+        assert default_library().get("guidance/memory") in section
+        assert default_library().get("guidance/skills") in section

@@ -37,8 +37,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Model name substrings that trigger the tool-use enforcement fragment.
+# These models exhibit a "narrate the action instead of executing it"
+# pattern (e.g. "I will now create an artifact" followed by end-of-turn
+# with no tool call) often enough that the enforcement fragment pays for
+# itself in prompt budget.  Claude and DeepSeek are *not* listed because
+# they reliably execute promised actions without the nag.
 TOOL_USE_ENFORCEMENT_MODELS: tuple[str, ...] = (
-    "gpt", "codex", "gemini", "gemma", "grok",
+    "gpt", "codex", "gemini", "gemma", "grok", "moonshot", "kimi",
 )
 
 # Maximum bytes to read from any single memory/skill file.

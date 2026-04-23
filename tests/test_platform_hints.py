@@ -146,6 +146,17 @@ class TestModelGuidance:
         prompt = builder.build()
         assert "Tool-use enforcement" in prompt
 
+    def test_kimi_gets_enforcement(self, tmp_path: Path):
+        # Added after session cbf414ac…e1362a1 where Kimi promised to
+        # "offer an HTML artifact" and ended the turn without a tool call.
+        tenant = _make_tenant(
+            tmp_path,
+            org_config={"agent_name": "Bot", "default_model": "moonshotai/kimi-k2.6"},
+        )
+        builder = PromptBuilder(tenant, available_tools={"terminal", "create_artifact"})
+        prompt = builder.build()
+        assert "Tool-use enforcement" in prompt
+
 
 # ---------------------------------------------------------------------------
 # Developer role routing

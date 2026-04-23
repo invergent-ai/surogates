@@ -275,6 +275,12 @@ async def run_worker(settings: Settings) -> None:
             memory_manager=memory_manager,
             session=session,
             available_agents=available_agents,
+            # The builder gates tool-aware guidance fragments (artifact,
+            # memory, skills, expert, session_search, tool_use_enforcement)
+            # on membership in ``available_tools``.  Passing the registry's
+            # live tool set keeps those fragments in the system prompt
+            # instead of silently stripping them.
+            available_tools=set(tool_registry.tool_names),
         )
 
         # Interactive sessions get a regular user access token;
