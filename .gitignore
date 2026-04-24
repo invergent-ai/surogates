@@ -31,3 +31,4 @@ dist/**
 .dev/
 config.dev.yaml
 .venv/
+node_modules/**

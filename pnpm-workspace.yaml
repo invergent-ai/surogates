@@ -1,0 +1,4 @@
+packages:
+  - 'sdk/*'
+# The 'web/' SPA keeps its existing npm tooling and is deliberately not
+# part of this workspace -- migrating it would churn unrelated files.
