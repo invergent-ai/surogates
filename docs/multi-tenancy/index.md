@@ -108,6 +108,39 @@ Sensitive values (API keys, OAuth secrets, LLM provider tokens) are stored encry
 
 Credentials are never exposed to sandboxes. The MCP proxy fetches credentials from the vault and injects them into outbound requests.
 
+## Agent Identity (`SOUL.md`)
+
+Each tenant can define the agent's persona, voice, and identity via a `SOUL.md` file in the tenant's asset bucket. The harness loads it at session start and injects it into the system prompt under the heading `## Agent Identity (SOUL.md)`.
+
+**Location** (first match wins):
+
+```
+tenant-{org_id}/
+  shared/SOUL.md         # preferred
+  SOUL.md                # fallback
+```
+
+Loaded by `surogates.harness.context_files.load_soul_md` and assembled into the prompt by `PromptBuilder._build_context_files`.
+
+**Scope.** Org-wide only. There is no per-user `SOUL.md`; per-user personalization belongs in `users/{user_id}/memory/USER.md`. `SOUL.md` defines *who the agent is for this org*; `USER.md` records *what the agent knows about a specific user*.
+
+**Safety.** Content passes through `scan_context_content` (12 prompt-injection patterns -- jailbreak phrases, hidden-instruction markers, role-override attempts, invisible unicode) and is truncated by `truncate_context` before injection. Detected injections are stripped, not silently passed through.
+
+**Example.**
+
+```markdown
+# Acme Support Agent
+
+You are the Acme Corp customer support assistant. You speak in the first
+person plural ("we") when referring to Acme. You never disclose internal
+ticket IDs to users. When a request is outside support scope, you offer
+to escalate to a human agent rather than guessing.
+
+Tone: warm, concise, technically literate. Avoid corporate boilerplate.
+```
+
+`SOUL.md` is optional -- if absent, no identity block is added to the prompt.
+
 ## Channel Identity Mapping
 
 ```
