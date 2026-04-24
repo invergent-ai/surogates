@@ -73,6 +73,9 @@ class Org(Base):
     service_accounts: Mapped[list[ServiceAccount]] = relationship(
         back_populates="org", lazy="raise"
     )
+    website_agents: Mapped[list[WebsiteAgent]] = relationship(
+        back_populates="org", lazy="raise"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -730,4 +733,108 @@ class McpServer(Base):
     org: Mapped[Org] = relationship(back_populates="mcp_servers", lazy="raise")
     user: Mapped[Optional[User]] = relationship(
         back_populates="mcp_servers", lazy="raise"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Website agents -- public-website channel configuration
+# ---------------------------------------------------------------------------
+
+
+class WebsiteAgent(Base):
+    """Configuration for a public-website embed of the agent.
+
+    Each row corresponds to one named agent an org admin has provisioned
+    for embedding on a public website (e.g. a support bot).  The row
+    carries the CORS allow-list, the publishable key (stored hashed) the
+    embed presents on bootstrap, the tool allow-list the anonymous
+    visitor may invoke, and per-session caps.  Visitors are anonymous —
+    no :class:`User` row exists for them; identity is the server-side
+    session cookie alone.
+
+    The publishable key is safe to ship to the browser: its authority is
+    only recognised together with an ``Origin`` header in
+    :attr:`allowed_origins`.  A stolen key used from a different origin
+    is rejected.
+    """
+
+    __tablename__ = "website_agents"
+    __table_args__ = (
+        Index("idx_website_agents_org", "org_id"),
+        # Unique publishable-key hash so token lookups are O(1) and every
+        # key globally identifies exactly one agent row.
+        Index(
+            "uq_website_agents_publishable_key",
+            "publishable_key_hash",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # SHA-256 hex digest of the raw publishable key.  Raw key never hits
+    # the database; the admin route returns it once on creation.
+    publishable_key_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    # Display-safe prefix (e.g. "surg_wk_abcd…") for UIs.
+    publishable_key_prefix: Mapped[str] = mapped_column(Text, nullable=False)
+    # Exact-match origin allow-list (scheme + host + port, no wildcards).
+    # Browser-origin validation uses this list on both CORS preflight and
+    # on every message/events request; the cookie JWT also binds one
+    # origin on issue so a stolen cookie cannot be reused cross-origin.
+    allowed_origins: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    # Subset of registered tools this agent's visitors may invoke.  A
+    # non-empty list enforces strict membership -- any tool outside it
+    # is rejected by ``execute_single_tool`` in ``harness/tool_exec.py``
+    # before dispatch, with a ``policy.denied`` event and an error tool
+    # result.  An empty list means "no per-session restriction" and
+    # falls back to the platform-wide governance rules; ops should set
+    # an explicit list for every website agent, because the default
+    # platform rules are calibrated for authenticated users, not
+    # anonymous website visitors.
+    tool_allow_list: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    # Body prepended to the harness system prompt for visitor sessions.
+    # Populated at session bootstrap onto ``session.config.system_prompt``
+    # so the harness doesn't need a live DB lookup on every wake.
+    system_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    model: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Names of skills to pin into every session started from this agent.
+    skill_pins: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    # Per-session caps; the worker enforces these before enqueuing more
+    # work on the session.  0 means "no cap".
+    session_message_cap: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    session_token_cap: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    # Idle minutes before the session is auto-reset; kept distinct from
+    # the platform default so high-traffic embeds can tune retention.
+    session_idle_minutes: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="30"
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    # Relationships
+    org: Mapped[Org] = relationship(
+        back_populates="website_agents", lazy="raise"
     )
