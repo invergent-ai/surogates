@@ -394,15 +394,21 @@ async def flush_and_reset_session(
     org_id = session.org_id
     reset_settings = settings.session_reset
 
-    # API-channel sessions are owned by a service account, not a user, and
-    # carry no per-user memory to flush.  Reset them in place without running
+    # Anonymous-principal sessions (API channel service accounts,
+    # website channel visitors) have no :class:`User` row and therefore
+    # no per-user memory to flush.  Reset them in place without running
     # the flush agent.
     if user_id is None:
         logger.info(
-            "Resetting service-account session %s (channel=%s) without memory flush",
+            "Resetting anonymous-principal session %s (channel=%s) without memory flush",
             session_id, session.channel,
         )
-        await session_store.reset_session(session_id, reason="idle_service_account")
+        reason = (
+            "idle_website_visitor"
+            if session.channel == "website"
+            else "idle_service_account"
+        )
+        await session_store.reset_session(session_id, reason=reason)
         return True
 
     logger.info(

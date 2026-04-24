@@ -55,9 +55,15 @@ logger = logging.getLogger(__name__)
 _PROTECTED_PATH_PREFIXES: tuple[str, ...] = ("/v1/",)
 
 # API subpaths that are exempt from auth even though they live under /v1.
+# The website channel routes authenticate anonymous visitors with a
+# publishable key (bootstrap) or a signed session cookie (follow-up
+# requests); neither is shaped as an ``Authorization: Bearer`` JWT, so
+# they must bypass this middleware entirely.  The route handlers under
+# ``/v1/website/*`` do their own origin + CSRF enforcement.
 _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/v1/auth/",
     "/v1/transparency",
+    "/v1/website/",
 )
 
 # Path prefix for routes that service-account tokens are allowed to hit.

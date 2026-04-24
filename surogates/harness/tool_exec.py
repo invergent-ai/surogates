@@ -573,6 +573,52 @@ async def execute_single_tool(
                 },
             )
 
+    # --- Session tool allow-list check ---
+    # When the session config declares a ``tool_allow_list`` (the
+    # website channel sets this from the website_agents row at
+    # bootstrap), any tool outside the list is rejected before
+    # dispatch.  A missing or empty list means "no per-session
+    # restriction"; a non-empty list enforces strict membership.
+    # We emit ``policy.denied`` for auditability and a ``tool.result``
+    # carrying the explanation so the LLM sees the refusal inline
+    # (without which the model would keep calling the same forbidden
+    # tool on the next turn).
+    allow_list = session.config.get("tool_allow_list") if session.config else None
+    if allow_list and tool_name not in allow_list:
+        reason = (
+            f"Tool '{tool_name}' is not in this session's allow-list. "
+            f"Allowed: {sorted(allow_list)}"
+        )
+        logger.warning(
+            "Session allow-list blocked %s for session %s", tool_name, session.id,
+        )
+        await store.emit_event(
+            session.id,
+            EventType.POLICY_DENIED,
+            policy_denied_event(tool_name, reason),
+        )
+        result_content = json.dumps({"error": reason})
+        result_event_id = await store.emit_event(
+            session.id,
+            EventType.TOOL_RESULT,
+            {
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "content": result_content,
+                "elapsed_ms": 0,
+            },
+        )
+        await store.advance_harness_cursor(
+            session.id,
+            through_event_id=result_event_id,
+            lease_token=lease.lease_token,
+        )
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": result_content,
+        }
+
     # --- Saga step tracking ---
     saga_step = None
     _active_saga_id: str | None = None

@@ -1,0 +1,70 @@
+{
+  "name": "@surogates/website-widget",
+  "version": "0.1.0",
+  "description": "AG-UI-compatible TypeScript client for the Surogates public-website channel. Wraps the publishable-key bootstrap, HttpOnly cookie, CSRF double-submit, and SSE streaming behind a standard AbstractAgent so widgets built for AG-UI work out of the box.",
+  "keywords": [
+    "surogates",
+    "ag-ui",
+    "agent-user-interaction-protocol",
+    "agent",
+    "chat",
+    "widget",
+    "sse",
+    "typescript"
+  ],
+  "license": "AGPL-3.0-or-later",
+  "homepage": "https://github.com/your-org/surogates/tree/master/sdk/website-widget#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/surogates.git",
+    "directory": "sdk/website-widget"
+  },
+  "bugs": {
+    "url": "https://github.com/your-org/surogates/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm run typecheck && pnpm run test && pnpm run build"
+  },
+  "peerDependencies": {
+    "@ag-ui/client": "^0.0.52",
+    "rxjs": "7.8.1"
+  },
+  "devDependencies": {
+    "@ag-ui/client": "^0.0.52",
+    "@types/node": "^22.10.0",
+    "happy-dom": "^15.11.0",
+    "rxjs": "7.8.1",
+    "tsup": "^8.3.5",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

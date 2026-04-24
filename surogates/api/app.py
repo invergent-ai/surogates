@@ -112,12 +112,18 @@ def create_app() -> FastAPI:
     from surogates.api.middleware.rate_limit import setup_rate_limit_middleware
     from surogates.api.middleware.tenant import setup_tenant_middleware
     from surogates.api.middleware.trace import setup_trace_middleware
+    from surogates.api.middleware.website_cors import setup_website_cors_middleware
 
     # Trace middleware must be registered AFTER the others so that
     # Starlette executes it FIRST (outermost layer).
     setup_auth_middleware(app, settings)
     setup_tenant_middleware(app, settings)
     setup_rate_limit_middleware(app, settings)
+    # Website CORS must sit OUTSIDE the global CORS middleware so it
+    # can intercept preflights for ``/v1/website/*`` before the global
+    # allow-list kicks in, and overwrite response headers with the
+    # per-agent decision.
+    setup_website_cors_middleware(app)
     setup_trace_middleware(app, settings)
 
     # The /api prefix strip must be the OUTERMOST layer so every
@@ -144,6 +150,7 @@ def create_app() -> FastAPI:
         skills,
         tools,
         transparency,
+        website,
         workspace,
     )
 
@@ -161,6 +168,7 @@ def create_app() -> FastAPI:
     app.include_router(memory.router, prefix="/v1", tags=["memory"])
     app.include_router(prompts.router, prefix="/v1", tags=["prompts"])
     app.include_router(transparency.router, prefix="/v1", tags=["transparency"])
+    app.include_router(website.router, prefix="/v1", tags=["website"])
     app.include_router(workspace.router, prefix="/v1", tags=["workspace"])
     app.include_router(artifacts.router, prefix="/v1", tags=["artifacts"])
     app.include_router(clarify.router, prefix="/v1", tags=["clarify"])
