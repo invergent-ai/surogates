@@ -311,19 +311,35 @@ async def run_worker(settings: Settings) -> None:
                     session_id=session.id,
                 )
             else:
-                # Session has neither user_id nor service_account_id —
-                # create_session enforces the invariant that one is set,
-                # so this branch is unreachable in normal operation.
-                raise RuntimeError(
-                    f"session {session.id} has no principal; "
-                    "cannot mint harness API token"
+                # Anonymous (website-channel) session — no principal to
+                # mint a token from. Visitors hit ``/v1/website/sessions``
+                # which deliberately creates sessions with ``user_id=None``
+                # and no ``service_account_id`` (see
+                # docs/channels/website.md §"Interaction with other
+                # subsystems"). Falling through with
+                # ``harness_api_client = None`` routes the harness into
+                # the same code path the ``use_api_for_harness_tools=False``
+                # config already supports: skill loading goes to local
+                # disk via ``_load_all_skills`` (skills.py:225-229),
+                # per-user memory is skipped (visitors have none by
+                # design), and auto-artifact creation is silently
+                # bypassed (loop.py:2185 guards on
+                # ``self._api_client is None``). Tool allow-list
+                # enforcement is unaffected; it reads from
+                # ``session.config`` independently of the API client.
+                logger.info(
+                    "session %s has no principal; harness will run "
+                    "without API client (anonymous website visitor)",
+                    session.id,
                 )
+                token = None
 
-            harness_api_client = HarnessAPIClient(
-                base_url=settings.worker.api_base_url,
-                token=token,
-                session_id=str(session.id),
-            )
+            if token is not None:
+                harness_api_client = HarnessAPIClient(
+                    base_url=settings.worker.api_base_url,
+                    token=token,
+                    session_id=str(session.id),
+                )
 
         return AgentHarness(
             session_store=session_store,
