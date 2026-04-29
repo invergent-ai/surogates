@@ -367,6 +367,37 @@ class SagaSettings(BaseSettings):
     retry_delay: float = 1.0
 
 
+class EmbeddingSettings(BaseSettings):
+    """Embedding service config for the KB retrieval layer.
+
+    When ``enabled=False`` (default for backward compatibility with
+    deployments that pre-date the KB feature) the worker constructs no
+    embedder and ``kb_search`` runs BM25-only. When enabled, the
+    worker builds an :class:`OpenAICompatibleEmbeddingClient` against
+    ``base_url`` and threads it through the harness so ``kb_search``
+    can take the vector branch.
+
+    The same client is used by :func:`compile_wiki_for_kb` to embed
+    chunks during the wiki-compile pass.
+    """
+
+    model_config = {"env_prefix": "SUROGATES_EMBEDDINGS_"}
+
+    enabled: bool = False
+    # Examples:
+    #   TEI:         "http://text-embeddings-inference:80/v1"
+    #   OpenAI:      "https://api.openai.com/v1"
+    #   vLLM-embed:  "http://vllm-embed:8000/v1"
+    base_url: str = ""
+    model: str = "mxbai-embed-large-v1"
+    # Must match the platform-wide ``kb_chunk.embedding vector(N)`` dim.
+    # Locked at 1024 by default in step 1's schema; override only if you
+    # rebuild the index with a matching dim.
+    dim: int = 1024
+    api_key: str = ""
+    timeout: float = 60.0
+
+
 class Settings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_"}
 
@@ -380,6 +411,7 @@ class Settings(BaseSettings):
     saga: SagaSettings = Field(default_factory=SagaSettings)
     session_reset: SessionResetSettings = Field(default_factory=SessionResetSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
+    embeddings: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     slack: SlackSettings = Field(default_factory=SlackSettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
 

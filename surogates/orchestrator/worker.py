@@ -82,6 +82,12 @@ async def run_worker(settings: Settings) -> None:
     from surogates.storage.backend import create_backend
     storage_backend = create_backend(settings)
 
+    # 3c. Optional embedding client for KB hybrid retrieval. None when
+    # settings.embeddings is disabled; kb_search runs BM25-only in that
+    # case and wiki_compile inserts chunks with NULL embeddings.
+    from surogates.storage.embeddings import create_embedding_client
+    embedding_client = create_embedding_client(settings.embeddings)
+
     # 4a. Sandbox pool -- one sandbox per session, lazily provisioned.
     if settings.sandbox.backend == "kubernetes":
         from surogates.sandbox.kubernetes import K8sSandbox
@@ -348,6 +354,7 @@ async def run_worker(settings: Settings) -> None:
             default_model=model_id,
             session_factory=session_factory,
             storage_backend=storage_backend,
+            embedder=embedding_client,
             saga_enabled=settings.saga.enabled,
             saga_settings=settings.saga if settings.saga.enabled else None,
             log_policy_allowed=settings.governance.log_allowed,

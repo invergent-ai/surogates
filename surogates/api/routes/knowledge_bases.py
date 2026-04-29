@@ -34,6 +34,7 @@ from sqlalchemy import text
 from surogates.jobs.kb_ingest import IngestLocked, run_ingest
 from surogates.jobs.kb_sources._base import IngestResult
 from surogates.jobs.kb_sources.file_upload import holding_prefix_for
+from surogates.jobs.wiki_compile import CompileResult, compile_wiki_for_kb
 from surogates.storage.kb_storage import KbStorage
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -114,6 +115,16 @@ class UploadedFileInfo(BaseModel):
 class UploadOut(BaseModel):
     source_id: UUID
     files: list[UploadedFileInfo]
+
+
+class RecompileOut(BaseModel):
+    """Result of a wiki-compile pass."""
+
+    kb_id: UUID
+    entries_added: int
+    entries_updated: int
+    entries_unchanged: int
+    chunks_added: int
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +389,7 @@ async def sync_source(
     kb_id: UUID,
     source_id: UUID,
     request: Request,
+    compile: bool = False,
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> SyncOut:
     """Trigger a synchronous ingest of *source_id*.
@@ -386,6 +398,12 @@ async def sync_source(
     source return 409 Conflict. The ingest runs in-request, so the
     HTTP timeout is the bound on how long we'll wait — long-running
     ingests should be moved to a background queue (later step).
+
+    Pass ``?compile=true`` to chain a wiki-compile pass after a
+    successful sync (writes wiki_entry rows + chunks + embeddings so
+    the new content shows up in ``kb_search`` immediately). Otherwise
+    compile must be triggered separately via
+    ``POST /v1/kb/{id}/recompile``.
     """
     factory = request.app.state.session_factory
     storage_backend = request.app.state.storage
@@ -422,6 +440,32 @@ async def sync_source(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    # Optional chained compile. We pull the embedder from app.state so
+    # vector embeddings populate when the platform has an embedding
+    # service configured; without one, chunks land with NULL embedding
+    # and kb_search runs BM25-only.
+    if compile:
+        embedder = getattr(request.app.state, "embedder", None)
+        try:
+            await compile_wiki_for_kb(
+                kb_id,
+                session_factory=factory,
+                storage_backend=storage_backend,
+                embedder=embedder,
+                only_changed_since=True,
+            )
+        except Exception as exc:
+            logger.exception("post-sync compile failed for kb=%s", kb_id)
+            # Don't fail the whole request — the ingest succeeded; the
+            # compile failure is recoverable via /recompile.
+            raise HTTPException(
+                status_code=status.HTTP_207_MULTI_STATUS,
+                detail=(
+                    "ingest succeeded but compile failed: "
+                    f"{exc!s}. Retry via POST /v1/kb/{{id}}/recompile."
+                ),
+            )
+
     return SyncOut(
         source_id=source_id,
         docs_added=result.docs_added,
@@ -430,6 +474,65 @@ async def sync_source(
         docs_skipped=result.docs_skipped,
         bytes_written=result.bytes_written,
         total=result.total,
+    )
+
+
+@router.post(
+    "/kb/{kb_id}/recompile",
+    response_model=RecompileOut,
+)
+async def recompile_kb(
+    kb_id: UUID,
+    request: Request,
+    full: bool = False,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> RecompileOut:
+    """Run the wiki-compile pass for *kb_id*.
+
+    By default only raw_docs ingested since the KB's
+    ``last_compiled_at`` watermark are processed; pass ``?full=true``
+    to force a full recompile (used after schema changes or when the
+    chunker is updated).
+
+    Embedder is pulled from ``app.state.embedder``; when no embedder
+    is configured, chunks are inserted with ``embedding=NULL`` and
+    ``kb_search`` falls back to BM25-only.
+    """
+    factory = request.app.state.session_factory
+    storage_backend = request.app.state.storage
+    embedder = getattr(request.app.state, "embedder", None)
+
+    async with factory() as db:
+        await _set_org_guc(db, tenant.org_id)
+        row = (
+            await db.execute(
+                text(
+                    "SELECT id FROM kb "
+                    "WHERE id = :id AND org_id = :org_id"
+                ),
+                {"id": kb_id, "org_id": tenant.org_id},
+            )
+        ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="kb not found")
+
+    try:
+        result: CompileResult = await compile_wiki_for_kb(
+            kb_id,
+            session_factory=factory,
+            storage_backend=storage_backend,
+            embedder=embedder,
+            only_changed_since=not full,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return RecompileOut(
+        kb_id=kb_id,
+        entries_added=result.entries_added,
+        entries_updated=result.entries_updated,
+        entries_unchanged=result.entries_unchanged,
+        chunks_added=result.chunks_added,
     )
 
 

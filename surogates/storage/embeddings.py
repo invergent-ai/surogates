@@ -173,6 +173,40 @@ class OpenAICompatibleEmbeddingClient:
 # ---------------------------------------------------------------------------
 
 
+def create_embedding_client(settings: object) -> EmbeddingClient | None:
+    """Build the configured :class:`EmbeddingClient`, or ``None``.
+
+    *settings* is duck-typed against :class:`EmbeddingSettings` (no
+    explicit import here so this module remains usable from contexts
+    that don't have the full settings stack).
+
+    Returns ``None`` when:
+      - ``embeddings.enabled`` is False, OR
+      - ``embeddings.base_url`` is empty.
+
+    Callers must handle the ``None`` case by either skipping
+    embedding writes (wiki_compile) or running BM25-only
+    (``kb_search``). Both call sites already do.
+    """
+    enabled = getattr(settings, "enabled", False)
+    base_url = getattr(settings, "base_url", "") or ""
+    if not enabled or not base_url:
+        logger.info(
+            "embeddings: disabled (enabled=%s, base_url=%r); "
+            "kb_search will run BM25-only and wiki_compile will "
+            "insert chunks with NULL embeddings",
+            enabled, base_url,
+        )
+        return None
+    return OpenAICompatibleEmbeddingClient(
+        base_url=base_url,
+        model=getattr(settings, "model", "mxbai-embed-large-v1"),
+        dim=int(getattr(settings, "dim", 1024)),
+        api_key=getattr(settings, "api_key", "") or None,
+        timeout=float(getattr(settings, "timeout", 60.0)),
+    )
+
+
 def vector_literal(vec: Sequence[float]) -> str:
     """Format a list of floats as a pgvector literal: ``'[0.1,0.2,...]'``.
 

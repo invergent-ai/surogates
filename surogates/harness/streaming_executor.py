@@ -130,6 +130,7 @@ class StreamingToolExecutor:
         api_client: Any | None = None,
         session_factory: Any | None = None,
         storage_backend: Any | None = None,
+        embedder: Any | None = None,
         saga: SagaOrchestrator | None = None,
         log_policy_allowed: bool = False,
     ) -> None:
@@ -148,6 +149,7 @@ class StreamingToolExecutor:
         self._api_client = api_client
         self._session_factory = session_factory
         self._storage_backend = storage_backend
+        self._embedder = embedder
         self._saga = saga
 
         self._tracked: list[TrackedTool] = []
@@ -319,6 +321,7 @@ class StreamingToolExecutor:
                 api_client=self._api_client,
                 session_factory=self._session_factory,
                 storage_backend=self._storage_backend,
+                embedder=self._embedder,
                 saga=self._saga,
                 log_policy_allowed=self._log_policy_allowed,
             )

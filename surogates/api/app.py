@@ -60,6 +60,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.session_store = SessionStore(app.state.session_factory, redis=app.state.redis)
     app.state.audit_store = AuditStore(app.state.session_factory)
     app.state.storage = create_backend(settings)
+    # Optional embedding client for the KB retrieval layer. Returns
+    # None when settings.embeddings.enabled=False; downstream code
+    # treats None as "BM25 only" / "skip embedding writes".
+    from surogates.storage.embeddings import create_embedding_client
+    app.state.embedder = create_embedding_client(settings.embeddings)
 
     app.state.credential_vault = _build_vault(
         settings.encryption_key, app.state.session_factory,

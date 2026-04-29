@@ -275,6 +275,7 @@ async def execute_tool_calls(
     api_client: Any | None = None,
     session_factory: Any | None = None,
     storage_backend: Any | None = None,
+    embedder: Any | None = None,
     saga: SagaOrchestrator | None = None,
     log_policy_allowed: bool = False,
 ) -> list[dict]:
@@ -305,6 +306,7 @@ async def execute_tool_calls(
             api_client=api_client,
             session_factory=session_factory,
             storage_backend=storage_backend,
+            embedder=embedder,
             log_policy_allowed=log_policy_allowed,
         )
     return await execute_tool_calls_sequential(
@@ -323,6 +325,7 @@ async def execute_tool_calls(
         api_client=api_client,
         session_factory=session_factory,
         storage_backend=storage_backend,
+        embedder=embedder,
         saga=saga,
         log_policy_allowed=log_policy_allowed,
     )
@@ -345,6 +348,7 @@ async def execute_tool_calls_sequential(
     api_client: Any | None = None,
     session_factory: Any | None = None,
     storage_backend: Any | None = None,
+    embedder: Any | None = None,
     saga: SagaOrchestrator | None = None,
     log_policy_allowed: bool = False,
 ) -> list[dict]:
@@ -372,6 +376,7 @@ async def execute_tool_calls_sequential(
             api_client=api_client,
             session_factory=session_factory,
             storage_backend=storage_backend,
+            embedder=embedder,
             saga=saga,
             log_policy_allowed=log_policy_allowed,
         )
@@ -397,6 +402,7 @@ async def execute_tool_calls_concurrent(
     api_client: Any | None = None,
     session_factory: Any | None = None,
     storage_backend: Any | None = None,
+    embedder: Any | None = None,
     log_policy_allowed: bool = False,
 ) -> list[dict]:
     """Execute tool calls concurrently using asyncio.gather.
@@ -440,6 +446,7 @@ async def execute_tool_calls_concurrent(
                 api_client=api_client,
                 session_factory=session_factory,
                 storage_backend=storage_backend,
+                embedder=embedder,
                 _parent_trace=parent_trace,
                 log_policy_allowed=log_policy_allowed,
             )
@@ -470,6 +477,7 @@ async def execute_single_tool(
     api_client: Any | None = None,
     session_factory: Any | None = None,
     storage_backend: Any | None = None,
+    embedder: Any | None = None,
     _parent_trace: Any | None = None,
     saga: SagaOrchestrator | None = None,
     log_policy_allowed: bool = False,
@@ -733,6 +741,7 @@ async def execute_single_tool(
                 api_client=api_client,
                 session_factory=session_factory,
                 storage_backend=storage_backend,
+                embedder=embedder,
                 tools=tools,
                 tool_call_id=tool_call_id,
                 lease_token=lease.lease_token,

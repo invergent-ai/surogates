@@ -222,6 +222,7 @@ class AgentHarness:
         default_model: str = "gpt-4o",
         session_factory: Any | None = None,
         storage_backend: Any | None = None,
+        embedder: Any | None = None,
         log_policy_allowed: bool = False,
     ) -> None:
         self._store = session_store
@@ -243,6 +244,11 @@ class AgentHarness:
         # legacy code paths that construct AgentHarness without storage
         # (older tests) still work; KB tools handle ``None`` gracefully.
         self._storage_backend = storage_backend
+        # Optional embedding client (mxbai/BGE/etc. via OpenAI-compatible
+        # HTTP). When wired, kb_search uses the vector branch alongside
+        # BM25 and merges via RRF. When None, retrieval degrades to
+        # BM25-only — same shape, narrower recall on paraphrased queries.
+        self._embedder = embedder
 
         # Checkpoint flag — when enabled, the harness tells the sandbox
         # to take filesystem snapshots before file-mutating operations.
@@ -867,6 +873,7 @@ class AgentHarness:
                     api_client=self._api_client,
                     session_factory=self._session_factory,
                     storage_backend=self._storage_backend,
+                    embedder=self._embedder,
                     saga=saga,
                     log_policy_allowed=self._log_policy_allowed,
                 )
@@ -1370,6 +1377,7 @@ class AgentHarness:
                     api_client=self._api_client,
                     session_factory=self._session_factory,
                     storage_backend=self._storage_backend,
+                    embedder=self._embedder,
                     saga=saga,
                     log_policy_allowed=self._log_policy_allowed,
                 )
