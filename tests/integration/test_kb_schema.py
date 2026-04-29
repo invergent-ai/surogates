@@ -186,14 +186,33 @@ async def test_rls_enabled_and_forced_on_all_kb_tables(session_factory):
         assert force_on, f"FORCE RLS not set on {name}"
 
 
-async def test_tenant_iso_policy_present_on_each_kb_table(session_factory):
-    expected_policies = {
-        "kb": "kb_tenant_iso",
-        "kb_source": "kb_source_tenant_iso",
-        "kb_raw_doc": "kb_raw_doc_tenant_iso",
-        "kb_wiki_entry": "kb_wiki_entry_tenant_iso",
-        "kb_chunk": "kb_chunk_tenant_iso",
-        "agent_kb_grant": "agent_kb_grant_tenant_iso",
+async def test_tenant_iso_policies_present_on_each_kb_table(session_factory):
+    """Each KB table has a pair of permissive policies:
+    ``*_read_with_platform`` (FOR SELECT, includes platform rows) and
+    ``*_strict_own`` (FOR ALL, restricts INSERT/UPDATE/DELETE to own org).
+    """
+    expected_pairs = {
+        "kb": ("kb_read_with_platform", "kb_strict_own"),
+        "kb_source": (
+            "kb_source_read_with_platform",
+            "kb_source_strict_own",
+        ),
+        "kb_raw_doc": (
+            "kb_raw_doc_read_with_platform",
+            "kb_raw_doc_strict_own",
+        ),
+        "kb_wiki_entry": (
+            "kb_wiki_entry_read_with_platform",
+            "kb_wiki_entry_strict_own",
+        ),
+        "kb_chunk": (
+            "kb_chunk_read_with_platform",
+            "kb_chunk_strict_own",
+        ),
+        "agent_kb_grant": (
+            "agent_kb_grant_read_with_platform",
+            "agent_kb_grant_strict_own",
+        ),
     }
     async with session_factory() as db:
         rows = (
@@ -202,12 +221,13 @@ async def test_tenant_iso_policy_present_on_each_kb_table(session_factory):
                     "SELECT tablename, policyname FROM pg_policies "
                     "WHERE tablename = ANY(:names)"
                 ),
-                {"names": list(expected_policies)},
+                {"names": list(expected_pairs)},
             )
         ).all()
     found = {(r.tablename, r.policyname) for r in rows}
-    for table, policy in expected_policies.items():
-        assert (table, policy) in found, f"missing policy {policy} on {table}"
+    for table, (read_policy, strict_policy) in expected_pairs.items():
+        assert (table, read_policy) in found, f"missing {read_policy} on {table}"
+        assert (table, strict_policy) in found, f"missing {strict_policy} on {table}"
 
 
 # ---------------------------------------------------------------------------
