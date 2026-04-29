@@ -112,6 +112,18 @@ async def _kb_search_handler(
         top_k = 5
 
     embedder = kwargs.get("embedder")
+    # agent_id arrives as a string from the harness (session.agent_id is
+    # a string). Coerce to UUID when present + parseable; otherwise leave
+    # as None so the legacy "all-org-visible" path applies (for direct
+    # admin dispatch + tests that don't set up grants).
+    raw_agent = kwargs.get("agent_id") or None
+    try:
+        agent_uuid = UUID(raw_agent) if isinstance(raw_agent, str) and raw_agent else (
+            raw_agent if isinstance(raw_agent, UUID) else None
+        )
+    except (TypeError, ValueError):
+        agent_uuid = None
+
     store = KbStore(session_factory, embedder=embedder)
     try:
         hits = await store.search(
@@ -119,6 +131,7 @@ async def _kb_search_handler(
             query=query,
             kb_name=kb_name,
             top_k=top_k,
+            agent_id=agent_uuid,
         )
     except Exception as exc:
         logger.exception("kb_search failed")

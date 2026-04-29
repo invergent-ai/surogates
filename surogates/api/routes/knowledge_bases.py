@@ -127,6 +127,51 @@ class RecompileOut(BaseModel):
     chunks_added: int
 
 
+class RawDocOut(BaseModel):
+    id: UUID
+    path: str
+    content_sha: str
+    title: Optional[str]
+    url: Optional[str]
+    ingested_at: datetime
+
+
+class RawDocListOut(BaseModel):
+    kb_id: UUID
+    raw_docs: list[RawDocOut]
+    total: int
+
+
+class WikiEntryOut(BaseModel):
+    id: UUID
+    path: str
+    kind: str
+    content_sha: str
+    sources: list[UUID]
+    updated_at: datetime
+
+
+class WikiEntryListOut(BaseModel):
+    kb_id: UUID
+    wiki_entries: list[WikiEntryOut]
+    total: int
+
+
+class GrantBody(BaseModel):
+    agent_id: UUID
+
+
+class GrantOut(BaseModel):
+    agent_id: UUID
+    kb_id: UUID
+    granted_at: datetime
+
+
+class GrantListOut(BaseModel):
+    kb_id: UUID
+    grants: list[GrantOut]
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -533,6 +578,379 @@ async def recompile_kb(
         entries_updated=result.entries_updated,
         entries_unchanged=result.entries_unchanged,
         chunks_added=result.chunks_added,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Browse: raw_docs and wiki_entries within a KB
+# ---------------------------------------------------------------------------
+
+
+async def _confirm_kb_visible(
+    factory,
+    *,
+    kb_id: UUID,
+    org_id: UUID,
+) -> None:
+    """Raise 404 unless the KB is owned by *org_id* OR is platform-shared."""
+    async with factory() as db:
+        await _set_org_guc(db, org_id)
+        row = (
+            await db.execute(
+                text(
+                    "SELECT 1 FROM kb "
+                    "WHERE id = :id "
+                    "  AND (org_id = :org_id OR org_id IS NULL)"
+                ),
+                {"id": kb_id, "org_id": org_id},
+            )
+        ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="kb not found")
+
+
+@router.get(
+    "/kb/{kb_id}/raw",
+    response_model=RawDocListOut,
+)
+async def list_raw_docs(
+    kb_id: UUID,
+    request: Request,
+    limit: int = 100,
+    offset: int = 0,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> RawDocListOut:
+    """List raw_docs ingested into this KB.
+
+    Paginated; ``limit`` capped at 500 to protect the response size.
+    Used by the management UI to render the source's recent ingest
+    log + by admin tools to sanity-check what's in the KB.
+    """
+    factory = request.app.state.session_factory
+    await _confirm_kb_visible(factory, kb_id=kb_id, org_id=tenant.org_id)
+
+    limit = max(1, min(500, limit))
+    offset = max(0, offset)
+    async with factory() as db:
+        await _set_org_guc(db, tenant.org_id)
+        total = (
+            await db.execute(
+                text(
+                    "SELECT count(*) FROM kb_raw_doc WHERE kb_id = :id"
+                ),
+                {"id": kb_id},
+            )
+        ).scalar()
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT id, path, content_sha, title, url, "
+                    "       ingested_at "
+                    "FROM kb_raw_doc WHERE kb_id = :id "
+                    "ORDER BY ingested_at DESC, path ASC "
+                    "LIMIT :limit OFFSET :offset"
+                ),
+                {"id": kb_id, "limit": limit, "offset": offset},
+            )
+        ).all()
+    return RawDocListOut(
+        kb_id=kb_id,
+        raw_docs=[
+            RawDocOut(
+                id=r.id,
+                path=r.path,
+                content_sha=r.content_sha,
+                title=r.title,
+                url=r.url,
+                ingested_at=r.ingested_at,
+            )
+            for r in rows
+        ],
+        total=int(total or 0),
+    )
+
+
+@router.get(
+    "/kb/{kb_id}/wiki",
+    response_model=WikiEntryListOut,
+)
+async def list_wiki_entries(
+    kb_id: UUID,
+    request: Request,
+    limit: int = 100,
+    offset: int = 0,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> WikiEntryListOut:
+    """List wiki_entries (compiled retrieval units) for this KB."""
+    factory = request.app.state.session_factory
+    await _confirm_kb_visible(factory, kb_id=kb_id, org_id=tenant.org_id)
+
+    limit = max(1, min(500, limit))
+    offset = max(0, offset)
+    async with factory() as db:
+        await _set_org_guc(db, tenant.org_id)
+        total = (
+            await db.execute(
+                text(
+                    "SELECT count(*) FROM kb_wiki_entry WHERE kb_id = :id"
+                ),
+                {"id": kb_id},
+            )
+        ).scalar()
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT id, path, kind, content_sha, sources, "
+                    "       updated_at "
+                    "FROM kb_wiki_entry WHERE kb_id = :id "
+                    "ORDER BY updated_at DESC, path ASC "
+                    "LIMIT :limit OFFSET :offset"
+                ),
+                {"id": kb_id, "limit": limit, "offset": offset},
+            )
+        ).all()
+    return WikiEntryListOut(
+        kb_id=kb_id,
+        wiki_entries=[
+            WikiEntryOut(
+                id=r.id,
+                path=r.path,
+                kind=r.kind,
+                content_sha=r.content_sha,
+                sources=list(r.sources or []),
+                updated_at=r.updated_at,
+            )
+            for r in rows
+        ],
+        total=int(total or 0),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Delete: source (tombstone) + KB (CASCADE)
+# ---------------------------------------------------------------------------
+
+
+@router.delete(
+    "/kb/{kb_id}/sources/{source_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_source(
+    kb_id: UUID,
+    source_id: UUID,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> None:
+    """Tombstone a source.
+
+    Sets ``kb_source.deleted_at = NOW()``; does not remove the row or
+    its raw_doc children. The wiki maintainer's next pass rewrites
+    affected wiki entries to drop references to docs from the
+    tombstoned source. Hard-purge is a separate admin operation.
+    """
+    factory = request.app.state.session_factory
+    async with factory() as db:
+        await _set_org_guc(db, tenant.org_id)
+        result = await db.execute(
+            text(
+                "UPDATE kb_source SET deleted_at = NOW() "
+                "WHERE id = :sid AND kb_id = :kbid "
+                "  AND kb_id IN (SELECT id FROM kb WHERE org_id = :org_id) "
+                "  AND deleted_at IS NULL"
+            ),
+            {
+                "sid": source_id,
+                "kbid": kb_id,
+                "org_id": tenant.org_id,
+            },
+        )
+        await db.commit()
+    if result.rowcount == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="source not found or already deleted",
+        )
+
+
+@router.delete(
+    "/kb/{kb_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_kb(
+    kb_id: UUID,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> None:
+    """Hard-delete a KB and all its descendants.
+
+    Cascades through kb_source, kb_raw_doc, kb_wiki_entry, kb_chunk
+    via FK ``ON DELETE CASCADE``. Garage objects are NOT cleaned up
+    here — that's a separate admin sweep keyed off the watermark.
+    Platform KBs (``org_id IS NULL``) are not deletable through this
+    endpoint; the privileged migration role manages them.
+    """
+    factory = request.app.state.session_factory
+    async with factory() as db:
+        await _set_org_guc(db, tenant.org_id)
+        result = await db.execute(
+            text(
+                "DELETE FROM kb "
+                "WHERE id = :id AND org_id = :org_id"
+            ),
+            {"id": kb_id, "org_id": tenant.org_id},
+        )
+        await db.commit()
+    if result.rowcount == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="kb not found",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Per-agent grants
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/kb/{kb_id}/grants",
+    response_model=GrantOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_grant(
+    kb_id: UUID,
+    body: GrantBody,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> GrantOut:
+    """Grant *body.agent_id* read access to *kb_id*.
+
+    The KB must be owned by the calling tenant; the agent must also
+    belong to the same tenant. Idempotent — granting twice is a no-op
+    that returns the existing row.
+    """
+    factory = request.app.state.session_factory
+    async with factory() as db:
+        await _set_org_guc(db, tenant.org_id)
+        # Confirm KB is owned by tenant.
+        kb_row = (
+            await db.execute(
+                text(
+                    "SELECT id FROM kb WHERE id = :id AND org_id = :org_id"
+                ),
+                {"id": kb_id, "org_id": tenant.org_id},
+            )
+        ).first()
+        if kb_row is None:
+            raise HTTPException(status_code=404, detail="kb not found")
+        # Confirm agent is also in the tenant.
+        agent_row = (
+            await db.execute(
+                text(
+                    "SELECT id FROM agents "
+                    "WHERE id = :id AND org_id = :org_id"
+                ),
+                {"id": body.agent_id, "org_id": tenant.org_id},
+            )
+        ).first()
+        if agent_row is None:
+            raise HTTPException(status_code=404, detail="agent not found")
+
+        await db.execute(
+            text(
+                "INSERT INTO agent_kb_grant (agent_id, kb_id) "
+                "VALUES (:agent_id, :kb_id) "
+                "ON CONFLICT DO NOTHING"
+            ),
+            {"agent_id": body.agent_id, "kb_id": kb_id},
+        )
+        row = (
+            await db.execute(
+                text(
+                    "SELECT agent_id, kb_id, granted_at "
+                    "FROM agent_kb_grant "
+                    "WHERE agent_id = :agent_id AND kb_id = :kb_id"
+                ),
+                {"agent_id": body.agent_id, "kb_id": kb_id},
+            )
+        ).first()
+        await db.commit()
+    return GrantOut(
+        agent_id=row.agent_id,
+        kb_id=row.kb_id,
+        granted_at=row.granted_at,
+    )
+
+
+@router.delete(
+    "/kb/{kb_id}/grants/{agent_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def revoke_grant(
+    kb_id: UUID,
+    agent_id: UUID,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> None:
+    """Revoke a specific (agent, kb) grant. 404 if it didn't exist."""
+    factory = request.app.state.session_factory
+    async with factory() as db:
+        await _set_org_guc(db, tenant.org_id)
+        result = await db.execute(
+            text(
+                "DELETE FROM agent_kb_grant g "
+                "USING kb "
+                "WHERE g.kb_id = kb.id "
+                "  AND g.kb_id = :kb_id "
+                "  AND g.agent_id = :agent_id "
+                "  AND kb.org_id = :org_id"
+            ),
+            {
+                "kb_id": kb_id,
+                "agent_id": agent_id,
+                "org_id": tenant.org_id,
+            },
+        )
+        await db.commit()
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="grant not found")
+
+
+@router.get(
+    "/kb/{kb_id}/grants",
+    response_model=GrantListOut,
+)
+async def list_grants(
+    kb_id: UUID,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> GrantListOut:
+    """List all agents granted access to this KB."""
+    factory = request.app.state.session_factory
+    await _confirm_kb_visible(factory, kb_id=kb_id, org_id=tenant.org_id)
+
+    async with factory() as db:
+        await _set_org_guc(db, tenant.org_id)
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT agent_id, kb_id, granted_at "
+                    "FROM agent_kb_grant WHERE kb_id = :id "
+                    "ORDER BY granted_at DESC"
+                ),
+                {"id": kb_id},
+            )
+        ).all()
+    return GrantListOut(
+        kb_id=kb_id,
+        grants=[
+            GrantOut(
+                agent_id=r.agent_id,
+                kb_id=r.kb_id,
+                granted_at=r.granted_at,
+            )
+            for r in rows
+        ],
     )
 
 

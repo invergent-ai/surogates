@@ -79,6 +79,7 @@ class KbStore:
         query: str,
         kb_name: Optional[str] = None,
         top_k: int = 5,
+        agent_id: Optional[UUID] = None,
     ) -> list[KbHit]:
         """Search KBs visible to *org_id* (own + platform).
 
@@ -94,6 +95,15 @@ class KbStore:
 
         Per-KB top_k bucketing prevents a high-volume KB from
         drowning federated results.
+
+        Per-agent grants:
+          - When ``agent_id`` is provided (the harness always supplies
+            it), only KBs that are platform-shared OR have an
+            ``agent_kb_grant`` row for this agent are searched. Other
+            org KBs are invisible to the agent even though they're
+            visible to the tenant.
+          - When ``agent_id`` is ``None`` (direct admin / test
+            dispatch), the legacy "all-org-visible" semantics apply.
         """
         if not query or not query.strip():
             return []
@@ -101,21 +111,15 @@ class KbStore:
             top_k = 1
 
         # 1. Resolve the candidate KBs.
-        async with self._session_factory() as db:
-            kb_sql = (
-                "SELECT id, name FROM kb "
-                "WHERE (org_id = :org_id OR org_id IS NULL) "
-            )
-            params: dict[str, object] = {"org_id": org_id}
-            if kb_name is not None:
-                kb_sql += "AND name = :name"
-                params["name"] = kb_name
-            kb_rows = (await db.execute(text(kb_sql), params)).all()
+        kb_rows = await self._resolve_visible_kbs(
+            org_id=org_id,
+            kb_name=kb_name,
+            agent_id=agent_id,
+        )
 
         if not kb_rows:
             return []
         kb_ids = [r.id for r in kb_rows]
-        kb_names = {r.id: r.name for r in kb_rows}
 
         # 2a. BM25 branch.
         overfetch = top_k * len(kb_ids) + top_k
@@ -169,6 +173,51 @@ class KbStore:
         # Federated cap: at most 4 KBs × top_k, so a misuse of `kb=None`
         # can't blow up the assistant's context window.
         return results[: min(len(per_kb), 4) * top_k]
+
+    # ------------------------------------------------------------------
+    # Visibility resolver — the single place agent grants are enforced
+    # ------------------------------------------------------------------
+
+    async def _resolve_visible_kbs(
+        self,
+        *,
+        org_id: UUID,
+        kb_name: Optional[str],
+        agent_id: Optional[UUID],
+    ) -> list:
+        """Return ``[(id, name, org_id)]`` for every KB visible to the
+        caller, after applying tenant scope + per-agent grants.
+
+        Visibility rules:
+          * Platform KBs (``org_id IS NULL``) always visible.
+          * Org KBs visible only when ``kb.org_id = :org_id``.
+          * When *agent_id* is set, org KBs additionally require an
+            ``agent_kb_grant`` row matching ``(kb_id, agent_id)``.
+            ``None`` skips the grant check (legacy admin / direct-test
+            path).
+        """
+        params: dict[str, object] = {"org_id": org_id}
+        if agent_id is not None:
+            params["agent_id"] = agent_id
+            grant_clause = (
+                "(kb.org_id = :org_id AND EXISTS ("
+                "  SELECT 1 FROM agent_kb_grant g "
+                "  WHERE g.kb_id = kb.id AND g.agent_id = :agent_id"
+                "))"
+            )
+        else:
+            grant_clause = "kb.org_id = :org_id"
+
+        sql = (
+            "SELECT id, name, org_id FROM kb "
+            f"WHERE (kb.org_id IS NULL OR {grant_clause}) "
+        )
+        if kb_name is not None:
+            sql += "AND kb.name = :name"
+            params["name"] = kb_name
+
+        async with self._session_factory() as db:
+            return list((await db.execute(text(sql), params)).all())
 
     # ------------------------------------------------------------------
     # Search branches
@@ -275,6 +324,7 @@ class KbStore:
         org_id: UUID,
         path: str,
         kb_name: Optional[str] = None,
+        agent_id: Optional[UUID] = None,
     ) -> Optional[dict]:
         """Resolve a wiki or raw entry within the calling org's KBs and
         fetch its bytes from object storage.
@@ -306,19 +356,19 @@ class KbStore:
             kb_name_resolved = kb_name
             rest = path
 
+        # Resolve through the same grants-aware filter as search().
+        # This means an agent that lost a grant after kb_search returned
+        # a path can still NOT then read the entry, closing the
+        # time-of-check / time-of-use window.
+        kb_candidates = await self._resolve_visible_kbs(
+            org_id=org_id,
+            kb_name=kb_name_resolved,
+            agent_id=agent_id,
+        )
+        if not kb_candidates:
+            return None
+        kb_row = kb_candidates[0]
         async with self._session_factory() as db:
-            kb_row = (
-                await db.execute(
-                    text(
-                        "SELECT id, org_id FROM kb "
-                        "WHERE name = :name "
-                        "  AND (org_id = :org_id OR org_id IS NULL)"
-                    ),
-                    {"name": kb_name_resolved, "org_id": org_id},
-                )
-            ).first()
-            if kb_row is None:
-                return None
 
             entry = (
                 await db.execute(
