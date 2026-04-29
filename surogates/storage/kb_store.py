@@ -18,7 +18,7 @@ ingest path.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 from uuid import UUID
 
@@ -26,9 +26,15 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from surogates.storage.backend import StorageBackend
+from surogates.storage.embeddings import EmbeddingClient, vector_literal
 from surogates.storage.kb_storage import KbStorage
 
 logger = logging.getLogger(__name__)
+
+#: Reciprocal-rank-fusion smoothing constant. 60 is the value from the
+#: Cormack-Clarke-Buettcher paper that introduced RRF; widely re-used
+#: (Vespa, Elastic, Weaviate, OpenSearch).
+RRF_K = 60
 
 
 @dataclass
@@ -55,11 +61,13 @@ class KbStore:
         self,
         session_factory: async_sessionmaker,
         storage_backend: StorageBackend | None = None,
+        embedder: EmbeddingClient | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._kb_storage = (
             KbStorage(storage_backend) if storage_backend is not None else None
         )
+        self._embedder = embedder
 
     # ------------------------------------------------------------------
     # Search
@@ -74,20 +82,18 @@ class KbStore:
     ) -> list[KbHit]:
         """Search KBs visible to *org_id* (own + platform).
 
-        Args:
-            org_id: tenant org id (drawn from the harness ``tenant``
-                kwarg, never from a tool argument).
-            query: natural-language query string.
-            kb_name: optional KB name to scope the search. Omit for
-                federated search across every KB the org can read.
-            top_k: maximum hits per KB. Federated results are merged
-                across KBs, not capped at ``top_k`` total — so one big
-                KB cannot drown smaller ones.
+        Hybrid retrieval:
+          - **Lexical (BM25)** via ``ts_rank_cd(tsv, plainto_tsquery(q))``.
+          - **Vector (cosine)** via pgvector ``embedding <=> :qvec`` —
+            only when an :class:`EmbeddingClient` was passed to the
+            store and the query embeds successfully. Without an
+            embedder, retrieval is BM25-only.
+          - Merged via reciprocal-rank-fusion with constant
+            ``RRF_K=60`` so a chunk that ranks high in either branch
+            wins, and a chunk that ranks high in both wins decisively.
 
-        Returns: list of :class:`KbHit`, ordered by score descending,
-        capped at ``top_k`` (single-KB) or ``4 * top_k`` (federated).
-        Returns ``[]`` for whitespace queries, unknown KB names, or
-        empty corpora.
+        Per-KB top_k bucketing prevents a high-volume KB from
+        drowning federated results.
         """
         if not query or not query.strip():
             return []
@@ -109,61 +115,156 @@ class KbStore:
         if not kb_rows:
             return []
         kb_ids = [r.id for r in kb_rows]
+        kb_names = {r.id: r.name for r in kb_rows}
 
-        # 2. BM25 query against the matching chunks. Over-fetch so the
-        # per-KB bucketing below has enough candidates per KB.
-        async with self._session_factory() as db:
-            sql = text(
-                """
-                SELECT
-                    we.path        AS path,
-                    we.kb_id       AS kb_id,
-                    kb.name        AS kb_name,
-                    c.content      AS content,
-                    ts_rank_cd(c.tsv, plainto_tsquery('english', :q)) AS score
-                FROM kb_chunk c
-                JOIN kb_wiki_entry we ON we.id = c.wiki_entry_id
-                JOIN kb ON kb.id = we.kb_id
-                WHERE we.kb_id = ANY(:kb_ids)
-                  AND c.tsv @@ plainto_tsquery('english', :q)
-                ORDER BY score DESC
-                LIMIT :overfetch
-                """
+        # 2a. BM25 branch.
+        overfetch = top_k * len(kb_ids) + top_k
+        bm25_hits = await self._bm25_search(query, kb_ids, overfetch)
+
+        # 2b. Vector branch (only if embedder is wired). Embedding
+        # failures (network, dim mismatch, etc.) degrade gracefully to
+        # BM25-only — we don't want a transient embedding outage to
+        # take retrieval offline.
+        vec_hits: list[_RankedChunk] = []
+        if self._embedder is not None:
+            try:
+                [qvec] = await self._embedder.embed([query])
+                vec_hits = await self._vector_search(qvec, kb_ids, overfetch)
+            except Exception:  # noqa: BLE001 - intentionally broad
+                logger.exception(
+                    "kb_search: vector branch failed; degrading to BM25-only"
+                )
+
+        if not bm25_hits and not vec_hits:
+            return []
+
+        # 3. RRF merge by chunk_id.
+        merged = _reciprocal_rank_fusion(bm25_hits, vec_hits)
+
+        # 4. Per-KB top_k bucketing.
+        per_kb: dict[UUID, list[KbHit]] = {}
+        for chunk_id, rrf_score in merged:
+            kb_id = _CHUNK_INDEX[chunk_id].kb_id
+            bucket = per_kb.setdefault(kb_id, [])
+            if len(bucket) >= top_k:
+                continue
+            row = _CHUNK_INDEX[chunk_id]
+            bucket.append(
+                KbHit(
+                    kb_name=row.kb_name,
+                    document_path=row.path,
+                    snippet=_make_snippet(row.content, query),
+                    score=rrf_score,
+                )
             )
+
+        # Reset the per-call chunk index (this is a module-private
+        # cache scoped to one call; not worth thread-locals).
+        _CHUNK_INDEX.clear()
+
+        results = [h for hits in per_kb.values() for h in hits]
+        results.sort(key=lambda h: h.score, reverse=True)
+        if kb_name is not None:
+            return results[:top_k]
+        # Federated cap: at most 4 KBs × top_k, so a misuse of `kb=None`
+        # can't blow up the assistant's context window.
+        return results[: min(len(per_kb), 4) * top_k]
+
+    # ------------------------------------------------------------------
+    # Search branches
+    # ------------------------------------------------------------------
+
+    async def _bm25_search(
+        self,
+        query: str,
+        kb_ids: list[UUID],
+        limit: int,
+    ) -> list["_RankedChunk"]:
+        async with self._session_factory() as db:
             rows = (
                 await db.execute(
-                    sql,
+                    text(
+                        """
+                        SELECT
+                            c.id           AS chunk_id,
+                            we.path        AS path,
+                            we.kb_id       AS kb_id,
+                            kb.name        AS kb_name,
+                            c.content      AS content
+                        FROM kb_chunk c
+                        JOIN kb_wiki_entry we ON we.id = c.wiki_entry_id
+                        JOIN kb ON kb.id = we.kb_id
+                        WHERE we.kb_id = ANY(:kb_ids)
+                          AND c.tsv @@ plainto_tsquery('english', :q)
+                        ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', :q)) DESC
+                        LIMIT :limit
+                        """
+                    ),
+                    {"q": query, "kb_ids": kb_ids, "limit": limit},
+                )
+            ).all()
+        ranked: list[_RankedChunk] = []
+        for rank, r in enumerate(rows):
+            row = _RankedChunk(
+                chunk_id=r.chunk_id,
+                kb_id=r.kb_id,
+                kb_name=r.kb_name,
+                path=r.path,
+                content=r.content,
+                rank=rank,
+            )
+            ranked.append(row)
+            _CHUNK_INDEX[r.chunk_id] = row
+        return ranked
+
+    async def _vector_search(
+        self,
+        qvec: list[float],
+        kb_ids: list[UUID],
+        limit: int,
+    ) -> list["_RankedChunk"]:
+        async with self._session_factory() as db:
+            rows = (
+                await db.execute(
+                    text(
+                        """
+                        SELECT
+                            c.id           AS chunk_id,
+                            we.path        AS path,
+                            we.kb_id       AS kb_id,
+                            kb.name        AS kb_name,
+                            c.content      AS content
+                        FROM kb_chunk c
+                        JOIN kb_wiki_entry we ON we.id = c.wiki_entry_id
+                        JOIN kb ON kb.id = we.kb_id
+                        WHERE we.kb_id = ANY(:kb_ids)
+                          AND c.embedding IS NOT NULL
+                        ORDER BY c.embedding <=> (:qvec)::vector
+                        LIMIT :limit
+                        """
+                    ),
                     {
-                        "q": query,
+                        "qvec": vector_literal(qvec),
                         "kb_ids": kb_ids,
-                        "overfetch": top_k * len(kb_ids) + top_k,
+                        "limit": limit,
                     },
                 )
             ).all()
-
-        # 3. Per-KB top_k slicing prevents a high-volume KB from
-        # crowding others off the result list.
-        per_kb: dict[UUID, list[KbHit]] = {}
-        for r in rows:
-            bucket = per_kb.setdefault(r.kb_id, [])
-            if len(bucket) >= top_k:
-                continue
-            bucket.append(
-                KbHit(
-                    kb_name=r.kb_name,
-                    document_path=r.path,
-                    snippet=_make_snippet(r.content, query),
-                    score=float(r.score),
-                )
+        ranked: list[_RankedChunk] = []
+        for rank, r in enumerate(rows):
+            row = _RankedChunk(
+                chunk_id=r.chunk_id,
+                kb_id=r.kb_id,
+                kb_name=r.kb_name,
+                path=r.path,
+                content=r.content,
+                rank=rank,
             )
-
-        merged = [h for hits in per_kb.values() for h in hits]
-        merged.sort(key=lambda h: h.score, reverse=True)
-        if kb_name is not None:
-            return merged[:top_k]
-        # Federated cap: at most 4 KBs * top_k, so a malformed query
-        # can never blow up the assistant's context window.
-        return merged[: min(len(per_kb), 4) * top_k]
+            ranked.append(row)
+            # First branch wins for the per-call index — vector branch
+            # adds chunks the BM25 branch may not have surfaced.
+            _CHUNK_INDEX.setdefault(r.chunk_id, row)
+        return ranked
 
     # ------------------------------------------------------------------
     # Read
@@ -269,6 +370,48 @@ class KbStore:
             "kind": entry.kind,
             "content": content,
         }
+
+
+@dataclass
+class _RankedChunk:
+    """Per-branch chunk row + its rank within that branch's result list."""
+
+    chunk_id: UUID
+    kb_id: UUID
+    kb_name: str
+    path: str
+    content: str
+    rank: int  # 0-indexed; 0 is best
+
+
+# Per-call chunk lookup table populated by the search branches and
+# read during RRF merge. Cleared at the end of every search() call.
+# Module-private, single-thread (one search at a time per task).
+_CHUNK_INDEX: dict[UUID, _RankedChunk] = {}
+
+
+def _reciprocal_rank_fusion(
+    *branch_lists: list[_RankedChunk],
+) -> list[tuple[UUID, float]]:
+    """Merge multiple ranked lists via reciprocal-rank-fusion.
+
+    For each chunk that appears in at least one branch, its RRF score
+    is ``sum(1 / (RRF_K + rank))`` across all branches it appears in.
+    Returns ``[(chunk_id, score), ...]`` sorted by score descending.
+
+    A chunk that ranks highly in either branch alone gets a non-zero
+    score; a chunk that ranks highly in BOTH gets ~2× the score and
+    rises to the top, which is the property that makes RRF work better
+    than either branch in isolation.
+    """
+    scores: dict[UUID, float] = {}
+    for branch in branch_lists:
+        for hit in branch:
+            scores[hit.chunk_id] = (
+                scores.get(hit.chunk_id, 0.0)
+                + 1.0 / (RRF_K + hit.rank)
+            )
+    return sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
 
 
 def _make_snippet(content: str, query: str, ctx_chars: int = 160) -> str:

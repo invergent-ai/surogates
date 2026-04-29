@@ -111,7 +111,8 @@ async def _kb_search_handler(
     except (TypeError, ValueError):
         top_k = 5
 
-    store = KbStore(session_factory)
+    embedder = kwargs.get("embedder")
+    store = KbStore(session_factory, embedder=embedder)
     try:
         hits = await store.search(
             org_id=org_id,
