@@ -144,6 +144,7 @@ def create_app() -> FastAPI:
         events,
         feedback,
         health,
+        knowledge_bases,
         memory,
         prompts,
         sessions,
@@ -164,6 +165,9 @@ def create_app() -> FastAPI:
     app.include_router(feedback.router, prefix="/v1/api", tags=["feedback"])
     app.include_router(tools.router, prefix="/v1", tags=["tools"])
     app.include_router(skills.router, prefix="/v1", tags=["skills"])
+    app.include_router(
+        knowledge_bases.router, prefix="/v1", tags=["knowledge_bases"],
+    )
     app.include_router(agents.router, prefix="/v1", tags=["agents"])
     app.include_router(memory.router, prefix="/v1", tags=["memory"])
     app.include_router(prompts.router, prefix="/v1", tags=["prompts"])
