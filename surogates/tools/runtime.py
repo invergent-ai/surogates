@@ -61,6 +61,8 @@ class ToolRuntime:
             delegate,
             expert,
             file_ops,
+            kb_read,
+            kb_search,
             memory,
             session_search,
             skill_manager,
@@ -79,6 +81,8 @@ class ToolRuntime:
             delegate,
             terminal,  # also registers the 'process' tool
             session_search,
+            kb_search,
+            kb_read,
             todo,
             clarify,
             expert,

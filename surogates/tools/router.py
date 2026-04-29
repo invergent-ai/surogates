@@ -44,6 +44,8 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "skill_view": ToolLocation.HARNESS,
     "skill_manage": ToolLocation.HARNESS,
     "session_search": ToolLocation.HARNESS,
+    "kb_search": ToolLocation.HARNESS,
+    "kb_read": ToolLocation.HARNESS,
     "web_search": ToolLocation.HARNESS,
     "web_extract": ToolLocation.HARNESS,
     "web_crawl": ToolLocation.HARNESS,
