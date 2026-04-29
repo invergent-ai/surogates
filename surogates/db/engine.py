@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 # PostgreSQL-specific constructs (recursive CTEs, LATERAL joins, plpgsql).
 OBSERVABILITY_SQL_PATH = Path(__file__).with_name("observability.sql")
 
+# Path to the KB DDL (pgvector ext, GENERATED tsvector, HNSW + GIN indexes,
+# RLS policies).  Same rationale as observability.sql — the constructs here
+# are not expressible via SQLAlchemy DDL.  See ``apply_kb_ddl`` below.
+KB_SQL_PATH = Path(__file__).with_name("kb.sql")
+
 # Suppress noisy CancelledError logs from the connection pool when SSE
 # clients disconnect mid-query.  These are harmless — the pool discards
 # the cancelled connection and creates a fresh one.
@@ -80,14 +85,34 @@ async def apply_observability_ddl(conn: AsyncConnection) -> None:
     await raw.driver_connection.execute(sql)
 
 
+async def apply_kb_ddl(conn: AsyncConnection) -> None:
+    """Apply the KB DDL: pgvector extension, GENERATED tsvector column on
+    ``kb_chunk``, GIN + HNSW indexes, and row-level-security policies.
+
+    Reads :data:`KB_SQL_PATH` via the simple-query protocol like
+    :func:`apply_observability_ddl`.  Idempotent.
+
+    Note: the pgvector extension is also installed by :func:`run_migrations`
+    *before* ``Base.metadata.create_all`` — that path matters because the
+    ORM emits ``embedding vector(1024)`` and the type must exist when the
+    table is created on a fresh database.  The ``CREATE EXTENSION`` here
+    is a safety net for re-runs.
+    """
+    sql = KB_SQL_PATH.read_text(encoding="utf-8")
+    raw = await conn.get_raw_connection()
+    await raw.driver_connection.execute(sql)
+
+
 def run_migrations(db_settings: DatabaseSettings) -> None:
-    """Create all tables and install observability DDL.
+    """Create all tables and install observability + KB DDL.
 
     Uses ``Base.metadata.create_all`` (idempotent — skips existing
     tables) for ORM-managed schema, then applies
-    :func:`apply_observability_ddl` for the trigger and views that sit
-    on top of the events table.  A future version can wire Alembic for
-    versioned migrations.
+    :func:`apply_observability_ddl` and :func:`apply_kb_ddl`.  The
+    pgvector extension is installed *before* ``create_all`` because the
+    KB ORM emits ``vector(1024)`` and the type must exist before the
+    table is created on a fresh database.  A future version can wire
+    Alembic for versioned migrations.
     """
     import asyncio
 
@@ -96,12 +121,19 @@ def run_migrations(db_settings: DatabaseSettings) -> None:
     async def _create_all() -> None:
         engine = async_engine_from_settings(db_settings)
         async with engine.begin() as conn:
+            # Install pgvector before create_all — the kb_chunk.embedding
+            # column is ``vector(1024)`` and the type must exist on a fresh DB.
+            raw = await conn.get_raw_connection()
+            await raw.driver_connection.execute(
+                "CREATE EXTENSION IF NOT EXISTS vector;"
+            )
             await conn.run_sync(Base.metadata.create_all)
             await apply_observability_ddl(conn)
+            await apply_kb_ddl(conn)
         await engine.dispose()
 
     asyncio.run(_create_all())
     logger.info(
-        "Database tables + observability DDL created/verified: %s",
+        "Database tables + observability + KB DDL created/verified: %s",
         db_settings.url.rsplit("@", 1)[-1],
     )

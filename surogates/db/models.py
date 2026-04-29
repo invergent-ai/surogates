@@ -20,7 +20,8 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from pgvector.sqlalchemy import Vector
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
@@ -837,4 +838,346 @@ class WebsiteAgent(Base):
     # Relationships
     org: Mapped[Org] = relationship(
         back_populates="website_agents", lazy="raise"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Bases
+#
+# Two-layer model:
+#   - ``kb_raw_doc``: immutable, source of truth, ingested from a ``kb_source``.
+#   - ``kb_wiki_entry``: LLM-authored, denoised, cross-referenced wiki layer
+#     (one or more raw docs per entry). Chunked into ``kb_chunk`` for hybrid
+#     retrieval (BM25 via tsvector + vector via pgvector HNSW).
+#
+# Storage:
+#   - Postgres: metadata, chunks, embeddings, RLS policies (see ``kb.sql``).
+#   - Garage S3: raw bytes + wiki entry markdown at
+#     ``tenant-{org_id}/shared/knowledge_bases/{kb_name}/...`` for tenant KBs,
+#     ``platform-shared/knowledge_bases/{kb_name}/...`` for platform KBs
+#     (where ``kb.org_id IS NULL``).
+#
+# Tenancy is enforced three ways: (1) tools derive ``org_id`` from kwargs,
+# never from a tool argument; (2) every query joins ``kb`` and filters
+# ``kb.org_id``; (3) Postgres row-level security on every KB table tied to
+# the ``app.org_id`` session GUC (set in ``kb.sql``).
+#
+# DDL that ``Base.metadata.create_all`` cannot express (GENERATED tsvector
+# column, HNSW + GIN indexes, RLS policies, pgvector extension) lives in
+# ``surogates/db/kb.sql`` and is applied by ``apply_kb_ddl`` in
+# ``surogates/db/engine.py``.
+# ---------------------------------------------------------------------------
+
+
+class KnowledgeBase(Base):
+    """A named knowledge base owned by an org, or a platform-shared KB
+    (``org_id IS NULL`` and ``is_platform = True``).
+
+    Platform KBs live in a single ``platform-shared/`` Garage bucket and
+    are implicitly granted to every agent in every org. Org KBs live in
+    the org's tenant bucket and require an explicit ``agent_kb_grant`` row
+    for an agent to use them via ``kb_search``.
+    """
+
+    __tablename__ = "kb"
+    __table_args__ = (
+        # Per-org name uniqueness (org KBs).
+        Index(
+            "uq_kb_org_name",
+            "org_id", "name",
+            unique=True,
+            postgresql_where=text("org_id IS NOT NULL"),
+        ),
+        # Platform-wide name uniqueness (platform KBs).
+        Index(
+            "uq_kb_platform_name",
+            "name",
+            unique=True,
+            postgresql_where=text("org_id IS NULL"),
+        ),
+        Index("idx_kb_org", "org_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    # NULL for platform KBs (visible to all orgs); UUID for org-owned KBs.
+    org_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=True
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Per-KB conventions document, used as the wiki-maintainer's system prompt
+    # and surfaced in the management UI as an editable doc.
+    agents_md: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=""
+    )
+    embedding_model: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="mxbai-embed-large"
+    )
+    # Locked at create-time. Switching ``embedding_model`` to one with a
+    # different dim requires a re-index job (sets ``status = 'reindexing'``).
+    embedding_dim: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1024"
+    )
+    is_platform: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    # 'active' | 'reindexing'.
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="active"
+    )
+    # Watermark: max ``kb_raw_doc.ingested_at`` the maintainer has compiled.
+    # Maintainer reads only rows ingested at or before this watermark on the
+    # next run, then advances it. Lets ingest run concurrently with compile.
+    last_compiled_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    # Daily LLM budget (USD) for the wiki maintainer on this KB. 0 = unlimited.
+    maintenance_budget_usd_per_day: Mapped[Decimal] = mapped_column(
+        Numeric(10, 6), nullable=False, server_default="0"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now()
+    )
+
+    # Relationships (one-way; we don't expose ``org.kbs`` to keep the diff
+    # to the existing ``Org`` model nil).
+    org: Mapped[Optional[Org]] = relationship(lazy="raise")
+    sources: Mapped[list[KbSource]] = relationship(
+        back_populates="kb", lazy="raise", cascade="all, delete-orphan"
+    )
+    raw_docs: Mapped[list[KbRawDoc]] = relationship(
+        back_populates="kb", lazy="raise", cascade="all, delete-orphan"
+    )
+    wiki_entries: Mapped[list[KbWikiEntry]] = relationship(
+        back_populates="kb", lazy="raise", cascade="all, delete-orphan"
+    )
+
+
+class KbSource(Base):
+    """An ingestion source feeding a ``KnowledgeBase``.
+
+    The ``kind`` discriminator selects the runner module under
+    ``surogates.jobs.kb_sources`` (``markdown_dir``, ``web_scraper``,
+    ``pdf``, ...). The ``config`` JSONB holds kind-specific parameters
+    (URL, glob patterns, credentials reference, etc.).
+
+    Tombstone-on-delete: setting ``deleted_at`` stops further ingest;
+    associated raw docs remain so the wiki maintainer can rewrite affected
+    entries. Hard purge is a separate admin operation.
+    """
+
+    __tablename__ = "kb_source"
+    __table_args__ = (
+        Index("idx_kb_source_kb", "kb_id"),
+        # Backing index for the cron scheduler scan.
+        Index(
+            "idx_kb_source_schedule",
+            "schedule",
+            postgresql_where=text(
+                "schedule IS NOT NULL AND deleted_at IS NULL"
+            ),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    kb_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("kb.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # 'markdown_dir' | 'web_scraper' | 'github' | 'pdf' | 'notion' | 'slack' | ...
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    # Cron expression or NULL (manual-trigger only).
+    schedule: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_synced_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    # 'success' | 'failed' | 'partial' | 'running' | NULL (never synced).
+    last_status: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now()
+    )
+
+    # Relationships
+    kb: Mapped[KnowledgeBase] = relationship(
+        back_populates="sources", lazy="raise"
+    )
+
+
+class KbRawDoc(Base):
+    """A raw document ingested from a ``KbSource`` -- the immutable source
+    of truth. Bytes live in Garage at
+    ``{bucket}/shared/knowledge_bases/{kb_name}/raw/{id}.md`` (or the
+    platform bucket equivalent for platform KBs).
+
+    Hashed on ingest; ingest is idempotent on ``content_sha`` so re-running
+    a sync only re-embeds rows that actually changed.
+    """
+
+    __tablename__ = "kb_raw_doc"
+    __table_args__ = (
+        Index("idx_kb_raw_doc_kb", "kb_id"),
+        Index("idx_kb_raw_doc_source", "source_id"),
+        Index("idx_kb_raw_doc_kb_ingested", "kb_id", "ingested_at"),
+        UniqueConstraint("kb_id", "path", name="uq_kb_raw_doc_kb_path"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    kb_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("kb.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # NULL when the source was deleted but the raw doc kept (orphaned).
+    source_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("kb_source.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Source-relative path, e.g. "docs/sub-agents.md" or
+    # "https://docs.bigconnect.io/concepts/security".
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    content_sha: Mapped[str] = mapped_column(Text, nullable=False)
+    # Live URL for the raw doc, when applicable. Lets the agent surface a
+    # back-pointer to the original location in citations.
+    url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ingested_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now()
+    )
+
+    # Relationships
+    kb: Mapped[KnowledgeBase] = relationship(
+        back_populates="raw_docs", lazy="raise"
+    )
+
+
+class KbWikiEntry(Base):
+    """An LLM-authored wiki entry compiled from one or more raw docs.
+
+    Bytes live in Garage at
+    ``{bucket}/shared/knowledge_bases/{kb_name}/{path}``, e.g.
+    ``wiki/summaries/sub-agents.md`` or ``wiki/concepts/sandbox.md``.
+
+    Chunked into ``kb_chunk`` rows for hybrid retrieval. The maintainer
+    rewrites entries by atomic ``.tmp``-then-rename in Garage and updates
+    ``content_sha`` last (the truth-marker on crash recovery).
+    """
+
+    __tablename__ = "kb_wiki_entry"
+    __table_args__ = (
+        Index("idx_kb_wiki_entry_kb", "kb_id"),
+        Index("idx_kb_wiki_entry_kb_kind", "kb_id", "kind"),
+        UniqueConstraint("kb_id", "path", name="uq_kb_wiki_entry_kb_path"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    kb_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("kb.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # KB-bucket-relative path, e.g. "wiki/summaries/sub-agents.md",
+    # "wiki/concepts/sandbox.md", "index.md", "log.md".
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    # 'summary' | 'concept' | 'exploration' | 'index' | 'log'.
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    content_sha: Mapped[str] = mapped_column(Text, nullable=False)
+    # IDs of raw docs that contributed to this entry. Used by the maintainer
+    # to know which entries to rewrite when their source raw docs change.
+    sources: Mapped[list[uuid.UUID]] = mapped_column(
+        ARRAY(UUID(as_uuid=True)), nullable=False, server_default="{}"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    # Relationships
+    kb: Mapped[KnowledgeBase] = relationship(
+        back_populates="wiki_entries", lazy="raise"
+    )
+    chunks: Mapped[list[KbChunk]] = relationship(
+        back_populates="entry", lazy="raise", cascade="all, delete-orphan"
+    )
+
+
+class KbChunk(Base):
+    """A retrieval chunk over a ``KbWikiEntry``.
+
+    Hybrid index targets:
+      - ``tsv``: tsvector GENERATED column (added in ``kb.sql``; not declared
+        here because SQLAlchemy DDL for PG GENERATED columns is dialect-
+        specific and awkward). GIN-indexed for BM25-ish lexical search.
+      - ``embedding``: pgvector cosine-similarity vector. HNSW-indexed
+        (m=16, ef_construction=64) in ``kb.sql``.
+
+    ``kb_search`` runs both, merges via reciprocal-rank-fusion (per-KB
+    top_k normalised so one big KB doesn't drown others).
+    """
+
+    __tablename__ = "kb_chunk"
+    __table_args__ = (
+        UniqueConstraint(
+            "wiki_entry_id", "chunk_index", name="uq_kb_chunk_entry_idx"
+        ),
+        Index("idx_kb_chunk_entry", "wiki_entry_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    wiki_entry_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("kb_wiki_entry.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # Heading breadcrumb, e.g. "Sub-Agents > What is a Sub-Agent?". Aids
+    # ranking and citation.
+    heading_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Vector(1024) — fixed at platform default in MVP. Per-KB override in
+    # ``KnowledgeBase.embedding_dim`` is documented but not yet supported
+    # for retrieval (HNSW index dim is fixed at table-create time).
+    # Nullable so a chunk can exist mid-reindex before its embedding is
+    # populated; HNSW handles NULLs by skipping.
+    embedding = mapped_column(Vector(1024), nullable=True)
+
+    # Relationships
+    entry: Mapped[KbWikiEntry] = relationship(
+        back_populates="chunks", lazy="raise"
+    )
+
+
+class AgentKbGrant(Base):
+    """An agent's grant to read a specific (org-owned) ``KnowledgeBase``.
+
+    Default-deny: an agent without a grant row for an org KB cannot see
+    it via ``kb_search``. Platform KBs (``kb.is_platform = True``) are
+    implicitly granted to all agents and need no row here.
+    """
+
+    __tablename__ = "agent_kb_grant"
+
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agents.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    kb_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("kb.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    granted_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now()
     )

@@ -23,7 +23,7 @@ from testcontainers.redis import RedisContainer
 
 import bcrypt as _bcrypt
 
-from surogates.db.engine import apply_observability_ddl
+from surogates.db.engine import apply_kb_ddl, apply_observability_ddl
 from surogates.db.models import Base
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.service_account import _reset_caches as _reset_sa_caches
@@ -83,8 +83,15 @@ async def _flush_rate_limit_keys(redis_client):
 
 @pytest.fixture(scope="session")
 def postgres_container():
-    """Spin up a PostgreSQL 16 container for the test session."""
-    with PostgresContainer("postgres:16", driver="asyncpg") as pg:
+    """Spin up a PostgreSQL 16 + pgvector container for the test session.
+
+    Uses the ``pgvector/pgvector:pg16`` image (drop-in postgres:16 with the
+    ``vector`` extension preinstalled) because ``Base.metadata.create_all``
+    emits ``embedding vector(1024)`` on ``kb_chunk`` and the type must exist
+    before the table is created.  The plain ``postgres:16`` image lacks
+    pgvector and the migration would fail at fixture setup.
+    """
+    with PostgresContainer("pgvector/pgvector:pg16", driver="asyncpg") as pg:
         yield pg
 
 
@@ -129,8 +136,15 @@ async def engine(pg_url):
     )
 
     async with eng.begin() as conn:
+        # Install pgvector before create_all — kb_chunk.embedding is
+        # ``vector(1024)`` and the type must exist on a fresh DB.
+        raw = await conn.get_raw_connection()
+        await raw.driver_connection.execute(
+            "CREATE EXTENSION IF NOT EXISTS vector;"
+        )
         await conn.run_sync(Base.metadata.create_all)
         await apply_observability_ddl(conn)
+        await apply_kb_ddl(conn)
 
     yield eng
 
