@@ -274,6 +274,7 @@ async def execute_tool_calls(
     sandbox_pool: SandboxPool | None = None,
     api_client: Any | None = None,
     session_factory: Any | None = None,
+    storage_backend: Any | None = None,
     saga: SagaOrchestrator | None = None,
     log_policy_allowed: bool = False,
 ) -> list[dict]:
@@ -303,6 +304,7 @@ async def execute_tool_calls(
             sandbox_pool=sandbox_pool,
             api_client=api_client,
             session_factory=session_factory,
+            storage_backend=storage_backend,
             log_policy_allowed=log_policy_allowed,
         )
     return await execute_tool_calls_sequential(
@@ -320,6 +322,7 @@ async def execute_tool_calls(
         sandbox_pool=sandbox_pool,
         api_client=api_client,
         session_factory=session_factory,
+        storage_backend=storage_backend,
         saga=saga,
         log_policy_allowed=log_policy_allowed,
     )
@@ -341,6 +344,7 @@ async def execute_tool_calls_sequential(
     sandbox_pool: SandboxPool | None = None,
     api_client: Any | None = None,
     session_factory: Any | None = None,
+    storage_backend: Any | None = None,
     saga: SagaOrchestrator | None = None,
     log_policy_allowed: bool = False,
 ) -> list[dict]:
@@ -367,6 +371,7 @@ async def execute_tool_calls_sequential(
             sandbox_pool=sandbox_pool,
             api_client=api_client,
             session_factory=session_factory,
+            storage_backend=storage_backend,
             saga=saga,
             log_policy_allowed=log_policy_allowed,
         )
@@ -391,6 +396,7 @@ async def execute_tool_calls_concurrent(
     sandbox_pool: SandboxPool | None = None,
     api_client: Any | None = None,
     session_factory: Any | None = None,
+    storage_backend: Any | None = None,
     log_policy_allowed: bool = False,
 ) -> list[dict]:
     """Execute tool calls concurrently using asyncio.gather.
@@ -433,6 +439,7 @@ async def execute_tool_calls_concurrent(
                 sandbox_pool=sandbox_pool,
                 api_client=api_client,
                 session_factory=session_factory,
+                storage_backend=storage_backend,
                 _parent_trace=parent_trace,
                 log_policy_allowed=log_policy_allowed,
             )
@@ -462,6 +469,7 @@ async def execute_single_tool(
     sandbox_pool: SandboxPool | None = None,
     api_client: Any | None = None,
     session_factory: Any | None = None,
+    storage_backend: Any | None = None,
     _parent_trace: Any | None = None,
     saga: SagaOrchestrator | None = None,
     log_policy_allowed: bool = False,
@@ -724,6 +732,7 @@ async def execute_single_tool(
                 workspace_path=workspace_path,
                 api_client=api_client,
                 session_factory=session_factory,
+                storage_backend=storage_backend,
                 tools=tools,
                 tool_call_id=tool_call_id,
                 lease_token=lease.lease_token,

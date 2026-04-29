@@ -20,9 +20,12 @@ import json
 import uuid
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from surogates.storage.backend import LocalBackend
+from surogates.storage.kb_storage import KbStorage
 from surogates.tools.builtin import kb_read as kb_read_mod
 from surogates.tools.builtin import kb_search as kb_search_mod
 from surogates.tools.registry import ToolRegistry
@@ -30,6 +33,20 @@ from surogates.tools.registry import ToolRegistry
 from .conftest import create_org
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+
+# ---------------------------------------------------------------------------
+# LocalBackend fixture for storage-backed kb_read tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def local_storage(tmp_path) -> LocalBackend:
+    """LocalBackend rooted at the test's tmp dir.
+
+    Per-test scope so tests don't see each other's seeded bytes.
+    """
+    return LocalBackend(base_path=str(tmp_path))
 
 
 # ---------------------------------------------------------------------------
@@ -298,9 +315,11 @@ async def test_kb_read_cross_tenant_returns_not_found(session_factory):
     assert "not found" in payload["error"].lower()
 
 
-async def test_kb_read_resolves_own_org_wiki_entry(session_factory):
-    """Happy path: own org, registered wiki entry → success with the
-    step-3 stub content note. Validates kwargs flow + DB resolution.
+async def test_kb_read_resolves_own_org_wiki_entry_without_storage(session_factory):
+    """No storage_backend in kwargs → registration is confirmed but
+    content is the "backend not wired" stub. Verifies kwargs flow +
+    DB resolution work even when storage isn't available (used by
+    tests that don't set up a backend).
     """
     org_id = await create_org(session_factory)
     kb_name = f"own-{uuid.uuid4()}"
@@ -320,13 +339,145 @@ async def test_kb_read_resolves_own_org_wiki_entry(session_factory):
     assert payload["kb_name"] == kb_name
     assert payload["path"] == "wiki/summaries/foo.md"
     assert payload["kind"] == "wiki"
-    # Stub note for step 3; content fetch lands in step 4.
-    assert "step 4" in payload["content"].lower()
+    assert "storage backend not wired" in payload["content"].lower()
 
 
-async def test_kb_read_resolves_platform_kb_entry(session_factory):
+async def test_kb_read_returns_real_bytes_when_storage_wired(
+    session_factory, local_storage
+):
+    """Happy path: storage_backend in kwargs + bytes seeded at the right
+    bucket key → kb_read returns the real content.
+    """
+    org_id = await create_org(session_factory)
+    kb_name = f"own-{uuid.uuid4()}"
+    kb_id = await _seed_kb(session_factory, org_id, name=kb_name)
+    path = "wiki/summaries/sub-agents.md"
+    await _seed_wiki_entry(session_factory, kb_id, path=path)
+
+    # Seed bytes via the same KbStorage helper the production path uses.
+    helper = KbStorage(local_storage)
+    await helper.write_entry(
+        kb_org_id=org_id,
+        kb_name=kb_name,
+        path=path,
+        data=b"# Sub-Agents\n\nContent here.",
+    )
+
+    registry = _make_registry()
+    raw = await registry.dispatch(
+        "kb_read",
+        {"path": path, "kb": kb_name},
+        session_factory=session_factory,
+        tenant={"org_id": org_id},
+        storage_backend=local_storage,
+    )
+    payload = json.loads(raw)
+    assert payload["success"] is True
+    assert payload["content"] == "# Sub-Agents\n\nContent here."
+
+
+async def test_kb_read_partial_ingest_note_when_db_row_exists_but_bytes_missing(
+    session_factory, local_storage
+):
+    """Storage backend wired but the object isn't there (e.g. a previous
+    ingest crashed after inserting the DB row). kb_read returns success
+    with an explanatory partial-ingest note rather than crashing.
+    """
+    org_id = await create_org(session_factory)
+    kb_name = f"own-{uuid.uuid4()}"
+    kb_id = await _seed_kb(session_factory, org_id, name=kb_name)
+    path = "wiki/summaries/orphan.md"
+    await _seed_wiki_entry(session_factory, kb_id, path=path)
+    # No write_entry call — bucket object intentionally missing.
+
+    registry = _make_registry()
+    raw = await registry.dispatch(
+        "kb_read",
+        {"path": path, "kb": kb_name},
+        session_factory=session_factory,
+        tenant={"org_id": org_id},
+        storage_backend=local_storage,
+    )
+    payload = json.loads(raw)
+    assert payload["success"] is True
+    assert "partial ingest" in payload["content"].lower()
+
+
+async def test_kb_read_routes_platform_to_platform_bucket(
+    session_factory, local_storage
+):
+    """Platform KBs (org_id IS NULL) live in the platform-shared bucket,
+    NOT in any tenant bucket. Verifies kb_read uses kb.org_id from the
+    DB row (not the caller's org_id) for bucket routing.
+    """
+    plat_name = f"platform-{uuid.uuid4()}"
+    plat_kb = await _seed_kb(session_factory, None, name=plat_name)
+    path = "index.md"
+    await _seed_wiki_entry(session_factory, plat_kb, path=path)
+
+    helper = KbStorage(local_storage)
+    await helper.write_entry(
+        kb_org_id=None,  # platform
+        kb_name=plat_name,
+        path=path,
+        data=b"# Platform index",
+    )
+    # Sanity: writing with the wrong (tenant) org_id would put it in a
+    # different bucket; verify by attempting a read with the wrong arg.
+    wrong_org = await create_org(session_factory)
+    assert (
+        await helper.read_entry(wrong_org, plat_name, path)
+    ) is None, "platform bytes should NOT live in any tenant bucket"
+
+    # Now exercise the tool from a regular org's perspective; it should
+    # see the platform content.
+    org_id = await create_org(session_factory)
+    registry = _make_registry()
+    raw = await registry.dispatch(
+        "kb_read",
+        {"path": path, "kb": plat_name},
+        session_factory=session_factory,
+        tenant={"org_id": org_id},
+        storage_backend=local_storage,
+    )
+    payload = json.loads(raw)
+    assert payload["success"] is True
+    assert payload["content"] == "# Platform index"
+
+
+async def test_kb_read_combined_path_form_with_storage(
+    session_factory, local_storage
+):
+    """``path`` as ``<kb_name>/<rest>`` (no separate ``kb`` arg) with a
+    real storage backend wired — content comes back as bytes.
+    """
+    org_id = await create_org(session_factory)
+    kb_name = f"own-{uuid.uuid4()}"
+    kb_id = await _seed_kb(session_factory, org_id, name=kb_name)
+    path = "wiki/concepts/sandbox.md"
+    await _seed_wiki_entry(session_factory, kb_id, path=path)
+    helper = KbStorage(local_storage)
+    await helper.write_entry(
+        kb_org_id=org_id, kb_name=kb_name, path=path, data=b"# Sandbox",
+    )
+
+    registry = _make_registry()
+    raw = await registry.dispatch(
+        "kb_read",
+        {"path": f"{kb_name}/{path}"},
+        session_factory=session_factory,
+        tenant={"org_id": org_id},
+        storage_backend=local_storage,
+    )
+    payload = json.loads(raw)
+    assert payload["success"] is True
+    assert payload["content"] == "# Sandbox"
+
+
+async def test_kb_read_resolves_platform_kb_entry_without_storage(session_factory):
     """Platform KBs are visible to every org → kb_read from any org
-    can resolve a platform wiki entry.
+    resolves the registration even without a storage backend (content
+    is the no-backend stub).
     """
     plat_name = f"platform-{uuid.uuid4()}"
     plat_kb = await _seed_kb(session_factory, None, name=plat_name)
@@ -344,26 +495,3 @@ async def test_kb_read_resolves_platform_kb_entry(session_factory):
     payload = json.loads(raw)
     assert payload["success"] is True
     assert payload["kb_name"] == plat_name
-
-
-async def test_kb_read_combined_path_form(session_factory):
-    """``path`` as ``<kb_name>/<rest>`` (no separate ``kb`` arg) also
-    works.
-    """
-    org_id = await create_org(session_factory)
-    kb_name = f"own-{uuid.uuid4()}"
-    kb_id = await _seed_kb(session_factory, org_id, name=kb_name)
-    await _seed_wiki_entry(
-        session_factory, kb_id, path="wiki/concepts/sandbox.md"
-    )
-    registry = _make_registry()
-    raw = await registry.dispatch(
-        "kb_read",
-        {"path": f"{kb_name}/wiki/concepts/sandbox.md"},
-        session_factory=session_factory,
-        tenant={"org_id": org_id},
-    )
-    payload = json.loads(raw)
-    assert payload["success"] is True
-    assert payload["kb_name"] == kb_name
-    assert payload["path"] == "wiki/concepts/sandbox.md"

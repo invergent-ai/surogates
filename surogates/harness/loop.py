@@ -221,6 +221,7 @@ class AgentHarness:
         api_client: Any | None = None,
         default_model: str = "gpt-4o",
         session_factory: Any | None = None,
+        storage_backend: Any | None = None,
         log_policy_allowed: bool = False,
     ) -> None:
         self._store = session_store
@@ -235,6 +236,13 @@ class AgentHarness:
         self._sandbox_pool: SandboxPool | None = sandbox_pool
         self._api_client = api_client
         self._session_factory = session_factory
+        # Object-storage backend (Garage in prod, LocalBackend in dev/tests).
+        # Threaded into tool dispatch kwargs so HARNESS tools — kb_read in
+        # particular — can fetch tenant or platform-shared bucket bytes
+        # without needing the per-session sandbox involvement. Optional so
+        # legacy code paths that construct AgentHarness without storage
+        # (older tests) still work; KB tools handle ``None`` gracefully.
+        self._storage_backend = storage_backend
 
         # Checkpoint flag — when enabled, the harness tells the sandbox
         # to take filesystem snapshots before file-mutating operations.
@@ -858,6 +866,7 @@ class AgentHarness:
                     sandbox_pool=self._sandbox_pool,
                     api_client=self._api_client,
                     session_factory=self._session_factory,
+                    storage_backend=self._storage_backend,
                     saga=saga,
                     log_policy_allowed=self._log_policy_allowed,
                 )
@@ -1360,6 +1369,7 @@ class AgentHarness:
                     sandbox_pool=self._sandbox_pool,
                     api_client=self._api_client,
                     session_factory=self._session_factory,
+                    storage_backend=self._storage_backend,
                     saga=saga,
                     log_policy_allowed=self._log_policy_allowed,
                 )

@@ -25,6 +25,9 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from surogates.storage.backend import StorageBackend
+from surogates.storage.kb_storage import KbStorage
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,8 +51,15 @@ class KbStore:
     ``score`` is the BM25 ``ts_rank_cd``.
     """
 
-    def __init__(self, session_factory: async_sessionmaker) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker,
+        storage_backend: StorageBackend | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._kb_storage = (
+            KbStorage(storage_backend) if storage_backend is not None else None
+        )
 
     # ------------------------------------------------------------------
     # Search
@@ -165,7 +175,8 @@ class KbStore:
         path: str,
         kb_name: Optional[str] = None,
     ) -> Optional[dict]:
-        """Resolve a wiki or raw entry within the calling org's KBs.
+        """Resolve a wiki or raw entry within the calling org's KBs and
+        fetch its bytes from object storage.
 
         Path forms:
           - With ``kb_name`` set: ``path`` is relative to the KB root
@@ -174,15 +185,15 @@ class KbStore:
             its first segment (e.g.
             ``invergent-docs/wiki/summaries/foo.md``).
 
-        Returns a dict ``{kb_name, path, kind}`` where ``kind`` is
-        ``'wiki'`` or ``'raw'`` if the row exists and the org can see
-        the parent KB. Returns ``None`` otherwise (kb name unknown,
-        entry not registered, or cross-tenant access).
+        Returns ``{kb_name, path, kind, content}``. ``kind`` is
+        ``'wiki'`` or ``'raw'`` based on which table holds the row.
+        ``content`` is the decoded text from object storage when the
+        backend is wired and the object exists; an explanatory string
+        otherwise (no backend wired, or DB row exists but the bucket
+        object is missing — usually a partial-ingest failure).
 
-        Step 3 limitation: byte content is not fetched from object
-        storage. The handler returns the registration metadata so the
-        agent can confirm the entry exists; full content reads land in
-        step 4 alongside ingestion + storage-backend threading.
+        Returns ``None`` if the row is not registered or the org cannot
+        see the parent KB (kb name unknown, cross-tenant access, etc.).
         """
         if not path:
             return None
@@ -224,10 +235,39 @@ class KbStore:
             if entry is None:
                 return None
 
+        # Best-effort byte fetch. Note: ``kb_row.org_id`` (NOT the
+        # caller's ``org_id``) is the right value for bucket routing —
+        # platform KBs (org_id IS NULL) live in the platform bucket.
+        content: str
+        if self._kb_storage is None:
+            content = (
+                "[storage backend not wired in this context; entry "
+                "registration confirmed but bytes unavailable]"
+            )
+        else:
+            data = await self._kb_storage.read_entry(
+                kb_row.org_id, kb_name_resolved, rest,
+            )
+            if data is None:
+                content = (
+                    "[entry registered in DB but no object found at "
+                    f"bucket key for path={rest!r} — likely a partial "
+                    "ingest; please re-run the source sync]"
+                )
+            else:
+                try:
+                    content = data.decode("utf-8")
+                except UnicodeDecodeError:
+                    content = (
+                        "[binary content; "
+                        f"{len(data)} bytes]"
+                    )
+
         return {
             "kb_name": kb_name_resolved,
             "path": rest,
             "kind": entry.kind,
+            "content": content,
         }
 
 

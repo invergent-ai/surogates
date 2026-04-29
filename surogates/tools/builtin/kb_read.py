@@ -99,7 +99,8 @@ async def _kb_read_handler(
         })
     kb_name = arguments.get("kb")
 
-    store = KbStore(session_factory)
+    storage_backend = kwargs.get("storage_backend")
+    store = KbStore(session_factory, storage_backend=storage_backend)
     try:
         result = await store.read_entry(
             org_id=org_id,
@@ -124,17 +125,10 @@ async def _kb_read_handler(
             ),
         })
 
-    # Step-3 stub: registration confirmed; full byte fetch from object
-    # storage is wired in step 4 along with ingestion. Keeping the
-    # field name ``content`` so the agent's call shape stays stable.
     return json.dumps({
         "success": True,
         "kb_name": result["kb_name"],
         "path": result["path"],
         "kind": result["kind"],
-        "content": (
-            "[byte content fetch lands in MVP step 4 alongside "
-            "ingestion; this step verifies KB registration and "
-            "tenant scoping]"
-        ),
+        "content": result["content"],
     })

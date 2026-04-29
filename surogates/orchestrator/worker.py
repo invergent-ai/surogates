@@ -75,6 +75,13 @@ async def run_worker(settings: Settings) -> None:
     # 3. Session store
     session_store = SessionStore(session_factory, redis=redis_client)
 
+    # 3b. Object-storage backend (Garage / S3 in prod, LocalBackend in dev).
+    # Threaded into the agent harness so HARNESS tools — kb_read, future
+    # kb_stage — can read tenant or platform-shared bucket bytes without
+    # involving the per-session sandbox at all.
+    from surogates.storage.backend import create_backend
+    storage_backend = create_backend(settings)
+
     # 4a. Sandbox pool -- one sandbox per session, lazily provisioned.
     if settings.sandbox.backend == "kubernetes":
         from surogates.sandbox.kubernetes import K8sSandbox
@@ -340,6 +347,7 @@ async def run_worker(settings: Settings) -> None:
             api_client=harness_api_client,
             default_model=model_id,
             session_factory=session_factory,
+            storage_backend=storage_backend,
             saga_enabled=settings.saga.enabled,
             saga_settings=settings.saga if settings.saga.enabled else None,
             log_policy_allowed=settings.governance.log_allowed,
