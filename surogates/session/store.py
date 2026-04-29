@@ -18,7 +18,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 from uuid import UUID
 
-from sqlalchemy import select, text, update, delete, func
+from sqlalchemy import select, text, update, delete, func, or_
 
 from surogates.db.models import (
     Event as EventRow,
@@ -796,6 +796,19 @@ class SessionStore:
         event log and the session sits looking "running" to the UI
         forever.
 
+        Anonymous website-channel sessions stay ``active`` between
+        visitor messages by design (no auth principal owns them, so the
+        idle-reset job can't flush them like authenticated ``web``
+        sessions can).  For ``website`` rows we therefore add a second
+        condition: the latest event must NOT be a clean turn-end
+        (``llm.response``, ``session.done``/``complete``, ``session.fail``,
+        ``harness.crash``).  Without this, every visitor session
+        between turns would be re-enqueued every ``stale_seconds`` and
+        burn a fresh LLM turn each pass.  Other channels keep the
+        original behaviour — Studio/web sessions get cleaned by the
+        idle-reset memory-flush job, and ``api`` sessions are bounded
+        by the calling service.
+
         The ``stale_seconds`` threshold must exceed the LLM's longest
         plausible inter-chunk gap (streaming thinking can pause for
         tens of seconds on reasoning models) to avoid racing with
@@ -805,12 +818,32 @@ class SessionStore:
         Scoped to a single agent when ``agent_id`` is given so each
         agent's sweeper runs independently; omit to scan platform-wide.
 
-        ``sessions.updated_at`` is the single staleness signal:
+        ``sessions.updated_at`` is the staleness signal:
         :func:`emit_event` bumps it on every event (see
         ``_build_counter_update_clause``), so an idle ``updated_at``
-        is equivalent to "no events in the window" without the cost
-        of a LATERAL scan of the events table.
+        narrows the candidate set without a LATERAL scan; the
+        latest-event-type check then runs only on that small set.
         """
+        # Correlated scalar subquery: latest event type for the session
+        # under test.  Used only by the website-channel branch below.
+        latest_event_type = (
+            select(EventRow.type)
+            .where(EventRow.session_id == SessionRow.id)
+            .order_by(EventRow.id.desc())
+            .limit(1)
+            .correlate(SessionRow)
+            .scalar_subquery()
+        )
+        # Events that mean "this is not a silently-dead worker": the
+        # harness reached a clean turn end, the session was finalised,
+        # or the failure has already been surfaced through the event log.
+        terminal_event_types = (
+            "llm.response",
+            "session.done",
+            "session.complete",
+            "session.fail",
+            "harness.crash",
+        )
         stmt = (
             select(SessionRow)
             .outerjoin(
@@ -823,6 +856,14 @@ class SessionStore:
                 LeaseRow.session_id.is_(None),
                 SessionRow.updated_at
                 < func.now() - text(f"make_interval(secs => {int(stale_seconds)})"),
+                # Surgical scope: only the website channel needs the
+                # latest-event check (visitor sessions rest at active
+                # between turns).  Other channels keep the original
+                # contract — any active+stale+leaseless is an orphan.
+                or_(
+                    SessionRow.channel != "website",
+                    latest_event_type.notin_(terminal_event_types),
+                ),
             )
             .order_by(SessionRow.updated_at.asc())
             .limit(limit)

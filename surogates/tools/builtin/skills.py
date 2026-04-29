@@ -171,7 +171,7 @@ async def _skills_list_handler(
     if tenant is None:
         return json.dumps({"error": "No tenant context available"})
 
-    skills = await _load_all_skills(tenant, **kwargs)
+    skills = await _load_all_skills(**kwargs)
 
     category_filter = arguments.get("category")
 
@@ -243,7 +243,7 @@ async def _skill_view_handler(
 
     from surogates.tools.loader import PLATFORM_SKILLS_DIR
 
-    skills = await _load_all_skills(tenant, **kwargs)
+    skills = await _load_all_skills(**kwargs)
 
     # Find the requested skill by name
     matching_skill = None
