@@ -91,18 +91,11 @@ def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _seed_agent(session_factory, org_id: UUID, name: str = "test-agent") -> UUID:
-    agent_id = uuid.uuid4()
-    async with session_factory() as db:
-        await db.execute(
-            text(
-                "INSERT INTO agents (id, org_id, name) "
-                "VALUES (:id, :org_id, :name)"
-            ),
-            {"id": agent_id, "org_id": org_id, "name": name},
-        )
-        await db.commit()
-    return agent_id
+def _agent_name(prefix: str = "test-agent") -> str:
+    """Return a unique agent_id string suitable for use in
+    agent_kb_grant.agent_id (which is Text, matching session.agent_id
+    rather than a UUID)."""
+    return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +361,7 @@ async def test_delete_kb_cascades(client, session_factory, tmp_path):
 
 async def test_grants_crud(client, session_factory):
     org_id, _, token = await _tenant(session_factory)
-    agent_id = await _seed_agent(session_factory, org_id)
+    agent_id = _agent_name()  # string, matches session.agent_id shape
 
     r = await client.post(
         "/v1/kb",
@@ -385,19 +378,19 @@ async def test_grants_crud(client, session_factory):
     # Grant.
     r = await client.post(
         f"/v1/kb/{kb['id']}/grants",
-        json={"agent_id": str(agent_id)},
+        json={"agent_id": agent_id},
         headers=_auth(token),
     )
     assert r.status_code == 201, r.text
+    assert r.json()["agent_id"] == agent_id
 
     # Idempotent grant.
     r = await client.post(
         f"/v1/kb/{kb['id']}/grants",
-        json={"agent_id": str(agent_id)},
+        json={"agent_id": agent_id},
         headers=_auth(token),
     )
     assert r.status_code == 201
-    granted_at_first = r.json()["granted_at"]
 
     # List shows one.
     r = await client.get(f"/v1/kb/{kb['id']}/grants", headers=_auth(token))
@@ -418,21 +411,27 @@ async def test_grants_crud(client, session_factory):
     assert r.status_code == 404
 
 
-async def test_grant_for_agent_in_other_org_is_404(client, session_factory):
-    """Agent must belong to the same tenant as the KB."""
+async def test_grant_for_kb_in_other_org_is_404(client, session_factory):
+    """Granting against another tenant's KB is rejected via the kb
+    ownership check (the agent_id itself is just a string, no FK check
+    — top-level agent deployment names are valid grant targets even
+    though they don't appear in surogates' sub-agent type table).
+    """
     org_a, _, token_a = await _tenant(session_factory)
-    org_b, _, _ = await _tenant(session_factory)
-    other_agent = await _seed_agent(session_factory, org_b)
+    _, _, token_b = await _tenant(session_factory)
 
+    # KB created by org B.
     r = await client.post(
         "/v1/kb",
         json={"name": f"kb-{uuid.uuid4().hex[:8]}"},
-        headers=_auth(token_a),
+        headers=_auth(token_b),
     )
-    kb = r.json()
+    kb_b = r.json()
+
+    # org A tries to add a grant — kb ownership check fails.
     r = await client.post(
-        f"/v1/kb/{kb['id']}/grants",
-        json={"agent_id": str(other_agent)},
+        f"/v1/kb/{kb_b['id']}/grants",
+        json={"agent_id": _agent_name()},
         headers=_auth(token_a),
     )
     assert r.status_code == 404
@@ -450,7 +449,7 @@ async def test_kbstore_search_grants_enforcement(session_factory, tmp_path):
 
     storage = LocalBackend(base_path=str(tmp_path / "garage"))
     org_id = await create_org(session_factory)
-    agent_id = await _seed_agent(session_factory, org_id)
+    agent_id = _agent_name()  # string — matches what session.agent_id is
 
     # Seed a KB + 1 source + ingest + compile.
     kb_id = uuid.uuid4()
@@ -531,7 +530,7 @@ async def test_kbstore_platform_kb_visible_without_grant(session_factory, tmp_pa
 
     storage = LocalBackend(base_path=str(tmp_path / "garage"))
     org_id = await create_org(session_factory)
-    agent_id = await _seed_agent(session_factory, org_id)
+    agent_id = _agent_name()
 
     plat_kb = uuid.uuid4()
     plat_source = uuid.uuid4()

@@ -79,7 +79,7 @@ class KbStore:
         query: str,
         kb_name: Optional[str] = None,
         top_k: int = 5,
-        agent_id: Optional[UUID] = None,
+        agent_id: Optional[str] = None,
     ) -> list[KbHit]:
         """Search KBs visible to *org_id* (own + platform).
 
@@ -183,7 +183,7 @@ class KbStore:
         *,
         org_id: UUID,
         kb_name: Optional[str],
-        agent_id: Optional[UUID],
+        agent_id: Optional[str],
     ) -> list:
         """Return ``[(id, name, org_id)]`` for every KB visible to the
         caller, after applying tenant scope + per-agent grants.
@@ -191,13 +191,14 @@ class KbStore:
         Visibility rules:
           * Platform KBs (``org_id IS NULL``) always visible.
           * Org KBs visible only when ``kb.org_id = :org_id``.
-          * When *agent_id* is set, org KBs additionally require an
+          * When *agent_id* is set (string — matches
+            ``session.agent_id``), org KBs additionally require an
             ``agent_kb_grant`` row matching ``(kb_id, agent_id)``.
-            ``None`` skips the grant check (legacy admin / direct-test
-            path).
+            ``None`` or empty string skips the grant check (legacy
+            admin / direct-test path).
         """
         params: dict[str, object] = {"org_id": org_id}
-        if agent_id is not None:
+        if agent_id is not None and agent_id != "":
             params["agent_id"] = agent_id
             grant_clause = (
                 "(kb.org_id = :org_id AND EXISTS ("
@@ -324,7 +325,7 @@ class KbStore:
         org_id: UUID,
         path: str,
         kb_name: Optional[str] = None,
-        agent_id: Optional[UUID] = None,
+        agent_id: Optional[str] = None,
     ) -> Optional[dict]:
         """Resolve a wiki or raw entry within the calling org's KBs and
         fetch its bytes from object storage.

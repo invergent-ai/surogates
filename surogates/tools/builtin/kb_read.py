@@ -100,13 +100,9 @@ async def _kb_read_handler(
     kb_name = arguments.get("kb")
 
     storage_backend = kwargs.get("storage_backend")
-    raw_agent = kwargs.get("agent_id") or None
-    try:
-        agent_uuid = UUID(raw_agent) if isinstance(raw_agent, str) and raw_agent else (
-            raw_agent if isinstance(raw_agent, UUID) else None
-        )
-    except (TypeError, ValueError):
-        agent_uuid = None
+    agent_str = kwargs.get("agent_id") or None
+    if not isinstance(agent_str, str) or not agent_str:
+        agent_str = None
 
     store = KbStore(session_factory, storage_backend=storage_backend)
     try:
@@ -114,7 +110,7 @@ async def _kb_read_handler(
             org_id=org_id,
             path=path,
             kb_name=kb_name,
-            agent_id=agent_uuid,
+            agent_id=agent_str,
         )
     except Exception as exc:
         logger.exception("kb_read failed")

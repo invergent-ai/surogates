@@ -158,11 +158,13 @@ class WikiEntryListOut(BaseModel):
 
 
 class GrantBody(BaseModel):
-    agent_id: UUID
+    # String identifier — same shape as ``session.agent_id`` (the
+    # deployment name or sub-agent type name). NOT a UUID.
+    agent_id: str = Field(..., min_length=1, max_length=200)
 
 
 class GrantOut(BaseModel):
-    agent_id: UUID
+    agent_id: str
     kb_id: UUID
     granted_at: datetime
 
@@ -825,9 +827,15 @@ async def add_grant(
 ) -> GrantOut:
     """Grant *body.agent_id* read access to *kb_id*.
 
-    The KB must be owned by the calling tenant; the agent must also
-    belong to the same tenant. Idempotent — granting twice is a no-op
-    that returns the existing row.
+    ``body.agent_id`` is a string — it must match the value the harness
+    will pass as ``session.agent_id`` for sessions running under that
+    agent (typically the deployment name like ``testknoledgeagent`` or
+    a sub-agent type name). The KB must be owned by the calling
+    tenant. We don't FK-check the string against the agents table —
+    grants for top-level deployment names that aren't in surogates'
+    sub-agent type table are still valid.
+
+    Idempotent — granting twice returns the existing row.
     """
     factory = request.app.state.session_factory
     async with factory() as db:
@@ -843,18 +851,6 @@ async def add_grant(
         ).first()
         if kb_row is None:
             raise HTTPException(status_code=404, detail="kb not found")
-        # Confirm agent is also in the tenant.
-        agent_row = (
-            await db.execute(
-                text(
-                    "SELECT id FROM agents "
-                    "WHERE id = :id AND org_id = :org_id"
-                ),
-                {"id": body.agent_id, "org_id": tenant.org_id},
-            )
-        ).first()
-        if agent_row is None:
-            raise HTTPException(status_code=404, detail="agent not found")
 
         await db.execute(
             text(
@@ -888,7 +884,7 @@ async def add_grant(
 )
 async def revoke_grant(
     kb_id: UUID,
-    agent_id: UUID,
+    agent_id: str,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> None:

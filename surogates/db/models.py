@@ -1164,15 +1164,20 @@ class AgentKbGrant(Base):
     Default-deny: an agent without a grant row for an org KB cannot see
     it via ``kb_search``. Platform KBs (``kb.is_platform = True``) are
     implicitly granted to all agents and need no row here.
+
+    ``agent_id`` is a ``Text`` identifier, NOT a UUID. The harness
+    passes ``session.agent_id`` (also Text — the deployment name like
+    ``testknoledgeagent``, or a sub-agent type name spawned via
+    ``spawn_worker``) into ``kb_search`` and that value matches
+    directly against this column. Using Text keeps a single grant
+    table consistent across both top-level deployed agents (managed
+    by surogate-ops) and sub-agent types (declared in surogates'
+    ``agents`` table) — both refer to themselves by name.
     """
 
     __tablename__ = "agent_kb_grant"
 
-    agent_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("agents.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
+    agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
     kb_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("kb.id", ondelete="CASCADE"),
