@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 #: storage_backend) -> IngestResult``.
 RUNNERS: dict[str, str] = {
     "markdown_dir": "surogates.jobs.kb_sources.markdown_dir",
+    "web_scraper": "surogates.jobs.kb_sources.web_scraper",
+    "file_upload": "surogates.jobs.kb_sources.file_upload",
 }
 
 

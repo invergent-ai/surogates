@@ -426,6 +426,427 @@ async def test_ingest_missing_path_marks_failed(session_factory, local_storage):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# web_scraper runner — mocked HTTP via httpx.MockTransport
+# ---------------------------------------------------------------------------
+
+
+async def test_web_scraper_ingests_seed_urls_via_mocked_http(
+    session_factory, local_storage, monkeypatch
+):
+    """web_scraper runner with a mocked AsyncClient: fetch two URLs,
+    convert via markitdown, write raw_docs with stable per-URL paths.
+    """
+    import httpx
+
+    from surogates.jobs.kb_sources import web_scraper as ws_mod
+
+    pages = {
+        "https://docs.example.com/intro": (
+            b"<html><body><h1>Intro</h1><p>First page.</p></body></html>",
+            "text/html",
+        ),
+        "https://docs.example.com/setup/": (
+            b"<html><body><h1>Setup</h1><p>Second page.</p></body></html>",
+            "text/html",
+        ),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body, ct = pages.get(str(request.url), (b"", "text/plain"))
+        if not body:
+            return httpx.Response(404)
+        return httpx.Response(200, content=body, headers={"content-type": ct})
+
+    def fake_client_factory(*, timeout, user_agent) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+            timeout=timeout,
+            headers={"User-Agent": user_agent},
+        )
+
+    monkeypatch.setattr(ws_mod, "_new_http_client", fake_client_factory)
+
+    org_id = await create_org(session_factory)
+    kb_name = f"web-{uuid.uuid4()}"
+    kb_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+    async with session_factory() as db:
+        await db.execute(
+            text(
+                "INSERT INTO kb (id, org_id, name, agents_md) "
+                "VALUES (:id, :org_id, :name, '')"
+            ),
+            {"id": kb_id, "org_id": org_id, "name": kb_name},
+        )
+        await db.execute(
+            text(
+                "INSERT INTO kb_source (id, kb_id, kind, config) "
+                "VALUES (:id, :kb_id, 'web_scraper', :config)"
+            ),
+            {
+                "id": source_id,
+                "kb_id": kb_id,
+                "config": json.dumps({"seed_urls": list(pages.keys())}),
+            },
+        )
+        await db.commit()
+
+    result = await run_ingest(
+        source_id,
+        session_factory=session_factory,
+        storage_backend=local_storage,
+    )
+    assert result.docs_added == 2
+
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT path, url, title FROM kb_raw_doc "
+                    "WHERE kb_id = :kb_id ORDER BY path"
+                ),
+                {"kb_id": kb_id},
+            )
+        ).all()
+    by_url = {r.url: r for r in rows}
+    assert "https://docs.example.com/intro" in by_url
+    assert "https://docs.example.com/setup/" in by_url
+    assert by_url["https://docs.example.com/intro"].title == "Intro"
+
+    # Bytes were converted to markdown via markitdown.
+    storage = KbStorage(local_storage)
+    intro_bytes = await storage.read_entry(
+        kb_org_id=org_id,
+        kb_name=kb_name,
+        path=by_url["https://docs.example.com/intro"].path,
+    )
+    assert intro_bytes is not None
+    assert b"# Intro" in intro_bytes
+    assert b"First page." in intro_bytes
+
+
+async def test_web_scraper_sitemap_url_is_walked(
+    session_factory, local_storage, monkeypatch
+):
+    """``sitemap_url`` config: the runner fetches the sitemap, parses
+    its <loc> entries, and ingests each as a separate raw_doc.
+    """
+    import httpx
+
+    from surogates.jobs.kb_sources import web_scraper as ws_mod
+
+    sitemap = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        "  <url><loc>https://docs.example.com/a</loc></url>"
+        "  <url><loc>https://docs.example.com/b</loc></url>"
+        "</urlset>"
+    )
+    pages = {
+        "https://docs.example.com/sitemap.xml": (
+            sitemap.encode(),
+            "application/xml",
+        ),
+        "https://docs.example.com/a": (
+            b"<html><body><h1>A</h1></body></html>",
+            "text/html",
+        ),
+        "https://docs.example.com/b": (
+            b"<html><body><h1>B</h1></body></html>",
+            "text/html",
+        ),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body, ct = pages.get(str(request.url), (b"", "text/plain"))
+        if not body:
+            return httpx.Response(404)
+        return httpx.Response(200, content=body, headers={"content-type": ct})
+
+    monkeypatch.setattr(
+        ws_mod,
+        "_new_http_client",
+        lambda *, timeout, user_agent: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+            timeout=timeout,
+            headers={"User-Agent": user_agent},
+        ),
+    )
+
+    org_id = await create_org(session_factory)
+    kb_name = f"sm-{uuid.uuid4()}"
+    kb_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+    async with session_factory() as db:
+        await db.execute(
+            text(
+                "INSERT INTO kb (id, org_id, name, agents_md) "
+                "VALUES (:id, :org_id, :name, '')"
+            ),
+            {"id": kb_id, "org_id": org_id, "name": kb_name},
+        )
+        await db.execute(
+            text(
+                "INSERT INTO kb_source (id, kb_id, kind, config) "
+                "VALUES (:id, :kb_id, 'web_scraper', :config)"
+            ),
+            {
+                "id": source_id,
+                "kb_id": kb_id,
+                "config": json.dumps({
+                    "sitemap_url": "https://docs.example.com/sitemap.xml",
+                }),
+            },
+        )
+        await db.commit()
+
+    result = await run_ingest(
+        source_id,
+        session_factory=session_factory,
+        storage_backend=local_storage,
+    )
+    assert result.docs_added == 2
+
+
+async def test_web_scraper_skips_failed_url(
+    session_factory, local_storage, monkeypatch
+):
+    """A URL that 404s is counted as docs_skipped; siblings still ingest."""
+    import httpx
+
+    from surogates.jobs.kb_sources import web_scraper as ws_mod
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "good" in str(request.url):
+            return httpx.Response(
+                200,
+                content=b"<html><h1>OK</h1></html>",
+                headers={"content-type": "text/html"},
+            )
+        return httpx.Response(404)
+
+    monkeypatch.setattr(
+        ws_mod,
+        "_new_http_client",
+        lambda *, timeout, user_agent: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+            timeout=timeout,
+            headers={"User-Agent": user_agent},
+        ),
+    )
+
+    org_id = await create_org(session_factory)
+    kb_name = f"err-{uuid.uuid4()}"
+    kb_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+    async with session_factory() as db:
+        await db.execute(
+            text(
+                "INSERT INTO kb (id, org_id, name, agents_md) "
+                "VALUES (:id, :org_id, :name, '')"
+            ),
+            {"id": kb_id, "org_id": org_id, "name": kb_name},
+        )
+        await db.execute(
+            text(
+                "INSERT INTO kb_source (id, kb_id, kind, config) "
+                "VALUES (:id, :kb_id, 'web_scraper', :config)"
+            ),
+            {
+                "id": source_id,
+                "kb_id": kb_id,
+                "config": json.dumps({
+                    "seed_urls": [
+                        "https://x.example.com/good",
+                        "https://x.example.com/bad",
+                    ],
+                }),
+            },
+        )
+        await db.commit()
+
+    result = await run_ingest(
+        source_id,
+        session_factory=session_factory,
+        storage_backend=local_storage,
+    )
+    assert result.docs_added == 1
+    assert result.docs_skipped == 1
+
+
+# ---------------------------------------------------------------------------
+# file_upload runner — seed holding/ in Garage, run, verify converted md
+# ---------------------------------------------------------------------------
+
+
+async def test_file_upload_ingests_html_and_md_from_holding(
+    session_factory, local_storage
+):
+    """Seed a holding/{source_id}/ prefix with one .html (needs
+    markitdown) and one .md (passes through unchanged); ingest;
+    verify both land in raw/ as markdown with the expected content.
+    """
+    org_id = await create_org(session_factory)
+    kb_name = f"upl-{uuid.uuid4()}"
+    kb_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+    async with session_factory() as db:
+        await db.execute(
+            text(
+                "INSERT INTO kb (id, org_id, name, agents_md) "
+                "VALUES (:id, :org_id, :name, '')"
+            ),
+            {"id": kb_id, "org_id": org_id, "name": kb_name},
+        )
+        await db.execute(
+            text(
+                "INSERT INTO kb_source (id, kb_id, kind, config) "
+                "VALUES (:id, :kb_id, 'file_upload', '{}')"
+            ),
+            {"id": source_id, "kb_id": kb_id},
+        )
+        await db.commit()
+
+    storage = KbStorage(local_storage)
+    holding = f"holding/{source_id}"
+    await storage.write_entry(
+        kb_org_id=org_id,
+        kb_name=kb_name,
+        path=f"{holding}/page.html",
+        data=b"<html><body><h1>From HTML</h1><p>Body text.</p></body></html>",
+    )
+    await storage.write_entry(
+        kb_org_id=org_id,
+        kb_name=kb_name,
+        path=f"{holding}/notes.md",
+        data=b"# From Markdown\n\nA note.\n",
+    )
+
+    result = await run_ingest(
+        source_id,
+        session_factory=session_factory,
+        storage_backend=local_storage,
+    )
+    assert result.docs_added == 2
+
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT path, title FROM kb_raw_doc "
+                    "WHERE kb_id = :kb_id ORDER BY path"
+                ),
+                {"kb_id": kb_id},
+            )
+        ).all()
+    paths = sorted(r.path for r in rows)
+    # html file gets ".md" appended; md passes through.
+    assert "raw/notes.md" in paths
+    assert "raw/page.html.md" in paths
+
+    # Converted HTML body shows up as markdown.
+    html_md = await storage.read_entry(
+        kb_org_id=org_id, kb_name=kb_name, path="raw/page.html.md",
+    )
+    assert html_md is not None
+    assert b"From HTML" in html_md
+
+
+async def test_file_upload_empty_holding_returns_zero_result(
+    session_factory, local_storage
+):
+    """No files in holding/ → ingest returns an empty result (not an error)."""
+    org_id = await create_org(session_factory)
+    kb_name = f"empty-{uuid.uuid4()}"
+    kb_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+    async with session_factory() as db:
+        await db.execute(
+            text(
+                "INSERT INTO kb (id, org_id, name, agents_md) "
+                "VALUES (:id, :org_id, :name, '')"
+            ),
+            {"id": kb_id, "org_id": org_id, "name": kb_name},
+        )
+        await db.execute(
+            text(
+                "INSERT INTO kb_source (id, kb_id, kind, config) "
+                "VALUES (:id, :kb_id, 'file_upload', '{}')"
+            ),
+            {"id": source_id, "kb_id": kb_id},
+        )
+        await db.commit()
+
+    result = await run_ingest(
+        source_id,
+        session_factory=session_factory,
+        storage_backend=local_storage,
+    )
+    assert result.total == 0
+
+
+async def test_file_upload_skips_oversized_files(
+    session_factory, local_storage
+):
+    """Files over max_bytes_per_file are skipped, not failed."""
+    org_id = await create_org(session_factory)
+    kb_name = f"big-{uuid.uuid4()}"
+    kb_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+    async with session_factory() as db:
+        await db.execute(
+            text(
+                "INSERT INTO kb (id, org_id, name, agents_md) "
+                "VALUES (:id, :org_id, :name, '')"
+            ),
+            {"id": kb_id, "org_id": org_id, "name": kb_name},
+        )
+        await db.execute(
+            text(
+                "INSERT INTO kb_source (id, kb_id, kind, config) "
+                "VALUES (:id, :kb_id, 'file_upload', :config)"
+            ),
+            {
+                "id": source_id,
+                "kb_id": kb_id,
+                "config": json.dumps({"max_bytes_per_file": 100}),
+            },
+        )
+        await db.commit()
+
+    storage = KbStorage(local_storage)
+    holding = f"holding/{source_id}"
+    await storage.write_entry(
+        kb_org_id=org_id,
+        kb_name=kb_name,
+        path=f"{holding}/small.md",
+        data=b"# Small\n",
+    )
+    await storage.write_entry(
+        kb_org_id=org_id,
+        kb_name=kb_name,
+        path=f"{holding}/big.md",
+        data=b"# Big\n" + (b"x" * 500),
+    )
+
+    result = await run_ingest(
+        source_id,
+        session_factory=session_factory,
+        storage_backend=local_storage,
+    )
+    assert result.docs_added == 1
+    assert result.docs_skipped == 1
+
+
+# ---------------------------------------------------------------------------
+# kb_read can fetch ingested bytes (existing test)
+# ---------------------------------------------------------------------------
+
+
 async def test_kb_read_returns_ingested_bytes(
     session_factory, local_storage, fixture_docs_dir
 ):

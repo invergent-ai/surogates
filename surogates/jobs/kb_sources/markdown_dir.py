@@ -24,19 +24,21 @@ the existing ``kb_raw_doc`` row is updated.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import os
 import shutil
 import tempfile
-import uuid
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from surogates.jobs.kb_sources._base import IngestResult, SourceContext
+from surogates.jobs.kb_sources._base import (
+    IngestResult,
+    SourceContext,
+    load_existing_raw_docs,
+    upsert_raw_doc,
+)
 from surogates.storage.backend import StorageBackend
 from surogates.storage.kb_storage import KbStorage
 
@@ -105,22 +107,9 @@ async def _walk_and_ingest(
 
     storage = KbStorage(storage_backend)
     result = IngestResult()
-
-    # Snapshot of existing rows so we can decide add vs. update vs.
-    # unchanged in a single pass without round-tripping per file.
-    async with session_factory() as db:
-        existing_rows = (
-            await db.execute(
-                text(
-                    "SELECT id, path, content_sha "
-                    "FROM kb_raw_doc WHERE kb_id = :kb_id"
-                ),
-                {"kb_id": ctx.kb_id},
-            )
-        ).all()
-    existing: dict[str, tuple[uuid.UUID, str]] = {
-        r.path: (r.id, r.content_sha) for r in existing_rows
-    }
+    existing = await load_existing_raw_docs(
+        ctx.kb_id, session_factory=session_factory,
+    )
 
     files = sorted(p for p in root.glob(glob_pattern) if p.is_file())
     logger.info(
@@ -152,56 +141,17 @@ async def _walk_and_ingest(
             result.docs_skipped += 1
             continue
 
-        sha = hashlib.sha256(data).hexdigest()
-        title = _infer_title(data)
-
-        prior = existing.get(bucket_path)
-        if prior is None:
-            # New doc.
-            await storage.write_entry(
-                ctx.kb_org_id, ctx.kb_name, bucket_path, data,
-            )
-            async with session_factory() as db:
-                await db.execute(
-                    text(
-                        "INSERT INTO kb_raw_doc "
-                        "(id, kb_id, source_id, path, content_sha, title) "
-                        "VALUES (:id, :kb_id, :source_id, :path, :sha, :title)"
-                    ),
-                    {
-                        "id": uuid.uuid4(),
-                        "kb_id": ctx.kb_id,
-                        "source_id": ctx.id,
-                        "path": bucket_path,
-                        "sha": sha,
-                        "title": title,
-                    },
-                )
-                await db.commit()
-            result.docs_added += 1
-            result.bytes_written += len(data)
-        elif prior[1] != sha:
-            # Changed doc.
-            await storage.write_entry(
-                ctx.kb_org_id, ctx.kb_name, bucket_path, data,
-            )
-            async with session_factory() as db:
-                await db.execute(
-                    text(
-                        "UPDATE kb_raw_doc "
-                        "SET content_sha = :sha, "
-                        "    title = :title, "
-                        "    ingested_at = NOW() "
-                        "WHERE id = :id"
-                    ),
-                    {"sha": sha, "title": title, "id": prior[0]},
-                )
-                await db.commit()
-            result.docs_updated += 1
-            result.bytes_written += len(data)
-        else:
-            # Unchanged — skip both upload and DB update.
-            result.docs_unchanged += 1
+        await upsert_raw_doc(
+            ctx,
+            bucket_path=bucket_path,
+            data=data,
+            title=_infer_title(data),
+            url=None,
+            session_factory=session_factory,
+            storage=storage,
+            existing=existing,
+            result=result,
+        )
 
     logger.info("markdown_dir: ingest complete: %s", result.as_dict())
     return result

@@ -1,10 +1,28 @@
-"""Shared types for KB source runners."""
+"""Shared types and helpers for KB source runners.
+
+Every runner produces ``kb_raw_doc`` rows + Garage objects; the
+add-vs-update-vs-unchanged decision logic and the actual writes are
+identical regardless of where the bytes came from. The
+:func:`upsert_raw_doc` helper here owns that pattern so the runners
+focus on the source-specific work (file walking, URL fetching,
+markitdown conversion) instead of duplicating I/O.
+"""
 
 from __future__ import annotations
 
+import hashlib
+import logging
+import uuid
 from dataclasses import dataclass, field
-from typing import Any
-from uuid import UUID
+from enum import Enum
+from typing import Any, Optional
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from surogates.storage.kb_storage import KbStorage
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -55,3 +73,119 @@ class IngestResult:
             "bytes_written": self.bytes_written,
             "total": self.total,
         }
+
+
+class UpsertOutcome(Enum):
+    """What :func:`upsert_raw_doc` did with a single doc."""
+
+    ADDED = "added"
+    UPDATED = "updated"
+    UNCHANGED = "unchanged"
+
+
+async def upsert_raw_doc(
+    ctx: SourceContext,
+    *,
+    bucket_path: str,
+    data: bytes,
+    title: Optional[str],
+    url: Optional[str],
+    session_factory: async_sessionmaker,
+    storage: KbStorage,
+    existing: dict[str, tuple[uuid.UUID, str]],
+    result: IngestResult,
+) -> UpsertOutcome:
+    """Idempotently materialise one raw doc to Garage + Postgres.
+
+    *existing* is a per-run snapshot of ``{path: (id, content_sha)}`` for
+    the parent KB so we can decide add/update/unchanged in one pass
+    without round-tripping per file.
+
+    Updates *result* counters in-place. Returns the outcome for callers
+    that want per-doc telemetry.
+    """
+    sha = hashlib.sha256(data).hexdigest()
+    prior = existing.get(bucket_path)
+
+    if prior is None:
+        # New row + new bytes.
+        await storage.write_entry(
+            ctx.kb_org_id, ctx.kb_name, bucket_path, data,
+        )
+        async with session_factory() as db:
+            await db.execute(
+                text(
+                    "INSERT INTO kb_raw_doc "
+                    "(id, kb_id, source_id, path, content_sha, title, url) "
+                    "VALUES (:id, :kb_id, :source_id, :path, :sha, "
+                    "        :title, :url)"
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "kb_id": ctx.kb_id,
+                    "source_id": ctx.id,
+                    "path": bucket_path,
+                    "sha": sha,
+                    "title": title,
+                    "url": url,
+                },
+            )
+            await db.commit()
+        result.docs_added += 1
+        result.bytes_written += len(data)
+        return UpsertOutcome.ADDED
+
+    if prior[1] != sha:
+        # Content changed → re-upload + update row.
+        await storage.write_entry(
+            ctx.kb_org_id, ctx.kb_name, bucket_path, data,
+        )
+        async with session_factory() as db:
+            await db.execute(
+                text(
+                    "UPDATE kb_raw_doc "
+                    "SET content_sha = :sha, "
+                    "    title = :title, "
+                    "    url = :url, "
+                    "    ingested_at = NOW() "
+                    "WHERE id = :id"
+                ),
+                {
+                    "sha": sha,
+                    "title": title,
+                    "url": url,
+                    "id": prior[0],
+                },
+            )
+            await db.commit()
+        result.docs_updated += 1
+        result.bytes_written += len(data)
+        return UpsertOutcome.UPDATED
+
+    # Same hash → skip both upload and DB update.
+    result.docs_unchanged += 1
+    return UpsertOutcome.UNCHANGED
+
+
+async def load_existing_raw_docs(
+    kb_id: uuid.UUID,
+    *,
+    session_factory: async_sessionmaker,
+) -> dict[str, tuple[uuid.UUID, str]]:
+    """Snapshot ``{path: (id, content_sha)}`` for the KB's raw docs.
+
+    Called once at the start of a run; passed to
+    :func:`upsert_raw_doc` for each file the runner processes so the
+    add/update/unchanged decision is a dict lookup not a DB query.
+    """
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT id, path, content_sha "
+                    "FROM kb_raw_doc WHERE kb_id = :kb_id"
+                ),
+                {"kb_id": kb_id},
+            )
+        ).all()
+    return {r.path: (r.id, r.content_sha) for r in rows}

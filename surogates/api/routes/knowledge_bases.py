@@ -13,17 +13,28 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from surogates.jobs.kb_ingest import IngestLocked, run_ingest
 from surogates.jobs.kb_sources._base import IngestResult
+from surogates.jobs.kb_sources.file_upload import holding_prefix_for
+from surogates.storage.kb_storage import KbStorage
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 
@@ -93,6 +104,16 @@ class SyncOut(BaseModel):
     docs_skipped: int
     bytes_written: int
     total: int
+
+
+class UploadedFileInfo(BaseModel):
+    filename: str
+    size: int
+
+
+class UploadOut(BaseModel):
+    source_id: UUID
+    files: list[UploadedFileInfo]
 
 
 # ---------------------------------------------------------------------------
@@ -410,3 +431,105 @@ async def sync_source(
         bytes_written=result.bytes_written,
         total=result.total,
     )
+
+
+# ---------------------------------------------------------------------------
+# File upload (for the file_upload source kind)
+# ---------------------------------------------------------------------------
+
+
+_FILENAME_BAD = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _safe_filename(name: str) -> str:
+    """Strip path separators and unsafe chars from a client-supplied name.
+
+    Defensive: clients can send anything in a multipart filename, and
+    we put it directly into a bucket key. Drop the dirname, replace
+    everything outside ``[A-Za-z0-9._-]`` with ``-``, refuse empties
+    and dotfiles.
+    """
+    name = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    cleaned = _FILENAME_BAD.sub("-", name).strip("-.")
+    return cleaned or "upload.bin"
+
+
+@router.post(
+    "/kb/{kb_id}/sources/{source_id}/files",
+    response_model=UploadOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_files(
+    kb_id: UUID,
+    source_id: UUID,
+    request: Request,
+    files: list[UploadFile] = File(...),
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> UploadOut:
+    """Upload one or more files to a ``file_upload`` source's holding
+    prefix.
+
+    Bytes land at
+    ``{kb-bucket}/holding/{source_id}/{safe-filename}``. Trigger the
+    sync endpoint afterwards to convert them into ``raw_doc`` rows
+    via markitdown. Holding bytes are preserved by default so
+    re-syncing converts them again without a re-upload.
+    """
+    factory = request.app.state.session_factory
+    storage_backend = request.app.state.storage
+
+    # Confirm the source belongs to a kb owned by this tenant AND is
+    # of kind=file_upload (other kinds wouldn't know what to do with
+    # holding files).
+    async with factory() as db:
+        await _set_org_guc(db, tenant.org_id)
+        row = (
+            await db.execute(
+                text(
+                    "SELECT s.id, s.kind, kb.org_id AS kb_org_id, "
+                    "       kb.name AS kb_name "
+                    "FROM kb_source s "
+                    "JOIN kb ON kb.id = s.kb_id "
+                    "WHERE s.id = :sid AND s.kb_id = :kbid "
+                    "  AND kb.org_id = :org_id"
+                ),
+                {
+                    "sid": source_id,
+                    "kbid": kb_id,
+                    "org_id": tenant.org_id,
+                },
+            )
+        ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="source not found")
+    if row.kind != "file_upload":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"upload supported only for kind='file_upload', "
+                f"this source is kind={row.kind!r}"
+            ),
+        )
+
+    storage = KbStorage(storage_backend)
+    holding = holding_prefix_for(source_id)
+    uploaded: list[UploadedFileInfo] = []
+
+    for f in files:
+        original = f.filename or "upload.bin"
+        safe = _safe_filename(original)
+        data = await f.read()
+        if not data:
+            continue
+        await storage.write_entry(
+            kb_org_id=row.kb_org_id,
+            kb_name=row.kb_name,
+            path=f"{holding}/{safe}",
+            data=data,
+        )
+        uploaded.append(UploadedFileInfo(filename=safe, size=len(data)))
+
+    if not uploaded:
+        raise HTTPException(status_code=400, detail="no files uploaded")
+
+    return UploadOut(source_id=source_id, files=uploaded)
