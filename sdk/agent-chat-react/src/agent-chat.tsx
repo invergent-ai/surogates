@@ -77,6 +77,7 @@ export function AgentChat({
             sessionId={sessionId}
             selectedPath={workspacePath}
             onSelectedPathChange={setWorkspacePath}
+            disabled={disabled}
           />
         </section>
       </TooltipProvider>

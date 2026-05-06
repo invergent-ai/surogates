@@ -212,6 +212,29 @@ describe("AgentChat", () => {
     expect(container.textContent).toContain("print('hi')");
   });
 
+  it("disables the composer and workspace upload when chat is disabled", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" disabled />);
+      await Promise.resolve();
+    });
+
+    const composer = container.querySelector<HTMLTextAreaElement>("textarea");
+    expect(composer).not.toBeNull();
+    expect(composer!.disabled).toBe(true);
+
+    const uploadButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Upload files"]',
+    );
+    expect(uploadButton).not.toBeNull();
+    expect(uploadButton!.disabled).toBe(true);
+  });
+
   it("does not show a previous session workspace after switching to a new chat", async () => {
     const stream = new FakeEventStream();
     let resolveTree: ((value: Awaited<ReturnType<AgentChatAdapter["getWorkspaceTree"]>>) => void) | null = null;

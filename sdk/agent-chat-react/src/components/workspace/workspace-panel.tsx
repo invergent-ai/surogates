@@ -98,6 +98,7 @@ interface WorkspacePanelProps {
   sessionId: string | null;
   selectedPath: string | null;
   onSelectedPathChange: (path: string | null) => void;
+  disabled?: boolean;
 }
 
 function isViewable(name: string): boolean {
@@ -211,6 +212,7 @@ export function WorkspacePanel({
   sessionId,
   selectedPath,
   onSelectedPathChange,
+  disabled = false,
 }: WorkspacePanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [entries, setEntries] = useState<AgentChatWorkspaceEntry[]>([]);
@@ -338,7 +340,7 @@ export function WorkspacePanel({
 
   const handleUpload = useCallback(
     async (files: FileList) => {
-      if (!sessionId || files.length === 0) return;
+      if (disabled || !sessionId || files.length === 0) return;
       setUploading(true);
       setNotice(null);
       try {
@@ -361,7 +363,7 @@ export function WorkspacePanel({
         if (fileInputRef.current) fileInputRef.current.value = "";
       }
     },
-    [adapter, fetchTree, sessionId],
+    [adapter, disabled, fetchTree, sessionId],
   );
 
   const handleDelete = useCallback(
@@ -433,6 +435,7 @@ export function WorkspacePanel({
         type="file"
         multiple
         className="hidden"
+        disabled={disabled}
         onChange={(event) => {
           if (event.target.files) void handleUpload(event.target.files);
         }}
@@ -452,7 +455,7 @@ export function WorkspacePanel({
               variant="ghost"
               size="icon-sm"
               onClick={() => fileInputRef.current?.click()}
-              disabled={!sessionId || uploading}
+              disabled={disabled || !sessionId || uploading}
               aria-label="Upload files"
             >
               {uploading ? (
@@ -519,7 +522,7 @@ export function WorkspacePanel({
                 size="sm"
                 className="mt-3 gap-1.5"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={!sessionId}
+                disabled={disabled || !sessionId}
               >
                 <UploadIcon className="size-3.5" />
                 Upload files
