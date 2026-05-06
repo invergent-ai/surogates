@@ -13,7 +13,7 @@
 ## Progress Todo
 
 - [x] Commit 1: Add progress tracking to this plan.
-- [ ] Commit 2: Scaffold `@surogates/agent-chat-react` package.
+- [x] Commit 2: Scaffold `@surogates/agent-chat-react` package.
 - [ ] Commit 3: Extract and test the pure chat event reducer.
 - [ ] Commit 4: Implement adapter-driven chat runtime hook.
 - [ ] Commit 5: Move reusable chat UI into the package.
