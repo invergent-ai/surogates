@@ -89,8 +89,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          registry-url: "https://npm.pkg.github.com"
-          scope: "@invergent-ai"
+          registry-url: "https://registry.npmjs.org"
+          scope: "@invergent"
           cache: pnpm
 
       - name: Install dependencies
@@ -106,7 +106,7 @@ jobs:
 
       - name: Publish SDK packages
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: node scripts/publish-sdk-packages.mjs --version="${GITHUB_REF_NAME#v}"
 
   release:

@@ -1,11 +1,11 @@
-# @invergent-ai/website-widget
+# @invergent/website-widget
 
 AG-UI-compatible TypeScript client for the Surogates public-website channel. Wraps the channel-specific bootstrap, HttpOnly cookie, CSRF double-submit, and SSE stream behind a standard [AG-UI](https://docs.ag-ui.com/) `AbstractAgent` so any widget built against AG-UI works on top of Surogates with no custom glue.
 
 ## What you get
 
 ```ts
-import { WebsiteAgent } from '@invergent-ai/website-widget';
+import { WebsiteAgent } from '@invergent/website-widget';
 
 const agent = new WebsiteAgent({
   apiUrl: 'https://agent.acme.com',
@@ -41,7 +41,7 @@ Surogates-specific signals that don't have a first-class AG-UI equivalent (`memo
 ## Install
 
 ```bash
-pnpm add @invergent-ai/website-widget @ag-ui/client @ag-ui/core rxjs
+pnpm add @invergent/website-widget @ag-ui/client @ag-ui/core rxjs
 ```
 
 `@ag-ui/client`, `@ag-ui/core`, and `rxjs` are **peer dependencies** -- they likely already exist in your app's bundle (especially if you're using CopilotKit or another AG-UI consumer), so we don't duplicate them.

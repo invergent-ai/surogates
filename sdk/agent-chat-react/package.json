@@ -1,5 +1,5 @@
 {
-  "name": "@invergent-ai/agent-chat-react",
+  "name": "@invergent/agent-chat-react",
   "version": "0.1.0",
   "description": "Reusable React chat UI and runtime for Surogates agent sessions.",
   "license": "AGPL-3.0-only",
@@ -89,7 +89,6 @@
     "vitest": "^2.1.8"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com",
     "access": "public"
   }
 }

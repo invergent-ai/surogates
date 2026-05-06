@@ -16,7 +16,7 @@ test("release tag version is used for package publish planning", () => {
   const plan = planPackagePublish({
     dir: "sdk/agent-chat-react",
     manifest: {
-      name: "@invergent-ai/agent-chat-react",
+      name: "@invergent/agent-chat-react",
       version: "0.1.0",
       publishConfig: { access: "public" },
     },
@@ -25,14 +25,14 @@ test("release tag version is used for package publish planning", () => {
   });
 
   assert.equal(plan.action, "publish");
-  assert.equal(plan.spec, "@invergent-ai/agent-chat-react@1.4.0");
+  assert.equal(plan.spec, "@invergent/agent-chat-react@1.4.0");
 });
 
 test("published package versions are skipped", () => {
   const plan = planPackagePublish({
     dir: "sdk/website-widget",
     manifest: {
-      name: "@invergent-ai/website-widget",
+      name: "@invergent/website-widget",
       version: "0.1.0",
       publishConfig: { access: "public" },
     },
@@ -42,7 +42,7 @@ test("published package versions are skipped", () => {
 
   assert.equal(plan.action, "skip");
   assert.equal(plan.reason, "already published");
-  assert.equal(plan.spec, "@invergent-ai/website-widget@1.4.0");
+  assert.equal(plan.spec, "@invergent/website-widget@1.4.0");
 });
 
 test("npm view output is classified by package version state", () => {
@@ -83,8 +83,8 @@ test("publish command targets the package directory", () => {
 
 test("package spec preserves scoped package names", () => {
   assert.equal(
-    formatPackageSpec("@invergent-ai/website-widget", "0.1.0"),
-    "@invergent-ai/website-widget@0.1.0",
+    formatPackageSpec("@invergent/website-widget", "0.1.0"),
+    "@invergent/website-widget@0.1.0",
   );
 });
 
@@ -119,12 +119,12 @@ test("package manifest is prepared with release version before publish", async (
     const manifestPath = join(dir, "package.json");
     await writeFile(
       manifestPath,
-      `${JSON.stringify({ name: "@invergent-ai/website-widget", version: "0.1.0" }, null, 2)}\n`,
+      `${JSON.stringify({ name: "@invergent/website-widget", version: "0.1.0" }, null, 2)}\n`,
     );
 
     const preparedManifest = await preparePackageManifest({
       dir,
-      manifest: { name: "@invergent-ai/website-widget", version: "0.1.0" },
+      manifest: { name: "@invergent/website-widget", version: "0.1.0" },
       releaseVersion: "1.4.0",
     });
 

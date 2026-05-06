@@ -8,7 +8,7 @@ import type {
   AgentChatSession,
   AgentChatSlashCommand,
   AgentChatSseMessageEvent,
-} from "@invergent-ai/agent-chat-react";
+} from "@invergent/agent-chat-react";
 import { getArtifact } from "@/api/artifacts";
 import { submitClarifyResponse as submitClarifyResponseApi } from "@/api/clarify";
 import { submitExpertFeedback as submitExpertFeedbackApi } from "@/api/feedback";

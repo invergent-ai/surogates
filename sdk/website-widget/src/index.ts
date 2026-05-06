@@ -1,5 +1,5 @@
 /**
- * Public entry point of ``@invergent-ai/website-widget``.
+ * Public entry point of ``@invergent/website-widget``.
  *
  * Exports the :class:`WebsiteAgent` every consumer needs, plus the
  * constructor-config type, the typed error taxonomy, and the low-level

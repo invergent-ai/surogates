@@ -1,5 +1,5 @@
 {
-  "name": "@invergent-ai/website-widget",
+  "name": "@invergent/website-widget",
   "version": "0.1.0",
   "description": "AG-UI-compatible TypeScript client for the Surogates public-website channel. Wraps the publishable-key bootstrap, HttpOnly cookie, CSRF double-submit, and SSE streaming behind a standard AbstractAgent so widgets built for AG-UI work out of the box.",
   "keywords": [
@@ -65,7 +65,6 @@
     "vitest": "^2.1.8"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com",
     "access": "public"
   }
 }

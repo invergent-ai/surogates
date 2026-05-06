@@ -4,7 +4,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const DEFAULT_REGISTRY = "https://npm.pkg.github.com";
+const DEFAULT_REGISTRY = "https://registry.npmjs.org";
 
 export function formatPackageSpec(name, version) {
   return `${name}@${version}`;

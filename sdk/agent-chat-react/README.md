@@ -1,4 +1,4 @@
-# @invergent-ai/agent-chat-react
+# @invergent/agent-chat-react
 
 Reusable React chat UI and runtime for Surogates agent sessions.
 
