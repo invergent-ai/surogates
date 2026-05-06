@@ -21,7 +21,8 @@
     "noUncheckedSideEffectImports": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@surogates/agent-chat-react": ["../sdk/agent-chat-react/src/index.ts"]
     }
   },
   "include": ["src"]

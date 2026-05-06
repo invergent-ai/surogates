@@ -1,19 +1,23 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
-import { ChatThread } from "@/components/chat/chat-thread";
+import {
+  AgentChat,
+  type AgentChatAdapter,
+  type AgentChatMessage,
+} from "@surogates/agent-chat-react";
 import { SessionSidebar } from "@/components/navbar";
 import { WorkspacePanel } from "@/components/workspace-panel";
 import { TransparencyBanner } from "@/components/transparency-banner";
 import { useAppStore } from "@/stores/app-store";
-import { useSessionRuntime } from "@/hooks/use-session-runtime";
 import * as sessionsApi from "@/api/sessions";
 import {
   getTransparencyConfig,
   type TransparencyConfig,
 } from "@/api/transparency";
+import { surogatesWebChatAdapter } from "./surogates-web-chat-adapter";
 
 const PRE_SESSION_KEY = "__pre_session__";
 
@@ -57,7 +61,14 @@ export function ChatPage() {
         replace: true,
       });
     }
-  }, [sessionsLoading, sessions, params.sessionId, activeSessionId, setActiveSession, navigate]);
+  }, [
+    sessionsLoading,
+    sessions,
+    params.sessionId,
+    activeSessionId,
+    setActiveSession,
+    navigate,
+  ]);
 
   const setToolCheckpoint = useAppStore((s) => s.setToolCheckpoint);
 
@@ -77,16 +88,7 @@ export function ChatPage() {
   const preSessionAccepted = useRef(false);
 
   const sessionId = params.sessionId ?? activeSessionId;
-  const {
-    messages,
-    isRunning,
-    tokenUsage,
-    retryIndicator,
-    forceStop,
-    retrySession,
-    markSending,
-    markSendError,
-  } = useSessionRuntime(sessionId);
+  const [chatMessages, setChatMessages] = useState<AgentChatMessage[]>([]);
 
   // Show disclosure banner when transparency is enabled and the user has not
   // yet accepted.  This covers two states:
@@ -96,14 +98,14 @@ export function ChatPage() {
   const sessionDisclosure = disclosureState[disclosureKey];
   const needsDisclosure = !!(
     transparencyConfig?.enabled &&
-    messages.length === 0 &&
+    chatMessages.length === 0 &&
     !sessionDisclosure
   );
   const sessionDeclined = sessionDisclosure === "declined";
 
   // Sync checkpoint hashes from tool calls into the workspace store.
   useEffect(() => {
-    for (const msg of messages) {
+    for (const msg of chatMessages) {
       if (msg.toolCalls) {
         for (const tc of msg.toolCalls) {
           if (tc.checkpointHash) {
@@ -112,68 +114,43 @@ export function ChatPage() {
         }
       }
     }
-  }, [messages, setToolCheckpoint]);
+  }, [chatMessages, setToolCheckpoint]);
 
   // ── Handlers ──────────────────────────────────────────────────────
 
-  const handleSend = useCallback(
-    async (text: string) => {
-      if (sessionDeclined) return;
-      // First message in a fresh session can't use the optimistic echo — the
-      // runtime hook isn't tracking any session yet.  Create → send →
-      // navigate; the SSE stream picks up once the new route mounts.
-      if (!sessionId) {
-        try {
-          const session = await sessionsApi.createSession({});
-          if (preSessionAccepted.current) {
-            try {
-              await sessionsApi.confirmDisclosure(session.id);
-            } catch (err) {
-              console.error("Failed to confirm disclosure:", err);
-            }
+  const chatAdapter = useMemo<AgentChatAdapter>(
+    () => ({
+      ...surogatesWebChatAdapter,
+      async createSession(input) {
+        const session = await surogatesWebChatAdapter.createSession(input);
+        if (preSessionAccepted.current) {
+          try {
+            await sessionsApi.confirmDisclosure(session.id);
+            setDisclosureState((prev) => ({
+              ...prev,
+              [session.id]: "accepted",
+            }));
+          } catch (err) {
+            console.error("Failed to confirm disclosure:", err);
           }
-          await sessionsApi.sendMessage(session.id, text);
-          setActiveSession(session.id);
-          void fetchSessions();
-          void navigate({
-            to: "/chat/$sessionId",
-            params: { sessionId: session.id },
-          });
-        } catch (err) {
-          console.error("Failed to send message:", err);
         }
-        return;
-      }
-
-      markSending(text);
-      try {
-        await sessionsApi.sendMessage(sessionId, text);
-      } catch (err) {
-        console.error("Failed to send message:", err);
-        markSendError(err instanceof Error ? err.message : "send failed");
-      }
-    },
-    [
-      sessionId,
-      sessionDeclined,
-      setActiveSession,
-      fetchSessions,
-      navigate,
-      markSending,
-      markSendError,
-    ],
+        return session;
+      },
+    }),
+    [],
   );
 
-  const handleStop = useCallback(async () => {
-    if (sessionId) {
-      forceStop();
-      try {
-        await sessionsApi.pauseSession(sessionId);
-      } catch (err) {
-        console.error("Failed to stop session:", err);
-      }
-    }
-  }, [sessionId, forceStop]);
+  const handleSessionChange = useCallback(
+    (nextSessionId: string) => {
+      setActiveSession(nextSessionId);
+      void fetchSessions();
+      void navigate({
+        to: "/chat/$sessionId",
+        params: { sessionId: nextSessionId },
+      });
+    },
+    [fetchSessions, navigate, setActiveSession],
+  );
 
   const fetchWorkspaceFile = useAppStore((s) => s.fetchWorkspaceFile);
   const handleFileSelect = useCallback(
@@ -227,17 +204,13 @@ export function ChatPage() {
             </div>
           </div>
         ) : (
-          <ChatThread
+          <AgentChat
             sessionId={sessionId ?? null}
-            messages={messages}
-            isRunning={isRunning}
-            onSend={handleSend}
-            onStop={handleStop}
+            adapter={chatAdapter}
+            onSessionChange={handleSessionChange}
             onFileSelect={handleFileSelect}
             disabled={sessionDeclined}
-            tokenUsage={tokenUsage}
-            retryIndicator={retryIndicator}
-            onRetry={retrySession}
+            onMessagesChange={setChatMessages}
           />
         )}
       </main>

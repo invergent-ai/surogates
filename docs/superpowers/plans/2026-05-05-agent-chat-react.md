@@ -17,7 +17,7 @@
 - [x] Commit 3: Extract and test the pure chat event reducer.
 - [x] Commit 4: Implement adapter-driven chat runtime hook.
 - [x] Commit 5: Move reusable chat UI into the package.
-- [ ] Commit 6: Migrate standalone `/work/surogates/web` chat to the package.
+- [x] Commit 6: Migrate standalone `/work/surogates/web` chat to the package.
 - [ ] Commit 7: Add Ops backend live chat proxy routes.
 - [ ] Commit 8: Wire Ops Work chat routes and navbar.
 - [ ] Commit 9: Complete cross-repo verification fixes.

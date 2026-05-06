@@ -1,4 +1,4 @@
-import { FormEvent, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { AgentChatAdapterProvider } from "./adapter-context";
 import { useAgentChatRuntime } from "./runtime/use-agent-chat-runtime";
 import type {
@@ -15,23 +15,36 @@ export interface AgentChatProps {
   sessionId: string | null;
   onSessionChange?: (sessionId: string) => void;
   onFileSelect?: (path: string) => void;
+  onMessagesChange?: (messages: AgentChatMessage[]) => void;
   disabled?: boolean;
 }
 
-export function AgentChat(_props: AgentChatProps) {
+export function AgentChat({
+  adapter,
+  agentId,
+  sessionId,
+  onSessionChange,
+  onFileSelect,
+  onMessagesChange,
+  disabled,
+}: AgentChatProps) {
   const runtime = useAgentChatRuntime({
-    adapter: _props.adapter,
-    agentId: _props.agentId,
-    sessionId: _props.sessionId,
-    onSessionChange: _props.onSessionChange,
+    adapter,
+    agentId,
+    sessionId,
+    onSessionChange,
   });
+
+  useEffect(() => {
+    onMessagesChange?.(runtime.messages);
+  }, [onMessagesChange, runtime.messages]);
 
   return (
     <AgentChatAdapterProvider
       value={{
-        adapter: _props.adapter,
-        sessionId: _props.sessionId,
-        onFileSelect: _props.onFileSelect,
+        adapter,
+        sessionId,
+        onFileSelect,
       }}
     >
       <section className="flex h-full min-h-0 flex-col bg-card text-sm text-foreground">
@@ -40,7 +53,7 @@ export function AgentChat(_props: AgentChatProps) {
           retryIndicator={runtime.retryIndicator}
         />
         <Composer
-          disabled={_props.disabled}
+          disabled={disabled}
           isRunning={runtime.isRunning}
           tokenUsage={runtime.tokenUsage}
           onSend={runtime.send}
