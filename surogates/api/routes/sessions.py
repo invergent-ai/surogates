@@ -638,6 +638,10 @@ async def retry_session(
 
 
 @router.delete(
+    "/api/sessions/{session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+@router.delete(
     "/sessions/{session_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
@@ -647,6 +651,7 @@ async def delete_session(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> None:
     """Archive (soft-delete) a session and delete its workspace storage."""
+    _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant)
 

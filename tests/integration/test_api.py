@@ -307,6 +307,7 @@ async def test_api_live_chat_routes_are_registered(app):
 
     assert "/v1/api/sessions" in paths
     assert "/v1/api/sessions/{session_id}" in paths
+    assert "delete" in paths["/v1/api/sessions/{session_id}"]
     assert "/v1/api/sessions/{session_id}/messages" in paths
     assert "/v1/api/sessions/{session_id}/pause" in paths
     assert "/v1/api/sessions/{session_id}/retry" in paths

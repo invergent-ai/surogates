@@ -141,11 +141,17 @@ def _tenant(org_id: UUID, user_id: UUID | None = None) -> TenantContext:
     )
 
 
-def _request(store: _Store, storage: _RecordingStorage, redis: _Redis):
+def _request(
+    store: _Store,
+    storage: _RecordingStorage,
+    redis: _Redis,
+    path: str = "/v1/sessions",
+):
     settings = Settings(agent_id=store.agent_id)
     settings.llm.model = "gpt-test"
     settings.storage.bucket = "ops-agent-bucket"
     return SimpleNamespace(
+        url=SimpleNamespace(path=path),
         app=SimpleNamespace(
             state=SimpleNamespace(
                 settings=settings,
