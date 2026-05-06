@@ -13,6 +13,11 @@ from surogates.storage.backend import (
     StorageBackend,
     create_backend,
 )
+from surogates.storage.tenant import (
+    agent_session_bucket,
+    session_workspace_key,
+    session_workspace_prefix,
+)
 
 
 # =========================================================================
@@ -52,6 +57,15 @@ class TestLocalBackendBucket:
     async def test_resolve_bucket_path(self, backend: LocalBackend, tmp_path: Path):
         path = backend.resolve_bucket_path("test-bucket")
         assert path == str((tmp_path / "test-bucket").resolve())
+
+    async def test_resolve_workspace_path(
+        self, backend: LocalBackend, tmp_path: Path,
+    ):
+        path = backend.resolve_workspace_path("agent-alpha", "session-123")
+        assert path == str(
+            (tmp_path / "agent-alpha" / "sessions" / "session-123").resolve()
+        )
+        assert Path(path).is_dir()
 
 
 class TestLocalBackendObjects:
@@ -154,6 +168,39 @@ class TestLocalBackendSecurity:
 
 
 # =========================================================================
+# Session workspace helpers
+# =========================================================================
+
+
+class TestSessionWorkspaceHelpers:
+    def test_agent_session_bucket_uses_agent_id(self):
+        assert agent_session_bucket("ops-provided-agent-bucket") == (
+            "ops-provided-agent-bucket"
+        )
+
+    def test_agent_session_bucket_rejects_empty_bucket(self):
+        with pytest.raises(ValueError, match="configured storage bucket"):
+            agent_session_bucket("")
+
+    def test_agent_session_bucket_rejects_invalid_s3_bucket_name(self):
+        with pytest.raises(ValueError, match="S3-compatible"):
+            agent_session_bucket("Bad_Bucket")
+
+    def test_session_workspace_prefix_is_hard_coded_sessions_path(self):
+        assert session_workspace_prefix("abc-123") == "sessions/abc-123/"
+
+    def test_session_workspace_key_prefixes_relative_key(self):
+        assert session_workspace_key("abc-123", "src/app.py") == (
+            "sessions/abc-123/src/app.py"
+        )
+
+    def test_session_workspace_key_strips_leading_slash(self):
+        assert session_workspace_key("abc-123", "/src/app.py") == (
+            "sessions/abc-123/src/app.py"
+        )
+
+
+# =========================================================================
 # S3Backend (mocked with moto)
 # =========================================================================
 
@@ -224,3 +271,7 @@ class TestCreateBackend:
         """Both backends satisfy the StorageBackend protocol."""
         assert isinstance(LocalBackend("/tmp"), StorageBackend)
         assert isinstance(S3Backend("http://localhost:9000"), StorageBackend)
+
+    def test_s3_workspace_path_is_sandbox_mount(self):
+        backend = S3Backend("http://localhost:9000")
+        assert backend.resolve_workspace_path("agent-alpha", "session-123") == "/workspace"

@@ -48,7 +48,7 @@ Surogates enforces a three-component isolation model:
 |---|---|---|
 | **API Server** | Trusted | Full database, all storage buckets, JWT issuance |
 | **Worker** | Trusted | Database + Redis for session state; tenant operations go through API server |
-| **Sandbox** | Untrusted | Only the current session's workspace bucket; no database, no API, no tenant storage |
+| **Sandbox** | Untrusted | Only the current session's path in the agent bucket; no database, no API, no tenant storage |
 
 The structural fix for prompt injection: credentials and tenant data are never reachable from the sandbox where the LLM's generated code runs.
 

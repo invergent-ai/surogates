@@ -99,6 +99,10 @@ class StorageBackend(Protocol):
         """
         ...
 
+    def resolve_workspace_path(self, bucket: str, session_id: str) -> str:
+        """Return the workspace path visible to tools for a session."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # LocalBackend
@@ -210,6 +214,11 @@ class LocalBackend:
 
     def resolve_bucket_path(self, bucket: str) -> str:
         return str(self._bucket_path(bucket))
+
+    def resolve_workspace_path(self, bucket: str, session_id: str) -> str:
+        path = (self._bucket_path(bucket) / "sessions" / str(session_id)).resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
 
 
 # ---------------------------------------------------------------------------
@@ -369,8 +378,11 @@ class S3Backend:
             )
 
     def resolve_bucket_path(self, bucket: str) -> str:
-        # In production, the sandbox pod FUSE-mounts the session bucket
-        # at /workspace.  The API server doesn't need a filesystem path.
+        # S3 buckets are mounted inside sandbox pods, not directly on the
+        # API server filesystem.
+        return "/workspace"
+
+    def resolve_workspace_path(self, bucket: str, session_id: str) -> str:
         return "/workspace"
 
 

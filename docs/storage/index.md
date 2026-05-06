@@ -20,6 +20,7 @@ storage:
 # Production
 storage:
   backend: "s3"
+  bucket: "agent-bucket-name"
   endpoint: "http://garage.surogates.svc:3900"
   region: "garage"
   access_key: "..."
@@ -58,37 +59,39 @@ tenant-{org_id}/
       servers.json
 ```
 
-## Session Workspace Buckets
+## Session Workspaces
 
-Each session gets its own ephemeral bucket for workspace files:
+Each agent gets one bucket. Each session gets an ephemeral path
+inside that bucket:
 
 ```
-session-{session_id}/
+{configured-agent-bucket}/
+  sessions/{session_id}/
   (workspace files -- whatever the agent creates or modifies)
 ```
 
 ### Lifecycle
 
-1. **Session created** -- API server creates `session-{id}` bucket.
-2. **First sandbox tool call** -- sandbox pod is provisioned with the bucket FUSE-mounted as `/workspace`.
+1. **Session created** -- API server ensures the configured agent bucket exists.
+2. **First sandbox tool call** -- sandbox pod is provisioned with `sessions/{session_id}/` FUSE-mounted as `/workspace`.
 3. **Agent works** -- reads and writes files at `/workspace`. All changes are immediately durable in Garage.
-4. **Session ends** -- sandbox pod is destroyed, bucket is deleted.
+4. **Session ends** -- sandbox pod is destroyed, and the session prefix is deleted.
 
-If the sandbox pod dies, a new pod mounts the same bucket and the workspace is intact.
+If the sandbox pod dies, a new pod mounts the same path and the workspace is intact.
 
 ### Workspace Modes
 
-**S3-backed (default)**: The session bucket is FUSE-mounted as `/workspace`. Writes are immediately durable. Survives pod restarts.
+**S3-backed (default)**: The session path is FUSE-mounted as `/workspace`. Writes are immediately durable. Survives pod restarts.
 
 **Git-cloned**: A repository is cloned during sandbox provisioning. The clone token is used once and not stored in the sandbox. Changes can be pushed back.
 
 ## Security
 
 - **Tenant buckets** (`tenant-{org_id}`) are accessible only by the API server.
-- **Session buckets** (`session-{session_id}`) are accessible only by that session's sandbox pod and the API server.
-- Sandboxes cannot access other sessions' buckets or tenant storage.
+- **Agent buckets** store session paths under `sessions/{session_id}/`.
+- Sandboxes cannot access other sessions' paths or tenant storage.
 - Even if the LLM is compromised, the sandbox can only access the current session's workspace files.
 
 ### Cleanup
 
-A background CronJob (`cleanup_sessions`) sweeps orphaned `session-*` buckets that no longer have a corresponding active session. This is a safety net for cases where the normal cleanup path fails.
+A background CronJob (`cleanup_sessions`) sweeps orphaned `sessions/{session_id}/` prefixes that no longer have a corresponding active session. This is a safety net for cases where the normal cleanup path fails.

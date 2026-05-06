@@ -14,6 +14,10 @@ from surogates.storage.skill_staging import (
     SkillStager,
     has_stageable_assets,
 )
+from surogates.storage.tenant import session_workspace_key
+
+
+STORAGE_BUCKET = "agent-test"
 
 
 @pytest.fixture()
@@ -23,7 +27,7 @@ def backend(tmp_path: Path) -> LocalBackend:
 
 @pytest.fixture()
 def stager(backend: LocalBackend) -> SkillStager:
-    return SkillStager(backend=backend)
+    return SkillStager(backend=backend, storage_bucket=STORAGE_BUCKET)
 
 
 # =========================================================================
@@ -69,7 +73,7 @@ class TestStageFromFilesystem:
         (skill_src / "assets" / "template.pptx").write_bytes(b"\x00\x01binary")
 
         session_id = uuid4()
-        await backend.create_bucket(f"session-{session_id}")
+        await backend.create_bucket(STORAGE_BUCKET)
 
         staged_at = await stager.stage_from_filesystem(
             session_id=session_id,
@@ -79,18 +83,24 @@ class TestStageFromFilesystem:
 
         # staged_at points to the LocalBackend bucket dir + .skills prefix
         assert staged_at.endswith("/.skills/pptx_builder/")
-        assert f"session-{session_id}" in staged_at
+        assert STORAGE_BUCKET in staged_at
+        assert f"sessions/{session_id}" in staged_at
 
-        # All files are present in the session bucket.
-        keys = await backend.list_keys(f"session-{session_id}", prefix=".skills/")
-        assert ".skills/pptx_builder/SKILL.md" in keys
-        assert ".skills/pptx_builder/scripts/build.py" in keys
-        assert ".skills/pptx_builder/assets/template.pptx" in keys
-        assert ".skills/pptx_builder/.staged" in keys
+        # All files are present in the session workspace.
+        keys = await backend.list_keys(
+            STORAGE_BUCKET, prefix=f"sessions/{session_id}/.skills/",
+        )
+        assert session_workspace_key(session_id, ".skills/pptx_builder/SKILL.md") in keys
+        assert session_workspace_key(session_id, ".skills/pptx_builder/scripts/build.py") in keys
+        assert session_workspace_key(session_id, ".skills/pptx_builder/assets/template.pptx") in keys
+        assert session_workspace_key(session_id, ".skills/pptx_builder/.staged") in keys
 
         # Binary content is preserved bit-for-bit.
         data = await backend.read(
-            f"session-{session_id}", ".skills/pptx_builder/assets/template.pptx",
+            STORAGE_BUCKET,
+            session_workspace_key(
+                session_id, ".skills/pptx_builder/assets/template.pptx",
+            ),
         )
         assert data == b"\x00\x01binary"
 
@@ -103,7 +113,7 @@ class TestStageFromFilesystem:
         (skill_src / "script.py").write_text("v1")
 
         session_id = uuid4()
-        await backend.create_bucket(f"session-{session_id}")
+        await backend.create_bucket(STORAGE_BUCKET)
 
         first = await stager.stage_from_filesystem(
             session_id=session_id, skill_name="my_skill", source_dir=skill_src,
@@ -119,7 +129,8 @@ class TestStageFromFilesystem:
 
         assert first == second
         data = await backend.read(
-            f"session-{session_id}", ".skills/my_skill/script.py",
+            STORAGE_BUCKET,
+            session_workspace_key(session_id, ".skills/my_skill/script.py"),
         )
         assert data == b"v1"  # still the first version
 
@@ -127,7 +138,7 @@ class TestStageFromFilesystem:
         self, stager: SkillStager, backend: LocalBackend,
     ):
         session_id = uuid4()
-        await backend.create_bucket(f"session-{session_id}")
+        await backend.create_bucket(STORAGE_BUCKET)
 
         with pytest.raises(FileNotFoundError):
             await stager.stage_from_filesystem(
@@ -154,7 +165,7 @@ class TestStageFromTenantBucket:
         await backend.write(tenant_bucket, f"{src_prefix}/assets/template.pptx", b"\x89PNG")
 
         session_id = uuid4()
-        await backend.create_bucket(f"session-{session_id}")
+        await backend.create_bucket(STORAGE_BUCKET)
 
         staged_at = await stager.stage_from_tenant_bucket(
             session_id=session_id,
@@ -164,11 +175,13 @@ class TestStageFromTenantBucket:
         )
         assert staged_at.endswith("/.skills/pptx_builder/")
 
-        keys = await backend.list_keys(f"session-{session_id}", prefix=".skills/")
-        assert ".skills/pptx_builder/SKILL.md" in keys
-        assert ".skills/pptx_builder/scripts/build.py" in keys
-        assert ".skills/pptx_builder/assets/template.pptx" in keys
-        assert ".skills/pptx_builder/.staged" in keys
+        keys = await backend.list_keys(
+            STORAGE_BUCKET, prefix=f"sessions/{session_id}/.skills/",
+        )
+        assert session_workspace_key(session_id, ".skills/pptx_builder/SKILL.md") in keys
+        assert session_workspace_key(session_id, ".skills/pptx_builder/scripts/build.py") in keys
+        assert session_workspace_key(session_id, ".skills/pptx_builder/assets/template.pptx") in keys
+        assert session_workspace_key(session_id, ".skills/pptx_builder/.staged") in keys
 
     async def test_idempotent(self, stager: SkillStager, backend: LocalBackend):
         tenant_bucket = "tenant-bbbbbbbb"
@@ -178,7 +191,7 @@ class TestStageFromTenantBucket:
         await backend.write_text(tenant_bucket, f"{src_prefix}/scripts/x.py", "v1")
 
         session_id = uuid4()
-        await backend.create_bucket(f"session-{session_id}")
+        await backend.create_bucket(STORAGE_BUCKET)
 
         first = await stager.stage_from_tenant_bucket(
             session_id=session_id,
@@ -198,7 +211,8 @@ class TestStageFromTenantBucket:
         )
         assert first == second
         staged = await backend.read_text(
-            f"session-{session_id}", ".skills/stable/scripts/x.py",
+            STORAGE_BUCKET,
+            session_workspace_key(session_id, ".skills/stable/scripts/x.py"),
         )
         assert staged == "v1"
 
@@ -213,7 +227,7 @@ class TestIsStaged:
         self, stager: SkillStager, backend: LocalBackend,
     ):
         session_id = uuid4()
-        await backend.create_bucket(f"session-{session_id}")
+        await backend.create_bucket(STORAGE_BUCKET)
         assert await stager.is_staged(session_id, "anything") is False
 
     async def test_true_after_staging(
@@ -225,7 +239,7 @@ class TestIsStaged:
         (skill_src / "asset.bin").write_bytes(b"x")
 
         session_id = uuid4()
-        await backend.create_bucket(f"session-{session_id}")
+        await backend.create_bucket(STORAGE_BUCKET)
         await stager.stage_from_filesystem(
             session_id=session_id, skill_name="k", source_dir=skill_src,
         )
@@ -239,7 +253,8 @@ class TestStagedFilePath:
         session_id = uuid4()
         path = stager.staged_file_path(session_id, "pptx", "assets/t.pptx")
         assert path.endswith(f"/.skills/pptx/assets/t.pptx")
-        assert f"session-{session_id}" in path
+        assert STORAGE_BUCKET in path
+        assert f"sessions/{session_id}" in path
 
 
 # =========================================================================
@@ -263,6 +278,11 @@ def test_staging_marker_constant():
 class _MockAppState:
     def __init__(self, storage: LocalBackend) -> None:
         self.storage = storage
+        self.settings = type(
+            "_Settings",
+            (),
+            {"storage": type("_Storage", (), {"bucket": STORAGE_BUCKET})()},
+        )()
 
 
 class _MockApp:
@@ -303,7 +323,7 @@ class TestStageSkillForSessionHelper:
         loader_mod.PLATFORM_SKILLS_DIR = str(platform_dir)
         try:
             session_id = uuid4()
-            await backend.create_bucket(f"session-{session_id}")
+            await backend.create_bucket(STORAGE_BUCKET)
 
             # Fake SkillDef — minimum needed fields.
             class _DummySkill:
@@ -329,10 +349,14 @@ class TestStageSkillForSessionHelper:
             assert staged_at.endswith("/.skills/pptx_builder/")
 
             keys = await backend.list_keys(
-                f"session-{session_id}", prefix=".skills/",
+                STORAGE_BUCKET, prefix=f"sessions/{session_id}/.skills/",
             )
-            assert ".skills/pptx_builder/scripts/build.py" in keys
-            assert ".skills/pptx_builder/assets/template.pptx" in keys
+            assert session_workspace_key(
+                session_id, ".skills/pptx_builder/scripts/build.py",
+            ) in keys
+            assert session_workspace_key(
+                session_id, ".skills/pptx_builder/assets/template.pptx",
+            ) in keys
         finally:
             loader_mod.PLATFORM_SKILLS_DIR = original
 
@@ -384,7 +408,7 @@ class TestAuthorizeSessionForStaging:
 
     This is the guard that prevents any authenticated caller from pointing
     ``session_id=<someone else's session>`` at the staging endpoints and
-    polluting other tenants' session buckets.
+    polluting other tenants' session workspaces.
     """
 
     async def test_rejects_session_from_different_tenant(self):
@@ -540,7 +564,7 @@ class TestConcurrentStaging:
         marker and short-circuit.
         """
         backend = LocalBackend(base_path=str(tmp_path / "storage"))
-        stager = SkillStager(backend=backend)
+        stager = SkillStager(backend=backend, storage_bucket=STORAGE_BUCKET)
 
         skill_src = tmp_path / "src" / "concurrent_skill"
         skill_src.mkdir(parents=True)
@@ -549,7 +573,7 @@ class TestConcurrentStaging:
         (skill_src / "scripts" / "a.py").write_text("a=1")
 
         session_id = uuid4()
-        await backend.create_bucket(f"session-{session_id}")
+        await backend.create_bucket(STORAGE_BUCKET)
 
         # Count writes that look like content writes (ignore the marker
         # which both winners and losers would never produce twice because
@@ -588,7 +612,7 @@ class TestConcurrentStaging:
     ):
         """Same as above, but for ``stage_from_tenant_bucket``."""
         backend = LocalBackend(base_path=str(tmp_path / "storage"))
-        stager = SkillStager(backend=backend)
+        stager = SkillStager(backend=backend, storage_bucket=STORAGE_BUCKET)
 
         tenant = "tenant-xyz"
         await backend.create_bucket(tenant)
@@ -596,14 +620,14 @@ class TestConcurrentStaging:
         await backend.write_text(tenant, "shared/skills/s/scripts/a.py", "x=1")
 
         session_id = uuid4()
-        await backend.create_bucket(f"session-{session_id}")
+        await backend.create_bucket(STORAGE_BUCKET)
 
         content_writes = 0
         original_write = backend.write
 
         async def counting_write(bucket, key, data):
             nonlocal content_writes
-            if bucket == f"session-{session_id}" and not key.endswith(STAGING_MARKER):
+            if bucket == STORAGE_BUCKET and not key.endswith(STAGING_MARKER):
                 content_writes += 1
             await original_write(bucket, key, data)
 
@@ -665,7 +689,9 @@ class TestRedisLockIsUsedWhenProvided:
                 recorded_keys.append(key)
                 return _FakeLock()
 
-        stager = SkillStager(backend=backend, redis=_FakeRedis())
+        stager = SkillStager(
+            backend=backend, storage_bucket=STORAGE_BUCKET, redis=_FakeRedis(),
+        )
 
         skill_src = tmp_path / "src" / "k"
         skill_src.mkdir(parents=True)
@@ -673,7 +699,7 @@ class TestRedisLockIsUsedWhenProvided:
         (skill_src / "a.py").write_text("a")
 
         session_id = uuid4()
-        await backend.create_bucket(f"session-{session_id}")
+        await backend.create_bucket(STORAGE_BUCKET)
 
         await stager.stage_from_filesystem(session_id, "k", skill_src)
 

@@ -15,6 +15,7 @@ from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
 from surogates.session.models import Session
 from surogates.session.store import SessionNotFoundError, SessionStore
+from surogates.storage.tenant import agent_session_bucket, session_workspace_prefix
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 
@@ -177,18 +178,17 @@ async def create_session(
     if body.system:
         config["system"] = body.system
 
-    # Each session gets its own storage bucket for workspace files.
+    # Each agent gets one bucket; each session owns a path in it.
     session_id = uuid4()
-    session_bucket = f"session-{session_id}"
+    storage_bucket = agent_session_bucket(settings.storage.bucket)
 
     storage = request.app.state.storage
-    await storage.create_bucket(session_bucket)
+    await storage.create_bucket(storage_bucket)
 
-    config["workspace_bucket"] = session_bucket
-    # Workspace path for the sandbox:
-    # - LocalBackend: resolves to the bucket directory on disk
-    # - S3Backend: /workspace (s3fs-fuse mount point inside the sandbox pod)
-    config["workspace_path"] = storage.resolve_bucket_path(session_bucket)
+    config["storage_bucket"] = storage_bucket
+    config["workspace_path"] = storage.resolve_workspace_path(
+        storage_bucket, session_id,
+    )
 
     session = await store.create_session(
         session_id=session_id,
@@ -555,7 +555,7 @@ async def delete_session(
 ) -> None:
     """Archive (soft-delete) a session and delete its workspace storage."""
     store = _get_session_store(request)
-    await _get_session_for_tenant(request, session_id, tenant)
+    session = await _get_session_for_tenant(request, session_id, tenant)
 
     await store.update_session_status(session_id, "archived")
 
@@ -567,10 +567,23 @@ async def delete_session(
         _json.dumps({"reason": "session deleted"}),
     )
 
-    # Delete the session's storage bucket (workspace files).
+    # Delete the session's workspace objects without deleting the agent bucket.
     storage = request.app.state.storage
-    session_bucket = f"session-{session_id}"
+    storage_bucket = session.config.get("storage_bucket")
+    if not storage_bucket:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Session {session_id} has no agent bucket.",
+        )
+    prefix = session_workspace_prefix(session_id)
     try:
-        await storage.delete_bucket(session_bucket)
+        keys = await storage.list_keys(storage_bucket, prefix=prefix)
+        for key in keys:
+            await storage.delete(storage_bucket, key)
     except Exception:
-        logger.warning("Failed to delete storage bucket %s", session_bucket, exc_info=True)
+        logger.warning(
+            "Failed to delete workspace prefix %s in bucket %s",
+            prefix,
+            storage_bucket,
+            exc_info=True,
+        )

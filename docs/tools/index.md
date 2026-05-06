@@ -188,7 +188,7 @@ Render a named, versioned artifact inline in the chat thread: a Vega-Lite chart,
 | `html` | `html` (string) | `caption` | Rendered in an iframe with `sandbox="allow-scripts"` — no same-origin, no forms, no top-nav. Scripts run but can't reach the parent page. |
 | `svg` | `svg` (string) | `caption` | Rendered via `<img src="data:image/svg+xml;utf8,…">` — `<script>` inside SVG does **not** execute (browser image-mode). |
 
-**Storage and retrieval.** The artifact's metadata is recorded as an `artifact.created` event on the session log (no payload — keeps the event stream small). The payload itself is persisted in the session bucket at `_artifacts/{artifact_id}/v{N}.json`. The `_` prefix marks the directory as server-internal, so it is hidden from the workspace file browser and blocked from read/write/delete via the workspace API. The chat UI fetches the payload on demand through `GET /v1/sessions/{id}/artifacts/{artifact_id}`.
+**Storage and retrieval.** The artifact's metadata is recorded as an `artifact.created` event on the session log (no payload — keeps the event stream small). The payload itself is persisted under the session path at `_artifacts/{artifact_id}/v{N}.json`. The `_` prefix marks the directory as server-internal, so it is hidden from the workspace file browser and blocked from read/write/delete via the workspace API. The chat UI fetches the payload on demand through `GET /v1/sessions/{id}/artifacts/{artifact_id}`.
 
 **Limits.** 500 KB per artifact, 200 artifacts per session. A `caption` is optional for all kinds except markdown.
 

@@ -36,15 +36,15 @@ There is no legacy support requirement for existing per-session S3 buckets.
 
 ## Storage Naming
 
-For S3 storage, the agent workspace bucket is derived from the configured
-agent id:
+For S3 storage, the agent bucket is supplied by the agent
+deployment config:
 
 ```python
-agent_session_bucket(agent_id) == f"agent-{agent_id}"
+agent_session_bucket(settings.storage.bucket) == settings.storage.bucket
 ```
 
 The helper should validate that the resulting bucket name is S3-compatible and
-raise when `agent_id` is empty or invalid. Session keys are derived from the
+raise when the configured bucket is empty or invalid. Session keys are derived from the
 session id:
 
 ```python
@@ -59,7 +59,7 @@ helper whenever they need to address session workspace objects.
 New S3 sessions store:
 
 ```python
-config["workspace_bucket"] = agent_bucket
+config["storage_bucket"] = agent_bucket
 config["workspace_path"] = "/workspace"
 ```
 
@@ -70,7 +70,7 @@ For local storage, the workspace directory should mirror the S3 logical shape
 under the local base path:
 
 ```text
-{base_path}/agent-{agent_id}/sessions/{session_id}/
+{base_path}/{configured_agent_bucket}/sessions/{session_id}/
 ```
 
 That keeps development and production layouts aligned while still exposing a

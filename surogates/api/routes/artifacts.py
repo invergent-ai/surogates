@@ -27,7 +27,7 @@ from surogates.artifacts.store import (
 from surogates.session.events import EventType
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.backend import StorageBackend
-from surogates.storage.tenant import session_bucket
+from surogates.storage.tenant import session_workspace_prefix
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 
@@ -72,12 +72,12 @@ def _get_storage(request: Request) -> StorageBackend:
     return request.app.state.storage
 
 
-async def _resolve_session_bucket(
+async def _resolve_storage_bucket(
     store: SessionStore,
     session_id: UUID,
     tenant: TenantContext,
 ) -> str:
-    """Fetch the session, verify tenant access, return its workspace bucket."""
+    """Fetch the session, verify tenant access, return its agent bucket."""
     try:
         session = await store.get_session(session_id)
     except SessionNotFoundError:
@@ -90,7 +90,12 @@ async def _resolve_session_bucket(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
-    bucket = session.config.get("workspace_bucket") or session_bucket(session_id)
+    bucket = session.config.get("storage_bucket")
+    if not bucket:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Session {session_id} has no agent bucket.",
+        )
     return bucket
 
 
@@ -110,9 +115,12 @@ async def list_artifacts(
 ) -> ArtifactListResponse:
     """List every artifact that belongs to the session, oldest first."""
     store = _get_session_store(request)
-    bucket = await _resolve_session_bucket(store, session_id, tenant)
+    bucket = await _resolve_storage_bucket(store, session_id, tenant)
     artifact_store = ArtifactStore(
-        _get_storage(request), session_id=session_id, bucket=bucket,
+        _get_storage(request),
+        session_id=session_id,
+        bucket=bucket,
+        key_prefix=session_workspace_prefix(session_id),
     )
     artifacts = await artifact_store.list()
     return ArtifactListResponse(artifacts=artifacts)
@@ -130,9 +138,12 @@ async def get_artifact(
 ) -> ArtifactPayloadResponse:
     """Fetch a single artifact's metadata and full payload."""
     store = _get_session_store(request)
-    bucket = await _resolve_session_bucket(store, session_id, tenant)
+    bucket = await _resolve_storage_bucket(store, session_id, tenant)
     artifact_store = ArtifactStore(
-        _get_storage(request), session_id=session_id, bucket=bucket,
+        _get_storage(request),
+        session_id=session_id,
+        bucket=bucket,
+        key_prefix=session_workspace_prefix(session_id),
     )
     try:
         meta = await artifact_store.get_meta(artifact_id)
@@ -168,7 +179,7 @@ async def create_artifact(
     bucket and is fetched by the UI via :func:`get_artifact`.
     """
     store = _get_session_store(request)
-    bucket = await _resolve_session_bucket(store, session_id, tenant)
+    bucket = await _resolve_storage_bucket(store, session_id, tenant)
 
     try:
         body.validate_spec()
@@ -179,7 +190,10 @@ async def create_artifact(
         )
 
     artifact_store = ArtifactStore(
-        _get_storage(request), session_id=session_id, bucket=bucket,
+        _get_storage(request),
+        session_id=session_id,
+        bucket=bucket,
+        key_prefix=session_workspace_prefix(session_id),
     )
     try:
         meta = await artifact_store.create(

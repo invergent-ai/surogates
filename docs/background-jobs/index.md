@@ -2,17 +2,17 @@
 
 Surogates includes three background jobs that run as Kubernetes CronJobs.
 
-## `cleanup_sessions` -- Orphaned Bucket Sweep
+## `cleanup_sessions` -- Orphaned Session Prefix Sweep
 
-Over time, session workspace buckets can become orphaned -- the session is deleted or completed, but the bucket persists due to a crash or race condition during cleanup.
+Over time, session prefixes can become orphaned -- the session is deleted or completed, but the `sessions/{session_id}/` path persists due to a crash or race condition during cleanup.
 
 ### What It Does
 
 ```
-1. List all buckets with the "session-" prefix in Garage
+1. List all `sessions/{session_id}/` prefixes in the configured agent bucket
 2. Query the database for all active/paused session IDs
-3. Compare: find buckets with no matching active session
-4. Delete orphaned buckets (and all their contents)
+3. Compare: find prefixes with no matching active session
+4. Delete orphaned prefixes and their contents
 ```
 
 ### Usage

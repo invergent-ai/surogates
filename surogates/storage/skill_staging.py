@@ -11,8 +11,9 @@ follow-up ``skill_view(..., file_path=...)`` call — which burns tokens for
 text files and outright fails for binary files like ``.pptx`` templates.
 
 With staging, the API server copies the entire skill tree from its source
-(platform filesystem or tenant bucket) into ``session-{session_id}/.skills/
-{name}/`` as a side effect of ``skill_view``.  The sandbox then sees the files
+(platform filesystem or tenant bucket) into
+``sessions/{session_id}/.skills/{name}/`` as a side effect of ``skill_view``.
+The sandbox then sees the files
 at ``{workspace_path}/.skills/{name}/`` via s3fs-fuse (prod) or via the
 LocalBackend directory (dev), and the LLM runs them by relative path.
 
@@ -31,7 +32,7 @@ from typing import TYPE_CHECKING, AsyncIterator, Final
 from uuid import UUID
 
 from surogates.storage.backend import StorageBackend
-from surogates.storage.tenant import session_bucket
+from surogates.storage.tenant import session_workspace_key
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -62,7 +63,7 @@ _LOCK_BLOCKING_TIMEOUT_SECONDS: Final[int] = 60
 
 
 class SkillStager:
-    """Stages skill trees into a session's workspace bucket.
+    """Stages skill trees into a session's agent bucket.
 
     Parameters
     ----------
@@ -83,9 +84,11 @@ class SkillStager:
     def __init__(
         self,
         backend: StorageBackend,
+        storage_bucket: str,
         redis: "Redis | None" = None,
     ) -> None:
         self._backend = backend
+        self._storage_bucket = storage_bucket
         self._redis = redis
         # In-process fallback locks — only used when Redis isn't available.
         # Keyed by the same string as the Redis lock so the two code paths
@@ -99,18 +102,20 @@ class SkillStager:
 
     @staticmethod
     def staged_key_prefix(skill_name: str) -> str:
-        """Return the key prefix inside the session bucket for *skill_name*."""
+        """Return the key prefix inside a session workspace for *skill_name*."""
         return f"{STAGING_DIR}/{skill_name}"
 
     def workspace_path_for(self, session_id: UUID | str, skill_name: str) -> str:
         """Return the workspace-visible path where *skill_name* is staged.
 
         In production (``S3Backend``) this resolves to
-        ``/workspace/.skills/{name}/`` because the session bucket is mounted
+        ``/workspace/.skills/{name}/`` because the session prefix is mounted
         at ``/workspace``.  In development (``LocalBackend``) this resolves
-        to ``{base_path}/session-{session_id}/.skills/{name}/``.
+        to ``{base_path}/{agent_bucket}/sessions/{session_id}/.skills/{name}/``.
         """
-        root = self._backend.resolve_bucket_path(session_bucket(session_id))
+        root = self._backend.resolve_workspace_path(
+            self._storage_bucket, str(session_id),
+        )
         return f"{root.rstrip('/')}/{STAGING_DIR}/{skill_name}/"
 
     # ------------------------------------------------------------------
@@ -119,9 +124,11 @@ class SkillStager:
 
     async def is_staged(self, session_id: UUID | str, skill_name: str) -> bool:
         """Return ``True`` if *skill_name* has already been staged for this session."""
-        bucket = session_bucket(session_id)
         marker = f"{self.staged_key_prefix(skill_name)}/{STAGING_MARKER}"
-        return await self._backend.exists(bucket, marker)
+        return await self._backend.exists(
+            self._storage_bucket,
+            session_workspace_key(session_id, marker),
+        )
 
     # ------------------------------------------------------------------
     # Cross-worker lock (Redis) / single-worker lock (asyncio fallback)
@@ -186,10 +193,10 @@ class SkillStager:
         skill_name: str,
         source_dir: Path,
     ) -> str:
-        """Copy a platform skill's directory tree into the session bucket.
+        """Copy a platform skill's directory tree into the session workspace.
 
         All regular files under *source_dir* are copied to
-        ``session-{session_id}/.skills/{skill_name}/<relpath>``.  A
+        ``sessions/{session_id}/.skills/{skill_name}/<relpath>``.  A
         ``.staged`` marker is written last to signal completion.
 
         Returns the workspace-visible path where the skill is staged.
@@ -210,7 +217,6 @@ class SkillStager:
             if await self.is_staged(session_id, skill_name):
                 return self.workspace_path_for(session_id, skill_name)
 
-            bucket = session_bucket(session_id)
             dest_prefix = self.staged_key_prefix(skill_name)
 
             copied = 0
@@ -219,11 +225,19 @@ class SkillStager:
                     continue
                 rel = src_file.relative_to(source_dir).as_posix()
                 data = src_file.read_bytes()
-                await self._backend.write(bucket, f"{dest_prefix}/{rel}", data)
+                await self._backend.write(
+                    self._storage_bucket,
+                    session_workspace_key(session_id, f"{dest_prefix}/{rel}"),
+                    data,
+                )
                 copied += 1
 
             await self._backend.write(
-                bucket, f"{dest_prefix}/{STAGING_MARKER}", b"",
+                self._storage_bucket,
+                session_workspace_key(
+                    session_id, f"{dest_prefix}/{STAGING_MARKER}",
+                ),
+                b"",
             )
             logger.info(
                 "Staged platform skill '%s' (%d files) for session %s",
@@ -242,11 +256,11 @@ class SkillStager:
         tenant_bucket_name: str,
         source_prefix: str,
     ) -> str:
-        """Copy a tenant-bucket-backed skill into the session bucket.
+        """Copy a tenant-bucket-backed skill into the session workspace.
 
         Reads every object under *source_prefix* in *tenant_bucket_name*
         and rewrites it under
-        ``session-{session_id}/.skills/{skill_name}/<relpath>``.  A
+        ``sessions/{session_id}/.skills/{skill_name}/<relpath>``.  A
         ``.staged`` marker is written last.
 
         Concurrent callers for the same ``(session_id, skill_name)`` are
@@ -262,7 +276,6 @@ class SkillStager:
             if await self.is_staged(session_id, skill_name):
                 return self.workspace_path_for(session_id, skill_name)
 
-            dest_bucket = session_bucket(session_id)
             dest_prefix = self.staged_key_prefix(skill_name)
             normalized_src = source_prefix.rstrip("/")
             strip_len = len(normalized_src) + 1  # +1 for the trailing "/"
@@ -279,11 +292,19 @@ class SkillStager:
                 if not rel:
                     continue
                 data = await self._backend.read(tenant_bucket_name, key)
-                await self._backend.write(dest_bucket, f"{dest_prefix}/{rel}", data)
+                await self._backend.write(
+                    self._storage_bucket,
+                    session_workspace_key(session_id, f"{dest_prefix}/{rel}"),
+                    data,
+                )
                 copied += 1
 
             await self._backend.write(
-                dest_bucket, f"{dest_prefix}/{STAGING_MARKER}", b"",
+                self._storage_bucket,
+                session_workspace_key(
+                    session_id, f"{dest_prefix}/{STAGING_MARKER}",
+                ),
+                b"",
             )
             logger.info(
                 "Staged tenant skill '%s' (%d files) for session %s",

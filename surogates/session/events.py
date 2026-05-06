@@ -86,7 +86,7 @@ class EventType(str, Enum):
     USER_FEEDBACK = "user.feedback"
 
     # Artifacts — LLM-built inline content (charts, tables, markdown) stored
-    # in the session bucket and rendered in the chat thread.  Events carry
+    # in the session workspace and rendered in the chat thread.  Events carry
     # metadata only; the payload is fetched on-demand via the artifacts API.
     ARTIFACT_CREATED = "artifact.created"
     ARTIFACT_UPDATED = "artifact.updated"

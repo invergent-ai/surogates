@@ -1,7 +1,7 @@
-"""Session bucket cleanup job.
+"""Session workspace cleanup job.
 
-Deletes orphaned ``session-*`` storage buckets that have no matching
-active session in the database.  Runs as a K8s CronJob to catch buckets
+Deletes orphaned session workspace prefixes that have no matching active
+session in the database.  Runs as a K8s CronJob to catch workspace objects
 that were not cleaned up due to API server crashes or failed deletions.
 
 Usage::
@@ -23,28 +23,60 @@ from uuid import UUID
 from surogates.config import load_settings
 from surogates.db.engine import async_engine_from_settings, async_session_factory
 from surogates.storage.backend import create_backend
+from surogates.storage.tenant import agent_session_bucket, session_workspace_prefix
 
 logger = logging.getLogger(__name__)
 
-SESSION_BUCKET_PREFIX = "session-"
+SESSION_PREFIX_ROOT = "sessions/"
+
+
+async def cleanup_orphaned_session_prefixes(
+    storage,
+    *,
+    bucket: str,
+    active_session_ids: set[str],
+    dry_run: bool = False,
+) -> int:
+    """Delete session prefixes in the agent bucket with no active DB row."""
+    bucket = agent_session_bucket(bucket)
+    keys = await storage.list_keys(bucket, prefix=SESSION_PREFIX_ROOT)
+    session_ids = sorted(
+        {
+            key.split("/", 2)[1]
+            for key in keys
+            if key.startswith(SESSION_PREFIX_ROOT) and len(key.split("/", 2)) >= 2
+        }
+    )
+
+    deleted = 0
+    for session_id in session_ids:
+        if session_id in active_session_ids:
+            logger.debug(
+                "Session prefix %s belongs to active session, skipping.",
+                session_workspace_prefix(session_id),
+            )
+            continue
+
+        prefix = session_workspace_prefix(session_id)
+        if dry_run:
+            logger.info("[DRY RUN] Would delete workspace prefix: %s", prefix)
+        else:
+            logger.info("Deleting orphaned workspace prefix: %s", prefix)
+            for key in await storage.list_keys(bucket, prefix=prefix):
+                await storage.delete(bucket, key)
+        deleted += 1
+
+    return deleted
 
 
 async def cleanup_orphaned_buckets(dry_run: bool = False) -> int:
-    """Delete session buckets with no matching active session.
+    """Delete session workspace prefixes with no matching active session.
 
     Returns the number of buckets deleted (or that would be deleted
     in dry-run mode).
     """
     settings = load_settings()
     storage = create_backend(settings)
-
-    bucket_names = await storage.list_buckets(prefix=SESSION_BUCKET_PREFIX)
-
-    if not bucket_names:
-        logger.info("No session buckets found.")
-        return 0
-
-    logger.info("Found %d session bucket(s).", len(bucket_names))
 
     # Check which session IDs are still active in the database.
     engine = async_engine_from_settings(settings.db)
@@ -61,27 +93,19 @@ async def cleanup_orphaned_buckets(dry_run: bool = False) -> int:
 
     await engine.dispose()
 
-    # Delete orphaned buckets.
-    deleted = 0
-    for bucket_name in bucket_names:
-        session_id = bucket_name[len(SESSION_BUCKET_PREFIX):]
-        if session_id in active_session_ids:
-            logger.debug("Bucket %s belongs to active session, skipping.", bucket_name)
-            continue
-
-        if dry_run:
-            logger.info("[DRY RUN] Would delete bucket: %s", bucket_name)
-        else:
-            logger.info("Deleting orphaned bucket: %s", bucket_name)
-            try:
-                await storage.delete_bucket(bucket_name)
-            except Exception:
-                logger.error("Failed to delete bucket %s", bucket_name, exc_info=True)
-                continue
-        deleted += 1
+    try:
+        deleted = await cleanup_orphaned_session_prefixes(
+            storage,
+            bucket=settings.storage.bucket,
+            active_session_ids=active_session_ids,
+            dry_run=dry_run,
+        )
+    except Exception:
+        logger.error("Failed to clean up orphaned session prefixes", exc_info=True)
+        return 0
 
     logger.info(
-        "%s %d orphaned session bucket(s).",
+        "%s %d orphaned session prefix(es).",
         "Would delete" if dry_run else "Deleted",
         deleted,
     )

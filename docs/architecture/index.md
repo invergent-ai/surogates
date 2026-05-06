@@ -52,7 +52,7 @@ The API server is the trusted control plane. It serves HTTP to the frontend, man
 |---|---|
 | Framework | FastAPI |
 | Auth | JWT (HS256), short-lived access tokens, refresh tokens |
-| Storage access | Tenant-wide S3 (all `tenant-*` and `session-*` buckets) |
+| Storage access | Tenant and workspace S3 (all `tenant-*` and `agent-*` buckets) |
 | Database access | Full (sessions, events, tenants, credentials) |
 | Serves | Web chat SPA static files, REST API, SSE event streams |
 
@@ -80,7 +80,7 @@ Sandboxes are ephemeral execution environments for untrusted tool commands. One 
 |---|---|
 | Dev mode | `ProcessSandbox` -- subprocess in temp directory |
 | Production | `K8sSandbox` -- dedicated K8s pod per session |
-| Storage access | Session-scoped S3 only (`session-{session_id}` bucket) |
+| Storage access | Session-scoped S3 path only (`{agent_bucket}/sessions/{session_id}/`) |
 | Network | Restricted by NetworkPolicy -- only MCP proxy reachable |
 | Lifetime | `activeDeadlineSeconds: 3600` (K8s kills orphans) |
 
@@ -196,7 +196,7 @@ Children share everything about the tenant — skills, MCP servers, experts, mem
 | Iteration budget | Scoped per sub-agent (clamped at 30) |
 | Governance policy profile | Scoped per sub-agent (narrows tenant base) |
 | Event log | Scoped per child (own Session row) |
-| Workspace bucket | Scoped per child (own `session-{child_id}`) |
+| Session storage path | Scoped per child (own `sessions/{child_id}/`) |
 
 ### Resolution
 
@@ -240,7 +240,7 @@ Key properties:
 ```
 +-----------------------------------------------------------+
 | API Server (trusted)                                      |
-| - S3 credentials for all tenant-* and session-* buckets   |
+| - S3 credentials for all tenant-* and agent-* buckets     |
 | - DB credentials (sessions, tenants)                      |
 | - Serves skills, memory, workspace files to frontend      |
 | - Issues scoped tokens to worker pods                     |
@@ -256,8 +256,8 @@ Key properties:
                          | K8s exec API / subprocess
 +------------------------v----------------------------------+
 | Sandbox (untrusted)                                       |
-| - S3 credentials ONLY for session-{session_id} bucket     |
-| - s3fs-fuse mounts session bucket as /workspace           |
+| - S3 credentials scoped to the agent bucket session path  |
+| - s3fs-fuse mounts session path as /workspace             |
 | - Runs tool commands (terminal, file I/O, code exec)      |
 | - No DB access, no API token, no tenant S3 access         |
 | - Cannot access other sessions or tenant data             |
@@ -268,14 +268,17 @@ The structural fix for prompt injection: credentials and tenant data are never r
 
 ## Storage Architecture
 
-One Garage bucket per session for workspace files. One bucket per tenant for skills/memory. The sandbox pod only has credentials for its session bucket. All tenant-level operations go through the API server.
+One Garage bucket per agent for workspace files, with each session stored
+under `sessions/{session_id}/`. One bucket per tenant stores skills and
+memory. The sandbox pod mounts only the current session path. All tenant-level
+operations go through the API server.
 
 | Data | Storage | Location | Accessed by |
 |---|---|---|---|
 | Platform skills | Container image | `/etc/surogates/skills/` | API server (filesystem) |
 | Org/user skills + experts | Garage | `tenant-{org_id}` bucket | API server (S3 API) |
 | Memory | Garage | `tenant-{org_id}` bucket | API server (S3 API) |
-| Workspace files | Garage | `session-{session_id}` bucket | Sandbox (s3fs-fuse), API server (S3 API) |
+| Workspace files | Garage | `{agent_bucket}/sessions/{session_id}/` | Sandbox (s3fs-fuse), API server (S3 API) |
 | Session metadata | PostgreSQL | `sessions`, `events` tables | API server, Worker |
 | Tenant metadata | PostgreSQL | `orgs`, `users` tables | API server |
 

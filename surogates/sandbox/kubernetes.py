@@ -271,11 +271,17 @@ class K8sSandbox:
         spec: SandboxSpec,
     ) -> client.V1Pod:
         """Build the K8s pod manifest for a sandbox."""
-        # Parse resources from spec for s3fs mount.
-        session_bucket = ""
+        # Parse resources from spec for s3fs mount.  s3fs accepts
+        # "bucket:/prefix" to mount a path inside the bucket.
+        session_bucket_path = ""
         for res in spec.resources:
             if res.source_ref.startswith("s3://"):
-                session_bucket = res.source_ref[5:]
+                source = res.source_ref[5:].rstrip("/")
+                if "/" in source:
+                    bucket, path = source.split("/", 1)
+                    session_bucket_path = f"{bucket}:/{path}"
+                else:
+                    session_bucket_path = source
                 break
 
         # Use the in-cluster S3 endpoint (reachable from inside the pod),
@@ -329,7 +335,7 @@ class K8sSandbox:
 
         # s3fs sidecar container — uses the entrypoint.sh from the image.
         s3fs_env = [
-            client.V1EnvVar(name="S3_BUCKET", value=session_bucket),
+            client.V1EnvVar(name="S3_BUCKET_PATH", value=session_bucket_path),
             client.V1EnvVar(name="S3_ENDPOINT", value=s3_endpoint),
         ]
 
