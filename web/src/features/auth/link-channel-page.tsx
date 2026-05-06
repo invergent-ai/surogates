@@ -35,7 +35,6 @@ const TAGS = [
   { label: "MCP Integration", icon: "⚡" },
   { label: "Tool Governance", icon: "◈" },
   { label: "Multi-Tenant", icon: "◇" },
-  { label: "K8s Native", icon: "☁" },
 ] as const;
 
 export function LinkChannelPage() {
