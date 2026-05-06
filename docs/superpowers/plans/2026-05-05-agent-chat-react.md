@@ -24,6 +24,7 @@
 - [x] Commit 10: Restore standalone login visibility styles.
 - [x] Commit 11: Refactor login page to use shared UI components.
 - [x] Commit 12: Publish SDK packages from `v*` tags via GitHub Packages.
+- [x] Commit 13: Allow SDK package versions to publish independently from repo release tags.
 
 ---
 

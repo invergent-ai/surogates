@@ -101,36 +101,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify SDK versions match tag
-        env:
-          RELEASE_VERSION: ${{ github.ref_name }}
-        run: |
-          node <<'NODE'
-          const { readdirSync, readFileSync } = require("node:fs");
-          const { join } = require("node:path");
-
-          const expected = process.env.RELEASE_VERSION.replace(/^v/, "");
-          const packages = readdirSync("sdk", { withFileTypes: true })
-            .filter((entry) => entry.isDirectory())
-            .map((entry) => join("sdk", entry.name, "package.json"));
-
-          const mismatches = packages.filter((path) => {
-            const manifest = JSON.parse(readFileSync(path, "utf8"));
-            return manifest.version !== expected;
-          });
-
-          if (mismatches.length > 0) {
-            console.error(`Tag version ${expected} does not match all SDK package versions:`);
-            for (const path of mismatches) {
-              const manifest = JSON.parse(readFileSync(path, "utf8"));
-              console.error(`- ${manifest.name}: ${manifest.version} (${path})`);
-            }
-            process.exit(1);
-          }
-          NODE
-
       - name: Verify SDK packages
         run: |
+          node --test scripts/publish-sdk-packages.test.mjs
           pnpm -r --filter './sdk/*' --if-present run typecheck
           pnpm -r --filter './sdk/*' --if-present run test
           pnpm -r --filter './sdk/*' --if-present run build
@@ -138,4 +111,4 @@ jobs:
       - name: Publish SDK packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: pnpm -r --filter './sdk/*' publish --no-git-checks --access public
+        run: node scripts/publish-sdk-packages.mjs
