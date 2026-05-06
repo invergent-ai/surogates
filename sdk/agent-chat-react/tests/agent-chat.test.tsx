@@ -78,6 +78,15 @@ function createAdapter(stream: FakeEventStream): AgentChatAdapter {
     async submitClarifyResponse() {
       return { eventId: 1 };
     },
+    async listSlashCommands() {
+      return [
+        {
+          value: "/review",
+          label: "/review",
+          description: "Review the current work",
+        },
+      ];
+    },
     openEventStream() {
       return stream;
     },
@@ -119,5 +128,30 @@ describe("AgentChat", () => {
 
     expect(container.textContent).toContain("hello from stream");
     expect(container.textContent).toContain("assistant reply");
+  });
+
+  it("shows slash commands from the adapter from the composer command menu", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Slash commands"]',
+    );
+    expect(trigger).not.toBeNull();
+
+    await act(async () => {
+      trigger!.click();
+      await Promise.resolve();
+    });
+
+    expect(document.body.textContent).toContain("/review");
+    expect(document.body.textContent).toContain("Review the current work");
   });
 });

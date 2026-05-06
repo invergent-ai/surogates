@@ -6,10 +6,13 @@ import type {
   AgentChatEventStream,
   AgentChatEventType,
   AgentChatSession,
+  AgentChatSlashCommand,
   AgentChatSseMessageEvent,
 } from "@invergent-ai/agent-chat-react";
 import { getArtifact } from "@/api/artifacts";
 import { submitClarifyResponse as submitClarifyResponseApi } from "@/api/clarify";
+import { submitExpertFeedback as submitExpertFeedbackApi } from "@/api/feedback";
+import { listSkills, type SkillSummary } from "@/api/skills";
 import * as sessionsApi from "@/api/sessions";
 import { getAuthToken } from "@/features/auth";
 import type { Session } from "@/types/session";
@@ -69,6 +72,21 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     return { eventId: response.event_id };
   },
 
+  async submitExpertFeedback(input) {
+    const response = await submitExpertFeedbackApi(
+      input.sessionId,
+      input.expertResultEventId,
+      input.rating,
+      input.reason,
+    );
+    return { eventId: response.event_id, eventType: response.event_type };
+  },
+
+  async listSlashCommands() {
+    const response = await listSkills();
+    return response.skills.map(skillToSlashCommand);
+  },
+
   openEventStream(input) {
     const token = getAuthToken();
     const url = new URL(
@@ -80,6 +98,17 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     return wrapEventSource(new EventSource(url.toString()));
   },
 };
+
+function skillToSlashCommand(skill: SkillSummary): AgentChatSlashCommand {
+  const trigger = skill.trigger
+    ? skill.trigger.startsWith("/") ? skill.trigger : `/${skill.trigger}`
+    : `/${skill.name}`;
+  return {
+    value: trigger,
+    label: trigger,
+    description: skill.description,
+  };
+}
 
 function toAgentChatSession(session: Session): AgentChatSession {
   return {

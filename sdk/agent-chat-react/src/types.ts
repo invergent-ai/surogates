@@ -210,6 +210,14 @@ export interface AgentChatClarifyAnswer {
   is_other: boolean;
 }
 
+export interface AgentChatSlashCommand {
+  value: string;
+  label: string;
+  description: string;
+}
+
+export type AgentChatExpertFeedbackRating = "up" | "down";
+
 export interface AgentChatSseMessageEvent {
   data: string;
   lastEventId: string;
@@ -251,6 +259,13 @@ export interface AgentChatAdapter {
     toolCallId: string;
     responses: AgentChatClarifyAnswer[];
   }): Promise<{ eventId?: number }>;
+  submitExpertFeedback?(input: {
+    sessionId: string;
+    expertResultEventId: number;
+    rating: AgentChatExpertFeedbackRating;
+    reason?: string;
+  }): Promise<{ eventId?: number; eventType?: string }>;
+  listSlashCommands?(): Promise<AgentChatSlashCommand[]>;
   openEventStream(input: {
     sessionId: string;
     after: number;
@@ -268,3 +283,20 @@ export interface AgentChatRuntimeApi {
   markSending(content: string): void;
   markSendError(errorText: string): void;
 }
+
+export type ChatMessage = AgentChatMessage;
+export type ToolCallInfo = AgentChatToolCallInfo;
+export type TokenUsage = AgentChatTokenUsage;
+export type RetryIndicator = AgentChatRetryIndicator;
+export type ErrorInfo = AgentChatErrorInfo;
+export type ArtifactKind = AgentChatArtifactKind;
+export type ArtifactPayload = AgentChatArtifactPayload;
+export type MarkdownArtifactSpec = AgentChatMarkdownArtifactSpec;
+export type TableArtifactSpec = AgentChatTableArtifactSpec;
+export type ChartArtifactSpec = AgentChatChartArtifactSpec;
+export type HtmlArtifactSpec = AgentChatHtmlArtifactSpec;
+export type SvgArtifactSpec = AgentChatSvgArtifactSpec;
+export type ClarifyChoice = AgentChatClarifyChoice;
+export type ClarifyQuestion = AgentChatClarifyQuestion;
+export type ClarifyArgs = AgentChatClarifyArgs;
+export type ClarifyAnswer = AgentChatClarifyAnswer;
