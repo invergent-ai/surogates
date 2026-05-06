@@ -225,46 +225,66 @@ export function WorkspacePanel({
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [width, setWidth] = useState(DEFAULT_WIDTH);
+  const sessionIdRef = useRef(sessionId);
   const isResizing = useRef(false);
   const startX = useRef(0);
   const startWidth = useRef(DEFAULT_WIDTH);
+
+  sessionIdRef.current = sessionId;
 
   const fetchTree = useCallback(async () => {
     if (!sessionId) {
       setEntries([]);
       setRootName("workspace");
+      setExpandedPaths(new Set());
+      setTreeLoading(false);
       setTreeError(null);
       return;
     }
+    const requestedSessionId = sessionId;
     setTreeLoading(true);
     setTreeError(null);
     try {
-      const tree = await adapter.getWorkspaceTree({ sessionId });
+      const tree = await adapter.getWorkspaceTree({
+        sessionId: requestedSessionId,
+      });
+      if (sessionIdRef.current !== requestedSessionId) return;
       setEntries(tree.entries);
       setRootName(tree.root || "workspace");
       setExpandedPaths(new Set(collectExpandedPaths(tree.entries)));
     } catch (error) {
+      if (sessionIdRef.current !== requestedSessionId) return;
       setEntries([]);
       setRootName("workspace");
       setTreeError((error as Error).message);
     } finally {
-      setTreeLoading(false);
+      if (sessionIdRef.current === requestedSessionId) {
+        setTreeLoading(false);
+      }
     }
   }, [adapter, sessionId]);
 
   const fetchFile = useCallback(
     async (path: string) => {
       if (!sessionId) return;
+      const requestedSessionId = sessionId;
       setFileLoading(true);
       setFileError(null);
       try {
-        const nextFile = await adapter.getWorkspaceFile({ sessionId, path });
+        const nextFile = await adapter.getWorkspaceFile({
+          sessionId: requestedSessionId,
+          path,
+        });
+        if (sessionIdRef.current !== requestedSessionId) return;
         setFile(nextFile);
       } catch (error) {
+        if (sessionIdRef.current !== requestedSessionId) return;
         setFile(null);
         setFileError((error as Error).message);
       } finally {
-        setFileLoading(false);
+        if (sessionIdRef.current === requestedSessionId) {
+          setFileLoading(false);
+        }
       }
     },
     [adapter, sessionId],
@@ -604,4 +624,3 @@ function ConfirmDialog({
     </Dialog>
   );
 }
-

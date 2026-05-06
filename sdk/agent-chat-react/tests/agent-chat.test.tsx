@@ -211,4 +211,51 @@ describe("AgentChat", () => {
     expect(container.textContent).toContain("src/main.py");
     expect(container.textContent).toContain("print('hi')");
   });
+
+  it("does not show a previous session workspace after switching to a new chat", async () => {
+    const stream = new FakeEventStream();
+    let resolveTree: ((value: Awaited<ReturnType<AgentChatAdapter["getWorkspaceTree"]>>) => void) | null = null;
+    const adapter = {
+      ...createAdapter(stream),
+      async getWorkspaceTree() {
+        return await new Promise<Awaited<ReturnType<AgentChatAdapter["getWorkspaceTree"]>>>(
+          (resolve) => {
+            resolveTree = resolve;
+          },
+        );
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId={null} />);
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      resolveTree?.({
+        root: "workspace",
+        entries: [
+          {
+            name: "old-session.txt",
+            path: "old-session.txt",
+            kind: "file" as const,
+            size: 12,
+          },
+        ],
+        truncated: false,
+      });
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("No workspace files");
+    expect(container.textContent).not.toContain("old-session.txt");
+  });
 });
