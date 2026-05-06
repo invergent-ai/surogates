@@ -166,7 +166,7 @@ Resume a paused session.
 
 ### `DELETE /v1/sessions/{id}`
 
-Delete a session and its resources (events, workspace bucket).
+Delete a session and its resources (events, sandbox, and session storage prefix).
 
 ### `GET /v1/sessions/{id}/tree`
 

@@ -73,6 +73,7 @@ Surogates is configured via a YAML file merged with environment variables. Envir
 | Key | Env Var | Default | Description |
 |---|---|---|---|
 | `storage.backend` | `SUROGATES_STORAGE_BACKEND` | `local` | Backend: `local` (dev) or `s3` (prod) |
+| `storage.bucket` | `SUROGATES_STORAGE_BUCKET` | -- | Agent bucket for session workspaces |
 | `storage.base_path` | `SUROGATES_STORAGE_BASE_PATH` | `/tmp/surogates/tenant-assets` | Local backend base directory |
 | `storage.endpoint` | `SUROGATES_STORAGE_ENDPOINT` | -- | S3 endpoint URL |
 | `storage.region` | `SUROGATES_STORAGE_REGION` | `garage` | S3 region |

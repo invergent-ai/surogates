@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.backend import StorageBackend
-from surogates.storage.tenant import session_bucket
+from surogates.storage.tenant import session_workspace_key, session_workspace_prefix
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 
@@ -166,10 +166,10 @@ def _get_storage(request: Request) -> StorageBackend:
     return request.app.state.storage
 
 
-async def _get_session_bucket(
+async def _get_storage_bucket(
     store: SessionStore, session_id: UUID, tenant: TenantContext,
 ) -> str:
-    """Resolve and validate the session bucket for workspace access."""
+    """Resolve and validate the agent bucket for workspace access."""
     try:
         session = await store.get_session(session_id)
     except SessionNotFoundError:
@@ -184,12 +184,20 @@ async def _get_session_bucket(
             detail=f"Session {session_id} not found.",
         )
 
-    bucket = session.config.get("workspace_bucket")
+    bucket = session.config.get("storage_bucket")
     if not bucket:
-        # Fallback for sessions created before bucket support.
-        bucket = session_bucket(session_id)
-
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Session {session_id} has no agent bucket.",
+        )
     return bucket
+
+
+def _strip_session_prefix(session_id: UUID, key: str) -> str:
+    prefix = session_workspace_prefix(session_id)
+    if not key.startswith(prefix):
+        return key
+    return key[len(prefix):]
 
 
 def _is_text_key(key: str) -> bool:
@@ -305,12 +313,14 @@ async def get_workspace_tree(
     """Return the recursive file tree for a session's workspace."""
     store = _get_session_store(request)
     storage = _get_storage(request)
-    bucket = await _get_session_bucket(store, session_id, tenant)
+    bucket = await _get_storage_bucket(store, session_id, tenant)
 
-    keys = await storage.list_keys(bucket)
+    prefix = session_workspace_prefix(session_id)
+    keys = await storage.list_keys(bucket, prefix=prefix)
+    relative_keys = [_strip_session_prefix(session_id, k) for k in keys]
     # Drop keys living under reserved prefixes (artifact storage) so
     # internal server-side files don't leak into the workspace browser.
-    visible_keys = [k for k in keys if not _is_reserved(k)]
+    visible_keys = [k for k in relative_keys if k and not _is_reserved(k)]
     entries = _build_tree(visible_keys)
     truncated = len(visible_keys) >= _MAX_ENTRIES
 
@@ -335,7 +345,7 @@ async def get_workspace_file(
     _validate_path(path)
     store = _get_session_store(request)
     storage = _get_storage(request)
-    bucket = await _get_session_bucket(store, session_id, tenant)
+    bucket = await _get_storage_bucket(store, session_id, tenant)
 
     is_text = _is_text_key(path)
     is_image = _is_image_key(path)
@@ -347,7 +357,7 @@ async def get_workspace_file(
         )
 
     try:
-        data = await storage.read(bucket, path)
+        data = await storage.read(bucket, session_workspace_key(session_id, path))
     except KeyError:
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
@@ -402,7 +412,7 @@ async def upload_file(
     """Upload a file into the session's workspace."""
     store = _get_session_store(request)
     storage = _get_storage(request)
-    bucket = await _get_session_bucket(store, session_id, tenant)
+    bucket = await _get_storage_bucket(store, session_id, tenant)
 
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")
@@ -421,7 +431,7 @@ async def upload_file(
             detail=f"File exceeds maximum upload size ({_MAX_UPLOAD_BYTES // 1_000_000} MB).",
         )
 
-    await storage.write(bucket, key, contents)
+    await storage.write(bucket, session_workspace_key(session_id, key), contents)
 
     return UploadResponse(path=key, size=len(contents))
 
@@ -437,13 +447,14 @@ async def download_file(
     _validate_path(path)
     store = _get_session_store(request)
     storage = _get_storage(request)
-    bucket = await _get_session_bucket(store, session_id, tenant)
+    bucket = await _get_storage_bucket(store, session_id, tenant)
 
-    if not await storage.exists(bucket, path):
+    storage_key = session_workspace_key(session_id, path)
+    if not await storage.exists(bucket, storage_key):
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
     try:
-        info = await storage.stat(bucket, path)
+        info = await storage.stat(bucket, storage_key)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
@@ -453,7 +464,7 @@ async def download_file(
             detail="File too large to download.",
         )
 
-    data = await storage.read(bucket, path)
+    data = await storage.read(bucket, storage_key)
     mime, _ = mimetypes.guess_type(path)
     filename = PurePosixPath(path).name
 
@@ -478,11 +489,12 @@ async def delete_file(
     _validate_path(path)
     store = _get_session_store(request)
     storage = _get_storage(request)
-    bucket = await _get_session_bucket(store, session_id, tenant)
+    bucket = await _get_storage_bucket(store, session_id, tenant)
 
-    if not await storage.exists(bucket, path):
+    storage_key = session_workspace_key(session_id, path)
+    if not await storage.exists(bucket, storage_key):
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
-    await storage.delete(bucket, path)
+    await storage.delete(bucket, storage_key)
 
     return DeleteResponse(path=path)

@@ -2,7 +2,7 @@
 
 Used by harness tool handlers (skills, memory) to access tenant-scoped
 resources via the trusted API server instead of direct storage access.
-The worker pod only has credentials for its own session bucket; all
+The worker pod only has credentials for its own session workspace; all
 tenant-level operations go through this client.
 """
 
@@ -32,7 +32,7 @@ class HarnessAPIClient:
         The session this client is scoped to.  Forwarded as a
         ``session_id`` query parameter on skill-view endpoints so the API
         server can auto-stage supporting files into the session's
-        workspace bucket.  Required for staging to take effect; omitted
+        agent bucket.  Required for staging to take effect; omitted
         means skills view as text only (legacy behaviour).
     """
 

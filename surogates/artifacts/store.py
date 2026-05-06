@@ -1,6 +1,6 @@
 """ArtifactStore — persistence for chat-embedded artifacts.
 
-Artifacts live in the session bucket under ``_artifacts/{artifact_id}/``.
+Artifacts live in the session workspace under ``_artifacts/{artifact_id}/``.
 The leading underscore marks the directory as server-internal so the
 workspace file browser and REST layer can hide and reject access to it
 (see :data:`surogates.api.routes.workspace._RESERVED_PREFIXES`).
@@ -11,7 +11,7 @@ A session-level index at ``_artifacts/index.json`` lists every
 artifact in creation order so the UI can enumerate them without
 listing keys.
 
-Key layout inside the session bucket::
+Key layout inside the session workspace::
 
     _artifacts/
     ├── index.json                        # ordered list of ArtifactMeta
@@ -21,7 +21,7 @@ Key layout inside the session bucket::
         └── v2.json                       # serialised spec for version 2 (if updated)
 
 Payloads are JSON: ``{"kind": "chart", "spec": {...}}``.  The API server
-has the session bucket credentials; the worker calls it via
+has storage credentials; the worker calls it via
 :class:`HarnessAPIClient`.
 """
 
@@ -61,14 +61,17 @@ class ArtifactStore:
     Parameters
     ----------
     backend:
-        Object-storage backend for the session bucket.
+        Object-storage backend for the agent bucket.
     session_id:
         The session this store is scoped to.  Used only for metadata —
         the bucket name is passed in explicitly so callers already
         resolving the bucket for other workspace operations don't pay a
         second lookup.
     bucket:
-        The session bucket (``session-{session_id}``).
+        The per-agent bucket.
+    key_prefix:
+        Session workspace prefix inside the bucket, usually
+        ``sessions/{session_id}/``.
     """
 
     def __init__(
@@ -77,10 +80,12 @@ class ArtifactStore:
         *,
         session_id: UUID,
         bucket: str,
+        key_prefix: str,
     ) -> None:
         self._backend = backend
         self._session_id = session_id
         self._bucket = bucket
+        self._key_prefix = key_prefix.rstrip("/")
 
     # ------------------------------------------------------------------
     # Bucket / key helpers
@@ -98,6 +103,9 @@ class ArtifactStore:
     def _version_key(artifact_id: UUID, version: int) -> str:
         return f"{_ARTIFACTS_PREFIX}{artifact_id}/v{version}.json"
 
+    def _key(self, key: str) -> str:
+        return f"{self._key_prefix}/{key}" if self._key_prefix else key
+
     # ------------------------------------------------------------------
     # Index
     # ------------------------------------------------------------------
@@ -105,7 +113,7 @@ class ArtifactStore:
     async def _read_index(self) -> list[dict]:
         """Return the session's artifact index, empty if absent."""
         try:
-            raw = await self._backend.read_text(self._bucket, _INDEX_KEY)
+            raw = await self._backend.read_text(self._bucket, self._key(_INDEX_KEY))
         except KeyError:
             return []
         try:
@@ -120,7 +128,9 @@ class ArtifactStore:
 
     async def _write_index(self, entries: list[dict]) -> None:
         await self._backend.write_text(
-            self._bucket, _INDEX_KEY, json.dumps(entries, default=str),
+            self._bucket,
+            self._key(_INDEX_KEY),
+            json.dumps(entries, default=str),
         )
 
     # ------------------------------------------------------------------
@@ -160,10 +170,14 @@ class ArtifactStore:
 
         await asyncio.gather(
             self._backend.write_text(
-                self._bucket, self._version_key(artifact_id, 1), payload,
+                self._bucket,
+                self._key(self._version_key(artifact_id, 1)),
+                payload,
             ),
             self._backend.write_text(
-                self._bucket, self._meta_key(artifact_id), meta.model_dump_json(),
+                self._bucket,
+                self._key(self._meta_key(artifact_id)),
+                meta.model_dump_json(),
             ),
         )
 
@@ -185,7 +199,7 @@ class ArtifactStore:
         """Fetch metadata for a single artifact."""
         try:
             raw = await self._backend.read_text(
-                self._bucket, self._meta_key(artifact_id),
+                self._bucket, self._key(self._meta_key(artifact_id)),
             )
         except KeyError as exc:
             raise ArtifactNotFoundError(str(artifact_id)) from exc
@@ -204,7 +218,8 @@ class ArtifactStore:
             version = meta.version
         try:
             raw = await self._backend.read_text(
-                self._bucket, self._version_key(artifact_id, version),
+                self._bucket,
+                self._key(self._version_key(artifact_id, version)),
             )
         except KeyError as exc:
             raise ArtifactNotFoundError(

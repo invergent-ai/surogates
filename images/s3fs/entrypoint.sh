@@ -4,7 +4,7 @@ set -euo pipefail
 # Required env vars:
 #   AWS_ACCESS_KEY_ID     — S3 access key
 #   AWS_SECRET_ACCESS_KEY — S3 secret key
-#   S3_BUCKET             — bucket name to mount
+#   S3_BUCKET_PATH        — bucket or bucket:/path to mount
 #   S3_ENDPOINT           — S3 endpoint URL (e.g. http://garage:3900)
 #
 # Optional:
@@ -14,8 +14,8 @@ set -euo pipefail
 MOUNT_POINT="${S3_MOUNT_POINT:-/workspace}"
 REGION="${S3_REGION:-garage}"
 
-if [ -z "${S3_BUCKET:-}" ]; then
-    echo "ERROR: S3_BUCKET is required"
+if [ -z "${S3_BUCKET_PATH:-}" ]; then
+    echo "ERROR: S3_BUCKET_PATH is required"
     exit 1
 fi
 
@@ -28,10 +28,10 @@ fi
 echo "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" > /etc/passwd-s3fs
 chmod 600 /etc/passwd-s3fs
 
-echo "Mounting s3://${S3_BUCKET} at ${MOUNT_POINT} (endpoint: ${S3_ENDPOINT})"
+echo "Mounting s3://${S3_BUCKET_PATH} at ${MOUNT_POINT} (endpoint: ${S3_ENDPOINT})"
 
 # Run s3fs in foreground (-f) so the container stays alive.
-exec s3fs "${S3_BUCKET}" "${MOUNT_POINT}" \
+exec s3fs "${S3_BUCKET_PATH}" "${MOUNT_POINT}" \
     -f \
     -o url="${S3_ENDPOINT}" \
     -o use_path_request_style \

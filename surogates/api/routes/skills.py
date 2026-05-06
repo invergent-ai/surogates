@@ -12,7 +12,7 @@ list/view responses.
 ``GET /skills/{name}`` and ``GET /skills/{name}/file`` accept an
 optional ``session_id`` query parameter.  When supplied, the skill's
 supporting files (``scripts/``, ``assets/``, ``templates/``,
-``references/``) are auto-staged into ``session-{session_id}/.skills/
+``references/``) are auto-staged into ``sessions/{session_id}/.skills/
 {name}/`` so the sandbox can execute scripts and read binary assets
 directly at ``{workspace_path}/.skills/{name}/``.
 """
@@ -28,7 +28,11 @@ from pydantic import BaseModel, Field
 
 from surogates.api.routes._shared import normalize_source, raise_validation
 from surogates.storage.skill_staging import SkillStager, has_stageable_assets
-from surogates.storage.tenant import TenantStorage, tenant_bucket
+from surogates.storage.tenant import (
+    TenantStorage,
+    agent_session_bucket,
+    tenant_bucket,
+)
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 from surogates.tools.builtin.skill_validation import (
@@ -147,7 +151,12 @@ def _get_skill_stager(request: Request) -> SkillStager:
     broker), the stager falls back to an in-process ``asyncio.Lock``.
     """
     redis = getattr(request.app.state, "redis", None)
-    return SkillStager(backend=request.app.state.storage, redis=redis)
+    bucket = agent_session_bucket(request.app.state.settings.storage.bucket)
+    return SkillStager(
+        backend=request.app.state.storage,
+        storage_bucket=bucket,
+        redis=redis,
+    )
 
 
 def _staging_preamble(skill_name: str, staged_at: str) -> str:
@@ -178,11 +187,11 @@ async def _authorize_session_for_staging(
     tenant: TenantContext,
     session_id: UUID,
 ) -> None:
-    """Verify *session_id* belongs to the tenant before staging into its bucket.
+    """Verify *session_id* belongs to the tenant before staging into storage.
 
-    Staging writes to the ``session-{session_id}`` bucket; without this
-    check any authenticated user could pollute another tenant's sessions
-    or trigger arbitrary bucket creation with forged UUIDs.  Raises
+    Staging writes under ``sessions/{session_id}/`` in the agent bucket;
+    without this check any authenticated user could pollute another tenant's
+    sessions or trigger arbitrary workspace writes with forged UUIDs.  Raises
     ``HTTPException(404)`` with a generic message for both the not-found
     and wrong-tenant cases to avoid leaking session existence.
     """
@@ -200,7 +209,7 @@ async def _stage_skill_for_session(
     session_id: UUID,
     linked_files: list[str] | dict[str, list[str]] | None,
 ) -> str | None:
-    """Auto-stage a skill into the session bucket when it has assets to stage.
+    """Auto-stage a skill into the session workspace when it has assets to stage.
 
     Returns the workspace-visible ``staged_at`` path on success, or ``None``
     when the skill has nothing to stage (no supporting files, or DB-only).
@@ -372,7 +381,7 @@ async def view_skill(
     """View full skill content and linked files listing.
 
     When ``session_id`` is provided and the skill has supporting files,
-    the skill tree is auto-staged into ``session-{session_id}/.skills/
+    the skill tree is auto-staged into ``sessions/{session_id}/.skills/
     {name}/`` and a ``staged_at`` workspace path is returned.  A one-line
     preamble is prepended to ``content`` so the LLM can resolve relative
     paths (``scripts/foo.py``) against the staged directory.
@@ -463,7 +472,7 @@ async def read_skill_file(
     from surogates.tools.loader import ResourceLoader, SKILL_SOURCE_PLATFORM
 
     # Authorize the session up-front: any redirect-to-staged path writes
-    # into the session bucket, so ownership must be verified even though
+        # into the session workspace, so ownership must be verified even though
     # the caller may only be reading a text file in the end.
     if session_id is not None:
         await _authorize_session_for_staging(request, tenant, session_id)

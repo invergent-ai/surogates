@@ -121,11 +121,11 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 ### [14. Storage](storage/index.md)
 - StorageBackend protocol (`LocalBackend` / `S3Backend`)
 - Tenant asset roots (bucket layout, directory conventions)
-- Session workspace buckets (lifecycle, s3fs-fuse mount)
+- Session prefixes (lifecycle, s3fs-fuse mount)
 - Bucket security model (session-scoped vs. tenant-wide)
 
 ### [15. Background Jobs](background-jobs/index.md)
-- `cleanup_sessions` -- orphaned bucket sweep
+- `cleanup_sessions` -- orphaned session prefix sweep
 - `training_collector` -- expert training data export
 
 ### [16. Operations](operations/index.md)

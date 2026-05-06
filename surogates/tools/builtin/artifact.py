@@ -1,7 +1,7 @@
 """Builtin ``create_artifact`` tool.
 
 Routes through :class:`HarnessAPIClient` because artifacts live in the
-session bucket, which is tenant-gated resource the worker accesses via
+session workspace, which is a tenant-gated resource the worker accesses via
 the API server.  Same wiring as the ``memory`` and ``skills`` tools.
 
 Handler-side validation: we parse the spec locally with

@@ -188,7 +188,7 @@ def backend(tmp_path: Path) -> LocalBackend:
 
 @pytest.fixture
 async def bucket(backend: LocalBackend) -> str:
-    name = "session-abc"
+    name = "agent-test"
     await backend.create_bucket(name)
     return name
 
@@ -202,7 +202,12 @@ def session_id() -> UUID:
 def store(
     backend: LocalBackend, bucket: str, session_id: UUID,
 ) -> ArtifactStore:
-    return ArtifactStore(backend, session_id=session_id, bucket=bucket)
+    return ArtifactStore(
+        backend,
+        session_id=session_id,
+        bucket=bucket,
+        key_prefix=f"sessions/{session_id}/",
+    )
 
 
 class TestArtifactStoreCreate:
@@ -216,11 +221,14 @@ class TestArtifactStoreCreate:
         assert meta.version == 1
         assert meta.size > 0
         # meta.json exists
-        raw = await backend.read_text(bucket, f"_artifacts/{meta.artifact_id}/meta.json")
+        raw = await backend.read_text(
+            bucket,
+            f"sessions/{meta.session_id}/_artifacts/{meta.artifact_id}/meta.json",
+        )
         assert "chart1" in raw
         # v1 payload exists and contains the spec
         payload_raw = await backend.read_text(
-            bucket, f"_artifacts/{meta.artifact_id}/v1.json",
+            bucket, f"sessions/{meta.session_id}/_artifacts/{meta.artifact_id}/v1.json",
         )
         parsed = json.loads(payload_raw)
         assert parsed["kind"] == "markdown"
@@ -271,9 +279,14 @@ class TestArtifactStoreCreate:
             for i in range(m.MAX_ARTIFACTS_PER_SESSION)
         ]
         await backend.write_text(
-            bucket, "_artifacts/index.json", json.dumps(fake_index),
+            bucket, f"sessions/{session_id}/_artifacts/index.json", json.dumps(fake_index),
         )
-        store = ArtifactStore(backend, session_id=session_id, bucket=bucket)
+        store = ArtifactStore(
+            backend,
+            session_id=session_id,
+            bucket=bucket,
+            key_prefix=f"sessions/{session_id}/",
+        )
         with pytest.raises(ArtifactLimitError):
             await store.create(
                 name="one-too-many",

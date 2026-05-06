@@ -258,6 +258,7 @@ class StorageSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_STORAGE_"}
 
     backend: Literal["local", "s3"] = "local"
+    bucket: str = ""  # Agent bucket for session workspaces
     base_path: str = ""  # LocalBackend root (defaults to tenant_assets_root)
 
     # S3-compatible settings (only used when backend == "s3")
@@ -390,7 +391,7 @@ class Settings(BaseSettings):
 
     # Identity
     org_id: str = ""  # the org this agent instance belongs to
-    agent_id: str = ""  # the agent this instance serves (sessions belong to an agent)
+    agent_id: str = "default"  # the agent this instance serves (sessions belong to an agent)
     worker_id: str = ""  # set from K8s downward API (pod name)
     jwt_secret: str = "change-me-in-production"
     encryption_key: str = ""  # Fernet key for credential vault
