@@ -260,7 +260,6 @@ export function LoginPage() {
               onChange={(e) => { setEmail(e.target.value); clearError(); }}
               placeholder="you@company.com"
               aria-invalid={!!loginError && !email}
-              className="h-auto rounded-lg border border-border bg-input px-3.5 py-[11px] text-sm text-foreground focus-visible:border-primary/25 focus-visible:border-b-primary/25 focus-visible:ring-3 focus-visible:ring-primary/6 aria-invalid:border-destructive/20 aria-invalid:border-b-destructive/20"
             />
           </div>
 
@@ -276,7 +275,6 @@ export function LoginPage() {
                 onChange={(e) => { setPassword(e.target.value); clearError(); }}
                 placeholder="••••••••••••"
                 aria-invalid={!!loginError && !password}
-                className="h-auto rounded-lg border border-border bg-input px-3.5 py-[11px] pr-14 text-sm text-foreground focus-visible:border-primary/25 focus-visible:border-b-primary/25 focus-visible:ring-3 focus-visible:ring-primary/6 aria-invalid:border-destructive/20 aria-invalid:border-b-destructive/20"
               />
               <Button
                 type="button"
@@ -305,12 +303,6 @@ export function LoginPage() {
             type="submit"
             disabled={isLoading}
             size="lg"
-            className={cn(
-              "h-auto w-full rounded-lg border-none py-3 text-sm font-bold tracking-tight normal-case",
-              isLoading
-                ? "cursor-not-allowed bg-amber-600/50 text-primary-foreground"
-                : "cursor-pointer bg-gradient-to-br from-amber-500 to-amber-600 text-primary-foreground shadow-[0_4px_24px_rgba(245,158,11,0.15)] hover:shadow-[0_4px_32px_rgba(245,158,11,0.25)]",
-            )}
           >
             {isLoading ? (
               <>
