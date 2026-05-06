@@ -1,4 +1,4 @@
-name: Release wheel
+name: Release
 
 on:
   push:
@@ -79,3 +79,63 @@ jobs:
             ghcr.io/invergent-ai/${{ matrix.name }}:latest
           cache-from: type=gha,scope=${{ matrix.dir }}
           cache-to: type=gha,mode=max,scope=${{ matrix.dir }}
+
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@invergent-ai"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify SDK versions match tag
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          node <<'NODE'
+          const { readdirSync, readFileSync } = require("node:fs");
+          const { join } = require("node:path");
+
+          const expected = process.env.RELEASE_VERSION.replace(/^v/, "");
+          const packages = readdirSync("sdk", { withFileTypes: true })
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => join("sdk", entry.name, "package.json"));
+
+          const mismatches = packages.filter((path) => {
+            const manifest = JSON.parse(readFileSync(path, "utf8"));
+            return manifest.version !== expected;
+          });
+
+          if (mismatches.length > 0) {
+            console.error(`Tag version ${expected} does not match all SDK package versions:`);
+            for (const path of mismatches) {
+              const manifest = JSON.parse(readFileSync(path, "utf8"));
+              console.error(`- ${manifest.name}: ${manifest.version} (${path})`);
+            }
+            process.exit(1);
+          }
+          NODE
+
+      - name: Verify SDK packages
+        run: |
+          pnpm -r --filter './sdk/*' --if-present run typecheck
+          pnpm -r --filter './sdk/*' --if-present run test
+          pnpm -r --filter './sdk/*' --if-present run build
+
+      - name: Publish SDK packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm -r --filter './sdk/*' publish --no-git-checks --access public

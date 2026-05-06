@@ -1,8 +1,17 @@
 {
-  "name": "@surogates/agent-chat-react",
+  "name": "@invergent-ai/agent-chat-react",
   "version": "0.1.0",
   "description": "Reusable React chat UI and runtime for Surogates agent sessions.",
   "license": "AGPL-3.0-only",
+  "homepage": "https://github.com/invergent-ai/surogates/tree/master/sdk/agent-chat-react#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/invergent-ai/surogates.git",
+    "directory": "sdk/agent-chat-react"
+  },
+  "bugs": {
+    "url": "https://github.com/invergent-ai/surogates/issues"
+  },
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -68,6 +77,7 @@
     "vitest": "^2.1.8"
   },
   "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
     "access": "public"
   }
 }

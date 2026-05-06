@@ -7,7 +7,7 @@ import type {
   AgentChatEventType,
   AgentChatSession,
   AgentChatSseMessageEvent,
-} from "@surogates/agent-chat-react";
+} from "@invergent-ai/agent-chat-react";
 import { getArtifact } from "@/api/artifacts";
 import { submitClarifyResponse as submitClarifyResponseApi } from "@/api/clarify";
 import * as sessionsApi from "@/api/sessions";

@@ -7,7 +7,7 @@ import {
   AgentChat,
   type AgentChatAdapter,
   type AgentChatMessage,
-} from "@surogates/agent-chat-react";
+} from "@invergent-ai/agent-chat-react";
 import { SessionSidebar } from "@/components/navbar";
 import { WorkspacePanel } from "@/components/workspace-panel";
 import { TransparencyBanner } from "@/components/transparency-banner";

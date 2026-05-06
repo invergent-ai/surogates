@@ -4,7 +4,7 @@
 
 **Goal:** Create a reusable React chat package in the Surogates repo, migrate the standalone Surogates web chat to it, and wire Surogate Ops Work agent pages to live, agent-scoped chat sessions.
 
-**Architecture:** `@surogates/agent-chat-react` owns the chat runtime reducer, live SSE interpretation, chat UI, tool rendering, artifact rendering, and clarify widgets. Each consuming app owns routing, authentication, API base URLs, workspace side panels, transparency banners, and an adapter that binds package calls to that app's HTTP/SSE endpoints. Ops live chat goes through new `/api/sessions/*` proxy routes that authorize the selected Work agent, then forward requests to the running agent's `api_url` with the existing service-account token lifecycle.
+**Architecture:** `@invergent-ai/agent-chat-react` owns the chat runtime reducer, live SSE interpretation, chat UI, tool rendering, artifact rendering, and clarify widgets. Each consuming app owns routing, authentication, API base URLs, workspace side panels, transparency banners, and an adapter that binds package calls to that app's HTTP/SSE endpoints. Ops live chat goes through new `/api/sessions/*` proxy routes that authorize the selected Work agent, then forward requests to the running agent's `api_url` with the existing service-account token lifecycle.
 
 **Tech Stack:** React 19, TypeScript 5.9, Vite 8, Tailwind CSS 4, tsup, Vitest, FastAPI, httpx, SQLAlchemy, Surogates session/event APIs.
 
@@ -13,7 +13,7 @@
 ## Progress Todo
 
 - [x] Commit 1: Add progress tracking to this plan.
-- [x] Commit 2: Scaffold `@surogates/agent-chat-react` package.
+- [x] Commit 2: Scaffold `@invergent-ai/agent-chat-react` package.
 - [x] Commit 3: Extract and test the pure chat event reducer.
 - [x] Commit 4: Implement adapter-driven chat runtime hook.
 - [x] Commit 5: Move reusable chat UI into the package.
@@ -23,6 +23,7 @@
 - [x] Commit 9: Complete cross-repo verification fixes.
 - [x] Commit 10: Restore standalone login visibility styles.
 - [x] Commit 11: Refactor login page to use shared UI components.
+- [x] Commit 12: Publish SDK packages from `v*` tags via GitHub Packages.
 
 ---
 
@@ -71,7 +72,7 @@
 
 ### Standalone Web Changes
 
-- Modify `/work/surogates/web/package.json`: add `"@surogates/agent-chat-react": "file:../sdk/agent-chat-react"`.
+- Modify `/work/surogates/web/package.json`: add `"@invergent-ai/agent-chat-react": "file:../sdk/agent-chat-react"`.
 - Modify `/work/surogates/web/vite.config.ts`: dedupe React and allow package source/dependency build behavior.
 - Create `/work/surogates/web/src/features/chat/surogates-web-chat-adapter.ts`: standalone adapter for `/api/v1/sessions`.
 - Modify `/work/surogates/web/src/features/chat/chat-page.tsx`: render `AgentChat` and keep route/session/transparency/workspace concerns local.
@@ -85,7 +86,7 @@
 
 ### Ops Frontend Changes
 
-- Modify `/work/surogate-ops/frontend/package.json`: add `"@surogates/agent-chat-react": "file:../../surogates/sdk/agent-chat-react"`.
+- Modify `/work/surogate-ops/frontend/package.json`: add `"@invergent-ai/agent-chat-react": "file:../../surogates/sdk/agent-chat-react"`.
 - Modify `/work/surogate-ops/frontend/vite.config.ts`: dedupe React and include the local package for optimization as needed.
 - Create `/work/surogate-ops/frontend/src/features/work/work-agent-chat-adapter.ts`: Ops adapter for `/api/sessions`.
 - Create `/work/surogate-ops/frontend/src/features/work/work-agent-chat-page.tsx`: Work chat route component.
@@ -158,7 +159,7 @@ export interface AgentChatEventStream {
 
 ---
 
-## Task 1: Scaffold `@surogates/agent-chat-react`
+## Task 1: Scaffold `@invergent-ai/agent-chat-react`
 
 **Files:**
 - Create: `/work/surogates/sdk/agent-chat-react/package.json`
@@ -174,7 +175,7 @@ Use this dependency split: `react` and `react-dom` are peers; renderer libraries
 
 ```json
 {
-  "name": "@surogates/agent-chat-react",
+  "name": "@invergent-ai/agent-chat-react",
   "version": "0.1.0",
   "description": "Reusable React chat UI and runtime for Surogates agent sessions.",
   "license": "AGPL-3.0-only",
@@ -540,7 +541,7 @@ Expected: `rg` returns no matches for app-private imports or hardcoded standalon
 Add to `/work/surogates/web/package.json` dependencies:
 
 ```json
-"@surogates/agent-chat-react": "file:../sdk/agent-chat-react"
+"@invergent-ai/agent-chat-react": "file:../sdk/agent-chat-react"
 ```
 
 Run:
@@ -888,7 +889,7 @@ Expected: tests pass without weakening existing read-only session route behavior
 Add to `/work/surogate-ops/frontend/package.json` dependencies:
 
 ```json
-"@surogates/agent-chat-react": "file:../../surogates/sdk/agent-chat-react"
+"@invergent-ai/agent-chat-react": "file:../../surogates/sdk/agent-chat-react"
 ```
 
 Run:
