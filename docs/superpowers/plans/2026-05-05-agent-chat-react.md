@@ -20,7 +20,7 @@
 - [x] Commit 6: Migrate standalone `/work/surogates/web` chat to the package.
 - [x] Commit 7: Add Ops backend live chat proxy routes.
 - [x] Commit 8: Wire Ops Work chat routes and navbar.
-- [ ] Commit 9: Complete cross-repo verification fixes.
+- [x] Commit 9: Complete cross-repo verification fixes.
 
 ---
 
