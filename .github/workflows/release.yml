@@ -31,12 +31,6 @@ jobs:
           name: dist
           path: dist/*
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
-
   images:
     needs: npm
     runs-on: ubuntu-latest
@@ -113,4 +107,22 @@ jobs:
       - name: Publish SDK packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node scripts/publish-sdk-packages.mjs
+        run: node scripts/publish-sdk-packages.mjs --version="${GITHUB_REF_NAME#v}"
+
+  release:
+    needs:
+      - wheel
+      - images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
