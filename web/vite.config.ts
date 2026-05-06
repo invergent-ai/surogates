@@ -26,8 +26,13 @@ export default defineConfig({
     },
   },
   resolve: {
+    dedupe: ["react", "react-dom"],
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      "@invergent-ai/agent-chat-react": path.resolve(
+        __dirname,
+        "../sdk/agent-chat-react/src",
+      ),
     },
   },
   build: {

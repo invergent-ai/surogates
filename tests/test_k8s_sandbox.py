@@ -73,12 +73,19 @@ class TestBuildPodManifest:
 
     def test_s3_resource_parsed(self, sandbox: K8sSandbox):
         from surogates.sandbox.base import Resource
-        spec = SandboxSpec(resources=[Resource(source_ref="s3://session-123", mount_path="/workspace")])
+        spec = SandboxSpec(
+            resources=[
+                Resource(
+                    source_ref="s3://agent-test/sessions/session-123/",
+                    mount_path="/workspace",
+                ),
+            ],
+        )
         pod = sandbox._build_pod_manifest("id", "pod", "secret", spec)
         s3fs = pod.spec.containers[1]
-        # The s3fs env should contain the bucket name.
+        # The s3fs env should contain the bucket path.
         env_map = {e.name: e.value for e in s3fs.env}
-        assert env_map["S3_BUCKET"] == "session-123"
+        assert env_map["S3_BUCKET_PATH"] == "agent-test:/sessions/session-123"
 
 
 class TestStatusMapping:

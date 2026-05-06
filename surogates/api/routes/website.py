@@ -57,7 +57,7 @@ from surogates.channels.website_session import (
 from surogates.config import enqueue_session
 from surogates.session.events import EventType
 from surogates.session.store import SessionNotFoundError, SessionStore
-from surogates.storage.tenant import session_bucket
+from surogates.storage.tenant import agent_session_bucket
 from surogates.tenant.auth.jwt import InvalidTokenError
 
 logger = logging.getLogger(__name__)
@@ -347,15 +347,15 @@ async def bootstrap_website_session(
     storage = request.app.state.storage
 
     session_id = uuid.uuid4()
-    bucket = session_bucket(session_id)
+    bucket = agent_session_bucket(settings.storage.bucket)
     normalized_origin = request_origin.strip().rstrip("/").lower()
 
     # Materialize the agent config into session.config so the harness
     # doesn't need a live DB lookup on every wake, and edits to the
     # agent row later don't retroactively widen a running session.
     config: dict = {
-        "workspace_bucket": bucket,
-        "workspace_path": storage.resolve_bucket_path(bucket),
+        "storage_bucket": bucket,
+        "workspace_path": storage.resolve_workspace_path(bucket, session_id),
         "website_agent_id": str(agent.id),
         "website_origin": normalized_origin,
         "tool_allow_list": list(agent.tool_allow_list),
@@ -394,7 +394,7 @@ async def bootstrap_website_session(
         await storage.create_bucket(bucket)
     except Exception:
         logger.exception(
-            "Failed to provision workspace bucket for session %s; rolling back",
+            "Failed to provision agent bucket for session %s; rolling back",
             session_id,
         )
         try:

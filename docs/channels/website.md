@@ -1,6 +1,6 @@
 # Website Channel
 
-The website channel exposes an agent on a **public website** as a chat widget. Visitors are anonymous browser users with no platform account; identity is the server-side session cookie alone. Developers embed the agent using either the official [`@surogates/website-widget`](../../sdk/website-widget/README.md) JavaScript SDK ([AG-UI](https://docs.ag-ui.com/)-compatible) or plain `fetch` + `EventSource` against the raw HTTP surface documented below.
+The website channel exposes an agent on a **public website** as a chat widget. Visitors are anonymous browser users with no platform account; identity is the server-side session cookie alone. Developers embed the agent using either the official [`@invergent-ai/website-widget`](../../sdk/website-widget/README.md) JavaScript SDK ([AG-UI](https://docs.ag-ui.com/)-compatible) or plain `fetch` + `EventSource` against the raw HTTP surface documented below.
 
 Authentication is a two-layer pattern borrowed from Stripe's publishable keys:
 
@@ -76,12 +76,12 @@ Two supported paths. **Pick the SDK unless you have a specific reason not to** �
 
 ## Option 1: JavaScript SDK (recommended)
 
-The [`@surogates/website-widget`](../../sdk/website-widget/README.md) package is a TypeScript SDK built around [AG-UI](https://docs.ag-ui.com/) — the industry-standard agent-to-UI protocol also used by CopilotKit, LangGraph, Mastra, and CrewAI. Widgets written against AG-UI work on top of Surogates with no custom glue.
+The [`@invergent-ai/website-widget`](../../sdk/website-widget/README.md) package is a TypeScript SDK built around [AG-UI](https://docs.ag-ui.com/) — the industry-standard agent-to-UI protocol also used by CopilotKit, LangGraph, Mastra, and CrewAI. Widgets written against AG-UI work on top of Surogates with no custom glue.
 
 ### Install (npm / pnpm / yarn)
 
 ```bash
-pnpm add @surogates/website-widget @ag-ui/client rxjs
+pnpm add @invergent-ai/website-widget @ag-ui/client rxjs
 ```
 
 `@ag-ui/client` and `rxjs` are peer dependencies — they likely exist in your app bundle already if you use CopilotKit or any other AG-UI consumer.
@@ -105,7 +105,7 @@ The IIFE global exposes `WebsiteAgent`, `EventType`, `AbstractAgent`, all four `
 ### Quick start
 
 ```ts
-import { WebsiteAgent, EventType } from '@surogates/website-widget';
+import { WebsiteAgent, EventType } from '@invergent-ai/website-widget';
 
 const agent = new WebsiteAgent({
   apiUrl: 'https://agent.acme.com',
@@ -223,7 +223,7 @@ import {
   SurogatesNetworkError,
   SURG_EVENT,
   type WebsiteAgentConfig,
-} from '@surogates/website-widget';
+} from '@invergent-ai/website-widget';
 
 // ---------------------------------------------------------------------------
 // Widget state — what your UI needs to render.
@@ -555,7 +555,7 @@ The subscriber handlers above don't know about React; lift them into a custom ho
 
 ```tsx
 import { useEffect, useMemo, useState } from 'react';
-import { WebsiteAgent, SurogatesAuthError } from '@surogates/website-widget';
+import { WebsiteAgent, SurogatesAuthError } from '@invergent-ai/website-widget';
 import type { Message } from '@ag-ui/client';
 
 export function useWebsiteAgent(apiUrl: string, publishableKey: string) {

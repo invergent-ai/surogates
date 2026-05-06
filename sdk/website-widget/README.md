@@ -1,11 +1,11 @@
-# @surogates/website-widget
+# @invergent-ai/website-widget
 
 AG-UI-compatible TypeScript client for the Surogates public-website channel. Wraps the channel-specific bootstrap, HttpOnly cookie, CSRF double-submit, and SSE stream behind a standard [AG-UI](https://docs.ag-ui.com/) `AbstractAgent` so any widget built against AG-UI works on top of Surogates with no custom glue.
 
 ## What you get
 
 ```ts
-import { WebsiteAgent } from '@surogates/website-widget';
+import { WebsiteAgent } from '@invergent-ai/website-widget';
 
 const agent = new WebsiteAgent({
   apiUrl: 'https://agent.acme.com',
@@ -41,7 +41,7 @@ Surogates-specific signals that don't have a first-class AG-UI equivalent (`memo
 ## Install
 
 ```bash
-pnpm add @surogates/website-widget @ag-ui/client @ag-ui/core rxjs
+pnpm add @invergent-ai/website-widget @ag-ui/client @ag-ui/core rxjs
 ```
 
 `@ag-ui/client`, `@ag-ui/core`, and `rxjs` are **peer dependencies** -- they likely already exist in your app's bundle (especially if you're using CopilotKit or another AG-UI consumer), so we don't duplicate them.
@@ -143,7 +143,7 @@ The agent enforces the website channel's security contract transparently:
 - **Session cookie** is HttpOnly + Secure + SameSite=None, Path=/. Set by the server, managed by the browser.
 - **CSRF**: the bootstrap response returns a CSRF token that the SDK caches in memory and attaches to every `POST` as `X-CSRF-Token`. The server compares it constant-time against the `csrf` claim baked into the cookie JWT.
 
-See the [website channel documentation](https://github.com/your-org/surogates/blob/master/docs/channels/website.md) for the full threat model and the server-side invariants.
+See the [website channel documentation](https://github.com/invergent-ai/surogates/blob/master/docs/channels/website.md) for the full threat model and the server-side invariants.
 
 ## Development
 

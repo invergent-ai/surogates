@@ -42,7 +42,7 @@ A task suits a sub-agent when it (a) benefits from a fresh context window, (b) n
 
 ## Design Principles
 
-1. **Child sessions share the tenant.** Sub-agents inherit the parent's skills, MCP servers, experts, tenant memory, and workspace bucket. Only the preset (prompt, tool filter, model, iteration cap, policy profile) is scoped per sub-agent.
+1. **Child sessions share the tenant.** Sub-agents inherit the parent's skills, MCP servers, experts, tenant memory, and configured agent bucket. Only the preset (prompt, tool filter, model, iteration cap, policy profile) is scoped per sub-agent.
 
 2. **Every tool call is governed.** The same `GovernanceGate` the parent runs through also guards the child. An optional `policy_profile` narrows (intersects allowed, unions denied) on top of the base policy; profiles never widen.
 
@@ -288,7 +288,7 @@ What the child **shares** with the parent (no scoping, no duplication):
 - **MCP servers** — a single connection pool per tenant, reused across all sessions.
 - **Experts** — the base LLM inside a sub-agent can still call `consult_expert` if it's in the allowed tool set.
 - **Tenant memory** — `MEMORY.md` / `USER.md` are tenant-scoped, not session-scoped.
-- **Workspace bucket** — the parent's session workspace (`session-{parent_id}/`) is **not** inherited by default; children get their own workspace bucket. Coordinators can opt-in to sharing by passing `workspace_path` through the spawn config.
+- **Session path** — the parent's session workspace (`sessions/{parent_id}/`) is **not** inherited by default; children get their own path in the configured agent bucket. Coordinators can opt in to sharing by passing `workspace_path` through the spawn config.
 
 What the child **overrides**:
 

@@ -668,11 +668,20 @@ async def execute_single_tool(
             # files the parent already produced.
             from surogates.sandbox.base import SandboxSpec, Resource
             from surogates.sandbox.pool import sandbox_session_key
+            from surogates.storage.tenant import session_workspace_prefix
             sandbox_spec = getattr(tenant, "sandbox_spec", None) or SandboxSpec()
-            ws_bucket = session.config.get("workspace_bucket", "")
-            if ws_bucket and not any(r.source_ref.startswith("s3://") for r in sandbox_spec.resources):
+            storage_bucket = session.config.get("storage_bucket", "")
+            if storage_bucket and not any(
+                r.source_ref.startswith("s3://") for r in sandbox_spec.resources
+            ):
                 sandbox_spec.resources.append(
-                    Resource(source_ref=f"s3://{ws_bucket}", mount_path="/workspace"),
+                    Resource(
+                        source_ref=(
+                            f"s3://{storage_bucket}/"
+                            f"{session_workspace_prefix(session.id)}"
+                        ),
+                        mount_path="/workspace",
+                    ),
                 )
             # Pass through skill-declared env vars to the sandbox pod.
             # Only matters at provisioning time — env is baked into the pod spec.

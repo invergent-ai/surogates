@@ -87,6 +87,7 @@ governance:
 # ── Storage (S3-compatible) ───────────────────────────────────────────
 storage:
   backend: "local"              # "local" (dev) or "s3" (production, Garage/MinIO/AWS)
+  bucket: "surogates-agent-default"  # Agent bucket for session workspaces
   base_path: "/tmp/surogates/tenant-assets"  # LocalBackend root (dev only)
   # endpoint: "http://garage:3900"  # S3 endpoint (Garage, MinIO, etc.)
   # access_key: ""
@@ -107,6 +108,9 @@ storage:
 
 # ── Authentication ────────────────────────────────────────────────────
 jwt_secret: "change-me-in-production"
+
+# ── Agent Identity ────────────────────────────────────────────────────
+agent_id: "default"
 
 # ── Logging ───────────────────────────────────────────────────────────
 log_level: "INFO"

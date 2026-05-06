@@ -81,7 +81,7 @@ containers:
 
 The API server needs:
 - Database credentials (sessions, tenants, credentials)
-- S3 credentials for all tenant and session buckets
+- S3 credentials for all tenant and agent buckets
 - JWT signing secret
 - Platform volumes (skills) mounted read-only
 
@@ -150,14 +150,14 @@ Sandbox pods are created dynamically by workers when a session first needs isola
 
 **Pod structure:**
 - **Main container**: Full `surogates` package + `tool-executor` (Python). Receives tool calls via K8s exec API.
-- **s3fs sidecar**: FUSE-mounts the session's Garage bucket (`session-{session_id}`) as `/workspace`.
+- **s3fs sidecar**: FUSE-mounts the session's Garage path (`{agent_bucket}:/sessions/{session_id}`) as `/workspace`.
 - **Credentials**: Session-scoped S3 credentials injected via K8s Secret. No database, API, or tenant storage access.
 - **Safety**: `activeDeadlineSeconds: 3600` -- K8s kills orphan pods after 1 hour.
 
 ```
 sandbox-{session_id} pod
 +---------------------------+
-| s3fs sidecar              |  FUSE mount: session-{id} bucket -> /workspace
+| s3fs sidecar              |  FUSE mount: agent bucket session path -> /workspace
 +---------------------------+
 | main container            |  tool-executor: terminal, file ops, code exec
 | (surogates package)       |  real Python handlers via ToolRegistry
@@ -230,7 +230,7 @@ Each agent deployment uses its own Redis instance (or database number).
 
 Lightweight, S3-compatible object storage. Two bucket types:
 - `tenant-{org_id}` -- skills, memory, MCP configs (persistent)
-- `session-{session_id}` -- workspace files (ephemeral, lifecycle-managed)
+- configured agent bucket -- session workspace files under `sessions/{session_id}/`
 
 Garage ports: 3900 (S3 API), 3903 (admin API).
 

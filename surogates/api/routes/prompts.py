@@ -26,7 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from surogates.config import enqueue_session
 from surogates.session.events import EventType
 from surogates.session.store import SessionStore
-from surogates.storage.tenant import session_bucket
+from surogates.storage.tenant import agent_session_bucket
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 
@@ -158,14 +158,14 @@ async def _submit_one(
             )
 
     session_id = uuid4()
-    bucket = session_bucket(session_id)
+    bucket = agent_session_bucket(settings.storage.bucket)
 
     storage = request.app.state.storage
     await storage.create_bucket(bucket)
 
     config: dict = {
-        "workspace_bucket": bucket,
-        "workspace_path": storage.resolve_bucket_path(bucket),
+        "storage_bucket": bucket,
+        "workspace_path": storage.resolve_workspace_path(bucket, session_id),
         "service_account_id": str(service_account_id),
     }
     if body.metadata:
@@ -196,14 +196,6 @@ async def _submit_one(
         if existing is None:
             # Truly exceptional: constraint fired but row not visible.
             raise
-        try:
-            await storage.delete_bucket(bucket)
-        except Exception:
-            logger.warning(
-                "Failed to clean up bucket %s after idempotency race",
-                bucket,
-                exc_info=True,
-            )
         return PromptAccepted(
             session_id=existing.id,
             event_id=None,

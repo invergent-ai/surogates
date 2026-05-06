@@ -5,7 +5,8 @@ Used by API routes to read/write skills, memory, and workspace files without kno
 
 Bucket naming:
 - ``tenant-{org_id}`` — org/user skills, memory, MCP config
-- ``session-{session_id}`` — workspace files
+- configured agent bucket — session workspace files under
+  ``sessions/{session_id}/``
 
 Key layout inside tenant bucket:
 - ``shared/skills/{name}/SKILL.md``
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 from uuid import UUID
 
@@ -35,9 +37,37 @@ def tenant_bucket(org_id: UUID | str) -> str:
     return f"tenant-{org_id}"
 
 
-def session_bucket(session_id: UUID | str) -> str:
-    """Return the bucket name for a session."""
-    return f"session-{session_id}"
+_S3_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+
+
+def _validate_s3_bucket_name(bucket: str) -> str:
+    if (
+        not _S3_BUCKET_RE.fullmatch(bucket)
+        or ".." in bucket
+        or ".-" in bucket
+        or "-." in bucket
+    ):
+        raise ValueError(
+            f"Agent bucket '{bucket}' is not S3-compatible."
+        )
+    return bucket
+
+
+def agent_session_bucket(bucket: str) -> str:
+    """Return the configured per-agent bucket name for session workspaces."""
+    if not bucket:
+        raise ValueError("agent_session_bucket requires a configured storage bucket")
+    return _validate_s3_bucket_name(bucket)
+
+
+def session_workspace_prefix(session_id: UUID | str) -> str:
+    """Return the hard-coded object prefix for a session workspace."""
+    return f"sessions/{session_id}/"
+
+
+def session_workspace_key(session_id: UUID | str, key: str = "") -> str:
+    """Return *key* scoped under the session workspace prefix."""
+    return f"{session_workspace_prefix(session_id)}{key.lstrip('/')}"
 
 
 class TenantStorage:
