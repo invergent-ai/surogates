@@ -166,6 +166,21 @@ def _get_storage(request: Request) -> StorageBackend:
     return request.app.state.storage
 
 
+def _require_service_account_api_route(
+    request: Request,
+    tenant: TenantContext,
+) -> None:
+    """For ``/v1/api/*`` aliases, require a service-account principal."""
+    if (
+        request.url.path.startswith("/v1/api/")
+        and tenant.service_account_id is None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint requires a service-account token.",
+        )
+
+
 async def _get_storage_bucket(
     store: SessionStore, session_id: UUID, tenant: TenantContext,
 ) -> str:
@@ -302,6 +317,10 @@ def _build_tree(keys: list[str]) -> list[FileEntry]:
 
 
 @router.get(
+    "/api/sessions/{session_id}/workspace/tree",
+    response_model=WorkspaceTreeResponse,
+)
+@router.get(
     "/sessions/{session_id}/workspace/tree",
     response_model=WorkspaceTreeResponse,
 )
@@ -311,6 +330,7 @@ async def get_workspace_tree(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> WorkspaceTreeResponse:
     """Return the recursive file tree for a session's workspace."""
+    _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     storage = _get_storage(request)
     bucket = await _get_storage_bucket(store, session_id, tenant)
@@ -332,6 +352,10 @@ async def get_workspace_tree(
 
 
 @router.get(
+    "/api/sessions/{session_id}/workspace/file",
+    response_model=FileContentResponse,
+)
+@router.get(
     "/sessions/{session_id}/workspace/file",
     response_model=FileContentResponse,
 )
@@ -342,6 +366,7 @@ async def get_workspace_file(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> FileContentResponse:
     """Read the content of a single file in the session's workspace."""
+    _require_service_account_api_route(request, tenant)
     _validate_path(path)
     store = _get_session_store(request)
     storage = _get_storage(request)
@@ -395,6 +420,11 @@ async def get_workspace_file(
 
 
 @router.post(
+    "/api/sessions/{session_id}/workspace/upload",
+    response_model=UploadResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+@router.post(
     "/sessions/{session_id}/workspace/upload",
     response_model=UploadResponse,
     status_code=status.HTTP_201_CREATED,
@@ -410,6 +440,7 @@ async def upload_file(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> UploadResponse:
     """Upload a file into the session's workspace."""
+    _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     storage = _get_storage(request)
     bucket = await _get_storage_bucket(store, session_id, tenant)
@@ -436,6 +467,7 @@ async def upload_file(
     return UploadResponse(path=key, size=len(contents))
 
 
+@router.get("/api/sessions/{session_id}/workspace/download")
 @router.get("/sessions/{session_id}/workspace/download")
 async def download_file(
     session_id: UUID,
@@ -444,6 +476,7 @@ async def download_file(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> Response:
     """Download a file from the session's workspace."""
+    _require_service_account_api_route(request, tenant)
     _validate_path(path)
     store = _get_session_store(request)
     storage = _get_storage(request)
@@ -476,6 +509,10 @@ async def download_file(
 
 
 @router.delete(
+    "/api/sessions/{session_id}/workspace/file",
+    response_model=DeleteResponse,
+)
+@router.delete(
     "/sessions/{session_id}/workspace/file",
     response_model=DeleteResponse,
 )
@@ -486,6 +523,7 @@ async def delete_file(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> DeleteResponse:
     """Delete a file from the session's workspace."""
+    _require_service_account_api_route(request, tenant)
     _validate_path(path)
     store = _get_session_store(request)
     storage = _get_storage(request)

@@ -87,6 +87,31 @@ function createAdapter(stream: FakeEventStream): AgentChatAdapter {
         },
       ];
     },
+    async getWorkspaceTree() {
+      return {
+        root: "workspace",
+        entries: [
+          { name: "src", path: "src", kind: "dir" as const, children: [
+            { name: "main.py", path: "src/main.py", kind: "file" as const, size: 12 },
+          ] },
+        ],
+        truncated: false,
+      };
+    },
+    async getWorkspaceFile() {
+      return {
+        path: "src/main.py",
+        content: "print('hi')",
+        size: 11,
+        mime_type: "text/x-python",
+        encoding: "utf-8" as const,
+        truncated: false,
+      };
+    },
+    async uploadWorkspaceFile() {
+      return { path: "uploaded.txt", size: 4 };
+    },
+    async deleteWorkspaceFile() {},
     openEventStream() {
       return stream;
     },
@@ -110,15 +135,16 @@ afterEach(() => {
 });
 
 describe("AgentChat", () => {
-  it("renders messages received from the runtime stream", () => {
+  it("renders messages received from the runtime stream", async () => {
     const stream = new FakeEventStream();
     const adapter = createAdapter(stream);
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
 
-    act(() => {
+    await act(async () => {
       root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
     });
 
     act(() => {
@@ -153,5 +179,36 @@ describe("AgentChat", () => {
 
     expect(document.body.textContent).toContain("/review");
     expect(document.body.textContent).toContain("Review the current work");
+  });
+
+  it("packages the workspace panel and file viewer with the chat component", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Workspace");
+    expect(container.textContent).toContain("main.py");
+
+    const fileButton = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="treeitem"]'),
+    )
+      .reverse()
+      .find((element) => element.textContent?.includes("main.py"));
+    expect(fileButton).toBeDefined();
+
+    await act(async () => {
+      fileButton!.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("src/main.py");
+    expect(container.textContent).toContain("print('hi')");
   });
 });

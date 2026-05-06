@@ -14,6 +14,7 @@ import { submitClarifyResponse as submitClarifyResponseApi } from "@/api/clarify
 import { submitExpertFeedback as submitExpertFeedbackApi } from "@/api/feedback";
 import { listSkills, type SkillSummary } from "@/api/skills";
 import * as sessionsApi from "@/api/sessions";
+import * as workspaceApi from "@/api/workspace";
 import { getAuthToken } from "@/features/auth";
 import type { Session } from "@/types/session";
 
@@ -85,6 +86,26 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
   async listSlashCommands() {
     const response = await listSkills();
     return response.skills.map(skillToSlashCommand);
+  },
+
+  async getWorkspaceTree(input) {
+    return await workspaceApi.getWorkspaceTree(input.sessionId);
+  },
+
+  async getWorkspaceFile(input) {
+    return await workspaceApi.getWorkspaceFile(input.sessionId, input.path);
+  },
+
+  async uploadWorkspaceFile(input) {
+    return await workspaceApi.uploadFile(
+      input.sessionId,
+      input.file,
+      input.directory,
+    );
+  },
+
+  async deleteWorkspaceFile(input) {
+    await workspaceApi.deleteFile(input.sessionId, input.path);
   },
 
   openEventStream(input) {

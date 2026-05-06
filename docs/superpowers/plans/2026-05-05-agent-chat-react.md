@@ -4,7 +4,9 @@
 
 **Goal:** Create a reusable React chat package in the Surogates repo, migrate the standalone Surogates web chat to it, and wire Surogate Ops Work agent pages to live, agent-scoped chat sessions.
 
-**Architecture:** `@invergent/agent-chat-react` owns the chat runtime reducer, live SSE interpretation, chat UI, tool rendering, artifact rendering, and clarify widgets. Each consuming app owns routing, authentication, API base URLs, workspace side panels, transparency banners, and an adapter that binds package calls to that app's HTTP/SSE endpoints. Ops live chat goes through new `/api/sessions/*` proxy routes that authorize the selected Work agent, then forward requests to the running agent's `api_url` with the existing service-account token lifecycle.
+**Architecture:** `@invergent/agent-chat-react` owns the chat runtime reducer, live SSE interpretation, chat UI, tool rendering, artifact rendering, clarify widgets, workspace panel, and file viewer. Each consuming app owns routing, authentication, API base URLs, transparency banners, and an adapter that binds package calls to that app's HTTP/SSE/workspace endpoints. Ops live chat goes through new `/api/sessions/*` proxy routes that authorize the selected Work agent, then forward requests to the running agent's `api_url` with the existing service-account token lifecycle.
+
+**Current architecture correction:** the workspace panel and file viewer are part of the reusable `AgentChat` package, not app-owned sidecars. The adapter contract must provide workspace tree, file read, upload, and delete operations because the chat component and workspace surface are deployed as one component.
 
 **Tech Stack:** React 19, TypeScript 5.9, Vite 8, Tailwind CSS 4, tsup, Vitest, FastAPI, httpx, SQLAlchemy, Surogates session/event APIs.
 
@@ -32,6 +34,8 @@
 - [x] Commit 18: Fix Ops package resolution and selected-agent session scoping.
 - [x] Commit 19: Add service-account live-chat endpoints in Surogates.
 - [x] Commit 20: Point Ops live-chat proxy at the service-account endpoints.
+- [x] Commit 21: Bundle workspace panel and file viewer into `AgentChat`.
+- [ ] Commit 22: Proxy workspace reads through Ops service-account session API.
 
 ---
 

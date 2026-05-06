@@ -12,6 +12,7 @@ from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
 
 from surogates.session.store import SessionStore
+from surogates.storage.tenant import session_workspace_key
 from surogates.tenant.auth.jwt import create_access_token
 from surogates.tenant.credentials import CredentialVault
 
@@ -312,6 +313,68 @@ async def test_api_live_chat_routes_are_registered(app):
     assert "/v1/api/sessions/{session_id}/events" in paths
     assert "/v1/api/sessions/{session_id}/artifacts/{artifact_id}" in paths
     assert "/v1/api/sessions/{session_id}/clarify/{tool_call_id}/respond" in paths
+    assert "/v1/api/sessions/{session_id}/workspace/tree" in paths
+    assert "/v1/api/sessions/{session_id}/workspace/file" in paths
+    assert "/v1/api/sessions/{session_id}/workspace/upload" in paths
+    assert "/v1/api/sessions/{session_id}/workspace/download" in paths
+
+
+async def test_api_session_workspace_file_with_service_account(
+    client: AsyncClient, app, session_factory
+):
+    """Service-account sessions can browse workspace files through /v1/api."""
+    org_id = await create_org(session_factory)
+    issued = await issue_service_account_token(
+        session_factory, org_id, name="ops-chat"
+    )
+    headers = {"Authorization": f"Bearer {issued.token}"}
+    create_resp = await client.post(
+        "/v1/api/sessions",
+        json={"config": {"source": "ops"}},
+        headers=headers,
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    session_id = create_resp.json()["id"]
+
+    store = SessionStore(session_factory)
+    session = await store.get_session(UUID(session_id))
+    bucket = session.config["storage_bucket"]
+    await app.state.storage.write(
+        bucket,
+        session_workspace_key(session_id, "src/main.py"),
+        b"print('hello')\n",
+    )
+
+    tree_resp = await client.get(
+        f"/v1/api/sessions/{session_id}/workspace/tree",
+        headers=headers,
+    )
+    assert tree_resp.status_code == 200, tree_resp.text
+    assert tree_resp.json()["entries"] == [
+        {
+            "name": "src",
+            "path": "src",
+            "kind": "dir",
+            "size": None,
+            "children": [
+                {
+                    "name": "main.py",
+                    "path": "src/main.py",
+                    "kind": "file",
+                    "size": None,
+                    "children": None,
+                }
+            ],
+        }
+    ]
+
+    file_resp = await client.get(
+        f"/v1/api/sessions/{session_id}/workspace/file",
+        params={"path": "src/main.py"},
+        headers=headers,
+    )
+    assert file_resp.status_code == 200, file_resp.text
+    assert file_resp.json()["content"] == "print('hello')\n"
 
 
 async def test_get_session(client: AsyncClient, session_factory):

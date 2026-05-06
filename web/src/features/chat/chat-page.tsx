@@ -9,7 +9,6 @@ import {
   type AgentChatMessage,
 } from "@invergent/agent-chat-react";
 import { SessionSidebar } from "@/components/navbar";
-import { WorkspacePanel } from "@/components/workspace-panel";
 import { TransparencyBanner } from "@/components/transparency-banner";
 import { useAppStore } from "@/stores/app-store";
 import * as sessionsApi from "@/api/sessions";
@@ -152,15 +151,6 @@ export function ChatPage() {
     [fetchSessions, navigate, setActiveSession],
   );
 
-  const fetchWorkspaceFile = useAppStore((s) => s.fetchWorkspaceFile);
-  const handleFileSelect = useCallback(
-    (path: string) => {
-      if (!sessionId) return;
-      void fetchWorkspaceFile(sessionId, path);
-    },
-    [sessionId, fetchWorkspaceFile],
-  );
-
   const handleDisclosureConfirmed = useCallback(() => {
     if (disclosureKey === PRE_SESSION_KEY) preSessionAccepted.current = true;
     setDisclosureState((prev) => ({ ...prev, [disclosureKey]: "accepted" }));
@@ -208,13 +198,11 @@ export function ChatPage() {
             sessionId={sessionId ?? null}
             adapter={chatAdapter}
             onSessionChange={handleSessionChange}
-            onFileSelect={handleFileSelect}
             disabled={sessionDeclined}
             onMessagesChange={setChatMessages}
           />
         )}
       </main>
-      <WorkspacePanel sessionId={sessionId ?? null} />
     </div>
   );
 }

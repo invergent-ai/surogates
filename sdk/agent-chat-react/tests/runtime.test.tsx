@@ -87,6 +87,16 @@ function createFakeAdapter(calls: AdapterCalls): AgentChatAdapter {
     async submitClarifyResponse() {
       return { eventId: 1 };
     },
+    async getWorkspaceTree() {
+      return { root: "workspace", entries: [], truncated: false };
+    },
+    async getWorkspaceFile() {
+      throw new Error("not used by runtime tests");
+    },
+    async uploadWorkspaceFile() {
+      return { path: "uploaded.txt", size: 4 };
+    },
+    async deleteWorkspaceFile() {},
     openEventStream(input) {
       const stream = new FakeEventStream();
       calls.opened.push({ ...input, stream });

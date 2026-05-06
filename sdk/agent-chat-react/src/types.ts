@@ -216,6 +216,34 @@ export interface AgentChatSlashCommand {
   description: string;
 }
 
+export interface AgentChatWorkspaceEntry {
+  name: string;
+  path: string;
+  kind: "file" | "dir";
+  size?: number | null;
+  children?: AgentChatWorkspaceEntry[] | null;
+}
+
+export interface AgentChatWorkspaceTree {
+  root: string;
+  entries: AgentChatWorkspaceEntry[];
+  truncated: boolean;
+}
+
+export interface AgentChatWorkspaceFile {
+  path: string;
+  content: string;
+  size: number;
+  mime_type?: string | null;
+  encoding: "utf-8" | "base64";
+  truncated: boolean;
+}
+
+export interface AgentChatWorkspaceUpload {
+  path: string;
+  size: number;
+}
+
 export type AgentChatExpertFeedbackRating = "up" | "down";
 
 export interface AgentChatSseMessageEvent {
@@ -266,6 +294,22 @@ export interface AgentChatAdapter {
     reason?: string;
   }): Promise<{ eventId?: number; eventType?: string }>;
   listSlashCommands?(): Promise<AgentChatSlashCommand[]>;
+  getWorkspaceTree(input: {
+    sessionId: string;
+  }): Promise<AgentChatWorkspaceTree>;
+  getWorkspaceFile(input: {
+    sessionId: string;
+    path: string;
+  }): Promise<AgentChatWorkspaceFile>;
+  uploadWorkspaceFile(input: {
+    sessionId: string;
+    file: File;
+    directory?: string;
+  }): Promise<AgentChatWorkspaceUpload>;
+  deleteWorkspaceFile(input: {
+    sessionId: string;
+    path: string;
+  }): Promise<void>;
   openEventStream(input: {
     sessionId: string;
     after: number;
@@ -300,3 +344,7 @@ export type ClarifyChoice = AgentChatClarifyChoice;
 export type ClarifyQuestion = AgentChatClarifyQuestion;
 export type ClarifyArgs = AgentChatClarifyArgs;
 export type ClarifyAnswer = AgentChatClarifyAnswer;
+export type WorkspaceEntry = AgentChatWorkspaceEntry;
+export type WorkspaceTree = AgentChatWorkspaceTree;
+export type WorkspaceFile = AgentChatWorkspaceFile;
+export type WorkspaceUpload = AgentChatWorkspaceUpload;
