@@ -25,6 +25,7 @@
 - [x] Commit 11: Refactor login page to use shared UI components.
 - [x] Commit 12: Publish SDK packages from `v*` tags via GitHub Packages.
 - [x] Commit 13: Allow SDK package versions to publish independently from repo release tags.
+- [x] Commit 14: Make Docker image publication wait for npm package publication.
 
 ---
 

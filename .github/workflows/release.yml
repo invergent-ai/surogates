@@ -38,6 +38,7 @@ jobs:
           generate_release_notes: true
 
   images:
+    needs: npm
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -103,6 +104,7 @@ jobs:
 
       - name: Verify SDK packages
         run: |
+          ruby scripts/release_workflow_test.rb
           node --test scripts/publish-sdk-packages.test.mjs
           pnpm -r --filter './sdk/*' --if-present run typecheck
           pnpm -r --filter './sdk/*' --if-present run test
