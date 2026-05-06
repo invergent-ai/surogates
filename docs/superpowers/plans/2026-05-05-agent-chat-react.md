@@ -35,7 +35,7 @@
 - [x] Commit 19: Add service-account live-chat endpoints in Surogates.
 - [x] Commit 20: Point Ops live-chat proxy at the service-account endpoints.
 - [x] Commit 21: Bundle workspace panel and file viewer into `AgentChat`.
-- [ ] Commit 22: Proxy workspace reads through Ops service-account session API.
+- [x] Commit 22: Proxy workspace reads through Ops service-account session API.
 
 ---
 
