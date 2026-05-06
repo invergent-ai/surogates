@@ -26,6 +26,7 @@
 - [x] Commit 12: Publish SDK packages from `v*` tags via GitHub Packages.
 - [x] Commit 13: Allow SDK package versions to publish independently from repo release tags.
 - [x] Commit 14: Make Docker image publication wait for npm package publication.
+- [x] Commit 15: Copy the local agent chat SDK into the API image web build stage.
 
 ---
 
