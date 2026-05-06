@@ -21,6 +21,7 @@
 - [x] Commit 7: Add Ops backend live chat proxy routes.
 - [x] Commit 8: Wire Ops Work chat routes and navbar.
 - [x] Commit 9: Complete cross-repo verification fixes.
+- [x] Commit 10: Restore standalone login visibility styles.
 
 ---
 
