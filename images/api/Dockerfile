@@ -17,6 +17,8 @@ COPY sdk/agent-chat-react/package.json /sdk/agent-chat-react/package.json
 RUN npm ci
 
 COPY sdk/agent-chat-react/ /sdk/agent-chat-react/
+RUN rm -rf /sdk/agent-chat-react/node_modules \
+    && ln -s /build/node_modules /sdk/agent-chat-react/node_modules
 COPY web/ ./
 # Skip tsc type-checking — Vite transpiles TS on its own.
 # Type errors are caught in CI / local `npm run build`, not at image build time.

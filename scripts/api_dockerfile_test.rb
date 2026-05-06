@@ -15,6 +15,10 @@ class ApiDockerfileTest < Minitest::Test
     assert_order "COPY sdk/agent-chat-react/", "RUN npx vite build"
   end
 
+  def test_web_build_stage_resolves_agent_chat_source_dependencies_from_web_install
+    assert_order "ln -s /build/node_modules /sdk/agent-chat-react/node_modules", "RUN npx vite build"
+  end
+
   private
 
   def assert_order(first, second)
