@@ -10,7 +10,7 @@ import pytest
 from surogates.session.events import EventType
 from surogates.session.store import LeaseNotHeldError, SessionNotFoundError
 
-from .conftest import create_org, create_user
+from .conftest import create_org, create_user, issue_service_account_token
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -553,6 +553,76 @@ async def test_find_orphaned_sessions(session_store, session_factory):
     found_all_ids = {s.id for s in found_all}
     assert orphan.id in found_all_ids
     assert other_orphan.id in found_all_ids
+
+
+async def test_find_orphaned_sessions_ignores_clean_api_turns(
+    session_store, session_factory,
+):
+    """A stale API session that ended its turn cleanly is idle, not orphaned."""
+    org_id = await create_org(session_factory)
+    issued = await issue_service_account_token(session_factory, org_id)
+
+    session = await session_store.create_session(
+        user_id=None,
+        service_account_id=issued.id,
+        org_id=org_id,
+        agent_id="agent-a",
+        channel="api",
+    )
+    await session_store.emit_event(
+        session.id,
+        EventType.LLM_RESPONSE,
+        {
+            "message": {
+                "role": "assistant",
+                "content": "Done.",
+            },
+        },
+    )
+    await _backdate(session_factory, session.id, seconds=120)
+
+    found = await session_store.find_orphaned_sessions(
+        stale_seconds=60, agent_id="agent-a",
+    )
+    assert session.id not in {s.id for s in found}
+
+
+async def test_find_orphaned_sessions_recovers_api_turn_waiting_on_tools(
+    session_store, session_factory,
+):
+    """An LLM tool-call response is mid-turn and still needs recovery."""
+    org_id = await create_org(session_factory)
+    issued = await issue_service_account_token(session_factory, org_id)
+
+    session = await session_store.create_session(
+        user_id=None,
+        service_account_id=issued.id,
+        org_id=org_id,
+        agent_id="agent-a",
+        channel="api",
+    )
+    await session_store.emit_event(
+        session.id,
+        EventType.LLM_RESPONSE,
+        {
+            "message": {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "memory", "arguments": "{}"},
+                    },
+                ],
+            },
+        },
+    )
+    await _backdate(session_factory, session.id, seconds=120)
+
+    found = await session_store.find_orphaned_sessions(
+        stale_seconds=60, agent_id="agent-a",
+    )
+    assert session.id in {s.id for s in found}
 
 
 async def _backdate(session_factory, session_id, *, seconds: int) -> None:

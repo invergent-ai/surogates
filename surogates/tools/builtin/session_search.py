@@ -265,10 +265,11 @@ async def _summarize_session(
 async def _list_recent_sessions(
     session_store: Any,
     org_id: UUID,
-    user_id: UUID,
+    user_id: UUID | None,
     agent_id: str,
     limit: int,
     current_session_id: UUID | None = None,
+    service_account_id: UUID | None = None,
 ) -> str:
     """Return metadata for the most recent sessions (no LLM calls)."""
     try:
@@ -276,6 +277,7 @@ async def _list_recent_sessions(
             org_id=org_id,
             user_id=user_id,
             agent_id=agent_id,
+            service_account_id=service_account_id,
             limit=limit + 5,  # fetch extra to skip current
         )
 
@@ -357,6 +359,7 @@ async def session_search(
     session_store: Any = None,
     org_id: UUID | None = None,
     user_id: UUID | None = None,
+    service_account_id: UUID | None = None,
     agent_id: str = "",
     current_session_id: UUID | None = None,
     auxiliary_fn: Any | None = None,
@@ -374,6 +377,7 @@ async def session_search(
         session_store: The Surogates SessionStore instance.
         org_id: Organization UUID for the authenticated user.
         user_id: User UUID for the authenticated user.
+        service_account_id: Service-account UUID for API sessions.
         current_session_id: The current session UUID to exclude.
         auxiliary_fn: Optional async callable for LLM summarization.
     """
@@ -383,10 +387,10 @@ async def session_search(
             "error": "Session store not available.",
         })
 
-    if org_id is None or user_id is None:
+    if org_id is None or (user_id is None and service_account_id is None):
         return json.dumps({
             "success": False,
-            "error": "Tenant context (org_id/user_id) not available.",
+            "error": "Tenant context (org_id/principal_id) not available.",
         })
 
     # Search stays within the current session's agent — cross-agent history is
@@ -403,7 +407,13 @@ async def session_search(
     # No LLM calls -- just DB queries for titles, previews, timestamps.
     if not query or not query.strip():
         return await _list_recent_sessions(
-            session_store, org_id, user_id, agent_id, limit, current_session_id,
+            session_store,
+            org_id,
+            user_id,
+            agent_id,
+            limit,
+            current_session_id,
+            service_account_id=service_account_id,
         )
 
     query = query.strip()
@@ -436,10 +446,20 @@ async def session_search(
         raw_results: list[dict[str, Any]] = []
         try:
             async with session_store._sf() as db:
+                principal_column = (
+                    "s.service_account_id"
+                    if service_account_id is not None
+                    else "s.user_id"
+                )
+                principal_param = (
+                    service_account_id
+                    if service_account_id is not None
+                    else user_id
+                )
                 # Build full-text search query using PostgreSQL ts_vector
                 # Search event data->>'content' across all sessions for this org
                 fts_query = sa_text(
-                    """
+                    f"""
                     SELECT e.id AS event_id,
                            e.session_id,
                            e.type,
@@ -457,7 +477,7 @@ async def session_search(
                     FROM events e
                     JOIN sessions s ON s.id = e.session_id
                     WHERE s.org_id = :org_id
-                      AND s.user_id = :user_id
+                      AND {principal_column} = :principal_id
                       AND s.agent_id = :agent_id
                       AND s.status != 'archived'
                       AND to_tsvector('english', COALESCE(e.data->>'content', '') || ' ' || COALESCE(e.data->>'result', ''))
@@ -469,7 +489,7 @@ async def session_search(
                 params: dict[str, Any] = {
                     "query": query,
                     "org_id": org_id,
-                    "user_id": user_id,
+                    "principal_id": principal_param,
                     "agent_id": agent_id,
                     "limit": 50,  # Get more matches to find unique sessions
                 }
@@ -739,7 +759,7 @@ async def _session_search_handler(
 ) -> str:
     """Handle session_search tool calls.
 
-    Extracts ``session_store``, ``tenant`` (with org_id/user_id),
+    Extracts ``session_store``, ``tenant`` (with org_id and principal),
     ``session_id``, and optional ``auxiliary_fn`` from kwargs, then
     delegates to the main :func:`session_search` function.
     """
@@ -753,6 +773,11 @@ async def _session_search_handler(
     tenant = kwargs.get("tenant", {})
     org_id = tenant.get("org_id") if isinstance(tenant, dict) else getattr(tenant, "org_id", None)
     user_id = tenant.get("user_id") if isinstance(tenant, dict) else getattr(tenant, "user_id", None)
+    service_account_id = (
+        tenant.get("service_account_id")
+        if isinstance(tenant, dict)
+        else getattr(tenant, "service_account_id", None)
+    )
     agent_id = kwargs.get("agent_id", "")
     current_session_id = kwargs.get("session_id")
     auxiliary_fn = kwargs.get("auxiliary_fn")
@@ -762,6 +787,8 @@ async def _session_search_handler(
         org_id = UUID(org_id)
     if isinstance(user_id, str):
         user_id = UUID(user_id)
+    if isinstance(service_account_id, str):
+        service_account_id = UUID(service_account_id)
     if isinstance(current_session_id, str):
         current_session_id = UUID(current_session_id)
 
@@ -772,6 +799,7 @@ async def _session_search_handler(
         session_store=store,
         org_id=org_id,
         user_id=user_id,
+        service_account_id=service_account_id,
         agent_id=agent_id,
         current_session_id=current_session_id,
         auxiliary_fn=auxiliary_fn,

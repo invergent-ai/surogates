@@ -129,6 +129,29 @@ _FENCE_RE = re.compile(
 # Module-level helpers
 # ---------------------------------------------------------------------------
 
+_HARNESS_CONTROL_PENDING_EVENT_TYPES = frozenset({
+    EventType.HARNESS_RECOVERED.value,
+    EventType.HARNESS_WAKE.value,
+})
+
+
+def _actionable_pending_events(events: list[Any], cursor: int) -> list[Any]:
+    """Return post-cursor events that should start harness work."""
+    pending = []
+    for event in events:
+        event_type = (
+            event.type.value
+            if isinstance(event.type, EventType)
+            else str(event.type)
+        )
+        if (
+            event.id is not None
+            and event.id > cursor
+            and event_type not in _HARNESS_CONTROL_PENDING_EVENT_TYPES
+        ):
+            pending.append(event)
+    return pending
+
 
 def _derive_artifact_name(kind: str, messages: list[dict]) -> str:
     """Pick a human-readable name for an auto-promoted artifact.
@@ -448,10 +471,10 @@ class AgentHarness:
             all_events = await self._store.get_events(session_id)
 
             # 4. Check for pending events (events after the cursor).
-            pending = [e for e in all_events if e.id is not None and e.id > cursor]
+            pending = _actionable_pending_events(all_events, cursor)
             if not pending:
                 logger.debug(
-                    "Session %s: no pending events after cursor %d",
+                    "Session %s: no actionable pending events after cursor %d",
                     session_id,
                     cursor,
                 )
@@ -2318,4 +2341,3 @@ class AgentHarness:
                 "Failed to advance cursor after session completion for %s",
                 session.id,
             )
-

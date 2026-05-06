@@ -18,7 +18,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 from uuid import UUID
 
-from sqlalchemy import select, text, update, delete, func, or_
+from sqlalchemy import and_, not_, select, text, update, delete, func, or_
 
 from surogates.db.models import (
     Event as EventRow,
@@ -170,13 +170,14 @@ class SessionStore:
     async def list_sessions(
         self,
         org_id: UUID,
-        user_id: UUID,
+        user_id: UUID | None,
         agent_id: str,
         *,
+        service_account_id: UUID | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[Session]:
-        """Return top-level sessions for a user within an org, newest first.
+        """Return top-level sessions for a principal within an org, newest first.
 
         Delegation children (``parent_id IS NOT NULL``) are excluded --
         they belong under their parent in the session tree, not as
@@ -184,12 +185,19 @@ class SessionStore:
         (:func:`get_session_tree`) surfaces them when the parent is
         opened.
         """
+        if (user_id is None) == (service_account_id is None):
+            raise ValueError("list_sessions requires exactly one principal id")
+        principal_filter = (
+            SessionRow.service_account_id == service_account_id
+            if service_account_id is not None
+            else SessionRow.user_id == user_id
+        )
         async with self._sf() as db:
             result = await db.execute(
                 select(SessionRow)
                 .where(
                     SessionRow.org_id == org_id,
-                    SessionRow.user_id == user_id,
+                    principal_filter,
                     SessionRow.agent_id == agent_id,
                     SessionRow.status != "archived",
                     SessionRow.parent_id.is_(None),
@@ -796,18 +804,14 @@ class SessionStore:
         event log and the session sits looking "running" to the UI
         forever.
 
-        Anonymous website-channel sessions stay ``active`` between
-        visitor messages by design (no auth principal owns them, so the
-        idle-reset job can't flush them like authenticated ``web``
-        sessions can).  For ``website`` rows we therefore add a second
-        condition: the latest event must NOT be a clean turn-end
-        (``llm.response``, ``session.done``/``complete``, ``session.fail``,
-        ``harness.crash``).  Without this, every visitor session
-        between turns would be re-enqueued every ``stale_seconds`` and
-        burn a fresh LLM turn each pass.  Other channels keep the
-        original behaviour — Studio/web sessions get cleaned by the
-        idle-reset memory-flush job, and ``api`` sessions are bounded
-        by the calling service.
+        Sessions can legitimately remain ``active`` between turns.  That
+        includes website visitors, web sessions before idle-reset flushes
+        them, and API sessions owned by service accounts.  A stale,
+        leaseless active session is therefore an orphan only when the
+        latest event does not show a clean turn/session end.  A
+        ``llm.response`` is clean only when it has no tool calls; if the
+        worker was killed after the model asked for tools but before tool
+        execution, recovery must still re-enqueue the session.
 
         The ``stale_seconds`` threshold must exceed the LLM's longest
         plausible inter-chunk gap (streaming thinking can pause for
@@ -824,8 +828,9 @@ class SessionStore:
         narrows the candidate set without a LATERAL scan; the
         latest-event-type check then runs only on that small set.
         """
-        # Correlated scalar subquery: latest event type for the session
-        # under test.  Used only by the website-channel branch below.
+        # Correlated scalar subqueries: latest event for the session
+        # under test.  Used to distinguish idle-between-turns sessions
+        # from genuinely abandoned mid-turn sessions.
         latest_event_type = (
             select(EventRow.type)
             .where(EventRow.session_id == SessionRow.id)
@@ -834,15 +839,32 @@ class SessionStore:
             .correlate(SessionRow)
             .scalar_subquery()
         )
-        # Events that mean "this is not a silently-dead worker": the
-        # harness reached a clean turn end, the session was finalised,
-        # or the failure has already been surfaced through the event log.
-        terminal_event_types = (
-            "llm.response",
+        latest_event_data = (
+            select(EventRow.data)
+            .where(EventRow.session_id == SessionRow.id)
+            .order_by(EventRow.id.desc())
+            .limit(1)
+            .correlate(SessionRow)
+            .scalar_subquery()
+        )
+        session_end_event_types = (
             "session.done",
             "session.complete",
             "session.fail",
             "harness.crash",
+        )
+        latest_llm_response_is_clean = and_(
+            latest_event_type == "llm.response",
+            func.jsonb_array_length(
+                func.coalesce(
+                    latest_event_data["message"]["tool_calls"],
+                    text("'[]'::jsonb"),
+                )
+            ) == 0,
+        )
+        latest_event_ended_work = or_(
+            latest_event_type.in_(session_end_event_types),
+            latest_llm_response_is_clean,
         )
         stmt = (
             select(SessionRow)
@@ -856,13 +878,9 @@ class SessionStore:
                 LeaseRow.session_id.is_(None),
                 SessionRow.updated_at
                 < func.now() - text(f"make_interval(secs => {int(stale_seconds)})"),
-                # Surgical scope: only the website channel needs the
-                # latest-event check (visitor sessions rest at active
-                # between turns).  Other channels keep the original
-                # contract — any active+stale+leaseless is an orphan.
                 or_(
-                    SessionRow.channel != "website",
-                    latest_event_type.notin_(terminal_event_types),
+                    latest_event_type.is_(None),
+                    not_(latest_event_ended_work),
                 ),
             )
             .order_by(SessionRow.updated_at.asc())
