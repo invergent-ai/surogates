@@ -67,6 +67,26 @@ def _get_session_store(request: Request) -> SessionStore:
     return store
 
 
+def _require_service_account_api_route(
+    request: Request,
+    tenant: TenantContext,
+) -> None:
+    """For ``/v1/api/*`` aliases, require a service-account principal."""
+    if (
+        request.url.path.startswith("/v1/api/")
+        and tenant.service_account_id is None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint requires a service-account token.",
+        )
+
+
+@router.post(
+    "/api/sessions/{session_id}/clarify/{tool_call_id}/respond",
+    response_model=ClarifyResponseReply,
+    status_code=status.HTTP_201_CREATED,
+)
 @router.post(
     "/sessions/{session_id}/clarify/{tool_call_id}/respond",
     response_model=ClarifyResponseReply,
@@ -80,6 +100,7 @@ async def respond_to_clarify(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> ClarifyResponseReply:
     """Record the user's answers and unblock the worker's clarify handler."""
+    _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
 
     try:

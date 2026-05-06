@@ -36,6 +36,8 @@ def _get_injection_detector():
 
 router = APIRouter()
 
+API_CHANNEL = "api"
+
 
 # ---------------------------------------------------------------------------
 # Request / response schemas
@@ -117,6 +119,28 @@ def _get_session_store(request: Request) -> SessionStore:
     return store
 
 
+def _require_service_account_api_route(
+    request: Request,
+    tenant: TenantContext,
+    *,
+    allow_session_scoped: bool = True,
+) -> UUID | None:
+    """For ``/v1/api/*`` aliases, require a service-account principal."""
+    if not request.url.path.startswith("/v1/api/"):
+        return None
+    if tenant.service_account_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint requires a service-account token.",
+        )
+    if not allow_session_scoped and tenant.session_scope_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Session-scoped service-account tokens cannot create sessions.",
+        )
+    return tenant.service_account_id
+
+
 async def _get_session_for_tenant(
     request: Request,
     session_id: UUID,
@@ -152,6 +176,59 @@ async def _get_session_for_tenant(
     return session
 
 
+async def _create_session(
+    body: CreateSessionRequest,
+    request: Request,
+    tenant: TenantContext,
+    *,
+    channel: str,
+    user_id: UUID | None,
+    service_account_id: UUID | None,
+) -> CreateSessionResponse:
+    """Create a chat session for either the web or service-account channel."""
+    store = _get_session_store(request)
+
+    # Model is always set from server config — not user-selectable.
+    settings = request.app.state.settings
+    model = settings.llm.model or "gpt-5.4"
+
+    config = body.config.copy()
+    if body.system:
+        config["system"] = body.system
+    if service_account_id is not None:
+        config["service_account_id"] = str(service_account_id)
+
+    # Each agent gets one bucket; each session owns a path in it.
+    session_id = uuid4()
+    storage_bucket = agent_session_bucket(settings.storage.bucket)
+
+    storage = request.app.state.storage
+    await storage.create_bucket(storage_bucket)
+
+    config["storage_bucket"] = storage_bucket
+    config["workspace_path"] = storage.resolve_workspace_path(
+        storage_bucket, session_id,
+    )
+
+    session = await store.create_session(
+        session_id=session_id,
+        user_id=user_id,
+        org_id=tenant.org_id,
+        agent_id=settings.agent_id,
+        channel=channel,
+        model=model,
+        config=config,
+        service_account_id=service_account_id,
+    )
+
+    return CreateSessionResponse(
+        id=session.id,
+        status=session.status,
+        channel=session.channel,
+        model=session.model,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -168,46 +245,52 @@ async def create_session(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> CreateSessionResponse:
     """Create a new session for the authenticated user."""
-    store = _get_session_store(request)
-
-    # Model is always set from server config — not user-selectable.
-    settings = request.app.state.settings
-    model = settings.llm.model or "gpt-5.4"
-
-    config = body.config.copy()
-    if body.system:
-        config["system"] = body.system
-
-    # Each agent gets one bucket; each session owns a path in it.
-    session_id = uuid4()
-    storage_bucket = agent_session_bucket(settings.storage.bucket)
-
-    storage = request.app.state.storage
-    await storage.create_bucket(storage_bucket)
-
-    config["storage_bucket"] = storage_bucket
-    config["workspace_path"] = storage.resolve_workspace_path(
-        storage_bucket, session_id,
-    )
-
-    session = await store.create_session(
-        session_id=session_id,
-        user_id=tenant.user_id,
-        org_id=tenant.org_id,
-        agent_id=settings.agent_id,
+    return await _create_session(
+        body,
+        request,
+        tenant,
         channel="web",
-        model=model,
-        config=config,
-    )
-
-    return CreateSessionResponse(
-        id=session.id,
-        status=session.status,
-        channel=session.channel,
-        model=session.model,
+        user_id=tenant.user_id,
+        service_account_id=None,
     )
 
 
+@router.post(
+    "/api/sessions",
+    response_model=CreateSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_api_session(
+    body: CreateSessionRequest,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> CreateSessionResponse:
+    """Create a new API-channel session for a service-account client."""
+    service_account_id = _require_service_account_api_route(
+        request,
+        tenant,
+        allow_session_scoped=False,
+    )
+    if service_account_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint requires a service-account token.",
+        )
+    return await _create_session(
+        body,
+        request,
+        tenant,
+        channel=API_CHANNEL,
+        user_id=None,
+        service_account_id=service_account_id,
+    )
+
+
+@router.post(
+    "/api/sessions/{session_id}/messages",
+    response_model=SendMessageResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 @router.post(
     "/sessions/{session_id}/messages",
     response_model=SendMessageResponse,
@@ -220,6 +303,7 @@ async def send_message(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> SendMessageResponse:
     """Send a user message to a session, triggering agent processing."""
+    _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant)
 
@@ -243,8 +327,11 @@ async def send_message(
         await store.emit_event(session_id, EventType.SESSION_RESUME, {})
 
     # Screen user message for prompt injection (AGT PromptInjectionDetector).
+    injection_source = (
+        "api_channel" if session.channel == API_CHANNEL else "web_channel"
+    )
     injection_result = _get_injection_detector().detect(
-        body.content, source="web_channel"
+        body.content, source=injection_source,
     )
     if injection_result.is_injection:
         raise HTTPException(
@@ -289,6 +376,7 @@ async def confirm_disclosure(
         governance.confirm_disclosure(str(session_id))
 
 
+@router.get("/api/sessions/{session_id}", response_model=Session)
 @router.get("/sessions/{session_id}", response_model=Session)
 async def get_session(
     session_id: UUID,
@@ -296,6 +384,7 @@ async def get_session(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> Session:
     """Retrieve metadata for a single session."""
+    _require_service_account_api_route(request, tenant)
     return await _get_session_for_tenant(request, session_id, tenant)
 
 
@@ -450,6 +539,7 @@ async def list_sessions(
     return ListSessionsResponse(sessions=sessions, total=total)
 
 
+@router.post("/api/sessions/{session_id}/pause", response_model=Session)
 @router.post("/sessions/{session_id}/pause", response_model=Session)
 async def pause_session(
     session_id: UUID,
@@ -457,6 +547,7 @@ async def pause_session(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> Session:
     """Pause an active session."""
+    _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant)
 
@@ -509,6 +600,7 @@ async def resume_session(
     return await store.get_session(session_id)
 
 
+@router.post("/api/sessions/{session_id}/retry", response_model=Session)
 @router.post("/sessions/{session_id}/retry", response_model=Session)
 async def retry_session(
     session_id: UUID,
@@ -524,6 +616,7 @@ async def retry_session(
     queries can distinguish user-initiated retries from pause/resume
     flows.
     """
+    _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant)
 

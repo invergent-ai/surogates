@@ -30,6 +30,8 @@
 - [x] Commit 16: Restore full legacy chat UI behavior behind the SDK adapter contract.
 - [x] Commit 17: Resolve API image SDK source dependencies through the web build install.
 - [x] Commit 18: Fix Ops package resolution and selected-agent session scoping.
+- [x] Commit 19: Add service-account live-chat endpoints in Surogates.
+- [x] Commit 20: Point Ops live-chat proxy at the service-account endpoints.
 
 ---
 

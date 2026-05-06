@@ -15,7 +15,7 @@ from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
 from surogates.tenant.credentials import CredentialVault
 
-from .conftest import create_org, create_user
+from .conftest import create_org, create_user, issue_service_account_token
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -44,6 +44,7 @@ async def app(session_factory, redis_client, pg_url, redis_url):
     application.state.redis = redis_client
     application.state.session_store = SessionStore(session_factory)
     application.state.settings = Settings()
+    application.state.settings.storage.bucket = f"test-agent-{uuid.uuid4()}"
 
     from surogates.storage.backend import create_backend
     application.state.storage = create_backend(application.state.settings)
@@ -223,6 +224,94 @@ async def test_send_message(client: AsyncClient, session_factory):
     data = resp.json()
     assert data["event_id"] > 0
     assert data["status"] == "processing"
+
+
+async def test_create_api_session_with_service_account(
+    client: AsyncClient, session_factory
+):
+    """POST /v1/api/sessions creates an API-channel service-account session."""
+    org_id = await create_org(session_factory)
+    issued = await issue_service_account_token(
+        session_factory, org_id, name="ops-chat"
+    )
+
+    resp = await client.post(
+        "/v1/api/sessions",
+        json={"system": "Keep replies concise.", "config": {"source": "ops"}},
+        headers={"Authorization": f"Bearer {issued.token}"},
+    )
+
+    assert resp.status_code == 201, resp.text
+    data = resp.json()
+    assert data["status"] == "active"
+    assert data["channel"] == "api"
+    assert "id" in data
+
+    store = SessionStore(session_factory)
+    session = await store.get_session(UUID(data["id"]))
+    assert session.service_account_id == issued.id
+    assert session.user_id is None
+    assert session.config["system"] == "Keep replies concise."
+    assert session.config["source"] == "ops"
+
+
+async def test_api_session_message_with_service_account(
+    client: AsyncClient, session_factory
+):
+    """POST /v1/api/sessions/{id}/messages accepts service-account tokens."""
+    org_id = await create_org(session_factory)
+    issued = await issue_service_account_token(
+        session_factory, org_id, name="ops-chat"
+    )
+    headers = {"Authorization": f"Bearer {issued.token}"}
+    create_resp = await client.post(
+        "/v1/api/sessions",
+        json={"config": {"source": "ops"}},
+        headers=headers,
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    session_id = create_resp.json()["id"]
+
+    resp = await client.post(
+        f"/v1/api/sessions/{session_id}/messages",
+        json={"content": "Hello from Ops"},
+        headers=headers,
+    )
+
+    assert resp.status_code == 202, resp.text
+    data = resp.json()
+    assert data["event_id"] > 0
+    assert data["status"] == "processing"
+
+
+async def test_api_session_create_rejects_user_jwt(
+    client: AsyncClient, session_factory
+):
+    """The /v1/api/sessions creation route is service-account only."""
+    _, _, token, _ = await _create_test_tenant(session_factory)
+
+    resp = await client.post(
+        "/v1/api/sessions",
+        json={"config": {"source": "ops"}},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert resp.status_code == 403
+    assert "service-account" in resp.json()["detail"].lower()
+
+
+async def test_api_live_chat_routes_are_registered(app):
+    """Ops-required live chat routes are exposed on the service-account prefix."""
+    paths = app.openapi()["paths"]
+
+    assert "/v1/api/sessions" in paths
+    assert "/v1/api/sessions/{session_id}" in paths
+    assert "/v1/api/sessions/{session_id}/messages" in paths
+    assert "/v1/api/sessions/{session_id}/pause" in paths
+    assert "/v1/api/sessions/{session_id}/retry" in paths
+    assert "/v1/api/sessions/{session_id}/events" in paths
+    assert "/v1/api/sessions/{session_id}/artifacts/{artifact_id}" in paths
+    assert "/v1/api/sessions/{session_id}/clarify/{tool_call_id}/respond" in paths
 
 
 async def test_get_session(client: AsyncClient, session_factory):

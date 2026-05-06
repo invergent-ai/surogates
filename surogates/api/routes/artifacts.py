@@ -72,6 +72,21 @@ def _get_storage(request: Request) -> StorageBackend:
     return request.app.state.storage
 
 
+def _require_service_account_api_route(
+    request: Request,
+    tenant: TenantContext,
+) -> None:
+    """For ``/v1/api/*`` aliases, require a service-account principal."""
+    if (
+        request.url.path.startswith("/v1/api/")
+        and tenant.service_account_id is None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint requires a service-account token.",
+        )
+
+
 async def _resolve_storage_bucket(
     store: SessionStore,
     session_id: UUID,
@@ -127,6 +142,10 @@ async def list_artifacts(
 
 
 @router.get(
+    "/api/sessions/{session_id}/artifacts/{artifact_id}",
+    response_model=ArtifactPayloadResponse,
+)
+@router.get(
     "/sessions/{session_id}/artifacts/{artifact_id}",
     response_model=ArtifactPayloadResponse,
 )
@@ -137,6 +156,7 @@ async def get_artifact(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> ArtifactPayloadResponse:
     """Fetch a single artifact's metadata and full payload."""
+    _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     bucket = await _resolve_storage_bucket(store, session_id, tenant)
     artifact_store = ArtifactStore(

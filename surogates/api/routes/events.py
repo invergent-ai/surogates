@@ -60,6 +60,21 @@ def _get_session_store(request: Request) -> SessionStore:
     return store
 
 
+def _require_service_account_api_route(
+    request: Request,
+    tenant: TenantContext,
+) -> None:
+    """For ``/v1/api/*`` aliases, require a service-account principal."""
+    if (
+        request.url.path.startswith("/v1/api/")
+        and tenant.service_account_id is None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint requires a service-account token.",
+        )
+
+
 async def _verify_session_access(
     store: SessionStore, session_id: UUID, tenant: TenantContext
 ) -> None:
@@ -88,6 +103,7 @@ async def _verify_session_access(
 # ---------------------------------------------------------------------------
 
 
+@router.get("/api/sessions/{session_id}/events")
 @router.get("/sessions/{session_id}/events")
 async def stream_events(
     session_id: UUID,
@@ -102,6 +118,7 @@ async def stream_events(
     reaches a terminal status, a ``session.done`` event is emitted and the
     stream closes.
     """
+    _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
 
     # Single DB call for access check + terminal status check.  Shielded so
