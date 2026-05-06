@@ -25,6 +25,7 @@ tmp/**
 surogate.db
 .claude/**
 .codex
+.superpowers/
 *.egg-info/
 dist/**
 *.egg
