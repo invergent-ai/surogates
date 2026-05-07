@@ -9,9 +9,21 @@ function repoPath(path) {
 }
 
 const forbiddenLocalSharedUi = [
+  "web/src/components/ai-elements",
   "web/src/components/chat",
   "web/src/components/workspace-panel.tsx",
   "web/src/components/file-viewer.tsx",
+  "web/src/components/ui/button-group.tsx",
+  "web/src/components/ui/checkbox.tsx",
+  "web/src/components/ui/command.tsx",
+  "web/src/components/ui/collapsible.tsx",
+  "web/src/components/ui/dropdown-menu.tsx",
+  "web/src/components/ui/hover-card.tsx",
+  "web/src/components/ui/popover.tsx",
+  "web/src/components/ui/progress.tsx",
+  "web/src/components/ui/scroll-area.tsx",
+  "web/src/components/ui/select.tsx",
+  "web/src/components/ui/skeleton.tsx",
   "web/src/hooks/use-session-runtime.ts",
 ];
 
