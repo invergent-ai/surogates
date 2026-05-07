@@ -7,6 +7,7 @@
 // the user open or stop each child.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { formatDistanceToNow } from "date-fns";
 import {
   ChevronDownIcon,
   ChevronRightIcon,
@@ -15,6 +16,7 @@ import {
   UsersIcon,
 } from "lucide-react";
 import { Badge } from "../ui/badge";
+import { Skeleton } from "../ui/skeleton";
 import { cn } from "../../lib/utils";
 import type {
   AgentChatAdapter,
@@ -128,19 +130,10 @@ function mergeTreeNodes(
   return Array.from(byId.values());
 }
 
-function statusColor(
-  status: AgentChatSessionTreeNode["status"],
-): "default" | "secondary" | "destructive" | "outline" {
-  switch (status) {
-    case "active":
-      return "default";
-    case "completed":
-      return "secondary";
-    case "failed":
-      return "destructive";
-    default:
-      return "outline";
-  }
+function formatSessionTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return formatDistanceToNow(date, { addSuffix: true });
 }
 
 function TreeNodeRow({
@@ -168,6 +161,11 @@ function TreeNodeRow({
   const hasChildren = entry.children.length > 0;
   const isActive = entry.id === activeSessionId;
   const isRunning = entry.status === "active";
+  const title = entry.title ?? "New session";
+  const subtitle = [
+    entry.model ?? "default",
+    formatSessionTime(entry.updatedAt),
+  ].filter(Boolean).join(" · ");
 
   return (
     <>
@@ -183,17 +181,17 @@ function TreeNodeRow({
           if (e.key === "Enter" || e.key === " ") onSelect(entry.id);
         }}
         className={cn(
-          "group flex items-center gap-1.5 py-1.5 pr-1 rounded cursor-pointer text-sm transition-colors",
+          "group flex items-center gap-2 w-full py-2 pr-2 text-left cursor-pointer transition-colors border-l-2",
           isActive
-            ? "bg-line text-foreground"
-            : "hover:bg-input text-subtle hover:text-foreground",
+            ? "bg-line text-foreground border-l-primary"
+            : "bg-transparent text-subtle hover:bg-input hover:text-foreground border-l-transparent",
         )}
-        style={{ paddingLeft: `${depth * 12 + 4}px` }}
+        style={{ paddingLeft: `${depth * 12 + 12}px` }}
       >
         {hasChildren ? (
           <button
             type="button"
-            className="p-0.5 rounded hover:bg-line"
+            className="p-0.5 rounded hover:bg-line shrink-0"
             onClick={(e) => {
               e.stopPropagation();
               setExpanded(!expanded);
@@ -210,19 +208,9 @@ function TreeNodeRow({
         ) : (
           <span className="w-4 h-4 shrink-0" />
         )}
-        <div className="flex-1 min-w-0 flex items-center gap-1.5">
-          <span className="truncate">{entry.title ?? "session"}</span>
-          {entry.agentType && (
-            <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
-              {entry.agentType}
-            </Badge>
-          )}
-          <Badge
-            variant={statusColor(entry.status)}
-            className="h-4 px-1.5 text-[10px]"
-          >
-            {entry.status}
-          </Badge>
+        <div className="flex-1 min-w-0">
+          <div className="text-sm truncate">{title}</div>
+          <div className="text-xs text-faint truncate">{subtitle}</div>
         </div>
         {isRunning && canStop && (
           <button
@@ -301,6 +289,11 @@ export function SessionTreePanel({
   // don't rebuild the tree and re-render every row on every poll of a
   // frozen session.
   const lastFingerprint = useRef<string>("");
+  const resetContext = useRef<{
+    adapter: AgentChatAdapter;
+    agentId?: string;
+    sessionListLimit: number;
+  } | null>(null);
 
   const refetch = useCallback(
     async (opts?: { silent?: boolean }) => {
@@ -368,12 +361,22 @@ export function SessionTreePanel({
   }, []);
 
   useEffect(() => {
-    setNodes([]);
+    const previous = resetContext.current;
+    const shouldReset =
+      !previous ||
+      previous.adapter !== adapter ||
+      previous.agentId !== agentId ||
+      previous.sessionListLimit !== sessionListLimit;
+    resetContext.current = { adapter, agentId, sessionListLimit };
+
+    if (shouldReset) {
+      setNodes([]);
+      setHasEverLoaded(false);
+      lastFingerprint.current = "";
+    }
     setError(null);
-    setHasEverLoaded(false);
-    lastFingerprint.current = "";
     void refetch();
-  }, [refetch, sessionId]);
+  }, [adapter, agentId, refetch, sessionListLimit]);
 
   // Adaptive polling: 4s while any child is running, 30s when every
   // child has settled.  Pulling the interval from ``nodes`` lets the
@@ -442,7 +445,7 @@ export function SessionTreePanel({
 
   return (
     <div className="border-t border-line">
-      <div className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-faint">
+      <div className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold uppercase tracking-wide">
         <UsersIcon className="w-3.5 h-3.5" />
         <span>{title}</span>
         {runningCount > 0 && (
@@ -452,7 +455,16 @@ export function SessionTreePanel({
         )}
       </div>
       {loading && (
-        <div className="px-3 py-2 text-xs text-faint">Loading...</div>
+        <div
+          className="px-3 py-2"
+          role="status"
+          aria-label="Loading sessions"
+        >
+          <div className="space-y-1.5">
+            <Skeleton className="h-3.5 w-28" />
+            <Skeleton className="h-3 w-20" />
+          </div>
+        </div>
       )}
       {error && (
         <div className="px-3 py-2 text-xs text-destructive">{error}</div>

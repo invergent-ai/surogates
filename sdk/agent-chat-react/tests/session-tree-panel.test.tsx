@@ -6,6 +6,7 @@ import type {
   AgentChatAdapter,
   AgentChatArtifactPayload,
   AgentChatSession,
+  AgentChatSessionList,
   AgentChatWorkspaceFile,
   AgentChatWorkspaceTree,
   AgentChatWorkspaceUpload,
@@ -65,6 +66,14 @@ function createAdapter(sessions: AgentChatSession[]) {
   } satisfies AgentChatAdapter;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
+}
+
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
@@ -80,7 +89,13 @@ afterEach(() => {
 describe("SessionTreePanel", () => {
   it("renders agent sessions from the adapter even without an active session", async () => {
     const adapter = createAdapter([
-      session({ id: "s-1", title: "First session", agentId: "agent-1" }),
+      session({
+        id: "s-1",
+        title: "First session",
+        agentId: "agent-1",
+        model: "surogate",
+        updatedAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+      }),
     ]);
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -99,6 +114,9 @@ describe("SessionTreePanel", () => {
 
     expect(container.textContent).toContain("Sessions");
     expect(container.textContent).toContain("First session");
+    expect(container.textContent).toContain("surogate");
+    expect(container.textContent).toContain("ago");
+    expect(container.textContent).not.toContain("completed");
   });
 
   it("does not render compact message and tool counters", async () => {
@@ -154,8 +172,66 @@ describe("SessionTreePanel", () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain("session");
+    expect(container.textContent).toContain("New session");
     expect(container.textContent).not.toContain("web");
+  });
+
+  it("keeps the session list visible while selecting another session refetches", async () => {
+    const sessions = [
+      session({ id: "s-1", title: "First session", agentId: "agent-1" }),
+    ];
+    const pendingList = deferred<AgentChatSessionList>();
+    let listCalls = 0;
+    const adapter: AgentChatAdapter = {
+      ...createAdapter(sessions),
+      async listSessions() {
+        listCalls += 1;
+        if (listCalls === 1) {
+          return { sessions, total: sessions.length };
+        }
+        return pendingList.promise;
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <SessionTreePanel
+          adapter={adapter}
+          agentId="agent-1"
+          title="Sessions"
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("First session");
+
+    await act(async () => {
+      root?.render(
+        <SessionTreePanel
+          adapter={adapter}
+          agentId="agent-1"
+          sessionId="s-1"
+          title="Sessions"
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    expect(listCalls).toBe(2);
+    expect(container.textContent).toContain("First session");
+    expect(container.textContent).not.toContain("Loading...");
+    expect(
+      container.querySelector('[aria-label="Loading sessions"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      pendingList.resolve({ sessions, total: sessions.length });
+      await Promise.resolve();
+    });
   });
 
   it("deletes a session from the hover action", async () => {
