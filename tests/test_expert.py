@@ -125,6 +125,40 @@ class TestExpertFrontmatterParsing:
         assert parsed["expert_endpoint"] == "http://expert:8000/v1"
         assert parsed["expert_adapter"] == "sql_writer/adapter/"
 
+    def test_parse_expert_model_alias(self):
+        text = (
+            "---\nname: code_expert\n"
+            "description: Handles coding tasks\n"
+            "type: expert\n"
+            "model: claude-sonnet-4-6\n"
+            "---\nBody\n"
+        )
+        parsed = _parse_skill_frontmatter(text, "fallback")
+        assert parsed["expert_model"] == "claude-sonnet-4-6"
+
+    def test_model_field_preferred_over_legacy_base_model(self):
+        text = (
+            "---\nname: code_expert\n"
+            "description: Handles coding tasks\n"
+            "type: expert\n"
+            "base_model: old-model\n"
+            "model: new-model\n"
+            "---\nBody\n"
+        )
+        parsed = _parse_skill_frontmatter(text, "fallback")
+        assert parsed["expert_model"] == "new-model"
+
+    def test_parse_expert_task_categories(self):
+        text = (
+            "---\nname: code_expert\n"
+            "description: Handles coding tasks\n"
+            "type: expert\n"
+            "task_categories: [coding, debugging, terminal]\n"
+            "---\nBody\n"
+        )
+        parsed = _parse_skill_frontmatter(text, "fallback")
+        assert parsed["task_categories"] == ["coding", "debugging", "terminal"]
+
     def test_parse_expert_tools_list(self):
         text = (
             "---\nname: test\n"
@@ -227,6 +261,7 @@ class TestResourceLoaderExperts:
         assert s.expert_tools == ["terminal", "read_file"]
         assert s.expert_max_iterations == 15
         assert s.expert_status == "active"
+        assert s.task_categories == []
         assert "Expert instructions here." in s.content
 
     def test_mixed_skills_and_experts(self, tmp_path: Path):

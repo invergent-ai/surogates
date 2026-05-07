@@ -2,12 +2,12 @@
 
 ## What is an Expert?
 
-An expert is a **small language model (SLM) fine-tuned on successful conversation trajectories** from the platform. It is a skill backed by a fine-tuned model instead of a prompt template.
+An expert is a **task-specialized model** configured for reasoning-intensive work such as coding, debugging, terminal commands, math, data reasoning, formal problem solving, or planning. It is declared as a skill backed by a model endpoint instead of a prompt template.
 
-Experts are distilled from the base model's behavior. They handle specific tasks faster and cheaper. The base LLM always stays in control -- it **explicitly delegates** to an expert via the `consult_expert` tool and receives the expert's result back as a tool response.
+The harness automatically consults a matching active expert for hard-task categories before the default LLM answers or uses tools. The default LLM can also explicitly delegate to an expert via the `consult_expert` tool and receives the expert's result back for review.
 
 ```
-Base LLM                          Expert (SLM)
+Base LLM                          Expert model
    |                                  |
    |  consult_expert(sql_writer,      |
    |    "write a query for ...")      |
@@ -34,7 +34,7 @@ The platform does **not** handle:
 
 ## Design Principles
 
-1. **Base LLM stays in control.** The base LLM decides when to delegate. It sees which experts are available, chooses when to use one, and can accept, reject, or modify the output. No transparent interception, no confidence gates -- the base LLM **is** the confidence gate.
+1. **Hard tasks are expert-routed.** The harness detects configured hard-task categories and consults a matching expert before the default LLM handles the turn. The default LLM still reviews the expert result and can accept, reject, or modify the output.
 
 2. **Expert = Skill + Model.** An expert is a `SKILL.md` with `type: expert` and additional model/endpoint frontmatter. Same file format, same registry, same 3-layer loading, same governance.
 
@@ -65,9 +65,10 @@ name: sql_writer
 description: Writes PostgreSQL queries from natural language descriptions
 type: expert
 
-# Model configuration
-base_model: qwen2.5-coder-7b
+# Model and routing configuration
+model: qwen2.5-coder-7b
 endpoint: http://expert-pool.your-cluster.svc:8000/v1
+task_categories: [data_reasoning]
 
 # Tools the expert can use in its mini-loop
 tools: [terminal, read_file, search_files]
@@ -102,7 +103,7 @@ curl -X POST http://localhost:8000/v1/skills \
   -H "Content-Type: application/json" \
   -d '{
     "name": "sql_writer",
-    "content": "---\nname: sql_writer\ndescription: Writes PostgreSQL queries\ntype: expert\nbase_model: qwen2.5-coder-7b\nendpoint: http://expert-pool:8000/v1\ntools: [terminal, read_file]\nmax_iterations: 10\nexpert_status: draft\n---\nYou are a PostgreSQL expert..."
+    "content": "---\nname: sql_writer\ndescription: Writes PostgreSQL queries\ntype: expert\nmodel: qwen2.5-coder-7b\nendpoint: http://expert-pool:8000/v1\ntask_categories: [data_reasoning]\ntools: [terminal, read_file]\nmax_iterations: 10\nexpert_status: draft\n---\nYou are a PostgreSQL expert..."
   }'
 ```
 
@@ -116,8 +117,9 @@ name: code_reviewer
 description: Reviews Python code for bugs, security issues, and style violations
 type: expert
 
-base_model: qwen2.5-coder-7b
+model: qwen2.5-coder-7b
 endpoint: http://expert-pool.your-cluster.svc:8000/v1
+task_categories: [coding, debugging]
 
 tools: [read_file, search_files, list_files]
 max_iterations: 15
@@ -157,9 +159,11 @@ This example shows a different pattern from the sql_writer: it uses read-only to
 |---|---|---|---|
 | `name` | Yes | -- | Expert name (lowercase, hyphens, dots) |
 | `description` | Yes | -- | What the expert does (shown to base LLM) |
-| `type` | Yes | `skill` | Must be `expert` for SLM-backed skills |
-| `base_model` | Yes | -- | Model name passed to the inference endpoint |
+| `type` | Yes | `skill` | Must be `expert` for model-backed skills |
+| `model` | Yes | -- | Model name passed to the inference endpoint |
+| `base_model` | No | -- | Legacy alias for `model` |
 | `endpoint` | No | -- | OpenAI-compatible URL (can be set at activation) |
+| `task_categories` | Yes for harness routing | `[]` | Hard-task categories this expert handles: `coding`, `debugging`, `terminal`, `math`, `problem_solving`, `data_reasoning`, `planning` |
 | `adapter` | No | -- | LoRA adapter path in tenant storage |
 | `tools` | No | `[]` | Tools the expert can use in its mini-loop |
 | `max_iterations` | No | `10` | Maximum tool-call rounds before budget exceeded |
@@ -174,7 +178,7 @@ tenant-{org_id}/shared/skills/
   code_reviewer/
     SKILL.md              # type: skill (normal prompt-based)
   sql_writer/
-    SKILL.md              # type: expert (SLM-backed)
+    SKILL.md              # type: expert (model-backed)
     training/             # JSONL datasets (expert skills only)
       dataset_001.jsonl
       dataset_002.jsonl
@@ -217,7 +221,7 @@ curl "http://localhost:8000/v1/skills/sql_writer/file?path=training/dataset_2026
 
 The collector has two modes — pick based on whether the expert already exists.
 
-1. **Bootstrap (`collect_for_skill`)**: walks `skill.invoked` events.  Each `/<skill> args` a user has typed is a labeled trajectory — the skill name is the class label — so the base LLM's reply span becomes a training example.  Use this to **graduate** a prompt-based skill into a fine-tuned SLM.  Requires only that the skill has been invoked a few dozen times by real users.
+1. **Bootstrap (`collect_for_skill`)**: walks `skill.invoked` events.  Each `/<skill> args` a user has typed is a labeled trajectory — the skill name is the class label — so the base LLM's reply span becomes a training example.  Use this to **graduate** a prompt-based skill into a model-backed expert.  Requires only that the skill has been invoked a few dozen times by real users.
 2. **Improve (`collect_for_expert`)**: walks `expert.delegation` → tool calls → `expert.result` chains.  Only usable once the expert is active and the base LLM is actually delegating to it via `consult_expert`.  Use this to **improve** an existing expert on the tasks it's already handling.
 
 Both modes filter tainted sessions by default (skip sessions with `policy.denied`, `harness.crash`, `saga.compensate`, or `expert.override`).  See [`v_skill_trajectories`](../audit/views.md#v_skill_trajectories) and [`v_expert_outcomes`](../audit/views.md#v_expert_outcomes) for the SQL views each mode reads.
@@ -289,7 +293,7 @@ After activation, the base LLM will see the expert in its system prompt:
 
 ```
 # Available Experts
-Use `consult_expert` to delegate tasks to these specialised models.
+The harness consults matching active experts for hard-task categories. You can also use `consult_expert` to delegate explicitly.
 
 - **sql_writer** -- Writes PostgreSQL queries from natural language descriptions
   Tools: terminal, read_file, search_files

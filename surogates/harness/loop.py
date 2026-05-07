@@ -32,6 +32,11 @@ from surogates.harness.connection_health import cleanup_dead_connections
 from surogates.harness.cost_tracker import SessionCostTracker
 from surogates.harness.credentials import CredentialPool
 from surogates.harness.error_classify import classify_harness_error
+from surogates.harness.expert_routing import (
+    classify_hard_task,
+    load_skills_for_expert_routing,
+    select_expert_for_category,
+)
 from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
 from surogates.harness.message_utils import coerce_message_content, make_skipped_tool_result
 from surogates.harness.prompt_cache import SystemPromptCache
@@ -62,6 +67,7 @@ from surogates.harness.tool_exec import execute_tool_calls
 from surogates.harness.tool_schemas import filter_schemas_for_tenant
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import EventType
+from surogates.tools.builtin.expert_service import ExpertConsultationService
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
@@ -697,6 +703,11 @@ class AgentHarness:
 
         # --- Memory prefetch (one-shot before loop) ---
         memory_context = await self._prefetch_memory()
+
+        # --- Forced expert consultation for hard tasks (one-shot before loop) ---
+        await self._maybe_consult_required_expert(
+            session, messages, all_events or [],
+        )
 
         # --- User turn tracking for memory nudge ---
         self._user_turn_count += 1
@@ -1756,6 +1767,152 @@ class AgentHarness:
         return make_skipped_tool_result(tc)
 
     # ------------------------------------------------------------------
+    # Expert preflight routing
+    # ------------------------------------------------------------------
+
+    async def _maybe_consult_required_expert(
+        self,
+        session: Session,
+        messages: list[dict],
+        all_events: list[Event],
+    ) -> bool:
+        """Consult a task-specific expert before the default model handles hard tasks."""
+        last_user = self._last_user_message(messages)
+        if last_user is None:
+            return False
+
+        user_content = str(last_user.get("content") or "")
+        classification = classify_hard_task(user_content)
+        if not classification.required or classification.category is None:
+            return False
+
+        if self._has_forced_expert_after_latest_user(all_events):
+            return False
+
+        try:
+            skills = await load_skills_for_expert_routing(
+                self._tenant,
+                session_factory=self._session_factory,
+            )
+        except Exception:
+            logger.debug(
+                "Session %s: failed to load experts for forced routing",
+                session.id,
+                exc_info=True,
+            )
+            skills = []
+
+        expert = select_expert_for_category(skills, classification.category)
+        if expert is None:
+            await self._emit_missing_forced_expert(
+                session, classification.category,
+            )
+            return False
+
+        service = ExpertConsultationService(
+            tenant=self._tenant,
+            session_id=session.id,
+            tool_registry=self._tools,
+            session_store=self._store,
+            sandbox_pool=self._sandbox_pool,
+        )
+        result = await service.consult(
+            expert=expert,
+            task=user_content,
+            context=self._build_expert_context(messages),
+            forced=True,
+            category=classification.category,
+        )
+        if not result.success:
+            return False
+
+        messages.append({
+            "role": "user",
+            "content": self._format_forced_expert_context(
+                category=classification.category,
+                expert=result.expert,
+                content=result.content,
+            ),
+        })
+        return True
+
+    @staticmethod
+    def _last_user_message(messages: list[dict]) -> dict | None:
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                return msg
+        return None
+
+    @staticmethod
+    def _has_forced_expert_after_latest_user(events: list[Event]) -> bool:
+        latest_user_event_id = 0
+        for event in events:
+            if event.type == EventType.USER_MESSAGE.value and event.id is not None:
+                latest_user_event_id = max(latest_user_event_id, event.id)
+        for event in events:
+            if event.id is None or event.id <= latest_user_event_id:
+                continue
+            if (
+                event.type in {
+                    EventType.EXPERT_DELEGATION.value,
+                    EventType.EXPERT_RESULT.value,
+                    EventType.EXPERT_FAILURE.value,
+                }
+                and event.data.get("forced")
+            ):
+                return True
+        return False
+
+    async def _emit_missing_forced_expert(
+        self,
+        session: Session,
+        category: str,
+    ) -> None:
+        try:
+            await self._store.emit_event(
+                session.id,
+                EventType.EXPERT_FAILURE,
+                {
+                    "expert": "",
+                    "success": False,
+                    "forced": True,
+                    "category": category,
+                    "error": f"No active expert configured for category '{category}'.",
+                },
+            )
+        except Exception:
+            logger.debug(
+                "Session %s: failed to emit missing forced expert event",
+                session.id,
+                exc_info=True,
+            )
+
+    @staticmethod
+    def _build_expert_context(messages: list[dict]) -> str:
+        fragments: list[str] = []
+        for msg in messages[-8:]:
+            role = msg.get("role", "unknown")
+            content = msg.get("content") or ""
+            if not isinstance(content, str) or not content.strip():
+                continue
+            fragments.append(f"{role}: {content}")
+        return "\n\n".join(fragments)[-12_000:]
+
+    @staticmethod
+    def _format_forced_expert_context(
+        *,
+        category: str,
+        expert: str,
+        content: str,
+    ) -> str:
+        return (
+            f"[Expert consultation: {category} via {expert}]\n"
+            f"{content}\n\n"
+            "Review this expert result before answering the user's request. "
+            "You may accept, modify, or discard it."
+        )
+
+    # ------------------------------------------------------------------
     # Message reconstruction from event log
     # ------------------------------------------------------------------
 
@@ -1831,6 +1988,21 @@ class AgentHarness:
                     "role": "tool",
                     "tool_call_id": event.data.get("tool_call_id", ""),
                     "content": event.data.get("content", ""),
+                })
+
+            elif (
+                etype == EventType.EXPERT_RESULT.value
+                and event.data.get("forced")
+                and event.data.get("success")
+                and event.data.get("content") is not None
+            ):
+                messages.append({
+                    "role": "user",
+                    "content": self._format_forced_expert_context(
+                        category=event.data.get("category", "expert"),
+                        expert=event.data.get("expert", "expert"),
+                        content=str(event.data.get("content") or ""),
+                    ),
                 })
 
             elif etype == EventType.CONTEXT_COMPACT.value:

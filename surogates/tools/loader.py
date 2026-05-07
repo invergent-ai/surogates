@@ -83,6 +83,7 @@ EXPERT_STATUS_RETIRED = "retired"
 # Keys not in this map are ignored.
 _EXPERT_FRONTMATTER_MAP: dict[str, str] = {
     "base_model": "expert_model",
+    "model": "expert_model",
     "endpoint": "expert_endpoint",
     "adapter": "expert_adapter",
     "max_iterations": "expert_max_iterations",
@@ -118,6 +119,7 @@ class SkillDef:
     expert_max_iterations: int = 10  # iteration budget for expert mini-loop
     expert_status: str = EXPERT_STATUS_DRAFT  # draft → collecting → active → retired
     expert_tools: list[str] | None = None  # tools the expert can use in its mini-loop
+    task_categories: list[str] = field(default_factory=list)  # hard-task routing categories
 
     @property
     def is_expert(self) -> bool:
@@ -889,6 +891,7 @@ def _skill_from_db_row(row: Any, source: str) -> SkillDef:
             ),
             "expert_status": row.expert_status or EXPERT_STATUS_DRAFT,
             "expert_tools": cfg.get("expert_tools"),
+            "task_categories": cfg.get("task_categories"),
         },
         source=source,
         category=cfg.get("category"),
@@ -1080,6 +1083,7 @@ def _build_skill_def(
         expert_max_iterations=max_iter,
         expert_status=str(parsed.get("expert_status", EXPERT_STATUS_DRAFT)),
         expert_tools=parsed.get("expert_tools"),
+        task_categories=parsed.get("task_categories") or [],
     )
 
 
@@ -1172,6 +1176,17 @@ def _parse_skill_frontmatter(
                     result["expert_tools"] = [t.strip() for t in expert_tools.split(",")]
                 elif isinstance(expert_tools, list):
                     result["expert_tools"] = [str(t) for t in expert_tools]
+
+            task_categories = fm.get("task_categories")
+            if task_categories:
+                if isinstance(task_categories, str):
+                    result["task_categories"] = [
+                        t.strip().lower() for t in task_categories.split(",") if t.strip()
+                    ]
+                elif isinstance(task_categories, list):
+                    result["task_categories"] = [
+                        str(t).strip().lower() for t in task_categories if t
+                    ]
 
     return result
 

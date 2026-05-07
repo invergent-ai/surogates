@@ -34,6 +34,9 @@ async def record_expert_outcome(
     success: bool,
     iterations_used: int = 0,
     error: str | None = None,
+    content: str | None = None,
+    forced: bool = False,
+    category: str | None = None,
     db_session: Any | None = None,
     skill_id: Any | None = None,
 ) -> None:
@@ -69,6 +72,12 @@ async def record_expert_outcome(
         "success": success,
         "iterations_used": iterations_used,
     }
+    if forced:
+        event_data["forced"] = True
+    if category:
+        event_data["category"] = category
+    if content is not None:
+        event_data["content"] = content
     if error:
         event_data["error"] = error
 

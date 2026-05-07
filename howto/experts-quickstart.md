@@ -1,13 +1,13 @@
 # Experts Quickstart
 
-Train a small language model (SLM) on your organisation's successful conversation patterns and let the base LLM delegate specialised tasks to it. Experts are faster, cheaper, and tuned to your workflows.
+Configure task-specialized expert models for reasoning-intensive work and let the harness route hard tasks to them before the default LLM responds.
 
 ## How It Works
 
-An expert is a regular skill (`SKILL.md`) with `type: expert` and a model endpoint. The base LLM sees available experts in its system prompt and can delegate tasks via the `consult_expert` tool. The expert runs its own scoped mini agent loop with a restricted tool set and bounded iteration budget, then returns the result to the base LLM for review.
+An expert is a regular skill (`SKILL.md`) with `type: expert`, a model endpoint, and `task_categories`. The harness consults a matching active expert for hard tasks such as coding, debugging, terminal commands, math, data reasoning, problem solving, and planning. The base LLM can also delegate via the `consult_expert` tool. The expert runs its own scoped mini agent loop with a restricted tool set and bounded iteration budget, then returns the result to the base LLM for review.
 
 ```
-Base LLM                          Expert (SLM)
+Base LLM                          Expert model
    |                                  |
    |  consult_expert(sql_writer,      |
    |    "write a query for ...")      |
@@ -48,9 +48,10 @@ name: sql_writer
 description: Writes PostgreSQL queries from natural language descriptions
 type: expert
 
-# Model configuration
-base_model: qwen2.5-coder-7b
+# Model and routing configuration
+model: qwen2.5-coder-7b
 endpoint: http://expert-pool.your-cluster.svc:8000/v1
+task_categories: [data_reasoning]
 
 # Tools the expert can use in its mini-loop
 tools: [terminal, read_file, search_files]
@@ -85,7 +86,7 @@ curl -X POST http://localhost:8000/v1/skills \
   -H "Content-Type: application/json" \
   -d '{
     "name": "sql_writer",
-    "content": "---\nname: sql_writer\ndescription: Writes PostgreSQL queries\ntype: expert\nbase_model: qwen2.5-coder-7b\nendpoint: http://expert-pool:8000/v1\ntools: [terminal, read_file]\nmax_iterations: 10\nexpert_status: draft\n---\nYou are a PostgreSQL expert..."
+    "content": "---\nname: sql_writer\ndescription: Writes PostgreSQL queries\ntype: expert\nmodel: qwen2.5-coder-7b\nendpoint: http://expert-pool:8000/v1\ntask_categories: [data_reasoning]\ntools: [terminal, read_file]\nmax_iterations: 10\nexpert_status: draft\n---\nYou are a PostgreSQL expert..."
   }'
 ```
 
@@ -199,7 +200,7 @@ After activation, the base LLM will see the expert in its system prompt:
 
 ```
 # Available Experts
-Use `consult_expert` to delegate tasks to these specialised models.
+The harness consults matching active experts for hard-task categories. You can also use `consult_expert` to delegate explicitly.
 
 - **sql_writer** -- Writes PostgreSQL queries from natural language descriptions
   Tools: terminal, read_file, search_files
@@ -290,9 +291,11 @@ curl -X POST http://localhost:8000/v1/skills/sql_writer/activate \
 |---|---|---|---|
 | `name` | Yes | -- | Expert name (lowercase, hyphens, dots) |
 | `description` | Yes | -- | What the expert does (shown to base LLM) |
-| `type` | Yes | `skill` | Must be `expert` for SLM-backed skills |
-| `base_model` | Yes | -- | Model name passed to the inference endpoint |
+| `type` | Yes | `skill` | Must be `expert` for model-backed skills |
+| `model` | Yes | -- | Model name passed to the inference endpoint |
+| `base_model` | No | -- | Legacy alias for `model` |
 | `endpoint` | No | -- | OpenAI-compatible URL (can be set at activation) |
+| `task_categories` | Yes for harness routing | `[]` | Hard-task categories this expert handles: `coding`, `debugging`, `terminal`, `math`, `problem_solving`, `data_reasoning`, `planning` |
 | `adapter` | No | -- | LoRA adapter path in tenant storage |
 | `tools` | No | `[]` | Tools the expert can use in its mini-loop |
 | `max_iterations` | No | `10` | Maximum tool-call rounds before budget exceeded |
