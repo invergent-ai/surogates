@@ -13,7 +13,8 @@
     "python.analysis.supportRestructuredText": false,
     "python.analysis.enablePytestSupport": false,
     "python.analysis.inlayHints.pytestParameters": false,
-    "python.analysis.autoImportCompletions": false,       
+    "python.analysis.autoImportCompletions": false,     
+    "python.terminal.useEnvFile": true, 
     "files.exclude": {
         "**/__pycache__": true,
         "**/*.pyc": true

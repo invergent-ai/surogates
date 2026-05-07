@@ -14,13 +14,26 @@ import { ChevronRightIcon, ThumbsDownIcon, ThumbsUpIcon } from "lucide-react";
 import { cn } from "../../../lib/utils";
 import { Textarea } from "../../ui/textarea";
 import { Button } from "../../ui/button";
-import { formatArgs, parseArgs, truncate } from "./shared";
+import { parseArgs } from "./shared";
 import type { ToolCallInfo } from "../../../types";
 import type { AgentChatExpertFeedbackRating } from "../../../types";
 import { useAgentChatAdapterContext } from "../../../adapter-context";
 
 // Keep in sync with _MAX_REASON_LENGTH in api/routes/feedback.py.
 const MAX_REASON_LENGTH = 500;
+
+interface ExpertArgs {
+  expert?: string;
+  question?: string;
+  prompt?: string;
+}
+
+interface ExpertResult {
+  summary?: string;
+  response?: string;
+  content?: string;
+  error?: string | null;
+}
 
 export function ExpertToolBlock({ tc }: { tc: ToolCallInfo }) {
   const [expanded, setExpanded] = useState(false);
@@ -71,16 +84,20 @@ export function ExpertToolBlock({ tc }: { tc: ToolCallInfo }) {
     void submit("up");
   };
 
-  const expertName = parseArgs<{ expert?: string }>(tc.args)?.expert ?? null;
+  const args = parseArgs<ExpertArgs>(tc.args) ?? {};
+  const expertName = args.expert ?? null;
+  const question = args.question ?? args.prompt ?? "";
+  const result = parseExpertResult(tc.result);
+  const failed = Boolean(result?.error);
 
   return (
-    <div>
+    <div className="space-y-1">
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
         className={cn(
-          "flex w-full items-center gap-1.5 rounded-md px-2 py-1",
-          "text-sm text-muted-foreground hover:bg-muted/50 transition-colors"
+          "flex w-fit max-w-full items-center gap-1.5 rounded-md px-0 py-0.5",
+          "text-sm text-muted-foreground hover:text-foreground transition-colors"
         )}
       >
         <ChevronRightIcon
@@ -89,25 +106,30 @@ export function ExpertToolBlock({ tc }: { tc: ToolCallInfo }) {
             expanded && "rotate-90",
           )}
         />
-        <span className="font-medium text-foreground/80">consult_expert</span>
+        <span className="font-semibold text-foreground">Consulted expert</span>
         {expertName && (
           <span className="text-muted-foreground">· {expertName}</span>
         )}
+        {failed && <span className="text-red-500">· failed</span>}
       </button>
 
+      {result?.summary && !expanded && (
+        <div className="ml-6 rounded-md border-l-2 border-primary/50 bg-muted/30 px-3 py-2 text-sm text-foreground/90">
+          {result.summary}
+        </div>
+      )}
+
       {expanded && (
-        <div className="ml-6 mt-0.5 space-y-1 text-sm ">
-          <pre className="overflow-x-auto rounded bg-muted/40 px-2 py-1 text-muted-foreground whitespace-pre-wrap break-all">
-            {formatArgs(tc.args)}
-          </pre>
-          {tc.result && (
-            <pre className="overflow-x-auto rounded bg-muted/40 px-2 py-1 text-muted-foreground whitespace-pre-wrap break-all max-h-64 overflow-y-auto">
-              <span className="text-emerald-600 dark:text-emerald-400">
-                Result:
-              </span>
-              {"\n"}
-              {truncate(tc.result, 2000)}
-            </pre>
+        <div className="ml-6 mt-0.5 space-y-1.5 text-sm">
+          {question && (
+            <ExpertDetail label="Question" content={question} />
+          )}
+          {result?.summary && (
+            <ExpertDetail
+              label={failed ? "Error" : "Response"}
+              content={result.summary}
+              tone={failed ? "error" : "default"}
+            />
           )}
         </div>
       )}
@@ -172,6 +194,46 @@ export function ExpertToolBlock({ tc }: { tc: ToolCallInfo }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function parseExpertResult(result: string | undefined): ExpertResult | null {
+  if (!result) return null;
+  const parsed = parseArgs<ExpertResult>(result);
+  if (parsed) {
+    return {
+      ...parsed,
+      summary: parsed.summary ?? parsed.response ?? parsed.content,
+    };
+  }
+  return { summary: result };
+}
+
+function ExpertDetail({
+  label,
+  content,
+  tone = "default",
+}: {
+  label: string;
+  content: string;
+  tone?: "default" | "error";
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-md border-l-2 px-3 py-2",
+        tone === "error"
+          ? "border-red-500/50 bg-red-500/5"
+          : "border-primary/50 bg-muted/30",
+      )}
+    >
+      <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground/70">
+        {label}
+      </div>
+      <div className="whitespace-pre-wrap wrap-break-word text-foreground/90">
+        {content}
+      </div>
     </div>
   );
 }
