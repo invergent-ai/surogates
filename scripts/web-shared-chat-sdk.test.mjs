@@ -24,6 +24,7 @@ const forbiddenLocalSharedUi = [
   "web/src/components/ui/scroll-area.tsx",
   "web/src/components/ui/select.tsx",
   "web/src/components/ui/skeleton.tsx",
+  "web/src/features/sessions/session-tree-panel.tsx",
   "web/src/hooks/use-session-runtime.ts",
 ];
 
@@ -37,6 +38,7 @@ for (const path of forbiddenLocalSharedUi) {
 
 for (const path of [
   "web/src/features/chat/chat-page.tsx",
+  "web/src/components/navbar.tsx",
   "web/src/features/skills/skills-page.tsx",
   "web/src/features/agents/agents-page.tsx",
 ]) {
@@ -50,5 +52,17 @@ for (const path of [
     source,
     /@\/components\/(?:chat|workspace-panel|file-viewer|ai-elements\/message)/,
     `${path} should not import duplicated shared chat UI from web/src/components`,
+  );
+}
+
+{
+  const sdkIndex = readFileSync(
+    repoPath("sdk/agent-chat-react/src/index.ts"),
+    "utf8",
+  );
+  assert.match(
+    sdkIndex,
+    /SessionTreePanel/,
+    "sdk/agent-chat-react should export SessionTreePanel",
   );
 }
