@@ -17,9 +17,7 @@ import json
 import logging
 from typing import Any
 
-from surogates.session.events import EventType
-from surogates.tools.builtin.expert_feedback import record_expert_outcome
-from surogates.tools.builtin.expert_loop import ExpertBudgetExceeded, run_expert_loop
+from surogates.tools.builtin.expert_service import ExpertConsultationService
 from surogates.tools.loader import SkillDef
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
@@ -96,7 +94,7 @@ async def _consult_expert_handler(
     tenant = kwargs.get("tenant")
     session_id_str = kwargs.get("session_id")
     tool_router = kwargs.get("tool_router")
-    tool_registry = kwargs.get("tool_registry")
+    tool_registry = kwargs.get("tool_registry") or kwargs.get("tools")
     session_store = kwargs.get("session_store")
     loaded_skills: list[SkillDef] = kwargs.get("loaded_skills", [])
 
@@ -104,8 +102,6 @@ async def _consult_expert_handler(
         return json.dumps({"error": "tenant context not available"})
     if session_id_str is None:
         return json.dumps({"error": "session_id not available"})
-    if tool_router is None:
-        return json.dumps({"error": "tool_router not available"})
     if tool_registry is None:
         return json.dumps({"error": "tool_registry not available"})
 
@@ -120,6 +116,15 @@ async def _consult_expert_handler(
 
     session_id = UUID(str(session_id_str))
 
+    if not loaded_skills:
+        try:
+            from surogates.tools.builtin.skills import _load_all_skills
+
+            loaded_skills = await _load_all_skills(**kwargs)
+        except Exception:
+            logger.debug("Failed to load experts for consult_expert", exc_info=True)
+            loaded_skills = []
+
     # Resolve the expert from loaded skills.
     expert = _find_expert(expert_name, loaded_skills)
     if expert is None:
@@ -129,79 +134,20 @@ async def _consult_expert_handler(
             "available_experts": available,
         })
 
-    # Validate the expert has an endpoint configured.
-    if not expert.expert_endpoint:
-        return json.dumps({
-            "error": f"Expert '{expert_name}' has no endpoint configured.",
-        })
-
-    # Emit delegation event.
-    if session_store is not None:
-        try:
-            await session_store.emit_event(
-                session_id,
-                EventType.EXPERT_DELEGATION,
-                {
-                    "expert": expert_name,
-                    "task": task[:500],
-                    "tools": expert.expert_tools or [],
-                    "max_iterations": expert.expert_max_iterations,
-                },
-            )
-        except Exception:
-            logger.debug("Failed to emit EXPERT_DELEGATION event", exc_info=True)
-
-    # Run the expert's mini agent loop.
-    try:
-        result, iterations_used = await run_expert_loop(
-            expert=expert,
-            task=task,
-            context=context,
-            tool_router=tool_router,
-            tool_registry=tool_registry,
-            tenant=tenant,
-            session_id=session_id,
-            session_store=session_store,
-        )
-
-        await record_expert_outcome(
-            session_store=session_store,
-            session_id=session_id,
-            expert_name=expert_name,
-            success=True,
-            iterations_used=iterations_used,
-        )
-
-        return result
-
-    except ExpertBudgetExceeded as exc:
-        logger.warning("Expert %s budget exceeded: %s", expert_name, exc)
-        await record_expert_outcome(
-            session_store=session_store,
-            session_id=session_id,
-            expert_name=expert_name,
-            success=False,
-            iterations_used=expert.expert_max_iterations,
-            error=str(exc),
-        )
-        return json.dumps({
-            "error": str(exc),
-            "suggestion": "The expert could not complete the task within its "
-            "iteration budget. You may want to handle this task directly.",
-        })
-
-    except Exception as exc:
-        logger.exception("Expert %s failed with error", expert_name)
-        await record_expert_outcome(
-            session_store=session_store,
-            session_id=session_id,
-            expert_name=expert_name,
-            success=False,
-            error=str(exc),
-        )
-        return json.dumps({
-            "error": f"Expert '{expert_name}' failed: {exc}",
-        })
+    service = ExpertConsultationService(
+        tenant=tenant,
+        session_id=session_id,
+        tool_registry=tool_registry,
+        session_store=session_store,
+        tool_router=tool_router,
+        sandbox_pool=kwargs.get("sandbox_pool"),
+    )
+    result = await service.consult(
+        expert=expert,
+        task=task,
+        context=context,
+    )
+    return result.content
 
 
 def _find_expert(name: str, skills: list[SkillDef]) -> SkillDef | None:

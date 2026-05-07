@@ -92,6 +92,28 @@ export interface AgentChatSessionList {
   total: number;
 }
 
+export interface AgentChatSessionTreeNode {
+  id: string;
+  parentId: string | null;
+  rootSessionId?: string | null;
+  depth?: number;
+  agentId?: string | null;
+  agentType?: string | null;
+  channel?: string | null;
+  status: "active" | "paused" | "completed" | "failed" | string;
+  title?: string | null;
+  model?: string | null;
+  messageCount?: number;
+  toolCallCount?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentChatSessionTree {
+  nodes: AgentChatSessionTreeNode[];
+  total: number;
+}
+
 export type AgentChatEventType =
   | "user.message"
   | "llm.request"
@@ -278,6 +300,8 @@ export interface AgentChatAdapter {
   pauseSession(input: { sessionId: string }): Promise<void>;
   retrySession(input: { sessionId: string }): Promise<AgentChatSession>;
   deleteSession?(input: { sessionId: string }): Promise<void>;
+  getSessionTree?(input: { sessionId: string }): Promise<AgentChatSessionTree>;
+  stopSession?(input: { sessionId: string }): Promise<void>;
   getArtifact(input: {
     sessionId: string;
     artifactId: string;
@@ -329,6 +353,8 @@ export interface AgentChatRuntimeApi {
 }
 
 export type ChatMessage = AgentChatMessage;
+export type SessionTreeNode = AgentChatSessionTreeNode;
+export type SessionTree = AgentChatSessionTree;
 export type ToolCallInfo = AgentChatToolCallInfo;
 export type TokenUsage = AgentChatTokenUsage;
 export type RetryIndicator = AgentChatRetryIndicator;

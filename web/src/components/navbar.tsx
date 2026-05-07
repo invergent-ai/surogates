@@ -3,6 +3,7 @@
 //
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
+import { SessionTreePanel } from "@invergent/agent-chat-react";
 import { PlusIcon, MessageSquareIcon, LogOutIcon, TrashIcon, SunIcon, MoonIcon, SettingsIcon, BookOpenIcon, UsersIcon } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useAppStore } from "@/stores/app-store";
@@ -11,7 +12,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { formatDistanceToNow } from "date-fns";
-import { SessionTreePanel } from "@/features/sessions/session-tree-panel";
+import { surogatesWebChatAdapter } from "@/features/chat/surogates-web-chat-adapter";
 
 export function SessionSidebar() {
   const navigate = useNavigate();
@@ -228,7 +229,13 @@ export function SessionSidebar() {
 
       {/* Sub-agent tree for the active session. */}
       {!collapsed && activeSessionId && (
-        <SessionTreePanel sessionId={activeSessionId} hideRoot />
+        <SessionTreePanel
+          adapter={surogatesWebChatAdapter}
+          sessionId={activeSessionId}
+          activeSessionId={activeSessionId}
+          hideRoot
+          onSessionSelect={handleSelectSession}
+        />
       )}
 
       {/* Footer */}
