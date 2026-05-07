@@ -105,6 +105,26 @@ class TestHardTaskClassification:
         assert result.required is False
         assert result.category is None
 
+    def test_routes_terminal_tool_call(self):
+        from surogates.harness.expert_routing import classify_tool_calls
+
+        result = classify_tool_calls([
+            {"function": {"name": "terminal", "arguments": '{"cmd": "pytest"}'}},
+        ])
+
+        assert result.required is True
+        assert result.category == "terminal"
+
+    def test_routes_patch_tool_call(self):
+        from surogates.harness.expert_routing import classify_tool_calls
+
+        result = classify_tool_calls([
+            {"function": {"name": "patch", "arguments": "{}"}},
+        ])
+
+        assert result.required is True
+        assert result.category == "coding"
+
 
 class TestExpertSelection:
     def test_selects_matching_active_expert(self):
@@ -253,3 +273,55 @@ class TestHarnessExpertPreflight:
 
         assert consulted is False
         assert len(messages) == 1
+
+    @pytest.mark.asyncio
+    async def test_tool_call_intent_consults_expert_before_execution(self):
+        from surogates.tools.builtin.expert_service import ExpertConsultationResult
+
+        harness = _harness()
+        session = _session()
+        messages = [{"role": "user", "content": "Check whether the project is healthy"}]
+        events = [
+            Event(id=1, session_id=session.id, type=EventType.USER_MESSAGE.value, data={"content": messages[0]["content"]}),
+        ]
+        tool_calls = [
+            {
+                "id": "tc_1",
+                "function": {"name": "terminal", "arguments": '{"cmd": "pytest"}'},
+            },
+        ]
+
+        service = MagicMock()
+        service.consult = AsyncMock(
+            return_value=ExpertConsultationResult(
+                expert="terminal_expert",
+                success=True,
+                content="Run the targeted tests first.",
+                iterations_used=1,
+            )
+        )
+        consulted_categories: set[str] = set()
+
+        with (
+            patch(
+                "surogates.harness.loop.load_skills_for_expert_routing",
+                AsyncMock(return_value=[_expert("terminal_expert", ["terminal"])]),
+            ),
+            patch(
+                "surogates.harness.loop.ExpertConsultationService",
+                return_value=service,
+            ),
+        ):
+            intercepted = await harness._maybe_consult_for_tool_calls(
+                session,
+                messages,
+                events,
+                tool_calls,
+                consulted_categories,
+            )
+
+        assert intercepted is True
+        assert "terminal" in consulted_categories
+        assert "[Expert consultation: terminal via terminal_expert]" in messages[-1]["content"]
+        assert "Run the targeted tests first." in messages[-1]["content"]
+        service.consult.assert_awaited_once()

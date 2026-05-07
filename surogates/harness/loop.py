@@ -34,6 +34,7 @@ from surogates.harness.credentials import CredentialPool
 from surogates.harness.error_classify import classify_harness_error
 from surogates.harness.expert_routing import (
     classify_hard_task,
+    classify_tool_calls,
     load_skills_for_expert_routing,
     select_expert_for_category,
 )
@@ -704,9 +705,16 @@ class AgentHarness:
         # --- Memory prefetch (one-shot before loop) ---
         memory_context = await self._prefetch_memory()
 
+        consulted_expert_categories = self._forced_expert_categories_after_latest_user(
+            all_events or [],
+        )
+
         # --- Forced expert consultation for hard tasks (one-shot before loop) ---
         await self._maybe_consult_required_expert(
-            session, messages, all_events or [],
+            session,
+            messages,
+            all_events or [],
+            consulted_expert_categories,
         )
 
         # --- User turn tracking for memory nudge ---
@@ -1023,6 +1031,20 @@ class AgentHarness:
                     session.id, len(reasoning_details),
                 )
 
+            tool_calls_raw = assistant_message.get("tool_calls")
+            if tool_calls_raw:
+                consulted_for_tools = await self._maybe_consult_for_tool_calls(
+                    session,
+                    messages,
+                    all_events or [],
+                    tool_calls_raw,
+                    consulted_expert_categories,
+                )
+                if consulted_for_tools:
+                    if streaming_executor is not None:
+                        streaming_executor.discard()
+                    continue
+
             # 4. Emit LLM_RESPONSE event with usage data.
             input_tokens = usage_data.get("input_tokens", 0)
             output_tokens = usage_data.get("output_tokens", 0)
@@ -1120,7 +1142,6 @@ class AgentHarness:
             length_continuation_count = 0
 
             # 5. If no tool calls -> session turn is complete.
-            tool_calls_raw = assistant_message.get("tool_calls")
             if not tool_calls_raw:
                 final_content = (assistant_message.get("content") or "").strip()
 
@@ -1775,8 +1796,10 @@ class AgentHarness:
         session: Session,
         messages: list[dict],
         all_events: list[Event],
+        consulted_categories: set[str] | None = None,
     ) -> bool:
         """Consult a task-specific expert before the default model handles hard tasks."""
+        consulted_categories = consulted_categories if consulted_categories is not None else set()
         last_user = self._last_user_message(messages)
         if last_user is None:
             return False
@@ -1786,42 +1809,20 @@ class AgentHarness:
         if not classification.required or classification.category is None:
             return False
 
-        if self._has_forced_expert_after_latest_user(all_events):
+        if (
+            classification.category in consulted_categories
+            or classification.category in self._forced_expert_categories_after_latest_user(
+                all_events,
+            )
+        ):
             return False
 
-        try:
-            skills = await load_skills_for_expert_routing(
-                self._tenant,
-                session_factory=self._session_factory,
-            )
-        except Exception:
-            logger.debug(
-                "Session %s: failed to load experts for forced routing",
-                session.id,
-                exc_info=True,
-            )
-            skills = []
-
-        expert = select_expert_for_category(skills, classification.category)
-        if expert is None:
-            await self._emit_missing_forced_expert(
-                session, classification.category,
-            )
-            return False
-
-        service = ExpertConsultationService(
-            tenant=self._tenant,
-            session_id=session.id,
-            tool_registry=self._tools,
-            session_store=self._store,
-            sandbox_pool=self._sandbox_pool,
-        )
-        result = await service.consult(
-            expert=expert,
-            task=user_content,
-            context=self._build_expert_context(messages),
-            forced=True,
+        result = await self._consult_expert_for_category(
+            session=session,
+            messages=messages,
             category=classification.category,
+            task=user_content,
+            consulted_categories=consulted_categories,
         )
         if not result.success:
             return False
@@ -1836,6 +1837,104 @@ class AgentHarness:
         })
         return True
 
+    async def _maybe_consult_for_tool_calls(
+        self,
+        session: Session,
+        messages: list[dict],
+        all_events: list[Event],
+        tool_calls: list[dict],
+        consulted_categories: set[str] | None = None,
+    ) -> bool:
+        """Consult an expert when the default model proposes hard tools mid-turn."""
+        consulted_categories = consulted_categories if consulted_categories is not None else set()
+        classification = classify_tool_calls(tool_calls)
+        if not classification.required or classification.category is None:
+            return False
+        if (
+            classification.category in consulted_categories
+            or classification.category in self._forced_expert_categories_after_latest_user(
+                all_events,
+            )
+        ):
+            return False
+
+        task = self._build_tool_intent_task(
+            messages=messages,
+            tool_calls=tool_calls,
+            category=classification.category,
+        )
+        result = await self._consult_expert_for_category(
+            session=session,
+            messages=messages,
+            category=classification.category,
+            task=task,
+            consulted_categories=consulted_categories,
+        )
+        if not result.success:
+            return False
+
+        messages.append({
+            "role": "user",
+            "content": self._format_forced_expert_context(
+                category=classification.category,
+                expert=result.expert,
+                content=result.content,
+            ),
+        })
+        return True
+
+    async def _consult_expert_for_category(
+        self,
+        *,
+        session: Session,
+        messages: list[dict],
+        category: str,
+        task: str,
+        consulted_categories: set[str],
+    ) -> Any:
+        try:
+            skills = await load_skills_for_expert_routing(
+                self._tenant,
+                session_factory=self._session_factory,
+            )
+        except Exception:
+            logger.debug(
+                "Session %s: failed to load experts for forced routing",
+                session.id,
+                exc_info=True,
+            )
+            skills = []
+
+        expert = select_expert_for_category(skills, category)
+        if expert is None:
+            await self._emit_missing_forced_expert(session, category)
+            consulted_categories.add(category)
+            from surogates.tools.builtin.expert_service import ExpertConsultationResult
+
+            return ExpertConsultationResult(
+                expert="",
+                success=False,
+                content="",
+                error=f"No active expert configured for category '{category}'.",
+            )
+
+        service = ExpertConsultationService(
+            tenant=self._tenant,
+            session_id=session.id,
+            tool_registry=self._tools,
+            session_store=self._store,
+            sandbox_pool=self._sandbox_pool,
+        )
+        result = await service.consult(
+            expert=expert,
+            task=task,
+            context=self._build_expert_context(messages),
+            forced=True,
+            category=category,
+        )
+        consulted_categories.add(category)
+        return result
+
     @staticmethod
     def _last_user_message(messages: list[dict]) -> dict | None:
         for msg in reversed(messages):
@@ -1845,10 +1944,15 @@ class AgentHarness:
 
     @staticmethod
     def _has_forced_expert_after_latest_user(events: list[Event]) -> bool:
+        return bool(AgentHarness._forced_expert_categories_after_latest_user(events))
+
+    @staticmethod
+    def _forced_expert_categories_after_latest_user(events: list[Event]) -> set[str]:
         latest_user_event_id = 0
         for event in events:
             if event.type == EventType.USER_MESSAGE.value and event.id is not None:
                 latest_user_event_id = max(latest_user_event_id, event.id)
+        categories: set[str] = set()
         for event in events:
             if event.id is None or event.id <= latest_user_event_id:
                 continue
@@ -1860,8 +1964,10 @@ class AgentHarness:
                 }
                 and event.data.get("forced")
             ):
-                return True
-        return False
+                category = event.data.get("category")
+                if category:
+                    categories.add(str(category))
+        return categories
 
     async def _emit_missing_forced_expert(
         self,
@@ -1897,6 +2003,24 @@ class AgentHarness:
                 continue
             fragments.append(f"{role}: {content}")
         return "\n\n".join(fragments)[-12_000:]
+
+    @staticmethod
+    def _build_tool_intent_task(
+        *,
+        messages: list[dict],
+        tool_calls: list[dict],
+        category: str,
+    ) -> str:
+        last_user = AgentHarness._last_user_message(messages)
+        user_content = str(last_user.get("content") or "") if last_user else ""
+        return (
+            "The default model determined that this turn needs a "
+            f"{category} expert before executing hard tools.\n\n"
+            f"Original user request:\n{user_content}\n\n"
+            f"Proposed tool calls:\n{tool_calls}\n\n"
+            "Complete the needed expert work using your available tools, "
+            "or return concise guidance if execution is not appropriate."
+        )
 
     @staticmethod
     def _format_forced_expert_context(

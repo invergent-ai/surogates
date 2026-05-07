@@ -94,6 +94,19 @@ def classify_hard_task(text: str) -> HardTaskClassification:
     return HardTaskClassification(False)
 
 
+def classify_tool_calls(tool_calls: list[dict]) -> HardTaskClassification:
+    """Classify explicit LLM tool intent into an expert routing category."""
+    names = [
+        str(tc.get("function", {}).get("name", ""))
+        for tc in tool_calls
+    ]
+    if any(name in {"terminal", "process"} for name in names):
+        return HardTaskClassification(True, "terminal", "terminal tool call")
+    if any(name in {"write_file", "patch"} for name in names):
+        return HardTaskClassification(True, "coding", "code mutation tool call")
+    return HardTaskClassification(False)
+
+
 def select_expert_for_category(
     experts: Iterable[SkillDef],
     category: str,
