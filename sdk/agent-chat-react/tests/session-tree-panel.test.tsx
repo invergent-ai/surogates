@@ -24,7 +24,7 @@ function session(input: Partial<AgentChatSession> & { id: string }): AgentChatSe
   };
 }
 
-function createAdapter(sessions: AgentChatSession[]): AgentChatAdapter {
+function createAdapter(sessions: AgentChatSession[]) {
   return {
     async listSessions() {
       return { sessions, total: sessions.length };
@@ -62,7 +62,7 @@ function createAdapter(sessions: AgentChatSession[]): AgentChatAdapter {
     openEventStream() {
       throw new Error("not used by session tree tests");
     },
-  };
+  } satisfies AgentChatAdapter;
 }
 
 let root: Root | null = null;

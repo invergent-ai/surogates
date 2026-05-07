@@ -39,6 +39,72 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+async def _load_attached_kbs(
+    *,
+    agent_id: str,
+    ops_db_url: str,
+) -> list[dict]:
+    """Look up the KBs attached to *agent_id* in the ops DB.
+
+    Empty list is the safe default and is returned in three cases:
+
+      - ``ops_db_url`` is empty (worker not wired to the KB platform).
+      - The ops engine fails to initialize or query (network glitch,
+        schema drift, etc.) -- we log and degrade gracefully rather
+        than refuse to start the session.
+      - The agent simply has no KBs attached.
+
+    The dicts returned mirror what PromptBuilder._kb_section consumes:
+    ``id``, ``name``, ``display_name``, ``description``. Keeping the
+    surface plain dict (not a SQLAlchemy row) lets us cache it and
+    pass it across async boundaries without dragging the session.
+    """
+    if not ops_db_url:
+        return []
+    try:
+        from surogates.db.ops_engine import get_ops_session_factory
+        from surogates.db.ops_models import (
+            OpsKnowledgeBase, agent_knowledge_bases,
+        )
+        import sqlalchemy as sa
+
+        factory = get_ops_session_factory()
+        if factory is None:
+            return []
+
+        async with factory() as session:
+            result = await session.execute(
+                sa.select(
+                    OpsKnowledgeBase.id,
+                    OpsKnowledgeBase.name,
+                    OpsKnowledgeBase.display_name,
+                    OpsKnowledgeBase.description,
+                )
+                .join(
+                    agent_knowledge_bases,
+                    agent_knowledge_bases.c.kb_id == OpsKnowledgeBase.id,
+                )
+                .where(agent_knowledge_bases.c.agent_id == agent_id)
+                .order_by(OpsKnowledgeBase.name.asc())
+            )
+            return [
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "display_name": row[2],
+                    "description": row[3],
+                }
+                for row in result.all()
+            ]
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Failed to load attached KBs for agent %s; KB tools will be "
+            "disabled for this session", agent_id, exc_info=True,
+        )
+        return []
+
+
 async def _load_prompt_catalogs(
     *,
     settings: Settings,
@@ -130,6 +196,23 @@ async def run_worker(settings: Settings) -> None:
     else:
         sandbox_backend = ProcessSandbox()
     sandbox_pool = SandboxPool(sandbox_backend)
+
+    # 4a. Optionally initialize the ops DB connection used by the
+    # KB navigation tools (kb_list_pages, kb_read_page). Skipped when
+    # SUROGATES_OPS_DB_URL is empty -- kb_tools handlers detect the
+    # missing factory and return a polite "unavailable" message,
+    # which is preferable to a crash for workers running without a
+    # KB platform.
+    if settings.ops_db.url:
+        from surogates.db.ops_engine import init_ops_engine
+        init_ops_engine(
+            settings.ops_db.url,
+            pool_size=settings.ops_db.pool_size,
+            pool_overflow=settings.ops_db.pool_overflow,
+        )
+        logger.info("Ops DB initialized for KB tools")
+    else:
+        logger.info("Ops DB not configured; KB tools will return unavailable")
 
     # 4. Tool registry -- register all builtin tools + MCP tools.
     tool_registry = ToolRegistry()
@@ -316,18 +399,36 @@ async def run_worker(settings: Settings) -> None:
             session_factory=session_factory,
         )
 
+        # Knowledge bases attached to this agent. Empty list when
+        # KB tools are unavailable (no ops DB) or no KBs are wired
+        # to this agent yet.
+        attached_kbs = await _load_attached_kbs(
+            agent_id=configured_agent_id,
+            ops_db_url=settings.ops_db.url,
+        )
+        # Filter the tool set to drop kb_list_pages / kb_read_page
+        # when this agent has nothing to navigate. Keeps the LLM from
+        # ever seeing tool schemas it cannot meaningfully use, and
+        # also keeps the prompt KB section empty so the LLM is not
+        # primed to hallucinate kb_id values.
+        effective_tools = set(tool_registry.tool_names)
+        if not attached_kbs:
+            effective_tools.discard("kb_list_pages")
+            effective_tools.discard("kb_read_page")
+
         prompt_builder = PromptBuilder(
             tenant,
             skills=available_skills,
             memory_manager=memory_manager,
             session=session,
             available_agents=available_agents,
+            available_kbs=attached_kbs,
             # The builder gates tool-aware guidance fragments (artifact,
             # memory, skills, expert, session_search, tool_use_enforcement)
-            # on membership in ``available_tools``.  Passing the registry's
-            # live tool set keeps those fragments in the system prompt
-            # instead of silently stripping them.
-            available_tools=set(tool_registry.tool_names),
+            # on membership in ``available_tools``.  Passing the filtered
+            # tool set keeps those fragments in sync with what the LLM
+            # actually has access to this turn.
+            available_tools=effective_tools,
         )
 
         # Interactive sessions get a regular user access token;

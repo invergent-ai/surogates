@@ -88,6 +88,7 @@ class PromptBuilder:
         available_tools: set[str] | None = None,
         agent_def: AgentDef | None = None,
         available_agents: list[AgentDef] | None = None,
+        available_kbs: list[dict] | None = None,
         prompt_library: PromptLibrary | None = None,
     ) -> None:
         self.tenant = tenant
@@ -107,6 +108,13 @@ class PromptBuilder:
             a for a in (available_agents or []) if a.enabled
         ]
         self.has_agents: bool = bool(self._available_agents)
+
+        # Knowledge bases attached to this agent. Each entry is a dict
+        # with keys: id, name, display_name, description. Rendered as
+        # an "Available Knowledge Bases" block in the system prompt
+        # so the LLM can pass kb_id to kb_list_pages / kb_read_page.
+        self._available_kbs: list[dict] = list(available_kbs or [])
+        self.has_kbs: bool = bool(self._available_kbs)
         # Cached rendered "# Available Sub-Agents" block.  The catalog
         # is immutable per builder and every description flows through
         # the regex injection scanner, so rendering once and reusing
@@ -153,6 +161,7 @@ class PromptBuilder:
         sections.append(self._memory_section())
         sections.append(self._skills_section())
         sections.append(self._available_agents_section())
+        sections.append(self._kb_section())
         sections.append(self._context_files_section())
         sections.append(self._context_section())
 
@@ -449,6 +458,33 @@ class PromptBuilder:
                 parts.append(f"\n## Platform\n{hint}")
 
         return "\n".join(parts)
+
+    def _kb_section(self) -> str:
+        """Render attached knowledge bases as a system prompt block.
+
+        Empty string when no KBs are attached -- the section is dropped
+        cleanly by the join filter in build(). The IDs are rendered
+        verbatim so the LLM can pass them to kb_list_pages and
+        kb_read_page without guesswork.
+        """
+        if not self._available_kbs:
+            return ""
+        lines = ["# Available Knowledge Bases", ""]
+        lines.append(
+            "You have access to the following knowledge bases. Use "
+            "`kb_list_pages` to see the structure of a KB and "
+            "`kb_read_page` to read individual pages. Pass the `id` "
+            "value below as the `kb_id` argument."
+        )
+        lines.append("")
+        for kb in self._available_kbs:
+            kb_id = kb.get("id", "")
+            display_name = kb.get("display_name") or kb.get("name", "")
+            description = (kb.get("description") or "").strip()
+            lines.append(f"- **{display_name}** (id: `{kb_id}`)")
+            if description:
+                lines.append(f"  {description}")
+        return "\n".join(lines)
 
     def _context_files_section(self) -> str:
         """Load context files (SOUL.md, AGENTS.md, etc.) into the prompt."""

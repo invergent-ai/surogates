@@ -61,6 +61,7 @@ class ToolRuntime:
             delegate,
             expert,
             file_ops,
+            kb_tools,
             memory,
             session_search,
             skill_manager,
@@ -76,6 +77,7 @@ class ToolRuntime:
             skill_manager,
             web_search,
             file_ops,
+            kb_tools,
             delegate,
             terminal,  # also registers the 'process' tool
             session_search,

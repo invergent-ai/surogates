@@ -99,6 +99,35 @@ class DatabaseSettings(BaseSettings):
     pool_overflow: int = 20
 
 
+class OpsDatabaseSettings(BaseSettings):
+    """Read-only connection to the surogate-ops database.
+
+    Used by the kb_list_pages / kb_read_page tools to look up which
+    knowledge bases are attached to this agent and to read the wiki
+    page tree. Empty ``url`` disables the KB tools entirely.
+    """
+    model_config = {"env_prefix": "SUROGATES_OPS_DB_"}
+
+    url: str = ""
+    pool_size: int = 5
+    pool_overflow: int = 5
+
+
+class KBHubSettings(BaseSettings):
+    """Connection to surogate-hub for fetching wiki page content.
+
+    The wiki tree (paths, titles, types) lives in the ops DB; the
+    actual markdown content lives in Hub repos. This struct holds the
+    Hub credentials the worker uses to fetch that content. Empty
+    ``endpoint_url`` disables the KB tools entirely.
+    """
+    model_config = {"env_prefix": "SUROGATES_KB_HUB_"}
+
+    endpoint_url: str = ""
+    access_key_id: str = ""
+    secret_access_key: str = ""
+
+
 class RedisSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_REDIS_"}
 
@@ -416,6 +445,8 @@ class Settings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_"}
 
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)
+    ops_db: OpsDatabaseSettings = Field(default_factory=OpsDatabaseSettings)
+    kb_hub: KBHubSettings = Field(default_factory=KBHubSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     api: APISettings = Field(default_factory=APISettings)
     worker: WorkerSettings = Field(default_factory=WorkerSettings)

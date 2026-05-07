@@ -42,7 +42,7 @@ class FakeEventStream implements AgentChatEventStream {
   }
 }
 
-function createAdapter(stream: FakeEventStream): AgentChatAdapter {
+function createAdapter(stream: FakeEventStream) {
   return {
     async listSessions() {
       return { sessions: [], total: 0 };
@@ -115,7 +115,7 @@ function createAdapter(stream: FakeEventStream): AgentChatAdapter {
     openEventStream() {
       return stream;
     },
-  };
+  } satisfies AgentChatAdapter;
 }
 
 function session(id: string): AgentChatSession {

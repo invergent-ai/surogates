@@ -15,7 +15,10 @@
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
-    "types": ["node", "vitest/globals"]
+    "types": ["node", "vitest/globals"],
+    "paths": {
+      "@invergent/agent-chat-react": ["../agent-chat-react/src/index.ts"]
+    }
   },
   "include": ["src", "tests", "vite.config.ts", "vitest.config.ts"]
 }
