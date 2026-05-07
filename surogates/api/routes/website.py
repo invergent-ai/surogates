@@ -1,13 +1,13 @@
 """Public-website channel routes.
 
 Three endpoints implement the end-to-end flow an anonymous visitor
-needs to talk to an agent embedded on a public website:
+needs to talk to the deployment's agent embedded on a public website:
 
 * ``POST /v1/website/sessions`` — bootstrap.  Authenticated with the
-  agent's publishable key (``surg_wk_...``) plus an ``Origin`` header
-  in the agent's allow-list.  Creates a session, issues the visitor's
-  HttpOnly cookie, returns the CSRF token the browser client must echo
-  on every subsequent state-changing request.
+  configured publishable key (``surg_wk_...``) plus an ``Origin``
+  header in the configured allow-list.  Creates a session, issues the
+  visitor's HttpOnly cookie, returns the CSRF token the browser
+  client must echo on every subsequent state-changing request.
 * ``POST /v1/website/sessions/{id}/messages`` — send a user message.
   Requires the cookie plus a matching ``X-CSRF-Token`` header
   (double-submit CSRF).  The cookie's baked-in origin claim is
@@ -15,13 +15,16 @@ needs to talk to an agent embedded on a public website:
   replayed from a different embed.
 * ``GET /v1/website/sessions/{id}/events`` — SSE stream of session
   events.  Cookie-authenticated; ``EventSource`` cannot set custom
-  headers, so the CSRF header isn't required (GETs are safe by CSRF's
-  standard assumption -- nothing is mutated).
+  headers, so the CSRF header isn't required (GETs are safe by
+  CSRF's standard assumption — nothing is mutated).
 
-Origin validation is the conjunction of two checks: the agent row's
-``allowed_origins`` (authoritative) and the session cookie's ``origin``
-claim (anchors a bootstrapped session to the embed it came from).  A
-request must satisfy both.
+All authority comes from :class:`WebsiteSettings`.  There is no
+per-row agent record any more: a deployment serves exactly one agent,
+identified by ``settings.agent_id``, and exposes it through this
+channel when ``website.enabled`` is true.  Origin validation is the
+conjunction of two checks: the configured allow-list (authoritative)
+and the session cookie's ``origin`` claim (anchors a bootstrapped
+session to the embed it came from).  A request must satisfy both.
 """
 
 from __future__ import annotations
@@ -37,12 +40,15 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from surogates.channels.website_agent_store import (
+from surogates.channels.website_keys import (
     PUBLISHABLE_KEY_PREFIX,
-    ResolvedWebsiteAgent,
-    WebsiteAgentStore,
     is_publishable_key,
+    verify_publishable_key,
+)
+from surogates.channels.website_origin import (
+    normalize_origin,
     origin_allowed,
+    parse_allowed_origins,
 )
 from surogates.channels.website_session import (
     COOKIE_NAME,
@@ -54,7 +60,7 @@ from surogates.channels.website_session import (
     generate_csrf_token,
     verify_csrf_token,
 )
-from surogates.config import enqueue_session
+from surogates.config import Settings, enqueue_session
 from surogates.session.events import EventType
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.tenant import agent_session_bucket
@@ -90,7 +96,9 @@ class BootstrapResponse(BaseModel):
     for clients that want to display a stable identifier.  ``csrf_token``
     is what the browser client must echo on every subsequent POST; the
     server compares it constant-time against the cookie JWT's ``csrf``
-    claim.
+    claim.  ``agent_name`` is the deployment's :attr:`Settings.agent_id`
+    (typically a slug like ``"support-bot"``) so the widget has a
+    stable label to render.
     """
 
     session_id: UUID
@@ -113,6 +121,10 @@ class SendMessageResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _get_settings(request: Request) -> Settings:
+    return request.app.state.settings
+
+
 def _get_session_store(request: Request) -> SessionStore:
     store: SessionStore | None = getattr(request.app.state, "session_store", None)
     if store is None:
@@ -123,8 +135,19 @@ def _get_session_store(request: Request) -> SessionStore:
     return store
 
 
-def _get_agent_store(request: Request) -> WebsiteAgentStore:
-    return WebsiteAgentStore(request.app.state.session_factory)
+def _require_website_enabled(settings: Settings) -> None:
+    """Refuse every website-channel request when the channel is disabled.
+
+    A deployment without ``website.enabled`` should look identical to
+    the embed as one that does not implement the route at all, so we
+    return 404 rather than 503 — the path effectively does not exist
+    when the channel is off.
+    """
+    if not settings.website.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Website channel is not enabled on this deployment.",
+        )
 
 
 def _extract_bearer(request: Request) -> str | None:
@@ -138,7 +161,7 @@ def _extract_bearer(request: Request) -> str | None:
 def _extract_origin(request: Request) -> str:
     """Return the request's ``Origin`` header, or raise 400.
 
-    Every public-website request must carry an Origin header -- browsers
+    Every public-website request must carry an Origin header — browsers
     always set one on cross-origin or credentialled requests, and a
     server-to-server attempt without one is not a browser embed.  This
     keeps the rest of the route simple: below here, ``origin`` is a
@@ -162,7 +185,7 @@ def _set_session_cookie(
     """Set the HttpOnly session cookie scoped to the API origin.
 
     ``SameSite=None`` with ``Secure=True`` is the only combination that
-    permits cross-site credentialled requests -- a website embedded on
+    permits cross-site credentialled requests — a website embedded on
     ``customer.com`` that talks to our API domain is cross-site by
     definition, and the cookie has to ride along.
 
@@ -174,7 +197,7 @@ def _set_session_cookie(
     cookie is ``HttpOnly`` so only this server reads it, (b) the JWT
     ``type`` claim is ``website_session`` and every other route rejects
     that type at the auth layer, and (c) the global auth middleware
-    doesn't read cookies at all -- only ``Authorization: Bearer`` and
+    doesn't read cookies at all — only ``Authorization: Bearer`` and
     ``?token=`` query params.
     """
     response.set_cookie(
@@ -192,16 +215,26 @@ def _clear_session_cookie(response: Response) -> None:
     response.delete_cookie(COOKIE_NAME, path="/")
 
 
-async def _resolve_agent_from_request(
-    request: Request,
-) -> ResolvedWebsiteAgent:
-    """Verify the publishable key from *request* and return the agent row.
+def _verify_publishable_key_from_request(request: Request, settings: Settings) -> None:
+    """Reject any request that does not present the configured key.
 
-    Raises HTTP 401 for unknown keys, HTTP 403 for disabled agents, and
-    HTTP 400 for a missing/malformed Authorization header -- the three
-    failure modes a legitimate embed has already pre-empted by reading
-    its config correctly.
+    Returns silently on success.  Three failure modes a legitimate
+    embed has already pre-empted by reading its config correctly:
+    HTTP 400 for a missing/malformed Authorization header, HTTP 401
+    for the wrong token shape (e.g. a service-account key) or a
+    mismatched value, HTTP 503 when the deployment is enabled but no
+    key is configured (a misconfiguration the operator must fix).
     """
+    expected = settings.website.publishable_key
+    if not expected:
+        # Deployment said website.enabled=true but didn't ship a key.
+        # Surfaces this as 503 so the operator notices, rather than
+        # silently letting any bearer through.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Website channel is enabled but no publishable key is configured.",
+        )
+
     token = _extract_bearer(request)
     if not token or not is_publishable_key(token):
         raise HTTPException(
@@ -213,19 +246,12 @@ async def _resolve_agent_from_request(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    agent = await _get_agent_store(request).get_by_publishable_key(token)
-    if agent is None:
+    if not verify_publishable_key(token, expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid publishable key.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if not agent.enabled:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Website agent is disabled.",
-        )
-    return agent
 
 
 async def _resolve_claims_from_cookie(
@@ -234,10 +260,10 @@ async def _resolve_claims_from_cookie(
     """Decode the session cookie from *request* or raise 401.
 
     The decoded claims are the authority for session ownership on
-    messages/events -- the cookie carries the session id, agent id,
-    origin, and CSRF token.  A missing cookie is an unauthenticated
-    request (expired or never bootstrapped); a malformed cookie is an
-    expired or forged JWT; either way, 401.
+    messages/events — the cookie carries the session id, org, origin,
+    and CSRF token.  A missing cookie is an unauthenticated request
+    (expired or never bootstrapped); a malformed cookie is an expired
+    or forged JWT; either way, 401.
     """
     raw = request.cookies.get(COOKIE_NAME)
     if not raw:
@@ -258,39 +284,42 @@ async def _resolve_claims_from_cookie(
 def _enforce_origin_binding(
     claims: WebsiteSessionClaims,
     request_origin: str,
-    agent: ResolvedWebsiteAgent,
+    allowed_origins: tuple[str, ...],
 ) -> None:
-    """Fail the request unless origin matches both the cookie and the agent.
+    """Fail the request unless origin matches both the cookie and config.
 
-    A stolen cookie replayed from another embed -- even another embed
-    of the same agent -- fails here because ``claims.origin`` captures
-    the origin at bootstrap time; ops shrinking the allow-list takes
-    effect within the auth cache TTL via the ``agent`` lookup.
+    A stolen cookie replayed from another embed — even another embed
+    of the same deployment's agent — fails here because
+    ``claims.origin`` captures the origin at bootstrap time; ops
+    shrinking the allow-list takes effect on the next request because
+    the allow-list is read from settings on every call.
     """
-    normalized = request_origin.strip().rstrip("/").lower()
-    if normalized != claims.origin:
+    if normalize_origin(request_origin) != claims.origin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Request origin does not match the session's bootstrap origin.",
         )
-    if not origin_allowed(request_origin, agent.allowed_origins):
+    if not origin_allowed(request_origin, allowed_origins):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Request origin is not in the agent's allow-list.",
+            detail="Request origin is not in the configured allow-list.",
         )
 
 
 async def _load_and_authorize_session(
     request: Request,
     path_session_id: UUID,
-) -> tuple[WebsiteSessionClaims, ResolvedWebsiteAgent]:
-    """Resolve cookie + agent, enforce origin binding, verify the session id.
+) -> WebsiteSessionClaims:
+    """Resolve cookie, verify session id, enforce origin binding.
 
-    Used by every cookie-authenticated route.  The path session id must
-    match the claim so a visitor of one session cannot target another
-    visitor's session by swapping the URL -- the session JWT scopes to
-    exactly one session.
+    Used by every cookie-authenticated route.  The path session id
+    must match the claim so a visitor of one session cannot target
+    another visitor's session by swapping the URL — the session JWT
+    scopes to exactly one session.
     """
+    settings = _get_settings(request)
+    _require_website_enabled(settings)
+
     claims = await _resolve_claims_from_cookie(request)
     if claims.session_id != path_session_id:
         raise HTTPException(
@@ -298,16 +327,10 @@ async def _load_and_authorize_session(
             detail=f"Session {path_session_id} not found.",
         )
 
-    agent = await _get_agent_store(request).get(claims.agent_id)
-    if agent is None or not agent.enabled:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Website agent is disabled or removed.",
-        )
-
     request_origin = _extract_origin(request)
-    _enforce_origin_binding(claims, request_origin, agent)
-    return claims, agent
+    allowed = parse_allowed_origins(settings.website.allowed_origins)
+    _enforce_origin_binding(claims, request_origin, allowed)
+    return claims
 
 
 # ---------------------------------------------------------------------------
@@ -326,68 +349,78 @@ async def bootstrap_website_session(
 ) -> BootstrapResponse:
     """Exchange a publishable key + approved origin for a session cookie.
 
-    Creates a fresh session owned by the agent's org (no user row),
-    mints the HttpOnly cookie the browser presents on subsequent
-    requests, and returns the CSRF token the browser client echoes in
-    ``X-CSRF-Token``.  The session's ``config.system_prompt``,
-    ``tool_allow_list``, and caps are materialised from the agent row
-    so the harness can read them without touching the website_agents
-    table on every wake.
+    Creates a fresh session owned by the deployment's org (no user
+    row), mints the HttpOnly cookie the browser presents on
+    subsequent requests, and returns the CSRF token the browser
+    client echoes in ``X-CSRF-Token``.
     """
-    agent = await _resolve_agent_from_request(request)
+    settings = _get_settings(request)
+    _require_website_enabled(settings)
+    _verify_publishable_key_from_request(request, settings)
+
     request_origin = _extract_origin(request)
-    if not origin_allowed(request_origin, agent.allowed_origins):
+    allowed = parse_allowed_origins(settings.website.allowed_origins)
+    if not origin_allowed(request_origin, allowed):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Request origin is not in the agent's allow-list.",
+            detail="Request origin is not in the configured allow-list.",
+        )
+
+    if not settings.org_id:
+        # Visitor sessions need a real org to attach to (memory,
+        # storage, governance are all org-scoped).  A misconfigured
+        # deployment that hasn't set org_id cannot honour the channel
+        # contract; surface it explicitly rather than crashing the
+        # SQLAlchemy insert with a NULL constraint failure.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Website channel is enabled but the deployment org is not configured.",
+        )
+
+    try:
+        org_uuid = UUID(settings.org_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Configured org_id is not a valid UUID.",
+        ) from exc
+
+    if not settings.storage.bucket:
+        # ``agent_session_bucket`` raises ValueError on an empty bucket,
+        # which Starlette would surface as a 500 with a stack trace
+        # through the public website surface.  Match the org_id /
+        # llm.model fail-loud shape and return 503 explicitly.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Storage bucket is not configured (settings.storage.bucket is empty).",
         )
 
     store = _get_session_store(request)
-    settings = request.app.state.settings
     storage = request.app.state.storage
 
     session_id = uuid.uuid4()
     bucket = agent_session_bucket(settings.storage.bucket)
-    normalized_origin = request_origin.strip().rstrip("/").lower()
+    normalized_origin = normalize_origin(request_origin)
 
-    # Materialize the agent config into session.config so the harness
-    # doesn't need a live DB lookup on every wake, and edits to the
-    # agent row later don't retroactively widen a running session.
     config: dict = {
         "storage_bucket": bucket,
         "workspace_path": storage.resolve_workspace_path(bucket, session_id),
-        "website_agent_id": str(agent.id),
         "website_origin": normalized_origin,
-        "tool_allow_list": list(agent.tool_allow_list),
-        "skill_pins": list(agent.skill_pins),
-        "session_idle_minutes": agent.session_idle_minutes,
     }
-    if agent.system_prompt:
-        # Reuse the web-channel convention for the system-prompt config
-        # key so any future PromptBuilder integration picks up website
-        # sessions and web sessions through the same path.
-        config["system"] = agent.system_prompt
-    if agent.session_message_cap:
-        config["session_message_cap"] = agent.session_message_cap
-    if agent.session_token_cap:
-        config["session_token_cap"] = agent.session_token_cap
+    # Materialise the message cap onto session.config so the route's
+    # 429 enforcement is decoupled from settings — the cookie-bound
+    # cap stays stable for the visitor even if ops adjusts the channel
+    # knob while the session is in flight.
+    if settings.website.session_message_cap:
+        config["session_message_cap"] = settings.website.session_message_cap
 
-    model = agent.model or settings.llm.model or "gpt-5.4"
-
-    # Row first, then bucket.  If ``create_bucket`` raises we delete the
-    # row so a retry isn't stuck behind a half-provisioned session; if
-    # ``create_session`` raises nothing was allocated at all.  This
-    # avoids the orphan-bucket leak the ``prompts`` route mitigates with
-    # a more specific ``IntegrityError`` dance (that route needs it
-    # because idempotency keys race; the website channel has no
-    # idempotency and can use the simpler try/finally here).
     session = await store.create_session(
         session_id=session_id,
         user_id=None,
-        org_id=agent.org_id,
+        org_id=org_uuid,
         agent_id=settings.agent_id,
         channel=WEBSITE_CHANNEL,
-        model=model,
+        model=settings.llm.model,
         config=config,
     )
     try:
@@ -412,8 +445,7 @@ async def bootstrap_website_session(
     csrf_token = generate_csrf_token()
     cookie_token = create_website_session_token(
         session_id=session.id,
-        org_id=agent.org_id,
-        agent_id=agent.id,
+        org_id=org_uuid,
         origin=normalized_origin,
         csrf_token=csrf_token,
     )
@@ -425,7 +457,7 @@ async def bootstrap_website_session(
         session_id=session.id,
         csrf_token=csrf_token,
         expires_at=int(time.time()) + DEFAULT_SESSION_TTL_SECONDS,
-        agent_name=agent.name,
+        agent_name=settings.agent_id,
     )
 
 
@@ -446,7 +478,7 @@ async def send_website_message(
     forge a cross-site POST cannot read the HttpOnly cookie, so they
     cannot produce a matching header value.
     """
-    claims, _agent = await _load_and_authorize_session(request, session_id)
+    claims = await _load_and_authorize_session(request, session_id)
 
     header_csrf = request.headers.get(CSRF_HEADER_NAME)
     if not verify_csrf_token(claims.csrf_token, header_csrf):
@@ -476,7 +508,9 @@ async def send_website_message(
             detail=f"Session is in '{session.status}' state and cannot accept messages.",
         )
 
-    # Enforce the per-session message cap the agent config carries.
+    # Enforce the per-session message cap captured at bootstrap.  Read
+    # from ``session.config`` rather than live settings so the cap a
+    # visitor was admitted under stays stable for the whole session.
     cap = session.config.get("session_message_cap") if session.config else None
     if cap and session.message_count >= cap:
         raise HTTPException(
@@ -513,9 +547,9 @@ async def stream_website_events(
     here (and the request doesn't mutate state).  Authentication is
     cookie-only; the decoded claims carry the session id, and the
     Origin header is re-validated against both the cookie's bound
-    origin and the agent's live allow-list.
+    origin and the deployment's live allow-list.
     """
-    claims, _agent = await _load_and_authorize_session(request, session_id)
+    claims = await _load_and_authorize_session(request, session_id)
     store = _get_session_store(request)
 
     try:
@@ -662,11 +696,11 @@ async def end_website_session(
 ) -> None:
     """Explicit end-of-visit hook: marks the session completed and clears the cookie.
 
-    Optional -- sessions also auto-reset by the idle-reset job.  Useful
+    Optional — sessions also auto-reset by the idle-reset job.  Useful
     for single-page apps that want to release server resources when
     the visitor closes the chat.
     """
-    claims, _agent = await _load_and_authorize_session(request, session_id)
+    claims = await _load_and_authorize_session(request, session_id)
     header_csrf = request.headers.get(CSRF_HEADER_NAME)
     if not verify_csrf_token(claims.csrf_token, header_csrf):
         raise HTTPException(

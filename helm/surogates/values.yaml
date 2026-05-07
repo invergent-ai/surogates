@@ -138,6 +138,19 @@ channels:
     enabled: false
     botToken: ""
 
+  website:
+    enabled: false
+    # Visitors authenticate via publishable_key + Origin at bootstrap.
+    # Rotate by redeploying with a fresh value (the secret only ever
+    # appears in the bootstrap Authorization header).
+    publishableKey: ""
+    # Comma-separated list of exact-match origins (scheme://host[:port]).
+    # No wildcards — every embedding domain must be enumerated.
+    allowedOrigins: ""
+    # Visitor message cap.  Anonymous browser visitors warrant a
+    # tighter ceiling than authenticated channels.  ``0`` = "no cap".
+    sessionMessageCap: 0
+
 # -- Ingress
 # -- Agent-specific environment variables (governance, saga, etc.)
 # Injected into worker and API pods.  Keys are env-var names, values

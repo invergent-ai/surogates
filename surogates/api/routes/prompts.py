@@ -157,6 +157,16 @@ async def _submit_one(
                 deduplicated=True,
             )
 
+    # Validate config up front so a misconfigured deployment doesn't
+    # leak partial provisioning artefacts (Garage bucket created, then
+    # 503 returned, leaving an orphan bucket behind on every retry).
+    if not settings.llm.model:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="LLM model is not configured (settings.llm.model is empty).",
+        )
+    model = settings.llm.model
+
     session_id = uuid4()
     bucket = agent_session_bucket(settings.storage.bucket)
 
@@ -170,8 +180,6 @@ async def _submit_one(
     }
     if body.metadata:
         config["pipeline_metadata"] = body.metadata
-
-    model = settings.llm.model or "gpt-5.4"
 
     try:
         session = await store.create_session(

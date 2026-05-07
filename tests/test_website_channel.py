@@ -1,8 +1,9 @@
 """Unit tests for the website-channel helpers.
 
 Exercises the pieces that don't need a running database: publishable
-key generation/hash/recognition, origin allow-list normalisation, CSRF
-token verify, and the website-session JWT encode/decode cycle.
+key generation/recognition/verification, origin allow-list normalisation
+and parsing, CSRF token verify, and the website-session JWT
+encode/decode cycle.
 """
 
 from __future__ import annotations
@@ -14,12 +15,16 @@ import pytest
 
 os.environ.setdefault("SUROGATES_JWT_SECRET", "website-channel-test-secret")
 
-from surogates.channels.website_agent_store import (
+from surogates.channels.website_keys import (
     PUBLISHABLE_KEY_PREFIX,
     generate_publishable_key,
-    hash_publishable_key,
     is_publishable_key,
+    verify_publishable_key,
+)
+from surogates.channels.website_origin import (
+    normalize_origin,
     origin_allowed,
+    parse_allowed_origins,
 )
 from surogates.channels.website_session import (
     create_website_session_token,
@@ -49,19 +54,26 @@ class TestPublishableKey:
         suffix = k[len(PUBLISHABLE_KEY_PREFIX):]
         assert len(suffix) >= 40, "publishable key should have ~264 bits of entropy"
 
-    def test_hash_is_deterministic_and_hex(self):
-        k = generate_publishable_key()
-        assert hash_publishable_key(k) == hash_publishable_key(k)
-        assert len(hash_publishable_key(k)) == 64  # SHA-256 hex
-
-    def test_hash_different_for_different_keys(self):
-        assert hash_publishable_key("a") != hash_publishable_key("b")
-
     def test_is_publishable_key_discriminates(self):
         assert is_publishable_key(generate_publishable_key()) is True
         assert is_publishable_key("surg_sk_something") is False
         assert is_publishable_key("") is False
         assert is_publishable_key("random-text") is False
+
+    def test_verify_match(self):
+        k = generate_publishable_key()
+        assert verify_publishable_key(k, k) is True
+
+    def test_verify_mismatch(self):
+        a = generate_publishable_key()
+        b = generate_publishable_key()
+        assert verify_publishable_key(a, b) is False
+
+    def test_verify_missing_sides_are_always_false(self):
+        """Empty config or empty header → no auth."""
+        assert verify_publishable_key("", "configured-key") is False
+        assert verify_publishable_key("presented", "") is False
+        assert verify_publishable_key("", "") is False
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +118,33 @@ class TestOriginAllowed:
         assert not origin_allowed("https://customer.com", ())
 
 
+class TestNormalizeOrigin:
+    def test_strips_trailing_slash_and_lowercases(self):
+        assert normalize_origin("HTTPS://Customer.com/") == "https://customer.com"
+
+    def test_preserves_port(self):
+        assert normalize_origin("https://customer.com:8443") == "https://customer.com:8443"
+
+
+class TestParseAllowedOrigins:
+    def test_empty_returns_empty_tuple(self):
+        assert parse_allowed_origins("") == ()
+
+    def test_splits_csv_and_normalises(self):
+        result = parse_allowed_origins(
+            "HTTPS://A.com/, https://b.com:8080 ,HTTP://C.COM"
+        )
+        assert result == (
+            "https://a.com",
+            "https://b.com:8080",
+            "http://c.com",
+        )
+
+    def test_drops_empty_entries(self):
+        """Trailing or doubled commas don't admit blank origins."""
+        assert parse_allowed_origins("https://a.com,,") == ("https://a.com",)
+
+
 # ---------------------------------------------------------------------------
 # CSRF double-submit
 # ---------------------------------------------------------------------------
@@ -146,7 +185,6 @@ class TestWebsiteSessionToken:
         return {
             "session_id": uuid.uuid4(),
             "org_id": uuid.uuid4(),
-            "agent_id": uuid.uuid4(),
             "origin": "https://customer.com",
             "csrf_token": generate_csrf_token(),
         }
@@ -156,7 +194,6 @@ class TestWebsiteSessionToken:
         decoded = decode_website_session_token(token)
         assert decoded.session_id == claims_input["session_id"]
         assert decoded.org_id == claims_input["org_id"]
-        assert decoded.agent_id == claims_input["agent_id"]
         assert decoded.origin == claims_input["origin"]
         assert decoded.csrf_token == claims_input["csrf_token"]
         assert decoded.expires_at > decoded.issued_at

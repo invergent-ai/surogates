@@ -227,7 +227,20 @@ async def run_worker(settings: Settings) -> None:
             service_account_id=session.service_account_id,
         )
 
-        model_id = settings.llm.model or "gpt-4o"
+        if not settings.llm.model:
+            # Worker raises rather than returns a 503 because there's no
+            # HTTP response surface here.  ``dispatcher._process``
+            # catches and emits ``HARNESS_CRASH`` events; after 3 retries
+            # with exponential backoff the dispatcher promotes the
+            # session to ``SESSION_FAIL``.  A deployment that
+            # legitimately leaves ``llm.model`` blank therefore burns
+            # ~7s + log noise per session — operators should fix the
+            # config rather than rely on the retry loop.
+            raise RuntimeError(
+                f"LLM model is not configured (settings.llm.model is empty); "
+                f"cannot wake session {session.id}."
+            )
+        model_id = settings.llm.model
         budget = IterationBudget(max_total=90)
         compressor = ContextCompressor(
             model_id,

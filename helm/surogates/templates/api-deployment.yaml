@@ -147,6 +147,23 @@ spec:
             - name: SUROGATES_LLM_MAX_TOKENS
               value: {{ .Values.llm.maxTokens | quote }}
             {{- end }}
+            {{- if .Values.channels.website.enabled }}
+            # Website channel runs in-process on the API server (it's a
+            # FastAPI router, not a separate adapter pod), so the website
+            # env vars are injected here rather than into a dedicated
+            # channel deployment.
+            - name: SUROGATES_WEBSITE_ENABLED
+              value: "true"
+            - name: SUROGATES_WEBSITE_PUBLISHABLE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-website
+                  key: publishable-key
+            - name: SUROGATES_WEBSITE_ALLOWED_ORIGINS
+              value: {{ .Values.channels.website.allowedOrigins | quote }}
+            - name: SUROGATES_WEBSITE_SESSION_MESSAGE_CAP
+              value: {{ .Values.channels.website.sessionMessageCap | quote }}
+            {{- end }}
             {{- range $key, $value := .Values.extraEnv }}
             - name: {{ $key }}
               value: {{ $value | quote }}
