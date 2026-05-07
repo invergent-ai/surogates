@@ -17,13 +17,17 @@ import { Badge } from "../ui/badge";
 import { cn } from "../../lib/utils";
 import type {
   AgentChatAdapter,
+  AgentChatSession,
   AgentChatSessionTreeNode,
 } from "../../types";
 
 export interface SessionTreePanelProps {
   adapter: AgentChatAdapter;
-  sessionId: string;
+  sessionId?: string | null;
   activeSessionId?: string;
+  agentId?: string;
+  title?: string;
+  sessionListLimit?: number;
   /** Treat the root as hidden, so its children appear as top-level rows. */
   hideRoot?: boolean;
   onSessionSelect?: (sessionId: string) => void;
@@ -39,6 +43,7 @@ interface TreeEntry extends AgentChatSessionTreeNode {
 // charging the user 15 req/min for a frozen tree.
 const POLL_INTERVAL_ACTIVE_MS = 4000;
 const POLL_INTERVAL_IDLE_MS = 30000;
+const DEFAULT_SESSION_LIST_LIMIT = 50;
 
 function buildTree(nodes: AgentChatSessionTreeNode[]): TreeEntry[] {
   const byId = new Map<string, TreeEntry>();
@@ -75,6 +80,50 @@ function treeFingerprint(nodes: AgentChatSessionTreeNode[]): string {
         }:${n.toolCallCount ?? 0}:${n.updatedAt}`,
     )
     .join("|");
+}
+
+function sessionToTreeNode(session: AgentChatSession): AgentChatSessionTreeNode {
+  const timestamp = session.updatedAt ?? session.createdAt ?? "";
+  return {
+    id: session.id,
+    parentId: session.parentId ?? null,
+    agentId: session.agentId,
+    channel: session.channel,
+    status: session.status,
+    title: session.title,
+    model: session.model,
+    messageCount: session.messageCount,
+    toolCallCount: session.toolCallCount,
+    createdAt: session.createdAt ?? timestamp,
+    updatedAt: session.updatedAt ?? timestamp,
+  };
+}
+
+function mergeNodeFields(
+  current: AgentChatSessionTreeNode,
+  next: AgentChatSessionTreeNode,
+): AgentChatSessionTreeNode {
+  return {
+    ...current,
+    ...Object.fromEntries(
+      Object.entries(next).filter(([, value]) => value !== undefined),
+    ),
+    messageCount: next.messageCount ?? current.messageCount,
+    toolCallCount: next.toolCallCount ?? current.toolCallCount,
+  } as AgentChatSessionTreeNode;
+}
+
+function mergeTreeNodes(
+  groups: AgentChatSessionTreeNode[][],
+): AgentChatSessionTreeNode[] {
+  const byId = new Map<string, AgentChatSessionTreeNode>();
+  for (const group of groups) {
+    for (const node of group) {
+      const current = byId.get(node.id);
+      byId.set(node.id, current ? mergeNodeFields(current, node) : node);
+    }
+  }
+  return Array.from(byId.values());
 }
 
 function statusColor(
@@ -211,8 +260,11 @@ function TreeNodeRow({
 
 export function SessionTreePanel({
   adapter,
-  sessionId,
-  activeSessionId = sessionId,
+  sessionId = null,
+  activeSessionId = sessionId ?? undefined,
+  agentId,
+  title = "Running",
+  sessionListLimit = DEFAULT_SESSION_LIST_LIMIT,
   hideRoot = false,
   onSessionSelect,
 }: SessionTreePanelProps) {
@@ -233,7 +285,9 @@ export function SessionTreePanel({
 
   const refetch = useCallback(
     async (opts?: { silent?: boolean }) => {
-      if (!adapter.getSessionTree) {
+      const canLoadSessionList = Boolean(agentId && adapter.listSessions);
+      const canLoadSessionTree = Boolean(sessionId && adapter.getSessionTree);
+      if (!canLoadSessionList && !canLoadSessionTree) {
         setNodes([]);
         setHasEverLoaded(true);
         setLoading(false);
@@ -242,12 +296,30 @@ export function SessionTreePanel({
       const currentRequestId = ++requestId.current;
       if (!opts?.silent) setLoading(true);
       try {
-        const res = await adapter.getSessionTree({ sessionId });
+        const sessionListPromise =
+          agentId && adapter.listSessions
+            ? adapter.listSessions({
+                agentId,
+                limit: sessionListLimit,
+              })
+            : Promise.resolve(null);
+        const sessionTreePromise =
+          sessionId && adapter.getSessionTree
+            ? adapter.getSessionTree({ sessionId })
+            : Promise.resolve(null);
+        const [sessionList, sessionTree] = await Promise.all([
+          sessionListPromise,
+          sessionTreePromise,
+        ]);
         if (!mounted.current || currentRequestId !== requestId.current) return;
-        const fp = treeFingerprint(res.nodes);
+        const nextNodes = mergeTreeNodes([
+          sessionList?.sessions.map(sessionToTreeNode) ?? [],
+          sessionTree?.nodes ?? [],
+        ]);
+        const fp = treeFingerprint(nextNodes);
         if (fp !== lastFingerprint.current) {
           lastFingerprint.current = fp;
-          setNodes(res.nodes);
+          setNodes(nextNodes);
         }
         setError(null);
         setHasEverLoaded(true);
@@ -265,7 +337,7 @@ export function SessionTreePanel({
         }
       }
     },
-    [adapter, sessionId],
+    [adapter, agentId, sessionId, sessionListLimit],
   );
 
   // Mount / unmount flag for the component lifetime.
@@ -325,16 +397,18 @@ export function SessionTreePanel({
   // Hide the panel until the first fetch has completed so we don't
   // flash an empty "Loading..." header for sessions with no sub-agents.
   if (!hasEverLoaded) return null;
-  if (nodes.length <= 1) return null;
+  if (nodes.length === 0) return null;
 
-  const topLevel: TreeEntry[] = hideRoot ? roots.flatMap((r) => r.children) : roots;
+  const topLevel: TreeEntry[] = hideRoot
+    ? roots.flatMap((r) => r.children)
+    : roots;
   if (topLevel.length === 0) return null;
 
   return (
     <div className="border-t border-line">
       <div className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-faint">
         <UsersIcon className="w-3.5 h-3.5" />
-        <span>Running</span>
+        <span>{title}</span>
         {runningCount > 0 && (
           <Badge variant="default" className="h-4 px-1.5 text-[10px] ml-auto">
             {runningCount}
@@ -354,7 +428,7 @@ export function SessionTreePanel({
               key={entry.id}
               entry={entry}
               depth={0}
-              activeSessionId={activeSessionId}
+              activeSessionId={activeSessionId ?? ""}
               canStop={Boolean(adapter.stopSession)}
               onSelect={handleSelect}
               onStop={handleStop}
