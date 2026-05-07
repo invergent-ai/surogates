@@ -1,0 +1,45 @@
+{
+  "name": "@invergent/example-chat-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Runnable example app for @invergent/agent-chat-react with an OpenAI-compatible streaming chat backend.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n server,web \"pnpm dev:server\" \"vite --host 0.0.0.0\"",
+    "dev:server": "tsx watch src/server/index.ts",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fontsource-variable/noto-sans": "^5.2.10",
+    "@invergent/agent-chat-react": "workspace:*",
+    "@tailwindcss/vite": "^4.2.2",
+    "concurrently": "^9.2.1",
+    "express": "^5.2.1",
+    "lucide-react": "^1.8.0",
+    "multer": "^2.0.2",
+    "nanoid": "^5.1.7",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tailwindcss": "^4.2.1",
+    "tsx": "^4.21.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/multer": "^2.0.0",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.5",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "happy-dom": "^15.11.0",
+    "typescript": "~5.9.3",
+    "vite": "^8.0.1",
+    "vitest": "^2.1.8"
+  }
+}
