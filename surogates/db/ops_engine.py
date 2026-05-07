@@ -38,8 +38,8 @@ _session_factory: Optional[async_sessionmaker[AsyncSession]] = None
 def init_ops_engine(
     url: str,
     *,
-    pool_size: int = 5,
-    pool_overflow: int = 5,
+    pool_size: int = 2,
+    pool_overflow: int = 2,
 ) -> async_sessionmaker[AsyncSession]:
     """Initialize the ops DB engine + session factory once per process.
 
