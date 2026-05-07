@@ -32,7 +32,6 @@ jobs:
           path: dist/*
 
   images:
-    needs: npm
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
