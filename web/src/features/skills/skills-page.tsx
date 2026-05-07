@@ -13,6 +13,7 @@ import {
   SparklesIcon,
   TrashIcon,
 } from "lucide-react";
+import { MessageResponse } from "@invergent/agent-chat-react";
 import { toast } from "sonner";
 import {
   createSkill,
@@ -32,7 +33,6 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { SessionSidebar } from "@/components/navbar";
-import { MessageResponse } from "@/components/ai-elements/message";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
   InputGroup,

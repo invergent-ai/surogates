@@ -20,6 +20,7 @@ import {
   TrashIcon,
   UsersIcon,
 } from "lucide-react";
+import { MessageResponse } from "@invergent/agent-chat-react";
 import { toast } from "sonner";
 
 import {
@@ -58,7 +59,6 @@ import {
 } from "@/components/ui/input-group";
 import { Textarea } from "@/components/ui/textarea";
 import { SessionSidebar } from "@/components/navbar";
-import { MessageResponse } from "@/components/ai-elements/message";
 
 const SOURCE_LABELS: Record<AgentSource, string> = {
   platform: "Built-in",
