@@ -60,6 +60,33 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     await sessionsApi.deleteSession(input.sessionId);
   },
 
+  async getSessionTree(input) {
+    const response = await sessionsApi.getSessionTree(input.sessionId);
+    return {
+      total: response.total,
+      nodes: response.nodes.map((node) => ({
+        id: node.id,
+        parentId: node.parent_id,
+        rootSessionId: node.root_session_id,
+        depth: node.depth,
+        agentId: node.agent_id,
+        agentType: node.agent_type,
+        channel: node.channel,
+        status: node.status,
+        title: node.title,
+        model: node.model,
+        messageCount: node.message_count,
+        toolCallCount: node.tool_call_count,
+        createdAt: node.created_at,
+        updatedAt: node.updated_at,
+      })),
+    };
+  },
+
+  async stopSession(input) {
+    await sessionsApi.stopSession(input.sessionId);
+  },
+
   async getArtifact(input) {
     return await getArtifact(input.sessionId, input.artifactId);
   },

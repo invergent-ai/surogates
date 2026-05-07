@@ -7,27 +7,29 @@
 // the user open or stop each child.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
 import {
   ChevronDownIcon,
   ChevronRightIcon,
   SquareIcon,
   UsersIcon,
 } from "lucide-react";
-import { toast } from "sonner";
+import { Badge } from "../ui/badge";
+import { cn } from "../../lib/utils";
+import type {
+  AgentChatAdapter,
+  AgentChatSessionTreeNode,
+} from "../../types";
 
-import { getSessionTree, stopSession } from "@/api/sessions";
-import type { SessionTreeNode } from "@/types/session";
-import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
-
-interface SessionTreePanelProps {
+export interface SessionTreePanelProps {
+  adapter: AgentChatAdapter;
   sessionId: string;
+  activeSessionId?: string;
   /** Treat the root as hidden, so its children appear as top-level rows. */
   hideRoot?: boolean;
+  onSessionSelect?: (sessionId: string) => void;
 }
 
-interface TreeEntry extends SessionTreeNode {
+interface TreeEntry extends AgentChatSessionTreeNode {
   children: TreeEntry[];
 }
 
@@ -38,12 +40,12 @@ interface TreeEntry extends SessionTreeNode {
 const POLL_INTERVAL_ACTIVE_MS = 4000;
 const POLL_INTERVAL_IDLE_MS = 30000;
 
-function buildTree(nodes: SessionTreeNode[]): TreeEntry[] {
+function buildTree(nodes: AgentChatSessionTreeNode[]): TreeEntry[] {
   const byId = new Map<string, TreeEntry>();
   for (const n of nodes) byId.set(n.id, { ...n, children: [] });
   const roots: TreeEntry[] = [];
   for (const n of byId.values()) {
-    const parent = n.parent_id ? byId.get(n.parent_id) : undefined;
+    const parent = n.parentId ? byId.get(n.parentId) : undefined;
     if (parent) {
       parent.children.push(n);
     } else {
@@ -54,29 +56,29 @@ function buildTree(nodes: SessionTreeNode[]): TreeEntry[] {
     // ISO-8601 timestamps sort lexicographically; plain string compare
     // is ~10x faster than localeCompare and poll frequency keeps this
     // on the hot path for large trees.
-    e.children.sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
+    e.children.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
     for (const c of e.children) sortRec(c);
   };
   for (const r of roots) sortRec(r);
   return roots;
 }
 
-function treeFingerprint(nodes: SessionTreeNode[]): string {
+function treeFingerprint(nodes: AgentChatSessionTreeNode[]): string {
   // Cheap signature: only the fields that affect rendering.  If the
   // server returns structurally-identical data, skip the setState and
   // the entire rebuild / re-render cascade.
   return nodes
     .map(
       (n) =>
-        `${n.id}:${n.parent_id ?? ""}:${n.status}:${n.agent_type ?? ""}:${
-          n.message_count
-        }:${n.tool_call_count}:${n.updated_at}`,
+        `${n.id}:${n.parentId ?? ""}:${n.status}:${n.agentType ?? ""}:${
+          n.messageCount ?? 0
+        }:${n.toolCallCount ?? 0}:${n.updatedAt}`,
     )
     .join("|");
 }
 
 function statusColor(
-  status: SessionTreeNode["status"],
+  status: AgentChatSessionTreeNode["status"],
 ): "default" | "secondary" | "destructive" | "outline" {
   switch (status) {
     case "active":
@@ -94,12 +96,14 @@ function TreeNodeRow({
   entry,
   depth,
   activeSessionId,
+  canStop,
   onSelect,
   onStop,
 }: {
   entry: TreeEntry;
   depth: number;
   activeSessionId: string;
+  canStop: boolean;
   onSelect: (sessionId: string) => void;
   onStop: (sessionId: string) => void;
 }) {
@@ -107,6 +111,8 @@ function TreeNodeRow({
   const hasChildren = entry.children.length > 0;
   const isActive = entry.id === activeSessionId;
   const isRunning = entry.status === "active";
+  const messageCount = entry.messageCount ?? 0;
+  const toolCallCount = entry.toolCallCount ?? 0;
 
   return (
     <>
@@ -153,9 +159,9 @@ function TreeNodeRow({
           <span className="truncate">
             {entry.title ?? entry.channel ?? "session"}
           </span>
-          {entry.agent_type && (
+          {entry.agentType && (
             <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
-              {entry.agent_type}
+              {entry.agentType}
             </Badge>
           )}
           <Badge
@@ -167,12 +173,12 @@ function TreeNodeRow({
         </div>
         <span
           className="text-xs text-faint shrink-0 tabular-nums"
-          aria-label={`${entry.message_count} messages, ${entry.tool_call_count} tool calls`}
-          title={`${entry.message_count} messages, ${entry.tool_call_count} tool calls`}
+          aria-label={`${messageCount} messages, ${toolCallCount} tool calls`}
+          title={`${messageCount} messages, ${toolCallCount} tool calls`}
         >
-          {entry.message_count}m·{entry.tool_call_count}t
+          {messageCount}m/{toolCallCount}t
         </span>
-        {isRunning && (
+        {isRunning && canStop && (
           <button
             type="button"
             className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive transition-all"
@@ -194,6 +200,7 @@ function TreeNodeRow({
             entry={child}
             depth={depth + 1}
             activeSessionId={activeSessionId}
+            canStop={canStop}
             onSelect={onSelect}
             onStop={onStop}
           />
@@ -203,20 +210,22 @@ function TreeNodeRow({
 }
 
 export function SessionTreePanel({
+  adapter,
   sessionId,
+  activeSessionId = sessionId,
   hideRoot = false,
+  onSessionSelect,
 }: SessionTreePanelProps) {
-  const navigate = useNavigate();
-  const [nodes, setNodes] = useState<SessionTreeNode[]>([]);
+  const [nodes, setNodes] = useState<AgentChatSessionTreeNode[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasEverLoaded, setHasEverLoaded] = useState(false);
 
-  // ``active`` guards async setters from firing after unmount or after
-  // the effect tears down on ``sessionId`` change.  The closure-captured
-  // ``cancelled`` flag in older revisions didn't protect in-flight
-  // fetches because the flag lived on the callback, not on a ref.
+  // Guard async setters from firing after unmount.
   const mounted = useRef(true);
+  // Monotonic fetch id. If a route change or newer poll starts while an
+  // older request is in flight, only the newest response may update state.
+  const requestId = useRef(0);
   // Previous payload fingerprint -- skip setState when unchanged so we
   // don't rebuild the tree and re-render every row on every poll of a
   // frozen session.
@@ -224,19 +233,26 @@ export function SessionTreePanel({
 
   const refetch = useCallback(
     async (opts?: { silent?: boolean }) => {
+      if (!adapter.getSessionTree) {
+        setNodes([]);
+        setHasEverLoaded(true);
+        setLoading(false);
+        return;
+      }
+      const currentRequestId = ++requestId.current;
       if (!opts?.silent) setLoading(true);
       try {
-        const res = await getSessionTree(sessionId);
-        if (!mounted.current) return;
+        const res = await adapter.getSessionTree({ sessionId });
+        if (!mounted.current || currentRequestId !== requestId.current) return;
         const fp = treeFingerprint(res.nodes);
         if (fp !== lastFingerprint.current) {
           lastFingerprint.current = fp;
           setNodes(res.nodes);
         }
-        if (error !== null) setError(null);
-        if (!hasEverLoaded) setHasEverLoaded(true);
+        setError(null);
+        setHasEverLoaded(true);
       } catch (e) {
-        if (!mounted.current) return;
+        if (!mounted.current || currentRequestId !== requestId.current) return;
         // Silent polls must not clobber the last-known-good view --
         // one transient failure would otherwise flip the panel to a
         // red error block until the next successful poll.
@@ -244,15 +260,15 @@ export function SessionTreePanel({
           setError(e instanceof Error ? e.message : "Failed to load tree");
         }
       } finally {
-        if (mounted.current && !opts?.silent) setLoading(false);
+        if (mounted.current && currentRequestId === requestId.current && !opts?.silent) {
+          setLoading(false);
+        }
       }
     },
-    [sessionId, error, hasEverLoaded],
+    [adapter, sessionId],
   );
 
-  // Mount / unmount flag for the component lifetime.  Reset on
-  // ``sessionId`` change so the fresh effect run sees ``mounted.current
-  // === true`` after the cleanup above.
+  // Mount / unmount flag for the component lifetime.
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -261,8 +277,12 @@ export function SessionTreePanel({
   }, []);
 
   useEffect(() => {
+    setNodes([]);
+    setError(null);
+    setHasEverLoaded(false);
+    lastFingerprint.current = "";
     void refetch();
-  }, [refetch]);
+  }, [refetch, sessionId]);
 
   // Adaptive polling: 4s while any child is running, 30s when every
   // child has settled.  Pulling the interval from ``nodes`` lets the
@@ -284,26 +304,26 @@ export function SessionTreePanel({
 
   const handleSelect = useCallback(
     (id: string) => {
-      void navigate({ to: "/chat/$sessionId", params: { sessionId: id } });
+      onSessionSelect?.(id);
     },
-    [navigate],
+    [onSessionSelect],
   );
 
   const handleStop = useCallback(
     async (id: string) => {
+      if (!adapter.stopSession) return;
       try {
-        await stopSession(id);
-        toast.success("Sub-agent stopped.");
+        await adapter.stopSession({ sessionId: id });
         await refetch({ silent: true });
       } catch (e) {
-        toast.error(e instanceof Error ? e.message : "Failed to stop sub-agent");
+        setError(e instanceof Error ? e.message : "Failed to stop sub-agent");
       }
     },
-    [refetch],
+    [adapter, refetch],
   );
 
   // Hide the panel until the first fetch has completed so we don't
-  // flash an empty "Loading…" header for sessions with no sub-agents.
+  // flash an empty "Loading..." header for sessions with no sub-agents.
   if (!hasEverLoaded) return null;
   if (nodes.length <= 1) return null;
 
@@ -322,7 +342,7 @@ export function SessionTreePanel({
         )}
       </div>
       {loading && (
-        <div className="px-3 py-2 text-xs text-faint">Loading…</div>
+        <div className="px-3 py-2 text-xs text-faint">Loading...</div>
       )}
       {error && (
         <div className="px-3 py-2 text-xs text-destructive">{error}</div>
@@ -334,7 +354,8 @@ export function SessionTreePanel({
               key={entry.id}
               entry={entry}
               depth={0}
-              activeSessionId={sessionId}
+              activeSessionId={activeSessionId}
+              canStop={Boolean(adapter.stopSession)}
               onSelect={handleSelect}
               onStop={handleStop}
             />

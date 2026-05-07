@@ -5,9 +5,11 @@ export {
 } from "./adapter-context";
 export { useAgentChatRuntime } from "./runtime/use-agent-chat-runtime";
 export { MessageResponse } from "./components/ai-elements/message";
+export { SessionTreePanel } from "./components/sessions/session-tree-panel";
 export type { AgentChatProps } from "./agent-chat";
 export type { AgentChatAdapterContextValue } from "./adapter-context";
 export type { MessageResponseProps } from "./components/ai-elements/message";
+export type { SessionTreePanelProps } from "./components/sessions/session-tree-panel";
 export type {
   AgentChatAdapter,
   AgentChatArtifactMeta,
@@ -32,6 +34,8 @@ export type {
   AgentChatRole,
   AgentChatSession,
   AgentChatSessionList,
+  AgentChatSessionTree,
+  AgentChatSessionTreeNode,
   AgentChatSlashCommand,
   AgentChatSseMessageEvent,
   AgentChatState,
@@ -45,6 +49,8 @@ export type {
   AgentChatWorkspaceTree,
   AgentChatWorkspaceUpload,
   ChatMessage,
+  SessionTree,
+  SessionTreeNode,
   ToolCallInfo,
   TokenUsage,
   RetryIndicator,
