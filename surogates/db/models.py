@@ -506,11 +506,12 @@ class Credential(Base):
 
 
 class Skill(Base):
-    """Skill definition -- prompt-based (type='skill') or SLM-backed (type='expert').
+    """Skill definition -- prompt-based (type='skill') or model-backed (type='expert').
 
-    Expert skills delegate to a fine-tuned small language model via the
-    ``consult_expert`` tool.  The ``expert_*`` columns are only meaningful
-    when ``type == 'expert'``.
+    Expert skills configure task-specialized reasoning models. The
+    harness can route matching hard tasks using the skill trigger, and
+    the base LLM can delegate explicitly via ``consult_expert``. The
+    ``expert_*`` columns are only meaningful when ``type == 'expert'``.
     """
 
     __tablename__ = "skills"
@@ -731,5 +732,3 @@ class McpServer(Base):
     user: Mapped[Optional[User]] = relationship(
         back_populates="mcp_servers", lazy="raise"
     )
-
-

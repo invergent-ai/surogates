@@ -149,6 +149,8 @@ The flush is a mini agent loop, not a simple file copy:
 
 The training collector extracts successful conversation trajectories from the event log and writes them as JSONL files to the tenant's Garage bucket.
 
+The exported trajectories can be used for fine-tuning, LoRA/adapter training, evaluation datasets, or prompt/config updates. The collector does not decide which training method the organization uses.
+
 ### What It Does
 
 ```
@@ -163,7 +165,7 @@ The training collector extracts successful conversation trajectories from the ev
 Sessions from every channel (web, Slack, Telegram, API) are considered
 training candidates.  Synthetic-data pipelines that submit prompts via
 `POST /v1/api/prompts` feed successful trajectories back into expert
-fine-tuning exactly like human-driven sessions.
+training exactly like human-driven sessions.
 
 ### Usage
 
@@ -177,6 +179,6 @@ uv run python -m surogates.jobs.training_collector --expert-id <uuid> --since 20
 
 ### Important Boundary
 
-The platform's responsibility ends at the JSONL file. Training, fine-tuning, evaluation, and model hosting are the organization's concern. The platform exports data; the org trains the model; the org registers the resulting endpoint back in the expert's `SKILL.md`.
+The platform's responsibility ends at the JSONL file. Training strategy, fine-tuning, evaluation, prompt/config changes, and model hosting are the organization's concern. The platform exports data; the org trains the expert; the org registers the resulting model, endpoint, and configuration back in the expert's `SKILL.md`.
 
-See [Experts -- Training Data Export](../experts/index.md#training-data-export) for details on the export format.
+See [Experts -- Collect Training Data](../experts/index.md#2-collect-training-data) for details on the export format.

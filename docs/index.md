@@ -77,10 +77,10 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - Web UI library page and REST API reference
 
 ### [10. Experts](experts/index.md)
-- What is an expert? (fine-tuned SLM as a skill)
+- What is an expert? (task-specialized model as a skill)
 - Define an expert (`SKILL.md` with type: expert)
 - Collect training data from the event log
-- Train the model externally (OpenAI, Unsloth, Axolotl, vLLM)
+- Train the expert externally (fine-tuning, adapters, prompt/config updates)
 - Activate, verify, monitor, and retrain
 - Mini agent loop (scoped tools, bounded iterations)
 - Feedback tracking and auto-disable

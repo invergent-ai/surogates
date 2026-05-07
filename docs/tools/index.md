@@ -152,7 +152,7 @@ Do **not** use this tool for simple yes/no confirmation of dangerous commands â€
 
 ### `consult_expert` -- Expert Delegation
 
-Delegate a subtask to a fine-tuned SLM expert. See [Experts](../experts/index.md).
+Delegate a subtask to a configured task-specialized expert model. The `expert` value must be one of the active expert names listed in the system prompt's `# Available Experts` section. See [Experts](../experts/index.md).
 
 | Parameter | Type | Description |
 |---|---|---|

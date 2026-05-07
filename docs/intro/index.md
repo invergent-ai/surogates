@@ -41,7 +41,7 @@ Each component can fail or be replaced independently. The session log (an append
 | **Sandbox** | An isolated execution environment where the LLM's generated code runs. In development, this is a subprocess in a temp directory. In production, it is a dedicated K8s pod with an s3fs-fuse workspace mount. |
 | **Tenant** | An organization (org) and its users. Each org has its own skills, memory, MCP servers, credentials, and policies. Tenant isolation is enforced at every layer. |
 | **Skill** | A reusable prompt-based behavior defined in a `SKILL.md` file. Skills are loaded from three layers (platform > org > user) with last-wins precedence. |
-| **Expert** | A skill backed by a fine-tuned small language model (SLM) instead of a prompt template. Experts run scoped mini-loops with restricted tool access. |
+| **Expert** | A skill-defined, task-specialized reasoning model. Experts run scoped mini-loops with restricted tool access and can be selected by hard-task category. |
 | **Tool** | A capability the agent can invoke. Tools are either harness-local (memory, web search, skills) or sandbox-bound (terminal, file operations, code execution). Every tool call passes through governance before execution. |
 | **Saga** | A tracked sequence of tool calls with automatic rollback. When a step fails, previously completed steps are compensated in reverse order -- builtin tools via filesystem checkpoints, MCP tools via declared undo operations. |
 | **Lease** | An exclusive lock on a session. Only one worker can run a session's harness at a time. Leases have TTLs and are renewed during processing. If a worker crashes, the lease expires and another worker picks up. |

@@ -4,7 +4,7 @@
 
 A sub-agent is a **declarative, reusable agent type** — a preset bundle of (system prompt, tool allowlist/denylist, model override, iteration cap, governance policy profile) that a coordinator session can apply to a freshly spawned child session by name.
 
-Where a [skill](../skills/index.md) is a reusable *prompt* and an [expert](../experts/index.md) is a reusable *fine-tuned model*, a sub-agent is a reusable *role*. It lets an admin say "code-reviewer" once and have every spawn inherit the same persona, tools, and governance envelope.
+Where a [skill](../skills/index.md) is a reusable *prompt* and an [expert](../experts/index.md) is a reusable *task-specialized model*, a sub-agent is a reusable *role*. It lets an admin say "code-reviewer" once and have every spawn inherit the same persona, tools, and governance envelope.
 
 ```
 Coordinator session                  Child session (sub-agent)
@@ -31,11 +31,11 @@ The base LLM always decides when to spawn. No transparent interception — the c
 | | Skill | Sub-agent | Expert |
 |---|---|---|---|
 | **Asset file** | `SKILL.md` | `AGENT.md` | `SKILL.md` (`type: expert`) |
-| **What it bundles** | Prompt | Prompt + tool filter + model + iteration cap + policy profile | Prompt + fine-tuned SLM endpoint |
+| **What it bundles** | Prompt | Prompt + tool filter + model + iteration cap + policy profile | Model + trigger + restricted tools |
 | **Runs in** | Inlined into the parent session's prompt | A new child session (full harness loop) | A bounded mini-loop the base LLM delegates to |
-| **Invoked by** | The user typing `/<name>` or the LLM noticing the trigger | The coordinator LLM calling `spawn_worker(agent_type=...)` / `delegate_task(agent_type=...)` | The base LLM calling `consult_expert(name=...)` |
+| **Invoked by** | The user typing `/<name>` or the LLM noticing the trigger | The coordinator LLM calling `spawn_worker(agent_type=...)` / `delegate_task(agent_type=...)` | Harness-enforced routing or the base LLM calling `consult_expert(name=...)` |
 | **Context isolation** | None (same session) | Full (separate event log, parent_id link) | Bounded mini-loop inside the parent session |
-| **Model** | Inherited from the session | Configurable per sub-agent | The fine-tuned SLM endpoint |
+| **Model** | Inherited from the session | Configurable per sub-agent | Configured by the expert's `model`/`base_model` field |
 | **Governance** | Tenant-wide | Tenant-wide + optional narrowing policy profile | Tenant-wide |
 
 A task suits a sub-agent when it (a) benefits from a fresh context window, (b) needs its own tool envelope, or (c) should run in parallel with the parent.

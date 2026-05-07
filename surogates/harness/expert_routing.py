@@ -107,20 +107,66 @@ def classify_tool_calls(tool_calls: list[dict]) -> HardTaskClassification:
     return HardTaskClassification(False)
 
 
-def select_expert_for_category(
+_TRIGGER_SPLIT_RE = re.compile(r"[,;\n]+")
+_WORD_RE = re.compile(r"[a-z0-9_]+", re.IGNORECASE)
+_TRIGGER_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "by", "for", "in", "of", "on", "or",
+    "the", "to", "with",
+})
+
+
+def select_expert_for_task(
     experts: Iterable[SkillDef],
-    category: str,
+    task: str,
 ) -> SkillDef | None:
-    """Select an active expert for *category*, tie-breaking by stable name order."""
-    category_lower = category.lower()
-    matches = []
+    """Select an active expert whose trigger matches *task*.
+
+    Trigger text is the expert's routing contract.  Matching is
+    deterministic: exact phrase matches score highest, token coverage
+    scores next, and ties are resolved by stable expert name order.
+    """
+    haystack = _normalise_trigger_text(task)
+    scored: list[tuple[int, str, SkillDef]] = []
     for expert in experts:
-        categories = {c.lower() for c in (expert.task_categories or [])}
-        if expert.is_active_expert and category_lower in categories:
-            matches.append(expert)
-    if not matches:
+        if not expert.is_active_expert:
+            continue
+        score = _trigger_match_score(expert.trigger or "", haystack)
+        if score > 0:
+            scored.append((score, expert.name, expert))
+    if not scored:
         return None
-    return sorted(matches, key=lambda e: e.name)[0]
+    return sorted(scored, key=lambda item: (-item[0], item[1]))[0][2]
+
+
+def _normalise_trigger_text(text: str) -> str:
+    return " ".join(_WORD_RE.findall((text or "").lower()))
+
+
+def _trigger_match_score(trigger: str, haystack: str) -> int:
+    if not trigger.strip() or not haystack:
+        return 0
+
+    haystack_tokens = set(haystack.split())
+    best = 0
+    for raw_phrase in _TRIGGER_SPLIT_RE.split(trigger):
+        phrase = _normalise_trigger_text(raw_phrase)
+        if not phrase:
+            continue
+        if phrase in haystack:
+            best = max(best, 100 + len(phrase.split()))
+            continue
+        phrase_tokens = [
+            token for token in phrase.split()
+            if token not in _TRIGGER_STOPWORDS
+        ]
+        if not phrase_tokens:
+            continue
+        overlap = sum(1 for token in phrase_tokens if token in haystack_tokens)
+        if overlap == len(phrase_tokens):
+            best = max(best, 50 + overlap)
+        elif overlap > 0 and len(phrase_tokens) > 1:
+            best = max(best, overlap)
+    return best
 
 
 async def load_skills_for_expert_routing(

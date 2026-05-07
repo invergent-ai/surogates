@@ -283,8 +283,8 @@ class TrainingDataCollector:
     ) -> list[TrainingExample]:
         """Bootstrap-path: extract trajectories from ``skill.invoked`` events.
 
-        Graduates a prompt-based skill into a fine-tuned SLM (an
-        "expert") by walking every ``skill.invoked`` in *org_id* for
+        Bootstraps a task-specialized expert from a prompt-based skill by
+        walking every ``skill.invoked`` in *org_id* for
         *skill_name*, collecting the base LLM's reply span (assistant
         turns, tool calls, tool results) up to the next trajectory
         boundary (next user message, next skill invocation, or session

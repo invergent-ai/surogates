@@ -1,4 +1,4 @@
-"""Tests for the Experts feature -- fine-tuned SLMs as skills.
+"""Tests for the Experts feature -- task-specialized models as skills.
 
 Covers:
 - SkillDef expert field extensions
@@ -148,16 +148,16 @@ class TestExpertFrontmatterParsing:
         parsed = _parse_skill_frontmatter(text, "fallback")
         assert parsed["expert_model"] == "new-model"
 
-    def test_parse_expert_task_categories(self):
+    def test_parse_expert_trigger_list(self):
         text = (
             "---\nname: code_expert\n"
             "description: Handles coding tasks\n"
             "type: expert\n"
-            "task_categories: [coding, debugging, terminal]\n"
+            "trigger: [coding, debugging, terminal commands]\n"
             "---\nBody\n"
         )
         parsed = _parse_skill_frontmatter(text, "fallback")
-        assert parsed["task_categories"] == ["coding", "debugging", "terminal"]
+        assert parsed["trigger"] == "coding, debugging, terminal commands"
 
     def test_parse_expert_tools_list(self):
         text = (
@@ -261,7 +261,6 @@ class TestResourceLoaderExperts:
         assert s.expert_tools == ["terminal", "read_file"]
         assert s.expert_max_iterations == 15
         assert s.expert_status == "active"
-        assert s.task_categories == []
         assert "Expert instructions here." in s.content
 
     def test_mixed_skills_and_experts(self, tmp_path: Path):
@@ -746,6 +745,7 @@ class TestPromptBuilderExpertGuidance:
                 "description": "Writes SQL",
                 "type": "expert",
                 "expert_tools": ["terminal"],
+                "trigger": "SQL queries, database schemas",
                 "expert_stats": {"total_uses": 100, "total_successes": 94},
             },
         ]
@@ -762,6 +762,9 @@ class TestPromptBuilderExpertGuidance:
         assert "code-review" in section
         assert "sql_writer" in section
         assert "consult_expert" in section
+        assert "voluntary delegation" in section
+        assert "Harness-enforced expert routing uses expert triggers automatically" in section
+        assert "Trigger: SQL queries, database schemas" in section
         assert "94%" in section
         assert "terminal" in section
 
@@ -777,6 +780,7 @@ class TestPromptBuilderExpertGuidance:
                 type="expert",
                 expert_tools=["terminal"],
                 expert_status="active",
+                trigger="coding, debugging",
             ),
         ]
 
@@ -785,6 +789,72 @@ class TestPromptBuilderExpertGuidance:
 
         assert "# Available Experts" in section
         assert "my-expert" in section
+        assert "Trigger: coding, debugging" in section
+
+
+class TestWorkerExpertCatalogWiring:
+    """Worker prompt setup loads skills so available experts reach PromptBuilder."""
+
+    @pytest.mark.asyncio
+    async def test_load_prompt_catalogs_returns_agents_and_skills(self, monkeypatch):
+        from surogates.orchestrator import worker as worker_mod
+
+        loaded_agents = [SimpleNamespace(name="assistant")]
+        loaded_skills = [
+            SkillDef(
+                name="code_expert",
+                description="Handles code",
+                content="body",
+                source="org",
+                type="expert",
+                expert_status=EXPERT_STATUS_ACTIVE,
+                trigger="coding",
+            )
+        ]
+        init_kwargs = {}
+
+        class FakeResourceLoader:
+            def __init__(self, **kwargs):
+                init_kwargs.update(kwargs)
+
+            async def load_agents(self, tenant, db_session=None):
+                assert db_session == "db-session"
+                return loaded_agents
+
+            async def load_skills(self, tenant, db_session=None):
+                assert db_session == "db-session"
+                return loaded_skills
+
+        class FakeSessionFactory:
+            def __call__(self):
+                return self
+
+            async def __aenter__(self):
+                return "db-session"
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        monkeypatch.setattr(worker_mod, "ResourceLoader", FakeResourceLoader)
+
+        tenant = SimpleNamespace(org_id=uuid4())
+        settings = SimpleNamespace(
+            platform_agents_dir="/agents",
+            platform_skills_dir="/skills",
+        )
+
+        agents, skills = await worker_mod._load_prompt_catalogs(
+            settings=settings,
+            tenant=tenant,
+            session_factory=FakeSessionFactory(),
+        )
+
+        assert init_kwargs == {
+            "platform_agents_dir": "/agents",
+            "platform_skills_dir": "/skills",
+        }
+        assert agents == loaded_agents
+        assert skills == loaded_skills
 
 
 # =========================================================================

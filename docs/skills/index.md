@@ -36,7 +36,7 @@ You are a code reviewer. When asked to review code:
 |---|---|---|---|
 | `name` | string | yes | Unique skill name (lowercase, alphanumeric + hyphens) |
 | `description` | string | yes | Human-readable description |
-| `trigger` | string/list | no | Comma-separated keywords or phrases that activate the skill |
+| `trigger` | string/list | no | Comma-separated keywords or phrases that activate a prompt-based skill or select an expert for routing |
 | `tools` | list | no | Tools the skill uses (for progressive disclosure) |
 | `type` | string | no | `skill` (default) or `expert` (see [Experts](../experts/index.md)) |
 | `tags` | list | no | Metadata tags for categorisation and discovery |
@@ -45,6 +45,8 @@ You are a code reviewer. When asked to review code:
 | `fallback_for_tools` | list | no | Only activate when **any** listed tool is unavailable |
 
 The body text after the frontmatter is the skill's prompt content. It is injected into the system prompt or provided as context when the skill is activated.
+
+For `type: expert`, the frontmatter defines a task-specialized model. Use `trigger` to describe when the harness or base LLM should select that expert.
 
 ## Conditional Activation
 
@@ -178,4 +180,3 @@ Skills are validated on create and update:
 | **Content size** | Body text must not exceed configured limit |
 | **File path** | Must be within the tenant's skill directory |
 | **Category** | Must match one of the allowed categories (if configured) |
-

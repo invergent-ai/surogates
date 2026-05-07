@@ -1,4 +1,4 @@
-"""Built-in ``consult_expert`` tool -- delegate a subtask to a fine-tuned SLM.
+"""Built-in ``consult_expert`` tool -- delegate to an expert model.
 
 The base LLM decides when to consult an expert and receives the
 expert's result back as a tool response.  The expert runs its own
@@ -26,10 +26,9 @@ logger = logging.getLogger(__name__)
 _EXPERT_SCHEMA = ToolSchema(
     name="consult_expert",
     description=(
-        "Delegate a subtask to a specialised expert model. Experts are "
-        "fine-tuned on this organisation's patterns and data. The expert "
-        "handles the subtask and returns its result. Use this when a "
-        "task falls within an available expert's specialty."
+        "Delegate a subtask to a task-specialized expert model. The "
+        "expert handles the subtask and returns its result. Use this "
+        "when a task falls within an available expert's specialty."
     ),
     parameters={
         "type": "object",

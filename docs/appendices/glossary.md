@@ -11,7 +11,7 @@
 | **Cursor** | The last fully-processed event ID for a session. Used for crash recovery -- the new worker replays events after the cursor. Also used by SSE clients to resume event streams without data loss. |
 | **Delivery Outbox** | A PostgreSQL table that acts as a durable queue for outbound messages. Channel adapters claim rows, send messages, and mark them as delivered. Redis nudges are a latency optimization, not the source of truth. |
 | **Event** | An immutable record in the session's append-only log. Events capture every interaction: user messages, LLM responses, tool calls, tool results, sandbox operations, governance decisions, lifecycle transitions. |
-| **Expert** | A skill backed by a fine-tuned small language model (SLM) instead of a prompt template. Experts run scoped mini-loops with restricted tool access. The base LLM explicitly delegates to experts via the `consult_expert` tool. |
+| **Expert** | A skill-defined, task-specialized reasoning model. Active experts run scoped mini-loops with restricted tool access. The harness can route hard tasks to matching experts automatically using skill triggers, and the base LLM can explicitly delegate via the `consult_expert` tool. |
 | **Garage** | A lightweight, S3-compatible object storage system used by Surogates for workspace files and tenant assets. One bucket per session (workspace), one bucket per tenant (skills, memory, MCP configs). |
 | **GovernanceGate** | The policy enforcement point. Wraps AGT's `PolicyEngine` to check every tool call before execution. Supports allow-lists, deny-lists, ABAC rules, and file path containment. Policies are frozen at session start. |
 | **Harness** | The agent loop that runs inside a worker. It replays events, calls the LLM, dispatches tool calls, and emits new events. The harness is stateless -- all state lives in the session log. Also called "the brain". |
@@ -27,7 +27,7 @@
 | **Session** | A conversation between a user and an agent. Backed by an append-only event log in PostgreSQL. Sessions survive crashes -- any worker can resume from the last event. |
 | **Session Source** | Metadata about where a message came from: platform, chat ID, chat type, user ID, thread ID. Used to route messages to the correct session. |
 | **Skill** | A reusable, prompt-based behavior defined in a `SKILL.md` file. Skills are loaded from three layers (platform > org > user) with last-wins precedence. |
-| **SLM** | Small Language Model. A smaller, task-specific model (typically 1-13B parameters) used as an expert. Fine-tuned on successful conversation trajectories from the platform. |
+| **SLM** | Small Language Model. Legacy term for earlier expert implementations that used smaller fine-tuned models; current experts may use any configured model id. |
 | **Sub-Agent** | A declarative agent type defined in an `AGENT.md` file. Bundles a system prompt, tool allowlist/denylist, model override, iteration cap, and governance policy profile. When a coordinator calls `spawn_worker(agent_type=<name>)`, a child session is created and the preset is applied. Loaded from four layers (platform FS > user FS > org DB > user DB). |
 | **Agent Type** | The name of a sub-agent. Stored on a child session as `session.config.agent_type` and resolved at wake time by the harness via the shared `resolve_agent_by_name` helper. |
 | **SSE** | Server-Sent Events. The protocol used by the web chat UI to receive real-time events from the API server. The browser subscribes to `/v1/sessions/{id}/events` and receives events as they are emitted. |

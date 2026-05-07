@@ -1,4 +1,4 @@
-"""Expert mini agent loop -- runs a scoped LLM loop using a fine-tuned SLM.
+"""Expert mini agent loop -- runs a scoped LLM loop using an expert model.
 
 When the base LLM calls ``consult_expert``, this module executes a
 bounded agent loop using the expert's model and endpoint.  The expert
@@ -48,7 +48,7 @@ async def run_expert_loop(
     session_id: UUID,
     session_store: Any | None = None,
 ) -> tuple[str, int]:
-    """Run a scoped agent loop using the expert's fine-tuned model.
+    """Run a scoped agent loop using the expert's configured model.
 
     Parameters
     ----------

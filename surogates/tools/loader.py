@@ -95,16 +95,18 @@ _EXPERT_FRONTMATTER_MAP: dict[str, str] = {
 class SkillDef:
     """A loaded skill definition.
 
-    When ``type`` is ``"expert"``, the skill is backed by a fine-tuned
-    small language model (SLM) instead of a prompt template.  The base
-    LLM delegates to it via the ``consult_expert`` tool.
+    When ``type`` is ``"expert"``, the skill configures a
+    task-specialized reasoning model.  The harness may consult active
+    experts automatically for matching hard tasks using the skill
+    trigger, and the base LLM can also delegate explicitly via
+    ``consult_expert``.
     """
 
     name: str
     description: str
     content: str  # The SKILL.md body (everything after the frontmatter)
     source: str  # "platform", "user", "org_db", "user_db"
-    type: str = "skill"  # "skill" (prompt-based) or "expert" (SLM-backed)
+    type: str = "skill"  # "skill" (prompt-based) or "expert" (model-backed)
     category: str | None = None  # subdirectory grouping
     tags: list[str] | None = None  # metadata tags
     # Conditional activation fields (parsed from frontmatter).
@@ -113,17 +115,16 @@ class SkillDef:
     requires_tools: list[str] | None = None  # show only when these tools ARE available
     trigger: str | None = None  # trigger description
     # Expert-specific fields (None/default for regular skills).
-    expert_model: str | None = None  # base model name (e.g. "qwen2.5-coder-7b")
+    expert_model: str | None = None  # model name (e.g. "claude-sonnet-4-6")
     expert_endpoint: str | None = None  # OpenAI-compatible inference URL
     expert_adapter: str | None = None  # LoRA adapter path in tenant storage
     expert_max_iterations: int = 10  # iteration budget for expert mini-loop
     expert_status: str = EXPERT_STATUS_DRAFT  # draft → collecting → active → retired
     expert_tools: list[str] | None = None  # tools the expert can use in its mini-loop
-    task_categories: list[str] = field(default_factory=list)  # hard-task routing categories
 
     @property
     def is_expert(self) -> bool:
-        """Return ``True`` if this skill is backed by a fine-tuned model."""
+        """Return ``True`` if this skill configures an expert model."""
         return self.type == "expert"
 
     @property
@@ -891,7 +892,6 @@ def _skill_from_db_row(row: Any, source: str) -> SkillDef:
             ),
             "expert_status": row.expert_status or EXPERT_STATUS_DRAFT,
             "expert_tools": cfg.get("expert_tools"),
-            "task_categories": cfg.get("task_categories"),
         },
         source=source,
         category=cfg.get("category"),
@@ -1083,7 +1083,6 @@ def _build_skill_def(
         expert_max_iterations=max_iter,
         expert_status=str(parsed.get("expert_status", EXPERT_STATUS_DRAFT)),
         expert_tools=parsed.get("expert_tools"),
-        task_categories=parsed.get("task_categories") or [],
     )
 
 
@@ -1156,9 +1155,12 @@ def _parse_skill_frontmatter(
 
             trigger = fm.get("trigger")
             if trigger:
-                result["trigger"] = str(trigger)
+                if isinstance(trigger, list):
+                    result["trigger"] = ", ".join(str(t).strip() for t in trigger if t)
+                else:
+                    result["trigger"] = str(trigger)
 
-            # Skill type: "skill" (default) or "expert" (SLM-backed).
+            # Skill type: "skill" (default) or "expert" (model-backed).
             skill_type = fm.get("type")
             if skill_type and str(skill_type).lower() in ("expert", "skill"):
                 result["type"] = str(skill_type).lower()
@@ -1176,17 +1178,6 @@ def _parse_skill_frontmatter(
                     result["expert_tools"] = [t.strip() for t in expert_tools.split(",")]
                 elif isinstance(expert_tools, list):
                     result["expert_tools"] = [str(t) for t in expert_tools]
-
-            task_categories = fm.get("task_categories")
-            if task_categories:
-                if isinstance(task_categories, str):
-                    result["task_categories"] = [
-                        t.strip().lower() for t in task_categories.split(",") if t.strip()
-                    ]
-                elif isinstance(task_categories, list):
-                    result["task_categories"] = [
-                        str(t).strip().lower() for t in task_categories if t
-                    ]
 
     return result
 

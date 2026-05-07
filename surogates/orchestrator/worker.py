@@ -39,6 +39,45 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+async def _load_prompt_catalogs(
+    *,
+    settings: Settings,
+    tenant: TenantContext,
+    session_factory: Any,
+) -> tuple[list[Any], list[Any]]:
+    """Load prompt-visible sub-agent and skill catalogs for a tenant."""
+    resource_loader = ResourceLoader(
+        platform_skills_dir=getattr(settings, "platform_skills_dir", None),
+        platform_agents_dir=getattr(settings, "platform_agents_dir", None),
+    )
+
+    try:
+        async with session_factory() as _db:
+            available_agents = await resource_loader.load_agents(
+                tenant, db_session=_db,
+            )
+    except Exception:
+        logger.debug(
+            "Failed to load sub-agent catalog for tenant %s",
+            tenant.org_id, exc_info=True,
+        )
+        available_agents = []
+
+    try:
+        async with session_factory() as _db:
+            available_skills = await resource_loader.load_skills(
+                tenant, db_session=_db,
+            )
+    except Exception:
+        logger.debug(
+            "Failed to load skill catalog for tenant %s",
+            tenant.org_id, exc_info=True,
+        )
+        available_skills = []
+
+    return available_agents, available_skills
+
+
 async def run_worker(settings: Settings) -> None:
     """Bootstrap all dependencies and run the orchestrator loop.
 
@@ -265,27 +304,21 @@ async def run_worker(settings: Settings) -> None:
         memory_store = MemoryStore(memory_dir=memory_dir)
         memory_manager = MemoryManager(memory_store)
 
-        # Load the tenant's sub-agent catalog.  Coordinator sessions
-        # render it as an "Available Sub-Agents" prompt block; all
-        # sessions use its presence to gate the ``agent_type`` parameter
-        # on delegation tool schemas.
-        agent_loader = ResourceLoader(
-            platform_agents_dir=getattr(settings, "platform_agents_dir", None),
+        # Load prompt-visible catalogs.  Skills include expert
+        # definitions, which the prompt lists so the default LLM knows
+        # valid ``consult_expert`` names for voluntary delegation.
+        # Coordinator sessions also render sub-agents as an "Available
+        # Sub-Agents" block and use their presence to gate delegation
+        # tool schemas.
+        available_agents, available_skills = await _load_prompt_catalogs(
+            settings=settings,
+            tenant=tenant,
+            session_factory=session_factory,
         )
-        try:
-            async with session_factory() as _db:
-                available_agents = await agent_loader.load_agents(
-                    tenant, db_session=_db,
-                )
-        except Exception:
-            logger.debug(
-                "Failed to load sub-agent catalog for tenant %s",
-                tenant.org_id, exc_info=True,
-            )
-            available_agents = []
 
         prompt_builder = PromptBuilder(
             tenant,
+            skills=available_skills,
             memory_manager=memory_manager,
             session=session,
             available_agents=available_agents,

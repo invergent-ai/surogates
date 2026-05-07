@@ -4,7 +4,7 @@
 
 An expert is a **task-specialized model** configured for reasoning-intensive work such as coding, debugging, terminal commands, math, data reasoning, formal problem solving, or planning. It is declared as a skill backed by a model endpoint instead of a prompt template.
 
-The harness automatically consults a matching active expert for hard-task categories before the default LLM answers or uses tools. The default LLM can also explicitly delegate to an expert via the `consult_expert` tool and receives the expert's result back for review.
+The harness automatically consults a matching active expert for hard tasks before the default LLM answers or uses tools. The default LLM can also explicitly delegate to an expert via the `consult_expert` tool and receives the expert's result back for review.
 
 ```
 Base LLM                          Expert model
@@ -29,12 +29,12 @@ The platform handles:
 - Usage tracking and auto-demotion
 
 The platform does **not** handle:
-- Model training or fine-tuning (done externally)
+- Model training (done externally)
 - Model hosting or inference serving (your infrastructure)
 
 ## Design Principles
 
-1. **Hard tasks are expert-routed.** The harness detects configured hard-task categories and consults a matching expert before the default LLM handles the turn. The default LLM still reviews the expert result and can accept, reject, or modify the output.
+1. **Hard tasks are expert-routed.** The harness detects reasoning-intensive hard tasks and consults a matching expert before the default LLM handles the turn. The default LLM still reviews the expert result and can accept, reject, or modify the output.
 
 2. **Expert = Skill + Model.** An expert is a `SKILL.md` with `type: expert` and additional model/endpoint frontmatter. Same file format, same registry, same 3-layer loading, same governance.
 
@@ -42,17 +42,17 @@ The platform does **not** handle:
 
 4. **Feedback-driven lifecycle.** Every invocation is logged. Success rate is tracked automatically. Experts that degrade are auto-disabled.
 
-5. **Training is external.** The platform collects and exports training data (JSONL from the event log) but does **not** train, fine-tune, or host expert models. Training happens in the org's own pipeline. The platform consumes the result: an OpenAI-compatible endpoint URL.
+5. **Training is external.** Training is the umbrella term here. It can use fine-tuning, adapter training, eval-driven prompt/model changes, or another org-owned method. The platform collects and exports training data (JSONL from the event log) but does **not** train or host expert models. The platform consumes the result: an OpenAI-compatible endpoint URL.
 
 ## Lifecycle Summary
 
 ```
 1. Define      SKILL.md with type: expert             expert_status: draft
 2. Collect     POST /skills/{name}/collect             expert_status: collecting
-3. Train       External (OpenAI, Unsloth, Axolotl)     (not platform-managed)
+3. Train       External                              (not platform-managed)
 4. Activate    POST /skills/{name}/activate            expert_status: active
 5. Monitor     GET /skills/{name} -> expert_stats       (auto-retire if <60%)
-6. Retrain     Collect -> train -> activate              (repeat as needed)
+6. Retrain     Collect -> train -> activate          (repeat as needed)
 ```
 
 ## 1. Define the Expert
@@ -68,7 +68,7 @@ type: expert
 # Model and routing configuration
 model: qwen2.5-coder-7b
 endpoint: http://expert-pool.your-cluster.svc:8000/v1
-task_categories: [data_reasoning]
+trigger: SQL queries, database schemas, PostgreSQL, data analysis
 
 # Tools the expert can use in its mini-loop
 tools: [terminal, read_file, search_files]
@@ -103,7 +103,7 @@ curl -X POST http://localhost:8000/v1/skills \
   -H "Content-Type: application/json" \
   -d '{
     "name": "sql_writer",
-    "content": "---\nname: sql_writer\ndescription: Writes PostgreSQL queries\ntype: expert\nmodel: qwen2.5-coder-7b\nendpoint: http://expert-pool:8000/v1\ntask_categories: [data_reasoning]\ntools: [terminal, read_file]\nmax_iterations: 10\nexpert_status: draft\n---\nYou are a PostgreSQL expert..."
+    "content": "---\nname: sql_writer\ndescription: Writes PostgreSQL queries\ntype: expert\nmodel: qwen2.5-coder-7b\nendpoint: http://expert-pool:8000/v1\ntrigger: SQL queries, database schemas, PostgreSQL, data analysis\ntools: [terminal, read_file]\nmax_iterations: 10\nexpert_status: draft\n---\nYou are a PostgreSQL expert..."
   }'
 ```
 
@@ -119,7 +119,7 @@ type: expert
 
 model: qwen2.5-coder-7b
 endpoint: http://expert-pool.your-cluster.svc:8000/v1
-task_categories: [coding, debugging]
+trigger: Python code review, bugs, security issues, style violations
 
 tools: [read_file, search_files, list_files]
 max_iterations: 15
@@ -163,7 +163,7 @@ This example shows a different pattern from the sql_writer: it uses read-only to
 | `model` | Yes | -- | Model name passed to the inference endpoint |
 | `base_model` | No | -- | Legacy alias for `model` |
 | `endpoint` | No | -- | OpenAI-compatible URL (can be set at activation) |
-| `task_categories` | Yes for harness routing | `[]` | Hard-task categories this expert handles: `coding`, `debugging`, `terminal`, `math`, `problem_solving`, `data_reasoning`, `planning` |
+| `trigger` | Yes for harness routing | -- | Comma-separated phrases that describe when this expert should be selected |
 | `adapter` | No | -- | LoRA adapter path in tenant storage |
 | `tools` | No | `[]` | Tools the expert can use in its mini-loop |
 | `max_iterations` | No | `10` | Maximum tool-call rounds before budget exceeded |
@@ -187,6 +187,8 @@ tenant-{org_id}/shared/skills/
 ## 2. Collect Training Data
 
 The platform extracts successful conversation trajectories from the event log. These are conversations where the base LLM successfully completed tasks that match the expert's specialty.
+
+This data supports expert training. The exported trajectories can be used as teacher examples, fine-tuning data, LoRA/adapter data, supervised evals, or inputs for prompt, routing, and configuration changes.
 
 Trigger a collection:
 
@@ -221,8 +223,8 @@ curl "http://localhost:8000/v1/skills/sql_writer/file?path=training/dataset_2026
 
 The collector has two modes — pick based on whether the expert already exists.
 
-1. **Bootstrap (`collect_for_skill`)**: walks `skill.invoked` events.  Each `/<skill> args` a user has typed is a labeled trajectory — the skill name is the class label — so the base LLM's reply span becomes a training example.  Use this to **graduate** a prompt-based skill into a model-backed expert.  Requires only that the skill has been invoked a few dozen times by real users.
-2. **Improve (`collect_for_expert`)**: walks `expert.delegation` → tool calls → `expert.result` chains.  Only usable once the expert is active and the base LLM is actually delegating to it via `consult_expert`.  Use this to **improve** an existing expert on the tasks it's already handling.
+1. **Bootstrap (`collect_for_skill`)**: walks `skill.invoked` events. Each `/<skill> args` a user has typed is a labeled trajectory — the skill name is the class label — so the base LLM's reply span becomes a teacher example. Use this to train a model-backed expert from a prompt-based skill. Requires only that the skill has been invoked a few dozen times by real users.
+2. **Improve (`collect_for_expert`)**: walks `expert.delegation` → tool calls → `expert.result` chains. Only usable once the expert is active and the base LLM or harness is delegating to it. Use this to train the expert on fresh successful trajectories, or to build eval datasets for deciding whether its prompt/model/endpoint needs changes.
 
 Both modes filter tainted sessions by default (skip sessions with `policy.denied`, `harness.crash`, `saga.compensate`, or `expert.override`).  See [`v_skill_trajectories`](../audit/views.md#v_skill_trajectories) and [`v_expert_outcomes`](../audit/views.md#v_expert_outcomes) for the SQL views each mode reads.
 
@@ -230,11 +232,11 @@ Both modes filter tainted sessions by default (skip sessions with `policy.denied
 
 The exported JSONL follows the OpenAI fine-tuning format: each line is a complete conversation with system prompt, user message, tool calls, tool results, and final assistant response. This format is compatible with fine-tuning APIs from OpenAI, Together, Fireworks, and most other providers.
 
-The platform's responsibility ends at the JSONL file. Everything after -- data cleaning, hyperparameter tuning, training runs, evaluation, adapter hosting -- is the org's concern.
+The platform's responsibility ends at the JSONL file. Everything after -- data cleaning, training strategy, hyperparameter tuning, training runs, evaluation, prompt/config updates, adapter hosting -- is the org's concern.
 
-## 3. Train the Model (External)
+## 3. Train the Expert (External)
 
-Training happens outside the platform. Use your preferred tooling:
+Training happens outside the platform. Use your preferred tooling or process:
 
 **OpenAI fine-tuning:**
 ```bash
@@ -261,7 +263,15 @@ datasets:
 adapter: qlora
 ```
 
-**vLLM serving (after training):**
+**Prompt/config training:**
+```text
+Use the exported trajectories to identify durable instructions,
+failure modes, tool-use patterns, and examples. Update the expert's
+SKILL.md body, model, endpoint, or evaluation gates without changing
+model weights.
+```
+
+**vLLM serving (after weight training):**
 ```bash
 vllm serve Qwen/Qwen2.5-Coder-7B \
   --enable-lora \
@@ -293,9 +303,10 @@ After activation, the base LLM will see the expert in its system prompt:
 
 ```
 # Available Experts
-The harness consults matching active experts for hard-task categories. You can also use `consult_expert` to delegate explicitly.
+Use `consult_expert` for voluntary delegation to these task-specialized reasoning models. Harness-enforced expert routing uses expert triggers automatically.
 
 - **sql_writer** -- Writes PostgreSQL queries from natural language descriptions
+  Trigger: SQL queries, database schemas, PostgreSQL, data analysis
   Tools: terminal, read_file, search_files
 ```
 
@@ -350,7 +361,7 @@ The response includes `expert_stats`:
 
 ### Auto-Disable
 
-Once an expert accumulates at least 20 invocations, the platform monitors its success rate. If the rate drops below the configured threshold (default: 60%), the expert is automatically disabled and its status is set to `retired`. The admin can retrain the model externally and reactivate it.
+Once an expert accumulates at least 20 invocations, the platform monitors its success rate. If the rate drops below the configured threshold (default: 60%), the expert is automatically disabled and its status is set to `retired`. The admin can retrain or reconfigure the expert externally and reactivate it.
 
 **Success** means the session completed normally after expert delegation and the user did not override or redo the expert's work.
 
@@ -365,7 +376,7 @@ curl -X POST http://localhost:8000/v1/skills/sql_writer/retire \
 
 ### Retrain with Fresh Data
 
-Collect new training data (includes sessions since the last collection), retrain externally, update the endpoint, and reactivate:
+Collect new training data (includes sessions since the last collection), train externally, update the expert configuration or endpoint, and reactivate:
 
 ```bash
 # 1. Export new training data
@@ -374,7 +385,7 @@ curl -X POST http://localhost:8000/v1/skills/sql_writer/collect \
 
 # 2. Train externally (your pipeline)
 
-# 3. Reactivate with new endpoint (or same endpoint, new model)
+# 3. Reactivate with new endpoint, model, prompt, or config
 curl -X POST http://localhost:8000/v1/skills/sql_writer/activate \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"endpoint": "http://expert-pool:8000/v1"}'

@@ -210,9 +210,9 @@ WHERE org_id = $1
 One row per `skill.invoked` event with the id range of its trajectory
 — the user's `/<skill> args` message, the `skill.invoked` marker, and
 the assistant turns + tool exchanges that answered it.  Feeds the
-**bootstrap path** for new experts: graduate a prompt-based skill into
-a fine-tuned SLM by distilling every labeled invocation of that skill.
-The skill is the class label.
+**bootstrap path** for new experts: train or configure a task-specialized
+model by distilling every labeled invocation of that skill. The skill is
+the class label.
 
 `trajectory_end_event_id` is the id of the first event that closes the
 trajectory — next `user.message`, next `skill.invoked`, or a session

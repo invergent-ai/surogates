@@ -373,6 +373,8 @@ class PromptBuilder:
                 entry = f"- **{name}**"
                 if safe_desc:
                     entry += f" — {safe_desc}"
+                if trigger:
+                    entry += f"\n  Trigger: {trigger}"
                 total_uses = expert_stats.get("total_uses", 0)
                 total_successes = expert_stats.get("total_successes", 0)
                 if total_uses > 0:
@@ -395,7 +397,9 @@ class PromptBuilder:
         if expert_lines:
             sections.append(
                 "# Available Experts\n"
-                "Use `consult_expert` to delegate tasks to these specialised models.\n"
+                "Use `consult_expert` for voluntary delegation to these "
+                "task-specialized reasoning models. Harness-enforced expert "
+                "routing uses expert triggers automatically.\n"
                 + "\n".join(expert_lines)
             )
 

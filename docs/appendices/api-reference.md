@@ -295,7 +295,7 @@ These endpoints are only valid for skills with `type=expert`:
 
 | Endpoint | Description |
 |---|---|
-| `POST /v1/skills/{id}/collect` | Trigger training data export from event log |
+| `POST /v1/skills/{id}/collect` | Trigger training data export from the event log for expert training, evals, or prompt/config improvement |
 | `GET /v1/skills/{id}/training-data` | List exported training datasets |
 | `GET /v1/skills/{id}/training-data/{dataset_id}` | Download JSONL dataset |
 | `POST /v1/skills/{id}/activate` | Set `expert_status` to `active` (requires endpoint) |

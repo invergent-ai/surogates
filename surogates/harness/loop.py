@@ -36,7 +36,7 @@ from surogates.harness.expert_routing import (
     classify_hard_task,
     classify_tool_calls,
     load_skills_for_expert_routing,
-    select_expert_for_category,
+    select_expert_for_task,
 )
 from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
 from surogates.harness.message_utils import coerce_message_content, make_skipped_tool_result
@@ -1905,7 +1905,7 @@ class AgentHarness:
             )
             skills = []
 
-        expert = select_expert_for_category(skills, category)
+        expert = select_expert_for_task(skills, task)
         if expert is None:
             await self._emit_missing_forced_expert(session, category)
             consulted_categories.add(category)

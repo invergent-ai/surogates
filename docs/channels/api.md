@@ -110,7 +110,7 @@ Pipelines that run an automated judge over their outputs record the judge's grad
 
 ## Interaction with other subsystems
 
-- **Training data**: API sessions participate in `TrainingDataCollector` exports on the same footing as every other channel -- successful expert delegations and skill invocations from pipeline-submitted prompts are eligible for fine-tuning.
+- **Training data**: API sessions participate in `TrainingDataCollector` exports on the same footing as every other channel -- successful expert delegations and skill invocations from pipeline-submitted prompts are eligible for expert training, evaluation, or prompt/config improvement.
 - **Idle reset**: the session-reset CronJob resets API sessions in place without running the memory-flush agent -- service accounts have no per-user memory.
 - **Memory**: API sessions use the org-shared memory directory, not user-scoped memory.
 - **Permissions**: API keys carry no permissions; access is scoped entirely by org membership. They cannot reach admin, auth, or any other `/v1/` routes.

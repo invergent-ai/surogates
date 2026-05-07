@@ -19,7 +19,7 @@ from surogates.tools.registry import ToolRegistry
 
 def _expert(
     name: str,
-    categories: list[str],
+    trigger: str,
     *,
     status: str = "active",
 ) -> SkillDef:
@@ -32,7 +32,7 @@ def _expert(
         expert_status=status,
         expert_endpoint="http://expert:8000/v1",
         expert_model="expert-model",
-        task_categories=categories,
+        trigger=trigger,
     )
 
 
@@ -127,34 +127,47 @@ class TestHardTaskClassification:
 
 
 class TestExpertSelection:
-    def test_selects_matching_active_expert(self):
-        from surogates.harness.expert_routing import select_expert_for_category
+    def test_selects_active_expert_by_trigger(self):
+        from surogates.harness.expert_routing import select_expert_for_task
 
-        selected = select_expert_for_category(
-            [_expert("math_expert", ["math"]), _expert("code_expert", ["coding"])],
-            "coding",
+        selected = select_expert_for_task(
+            [
+                _expert("math_expert", "math, equations"),
+                _expert("code_expert", "python, coding, debugging"),
+            ],
+            "Fix this Python traceback in app.py",
         )
 
         assert selected is not None
         assert selected.name == "code_expert"
 
     def test_tie_breaks_by_name(self):
-        from surogates.harness.expert_routing import select_expert_for_category
+        from surogates.harness.expert_routing import select_expert_for_task
 
-        selected = select_expert_for_category(
-            [_expert("z_code", ["coding"]), _expert("a_code", ["coding"])],
-            "coding",
+        selected = select_expert_for_task(
+            [_expert("z_code", "python"), _expert("a_code", "python")],
+            "Write Python code",
         )
 
         assert selected is not None
         assert selected.name == "a_code"
 
     def test_ignores_inactive_experts(self):
-        from surogates.harness.expert_routing import select_expert_for_category
+        from surogates.harness.expert_routing import select_expert_for_task
 
-        selected = select_expert_for_category(
-            [_expert("code_expert", ["coding"], status="draft")],
-            "coding",
+        selected = select_expert_for_task(
+            [_expert("code_expert", "coding", status="draft")],
+            "Write Python code",
+        )
+
+        assert selected is None
+
+    def test_ignores_active_experts_without_matching_trigger(self):
+        from surogates.harness.expert_routing import select_expert_for_task
+
+        selected = select_expert_for_task(
+            [_expert("code_expert", "python, coding")],
+            "Solve 3x + 7 = 22",
         )
 
         assert selected is None
@@ -185,7 +198,7 @@ class TestHarnessExpertPreflight:
         with (
             patch(
                 "surogates.harness.loop.load_skills_for_expert_routing",
-                AsyncMock(return_value=[_expert("code_expert", ["coding"])]),
+                AsyncMock(return_value=[_expert("code_expert", "python, coding")]),
             ),
             patch(
                 "surogates.harness.loop.ExpertConsultationService",
@@ -218,8 +231,8 @@ class TestHarnessExpertPreflight:
         ]
 
         with patch(
-            "surogates.harness.loop.load_skills_for_expert_routing",
-            AsyncMock(return_value=[_expert("code_expert", ["coding"])]),
+                "surogates.harness.loop.load_skills_for_expert_routing",
+                AsyncMock(return_value=[_expert("code_expert", "python, coding")]),
         ) as load_skills:
             consulted = await harness._maybe_consult_required_expert(
                 session, messages, events,
@@ -264,8 +277,8 @@ class TestHarnessExpertPreflight:
         ]
 
         with patch(
-            "surogates.harness.loop.load_skills_for_expert_routing",
-            AsyncMock(return_value=[_expert("code_expert", ["coding"])]),
+                "surogates.harness.loop.load_skills_for_expert_routing",
+                AsyncMock(return_value=[_expert("code_expert", "python, coding")]),
         ):
             consulted = await harness._maybe_consult_required_expert(
                 session, messages, events,
@@ -305,7 +318,7 @@ class TestHarnessExpertPreflight:
         with (
             patch(
                 "surogates.harness.loop.load_skills_for_expert_routing",
-                AsyncMock(return_value=[_expert("terminal_expert", ["terminal"])]),
+                AsyncMock(return_value=[_expert("terminal_expert", "terminal, shell, pytest")]),
             ),
             patch(
                 "surogates.harness.loop.ExpertConsultationService",
