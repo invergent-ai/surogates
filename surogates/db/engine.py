@@ -35,13 +35,23 @@ def async_engine_from_settings(db_settings: DatabaseSettings) -> AsyncEngine:
 
     The engine is configured with connection-pool parameters drawn from
     *db_settings* and uses sensible production defaults (pool pre-ping
-    enabled, prepared-statement caching via asyncpg ``statement_cache_size``).
+    enabled). For asyncpg URLs both prepared-statement caches are
+    disabled so the engine is safe behind PgBouncer transaction-mode
+    pooling — cached plans get invalidated when the pooler swaps the
+    backend between transactions. Harmless on a direct PG connection.
     """
+    connect_args: dict = {}
+    if "asyncpg" in db_settings.url:
+        connect_args = {
+            "statement_cache_size": 0,
+            "prepared_statement_cache_size": 0,
+        }
     return create_async_engine(
         db_settings.url,
         pool_size=db_settings.pool_size,
         max_overflow=db_settings.pool_overflow,
         pool_pre_ping=True,
+        connect_args=connect_args,
     )
 
 

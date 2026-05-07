@@ -56,11 +56,21 @@ def init_ops_engine(
             "init_ops_engine called with different URL; replacing cached engine",
         )
 
+    # Disable asyncpg prepared-statement caches when going through
+    # PgBouncer transaction-mode pooling (backends get swapped between
+    # transactions, so cached plans become invalid).
+    connect_args: dict = {}
+    if "asyncpg" in url:
+        connect_args = {
+            "statement_cache_size": 0,
+            "prepared_statement_cache_size": 0,
+        }
     engine = create_async_engine(
         url,
         pool_size=pool_size,
         max_overflow=pool_overflow,
         pool_pre_ping=True,
+        connect_args=connect_args,
     )
     factory = async_sessionmaker(
         bind=engine,

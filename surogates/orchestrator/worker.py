@@ -164,10 +164,20 @@ async def run_worker(settings: Settings) -> None:
     default_prompt_library().validate()
 
     # 1. Database
+    # asyncpg's prepared-statement cache must be off behind PgBouncer
+    # transaction-mode pooling — cached plans are bound to backends that
+    # get swapped between transactions. Harmless on a direct PG connection.
+    db_connect_args: dict = {}
+    if "asyncpg" in settings.db.url:
+        db_connect_args = {
+            "statement_cache_size": 0,
+            "prepared_statement_cache_size": 0,
+        }
     engine = create_async_engine(
         settings.db.url,
         pool_size=settings.db.pool_size,
         max_overflow=settings.db.pool_overflow,
+        connect_args=db_connect_args,
     )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
