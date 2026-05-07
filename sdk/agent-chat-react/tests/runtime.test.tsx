@@ -58,7 +58,7 @@ function session(id: string, status: string = "active"): AgentChatSession {
   return { id, status };
 }
 
-function createFakeAdapter(calls: AdapterCalls): AgentChatAdapter {
+function createFakeAdapter(calls: AdapterCalls) {
   return {
     async listSessions() {
       return { sessions: [], total: 0 };
@@ -102,7 +102,7 @@ function createFakeAdapter(calls: AdapterCalls): AgentChatAdapter {
       calls.opened.push({ ...input, stream });
       return stream;
     },
-  };
+  } satisfies AgentChatAdapter;
 }
 
 let root: Root | null = null;
