@@ -12,7 +12,7 @@ export type ConversationProps = ComponentProps<typeof StickToBottom>;
 
 export const Conversation = ({ className, ...props }: ConversationProps) => (
   <StickToBottom
-    className={cn("relative flex-1 overflow-y-hidden", className)}
+    className={cn("relative flex-1 overflow-y-auto", className)}
     initial="smooth"
     resize="smooth"
     role="log"
@@ -29,7 +29,7 @@ export const ConversationContent = ({
   ...props
 }: ConversationContentProps) => (
   <StickToBottom.Content
-    className={cn("flex flex-col gap-4 py-4 px-8", className)}
+    className={cn("flex flex-col gap-6 py-6 px-6", className)}
     {...props}
   />
 );
@@ -50,18 +50,22 @@ export const ConversationEmptyState = ({
 }: ConversationEmptyStateProps) => (
   <div
     className={cn(
-      "flex size-full flex-col items-center justify-center gap-3 p-8 text-center",
+      "flex size-full flex-col items-center justify-center gap-4 p-8 text-center",
       className
     )}
     {...props}
   >
     {children ?? (
       <>
-        {icon && <div className="text-muted-foreground">{icon}</div>}
-        <div className="space-y-1">
-          <h3 className="font-medium text-sm">{title}</h3>
+        {icon && (
+          <div className="flex items-center justify-center size-14 rounded-2xl bg-muted/60 text-muted-foreground/60">
+            {icon}
+          </div>
+        )}
+        <div className="space-y-1.5">
+          <h3 className="font-semibold text-base text-foreground/80">{title}</h3>
           {description && (
-            <p className="text-muted-foreground text-sm">{description}</p>
+            <p className="text-muted-foreground/60 text-sm max-w-sm">{description}</p>
           )}
         </div>
       </>
@@ -85,7 +89,7 @@ export const ConversationScrollButton = ({
     !isAtBottom && (
       <Button
         className={cn(
-          "absolute bottom-4 left-[50%] translate-x-[-50%] rounded-full dark:bg-background dark:hover:bg-muted",
+          "absolute bottom-4 left-[50%] translate-x-[-50%] rounded-full shadow-lg border-border/50 dark:bg-background dark:hover:bg-muted",
           className
         )}
         onClick={handleScrollToBottom}

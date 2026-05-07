@@ -581,14 +581,14 @@ export function ChatThread({
   }, [messages]);
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-card text-sm">
+    <div className="flex flex-1 flex-col overflow-hidden bg-background text-sm">
       <Conversation className="relative flex-1 min-h-0">
-        <ConversationContent className="mx-auto">
+        <ConversationContent className="mx-auto w-full max-w-3xl">
           {messages.length === 0 && !disabled ? (
             <ConversationEmptyState
-              icon={<MessageSquareIcon className="size-6" />}
-              title="Hello there!"
-              description="How can I help you today?"
+              icon={<MessageSquareIcon className="size-8 opacity-40" />}
+              title="Start a conversation"
+              description="Ask me anything — I can search, analyze, write code, and more."
             />
           ) : (
             <>
@@ -650,7 +650,7 @@ export function ChatThread({
         <ConversationScrollButton />
       </Conversation>
 
-      <div className="mx-auto w-full max-w-4xl px-4 pb-4 pt-2">
+      <div className="mx-auto w-full max-w-3xl px-6 pb-5 pt-3">
         {retryIndicator && (
           <div className="mb-2">
             <RetryBanner indicator={retryIndicator} />

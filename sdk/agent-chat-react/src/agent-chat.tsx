@@ -57,8 +57,8 @@ export function AgentChat({
       }}
     >
       <TooltipProvider>
-        <section className="flex h-full min-h-0 bg-card text-sm text-foreground">
-          <div className="flex min-w-0 flex-1 flex-col">
+        <section className="flex flex-1 min-h-0 overflow-hidden bg-background text-sm text-foreground">
+          <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
             <ChatThread
               sessionId={sessionId}
               messages={runtime.messages}

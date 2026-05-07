@@ -134,3 +134,4 @@ If we missed any projects, do let us know! We are grateful to those communities 
 ## License
 
 AGPL-3.0 — see [LICENSE](LICENSE).
+SUROGATES_CONFIG=./config.dev.yaml

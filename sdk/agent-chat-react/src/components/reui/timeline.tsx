@@ -65,7 +65,7 @@ function Timeline({
     >
       <div
         className={cn(
-          "group/timeline flex data-[orientation=horizontal]:w-full data-[orientation=horizontal]:flex-row data-[orientation=vertical]:flex-col",
+          "group/timeline flex flex-col",
           className
         )}
         data-orientation={orientation}
@@ -85,7 +85,7 @@ function TimelineContent({
 }: HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={cn("text-foreground text-sm", className)}
+      className={cn("text-foreground text-sm min-w-0 overflow-hidden", className)}
       data-slot="timeline-content"
       {...props}
     />
@@ -107,7 +107,7 @@ function TimelineDate({
   return (
     <Comp
       className={cn(
-        "text-muted-foreground mb-1 block text-xs font-medium group-data-[orientation=vertical]/timeline:max-sm:h-4",
+        "text-muted-foreground mb-1 block text-xs font-medium max-sm:h-4",
         className
       )}
       data-slot="timeline-date"
@@ -143,7 +143,7 @@ function TimelineIndicator({
     <Comp
       aria-hidden="true"
       className={cn(
-        "border-primary/20 group-data-completed/timeline-item:border-primary absolute size-4 rounded-full border-2 group-data-[orientation=horizontal]/timeline:-top-6 group-data-[orientation=horizontal]/timeline:left-0 group-data-[orientation=horizontal]/timeline:-translate-y-1/2 group-data-[orientation=vertical]/timeline:top-1.25 group-data-[orientation=vertical]/timeline:-left-6 group-data-[orientation=vertical]/timeline:-translate-x-1/2",
+        "border-primary/20 group-data-completed/timeline-item:border-primary absolute size-4 rounded-full border-2 top-1.25 -left-6 -translate-x-1/2",
         className
       )}
       data-slot="timeline-indicator"
@@ -165,7 +165,7 @@ function TimelineItem({ step, className, ...props }: TimelineItemProps) {
   return (
     <div
       className={cn(
-        "group/timeline-item has-[+[data-completed]]:**:data-[slot=timeline-separator]:bg-primary relative flex flex-1 flex-col gap-0.5 group-data-[orientation=horizontal]/timeline:mt-8 group-data-[orientation=horizontal]/timeline:not-last:pe-8 group-data-[orientation=vertical]/timeline:ms-8 group-data-[orientation=vertical]/timeline:not-last:pb-6",
+        "group/timeline-item has-[+[data-completed]]:**:data-[slot=timeline-separator]:bg-primary relative flex flex-col gap-0.5 ms-8 not-last:pb-6",
         className
       )}
       data-completed={step <= activeStep || undefined}
@@ -184,7 +184,7 @@ function TimelineSeparator({
     <div
       aria-hidden="true"
       className={cn(
-        "bg-primary/10 absolute self-start group-last/timeline-item:hidden group-data-[orientation=horizontal]/timeline:-top-6 group-data-[orientation=horizontal]/timeline:h-0.5 group-data-[orientation=horizontal]/timeline:w-[calc(100%-1rem-0.25rem)] group-data-[orientation=horizontal]/timeline:translate-x-4.5 group-data-[orientation=horizontal]/timeline:-translate-y-1/2 group-data-[orientation=vertical]/timeline:-left-6 group-data-[orientation=vertical]/timeline:h-[calc(100%-1rem-0.25rem)] group-data-[orientation=vertical]/timeline:w-0.5 group-data-[orientation=vertical]/timeline:-translate-x-1/2 group-data-[orientation=vertical]/timeline:translate-y-4.5",
+        "bg-primary/10 absolute self-start group-last/timeline-item:hidden -left-6 h-[calc(100%-1rem-0.25rem)] w-0.5 -translate-x-1/2 translate-y-4.5",
         className
       )}
       data-slot="timeline-separator"

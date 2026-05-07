@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from uuid import UUID
 
 from sqlalchemy import text
 
@@ -33,7 +34,7 @@ async def main() -> None:
         await conn.run_sync(Base.metadata.create_all)
     print("Database schema ensured.")
 
-    org_id = uuid.uuid4()
+    org_id = UUID(settings.org_id) if settings.org_id else uuid.uuid4()
     user_id = uuid.uuid4()
     email = "admin@dev.local"
     password = "admin"

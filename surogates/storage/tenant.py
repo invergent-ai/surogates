@@ -56,7 +56,7 @@ def _validate_s3_bucket_name(bucket: str) -> str:
 def agent_session_bucket(bucket: str) -> str:
     """Return the configured per-agent bucket name for session workspaces."""
     if not bucket:
-        raise ValueError("agent_session_bucket requires a configured storage bucket")
+        raise ValueError("storage.bucket requires a configured storage bucket")
     return _validate_s3_bucket_name(bucket)
 
 
