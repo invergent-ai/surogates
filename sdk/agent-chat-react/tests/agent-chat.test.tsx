@@ -235,6 +235,99 @@ describe("AgentChat", () => {
     expect(uploadButton!.disabled).toBe(true);
   });
 
+  it("renders consult_expert as a dedicated expert block instead of raw JSON", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    act(() => {
+      stream.emit("tool.call", 1, {
+        tool_call_id: "expert-1",
+        name: "consult_expert",
+        arguments: {
+          expert: "Architecture reviewer",
+          question: "Review the example app architecture.",
+        },
+      });
+      stream.emit("tool.result", 2, {
+        tool_call_id: "expert-1",
+        content: "The architecture is appropriate for an SDK example.",
+      });
+      stream.emit("expert.result", 3, {
+        summary: "The architecture is appropriate for an SDK example.",
+      });
+    });
+
+    expect(container.textContent).toContain("Consulted expert");
+    expect(container.textContent).toContain("Architecture reviewer");
+    expect(container.textContent).toContain(
+      "The architecture is appropriate for an SDK example.",
+    );
+    expect(container.textContent).not.toContain('"question"');
+  });
+
+  it("renders skill management and coordinator tools as dedicated blocks", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    act(() => {
+      stream.emit("tool.call", 1, {
+        tool_call_id: "skill-1",
+        name: "skill_manage",
+        arguments: {
+          action: "patch",
+          name: "example-skill",
+          old_string: "old",
+          new_string: "new",
+        },
+      });
+      stream.emit("tool.result", 2, {
+        tool_call_id: "skill-1",
+        content: JSON.stringify({
+          success: true,
+          message: "Skill updated.",
+        }),
+      });
+      stream.emit("tool.call", 3, {
+        tool_call_id: "worker-1",
+        name: "spawn_worker",
+        arguments: {
+          agent_type: "reviewer",
+          goal: "Review the example app.",
+        },
+      });
+      stream.emit("tool.result", 4, {
+        tool_call_id: "worker-1",
+        content: JSON.stringify({
+          worker_id: "worker-demo",
+          status: "queued",
+        }),
+      });
+    });
+
+    expect(container.textContent).toContain("Patch skill");
+    expect(container.textContent).toContain("example-skill");
+    expect(container.textContent).toContain("Spawned worker");
+    expect(container.textContent).toContain("worker-demo");
+    expect(container.textContent).not.toContain("skill_manage");
+    expect(container.textContent).not.toContain("spawn_worker");
+  });
+
   it("does not show a previous session workspace after switching to a new chat", async () => {
     const stream = new FakeEventStream();
     let resolveTree: ((value: Awaited<ReturnType<AgentChatAdapter["getWorkspaceTree"]>>) => void) | null = null;

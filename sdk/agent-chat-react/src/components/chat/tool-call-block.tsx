@@ -18,6 +18,8 @@ import { ClarifyToolBlock } from "./tools/clarify-tool";
 import { ArtifactToolBlock } from "./tools/artifact-tool";
 import { DelegateToolBlock } from "./tools/delegate-tool";
 import { MemoryToolBlock } from "./tools/memory-tool";
+import { SkillManageToolBlock } from "./tools/skill-manage-tool";
+import { CoordinatorToolBlock } from "./tools/coordinator-tools";
 import { DefaultToolBlock } from "./tools/default-tool";
 
 export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSelect?: (path: string) => void }) {
@@ -66,6 +68,9 @@ export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSe
     case "skill_view":
       return <SkillViewBlock tc={tc} />;
 
+    case "skill_manage":
+      return <SkillManageToolBlock tc={tc} />;
+
     case "clarify":
       return <ClarifyToolBlock tc={tc} />;
 
@@ -77,6 +82,11 @@ export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSe
 
     case "memory":
       return <MemoryToolBlock tc={tc} />;
+
+    case "spawn_worker":
+    case "send_worker_message":
+    case "stop_worker":
+      return <CoordinatorToolBlock tc={tc} />;
 
     default:
       return <DefaultToolBlock tc={tc} />;
