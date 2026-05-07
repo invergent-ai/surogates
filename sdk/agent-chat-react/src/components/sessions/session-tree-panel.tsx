@@ -11,6 +11,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   SquareIcon,
+  Trash2Icon,
   UsersIcon,
 } from "lucide-react";
 import { Badge } from "../ui/badge";
@@ -31,6 +32,7 @@ export interface SessionTreePanelProps {
   /** Treat the root as hidden, so its children appear as top-level rows. */
   hideRoot?: boolean;
   onSessionSelect?: (sessionId: string) => void;
+  onSessionDelete?: (sessionId: string) => void;
 }
 
 interface TreeEntry extends AgentChatSessionTreeNode {
@@ -146,22 +148,26 @@ function TreeNodeRow({
   depth,
   activeSessionId,
   canStop,
+  canDelete,
+  deletingSessionId,
   onSelect,
   onStop,
+  onDelete,
 }: {
   entry: TreeEntry;
   depth: number;
   activeSessionId: string;
   canStop: boolean;
+  canDelete: boolean;
+  deletingSessionId: string | null;
   onSelect: (sessionId: string) => void;
   onStop: (sessionId: string) => void;
+  onDelete: (sessionId: string) => void;
 }) {
   const [expanded, setExpanded] = useState(true);
   const hasChildren = entry.children.length > 0;
   const isActive = entry.id === activeSessionId;
   const isRunning = entry.status === "active";
-  const messageCount = entry.messageCount ?? 0;
-  const toolCallCount = entry.toolCallCount ?? 0;
 
   return (
     <>
@@ -205,9 +211,7 @@ function TreeNodeRow({
           <span className="w-4 h-4 shrink-0" />
         )}
         <div className="flex-1 min-w-0 flex items-center gap-1.5">
-          <span className="truncate">
-            {entry.title ?? entry.channel ?? "session"}
-          </span>
+          <span className="truncate">{entry.title ?? "session"}</span>
           {entry.agentType && (
             <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
               {entry.agentType}
@@ -220,13 +224,6 @@ function TreeNodeRow({
             {entry.status}
           </Badge>
         </div>
-        <span
-          className="text-xs text-faint shrink-0 tabular-nums"
-          aria-label={`${messageCount} messages, ${toolCallCount} tool calls`}
-          title={`${messageCount} messages, ${toolCallCount} tool calls`}
-        >
-          {messageCount}m/{toolCallCount}t
-        </span>
         {isRunning && canStop && (
           <button
             type="button"
@@ -241,6 +238,21 @@ function TreeNodeRow({
             <SquareIcon className="w-3 h-3" fill="currentColor" />
           </button>
         )}
+        {canDelete && (
+          <button
+            type="button"
+            className="p-1 rounded opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-destructive/10 hover:text-destructive disabled:pointer-events-none disabled:opacity-50 transition-all"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(entry.id);
+            }}
+            aria-label="Delete session"
+            title="Delete session"
+            disabled={deletingSessionId === entry.id}
+          >
+            <Trash2Icon className="w-3 h-3" />
+          </button>
+        )}
       </div>
       {hasChildren && expanded &&
         entry.children.map((child) => (
@@ -250,8 +262,11 @@ function TreeNodeRow({
             depth={depth + 1}
             activeSessionId={activeSessionId}
             canStop={canStop}
+            canDelete={canDelete}
+            deletingSessionId={deletingSessionId}
             onSelect={onSelect}
             onStop={onStop}
+            onDelete={onDelete}
           />
         ))}
     </>
@@ -267,11 +282,15 @@ export function SessionTreePanel({
   sessionListLimit = DEFAULT_SESSION_LIST_LIMIT,
   hideRoot = false,
   onSessionSelect,
+  onSessionDelete,
 }: SessionTreePanelProps) {
   const [nodes, setNodes] = useState<AgentChatSessionTreeNode[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasEverLoaded, setHasEverLoaded] = useState(false);
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(
+    null,
+  );
 
   // Guard async setters from firing after unmount.
   const mounted = useRef(true);
@@ -394,6 +413,23 @@ export function SessionTreePanel({
     [adapter, refetch],
   );
 
+  const handleDelete = useCallback(
+    async (id: string) => {
+      if (!adapter.deleteSession || deletingSessionId) return;
+      setDeletingSessionId(id);
+      try {
+        await adapter.deleteSession({ sessionId: id });
+        onSessionDelete?.(id);
+        await refetch({ silent: true });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to delete session");
+      } finally {
+        if (mounted.current) setDeletingSessionId(null);
+      }
+    },
+    [adapter, deletingSessionId, onSessionDelete, refetch],
+  );
+
   // Hide the panel until the first fetch has completed so we don't
   // flash an empty "Loading..." header for sessions with no sub-agents.
   if (!hasEverLoaded) return null;
@@ -430,8 +466,11 @@ export function SessionTreePanel({
               depth={0}
               activeSessionId={activeSessionId ?? ""}
               canStop={Boolean(adapter.stopSession)}
+              canDelete={Boolean(adapter.deleteSession)}
+              deletingSessionId={deletingSessionId}
               onSelect={handleSelect}
               onStop={handleStop}
+              onDelete={handleDelete}
             />
           ))}
         </div>

@@ -42,6 +42,7 @@ function createAdapter(sessions: AgentChatSession[]): AgentChatAdapter {
     async retrySession(input) {
       return session({ id: input.sessionId });
     },
+    async deleteSession() {},
     async getArtifact(): Promise<AgentChatArtifactPayload> {
       throw new Error("not used by session tree tests");
     },
@@ -98,5 +99,107 @@ describe("SessionTreePanel", () => {
 
     expect(container.textContent).toContain("Sessions");
     expect(container.textContent).toContain("First session");
+  });
+
+  it("does not render compact message and tool counters", async () => {
+    const adapter = createAdapter([
+      session({
+        id: "s-1",
+        title: "First session",
+        agentId: "agent-1",
+        messageCount: 3,
+        toolCallCount: 2,
+      }),
+    ]);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <SessionTreePanel
+          adapter={adapter}
+          agentId="agent-1"
+          title="Sessions"
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("First session");
+    expect(container.textContent).not.toContain("3m/2t");
+  });
+
+  it("does not render the session channel as the row label", async () => {
+    const adapter = createAdapter([
+      session({
+        id: "s-1",
+        title: null,
+        agentId: "agent-1",
+        channel: "web",
+      }),
+    ]);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <SessionTreePanel
+          adapter={adapter}
+          agentId="agent-1"
+          title="Sessions"
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("session");
+    expect(container.textContent).not.toContain("web");
+  });
+
+  it("deletes a session from the hover action", async () => {
+    let sessions = [
+      session({ id: "s-1", title: "First session", agentId: "agent-1" }),
+    ];
+    const deletedSessionIds: string[] = [];
+    const adapter: AgentChatAdapter = {
+      ...createAdapter(sessions),
+      async listSessions() {
+        return { sessions, total: sessions.length };
+      },
+      async deleteSession(input) {
+        deletedSessionIds.push(input.sessionId);
+        sessions = sessions.filter((item) => item.id !== input.sessionId);
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <SessionTreePanel
+          adapter={adapter}
+          agentId="agent-1"
+          title="Sessions"
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    const deleteButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Delete session"]',
+    );
+
+    expect(deleteButton).not.toBeNull();
+
+    await act(async () => {
+      deleteButton?.click();
+      await Promise.resolve();
+    });
+
+    expect(deletedSessionIds).toEqual(["s-1"]);
+    expect(container.textContent).not.toContain("First session");
   });
 });
