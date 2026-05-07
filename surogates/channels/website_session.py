@@ -2,12 +2,16 @@
 
 A website session is represented by a single signed JWT stored in an
 ``HttpOnly``/``Secure``/``SameSite=None`` cookie.  The JWT claims bind
-the session to its originating website agent, the origin it was
-bootstrapped from, and a per-session CSRF token.  Double-submit CSRF:
-state-changing requests must present the same token in the
-``X-CSRF-Token`` header as the cookie JWT carries, so an attacker who
-cannot read the cookie also cannot forge a matching header from a
-different origin.
+the session to its org, the origin it was bootstrapped from, and a
+per-session CSRF token.  Double-submit CSRF: state-changing requests
+must present the same token in the ``X-CSRF-Token`` header as the
+cookie JWT carries, so an attacker who cannot read the cookie also
+cannot forge a matching header from a different origin.
+
+There is no ``agent_id`` claim — a deployment serves exactly one
+agent (``settings.agent_id``), so binding the cookie to the org plus
+the bootstrap origin is the entire identity surface the cookie needs
+to defend.
 
 The JWT is signed with the platform's existing HS256 secret via
 :mod:`surogates.tenant.auth.jwt` so operators only manage one signing
@@ -88,7 +92,6 @@ class WebsiteSessionClaims:
 
     session_id: UUID
     org_id: UUID
-    agent_id: UUID
     origin: str
     csrf_token: str
     issued_at: int
@@ -99,18 +102,17 @@ def create_website_session_token(
     *,
     session_id: UUID,
     org_id: UUID,
-    agent_id: UUID,
     origin: str,
     csrf_token: str,
     expires_seconds: int = DEFAULT_SESSION_TTL_SECONDS,
 ) -> str:
-    """Sign a JWT binding a website session to its agent + origin + CSRF.
+    """Sign a JWT binding a website session to its org + origin + CSRF.
 
     ``origin`` is baked into the claims on issue and re-checked against
     the request's ``Origin`` header on every subsequent call.  A cookie
-    stolen from one website embed and replayed against another embed
-    in the same org therefore still fails: the claims would name the
-    original origin, not the attacker's.
+    stolen from one embed and replayed against another embed (a
+    different domain serving the same deployment's agent) still fails
+    here: the claims name the original origin, not the attacker's.
     """
     now = int(time.time())
     payload: dict[str, Any] = {
@@ -118,7 +120,6 @@ def create_website_session_token(
         "type": "website_session",
         "session_id": str(session_id),
         "org_id": str(org_id),
-        "agent_id": str(agent_id),
         "origin": origin,
         "csrf": csrf_token,
         "iat": now,
@@ -150,7 +151,7 @@ def decode_website_session_token(token: str) -> WebsiteSessionClaims:
             f"Expected website_session token, got {payload.get('type')!r}"
         )
 
-    required = ("session_id", "org_id", "agent_id", "origin", "csrf")
+    required = ("session_id", "org_id", "origin", "csrf")
     missing = [c for c in required if c not in payload]
     if missing:
         raise InvalidTokenError(
@@ -161,7 +162,6 @@ def decode_website_session_token(token: str) -> WebsiteSessionClaims:
         return WebsiteSessionClaims(
             session_id=UUID(payload["session_id"]),
             org_id=UUID(payload["org_id"]),
-            agent_id=UUID(payload["agent_id"]),
             origin=str(payload["origin"]),
             csrf_token=str(payload["csrf"]),
             issued_at=int(payload["iat"]),

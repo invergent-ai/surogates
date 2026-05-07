@@ -797,6 +797,188 @@ async def test_policy_allowed_emitted_when_log_allowed_true(
     assert row["data"]["check"] == "workspace_sandbox"
 
 
+async def test_session_tool_allow_list_blocks_disallowed_tool(
+    session_store, session_factory,
+):
+    """A tool absent from ``session.config["tool_allow_list"]`` is blocked.
+
+    Exercises the harness primitive that any session creator may use to
+    tighten the tool surface for a single session, independent of the
+    org-wide governance policy.  The website channel was the original
+    writer; the primitive itself is general and must keep working for
+    future writers (other channels, programmatic API callers).
+    """
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+        config={
+            "workspace_path": "/workspace",
+            "tool_allow_list": ["clarify", "web_search"],
+        },
+    )
+    lease = await session_store.try_acquire_lease(
+        session.id, "worker-allow-list-test", ttl_seconds=60,
+    )
+    assert lease is not None
+
+    # ``execute_code`` is not in the allow-list — must be blocked before
+    # dispatch with a policy.denied event and an inline tool result so
+    # the LLM sees the refusal on its next turn.
+    tc = {
+        "id": "tc-allow-list-1",
+        "function": {
+            "name": "execute_code",
+            "arguments": json.dumps({"code": "print('hi')"}),
+        },
+    }
+    result_msg = await execute_single_tool(
+        tc,
+        session=session,
+        lease=lease,
+        store=session_store,
+        tools=ToolRegistry(),
+        tenant=_StubTenant(org_id=org_id, user_id=user_id),
+    )
+
+    # Tool result carries the rejection inline so the LLM stops calling
+    # the same forbidden tool on every subsequent turn.
+    assert result_msg["role"] == "tool"
+    assert result_msg["tool_call_id"] == "tc-allow-list-1"
+    assert "execute_code" in result_msg["content"]
+    assert "allow-list" in result_msg["content"]
+
+    async with session_factory() as db:
+        row = (
+            await db.execute(
+                text(
+                    "SELECT data FROM events "
+                    "WHERE session_id = :sid AND type = 'policy.denied' "
+                    "ORDER BY id DESC LIMIT 1"
+                ),
+                {"sid": session.id},
+            )
+        ).mappings().one()
+    assert row["data"]["tool"] == "execute_code"
+    assert "allow-list" in row["data"]["reason"]
+
+
+async def test_session_tool_allow_list_admits_listed_tool(
+    session_store, session_factory,
+):
+    """A tool present in ``session.config["tool_allow_list"]`` reaches dispatch.
+
+    ``ToolRegistry()`` is empty so the call ultimately fails downstream,
+    but the assertion is that the allow-list block did *not* short-circuit
+    the call: no ``policy.denied`` event for the allow-list reason, and
+    the tool result does not name an allow-list rejection.
+    """
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+        config={
+            "workspace_path": "/workspace",
+            "tool_allow_list": ["clarify"],
+        },
+    )
+    lease = await session_store.try_acquire_lease(
+        session.id, "worker-allow-list-pass-test", ttl_seconds=60,
+    )
+    assert lease is not None
+
+    tc = {
+        "id": "tc-allow-list-2",
+        "function": {
+            "name": "clarify",
+            "arguments": json.dumps({"question": "what?"}),
+        },
+    }
+    result_msg = await execute_single_tool(
+        tc,
+        session=session,
+        lease=lease,
+        store=session_store,
+        tools=ToolRegistry(),
+        tenant=_StubTenant(org_id=org_id, user_id=user_id),
+    )
+
+    # The allow-list path didn't reject — message content does not
+    # mention the allow-list (tool failed for a different reason
+    # downstream, which is expected with an empty registry).
+    assert "allow-list" not in result_msg["content"]
+
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT data FROM events "
+                    "WHERE session_id = :sid AND type = 'policy.denied'"
+                ),
+                {"sid": session.id},
+            )
+        ).mappings().all()
+    # No allow-list denial.  (Other governance denials may exist but
+    # this assertion is scoped to allow-list reasons.)
+    for r in rows:
+        assert "allow-list" not in r["data"].get("reason", "")
+
+
+async def test_session_empty_tool_allow_list_imposes_no_restriction(
+    session_store, session_factory,
+):
+    """Missing or empty allow-list means no per-session tool restriction.
+
+    Important so a session created without populating the key (the
+    default for every channel today) is not silently locked down.
+    """
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+        config={
+            "workspace_path": "/workspace",
+            # No "tool_allow_list" key at all.
+        },
+    )
+    lease = await session_store.try_acquire_lease(
+        session.id, "worker-allow-list-empty-test", ttl_seconds=60,
+    )
+    assert lease is not None
+
+    tc = {
+        "id": "tc-allow-list-empty",
+        "function": {
+            "name": "execute_code",
+            "arguments": json.dumps({"code": "print('hi')"}),
+        },
+    }
+    result_msg = await execute_single_tool(
+        tc,
+        session=session,
+        lease=lease,
+        store=session_store,
+        tools=ToolRegistry(),
+        tenant=_StubTenant(org_id=org_id, user_id=user_id),
+    )
+
+    # No allow-list restriction was applied.
+    assert "allow-list" not in result_msg["content"]
+
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT data FROM events "
+                    "WHERE session_id = :sid AND type = 'policy.denied'"
+                ),
+                {"sid": session.id},
+            )
+        ).mappings().all()
+    for r in rows:
+        assert "allow-list" not in r["data"].get("reason", "")
+
+
 async def test_training_candidates_thumbs_signals(
     session_store, session_factory,
 ):

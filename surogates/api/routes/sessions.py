@@ -189,8 +189,17 @@ async def _create_session(
     store = _get_session_store(request)
 
     # Model is always set from server config — not user-selectable.
+    # ``LLMSettings.model`` carries its own default; if the deployment
+    # actively cleared it, that's a misconfiguration we surface up
+    # front rather than silently substituting a model that may not
+    # exist on the configured provider.
     settings = request.app.state.settings
-    model = settings.llm.model or "gpt-5.4"
+    if not settings.llm.model:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="LLM model is not configured (settings.llm.model is empty).",
+        )
+    model = settings.llm.model
 
     config = body.config.copy()
     if body.system:

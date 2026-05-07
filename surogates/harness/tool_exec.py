@@ -574,15 +574,17 @@ async def execute_single_tool(
             )
 
     # --- Session tool allow-list check ---
-    # When the session config declares a ``tool_allow_list`` (the
-    # website channel sets this from the website_agents row at
-    # bootstrap), any tool outside the list is rejected before
-    # dispatch.  A missing or empty list means "no per-session
-    # restriction"; a non-empty list enforces strict membership.
-    # We emit ``policy.denied`` for auditability and a ``tool.result``
-    # carrying the explanation so the LLM sees the refusal inline
-    # (without which the model would keep calling the same forbidden
-    # tool on the next turn).
+    # When the session config declares a ``tool_allow_list``, any tool
+    # outside the list is rejected before dispatch.  A missing or empty
+    # list means "no per-session restriction"; a non-empty list enforces
+    # strict membership.  This is a general harness primitive — any
+    # code path that creates a session may populate the list (today the
+    # public-website bootstrap is one such path; future channels or
+    # programmatic API callers can use the same hook).  We emit
+    # ``policy.denied`` for auditability and a ``tool.result`` carrying
+    # the explanation so the LLM sees the refusal inline (without which
+    # the model would keep calling the same forbidden tool on the next
+    # turn).
     allow_list = session.config.get("tool_allow_list") if session.config else None
     if allow_list and tool_name not in allow_list:
         reason = (

@@ -1,11 +1,11 @@
-"""Per-agent CORS handling for ``/v1/website/*``.
+"""Per-channel CORS handling for ``/v1/website/*``.
 
 The global :class:`fastapi.middleware.cors.CORSMiddleware` applies a
 single static allow-list to every path.  The website channel needs a
-per-agent allow-list whose membership is resolved from the
-``website_agents`` row at request time, so this middleware takes over
-CORS for website paths and the global middleware only governs the rest
-of the API.
+separate, configurable allow-list that may differ from the rest of
+the API surface (the embedding domains rarely overlap with API
+consumers), so this middleware takes over CORS for website paths and
+the global middleware only governs the rest of the API.
 
 Preflight (``OPTIONS``) requests cannot be authenticated -- the
 browser strips cookies and the custom Authorization header from
@@ -82,8 +82,15 @@ def setup_website_cors_middleware(app: FastAPI) -> None:
         response = await call_next(request)
         if origin:
             # Overwrite -- Starlette's CORSMiddleware may have also set
-            # a header (we keep it in the stack for non-website paths);
-            # our per-agent decision wins for website paths.
+            # a header (we keep it in the stack for non-website paths)
+            # but website paths need ``Access-Control-Allow-Credentials:
+            # true`` and an explicit echoed origin (not ``*``) so the
+            # browser accepts the cookie.  Authority for *whether* this
+            # origin is permitted is enforced inside the route handlers
+            # against ``settings.website.allowed_origins`` -- this
+            # middleware only rewrites the response headers so the
+            # browser doesn't drop the response on CORS grounds before
+            # the handler's 401/403 reaches JS.
             response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Access-Control-Allow-Credentials"] = "true"
             existing_vary = response.headers.get("Vary", "")

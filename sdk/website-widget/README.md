@@ -77,7 +77,7 @@ The IIFE exposes `WebsiteAgent`, `EventType`, `AbstractAgent`, the error classes
 | Option | Type | Notes |
 |---|---|---|
 | `apiUrl` | string, required | Base URL of the Surogates API (e.g. `https://agent.acme.com`). No trailing slash required. |
-| `publishableKey` | string, required | `surg_wk_...` key provisioned by ops. Safe to embed in browser JS. |
+| `publishableKey` | string, required | `surg_wk_...` key configured at deploy time via `website.publishable_key`. Safe to embed in browser JS. |
 | `threadId` | string, optional | AG-UI thread id. One is minted if not provided. |
 | `agentId` | string, optional | AG-UI agent id. |
 | `initialMessages` | `Message[]`, optional | Pre-populated conversation history. |

@@ -309,6 +309,50 @@ class TelegramSettings(BaseSettings):
     text_batch_split_delay: float = 2.0
 
 
+class WebsiteSettings(BaseSettings):
+    """Public-website embed channel configuration.
+
+    The website channel exposes the deployment's agent to anonymous
+    browser visitors via an embeddable JS widget.  Like every other
+    channel adapter, this carries only transport-shaping fields —
+    auth, routing, the visitor lifecycle.  Anything that defines
+    *what the agent is* (model, system prompt, tool allow-list,
+    skills) lives on the agent itself, not here: a visitor-facing
+    agent that needs different capabilities than the same org's
+    employee-facing agent is a different agent and belongs in a
+    different deployment.
+
+    The visitor-side caps and idle timer below are channel-level
+    *because they describe the visitor*, not the agent.  Anonymous
+    browser visitors warrant tighter caps and shorter idle than
+    authenticated employee channels (Slack, Teams) — the agent is
+    the same in both cases; the abuse model is different.
+
+    ``allowed_origins`` is a comma-separated string to keep the env-var
+    injection path consistent with :class:`SlackSettings`; consumers
+    split it at the use site.  Rotate ``publishable_key`` by
+    redeploying with a fresh value — the key only ever appears in the
+    bootstrap ``Authorization`` header, so the blast radius of a leak
+    is one redeploy.
+    """
+
+    model_config = {"env_prefix": "SUROGATES_WEBSITE_"}
+
+    enabled: bool = False
+    publishable_key: str = ""
+    allowed_origins: str = ""           # CSV of scheme://host[:port]
+
+    # Visitor message cap.  Anonymous browser visitors warrant a
+    # tighter ceiling than authenticated channels; this is the only
+    # cap the route enforces today.  ``0`` means "no cap".  Token-cap
+    # and idle-policy knobs are deliberately not exposed here — the
+    # platform-wide :class:`SessionResetSettings` already covers idle
+    # for every channel, and there is no per-iteration token enforcer
+    # in the worker yet, so adding inert config fields would be
+    # misleading.
+    session_message_cap: int = 0
+
+
 class GovernanceSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_GOVERNANCE_"}
 
@@ -383,6 +427,7 @@ class Settings(BaseSettings):
     storage: StorageSettings = Field(default_factory=StorageSettings)
     slack: SlackSettings = Field(default_factory=SlackSettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
+    website: WebsiteSettings = Field(default_factory=WebsiteSettings)
 
     # Paths — each individually configurable, each a separate K8s volume mount
     platform_skills_dir: str = "/etc/surogates/skills"

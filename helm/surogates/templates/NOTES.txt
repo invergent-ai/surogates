@@ -25,6 +25,9 @@ Components:
   {{- if .Values.channels.telegram.enabled }}
   - Telegram:    enabled{{- if .Values.channels.telegram.webhookUrl }} (webhook){{- else }} (polling){{- end }}
   {{- end }}
+  {{- if .Values.channels.website.enabled }}
+  - Website:     enabled (origins: {{ .Values.channels.website.allowedOrigins | default "<none configured>" }})
+  {{- end }}
 
 LLM: {{ .Values.llm.model }}
 Sandbox: {{ .Values.sandbox.backend }}

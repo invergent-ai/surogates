@@ -1,11 +1,13 @@
 # Website Channel
 
-The website channel exposes an agent on a **public website** as a chat widget. Visitors are anonymous browser users with no platform account; identity is the server-side session cookie alone. Developers embed the agent using either the official [`@invergent/website-widget`](../../sdk/website-widget/README.md) JavaScript SDK ([AG-UI](https://docs.ag-ui.com/)-compatible) or plain `fetch` + `EventSource` against the raw HTTP surface documented below.
+The website channel exposes the deployment's agent on a **public website** as a chat widget. Visitors are anonymous browser users with no platform account; identity is the server-side session cookie alone. Developers embed the agent using either the official [`@invergent/website-widget`](../../sdk/website-widget/README.md) JavaScript SDK ([AG-UI](https://docs.ag-ui.com/)-compatible) or plain `fetch` + `EventSource` against the raw HTTP surface documented below.
+
+Like every other channel adapter, the website channel is configured at deploy time — there is no per-row "website agent" record in the database. A deployment serves exactly one agent (`settings.agent_id`) through any combination of channels it has enabled. If you need a sales bot on `acme.com` *and* a support bot on `help.acme.com` with different prompts, models, or tool surfaces, those are different agents — deploy them separately.
 
 Authentication is a two-layer pattern borrowed from Stripe's publishable keys:
 
-1. **Publishable key** (`surg_wk_…`) — safe to embed in browser JS. Authority is recognised only together with an `Origin` header listed in the agent's allow-list. A stolen key used from a different origin is rejected.
-2. **Session cookie** — issued on bootstrap. HttpOnly + Secure + SameSite=None, scoped to `/`. Signed JWT with the session id, agent id, origin, and a CSRF token baked in.
+1. **Publishable key** (`surg_wk_…`) — safe to embed in browser JS. Authority is recognised only together with an `Origin` header in the configured allow-list. A stolen key used from a different origin is rejected.
+2. **Session cookie** — issued on bootstrap. HttpOnly + Secure + SameSite=None, scoped to `/`. Signed JWT with the session id, org id, origin, and a CSRF token baked in.
 
 State-changing endpoints require a double-submit CSRF token: the value of the `csrf` claim in the cookie JWT must match an `X-CSRF-Token` header on every POST.
 
@@ -21,52 +23,51 @@ Do **not** use the website channel for authenticated end users; use the [web cha
 
 Do **not** use the website channel for fire-and-forget backend pipelines; use the [API channel](api.md) with `surg_sk_` service-account tokens.
 
-## Provisioning a website agent
+## Configuration
 
-Website agents are managed programmatically through `surogate-ops` using the `WebsiteAgentStore` Python API:
+The channel is enabled and configured via :class:`WebsiteSettings` (`SUROGATES_WEBSITE_*` env vars, populated from YAML / Helm / a K8s Secret).
 
-```python
-from surogates.channels.website_agent_store import WebsiteAgentStore
-
-store = WebsiteAgentStore(session_factory)
-issued = await store.create(
-    org_id=org_id,
-    name="support-bot",
-    allowed_origins=["https://customer.com", "https://www.customer.com"],
-    tool_allow_list=["web_search", "clarify", "consult_expert"],
-    system_prompt="You are the Acme product support agent...",
-    model="gpt-5.4",
-    session_message_cap=50,
-    session_idle_minutes=30,
-)
-print(issued.publishable_key)   # surg_wk_… — surface this ONCE
+```yaml
+# config.dev.yaml or chart values via SUROGATES_WEBSITE_*
+website:
+  enabled: true
+  publishable_key: "surg_wk_…"           # Bearer token the embed presents at bootstrap
+  allowed_origins: "https://customer.com,https://www.customer.com"
+  session_message_cap: 50                # 0 = no cap
 ```
 
-The raw publishable key is returned exactly once. Only a SHA-256 digest is stored; if you lose it, rotate by deleting and recreating the agent.
+```yaml
+# helm values: channels.website (rendered into the API deployment)
+channels:
+  website:
+    enabled: true
+    publishableKey: "surg_wk_…"
+    allowedOrigins: "https://customer.com,https://www.customer.com"
+    sessionMessageCap: 50
+```
 
-### Key configuration fields
+Mint a fresh publishable key with:
+
+```bash
+python -c "from surogates.channels.website_keys import generate_publishable_key; print(generate_publishable_key())"
+```
+
+The Helm chart packages it into the `{release}-website` Secret and injects it as `SUROGATES_WEBSITE_PUBLISHABLE_KEY` on the API deployment. Rotate by redeploying with a fresh value — the key only ever appears in the bootstrap `Authorization` header, so the blast radius of a leak is one redeploy.
+
+### Configuration fields
 
 | Field | Purpose |
 |---|---|
-| `allowed_origins` | Exact-match list (scheme + host + port). Wildcards not supported. |
-| `tool_allow_list` | Subset of tools the anonymous visitor may invoke. Empty = no restriction (falls back to platform governance). Ops should always set an explicit list. |
-| `system_prompt` | Prepended to the harness system prompt. |
-| `model` | Model override for this agent's sessions. |
-| `skill_pins` | Skills pinned into every session the agent serves. |
-| `session_message_cap` | 0 = unbounded. Enforced on each message submission. |
-| `session_token_cap` | 0 = unbounded. Enforced by the harness on each LLM call. |
-| `session_idle_minutes` | Idle timeout before the session is reset in place. |
-| `enabled` | Disabling stops all in-flight sessions within the auth cache TTL (~30s). |
+| `enabled` | Feature flag. When false, every `/v1/website/*` request returns 404 (the channel looks like it doesn't exist). |
+| `publishable_key` | The single bearer token visitors present at bootstrap. Compared constant-time against the configured value; no hashing — config *is* the secret store. |
+| `allowed_origins` | Comma-separated, exact-match list (scheme + host + port). Wildcards not supported; every embedding domain must be enumerated. |
+| `session_message_cap` | Per-session message ceiling. `0` means "no cap"; a non-zero value triggers HTTP 429 on the message endpoint when reached. Materialised onto `session.config` at bootstrap so the cap a visitor was admitted under stays stable for the whole session. |
 
-### Default tool allow-list rationale
+### What is *not* on the channel
 
-Tools that are never appropriate for anonymous visitors:
+The channel deliberately does **not** carry agent-defining fields — `model`, `system_prompt`, `tool_allow_list`, `skill_pins` — because a channel is a transport, not an agent. Different visitor populations that genuinely need different model behaviour, prompts, or tool surfaces are different agents and belong in different deployments.
 
-* `terminal`, `execute_code`, `patch`, `write_file`, `read_file`, `search_files`, `list_files` — filesystem/shell access
-* `skill_manage` — mutates tenant assets
-* `delegate_task` — can spawn arbitrary sub-agents
-
-Common safe defaults: `web_search`, `web_extract`, `clarify`, `consult_expert`, `todo`.
+The harness still honours `session.config["tool_allow_list"]` when present (see [tool_exec.py](../../surogates/harness/tool_exec.py)), so a programmatic session creator that wants to tighten the tool surface for a specific session can populate that key directly. The website channel just isn't a writer of it any more.
 
 ---
 
@@ -145,7 +146,7 @@ Constructor config extends AG-UI's `AgentConfig`:
 | Option | Type | Notes |
 |---|---|---|
 | `apiUrl` | `string` (required) | Base URL of the Surogates **API server**. No trailing slash required; stripped automatically. |
-| `publishableKey` | `string` (required) | `surg_wk_...` key provisioned by ops via `WebsiteAgentStore.create()`. Safe to embed in browser JS. |
+| `publishableKey` | `string` (required) | `surg_wk_...` key configured via `website.publishable_key` in the deployment's settings. Safe to embed in browser JS. |
 | `threadId` | `string` | AG-UI thread id. Minted if omitted. |
 | `agentId` | `string` | AG-UI agent id. |
 | `initialMessages` | `Message[]` | Pre-populated conversation history. |
@@ -646,6 +647,8 @@ Response (`201 Created`):
 }
 ```
 
+`agent_name` is the deployment's `settings.agent_id` (typically a slug like `support-bot`) so the widget has a stable label to display.
+
 `Set-Cookie` header sets `surg_ws=…; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=3600`. The browser holds the CSRF token in memory and echoes it on every POST. `Path=/` is intentionally broad: the `StripApiPrefixMiddleware` rewrites `/api/v1/...` to `/v1/...` on the server, so pinning the cookie to either form alone would break the other. HttpOnly + the `website_session` JWT `type` claim prevent cross-route leakage.
 
 ### POST /v1/website/sessions/{id}/messages — send a message
@@ -783,14 +786,14 @@ The API server is the trusted control plane; workers are the brain; sandboxes (p
 
 | Concern | Mitigation |
 |---|---|
-| Publishable key leak | Key authority is only recognised together with an `Origin` in the agent's allow-list. A key lifted from your site and used from a different origin is rejected at bootstrap. |
+| Publishable key leak | Key authority is only recognised together with an `Origin` in the configured allow-list. A key lifted from your site and used from a different origin is rejected at bootstrap. Rotate by redeploying with a fresh value. |
 | Session cookie theft | Cookie is HttpOnly (inaccessible to JS) + Secure (HTTPS only) + SameSite=None (cross-site because the widget embed is cross-site by definition). The cookie's `origin` claim is re-verified on every request so replay from a different origin fails even if the attacker has the cookie. |
 | Cross-site request forgery | Double-submit CSRF — the `X-CSRF-Token` header must match the `csrf` claim baked into the HttpOnly cookie. Cross-origin JS cannot read the cookie, so it cannot forge a matching header. |
-| Over-privileged visitor | `tool_allow_list` materialises onto `session.config` at bootstrap; the harness enforces it before dispatch. A visitor session physically cannot invoke tools outside the list, no matter what the LLM generates. |
-| Runaway visitor | `session_message_cap` and `session_token_cap` bound cost per session; `session_idle_minutes` triggers in-place reset without running the memory-flush agent (visitors have no per-user memory). |
-| Ops-side disable | Calling `store.update(agent_id, enabled=False)` stops new bootstraps immediately and in-flight sessions within the auth cache TTL (~30s). |
+| Runaway visitor | `session_message_cap` bounds cost per session and triggers HTTP 429 on the message endpoint when reached. The platform-wide `SessionResetSettings` idle policy applies on top. |
+| Channel disable | Setting `SUROGATES_WEBSITE_ENABLED=false` and redeploying makes every `/v1/website/*` route return 404 — both for new bootstraps and for in-flight sessions on their next request. |
 | Cross-session replay | The session cookie JWT scopes to a single `session_id`; hitting `/v1/website/sessions/{other}/messages` with it returns 404 indistinguishable from "session doesn't exist". |
-| Stolen key exfiltration via attacker site | Even with a valid key, the bootstrap fails unless `Origin` matches the agent's allow-list. Ops enumerates every permitted origin at provision time. |
+| Stolen key exfiltration via attacker site | Even with a valid key, the bootstrap fails unless `Origin` matches the configured allow-list. Operators enumerate every permitted origin in `website.allowed_origins`. |
+| Tool surface tightening | The harness honours `session.config["tool_allow_list"]` whenever a session creator populates it — useful for programmatic session creation paths that need a tighter tool surface than the platform's governance defaults. The website channel itself does not write this key (per-channel agent capability overrides are agent-defining; deploy a different agent if you need them). |
 
 ## Interaction with other subsystems
 
@@ -798,4 +801,4 @@ The API server is the trusted control plane; workers are the brain; sandboxes (p
 * **Training data**: every website session participates in `TrainingDataCollector` exports on the same footing as every other channel.
 * **Prompt injection**: the global `PromptInjectionDetector` does **not** run on website messages yet; adding it is straightforward but would need a review of how anonymous-visitor input compares to authenticated-user input for false-positive rates.
 * **Rate limiting**: per-token rate limits in `surogates:rate:*` do not apply to the website channel (the middleware keys off `Authorization`, which the browser doesn't carry after bootstrap). Consider per-IP limits at your edge/ingress for abuse protection.
-* **Out of scope for v1**: hosted React components, visitor identity continuity across bootstraps (cookie expiry → new session), per-agent analytics dashboard, CAPTCHA. The [SDK README](../../sdk/website-widget/README.md) discusses follow-ups.
+* **Out of scope today**: hosted React components, visitor identity continuity across bootstraps (cookie expiry → new session), per-deployment analytics dashboard, CAPTCHA, per-iteration token cap enforcement in the worker. The [SDK README](../../sdk/website-widget/README.md) discusses follow-ups.
