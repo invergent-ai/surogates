@@ -109,8 +109,8 @@ class OpsDatabaseSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_OPS_DB_"}
 
     url: str = ""
-    pool_size: int = 5
-    pool_overflow: int = 5
+    pool_size: int = 2
+    pool_overflow: int = 2
 
 
 class KBHubSettings(BaseSettings):
