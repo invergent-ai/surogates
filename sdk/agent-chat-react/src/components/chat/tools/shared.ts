@@ -57,3 +57,23 @@ export function parseArgs<T = Record<string, unknown>>(args: string): T | null {
 export function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) + "\n... (truncated)" : s;
 }
+
+export function toolErrorSummary(result: string | undefined, max = 180): string {
+  if (!result) return "";
+  try {
+    const parsed = JSON.parse(result);
+    const error = typeof parsed?.error === "string" ? parsed.error : "";
+    if (error === "sandbox_unavailable") {
+      return "Sandbox is unavailable. Workspace commands cannot run right now.";
+    }
+    const reason = typeof parsed?.reason === "string" ? parsed.reason : "";
+    const message = typeof parsed?.message === "string" ? parsed.message : "";
+    const detail = reason || message;
+    const summary = error && detail && detail !== error
+      ? `${error}: ${detail}`
+      : error || detail;
+    return summary ? summary.replace(/\s+/g, " ").slice(0, max) : "";
+  } catch {
+    return "";
+  }
+}

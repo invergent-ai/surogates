@@ -15,6 +15,7 @@ import {
 import { Shimmer } from "../../ai-elements/shimmer";
 import { cn } from "../../../lib/utils";
 import type { ToolCallInfo } from "../../../types";
+import { toolErrorSummary } from "./shared";
 
 
 function CopyButton({ text }: { text: string }) {
@@ -67,7 +68,8 @@ export function parseTerminalResult(
     const hasOutput = typeof parsed?.output === "string";
     const hasStdout = typeof parsed?.stdout === "string";
     const hasExitCode = typeof parsed?.exit_code === "number";
-    if (!hasOutput && !hasStdout && !hasExitCode) {
+    const errorSummary = toolErrorSummary(result, 400);
+    if (!hasOutput && !hasStdout && !hasExitCode && !errorSummary) {
       return null;
     }
     let command = "";
@@ -76,12 +78,12 @@ export function parseTerminalResult(
       command = parsedArgs?.command ?? "";
     } catch { /* ignore */ }
     const output = parsed.output ?? parsed.stdout ?? "";
-    const stderr = parsed.stderr ?? parsed.error ?? "";
+    const stderr = parsed.stderr ?? errorSummary;
     const combined = stderr ? `${output}\n${stderr}`.trim() : output;
     return {
       output: combined,
-      exit_code: parsed.exit_code ?? 0,
-      error: parsed.error ?? null,
+      exit_code: parsed.exit_code ?? (errorSummary ? 1 : 0),
+      error: errorSummary || null,
       command,
     };
   } catch {
@@ -93,9 +95,10 @@ interface TerminalBodyProps {
   command: string;
   output: string;
   isRunning: boolean;
+  hasError?: boolean;
 }
 
-function TerminalCollapsible({ command, output, isRunning }: TerminalBodyProps) {
+function TerminalCollapsible({ command, output, isRunning, hasError }: TerminalBodyProps) {
   // Terminal stays collapsed until the user clicks the trigger -- unlike
   // Reasoning, the terminal's output is rarely scannable at a glance and
   // auto-expanding every call floods the chat with noise.  The trigger
@@ -112,6 +115,8 @@ function TerminalCollapsible({ command, output, isRunning }: TerminalBodyProps) 
         <span className="text-left">
           {isRunning ? (
             <Shimmer as="span" duration={1}>Running command...</Shimmer>
+          ) : hasError ? (
+            <span className="font-semibold text-destructive">Command failed</span>
           ) : (
             <span className="font-semibold text-foreground">Command result</span>
           )}
@@ -172,6 +177,7 @@ export function TerminalToolBlock({ tc }: { tc: ToolCallInfo }) {
         command={result.command}
         output={output}
         isRunning={isRunning}
+        hasError={result.exit_code !== 0 || Boolean(result.error)}
       />
     );
   }

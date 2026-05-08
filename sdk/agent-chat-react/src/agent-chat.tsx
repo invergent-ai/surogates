@@ -29,6 +29,7 @@ export function AgentChat({
   disabled,
 }: AgentChatProps) {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
+  const [workspaceCollapsed, setWorkspaceCollapsed] = useState(false);
   const runtime = useAgentChatRuntime({
     adapter,
     agentId,
@@ -77,6 +78,8 @@ export function AgentChat({
             sessionId={sessionId}
             selectedPath={workspacePath}
             onSelectedPathChange={setWorkspacePath}
+            collapsed={workspaceCollapsed}
+            onCollapsedChange={setWorkspaceCollapsed}
             disabled={disabled}
           />
         </section>

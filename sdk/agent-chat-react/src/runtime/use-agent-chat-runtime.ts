@@ -59,11 +59,11 @@ export function useAgentChatRuntime({
 
     let cancelled = false;
 
-    const connect = () => {
+    const connect = (after?: number) => {
       if (cancelled) return;
       const stream = adapter.openEventStream({
         sessionId,
-        after: stateRef.current.lastEventId,
+        after: after ?? stateRef.current.lastEventId,
       });
       streamRef.current = stream;
 
@@ -90,13 +90,15 @@ export function useAgentChatRuntime({
           streamRef.current = null;
         }
         if (!stateRef.current.sessionDone && !cancelled) {
-          reconnectTimerRef.current = setTimeout(connect, 3000);
+          reconnectTimerRef.current = setTimeout(() => connect(), 3000);
         }
       };
     };
 
-    setState(createInitialAgentChatState());
-    connect();
+    const initialState = createInitialAgentChatState();
+    stateRef.current = initialState;
+    setState(initialState);
+    connect(0);
 
     adapter
       .getSession({ sessionId })
@@ -190,14 +192,20 @@ export function useAgentChatRuntime({
 
   const send = useCallback(
     async (content: string) => {
+      markSending(content);
+
       if (!sessionId) {
-        const session = await adapter.createSession({ agentId });
-        await adapter.sendMessage({ sessionId: session.id, content });
-        onSessionChange?.(session.id);
+        try {
+          const session = await adapter.createSession({ agentId });
+          await adapter.sendMessage({ sessionId: session.id, content });
+          onSessionChange?.(session.id);
+        } catch (error) {
+          markSendError(error instanceof Error ? error.message : "send failed");
+          throw error;
+        }
         return;
       }
 
-      markSending(content);
       try {
         await adapter.sendMessage({ sessionId, content });
       } catch (error) {

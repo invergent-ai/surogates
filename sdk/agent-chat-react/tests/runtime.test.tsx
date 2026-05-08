@@ -190,6 +190,42 @@ describe("useAgentChatRuntime", () => {
     });
   });
 
+  it("does not carry the previous session event cursor into the next session", () => {
+    const calls: AdapterCalls = {
+      opened: [],
+      sent: [],
+      paused: [],
+      retried: [],
+      created: [],
+    };
+    const adapter = createFakeAdapter(calls);
+
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root?.render(
+        <HarnessWrapper adapter={adapter} sessionId="s-1" />,
+      );
+    });
+    act(() => {
+      calls.opened[0]?.stream.emit("user.message", 42, {
+        content: "from session one",
+      });
+    });
+
+    act(() => {
+      root?.render(
+        <HarnessWrapper adapter={adapter} sessionId="s-2" />,
+      );
+    });
+
+    expect(calls.opened[calls.opened.length - 1]).toMatchObject({
+      sessionId: "s-2",
+      after: 0,
+    });
+  });
+
   it("optimistically appends a user message before sendMessage resolves", async () => {
     const calls: AdapterCalls = {
       opened: [],
@@ -240,6 +276,49 @@ describe("useAgentChatRuntime", () => {
       { sessionId: "created-session", content: "first" },
     ]);
     expect(changed).toEqual(["created-session"]);
+  });
+
+  it("shows the first message as running while creating a session", async () => {
+    const calls: AdapterCalls = {
+      opened: [],
+      sent: [],
+      paused: [],
+      retried: [],
+      created: [],
+    };
+    let resolveCreate: ((session: AgentChatSession) => void) | null = null;
+    const adapter: AgentChatAdapter = {
+      ...createFakeAdapter(calls),
+      async createSession(input) {
+        calls.created.push(input);
+        return await new Promise<AgentChatSession>((resolve) => {
+          resolveCreate = resolve;
+        });
+      },
+    };
+    const runtime = renderRuntime({
+      adapter,
+      agentId: "agent-1",
+      sessionId: null,
+    });
+
+    let sendPromise: Promise<void>;
+    await act(async () => {
+      sendPromise = runtime.api.send("first");
+      await Promise.resolve();
+    });
+
+    expect(runtime.api.isRunning).toBe(true);
+    expect(runtime.api.messages[0]).toMatchObject({
+      role: "user",
+      content: "first",
+      status: "complete",
+    });
+
+    await act(async () => {
+      resolveCreate?.(session("created-session"));
+      await sendPromise;
+    });
   });
 
   it("calls pauseSession and marks the current stream stopped on stop", async () => {

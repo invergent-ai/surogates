@@ -215,6 +215,55 @@ describe("AgentChat", () => {
     expect(container.textContent).toContain("print('hi')");
   });
 
+  it("opens the workspace by default and can collapse and expand it", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Workspace");
+    expect(container.textContent).toContain("main.py");
+
+    const collapseButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Collapse workspace"]',
+    );
+    expect(collapseButton).not.toBeNull();
+
+    await act(async () => {
+      collapseButton!.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).not.toContain("main.py");
+    expect(container.textContent).not.toContain("Workspace");
+
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Expand workspace"]',
+      ),
+    ).toBeNull();
+
+    const expandStrip = container.querySelector<HTMLElement>(
+      '[role="button"][aria-label="Expand workspace"]',
+    );
+    expect(expandStrip).not.toBeNull();
+    expect(expandStrip!.querySelector("svg")).not.toBeNull();
+
+    await act(async () => {
+      expandStrip!.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Workspace");
+    expect(container.textContent).toContain("main.py");
+  });
+
   it("renders PDF workspace files without using the image preview", async () => {
     const stream = new FakeEventStream();
     const adapter: AgentChatAdapter = {
@@ -489,6 +538,59 @@ describe("AgentChat", () => {
       "The architecture is appropriate for an SDK example.",
     );
     expect(container.textContent).not.toContain('"question"');
+  });
+
+  it("shows a visible explanation for failed tool result dots", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    act(() => {
+      stream.emit("tool.call", 1, {
+        tool_call_id: "crawl-1",
+        name: "web_crawl",
+        arguments: {
+          url: "https://example.com",
+        },
+      });
+      stream.emit("tool.result", 2, {
+        tool_call_id: "crawl-1",
+        content: JSON.stringify({
+          error: "Tavily API error: 401",
+          message: "Unauthorized",
+        }),
+      });
+      stream.emit("tool.call", 3, {
+        tool_call_id: "terminal-1",
+        name: "terminal",
+        arguments: {
+          command: "pip install python-pptx",
+        },
+      });
+      stream.emit("tool.result", 4, {
+        tool_call_id: "terminal-1",
+        content: JSON.stringify({
+          error: "sandbox_unavailable",
+          reason: "Sandbox pod sandbox-0df712402538 failed to become ready",
+        }),
+      });
+    });
+
+    expect(container.textContent).toContain(
+      "Tavily API error: 401: Unauthorized",
+    );
+    expect(container.textContent).toContain("Command failed");
+    expect(container.textContent).toContain(
+      "Sandbox is unavailable. Workspace commands cannot run right now.",
+    );
+    expect(container.textContent).not.toContain("sandbox-0df712402538");
   });
 
   it("renders skill management and coordinator tools as dedicated blocks", async () => {

@@ -31,7 +31,7 @@ import {
 } from "../reui/timeline";
 import { Shimmer } from "../ai-elements/shimmer";
 import { ToolCallBlock } from "./tool-call-block";
-import { statusColorClass, effectiveStatus } from "./tools/shared";
+import { statusColorClass, effectiveStatus, toolErrorSummary } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
 import { ChatComposer } from "./chat-composer";
 import { ArtifactBlock } from "./artifacts/artifact-block";
@@ -282,7 +282,7 @@ function OrphanSystemMarker({
 
   if (message.systemKind === "error" && message.errorInfo) {
     return (
-      <div className="mx-auto my-2 w-full max-w-4xl px-4">
+      <div className="mx-auto my-2 w-full max-w-4xl">
         <ErrorMessage errorInfo={message.errorInfo} onRetry={onRetry} />
       </div>
     );
@@ -363,6 +363,10 @@ function TimelineEntryItem({
   }
 
   if (entry.kind === "tool") {
+    const failureSummary =
+      effectiveStatus(entry.tc) === "error"
+        ? toolErrorSummary(entry.tc.result)
+        : "";
     return (
       <TimelineItem step={step}>
         <TimelineHeader>
@@ -375,7 +379,14 @@ function TimelineEntryItem({
           {entry.tc.cancelled ? (
             <CancelledToolRow tc={entry.tc} />
           ) : (
-            <ToolCallBlock tc={entry.tc} onFileSelect={onFileSelect} />
+            <div className="space-y-1">
+              <ToolCallBlock tc={entry.tc} onFileSelect={onFileSelect} />
+              {failureSummary ? (
+                <div className="max-w-full truncate text-xs text-destructive" title={failureSummary}>
+                  {failureSummary}
+                </div>
+              ) : null}
+            </div>
           )}
         </TimelineContent>
       </TimelineItem>
@@ -583,7 +594,7 @@ export function ChatThread({
   return (
     <div className="flex flex-1 flex-col overflow-hidden bg-background text-sm">
       <Conversation className="relative flex-1 min-h-0">
-        <ConversationContent className="mx-auto w-full max-w-3xl">
+        <ConversationContent className="mx-auto w-full max-w-4xl">
           {messages.length === 0 && !disabled ? (
             <ConversationEmptyState
               icon={<MessageSquareIcon className="size-8 opacity-40" />}
@@ -650,7 +661,7 @@ export function ChatThread({
         <ConversationScrollButton />
       </Conversation>
 
-      <div className="mx-auto w-full max-w-3xl px-6 pb-5 pt-3">
+      <div className="mx-auto w-full max-w-4xl px-6 pb-5 pt-3">
         {retryIndicator && (
           <div className="mb-2">
             <RetryBanner indicator={retryIndicator} />

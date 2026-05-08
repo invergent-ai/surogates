@@ -96,7 +96,7 @@ export function SessionSidebar() {
         {!collapsed && (
           <div>
             <div className="font-bold text-foreground tracking-tight">
-              Surogates
+              Surogate
             </div>
             <div className="text-xs text-muted-foreground tracking-wide uppercase">
               Agent Chat
