@@ -20,6 +20,7 @@ import {
   surogatesWebChatAdapter,
   toAgentChatSession,
 } from "./surogates-web-chat-adapter";
+import { getChatRouteState } from "./chat-route-state";
 
 const PRE_SESSION_KEY = "__pre_session__";
 
@@ -40,34 +41,29 @@ export function ChatPage() {
     void fetchUser();
   }, [fetchSessions, fetchUser]);
 
+  const sessionIds = useMemo(() => sessions.map((s) => s.id), [sessions]);
+  const chatRouteState = getChatRouteState({
+    activeSessionId,
+    sessionIds,
+    sessionsLoading,
+    urlSessionId: params.sessionId,
+  });
+
   // Single effect to sync URL <-> store <-> session list.
   useEffect(() => {
     if (sessionsLoading) return;
 
-    const urlId = params.sessionId;
-
-    if (urlId) {
-      const exists = sessions.some((s) => s.id === urlId);
-      if (exists) {
-        if (urlId !== activeSessionId) setActiveSession(urlId);
-      } else {
-        setActiveSession(null);
-        void navigate({ to: "/chat", replace: true });
-      }
-      return;
+    if (chatRouteState.nextActiveSessionId !== activeSessionId) {
+      setActiveSession(chatRouteState.nextActiveSessionId);
     }
 
-    if (activeSessionId) {
-      void navigate({
-        to: "/chat/$sessionId",
-        params: { sessionId: activeSessionId },
-        replace: true,
-      });
+    if (chatRouteState.redirectTo === "/chat") {
+      void navigate({ to: "/chat", replace: true });
     }
   }, [
     sessionsLoading,
-    sessions,
-    params.sessionId,
+    chatRouteState.nextActiveSessionId,
+    chatRouteState.redirectTo,
     activeSessionId,
     setActiveSession,
     navigate,
@@ -90,7 +86,7 @@ export function ChatPage() {
   // closing over the full disclosureState record.
   const preSessionAccepted = useRef(false);
 
-  const sessionId = params.sessionId ?? activeSessionId;
+  const sessionId = chatRouteState.sessionId;
   const [chatMessages, setChatMessages] = useState<AgentChatMessage[]>([]);
 
   // Show disclosure banner when transparency is enabled and the user has not

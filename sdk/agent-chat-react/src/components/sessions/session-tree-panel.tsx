@@ -130,6 +130,24 @@ function mergeTreeNodes(
   return Array.from(byId.values());
 }
 
+function pruneDeletedSessionNodes(
+  nodes: AgentChatSessionTreeNode[],
+  deletedSessionId: string,
+): AgentChatSessionTreeNode[] {
+  const deletedIds = new Set([deletedSessionId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const node of nodes) {
+      if (node.parentId && deletedIds.has(node.parentId) && !deletedIds.has(node.id)) {
+        deletedIds.add(node.id);
+        changed = true;
+      }
+    }
+  }
+  return nodes.filter((node) => !deletedIds.has(node.id));
+}
+
 function formatSessionTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
@@ -290,7 +308,6 @@ export function SessionTreePanel({
   // frozen session.
   const lastFingerprint = useRef<string>("");
   const resetContext = useRef<{
-    adapter: AgentChatAdapter;
     agentId?: string;
     sessionListLimit: number;
   } | null>(null);
@@ -364,10 +381,9 @@ export function SessionTreePanel({
     const previous = resetContext.current;
     const shouldReset =
       !previous ||
-      previous.adapter !== adapter ||
       previous.agentId !== agentId ||
       previous.sessionListLimit !== sessionListLimit;
-    resetContext.current = { adapter, agentId, sessionListLimit };
+    resetContext.current = { agentId, sessionListLimit };
 
     if (shouldReset) {
       setNodes([]);
@@ -422,6 +438,11 @@ export function SessionTreePanel({
       setDeletingSessionId(id);
       try {
         await adapter.deleteSession({ sessionId: id });
+        setNodes((current) => {
+          const next = pruneDeletedSessionNodes(current, id);
+          lastFingerprint.current = treeFingerprint(next);
+          return next;
+        });
         onSessionDelete?.(id);
         await refetch({ silent: true });
       } catch (e) {

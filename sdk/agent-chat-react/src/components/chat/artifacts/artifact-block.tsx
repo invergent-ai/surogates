@@ -198,7 +198,7 @@ function ArtifactBody({
             </Shimmer>
           }
         >
-          <ArtifactChart spec={payload.spec} />
+          <ArtifactChart spec={payload.spec} fill={fill} />
         </Suspense>
       );
     case "html":

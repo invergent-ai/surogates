@@ -8,6 +8,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { VegaEmbed } from "react-vega";
 import type { VisualizationSpec } from "vega-embed";
 import { useTheme } from "next-themes";
+import { cn } from "../../../lib/utils";
 import type { ChartArtifactSpec } from "../../../types";
 
 // Vega-Lite JSON schema identifier.  Injected when the LLM-emitted spec
@@ -23,6 +24,14 @@ const DEFAULT_CHART_HEIGHT = 320;
 // Minimum width we'll bother rendering at — guards against the rare
 // layout flash where ResizeObserver reports 0 before the parent lays out.
 const MIN_CHART_WIDTH = 120;
+
+// Hard ceiling on the chart's rendered height in the inline (non-fill)
+// view.  Vega's ``autosize: fit`` is best-effort on layered/faceted
+// specs, so a malformed spec can still produce an SVG taller than its
+// declared ``height`` and stretch the conversation column.  Anything
+// past this gets clipped; the user can hit the expand button for the
+// unconstrained dialog view.
+const MAX_INLINE_CHART_HEIGHT = 800;
 
 // Minimal theme overrides so charts sit on dark and light backgrounds
 // without manual colour tuning in every generated spec.  Vega-Lite's
@@ -54,7 +63,13 @@ const DARK_CONFIG = {
   legend: { labelColor: "#cbd5e1", titleColor: "#f1f5f9" },
 };
 
-export function ArtifactChart({ spec }: { spec: ChartArtifactSpec }) {
+export function ArtifactChart({
+  spec,
+  fill = false,
+}: {
+  spec: ChartArtifactSpec;
+  fill?: boolean;
+}) {
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === "dark";
 
@@ -89,6 +104,14 @@ export function ArtifactChart({ spec }: { spec: ChartArtifactSpec }) {
       $schema: VEGA_LITE_SCHEMA,
       width,
       height: DEFAULT_CHART_HEIGHT,
+      // Force the SVG to honour ``width``/``height`` instead of growing
+      // to fit content.  Defends against malformed specs (e.g. ``"y2":
+      // {"value": N}`` on a quantitative channel, which makes the area
+      // mark draw to pixel N below the plot and bloats the SVG height
+      // by an order of magnitude).  ``fit`` is best-effort on layered
+      // and faceted views — the prompt-side guidance is the primary
+      // fix for those; this is just a containment net.
+      autosize: { type: "fit", contains: "padding" },
       ...base,
       config: {
         ...themeConfig,
@@ -104,7 +127,11 @@ export function ArtifactChart({ spec }: { spec: ChartArtifactSpec }) {
 
   return (
     <div className="flex flex-col gap-2">
-      <div ref={containerRef} className="w-full">
+      <div
+        ref={containerRef}
+        className={cn("w-full", !fill && "overflow-hidden")}
+        style={fill ? undefined : { maxHeight: MAX_INLINE_CHART_HEIGHT }}
+      >
         {merged && (
           <VegaEmbed
             spec={merged}

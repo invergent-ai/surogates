@@ -54,4 +54,5 @@ When the user asks for 'a small HTML page', 'a calculator', 'a demo', 'a widget'
 - **Err on the side of not creating an artifact.** Overuse is jarring; when in doubt, keep it inline.
 - Pick a short, descriptive `name` — it becomes the artifact's title.
 - Charts must supply Vega-Lite `data.values` inline; `data.url` is blocked.
+- For chart positional channels (`x`, `y`, `x2`, `y2`), use `datum` when referencing a data value, not `value`. `value` on a positional channel is a literal pixel offset, not a data point — writing `"y2": {"value": 2260}` to extend an area down to price 2260 will produce a broken chart with runaway dimensions. The correct form is `"y2": {"datum": 2260}`.
 - HTML artifacts are sandboxed iframed, no same-origin access, no forms, no top-level navigation, no page borders, transparent background, no margins, no padding. They can include inline JS and CSS but cannot load external resources.
