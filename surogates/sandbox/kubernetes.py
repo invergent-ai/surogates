@@ -350,9 +350,16 @@ class K8sSandbox:
         )
 
         # s3fs sidecar container — uses the entrypoint.sh from the image.
+        # ``S3_REGION`` is what s3fs passes as ``-o endpoint=`` for SigV4
+        # signing.  When the bucket lives in real AWS, the region must
+        # match the endpoint host, otherwise AWS rejects the pre-mount
+        # ``s3fs_check_service`` call with HTTP 400 and s3fs exits cleanly,
+        # leaving the pod NotReady forever.
+        s3_region = self._resolve_s3_region(s3_endpoint)
         s3fs_env = [
             client.V1EnvVar(name="S3_BUCKET_PATH", value=session_bucket_path),
             client.V1EnvVar(name="S3_ENDPOINT", value=s3_endpoint),
+            client.V1EnvVar(name="S3_REGION", value=s3_region),
         ]
 
         s3fs_container = client.V1Container(
@@ -603,6 +610,43 @@ class K8sSandbox:
             return self._pods[sandbox_id]
         except KeyError:
             raise ValueError(f"Unknown sandbox: {sandbox_id}") from None
+
+    # Platform default region.  Used when the endpoint URL doesn't encode
+    # one and ``storage.region`` is unset.  Garage/MinIO ignore this label
+    # and AWS uses it for SigV4 signing, so the platform's home region is
+    # the safe choice.
+    _DEFAULT_REGION = "eu-central-1"
+
+    def _resolve_s3_region(self, s3_endpoint: str) -> str:
+        """Pick the SigV4 region label for s3fs's ``-o endpoint=`` flag.
+
+        Precedence:
+        1. Explicit ``storage.region`` setting — always wins.
+        2. Parse from a regional AWS S3 hostname (``s3.<region>.amazonaws.com``
+           or the legacy ``s3-<region>.amazonaws.com``).
+        3. Fall back to :attr:`_DEFAULT_REGION`.
+        """
+        explicit = ""
+        if self._storage:
+            explicit = getattr(self._storage, "region", "") or ""
+        if explicit:
+            return explicit
+
+        host = ""
+        if s3_endpoint:
+            try:
+                from urllib.parse import urlparse
+                host = urlparse(s3_endpoint).hostname or ""
+            except (ValueError, TypeError):
+                host = ""
+
+        if host.endswith(".amazonaws.com"):
+            import re
+            m = re.match(r"^s3[.-]([a-z0-9-]+)\.amazonaws\.com$", host)
+            if m:
+                return m.group(1)
+
+        return self._DEFAULT_REGION
 
     @staticmethod
     def _classify_create_pod_failure(exc: ApiException) -> str:

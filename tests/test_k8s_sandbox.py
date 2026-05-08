@@ -23,7 +23,7 @@ def sandbox() -> K8sSandbox:
         service_account="test-sa",
         pod_ready_timeout=5,
         executor_path="/usr/local/bin/tool-executor",
-        storage_settings=MagicMock(endpoint="http://minio:9000", access_key="key", secret_key="secret"),
+        storage_settings=MagicMock(endpoint="http://minio:9000", access_key="key", secret_key="secret", region=""),
         s3fs_image="s3fs:test",
     )
 
@@ -86,6 +86,68 @@ class TestBuildPodManifest:
         # The s3fs env should contain the bucket path.
         env_map = {e.name: e.value for e in s3fs.env}
         assert env_map["S3_BUCKET_PATH"] == "agent-test:/sessions/session-123"
+
+    def test_s3fs_env_includes_region(self, sandbox: K8sSandbox):
+        # s3fs needs S3_REGION; without it the sidecar runs with
+        # ``-o endpoint=garage`` (its hardcoded entrypoint default) and AWS
+        # rejects the pre-mount service check, leaving the pod NotReady.
+        pod = sandbox._build_pod_manifest("id", "pod", "secret", SandboxSpec())
+        s3fs = pod.spec.containers[1]
+        env_map = {e.name: e.value for e in s3fs.env}
+        assert "S3_REGION" in env_map
+
+
+class TestResolveS3Region:
+    """``S3_REGION`` is the SigV4 signing label s3fs sends.  Mismatching
+    it against the actual bucket region makes AWS S3 abort the mount."""
+
+    def _sb(self, *, region: str = "", endpoint: str = "") -> K8sSandbox:
+        return K8sSandbox(
+            namespace="ns", service_account="sa",
+            storage_settings=MagicMock(
+                endpoint=endpoint, access_key="k", secret_key="s",
+                region=region,
+            ),
+            s3_endpoint=endpoint,
+            s3fs_image="s3fs:test",
+        )
+
+    def test_explicit_region_wins(self):
+        sb = self._sb(region="ap-southeast-2", endpoint="https://s3.eu-central-1.amazonaws.com")
+        assert sb._resolve_s3_region("https://s3.eu-central-1.amazonaws.com") == "ap-southeast-2"
+
+    def test_aws_endpoint_yields_region(self):
+        sb = self._sb()
+        assert sb._resolve_s3_region("https://s3.eu-central-1.amazonaws.com") == "eu-central-1"
+
+    def test_aws_legacy_dash_endpoint(self):
+        sb = self._sb()
+        assert sb._resolve_s3_region("https://s3-us-west-2.amazonaws.com") == "us-west-2"
+
+    def test_bare_aws_endpoint_falls_back_to_platform_default(self):
+        # Bare ``s3.amazonaws.com`` carries no region in the host;
+        # platform default applies.
+        sb = self._sb()
+        assert sb._resolve_s3_region("https://s3.amazonaws.com") == K8sSandbox._DEFAULT_REGION
+
+    def test_non_aws_endpoint_falls_back_to_platform_default(self):
+        # Garage/MinIO ignore the region label, so the platform default
+        # is fine — they sign and route by URL, not by region.
+        sb = self._sb()
+        assert sb._resolve_s3_region("http://garage.surogates.svc:3900") == K8sSandbox._DEFAULT_REGION
+
+    def test_empty_endpoint_falls_back_to_platform_default(self):
+        sb = self._sb()
+        assert sb._resolve_s3_region("") == K8sSandbox._DEFAULT_REGION
+
+    def test_platform_default_region_is_eu_central_1(self):
+        # Platform deployment lives in eu-central-1; AWS rejects the
+        # mount when the SigV4 region label doesn't match the bucket's.
+        assert K8sSandbox._DEFAULT_REGION == "eu-central-1"
+
+    def test_no_storage_settings_falls_back(self):
+        sb = K8sSandbox(namespace="ns", service_account="sa", s3fs_image="x")
+        assert sb._resolve_s3_region("https://s3.eu-central-1.amazonaws.com") == "eu-central-1"
 
 
 class TestStatusMapping:

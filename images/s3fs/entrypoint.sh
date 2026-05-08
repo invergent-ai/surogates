@@ -12,7 +12,6 @@ set -euo pipefail
 #   S3_REGION             — S3 region (default: garage)
 
 MOUNT_POINT="${S3_MOUNT_POINT:-/workspace}"
-REGION="${S3_REGION:-garage}"
 
 if [ -z "${S3_BUCKET_PATH:-}" ]; then
     echo "ERROR: S3_BUCKET_PATH is required"
@@ -23,6 +22,21 @@ if [ -z "${S3_ENDPOINT:-}" ]; then
     echo "ERROR: S3_ENDPOINT is required"
     exit 1
 fi
+
+# Derive a sensible region for s3fs's `-o endpoint=` (SigV4 signing label)
+# when the caller didn't set one explicitly.  AWS S3 hosts encode the
+# region in the hostname; mismatching it makes AWS reject the pre-mount
+# service check with HTTP 400 and s3fs exits cleanly.
+if [ -z "${S3_REGION:-}" ]; then
+    HOST="$(echo "$S3_ENDPOINT" | sed -E 's|^[a-z]+://([^/:]+).*|\1|i')"
+    case "$HOST" in
+        s3.*.amazonaws.com|s3-*.amazonaws.com)
+            S3_REGION="$(echo "$HOST" | sed -E 's|^s3[.-]([a-z0-9-]+)\.amazonaws\.com$|\1|')"
+            ;;
+        *)                              S3_REGION="eu-central-1" ;;
+    esac
+fi
+REGION="$S3_REGION"
 
 # Write credentials file.
 echo "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" > /etc/passwd-s3fs
