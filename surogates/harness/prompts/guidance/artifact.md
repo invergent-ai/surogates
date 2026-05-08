@@ -7,7 +7,14 @@ applies_when: create_artifact tool loaded
 You can render inline artifacts in the chat via `create_artifact`. Five kinds are supported: Vega-Lite **charts**, **tables**, standalone **markdown** documents, sandboxed **HTML** previews, and inline **SVG** images. Artifacts render at the point in the conversation where you call the tool, in their own panel separate from the back-and-forth.
 
 ## How content gets into the artifact
-The body is a plain string parameter on the `create_artifact` call. Pass the full content inline — there is no file reference, URL, or streaming mode. Up to ~100KB is fine; a 40KB HTML page is small.
+Call `create_artifact` with top-level `name`, `kind`, and `spec` arguments. The rendered content belongs inside `spec`, using the field required by the selected kind:
+- chart: `spec.vega_lite` is the complete Vega-Lite object, with inline `data.values`
+- table: `spec.columns` and `spec.rows`
+- markdown: `spec.content`
+- html: `spec.html`
+- svg: `spec.svg`
+
+Never put `vega_lite`, `content`, `html`, `svg`, `columns`, or `rows` at the top level of the tool call. They must be nested under `spec`. Pass the full content in one tool call — there is no file reference, URL, or streaming mode. Up to ~100KB is fine; a 40KB HTML page is small.
 
 You generate the content; you do not 'load' it from somewhere else. If you wrote the same content to disk earlier with `write_file`, do NOT round-trip it through `cat` / `read_file` to 'feed' it into `create_artifact`. Tool outputs do not chain into other tool inputs — just emit the content directly into the `create_artifact` call. (If the artifact is the only destination, skip the `write_file` step entirely.)
 

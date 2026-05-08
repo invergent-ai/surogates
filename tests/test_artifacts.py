@@ -450,6 +450,26 @@ class TestCreateArtifactHandler:
         assert "caption" in props
         assert "optional" in props["caption"]["description"].lower()
 
+    def test_prompt_guidance_describes_structured_spec_contract(self):
+        # Smaller/local models are sensitive to contradictory wording.
+        # The guidance must match the actual tool schema: top-level
+        # name/kind/spec, with content nested inside spec.
+        tenant = TenantContext(
+            org_id=uuid4(),
+            user_id=uuid4(),
+            org_config={"default_model": "gpt-4o"},
+            user_preferences={},
+            permissions=frozenset(),
+            asset_root="/tmp/test_assets",
+        )
+        builder = PromptBuilder(tenant, available_tools={"create_artifact"})
+        prompt = builder.build()
+
+        assert "plain string parameter" not in prompt
+        assert "`name`, `kind`, and `spec`" in prompt
+        assert "`spec.vega_lite`" in prompt
+        assert "Never put `vega_lite`, `content`, `html`, `svg`, `columns`, or `rows` at the top level" in prompt
+
     async def test_chart_data_url_blocked_locally(self):
         # Data-URL SSRF guard also lives in the local validator.
         client = _StubAPIClient()
