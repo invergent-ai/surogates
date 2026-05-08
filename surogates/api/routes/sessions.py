@@ -49,13 +49,6 @@ class CreateSessionRequest(BaseModel):
     config: dict = Field(default_factory=dict)
 
 
-class CreateSessionResponse(BaseModel):
-    id: UUID
-    status: str
-    channel: str
-    model: str | None = None
-
-
 class SendMessageRequest(BaseModel):
     content: str
 
@@ -184,7 +177,7 @@ async def _create_session(
     channel: str,
     user_id: UUID | None,
     service_account_id: UUID | None,
-) -> CreateSessionResponse:
+) -> Session:
     """Create a chat session for either the web or service-account channel."""
     store = _get_session_store(request)
 
@@ -230,12 +223,7 @@ async def _create_session(
         service_account_id=service_account_id,
     )
 
-    return CreateSessionResponse(
-        id=session.id,
-        status=session.status,
-        channel=session.channel,
-        model=session.model,
-    )
+    return session
 
 
 # ---------------------------------------------------------------------------
@@ -245,14 +233,14 @@ async def _create_session(
 
 @router.post(
     "/sessions",
-    response_model=CreateSessionResponse,
+    response_model=Session,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_session(
     body: CreateSessionRequest,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
-) -> CreateSessionResponse:
+) -> Session:
     """Create a new session for the authenticated user."""
     return await _create_session(
         body,
@@ -266,14 +254,14 @@ async def create_session(
 
 @router.post(
     "/api/sessions",
-    response_model=CreateSessionResponse,
+    response_model=Session,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_api_session(
     body: CreateSessionRequest,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
-) -> CreateSessionResponse:
+) -> Session:
     """Create a new API-channel session for a service-account client."""
     service_account_id = _require_service_account_api_route(
         request,
