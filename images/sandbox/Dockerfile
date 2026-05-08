@@ -73,10 +73,18 @@ COPY images/sandbox/pip-wrapper /opt/venv/bin/pip
 RUN chmod +x /usr/local/bin/uv /opt/venv/bin/pip \
     && ln -sf /opt/venv/bin/pip /opt/venv/bin/pip3
 
-# PYTHONUSERBASE → /workspace/.local so pip installs persist on the
-# s3fs-mounted workspace (not the ephemeral home dir).
-ENV PATH="/workspace/.local/bin:/opt/venv/bin:$PATH" \
-    PYTHONUSERBASE="/workspace/.local" \
+# PYTHONUSERBASE lives in the sandbox container's writable layer rather
+# than on the s3fs mount.  s3fs serializes deleted-but-open files as
+# `.fuse_hidden*` entries that briefly appear in directory listings, and
+# uv (the backend for our pip wrapper) races them: it readdirs, sees a
+# hidden entry, then stat()s it after FUSE has already dropped it,
+# producing ENOENT and aborting the install.  Keeping site-packages off
+# s3fs sidesteps the race entirely.  Tradeoff: pip-installed packages
+# don't survive a sandbox-pod crash within a session (they're scoped to
+# the pod's lifetime) — sessions are short-lived enough that a re-install
+# on a fresh pod is cheap.
+ENV PATH="/home/sandbox/.local/bin:/opt/venv/bin:$PATH" \
+    PYTHONUSERBASE="/home/sandbox/.local" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_USER=1
@@ -88,8 +96,8 @@ RUN chmod +x /usr/local/bin/tool-executor
 # ── Non-root user ───────────────────────────────────────────────────
 RUN groupadd --gid 1000 sandbox \
     && useradd --uid 1000 --gid sandbox --create-home sandbox \
-    && mkdir -p /workspace \
-    && chown sandbox:sandbox /workspace
+    && mkdir -p /workspace /home/sandbox/.local \
+    && chown sandbox:sandbox /workspace /home/sandbox/.local
 
 USER sandbox
 WORKDIR /workspace

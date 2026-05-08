@@ -223,6 +223,14 @@ def _interpret_exit_code(command: str, exit_code: int) -> str | None:
 
 # Variables that are always inherited by the child process regardless of
 # passthrough config.  These are required for basic shell operation.
+#
+# ``PYTHONUSERBASE`` is included because the sandbox image installs pip
+# packages into ``$PYTHONUSERBASE`` (off the s3fs mount — see
+# images/sandbox/Dockerfile) and the agent's ``pip install X && python -c
+# "import X"`` flow needs Python's site module to find them.  Without
+# propagation, Python falls back to ``$HOME/.local`` — and we override
+# HOME to the workspace below, which would point Python at the wrong
+# (and s3fs-backed) location.
 _ALWAYS_INHERIT = frozenset({
     "HOME",
     "LANG",
@@ -230,6 +238,7 @@ _ALWAYS_INHERIT = frozenset({
     "LC_CTYPE",
     "LOGNAME",
     "PATH",
+    "PYTHONUSERBASE",
     "SHELL",
     "TERM",
     "TMPDIR",

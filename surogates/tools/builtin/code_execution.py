@@ -563,16 +563,18 @@ async def _execute_code_handler(
         child_env["SUROGATES_RPC_SOCKET"] = sock_path
         child_env["PYTHONDONTWRITEBYTECODE"] = "1"
 
-        # Make packages installed via `pip install --user` in the workspace
-        # visible to the child process.  The terminal tool runs pip in
-        # /workspace which writes to /workspace/.local — set PYTHONUSERBASE
-        # so the child's site-packages picks them up.
-        workspace_path: str = kwargs.get("workspace_path", "")
-        if workspace_path:
-            child_env["PYTHONUSERBASE"] = os.path.join(workspace_path, ".local")
-            # Also add .local/bin to PATH for console_scripts entry points.
-            local_bin = os.path.join(workspace_path, ".local", "bin")
+        # Make packages installed via `pip install` visible to the child.
+        # The pip wrapper installs to ``$PYTHONUSERBASE/lib/...`` and the
+        # sandbox image sets ``PYTHONUSERBASE`` off the s3fs mount (in the
+        # container's writable layer) — see images/sandbox/Dockerfile.
+        # Propagate it through with the matching ``$PYTHONUSERBASE/bin``
+        # on PATH so console_scripts entry points resolve.
+        userbase = os.environ.get("PYTHONUSERBASE", "")
+        if userbase:
+            child_env["PYTHONUSERBASE"] = userbase
+            local_bin = os.path.join(userbase, "bin")
             child_env["PATH"] = local_bin + os.pathsep + child_env.get("PATH", "")
+        workspace_path: str = kwargs.get("workspace_path", "")
 
         # Ensure the surogates root is importable in the sandbox so
         # repo-root modules are available to child scripts.
