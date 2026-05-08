@@ -1,66 +1,31 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// Chart artifact renderer — embeds a Vega-Lite spec via react-vega.
+// Chart artifact renderer — embeds a Chart.js configuration object.
 // Respects the app's dark/light theme and resizes with the thread column.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { VegaEmbed } from "react-vega";
-import type { VisualizationSpec } from "vega-embed";
+import { Chart as ChartJS } from "chart.js/auto";
+import type { ChartConfiguration, ChartOptions } from "chart.js";
 import { useTheme } from "next-themes";
 import { cn } from "../../../lib/utils";
 import type { ChartArtifactSpec } from "../../../types";
 
-// Vega-Lite JSON schema identifier.  Injected when the LLM-emitted spec
-// is missing one so ``VegaEmbed`` picks the Vega-Lite grammar instead
-// of falling back to base Vega.
-const VEGA_LITE_SCHEMA = "https://vega.github.io/schema/vega-lite/v5.json";
-
-// Fallback height when the spec doesn't supply one.  Width is measured
-// from the container; height only needs a sensible default because
-// Vega-Lite's internal default (200) is often too short for line charts.
 const DEFAULT_CHART_HEIGHT = 320;
-
-// Minimum width we'll bother rendering at — guards against the rare
-// layout flash where ResizeObserver reports 0 before the parent lays out.
-const MIN_CHART_WIDTH = 120;
-
-// Hard ceiling on the chart's rendered height in the inline (non-fill)
-// view.  Vega's ``autosize: fit`` is best-effort on layered/faceted
-// specs, so a malformed spec can still produce an SVG taller than its
-// declared ``height`` and stretch the conversation column.  Anything
-// past this gets clipped; the user can hit the expand button for the
-// unconstrained dialog view.
 const MAX_INLINE_CHART_HEIGHT = 800;
 
-// Minimal theme overrides so charts sit on dark and light backgrounds
-// without manual colour tuning in every generated spec.  Vega-Lite's
-// ``config`` is merged with the user's spec — the spec always wins on
-// an explicit collision.
-const LIGHT_CONFIG = {
-  background: "transparent",
-  axis: {
-    labelColor: "#444",
-    titleColor: "#111",
-    gridColor: "#e5e7eb",
-    domainColor: "#d1d5db",
-    tickColor: "#d1d5db",
-  },
-  view: { stroke: "transparent" },
-  legend: { labelColor: "#444", titleColor: "#111" },
+const LIGHT_THEME = {
+  text: "#444",
+  title: "#111",
+  grid: "#e5e7eb",
+  border: "#d1d5db",
 };
 
-const DARK_CONFIG = {
-  background: "transparent",
-  axis: {
-    labelColor: "#cbd5e1",
-    titleColor: "#f1f5f9",
-    gridColor: "#374151",
-    domainColor: "#4b5563",
-    tickColor: "#4b5563",
-  },
-  view: { stroke: "transparent" },
-  legend: { labelColor: "#cbd5e1", titleColor: "#f1f5f9" },
+const DARK_THEME = {
+  text: "#cbd5e1",
+  title: "#f1f5f9",
+  grid: "#374151",
+  border: "#4b5563",
 };
 
 export function ArtifactChart({
@@ -72,73 +37,52 @@ export function ArtifactChart({
 }) {
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === "dark";
-
-  // Measure the container so Vega gets an explicit numeric width.  The
-  // `width: "container"` mode depends on the parent having a layout
-  // width before vega-embed measures it; inside `flex`/`min-w-0`/
-  // `overflow-auto` chains it reports zero and the chart renders into
-  // a 0-wide box.  Passing a measured number sidesteps the problem.
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [width, setWidth] = useState<number | null>(null);
-
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const observer = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect.width ?? el.offsetWidth;
-      if (w >= MIN_CHART_WIDTH) setWidth(Math.floor(w));
-    });
-    observer.observe(el);
-    // Seed with the first measurement synchronously.
-    if (el.offsetWidth >= MIN_CHART_WIDTH) setWidth(el.offsetWidth);
-    return () => observer.disconnect();
-  }, []);
-
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const chartRef = useRef<ChartJS | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const merged = useMemo<VisualizationSpec | null>(() => {
-    if (width == null) return null;
-    const base = (spec.vega_lite ?? {}) as Record<string, unknown>;
-    const themeConfig = isDark ? DARK_CONFIG : LIGHT_CONFIG;
+  const config = useMemo<ChartConfiguration>(() => {
+    const base = cloneChartConfig(spec.chart_js ?? {});
     return {
-      $schema: VEGA_LITE_SCHEMA,
-      width,
-      height: DEFAULT_CHART_HEIGHT,
-      // Force the SVG to honour ``width``/``height`` instead of growing
-      // to fit content.  Defends against malformed specs (e.g. ``"y2":
-      // {"value": N}`` on a quantitative channel, which makes the area
-      // mark draw to pixel N below the plot and bloats the SVG height
-      // by an order of magnitude).  ``fit`` is best-effort on layered
-      // and faceted views — the prompt-side guidance is the primary
-      // fix for those; this is just a containment net.
-      autosize: { type: "fit", contains: "padding" },
       ...base,
-      config: {
-        ...themeConfig,
-        ...((base.config as Record<string, unknown>) ?? {}),
-      },
-    } as VisualizationSpec;
-  }, [spec.vega_lite, isDark, width]);
+      options: mergeThemeOptions(base.options, base.type, isDark),
+    } as ChartConfiguration;
+  }, [spec.chart_js, isDark]);
 
-  // Clear any prior error when the spec changes.
   useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    chartRef.current?.destroy();
+    chartRef.current = null;
     setError(null);
-  }, [spec.vega_lite]);
+
+    try {
+      chartRef.current = new ChartJS(canvas, config);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+
+    return () => {
+      chartRef.current?.destroy();
+      chartRef.current = null;
+    };
+  }, [config]);
 
   return (
     <div className="flex flex-col gap-2">
       <div
-        ref={containerRef}
-        className={cn("w-full", !fill && "overflow-hidden")}
-        style={fill ? undefined : { maxHeight: MAX_INLINE_CHART_HEIGHT }}
+        className={cn("relative w-full", fill && "h-full min-h-80")}
+        style={
+          fill
+            ? undefined
+            : {
+                height: DEFAULT_CHART_HEIGHT,
+                maxHeight: MAX_INLINE_CHART_HEIGHT,
+              }
+        }
       >
-        {merged && (
-          <VegaEmbed
-            spec={merged}
-            options={{ actions: false, renderer: "svg" }}
-            onError={(e) => setError(e instanceof Error ? e.message : String(e))}
-          />
-        )}
+        <canvas ref={canvasRef} />
       </div>
       {error && (
         <p className="text-xs text-destructive">Chart error: {error}</p>
@@ -148,4 +92,100 @@ export function ArtifactChart({
       )}
     </div>
   );
+}
+
+function cloneChartConfig(
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+}
+
+function mergeThemeOptions(
+  options: unknown,
+  chartType: unknown,
+  isDark: boolean,
+): ChartOptions {
+  const theme = isDark ? DARK_THEME : LIGHT_THEME;
+  const base = isRecord(options) ? options : {};
+  const plugins = isRecord(base.plugins) ? base.plugins : {};
+  const legend = isRecord(plugins.legend) ? plugins.legend : {};
+  const legendLabels = isRecord(legend.labels) ? legend.labels : {};
+  const title = isRecord(plugins.title) ? plugins.title : {};
+  const scales = isRecord(base.scales) ? base.scales : {};
+
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    color: theme.text,
+    ...base,
+    plugins: {
+      ...plugins,
+      legend: {
+        ...legend,
+        labels: {
+          color: theme.text,
+          ...legendLabels,
+        },
+      },
+      title: {
+        color: theme.title,
+        ...title,
+      },
+    },
+    scales: mergeScales(scales, chartType, theme),
+  } as ChartOptions;
+}
+
+function mergeScales(
+  scales: Record<string, unknown>,
+  chartType: unknown,
+  theme: typeof LIGHT_THEME,
+): Record<string, unknown> {
+  const names = new Set([...defaultScaleNames(chartType), ...Object.keys(scales)]);
+  const merged: Record<string, unknown> = {};
+
+  for (const name of names) {
+    const scale = isRecord(scales[name]) ? scales[name] : {};
+    const ticks = isRecord(scale.ticks) ? scale.ticks : {};
+    const grid = isRecord(scale.grid) ? scale.grid : {};
+    const title = isRecord(scale.title) ? scale.title : {};
+    merged[name] = {
+      ...scale,
+      ticks: {
+        color: theme.text,
+        ...ticks,
+      },
+      grid: {
+        color: theme.grid,
+        ...grid,
+      },
+      border: {
+        color: theme.border,
+        ...(isRecord(scale.border) ? scale.border : {}),
+      },
+      title: {
+        color: theme.title,
+        ...title,
+      },
+    };
+  }
+
+  return merged;
+}
+
+function defaultScaleNames(chartType: unknown): string[] {
+  if (chartType === "bar" || chartType === "line" || chartType === "scatter") {
+    return ["x", "y"];
+  }
+  if (chartType === "bubble") {
+    return ["x", "y"];
+  }
+  if (chartType === "radar" || chartType === "polarArea") {
+    return ["r"];
+  }
+  return [];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

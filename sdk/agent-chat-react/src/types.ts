@@ -187,7 +187,7 @@ export interface AgentChatTableArtifactSpec {
 }
 
 export interface AgentChatChartArtifactSpec {
-  vega_lite: Record<string, unknown>;
+  chart_js: Record<string, unknown>;
   caption?: string | null;
 }
 

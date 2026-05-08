@@ -20,7 +20,7 @@ from surogates.artifacts.models import (
     MAX_TABLE_ROWS,
     ArtifactKind,
     ArtifactSpec,
-    ChartSpec,
+    ChartJsSpec,
     HtmlSpec,
     MarkdownSpec,
     SvgSpec,
@@ -74,7 +74,7 @@ class TestArtifactSpec:
         ).validate_spec()
         ArtifactSpec(
             name="x", kind=ArtifactKind.CHART,
-            spec={"vega_lite": {"mark": "bar", "data": {"values": [{"a": 1}]}}},
+            spec={"chart_js": {"type": "bar", "data": {"labels": ["a"], "datasets": [{"data": [1]}]}}},
         ).validate_spec()
         ArtifactSpec(
             name="x", kind=ArtifactKind.HTML,
@@ -120,25 +120,23 @@ class TestTableSpec:
             )
 
 
-class TestChartSpec:
-    def test_inline_values_allowed(self):
-        c = ChartSpec(vega_lite={"mark": "bar", "data": {"values": [{"a": 1}]}})
-        assert c.vega_lite["mark"] == "bar"
+class TestChartJsSpec:
+    def test_basic_chartjs_config_allowed(self):
+        c = ChartJsSpec(
+            chart_js={
+                "type": "bar",
+                "data": {"labels": ["a"], "datasets": [{"label": "A", "data": [1]}]},
+            },
+        )
+        assert c.chart_js["type"] == "bar"
 
-    def test_data_url_rejected_at_top_level(self):
+    def test_chartjs_config_requires_type(self):
         with pytest.raises(ValidationError):
-            ChartSpec(vega_lite={"mark": "bar", "data": {"url": "https://evil.example.com/data.json"}})
+            ChartJsSpec(chart_js={"data": {"labels": ["a"], "datasets": [{"data": [1]}]}})
 
-    def test_data_url_rejected_when_nested(self):
-        # Layered spec: each layer has its own data block.  We must catch
-        # URLs anywhere in the tree, not just at the top level.
+    def test_chartjs_config_requires_data_object(self):
         with pytest.raises(ValidationError):
-            ChartSpec(vega_lite={
-                "layer": [
-                    {"mark": "bar", "data": {"values": [{"a": 1}]}},
-                    {"mark": "point", "data": {"url": "https://evil.example.com/data.json"}},
-                ],
-            })
+            ChartJsSpec(chart_js={"type": "bar"})
 
 
 class TestHtmlSpec:
@@ -349,7 +347,11 @@ class TestCreateArtifactHandler:
 
     async def test_forwards_to_api_client(self):
         client = _StubAPIClient()
-        args = {"name": "x", "kind": "chart", "spec": {"vega_lite": {}}}
+        args = {
+            "name": "x",
+            "kind": "chart",
+            "spec": {"chart_js": {"type": "bar", "data": {"datasets": [{"data": [1]}]}}},
+        }
         out = await _create_artifact_handler(args, api_client=client)
         assert json.loads(out)["success"] is True
         assert client.calls == [args]
@@ -390,18 +392,18 @@ class TestCreateArtifactHandler:
         assert client.calls == []
 
     async def test_invalid_kind_spec_caught_locally_with_shape_hint(self):
-        # Pass a spec for the wrong kind (chart without vega_lite).  The
+        # Pass a spec for the wrong kind (chart without chart_js).  The
         # handler should catch it via ArtifactSpec.validate_spec() and
         # return a focused message rather than bouncing to the API.
         client = _StubAPIClient()
         out = await _create_artifact_handler(
-            {"name": "x", "kind": "chart", "spec": {"not_vega": "oops"}},
+            {"name": "x", "kind": "chart", "spec": {"not_chart": "oops"}},
             api_client=client,
         )
         data = json.loads(out)
         assert data["success"] is False
         assert "chart" in data["error"]
-        assert "vega_lite" in data["hint"]
+        assert "chart_js" in data["hint"]
         # Crucially: never hit the API.
         assert client.calls == []
 
@@ -442,7 +444,7 @@ class TestCreateArtifactHandler:
         props = spec_schema["properties"]
         # Every kind's required field must appear as a named property.
         for required_field in (
-            "content", "columns", "rows", "vega_lite", "html", "svg",
+            "content", "columns", "rows", "chart_js", "html", "svg",
         ):
             assert required_field in props, f"schema missing {required_field}"
             assert "REQUIRED" in props[required_field]["description"]
@@ -467,25 +469,21 @@ class TestCreateArtifactHandler:
 
         assert "plain string parameter" not in prompt
         assert "`name`, `kind`, and `spec`" in prompt
-        assert "`spec.vega_lite`" in prompt
-        assert "Never put `vega_lite`, `content`, `html`, `svg`, `columns`, or `rows` at the top level" in prompt
+        assert "`spec.chart_js`" in prompt
+        assert "Never put `chart_js`, `content`, `html`, `svg`, `columns`, or `rows` at the top level" in prompt
 
-    async def test_chart_data_url_blocked_locally(self):
-        # Data-URL SSRF guard also lives in the local validator.
+    async def test_invalid_chartjs_config_blocked_locally(self):
         client = _StubAPIClient()
         out = await _create_artifact_handler(
             {
                 "name": "x", "kind": "chart",
-                "spec": {"vega_lite": {
-                    "mark": "bar",
-                    "data": {"url": "https://evil.example/d.json"},
-                }},
+                "spec": {"chart_js": {"data": {"datasets": [{"data": [1]}]}}},
             },
             api_client=client,
         )
         data = json.loads(out)
         assert data["success"] is False
-        assert "data.url" in data["error"]
+        assert "type" in data["error"]
         assert client.calls == []  # did not forward
 
     async def test_non_object_spec_rejected(self):
@@ -524,13 +522,13 @@ class TestCreateArtifactHandler:
             {
                 "name": "Revenue",
                 "kind": "chart",
-                "vega_lite": {"mark": "bar"},
+                "chart_js": {"type": "bar", "data": {"datasets": [{"data": [1]}]}},
             },
             api_client=client,
         )
         data = json.loads(out)
         assert data["success"] is False
-        assert "vega_lite" in data["error"]
+        assert "chart_js" in data["error"]
         assert client.calls == []
 
     async def test_flattened_html_spec_hint(self):

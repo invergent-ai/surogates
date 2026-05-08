@@ -39,8 +39,7 @@ def register(registry: ToolRegistry) -> None:
                 "- markdown: standalone markdown document (reports, specs, "
                 "study guides).\n"
                 "- table: tabular data; rows are objects keyed by column.\n"
-                "- chart: a Vega-Lite spec with inline data "
-                "(`data.values`, never `data.url`).\n"
+                "- chart: a Chart.js config object with inline data.\n"
                 "- html: self-contained HTML rendered in a sandboxed "
                 "iframe. Scripts run but cannot reach the parent page. "
                 "Use for interactive demos, widgets, single-page tools.\n"
@@ -109,12 +108,12 @@ def register(registry: ToolRegistry) -> None:
                                     "is an object keyed by column name."
                                 ),
                             },
-                            "vega_lite": {
+                            "chart_js": {
                                 "type": "object",
                                 "description": (
                                     "REQUIRED when kind='chart'. A complete "
-                                    "Vega-Lite spec with inline "
-                                    "`data.values` (data.url is blocked)."
+                                    "Chart.js config object with `type`, "
+                                    "`data`, and optional `options`."
                                 ),
                             },
                             "html": {
@@ -159,7 +158,7 @@ def register(registry: ToolRegistry) -> None:
 _SPEC_KEYS_BY_KIND: dict[str, tuple[str, ...]] = {
     "markdown": ("content",),
     "table": ("columns", "rows"),
-    "chart": ("vega_lite",),
+    "chart": ("chart_js",),
     "html": ("html",),
     "svg": ("svg",),
 }
@@ -178,9 +177,9 @@ _SHAPE_EXAMPLE_BY_KIND: dict[str, str] = {
     ),
     "chart": (
         '{"name": "…", "kind": "chart", '
-        '"spec": {"vega_lite": {"mark": "bar", '
-        '"data": {"values": [{"x": 1, "y": 2}]}, '
-        '"encoding": {"x": {"field": "x"}, "y": {"field": "y"}}}}}'
+        '"spec": {"chart_js": {"type": "bar", '
+        '"data": {"labels": ["x"], '
+        '"datasets": [{"label": "Series", "data": [2]}]}}}}'
     ),
     "html": (
         '{"name": "…", "kind": "html", '

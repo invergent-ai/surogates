@@ -37,7 +37,7 @@ import {
   safeFilename,
 } from "./artifact-export";
 
-// Vega ships a big bundle — only pay for it when a chart actually
+// Chart.js ships in a separate chunk — only pay for it when a chart actually
 // appears in the thread.
 const ArtifactChart = lazy(() =>
   import("./artifact-chart").then((m) => ({ default: m.ArtifactChart })),

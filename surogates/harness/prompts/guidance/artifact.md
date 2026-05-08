@@ -4,17 +4,17 @@ description: Injected when the create_artifact tool is available; teaches the ag
 applies_when: create_artifact tool loaded
 ---
 # Artifacts
-You can render inline artifacts in the chat via `create_artifact`. Five kinds are supported: Vega-Lite **charts**, **tables**, standalone **markdown** documents, sandboxed **HTML** previews, and inline **SVG** images. Artifacts render at the point in the conversation where you call the tool, in their own panel separate from the back-and-forth.
+You can render inline artifacts in the chat via `create_artifact`. Five kinds are supported: Chart.js **charts**, **tables**, standalone **markdown** documents, sandboxed **HTML** previews, and inline **SVG** images. Artifacts render at the point in the conversation where you call the tool, in their own panel separate from the back-and-forth.
 
 ## How content gets into the artifact
 Call `create_artifact` with top-level `name`, `kind`, and `spec` arguments. The rendered content belongs inside `spec`, using the field required by the selected kind:
-- chart: `spec.vega_lite` is the complete Vega-Lite object, with inline `data.values`
+- chart: `spec.chart_js` is the complete Chart.js config object, with `type`, `data`, and optional `options`
 - table: `spec.columns` and `spec.rows`
 - markdown: `spec.content`
 - html: `spec.html`
 - svg: `spec.svg`
 
-Never put `vega_lite`, `content`, `html`, `svg`, `columns`, or `rows` at the top level of the tool call. They must be nested under `spec`. Pass the full content in one tool call — there is no file reference, URL, or streaming mode. Up to ~100KB is fine; a 40KB HTML page is small.
+Never put `chart_js`, `content`, `html`, `svg`, `columns`, or `rows` at the top level of the tool call. They must be nested under `spec`. Pass the full content in one tool call — there is no file reference, URL, or streaming mode. Up to ~100KB is fine; a 40KB HTML page is small.
 
 You generate the content; you do not 'load' it from somewhere else. If you wrote the same content to disk earlier with `write_file`, do NOT round-trip it through `cat` / `read_file` to 'feed' it into `create_artifact`. Tool outputs do not chain into other tool inputs — just emit the content directly into the `create_artifact` call. (If the artifact is the only destination, skip the `write_file` step entirely.)
 
@@ -41,7 +41,7 @@ Ask yourself: *will the user want to copy, save, or refer back to this content o
 - One-off answers or small examples that clarify a point.
 
 ## Do not emit artifact-shaped content as code fences
-If the user asks for an **SVG**, an **HTML page or widget**, a **chart**, or any other content that `create_artifact` can render, invoke the tool. Do NOT paste the content into your reply as a ` ```svg `, ` ```html `, or ` ```json ` (vega-lite) code fence — the user will see raw source instead of the rendered output, which defeats the point of asking for it. The tool call is what produces a usable artifact; a fenced code block produces a wall of text.
+If the user asks for an **SVG**, an **HTML page or widget**, a **chart**, or any other content that `create_artifact` can render, invoke the tool. Do NOT paste the content into your reply as a ` ```svg `, ` ```html `, or ` ```json ` (Chart.js) code fence — the user will see raw source instead of the rendered output, which defeats the point of asking for it. The tool call is what produces a usable artifact; a fenced code block produces a wall of text.
 
 ## `create_artifact` vs `write_file`
 This is the one place it's easy to get wrong. The user's phrasing ('single file', 'save to a file') does NOT decide it; the **intent** does:
@@ -53,6 +53,6 @@ When the user asks for 'a small HTML page', 'a calculator', 'a demo', 'a widget'
 - **One artifact per response** unless the user explicitly asks for more.
 - **Err on the side of not creating an artifact.** Overuse is jarring; when in doubt, keep it inline.
 - Pick a short, descriptive `name` — it becomes the artifact's title.
-- Charts must supply Vega-Lite `data.values` inline; `data.url` is blocked.
-- For chart positional channels (`x`, `y`, `x2`, `y2`), use `datum` when referencing a data value, not `value`. `value` on a positional channel is a literal pixel offset, not a data point — writing `"y2": {"value": 2260}` to extend an area down to price 2260 will produce a broken chart with runaway dimensions. The correct form is `"y2": {"datum": 2260}`.
+- Charts must supply a Chart.js config in `spec.chart_js` with inline data. Include a `type` such as `"bar"`, `"line"`, `"pie"`, `"doughnut"`, `"scatter"`, or `"radar"`, plus `data.labels` and `data.datasets` where that chart type expects them.
+- Keep Chart.js options self-contained. Do not rely on plugins, external scripts, external images, or remote data.
 - HTML artifacts are sandboxed iframed, no same-origin access, no forms, no top-level navigation, no page borders, transparent background, no margins, no padding. They can include inline JS and CSS but cannot load external resources.

@@ -1,7 +1,7 @@
 """Artifacts subsystem — LLM-authored, chat-embedded inline content.
 
 Artifacts are named, versioned, kind-typed blobs (markdown, tables,
-Vega-Lite charts, sandboxed HTML, SVG) that the LLM creates via the
+Chart.js charts, sandboxed HTML, SVG) that the LLM creates via the
 ``create_artifact`` tool.  They live in the session workspace under
 ``_artifacts/{artifact_id}/v{N}.json`` — the underscore prefix marks
 the directory as server-internal so the workspace file browser hides

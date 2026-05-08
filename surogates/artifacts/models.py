@@ -1,11 +1,11 @@
 """Artifact data shapes and kind-specific spec validators.
 
 An artifact is a named, kind-typed blob produced by the ``create_artifact``
-tool.  Three kinds are supported at MVP:
+tool.  Five kinds are supported:
 
 - ``markdown`` — arbitrary GitHub-flavoured markdown rendered in-thread
 - ``table``   — row/column data with optional column hints
-- ``chart``   — a Vega-Lite spec with inline data only
+- ``chart``   — a Chart.js configuration object
 
 Each kind parses/validates its spec here before the artifact is persisted,
 so the API layer can reject malformed requests without touching storage.
@@ -103,45 +103,26 @@ class TableSpec(BaseModel):
         return v
 
 
-class ChartSpec(BaseModel):
-    """A Vega-Lite spec.  Inline data only — no external URL loading.
+class ChartJsSpec(BaseModel):
+    """A Chart.js config object rendered by the frontend.
 
-    We do not validate against the full Vega-Lite JSON schema here (too
-    large to pull in); the frontend's ``react-vega`` renderer reports a
-    clear error if the spec is malformed.  We *do* reject specs that
-    reference external data sources, which is the main SSRF vector.
+    We do not validate against Chart.js' TypeScript types here.  The local
+    validator only enforces the minimal shape needed for a renderer retry to
+    be actionable: chart ``type`` plus a ``data`` object.
     """
 
-    vega_lite: dict[str, Any]
+    chart_js: dict[str, Any]
     caption: str | None = None
 
-    @field_validator("vega_lite")
+    @field_validator("chart_js")
     @classmethod
-    def _no_external_data(cls, v: dict[str, Any]) -> dict[str, Any]:
-        data = v.get("data")
-        if isinstance(data, dict) and "url" in data:
-            raise ValueError(
-                "chart data.url is not allowed — provide inline data.values instead"
-            )
-        # Reject any nested data blocks that reference external URLs (e.g.
-        # inside layered/faceted specs).
-        _reject_urls(v)
+    def _minimal_chartjs_shape(cls, v: dict[str, Any]) -> dict[str, Any]:
+        chart_type = v.get("type")
+        if not isinstance(chart_type, str) or not chart_type.strip():
+            raise ValueError("chart_js.type must be a non-empty string")
+        if not isinstance(v.get("data"), dict):
+            raise ValueError("chart_js.data must be an object")
         return v
-
-
-def _reject_urls(node: Any) -> None:
-    """Walk a Vega-Lite spec and raise if any ``data`` block references a URL."""
-    if isinstance(node, dict):
-        data = node.get("data")
-        if isinstance(data, dict) and "url" in data:
-            raise ValueError(
-                "chart data.url is not allowed — provide inline data.values instead"
-            )
-        for value in node.values():
-            _reject_urls(value)
-    elif isinstance(node, list):
-        for item in node:
-            _reject_urls(item)
 
 
 class HtmlSpec(BaseModel):
@@ -230,7 +211,7 @@ class ArtifactSpec(BaseModel):
             case ArtifactKind.TABLE:
                 TableSpec(**self.spec)
             case ArtifactKind.CHART:
-                ChartSpec(**self.spec)
+                ChartJsSpec(**self.spec)
             case ArtifactKind.HTML:
                 HtmlSpec(**self.spec)
             case ArtifactKind.SVG:

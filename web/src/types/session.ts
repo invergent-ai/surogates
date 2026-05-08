@@ -150,7 +150,7 @@ export interface TableArtifactSpec {
 }
 
 export interface ChartArtifactSpec {
-  vega_lite: Record<string, unknown>;
+  chart_js: Record<string, unknown>;
   caption?: string | null;
 }
 

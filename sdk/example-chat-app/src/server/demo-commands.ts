@@ -402,12 +402,16 @@ function emitArtifactDemo(store: ExampleSessionStore, record: ExampleSessionReco
       kind: "chart",
       meta: meta(record.session.id, "demo-chart", "Token chart", "chart", 300),
       spec: {
-        vega_lite: {
-          mark: "bar",
-          data: { values: [{ type: "input", tokens: 12 }, { type: "output", tokens: 28 }] },
-          encoding: {
-            x: { field: "type", type: "nominal" },
-            y: { field: "tokens", type: "quantitative" },
+        chart_js: {
+          type: "bar",
+          data: {
+            labels: ["input", "output"],
+            datasets: [
+              {
+                label: "Tokens",
+                data: [12, 28],
+              },
+            ],
           },
         },
         caption: "Synthetic token usage",

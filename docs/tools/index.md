@@ -170,7 +170,7 @@ Navigate to a URL and return page content.
 
 ### `create_artifact` -- Inline Chat Artifact
 
-Render a named, versioned artifact inline in the chat thread: a Vega-Lite chart, a table, a standalone markdown document, a sandboxed HTML preview, or an SVG image. The LLM calls this tool whenever the user wants to **see and interact with** output in the chat rather than save it to disk (which is what `write_file` is for).
+Render a named, versioned artifact inline in the chat thread: a Chart.js chart, a table, a standalone markdown document, a sandboxed HTML preview, or an SVG image. The LLM calls this tool whenever the user wants to **see and interact with** output in the chat rather than save it to disk (which is what `write_file` is for).
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -184,7 +184,7 @@ Render a named, versioned artifact inline in the chat thread: a Vega-Lite chart,
 |---|---|---|---|
 | `markdown` | `content` (string) | — | Rendered with the chat's Streamdown pipeline (code fences, math, mermaid). |
 | `table` | `columns` (array of strings), `rows` (array of objects keyed by column name) | `caption` | Scrolls horizontally on wide data. Capped at 50 columns × 2000 rows. |
-| `chart` | `vega_lite` (object) | `caption` | A complete Vega-Lite spec. **Inline data only** — `data.url` is blocked (SSRF guard). |
+| `chart` | `chart_js` (object) | `caption` | A complete Chart.js config object with `type`, `data`, and optional `options`. Keep data inline and self-contained. |
 | `html` | `html` (string) | `caption` | Rendered in an iframe with `sandbox="allow-scripts"` — no same-origin, no forms, no top-nav. Scripts run but can't reach the parent page. |
 | `svg` | `svg` (string) | `caption` | Rendered via `<img src="data:image/svg+xml;utf8,…">` — `<script>` inside SVG does **not** execute (browser image-mode). |
 
@@ -194,4 +194,4 @@ Render a named, versioned artifact inline in the chat thread: a Vega-Lite chart,
 
 **One artifact per response.** The harness enforces this softly via prompt guidance, not at the tool level. If an assistant turn ends with a ` ```svg ` or ` ```html ` fence in its content (some smaller models prefer fences over tool calls), the harness auto-promotes the first such fence into a real artifact so the user sees the rendered output regardless.
 
-**Frontend rendering.** Each kind has a dedicated renderer under `web/src/components/chat/artifacts/`. Artifacts appear in the timeline at the point the tool ran, inside a bordered card with copy and download actions. The chart renderer is lazy-loaded so the Vega bundle only ships when a chart appears.
+**Frontend rendering.** Each kind has a dedicated renderer under `web/src/components/chat/artifacts/`. Artifacts appear in the timeline at the point the tool ran, inside a bordered card with copy and download actions. The chart renderer is lazy-loaded so Chart.js only ships when a chart appears.

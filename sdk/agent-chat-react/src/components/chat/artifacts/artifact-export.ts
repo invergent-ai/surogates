@@ -29,7 +29,7 @@ export function exportArtifact(payload: ArtifactPayload): ArtifactExport {
       };
     case "chart":
       return {
-        text: JSON.stringify(payload.spec.vega_lite, null, 2),
+        text: JSON.stringify(payload.spec.chart_js, null, 2),
         mime: "application/json",
         extension: "json",
       };
