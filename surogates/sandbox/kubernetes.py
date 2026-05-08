@@ -103,13 +103,23 @@ class K8sSandbox:
         """Return a cached CoreV1Api client.
 
         Tries in-cluster config first (production), falls back to
-        kubeconfig (local dev running outside the cluster).
+        kubeconfig (local dev running outside the cluster).  If neither
+        path yields a usable config, raises ``SandboxUnavailableError``
+        so the harness reports the failure as an infra issue rather
+        than leaking a raw ``ConfigException`` to the LLM.
         """
         if self._api is None:
             try:
                 config.load_incluster_config()
             except config.ConfigException:
-                await config.load_kube_config()
+                try:
+                    await config.load_kube_config()
+                except Exception as exc:
+                    raise SandboxUnavailableError(
+                        f"Kubernetes sandbox unavailable — could not load "
+                        f"kubeconfig: {exc}. Check that your local cluster "
+                        f"is running and ~/.kube/config is valid.",
+                    ) from exc
             self._api = client.CoreV1Api()
         return self._api
 
