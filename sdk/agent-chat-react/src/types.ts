@@ -150,6 +150,7 @@ export interface AgentChatRuntimeEvent {
 export interface AgentChatState {
   messages: AgentChatMessage[];
   isRunning: boolean;
+  isLoadingHistory: boolean;
   tokenUsage: AgentChatTokenUsage;
   retryIndicator: AgentChatRetryIndicator | null;
   lastEventId: number;
@@ -354,6 +355,7 @@ export interface AgentChatAdapter {
 export interface AgentChatRuntimeApi {
   messages: AgentChatMessage[];
   isRunning: boolean;
+  isLoadingHistory: boolean;
   tokenUsage: AgentChatTokenUsage;
   retryIndicator: AgentChatRetryIndicator | null;
   send(content: string): Promise<void>;

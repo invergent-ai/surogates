@@ -64,6 +64,7 @@ export function AgentChat({
               sessionId={sessionId}
               messages={runtime.messages}
               isRunning={runtime.isRunning}
+              isLoadingHistory={runtime.isLoadingHistory}
               onSend={(content) => void runtime.send(content)}
               onStop={() => void runtime.stop()}
               onRetry={runtime.retry}

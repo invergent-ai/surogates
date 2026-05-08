@@ -56,6 +56,40 @@ for (const path of [
 }
 
 {
+  const navbarSource = readFileSync(
+    repoPath("web/src/components/navbar.tsx"),
+    "utf8",
+  );
+  assert.doesNotMatch(
+    navbarSource,
+    /createSession/,
+    "web New chat must open a local draft; backend sessions are created by AgentChat when the first message is sent",
+  );
+  assert.match(
+    navbarSource,
+    /setActiveSession\(null\)/,
+    "web New chat should clear the active session before opening /chat",
+  );
+  assert.match(
+    navbarSource,
+    /navigate\(\{\s*to:\s*"\/chat"/s,
+    "web New chat should navigate to the draft /chat route instead of a session route",
+  );
+}
+
+{
+  const sessionsSliceSource = readFileSync(
+    repoPath("web/src/stores/sessions-slice.ts"),
+    "utf8",
+  );
+  assert.doesNotMatch(
+    sessionsSliceSource,
+    /Auto-select first session|res\.sessions\[0\]\.id/,
+    "fetchSessions must not auto-select an existing session; /chat is the unsaved draft state",
+  );
+}
+
+{
   const sdkIndex = readFileSync(
     repoPath("sdk/agent-chat-react/src/index.ts"),
     "utf8",

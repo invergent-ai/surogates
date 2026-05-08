@@ -159,6 +159,29 @@ describe("AgentChat", () => {
     expect(container.textContent).toContain("assistant reply");
   });
 
+  it("shows a loading state instead of the new-chat empty state while session history loads", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).not.toContain("Start a conversation");
+    expect(container.textContent).toContain("Loading conversation");
+
+    act(() => {
+      stream.emit("user.message", 1, { content: "previous session message" });
+    });
+
+    expect(container.textContent).toContain("previous session message");
+    expect(container.textContent).not.toContain("Loading conversation");
+  });
+
   it("shows slash commands from the adapter from the composer command menu", async () => {
     const stream = new FakeEventStream();
     const adapter = createAdapter(stream);

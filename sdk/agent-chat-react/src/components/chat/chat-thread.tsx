@@ -51,6 +51,7 @@ interface ChatThreadProps {
   sessionId: string | null;
   messages: ChatMessageType[];
   isRunning: boolean;
+  isLoadingHistory?: boolean;
   onSend: (text: string) => void;
   onStop: () => void;
   onFileSelect?: (path: string) => void;
@@ -562,6 +563,7 @@ export function ChatThread({
   sessionId,
   messages,
   isRunning,
+  isLoadingHistory = false,
   onSend,
   onStop,
   onFileSelect,
@@ -595,7 +597,13 @@ export function ChatThread({
     <div className="flex flex-1 flex-col overflow-hidden bg-background text-sm">
       <Conversation className="relative flex-1 min-h-0">
         <ConversationContent className="mx-auto w-full max-w-4xl">
-          {messages.length === 0 && !disabled ? (
+          {messages.length === 0 && isLoadingHistory ? (
+            <ConversationEmptyState
+              icon={<MessageSquareIcon className="size-8 opacity-40" />}
+              title="Loading conversation"
+              description="Fetching the session history."
+            />
+          ) : messages.length === 0 && !disabled ? (
             <ConversationEmptyState
               icon={<MessageSquareIcon className="size-8 opacity-40" />}
               title="Start a conversation"

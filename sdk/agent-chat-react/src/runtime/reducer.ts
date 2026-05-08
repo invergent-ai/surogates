@@ -17,10 +17,13 @@ export const EMPTY_TOKEN_USAGE: AgentChatTokenUsage = {
   model: "",
 };
 
-export function createInitialAgentChatState(): AgentChatState {
+export function createInitialAgentChatState(
+  options: { isLoadingHistory?: boolean } = {},
+): AgentChatState {
   return {
     messages: [],
     isRunning: false,
+    isLoadingHistory: options.isLoadingHistory ?? false,
     tokenUsage: EMPTY_TOKEN_USAGE,
     retryIndicator: null,
     lastEventId: 0,
@@ -36,6 +39,7 @@ export function applyAgentChatEvent(
 ): AgentChatState {
   let nextState: AgentChatState = {
     ...state,
+    isLoadingHistory: false,
     lastEventId: Math.max(state.lastEventId, event.eventId),
     sessionDone: state.sessionDone || event.type === "session.done",
   };

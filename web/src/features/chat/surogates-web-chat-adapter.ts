@@ -171,7 +171,7 @@ function skillToSlashCommand(skill: SkillSummary): AgentChatSlashCommand {
   };
 }
 
-function toAgentChatSession(session: Session): AgentChatSession {
+export function toAgentChatSession(session: Session): AgentChatSession {
   return {
     id: session.id,
     userId: session.user_id,

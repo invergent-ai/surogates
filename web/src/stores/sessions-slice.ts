@@ -19,6 +19,7 @@ export type SessionsSlice = {
   createSession: (body: SessionCreateRequest) => Promise<Session | null>;
   deleteSession: (sessionId: string) => Promise<boolean>;
   setActiveSession: (sessionId: string | null) => void;
+  upsertSession: (session: Session) => void;
 };
 
 export const createSessionsSlice: StateCreator<
@@ -45,10 +46,6 @@ export const createSessionsSlice: StateCreator<
       if (active && !res.sessions.find((s) => s.id === active)) {
         set({ activeSessionId: null });
       }
-      // Auto-select first session if none is active
-      if (!get().activeSessionId && res.sessions.length > 0) {
-        set({ activeSessionId: res.sessions[0].id });
-      }
     } catch (e) {
       set({ sessionsLoading: false, error: (e as Error).message });
     }
@@ -57,7 +54,7 @@ export const createSessionsSlice: StateCreator<
   createSession: async (body) => {
     try {
       const session = await sessionsApi.createSession(body);
-      set({ activeSessionId: session.id });
+      get().upsertSession(session);
       await get().fetchSessions();
       return session;
     } catch (e) {
@@ -81,4 +78,22 @@ export const createSessionsSlice: StateCreator<
   },
 
   setActiveSession: (sessionId) => set({ activeSessionId: sessionId }),
+
+  upsertSession: (session) =>
+    set((state) => {
+      const existed = state.sessions.some(
+        (candidate) => candidate.id === session.id,
+      );
+      return {
+        activeSessionId: session.id,
+        sessions: [
+          session,
+          ...state.sessions.filter((candidate) => candidate.id !== session.id),
+        ],
+        sessionsTotal: Math.max(
+          state.sessionsTotal,
+          state.sessions.length + (existed ? 0 : 1),
+        ),
+      };
+    }),
 });

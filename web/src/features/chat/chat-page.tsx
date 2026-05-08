@@ -16,7 +16,10 @@ import {
   getTransparencyConfig,
   type TransparencyConfig,
 } from "@/api/transparency";
-import { surogatesWebChatAdapter } from "./surogates-web-chat-adapter";
+import {
+  surogatesWebChatAdapter,
+  toAgentChatSession,
+} from "./surogates-web-chat-adapter";
 
 const PRE_SESSION_KEY = "__pre_session__";
 
@@ -29,6 +32,7 @@ export function ChatPage() {
   const fetchUser = useAppStore((s) => s.fetchUser);
   const sessions = useAppStore((s) => s.sessions);
   const sessionsLoading = useAppStore((s) => s.sessionsLoading);
+  const upsertSession = useAppStore((s) => s.upsertSession);
 
   // Load initial data on mount
   useEffect(() => {
@@ -117,28 +121,6 @@ export function ChatPage() {
 
   // ── Handlers ──────────────────────────────────────────────────────
 
-  const chatAdapter = useMemo<AgentChatAdapter>(
-    () => ({
-      ...surogatesWebChatAdapter,
-      async createSession(input) {
-        const session = await surogatesWebChatAdapter.createSession(input);
-        if (preSessionAccepted.current) {
-          try {
-            await sessionsApi.confirmDisclosure(session.id);
-            setDisclosureState((prev) => ({
-              ...prev,
-              [session.id]: "accepted",
-            }));
-          } catch (err) {
-            console.error("Failed to confirm disclosure:", err);
-          }
-        }
-        return session;
-      },
-    }),
-    [],
-  );
-
   const handleSessionChange = useCallback(
     (nextSessionId: string) => {
       setActiveSession(nextSessionId);
@@ -149,6 +131,32 @@ export function ChatPage() {
       });
     },
     [fetchSessions, navigate, setActiveSession],
+  );
+
+  const chatAdapter = useMemo<AgentChatAdapter>(
+    () => ({
+      ...surogatesWebChatAdapter,
+      async createSession(input) {
+        const rawSession = await sessionsApi.createSession({
+          system: input.system,
+        });
+        upsertSession(rawSession);
+        handleSessionChange(rawSession.id);
+        if (preSessionAccepted.current) {
+          try {
+            await sessionsApi.confirmDisclosure(rawSession.id);
+            setDisclosureState((prev) => ({
+              ...prev,
+              [rawSession.id]: "accepted",
+            }));
+          } catch (err) {
+            console.error("Failed to confirm disclosure:", err);
+          }
+        }
+        return toAgentChatSession(rawSession);
+      },
+    }),
+    [handleSessionChange, upsertSession],
   );
 
   const handleDisclosureConfirmed = useCallback(() => {
@@ -194,13 +202,18 @@ export function ChatPage() {
             </div>
           </div>
         ) : (
-          <AgentChat
-            sessionId={sessionId ?? null}
-            adapter={chatAdapter}
-            onSessionChange={handleSessionChange}
-            disabled={sessionDeclined}
-            onMessagesChange={setChatMessages}
-          />
+          <div
+            className={`flex min-h-0 flex-1 flex-col overflow-hidden${sessionId ? "" : " [&>section>:last-child]:hidden"}`}
+          >
+            <AgentChat
+              key={sessionId ?? "new-session"}
+              sessionId={sessionId ?? null}
+              adapter={chatAdapter}
+              onSessionChange={handleSessionChange}
+              disabled={sessionDeclined}
+              onMessagesChange={setChatMessages}
+            />
+          </div>
         )}
       </main>
     </div>

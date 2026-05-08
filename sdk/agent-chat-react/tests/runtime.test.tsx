@@ -165,6 +165,29 @@ describe("useAgentChatRuntime", () => {
     expect(calls.opened[0]).toMatchObject({ sessionId: "s-1", after: 0 });
   });
 
+  it("marks session history as loading until replay events arrive", () => {
+    const calls: AdapterCalls = {
+      opened: [],
+      sent: [],
+      paused: [],
+      retried: [],
+      created: [],
+    };
+    const adapter = createFakeAdapter(calls);
+    const runtime = renderRuntime({ adapter, sessionId: "s-1" });
+
+    expect(runtime.api.isLoadingHistory).toBe(true);
+
+    act(() => {
+      calls.opened[0]?.stream.emit("user.message", 1, {
+        content: "loaded message",
+      });
+    });
+
+    expect(runtime.api.isLoadingHistory).toBe(false);
+    expect(runtime.api.messages[0]?.content).toBe("loaded message");
+  });
+
   it("closes the old stream when session id changes", () => {
     const calls: AdapterCalls = {
       opened: [],

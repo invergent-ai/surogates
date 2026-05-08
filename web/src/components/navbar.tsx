@@ -17,34 +17,17 @@ import { surogatesWebChatAdapter } from "@/features/chat/surogates-web-chat-adap
 export function SessionSidebar() {
   const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState(false);
-  // Per-action loading state: ``creating`` is a single flag for the
-  // single new-session button; ``deleting`` is a set because each
-  // session row has its own delete button and a user may click more
-  // than one while previous requests are in flight.
-  const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<Set<string>>(new Set());
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const setActiveSession = useAppStore((s) => s.setActiveSession);
-  const createSession = useAppStore((s) => s.createSession);
   const deleteSession = useAppStore((s) => s.deleteSession);
   const user = useAppStore((s) => s.user);
   const { theme, setTheme } = useTheme();
 
-  async function handleNewSession() {
-    if (creating) return;
-    setCreating(true);
-    try {
-      const session = await createSession({});
-      if (session) {
-        void navigate({
-          to: "/chat/$sessionId",
-          params: { sessionId: session.id },
-        });
-      }
-    } finally {
-      setCreating(false);
-    }
+  function handleNewSession() {
+    setActiveSession(null);
+    void navigate({ to: "/chat" });
   }
 
   async function handleDeleteSession(sessionId: string) {
@@ -110,18 +93,13 @@ export function SessionSidebar() {
         <Button
           variant="outline"
           onClick={handleNewSession}
-          disabled={creating}
           className={cn(
             "w-full gap-2",
             collapsed ? "justify-center px-0" : "justify-start",
           )}
         >
-          {creating ? (
-            <Spinner className="w-4 h-4" />
-          ) : (
-            <PlusIcon className="w-4 h-4" />
-          )}
-          {!collapsed && (creating ? "Creating…" : "New session")}
+          <PlusIcon className="w-4 h-4" />
+          {!collapsed && "New chat"}
         </Button>
         <Button
           variant="ghost"

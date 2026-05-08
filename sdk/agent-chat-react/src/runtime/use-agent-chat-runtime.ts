@@ -25,7 +25,7 @@ export function useAgentChatRuntime({
   onSessionChange,
 }: UseAgentChatRuntimeInput): AgentChatRuntimeApi {
   const [state, setState] = useState<AgentChatState>(() =>
-    createInitialAgentChatState(),
+    createInitialAgentChatState({ isLoadingHistory: Boolean(sessionId) }),
   );
   const stateRef = useRef(state);
   const streamRef = useRef<AgentChatEventStream | null>(null);
@@ -95,7 +95,9 @@ export function useAgentChatRuntime({
       };
     };
 
-    const initialState = createInitialAgentChatState();
+    const initialState = createInitialAgentChatState({
+      isLoadingHistory: true,
+    });
     stateRef.current = initialState;
     setState(initialState);
     connect(0);
@@ -104,6 +106,12 @@ export function useAgentChatRuntime({
       .getSession({ sessionId })
       .then((session) => {
         if (cancelled) return;
+        if (session.messageCount === 0) {
+          setState((prev) => ({
+            ...prev,
+            isLoadingHistory: false,
+          }));
+        }
         if (isTerminalStatus(session.status)) {
           setState((prev) => ({
             ...prev,
@@ -245,6 +253,7 @@ export function useAgentChatRuntime({
   return {
     messages: state.messages,
     isRunning: state.isRunning,
+    isLoadingHistory: state.isLoadingHistory,
     tokenUsage: state.tokenUsage,
     retryIndicator: state.retryIndicator,
     send,
