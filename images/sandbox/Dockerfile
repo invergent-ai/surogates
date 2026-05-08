@@ -36,7 +36,8 @@ RUN uv venv /opt/venv \
         matplotlib \
         tabulate \
         pypdf \
-        python-docx
+        python-docx \
+        python-pptx
 
 # ── Stage 2: Final image ─────────────────────────────────────────────
 FROM python:3.12-slim
