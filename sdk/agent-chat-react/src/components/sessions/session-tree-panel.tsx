@@ -361,7 +361,7 @@ export function SessionTreePanel({
           setError(e instanceof Error ? e.message : "Failed to load tree");
         }
       } finally {
-        if (mounted.current && currentRequestId === requestId.current && !opts?.silent) {
+        if (mounted.current && currentRequestId === requestId.current) {
           setLoading(false);
         }
       }
@@ -481,9 +481,9 @@ export function SessionTreePanel({
           role="status"
           aria-label="Loading sessions"
         >
-          <div className="space-y-1.5">
-            <Skeleton className="h-3.5 w-28" />
-            <Skeleton className="h-3 w-20" />
+          <div className="w-full space-y-1.5">
+            <Skeleton className="h-3.5 w-full" />
+            <Skeleton className="h-3 w-full" />
           </div>
         </div>
       )}

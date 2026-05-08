@@ -30,6 +30,7 @@ export function useAgentChatRuntime({
   const stateRef = useRef(state);
   const streamRef = useRef<AgentChatEventStream | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const previousSessionIdRef = useRef<string | null>(sessionId);
 
   useEffect(() => {
     stateRef.current = state;
@@ -49,6 +50,8 @@ export function useAgentChatRuntime({
   }, []);
 
   useEffect(() => {
+    const previousSessionId = previousSessionIdRef.current;
+    previousSessionIdRef.current = sessionId;
     clearReconnectTimer();
     closeStream();
 
@@ -95,9 +98,23 @@ export function useAgentChatRuntime({
       };
     };
 
-    const initialState = createInitialAgentChatState({
-      isLoadingHistory: true,
-    });
+    const currentState = stateRef.current;
+    const preservePendingFirstMessage =
+      previousSessionId === null &&
+      currentState.isRunning &&
+      currentState.messages.some(
+        (message) =>
+          message.role === "user" && message.id.startsWith("local-"),
+      );
+    const initialState = preservePendingFirstMessage
+      ? {
+          ...createInitialAgentChatState({ isLoadingHistory: false }),
+          messages: currentState.messages,
+          isRunning: true,
+        }
+      : createInitialAgentChatState({
+          isLoadingHistory: true,
+        });
     stateRef.current = initialState;
     setState(initialState);
     connect(0);
@@ -205,8 +222,8 @@ export function useAgentChatRuntime({
       if (!sessionId) {
         try {
           const session = await adapter.createSession({ agentId });
-          await adapter.sendMessage({ sessionId: session.id, content });
           onSessionChange?.(session.id);
+          await adapter.sendMessage({ sessionId: session.id, content });
         } catch (error) {
           markSendError(error instanceof Error ? error.message : "send failed");
           throw error;

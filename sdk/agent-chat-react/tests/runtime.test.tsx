@@ -344,6 +344,105 @@ describe("useAgentChatRuntime", () => {
     });
   });
 
+  it("keeps the first local message visible when the created session id is applied", async () => {
+    const calls: AdapterCalls = {
+      opened: [],
+      sent: [],
+      paused: [],
+      retried: [],
+      created: [],
+    };
+    let api: AgentChatRuntimeApi | null = null;
+    let routeSessionId: string | null = null;
+    let resolveCreate: ((session: AgentChatSession) => void) | null = null;
+    let resolveSend:
+      | ((value: { eventId: number; status: "accepted" }) => void)
+      | null = null;
+
+    function rerender() {
+      root?.render(
+        <HarnessWrapper
+          adapter={adapter}
+          sessionId={routeSessionId}
+          onRuntime={(runtime) => {
+            api = runtime;
+          }}
+        />,
+      );
+    }
+
+    const adapter: AgentChatAdapter = {
+      ...createFakeAdapter(calls),
+      async createSession(input) {
+        calls.created.push(input);
+        const created = await new Promise<AgentChatSession>((resolve) => {
+          resolveCreate = resolve;
+        });
+        routeSessionId = created.id;
+        rerender();
+        return created;
+      },
+      async sendMessage(input) {
+        calls.sent.push(input);
+        return await new Promise<{ eventId: number; status: "accepted" }>(
+          (resolve) => {
+            resolveSend = resolve;
+          },
+        );
+      },
+    };
+
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      rerender();
+    });
+
+    let sendPromise: Promise<void>;
+    await act(async () => {
+      sendPromise = api!.send("first");
+      await Promise.resolve();
+    });
+
+    expect(api!.messages).toHaveLength(1);
+    expect(api!.messages[0]).toMatchObject({
+      role: "user",
+      content: "first",
+      status: "complete",
+    });
+
+    await act(async () => {
+      resolveCreate?.(session("created-session"));
+      await Promise.resolve();
+    });
+
+    expect(calls.sent).toEqual([
+      { sessionId: "created-session", content: "first" },
+    ]);
+    expect(api!.isLoadingHistory).toBe(false);
+    expect(api!.messages).toHaveLength(1);
+    expect(api!.messages[0]).toMatchObject({
+      role: "user",
+      content: "first",
+      status: "complete",
+    });
+
+    act(() => {
+      calls.opened[calls.opened.length - 1]?.stream.emit("user.message", 1, {
+        content: "first",
+      });
+    });
+
+    expect(api!.messages).toHaveLength(1);
+    expect(api!.messages[0]?.id).toBe("evt-1");
+
+    await act(async () => {
+      resolveSend?.({ eventId: 1, status: "accepted" });
+      await sendPromise;
+    });
+  });
+
   it("calls pauseSession and marks the current stream stopped on stop", async () => {
     const calls: AdapterCalls = {
       opened: [],
@@ -401,7 +500,10 @@ describe("useAgentChatRuntime", () => {
 function HarnessWrapper(props: {
   adapter: AgentChatAdapter;
   sessionId: string | null;
+  onSessionChange?: (sessionId: string) => void;
+  onRuntime?: (runtime: AgentChatRuntimeApi) => void;
 }) {
-  useAgentChatRuntime(props);
+  const runtime = useAgentChatRuntime(props);
+  props.onRuntime?.(runtime);
   return null;
 }

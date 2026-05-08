@@ -202,7 +202,6 @@ export function ChatPage() {
             className={`flex min-h-0 flex-1 flex-col overflow-hidden${sessionId ? "" : " [&>section>:last-child]:hidden"}`}
           >
             <AgentChat
-              key={sessionId ?? "new-session"}
               sessionId={sessionId ?? null}
               adapter={chatAdapter}
               onSessionChange={handleSessionChange}
