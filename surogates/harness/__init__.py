@@ -54,7 +54,7 @@ from surogates.harness.model_metadata import (
     parse_context_limit_from_error,
 )
 from surogates.harness.prompt import (
-    TOOL_USE_ENFORCEMENT_MODELS,
+    MODELS_REQUIRING_DISCIPLINE,
     PromptBuilder,
 )
 from surogates.harness.prompt_library import PromptLibrary, default_library
@@ -122,6 +122,7 @@ __all__ = [
     "LEGACY_SUMMARY_PREFIX",
     "IterationBudget",
     "MODEL_CATALOG",
+    "MODELS_REQUIRING_DISCIPLINE",
     "ModelInfo",
     "PooledCredential",
     "PromptBuilder",
@@ -131,7 +132,6 @@ __all__ = [
     "SUMMARY_PREFIX",
     "SubdirectoryHintTracker",
     "SystemPromptCache",
-    "TOOL_USE_ENFORCEMENT_MODELS",
     "anthropic_to_openai_response",
     "apply_cache_control",
     "build_cache_extra_body",

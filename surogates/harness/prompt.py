@@ -36,14 +36,21 @@ logger = logging.getLogger(__name__)
 # Model routing constants (not prompt prose -- stays as Python config).
 # ---------------------------------------------------------------------------
 
-# Model name substrings that trigger the tool-use enforcement fragment.
-# These models exhibit a "narrate the action instead of executing it"
-# pattern (e.g. "I will now create an artifact" followed by end-of-turn
-# with no tool call) often enough that the enforcement fragment pays for
-# itself in prompt budget.  Claude and DeepSeek are *not* listed because
-# they reliably execute promised actions without the nag.
-TOOL_USE_ENFORCEMENT_MODELS: tuple[str, ...] = (
+# Model name substrings that trigger the execution-discipline and
+# tool-use-enforcement fragments.  These models benefit from explicit
+# rules about verifying results, labelling assumptions, and executing
+# promised actions instead of narrating them.  Claude and DeepSeek are
+# *not* listed because they already do these things reliably; the prompt
+# budget is better spent elsewhere for them.
+#
+# When you wire a new model into the platform, add its identifier (or a
+# substring that matches it) here.  The failure mode of forgetting is
+# silent — the model loads with no execution-discipline guidance and
+# regresses on tasks like multi-source research, retry-on-empty, and
+# uncertainty labelling — so prefer to add eagerly.
+MODELS_REQUIRING_DISCIPLINE: tuple[str, ...] = (
     "gpt", "codex", "gemini", "gemma", "grok", "moonshot", "kimi",
+    "surogate",
 )
 
 # Maximum bytes to read from any single memory/skill file.
@@ -205,10 +212,19 @@ class PromptBuilder:
         ):
             parts.append(self._prompts.get("guidance/coordinator"))
 
-        # Tool-use enforcement for models that tend to skip tools.
-        if self._available_tools:
-            model_lower = self._get_model_id().lower()
-            if any(p in model_lower for p in TOOL_USE_ENFORCEMENT_MODELS):
+        # Execution discipline (verification, missing_context, etc.)
+        # applies to any response from a discipline-required model — not
+        # only ones that issue tool calls — so it loads on the model
+        # match alone.  Tool-use enforcement is specifically about
+        # narrate-vs-act on tool calls, so it additionally requires that
+        # at least one tool be loaded.
+        model_lower = self._get_model_id().lower()
+        needs_discipline = any(
+            p in model_lower for p in MODELS_REQUIRING_DISCIPLINE
+        )
+        if needs_discipline:
+            parts.append(self._prompts.get("guidance/execution_discipline"))
+            if self._available_tools:
                 parts.append(self._prompts.get("guidance/tool_use_enforcement"))
 
         if not parts:
@@ -509,19 +525,18 @@ class PromptBuilder:
     def _model_guidance_section(self, model_id: str) -> str:
         """Model-specific execution guidance based on model ID pattern matching.
 
-        Note: the generic tool-use-enforcement fragment is injected by
-        ``_tool_guidance_section`` (conditional on available tools).  This
-        method adds the *provider-specific* addenda only.
+        Note: model-agnostic execution discipline (verification, missing
+        context, mandatory tool use) is injected by
+        ``_tool_guidance_section`` via ``guidance/execution_discipline``.
+        This method adds *provider-specific* addenda only — currently
+        just Google's operational quirks (absolute paths, parallel tool
+        calls, non-interactive flags).
         """
         if not model_id:
             return ""
 
         model_lower = model_id.lower()
         parts: list[str] = []
-
-        # OpenAI-specific execution discipline.
-        if any(p in model_lower for p in ("gpt", "codex", "o3", "o4")):
-            parts.append(self._prompts.get("models/openai"))
 
         # Google-specific operational guidance.
         if any(p in model_lower for p in ("gemini", "gemma")):
