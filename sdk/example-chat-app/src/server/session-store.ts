@@ -136,14 +136,17 @@ export class ExampleSessionStore {
     path: string;
     content: string;
     mimeType?: string | null;
+    encoding?: ExampleWorkspaceFile["encoding"];
+    size?: number;
   }): ExampleWorkspaceUpload {
     const path = normalizePath(input.path);
+    const encoding = input.encoding ?? "utf-8";
     const file: ExampleWorkspaceFile = {
       path,
       content: input.content,
-      size: new TextEncoder().encode(input.content).byteLength,
+      size: input.size ?? new TextEncoder().encode(input.content).byteLength,
       mime_type: input.mimeType ?? "text/plain",
-      encoding: "utf-8",
+      encoding,
       truncated: false,
     };
     record.workspace.set(path, file);

@@ -149,6 +149,26 @@ export function createExampleApp({
     response.json(store.getWorkspaceFile(requireRecord(store, request), String(request.query.path ?? "")));
   });
 
+  app.get("/api/sessions/:sessionId/workspace/download", (request, response) => {
+    const file = store.getWorkspaceFile(
+      requireRecord(store, request),
+      String(request.query.path ?? ""),
+    );
+    const filename = file.path.split("/").pop() || "file";
+    const body =
+      file.encoding === "base64"
+        ? Buffer.from(file.content, "base64")
+        : Buffer.from(file.content, "utf8");
+    response
+      .status(200)
+      .setHeader("Content-Type", file.mime_type ?? "application/octet-stream")
+      .setHeader(
+        "Content-Disposition",
+        `attachment; filename="${filename.replace(/"/g, "")}"`,
+      )
+      .send(body);
+  });
+
   app.post(
     "/api/sessions/:sessionId/workspace/upload",
     upload.single("file"),
@@ -159,11 +179,19 @@ export function createExampleApp({
         return;
       }
       const directory = typeof request.body?.directory === "string" ? request.body.directory : "";
+      const inlineBinaryPreview = isInlineBinaryPreview(
+        request.file.originalname,
+        request.file.mimetype,
+      );
       response.status(201).json(
         store.uploadWorkspaceFile(record, {
           path: normalizePath(`${directory}/${request.file.originalname}`),
-          content: request.file.buffer.toString("utf8"),
+          content: request.file.buffer.toString(
+            inlineBinaryPreview ? "base64" : "utf8",
+          ),
           mimeType: request.file.mimetype,
+          encoding: inlineBinaryPreview ? "base64" : "utf-8",
+          size: request.file.size,
         }),
       );
     },
@@ -248,4 +276,13 @@ function stringBody(request: Request, name: string) {
 
 function arrayBody(request: Request, name: string) {
   return Array.isArray(request.body?.[name]) ? request.body[name] : [];
+}
+
+function isInlineBinaryPreview(filename: string, mimeType: string | undefined) {
+  const normalizedMime = mimeType?.toLowerCase() ?? "";
+  return (
+    normalizedMime === "application/pdf" ||
+    normalizedMime.startsWith("image/") ||
+    filename.toLowerCase().endsWith(".pdf")
+  );
 }

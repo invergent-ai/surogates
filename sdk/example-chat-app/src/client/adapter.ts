@@ -81,6 +81,10 @@ export function createExampleChatAdapter(baseUrl = "/api"): AgentChatAdapter {
         { method: "DELETE" },
       );
     },
+    getWorkspaceDownloadUrl(input) {
+      const params = new URLSearchParams({ path: input.path });
+      return `${baseUrl}/sessions/${encodeURIComponent(input.sessionId)}/workspace/download?${params}`;
+    },
     openEventStream(input) {
       const params = new URLSearchParams({ after: String(input.after) });
       return wrapEventSource(

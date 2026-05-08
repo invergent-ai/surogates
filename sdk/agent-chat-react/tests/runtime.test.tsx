@@ -97,6 +97,9 @@ function createFakeAdapter(calls: AdapterCalls) {
       return { path: "uploaded.txt", size: 4 };
     },
     async deleteWorkspaceFile() {},
+    getWorkspaceDownloadUrl(input) {
+      return `/api/v1/sessions/${input.sessionId}/workspace/download?path=${encodeURIComponent(input.path)}`;
+    },
     openEventStream(input) {
       const stream = new FakeEventStream();
       calls.opened.push({ ...input, stream });

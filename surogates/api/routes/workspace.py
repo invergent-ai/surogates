@@ -70,6 +70,11 @@ _IMAGE_EXTENSIONS = frozenset({
 # Maximum raw bytes for image files served inline as base64.
 _MAX_IMAGE_BYTES = 10_000_000  # 10 MB
 
+# Maximum raw bytes for PDF files served inline for PDF.js previews.
+_MAX_PDF_BYTES = 25_000_000  # 25 MB
+
+_PDF_EXTENSIONS = frozenset({".pdf"})
+
 
 # Directories to skip when building the tree.
 _SKIP_DIRS = frozenset({
@@ -119,8 +124,9 @@ class FileContentResponse(BaseModel):
     """Content of a single workspace file.
 
     For text files ``encoding`` is ``"utf-8"`` (default) and ``content``
-    contains the raw text.  For image files ``encoding`` is ``"base64"``
-    and ``content`` holds the base64-encoded bytes.
+    contains the raw text.  For inline binary previews, such as images and
+    PDFs, ``encoding`` is ``"base64"`` and ``content`` holds the
+    base64-encoded bytes.
     """
 
     path: str
@@ -233,6 +239,12 @@ def _is_image_key(key: str) -> bool:
     """Heuristic: is this key an image file we can display inline?"""
     ext = PurePosixPath(key).suffix.lower()
     return ext in _IMAGE_EXTENSIONS
+
+
+def _is_pdf_key(key: str) -> bool:
+    """Heuristic: is this key a PDF file we can display inline?"""
+    ext = PurePosixPath(key).suffix.lower()
+    return ext in _PDF_EXTENSIONS
 
 
 def _should_skip_dir(dirname: str) -> bool:
@@ -374,8 +386,9 @@ async def get_workspace_file(
 
     is_text = _is_text_key(path)
     is_image = _is_image_key(path)
+    is_pdf = _is_pdf_key(path)
 
-    if not is_text and not is_image:
+    if not is_text and not is_image and not is_pdf:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail="Binary files cannot be viewed in the workspace panel.",
@@ -389,18 +402,20 @@ async def get_workspace_file(
     size = len(data)
     mime, _ = mimetypes.guess_type(path)
 
-    if is_image:
-        if size > _MAX_IMAGE_BYTES:
+    if is_image or is_pdf:
+        max_bytes = _MAX_PDF_BYTES if is_pdf else _MAX_IMAGE_BYTES
+        kind = "PDF" if is_pdf else "Image"
+        if size > max_bytes:
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"Image too large to preview ({size} bytes, limit {_MAX_IMAGE_BYTES}).",
+                detail=f"{kind} too large to preview ({size} bytes, limit {max_bytes}).",
             )
         content = base64.b64encode(data).decode("ascii")
         return FileContentResponse(
             path=path,
             content=content,
             size=size,
-            mime_type=mime or "application/octet-stream",
+            mime_type=mime or ("application/pdf" if is_pdf else "application/octet-stream"),
             encoding="base64",
             truncated=False,
         )

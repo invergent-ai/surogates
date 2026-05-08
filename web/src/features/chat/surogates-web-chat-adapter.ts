@@ -135,6 +135,19 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     await workspaceApi.deleteFile(input.sessionId, input.path);
   },
 
+  getWorkspaceDownloadUrl(input) {
+    // The download endpoint accepts the JWT via ``?token=`` (same flow
+    // SSE uses) — anchor downloads can't carry the Authorization header.
+    const url = new URL(
+      workspaceApi.getDownloadUrl(input.sessionId, input.path),
+      window.location.origin,
+    );
+    const token = getAuthToken();
+    if (token) url.searchParams.set("token", token);
+    // Return a relative URL so the browser stays on-origin.
+    return url.pathname + url.search;
+  },
+
   openEventStream(input) {
     const token = getAuthToken();
     const url = new URL(

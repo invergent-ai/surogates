@@ -334,6 +334,17 @@ export interface AgentChatAdapter {
     sessionId: string;
     path: string;
   }): Promise<void>;
+  /**
+   * Build a same-origin URL the browser can navigate to (or anchor at via
+   * ``<a href download>``) to download the workspace file.  The adapter
+   * is responsible for embedding any auth credential the server expects
+   * — typically as a query-string token, since cross-origin/anchor
+   * downloads can't carry custom headers.
+   */
+  getWorkspaceDownloadUrl(input: {
+    sessionId: string;
+    path: string;
+  }): string;
   openEventStream(input: {
     sessionId: string;
     after: number;

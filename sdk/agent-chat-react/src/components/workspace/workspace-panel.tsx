@@ -39,55 +39,6 @@ import type {
 } from "../../types";
 import { FileViewer } from "./file-viewer";
 
-const TEXT_EXTENSIONS = new Set([
-  ".py",
-  ".js",
-  ".ts",
-  ".tsx",
-  ".jsx",
-  ".json",
-  ".md",
-  ".yaml",
-  ".yml",
-  ".toml",
-  ".sql",
-  ".sh",
-  ".css",
-  ".html",
-  ".txt",
-  ".csv",
-  ".rst",
-  ".cfg",
-  ".ini",
-  ".env",
-  ".rs",
-  ".go",
-  ".java",
-  ".rb",
-  ".php",
-  ".c",
-  ".cpp",
-  ".h",
-  ".lock",
-  ".gitignore",
-  ".dockerignore",
-  ".editorconfig",
-]);
-
-const IMAGE_EXTENSIONS = new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".gif",
-  ".webp",
-  ".svg",
-  ".bmp",
-  ".ico",
-  ".avif",
-  ".tiff",
-  ".tif",
-]);
-
 const SKELETON_WIDTHS = [75, 60, 90, 65, 80, 70, 85, 55];
 const DEFAULT_WIDTH = 500;
 const MIN_WIDTH = 300;
@@ -99,12 +50,6 @@ interface WorkspacePanelProps {
   selectedPath: string | null;
   onSelectedPathChange: (path: string | null) => void;
   disabled?: boolean;
-}
-
-function isViewable(name: string): boolean {
-  const dot = name.lastIndexOf(".");
-  const ext = dot >= 0 ? name.slice(dot).toLowerCase() : "";
-  return TEXT_EXTENSIONS.has(ext) || IMAGE_EXTENSIONS.has(ext);
 }
 
 function collectExpandedPaths(
@@ -139,12 +84,12 @@ function findEntry(
 
 function RenderEntries({
   entries,
-  onFileSelect,
   onDelete,
+  downloadUrlFor,
 }: {
   entries: AgentChatWorkspaceEntry[];
-  onFileSelect: (path: string) => void;
   onDelete: (path: string) => void;
+  downloadUrlFor: (path: string) => string;
 }) {
   return (
     <>
@@ -155,15 +100,15 @@ function RenderEntries({
               {entry.children && entry.children.length > 0 && (
                 <RenderEntries
                   entries={entry.children}
-                  onFileSelect={onFileSelect}
                   onDelete={onDelete}
+                  downloadUrlFor={downloadUrlFor}
                 />
               )}
             </FileTreeFolder>
           );
         }
 
-        const viewable = isViewable(entry.name);
+        const fileName = entry.name;
 
         return (
           <FileTreeFile key={entry.path} name={entry.name} path={entry.path}>
@@ -175,19 +120,16 @@ function RenderEntries({
               </span>
             )}
             <div className="ml-1 flex shrink-0 items-center gap-0 opacity-0 transition-opacity group-hover:opacity-100">
-              {viewable && (
-                <button
-                  type="button"
-                  className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onFileSelect(entry.path);
-                  }}
-                  title="View"
-                >
-                  <DownloadIcon className="size-3" />
-                </button>
-              )}
+              <a
+                href={downloadUrlFor(entry.path)}
+                download={fileName}
+                className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                onClick={(event) => event.stopPropagation()}
+                title="Download"
+                aria-label={`Download ${fileName}`}
+              >
+                <DownloadIcon className="size-3" />
+              </a>
               <button
                 type="button"
                 className="rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
@@ -196,6 +138,7 @@ function RenderEntries({
                   onDelete(entry.path);
                 }}
                 title="Delete"
+                aria-label={`Delete ${fileName}`}
               >
                 <TrashIcon className="size-3" />
               </button>
@@ -540,8 +483,12 @@ export function WorkspacePanel({
             >
               <RenderEntries
                 entries={entries}
-                onFileSelect={handleSelect}
                 onDelete={setDeleteTarget}
+                downloadUrlFor={(path) =>
+                  sessionId
+                    ? adapter.getWorkspaceDownloadUrl({ sessionId, path })
+                    : "#"
+                }
               />
             </FileTree>
           )}
@@ -552,7 +499,17 @@ export function WorkspacePanel({
         file={file}
         loading={fileLoading}
         error={fileError}
+        downloadUrl={
+          file && sessionId
+            ? adapter.getWorkspaceDownloadUrl({
+                sessionId,
+                path: file.path,
+              })
+            : null
+        }
+        onDelete={file ? () => setDeleteTarget(file.path) : null}
         onClose={() => {
+          onSelectedPathChange(null);
           setFile(null);
           setFileError(null);
         }}

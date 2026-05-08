@@ -283,6 +283,35 @@ async def test_workspace_upload_read_tree_and_delete_use_session_prefix():
     )
 
 
+async def test_workspace_pdf_files_are_read_as_base64_previews():
+    org_id = uuid4()
+    session_id = uuid4()
+    store = _Store(org_id)
+    store.session = SimpleNamespace(
+        id=session_id,
+        org_id=org_id,
+        agent_id="support-bot",
+        status="active",
+        config={"storage_bucket": "ops-agent-bucket"},
+    )
+    storage = _RecordingStorage()
+    storage.objects[
+        ("ops-agent-bucket", f"sessions/{session_id}/docs/report.pdf")
+    ] = b"%PDF-1.4\n"
+    request = _request(store, storage, _Redis())
+    tenant = _tenant(org_id, uuid4())
+
+    content = await workspace_route.get_workspace_file(
+        session_id, request, path="docs/report.pdf", tenant=tenant,
+    )
+
+    assert content.path == "docs/report.pdf"
+    assert content.content == "JVBERi0xLjQK"
+    assert content.mime_type == "application/pdf"
+    assert content.encoding == "base64"
+    assert content.truncated is False
+
+
 async def test_artifact_store_writes_under_session_prefix():
     storage = _RecordingStorage()
     session_id = uuid4()

@@ -22,7 +22,7 @@ export interface FileContentResponse {
   content: string;
   size: number;
   mime_type: string | null;
-  /** "utf-8" for text files, "base64" for images. */
+  /** "utf-8" for text files, "base64" for inline binary previews. */
   encoding: "utf-8" | "base64";
   truncated: boolean;
 }

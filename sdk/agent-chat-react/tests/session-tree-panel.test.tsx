@@ -60,6 +60,9 @@ function createAdapter(sessions: AgentChatSession[]) {
       return { path: "uploaded.txt", size: 4 };
     },
     async deleteWorkspaceFile() {},
+    getWorkspaceDownloadUrl(input) {
+      return `/api/v1/sessions/${input.sessionId}/workspace/download?path=${encodeURIComponent(input.path)}`;
+    },
     openEventStream() {
       throw new Error("not used by session tree tests");
     },

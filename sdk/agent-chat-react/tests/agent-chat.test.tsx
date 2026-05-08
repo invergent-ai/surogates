@@ -112,6 +112,9 @@ function createAdapter(stream: FakeEventStream) {
       return { path: "uploaded.txt", size: 4 };
     },
     async deleteWorkspaceFile() {},
+    getWorkspaceDownloadUrl(input) {
+      return `/api/v1/sessions/${input.sessionId}/workspace/download?path=${encodeURIComponent(input.path)}`;
+    },
     openEventStream() {
       return stream;
     },
@@ -210,6 +213,221 @@ describe("AgentChat", () => {
 
     expect(container.textContent).toContain("src/main.py");
     expect(container.textContent).toContain("print('hi')");
+  });
+
+  it("renders PDF workspace files without using the image preview", async () => {
+    const stream = new FakeEventStream();
+    const adapter: AgentChatAdapter = {
+      ...createAdapter(stream),
+      async getWorkspaceTree() {
+        return {
+          root: "workspace",
+          entries: [
+            {
+              name: "report.pdf",
+              path: "report.pdf",
+              kind: "file" as const,
+              size: 128,
+            },
+          ],
+          truncated: false,
+        };
+      },
+      async getWorkspaceFile() {
+        return {
+          path: "report.pdf",
+          content: "JVBERi0xLjQKJcOkw7zDtsOfCg==",
+          size: 18,
+          mime_type: "application/pdf",
+          encoding: "base64",
+          truncated: false,
+        };
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    const fileButton = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="treeitem"]'),
+    ).find((element) => element.textContent?.includes("report.pdf"));
+    expect(fileButton).toBeDefined();
+
+    await act(async () => {
+      fileButton!.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("report.pdf");
+    expect(
+      container.querySelector('div[aria-label="PDF viewer for report.pdf"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Previous PDF page"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('input[aria-label="Find in PDF"]'),
+    ).not.toBeNull();
+    expect(container.querySelector("img")).toBeNull();
+  });
+
+  it("shows a clear error when a PDF workspace file is not base64 encoded", async () => {
+    const stream = new FakeEventStream();
+    const adapter: AgentChatAdapter = {
+      ...createAdapter(stream),
+      async getWorkspaceTree() {
+        return {
+          root: "workspace",
+          entries: [
+            {
+              name: "broken.pdf",
+              path: "broken.pdf",
+              kind: "file" as const,
+              size: 12,
+            },
+          ],
+          truncated: false,
+        };
+      },
+      async getWorkspaceFile() {
+        return {
+          path: "broken.pdf",
+          content: "%PDF-\ufffd\n",
+          size: 12,
+          mime_type: "application/pdf",
+          encoding: "utf-8",
+          truncated: false,
+        };
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    const fileButton = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="treeitem"]'),
+    ).find((element) => element.textContent?.includes("broken.pdf"));
+    expect(fileButton).toBeDefined();
+
+    await act(async () => {
+      fileButton!.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain(
+      "PDF preview requires base64 file content.",
+    );
+    expect(
+      container.querySelector('div[aria-label="PDF viewer for broken.pdf"]'),
+    ).toBeNull();
+  });
+
+  it("does not show a blank PDF canvas when base64 content is invalid", async () => {
+    const stream = new FakeEventStream();
+    const adapter: AgentChatAdapter = {
+      ...createAdapter(stream),
+      async getWorkspaceTree() {
+        return {
+          root: "workspace",
+          entries: [
+            {
+              name: "broken.pdf",
+              path: "broken.pdf",
+              kind: "file" as const,
+              size: 12,
+            },
+          ],
+          truncated: false,
+        };
+      },
+      async getWorkspaceFile() {
+        return {
+          path: "broken.pdf",
+          content: "%PDF-\ufffd\n",
+          size: 12,
+          mime_type: "application/pdf",
+          encoding: "base64",
+          truncated: false,
+        };
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    const fileButton = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="treeitem"]'),
+    ).find((element) => element.textContent?.includes("broken.pdf"));
+    expect(fileButton).toBeDefined();
+
+    await act(async () => {
+      fileButton!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("PDF preview data is not valid base64.");
+    expect(
+      container.querySelector('div[aria-label="PDF viewer for broken.pdf"]'),
+    ).toBeNull();
+  });
+
+  it("keeps the workspace file viewer closed after clicking close", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    const fileButton = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="treeitem"]'),
+    )
+      .reverse()
+      .find((element) => element.textContent?.includes("main.py"));
+    expect(fileButton).toBeDefined();
+
+    await act(async () => {
+      fileButton!.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("print('hi')");
+
+    const closeButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Close file"]',
+    );
+    expect(closeButton).not.toBeNull();
+
+    await act(async () => {
+      closeButton!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).not.toContain("print('hi')");
+    expect(
+      container.querySelector('button[aria-label="Close file"]'),
+    ).toBeNull();
   });
 
   it("disables the composer and workspace upload when chat is disabled", async () => {
