@@ -4,6 +4,7 @@
 @import "streamdown/styles.css";
 @import "tw-shimmer";
 @plugin "@toolwind/corner-shape";
+@source "../../sdk/agent-chat-react/src";
 @import "@fontsource-variable/noto-sans";
 
 @custom-variant dark (&:is(.dark *));
