@@ -18,6 +18,7 @@ export type SessionsSlice = {
   }) => Promise<void>;
   createSession: (body: SessionCreateRequest) => Promise<Session | null>;
   deleteSession: (sessionId: string) => Promise<boolean>;
+  removeSession: (sessionId: string) => void;
   setActiveSession: (sessionId: string | null) => void;
   upsertSession: (session: Session) => void;
 };
@@ -31,7 +32,9 @@ export const createSessionsSlice: StateCreator<
   sessions: [],
   sessionsTotal: 0,
   activeSessionId: null,
-  sessionsLoading: false,
+  // True until the first ``fetchSessions`` settles, so empty-state UI and
+  // the route-state guard don't fire before the first list arrives.
+  sessionsLoading: true,
 
   fetchSessions: async (params) => {
     try {
@@ -42,10 +45,6 @@ export const createSessionsSlice: StateCreator<
         sessionsTotal: res.total,
         sessionsLoading: false,
       });
-      const active = get().activeSessionId;
-      if (active && !res.sessions.find((s) => s.id === active)) {
-        set({ activeSessionId: null });
-      }
     } catch (e) {
       set({ sessionsLoading: false, error: (e as Error).message });
     }
@@ -76,6 +75,14 @@ export const createSessionsSlice: StateCreator<
       return false;
     }
   },
+
+  removeSession: (sessionId) =>
+    set((state) => ({
+      sessions: state.sessions.filter((s) => s.id !== sessionId),
+      sessionsTotal: Math.max(0, state.sessionsTotal - 1),
+      activeSessionId:
+        state.activeSessionId === sessionId ? null : state.activeSessionId,
+    })),
 
   setActiveSession: (sessionId) => set({ activeSessionId: sessionId }),
 

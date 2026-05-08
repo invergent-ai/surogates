@@ -31,7 +31,6 @@ export function ChatPage() {
   const setActiveSession = useAppStore((s) => s.setActiveSession);
   const fetchSessions = useAppStore((s) => s.fetchSessions);
   const fetchUser = useAppStore((s) => s.fetchUser);
-  const sessions = useAppStore((s) => s.sessions);
   const sessionsLoading = useAppStore((s) => s.sessionsLoading);
   const upsertSession = useAppStore((s) => s.upsertSession);
 
@@ -41,10 +40,8 @@ export function ChatPage() {
     void fetchUser();
   }, [fetchSessions, fetchUser]);
 
-  const sessionIds = useMemo(() => sessions.map((s) => s.id), [sessions]);
   const chatRouteState = getChatRouteState({
     activeSessionId,
-    sessionIds,
     sessionsLoading,
     urlSessionId: params.sessionId,
   });

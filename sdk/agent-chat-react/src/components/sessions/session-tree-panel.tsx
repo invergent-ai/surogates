@@ -16,7 +16,6 @@ import {
   UsersIcon,
 } from "lucide-react";
 import { Badge } from "../ui/badge";
-import { Skeleton } from "../ui/skeleton";
 import { cn } from "../../lib/utils";
 import type {
   AgentChatAdapter,
@@ -33,6 +32,14 @@ export interface SessionTreePanelProps {
   sessionListLimit?: number;
   /** Treat the root as hidden, so its children appear as top-level rows. */
   hideRoot?: boolean;
+  /** Suppress the header row (icon + title + running count badge). */
+  hideHeader?: boolean;
+  /**
+   * Fetch the tenant's full session list via ``adapter.listSessions`` and
+   * merge it with the per-session tree.  Off by default; the panel renders
+   * only the tree of ``sessionId`` unless this is set.
+   */
+  loadList?: boolean;
   onSessionSelect?: (sessionId: string) => void;
   onSessionDelete?: (sessionId: string) => void;
 }
@@ -287,11 +294,12 @@ export function SessionTreePanel({
   title = "Running",
   sessionListLimit = DEFAULT_SESSION_LIST_LIMIT,
   hideRoot = false,
+  hideHeader = false,
+  loadList = false,
   onSessionSelect,
   onSessionDelete,
 }: SessionTreePanelProps) {
   const [nodes, setNodes] = useState<AgentChatSessionTreeNode[]>([]);
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasEverLoaded, setHasEverLoaded] = useState(false);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(
@@ -308,25 +316,24 @@ export function SessionTreePanel({
   // frozen session.
   const lastFingerprint = useRef<string>("");
   const resetContext = useRef<{
+    loadList: boolean;
     agentId?: string;
     sessionListLimit: number;
   } | null>(null);
 
   const refetch = useCallback(
     async (opts?: { silent?: boolean }) => {
-      const canLoadSessionList = Boolean(agentId && adapter.listSessions);
+      const canLoadSessionList = Boolean(loadList && adapter.listSessions);
       const canLoadSessionTree = Boolean(sessionId && adapter.getSessionTree);
       if (!canLoadSessionList && !canLoadSessionTree) {
         setNodes([]);
         setHasEverLoaded(true);
-        setLoading(false);
         return;
       }
       const currentRequestId = ++requestId.current;
-      if (!opts?.silent) setLoading(true);
       try {
         const sessionListPromise =
-          agentId && adapter.listSessions
+          loadList && adapter.listSessions
             ? adapter.listSessions({
                 agentId,
                 limit: sessionListLimit,
@@ -360,13 +367,9 @@ export function SessionTreePanel({
         if (!opts?.silent) {
           setError(e instanceof Error ? e.message : "Failed to load tree");
         }
-      } finally {
-        if (mounted.current && currentRequestId === requestId.current) {
-          setLoading(false);
-        }
       }
     },
-    [adapter, agentId, sessionId, sessionListLimit],
+    [adapter, agentId, loadList, sessionId, sessionListLimit],
   );
 
   // Mount / unmount flag for the component lifetime.
@@ -381,9 +384,10 @@ export function SessionTreePanel({
     const previous = resetContext.current;
     const shouldReset =
       !previous ||
+      previous.loadList !== loadList ||
       previous.agentId !== agentId ||
       previous.sessionListLimit !== sessionListLimit;
-    resetContext.current = { agentId, sessionListLimit };
+    resetContext.current = { loadList, agentId, sessionListLimit };
 
     if (shouldReset) {
       setNodes([]);
@@ -392,7 +396,7 @@ export function SessionTreePanel({
     }
     setError(null);
     void refetch();
-  }, [adapter, agentId, refetch, sessionListLimit]);
+  }, [adapter, agentId, loadList, refetch, sessionListLimit]);
 
   // Adaptive polling: 4s while any child is running, 30s when every
   // child has settled.  Pulling the interval from ``nodes`` lets the
@@ -465,26 +469,16 @@ export function SessionTreePanel({
   if (topLevel.length === 0) return null;
 
   return (
-    <div className="border-t border-line">
-      <div className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold uppercase tracking-wide">
-        <UsersIcon className="w-3.5 h-3.5" />
-        <span>{title}</span>
-        {runningCount > 0 && (
-          <Badge variant="default" className="h-4 px-1.5 text-[10px] ml-auto">
-            {runningCount}
-          </Badge>
-        )}
-      </div>
-      {loading && (
-        <div
-          className="px-3 py-2"
-          role="status"
-          aria-label="Loading sessions"
-        >
-          <div className="w-full space-y-1.5">
-            <Skeleton className="h-3.5 w-full" />
-            <Skeleton className="h-3 w-full" />
-          </div>
+    <>
+      {!hideHeader && (
+        <div className="border-t border-line flex items-center gap-1.5 px-3 py-2 text-xs font-semibold uppercase tracking-wide">
+          <UsersIcon className="w-3.5 h-3.5" />
+          <span>{title}</span>
+          {runningCount > 0 && (
+            <Badge variant="default" className="h-4 px-1.5 text-[10px] ml-auto">
+              {runningCount}
+            </Badge>
+          )}
         </div>
       )}
       {error && (
@@ -508,6 +502,6 @@ export function SessionTreePanel({
           ))}
         </div>
       )}
-    </div>
+    </>
   );
 }

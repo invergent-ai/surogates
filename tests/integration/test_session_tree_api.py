@@ -151,6 +151,41 @@ async def test_tree_returns_nested_descendants(
         assert n["root_session_id"] == str(root.id)
 
 
+async def test_tree_returns_full_root_tree_when_called_with_subagent_id(
+    client: AsyncClient, session_factory, session_store,
+):
+    """Calling /tree with a sub-agent id returns the whole tree containing
+    that sub-agent, not just its descendants.  This lets the sidebar
+    anchor on whichever node the user clicked while keeping the
+    sub-agent's siblings visible."""
+    org_id, user_id, token = await _tenant(session_factory)
+
+    root = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id=_AGENT_ID,
+    )
+    sibling_a = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id=_AGENT_ID,
+        parent_id=root.id, channel="worker",
+    )
+    sibling_b = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id=_AGENT_ID,
+        parent_id=root.id, channel="worker",
+    )
+
+    resp = await client.get(
+        f"/v1/sessions/{sibling_a.id}/tree",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+
+    ids = {n["id"] for n in data["nodes"]}
+    assert ids == {str(root.id), str(sibling_a.id), str(sibling_b.id)}
+    assert data["total"] == 3
+    for n in data["nodes"]:
+        assert n["root_session_id"] == str(root.id)
+
+
 async def test_tree_authorization_blocks_other_tenant(
     client: AsyncClient, session_factory, session_store,
 ):

@@ -3,7 +3,6 @@
 //
 export type ChatRouteStateInput = {
   activeSessionId: string | null;
-  sessionIds: string[];
   sessionsLoading: boolean;
   urlSessionId?: string;
 };
@@ -16,7 +15,6 @@ export type ChatRouteState = {
 
 export function getChatRouteState({
   activeSessionId,
-  sessionIds,
   sessionsLoading,
   urlSessionId,
 }: ChatRouteStateInput): ChatRouteState {
@@ -36,14 +34,8 @@ export function getChatRouteState({
     };
   }
 
-  if (!sessionIds.includes(urlSessionId)) {
-    return {
-      sessionId: null,
-      nextActiveSessionId: null,
-      redirectTo: "/chat",
-    };
-  }
-
+  // Sub-agent ids aren't in the top-level list -- trust the URL and let
+  // the chat adapter surface invalid ids via ``getSession``.
   return {
     sessionId: urlSessionId,
     nextActiveSessionId: urlSessionId,

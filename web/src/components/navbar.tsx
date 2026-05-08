@@ -4,24 +4,24 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { SessionTreePanel } from "@invergent/agent-chat-react";
-import { PlusIcon, MessageSquareIcon, LogOutIcon, TrashIcon, SunIcon, MoonIcon, SettingsIcon, BookOpenIcon, UsersIcon } from "lucide-react";
+import { PlusIcon, MessageSquareIcon, LogOutIcon, SunIcon, MoonIcon, SettingsIcon, BookOpenIcon, UsersIcon } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useAppStore } from "@/stores/app-store";
 import { logout } from "@/api/auth";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Spinner } from "@/components/ui/spinner";
-import { formatDistanceToNow } from "date-fns";
 import { surogatesWebChatAdapter } from "@/features/chat/surogates-web-chat-adapter";
 
 export function SessionSidebar() {
   const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState(false);
-  const [deleting, setDeleting] = useState<Set<string>>(new Set());
-  const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const setActiveSession = useAppStore((s) => s.setActiveSession);
-  const deleteSession = useAppStore((s) => s.deleteSession);
+  const removeSession = useAppStore((s) => s.removeSession);
+  // Store-backed list drives the empty-state placeholder and collapsed-mode
+  // icon column; SessionTreePanel returns null while loading and when empty.
+  const sessions = useAppStore((s) => s.sessions);
+  const sessionsLoading = useAppStore((s) => s.sessionsLoading);
   const user = useAppStore((s) => s.user);
   const { theme, setTheme } = useTheme();
 
@@ -30,28 +30,16 @@ export function SessionSidebar() {
     void navigate({ to: "/chat" });
   }
 
-  async function handleDeleteSession(sessionId: string) {
-    if (deleting.has(sessionId)) return;
-    setDeleting((prev) => {
-      const next = new Set(prev);
-      next.add(sessionId);
-      return next;
-    });
-    try {
-      await deleteSession(sessionId);
-    } finally {
-      setDeleting((prev) => {
-        if (!prev.has(sessionId)) return prev;
-        const next = new Set(prev);
-        next.delete(sessionId);
-        return next;
-      });
-    }
-  }
-
   function handleSelectSession(sessionId: string) {
     setActiveSession(sessionId);
     void navigate({ to: "/chat/$sessionId", params: { sessionId } });
+  }
+
+  function handleSessionDeleted(sessionId: string) {
+    if (sessionId === activeSessionId) {
+      void navigate({ to: "/chat" });
+    }
+    removeSession(sessionId);
   }
 
   function handleLogout() {
@@ -125,96 +113,44 @@ export function SessionSidebar() {
         </Button>
       </div>
 
-      {/* Session list */}
       <div className="flex-1 overflow-y-auto py-1">
-        {sessions.map((session) => {
-          const isActive = session.id === activeSessionId;
-          const title = session.title ?? "New session";
-          const time = formatDistanceToNow(new Date(session.updated_at), {
-            addSuffix: true,
-          });
-          const isDeleting = deleting.has(session.id);
-
-          return (
-            <div
-              role="button"
-              tabIndex={0}
-              key={session.id}
-              aria-busy={isDeleting || undefined}
-              className={cn(
-                "group flex items-center gap-2 w-full transition-colors text-left",
-                collapsed ? "justify-center py-2" : "px-3 py-2 my-px",
-                isDeleting
-                  ? "opacity-50 cursor-not-allowed"
-                  : "cursor-pointer",
-                isActive
-                  ? "bg-line text-foreground border-l-2 border-l-primary"
-                  : "bg-transparent text-subtle hover:bg-input hover:text-foreground border-l-2 border-l-transparent",
-              )}
-              onClick={() => {
-                if (isDeleting) return;
-                handleSelectSession(session.id);
-              }}
-              onKeyDown={(e) => {
-                if (isDeleting) return;
-                if (e.key === "Enter") handleSelectSession(session.id);
-              }}
-            >
-              {collapsed ? (
+        {collapsed ? (
+          sessions.map((session) => {
+            const isActive = session.id === activeSessionId;
+            return (
+              <button
+                key={session.id}
+                type="button"
+                onClick={() => handleSelectSession(session.id)}
+                aria-label={session.title ?? "New session"}
+                className={cn(
+                  "flex items-center justify-center w-full py-2 transition-colors border-l-2",
+                  isActive
+                    ? "bg-line text-foreground border-l-primary"
+                    : "bg-transparent text-subtle hover:bg-input hover:text-foreground border-l-transparent",
+                )}
+              >
                 <MessageSquareIcon className="w-4 h-4 shrink-0" />
-              ) : (
-                <>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm truncate">{title}</div>
-                    <div className="text-xs text-faint truncate">
-                      {session.model ?? "default"} &middot; {time}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={isDeleting}
-                    aria-label={
-                      isDeleting ? "Deleting session" : "Delete session"
-                    }
-                    className={cn(
-                      "p-1 rounded transition-all",
-                      isDeleting
-                        ? "opacity-100 text-destructive cursor-wait"
-                        : "opacity-0 group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive",
-                    )}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void handleDeleteSession(session.id);
-                    }}
-                  >
-                    {isDeleting ? (
-                      <Spinner className="w-3.5 h-3.5" />
-                    ) : (
-                      <TrashIcon className="w-3.5 h-3.5" />
-                    )}
-                  </button>
-                </>
-              )}
-            </div>
-          );
-        })}
-        {sessions.length === 0 && !collapsed && (
+              </button>
+            );
+          })
+        ) : (
+          <SessionTreePanel
+            adapter={surogatesWebChatAdapter}
+            loadList
+            sessionId={activeSessionId ?? undefined}
+            activeSessionId={activeSessionId ?? undefined}
+            hideHeader
+            onSessionSelect={handleSelectSession}
+            onSessionDelete={handleSessionDeleted}
+          />
+        )}
+        {!collapsed && !sessionsLoading && sessions.length === 0 && (
           <div className="px-4 py-8 text-center text-sm text-faint">
             No sessions yet
           </div>
         )}
       </div>
-
-      {/* Sub-agent tree for the active session. */}
-      {!collapsed && activeSessionId && (
-        <SessionTreePanel
-          adapter={surogatesWebChatAdapter}
-          sessionId={activeSessionId}
-          activeSessionId={activeSessionId}
-          hideRoot
-          onSessionSelect={handleSelectSession}
-        />
-      )}
 
       {/* Footer */}
       <div className={cn("border-t border-line", collapsed ? "py-2" : "p-3")}>

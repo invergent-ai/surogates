@@ -417,14 +417,21 @@ async def get_session_tree(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> SessionTreeResponse:
-    """Return the full recursive descendant tree rooted at *session_id*.
+    """Return the full delegation tree containing *session_id*.
 
-    The response contains the session itself plus every sub-agent /
-    delegation child, up to :data:`_MAX_TREE_NODES` to keep payloads
-    bounded.  Authorization: the root session must belong to this
-    tenant and agent.  Children inherit the root's tenant (enforced by
-    ``sessions.org_id`` constraints at session creation time), so no
-    per-child authorization is needed.
+    The response contains every session that shares a root with
+    *session_id*: the root, the input session itself, and every
+    sub-agent / delegation child of the root, up to
+    :data:`_MAX_TREE_NODES` to keep payloads bounded.  Passing a
+    sub-agent id returns the same tree as passing its root id, so the
+    UI can anchor the sidebar tree on whichever node the user clicked
+    without losing siblings.
+
+    Authorization: the input session must belong to this tenant and
+    agent.  Other sessions in the tree inherit the root's tenant
+    (enforced by ``sessions.org_id`` constraints at session creation
+    time), so no per-node authorization is needed beyond the org/agent
+    filter applied below.
 
     Each node carries the session's ``agent_type`` when set (via
     ``session.config.agent_type``) so the frontend can display badges
@@ -435,16 +442,37 @@ async def get_session_tree(
     session_factory = request.app.state.session_factory
     agent_id = request.app.state.settings.agent_id
 
+    # ``v_session_tree`` walks the entire forest from every root, so reusing
+    # it twice (once for the input → root lookup, once for the descendant
+    # walk) doubles a forest-wide cost.  Walk up from :sid to the root, then
+    # walk down from that root, in a single pair of bounded recursive CTEs.
     async with session_factory() as db:
         result = await db.execute(
             _sql_text(
-                "SELECT t.*, s.config, s.message_count, s.tool_call_count "
-                "FROM v_session_tree t "
-                "JOIN sessions s ON s.id = t.session_id "
-                "WHERE t.root_session_id = :sid "
-                "AND s.org_id = :org_id "
-                "AND s.agent_id = :agent_id "
-                "ORDER BY t.depth, t.created_at "
+                "WITH RECURSIVE up AS ("
+                "  SELECT id, parent_id FROM sessions WHERE id = :sid "
+                "  UNION ALL "
+                "  SELECT s.id, s.parent_id "
+                "  FROM sessions s JOIN up u ON s.id = u.parent_id"
+                "), "
+                "root_id AS (SELECT id FROM up WHERE parent_id IS NULL), "
+                "down AS ("
+                "  SELECT s.id AS session_id, s.id AS root_session_id, "
+                "         s.parent_id, 0 AS depth, s.org_id, s.agent_id, "
+                "         s.channel, s.status, s.title, s.model, "
+                "         s.created_at, s.updated_at, s.config, "
+                "         s.message_count, s.tool_call_count "
+                "  FROM sessions s, root_id WHERE s.id = root_id.id "
+                "  UNION ALL "
+                "  SELECT s.id, d.root_session_id, s.parent_id, d.depth + 1, "
+                "         s.org_id, s.agent_id, s.channel, s.status, "
+                "         s.title, s.model, s.created_at, s.updated_at, "
+                "         s.config, s.message_count, s.tool_call_count "
+                "  FROM sessions s JOIN down d ON s.parent_id = d.session_id"
+                ") "
+                "SELECT * FROM down "
+                "WHERE org_id = :org_id AND agent_id = :agent_id "
+                "ORDER BY depth, created_at "
                 "LIMIT :limit"
             ),
             {

@@ -109,6 +109,7 @@ describe("SessionTreePanel", () => {
         <SessionTreePanel
           adapter={adapter}
           agentId="agent-1"
+          loadList
           title="Sessions"
         />,
       );
@@ -120,6 +121,35 @@ describe("SessionTreePanel", () => {
     expect(container.textContent).toContain("surogate");
     expect(container.textContent).toContain("ago");
     expect(container.textContent).not.toContain("completed");
+  });
+
+  it("suppresses the header row when hideHeader is set", async () => {
+    const adapter = createAdapter([
+      session({
+        id: "s-1",
+        title: "First session",
+        agentId: "agent-1",
+      }),
+    ]);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <SessionTreePanel
+          adapter={adapter}
+          agentId="agent-1"
+          loadList
+          title="Should be hidden"
+          hideHeader
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("First session");
+    expect(container.textContent).not.toContain("Should be hidden");
   });
 
   it("does not render compact message and tool counters", async () => {
@@ -141,6 +171,7 @@ describe("SessionTreePanel", () => {
         <SessionTreePanel
           adapter={adapter}
           agentId="agent-1"
+          loadList
           title="Sessions"
         />,
       );
@@ -169,6 +200,7 @@ describe("SessionTreePanel", () => {
         <SessionTreePanel
           adapter={adapter}
           agentId="agent-1"
+          loadList
           title="Sessions"
         />,
       );
@@ -204,6 +236,7 @@ describe("SessionTreePanel", () => {
         <SessionTreePanel
           adapter={adapter}
           agentId="agent-1"
+          loadList
           title="Sessions"
         />,
       );
@@ -217,6 +250,7 @@ describe("SessionTreePanel", () => {
         <SessionTreePanel
           adapter={adapter}
           agentId="agent-1"
+          loadList
           sessionId="s-1"
           title="Sessions"
         />,
@@ -229,10 +263,7 @@ describe("SessionTreePanel", () => {
     expect(container.textContent).not.toContain("Loading...");
     expect(
       container.querySelector('[aria-label="Loading sessions"]'),
-    ).not.toBeNull();
-    expect(
-      container.querySelector('[aria-label="Loading sessions"] .w-full'),
-    ).not.toBeNull();
+    ).toBeNull();
 
     await act(async () => {
       pendingList.resolve({ sessions, total: sessions.length });
@@ -269,6 +300,7 @@ describe("SessionTreePanel", () => {
         <SessionTreePanel
           adapter={firstAdapter}
           agentId="agent-1"
+          loadList
           title="Sessions"
         />,
       );
@@ -282,6 +314,7 @@ describe("SessionTreePanel", () => {
         <SessionTreePanel
           adapter={refreshedAdapter}
           agentId="agent-1"
+          loadList
           title="Sessions"
         />,
       );
@@ -293,7 +326,7 @@ describe("SessionTreePanel", () => {
     expect(container.textContent).not.toContain("Loading...");
     expect(
       container.querySelector('[aria-label="Loading sessions"]'),
-    ).not.toBeNull();
+    ).toBeNull();
 
     await act(async () => {
       pendingList.resolve({ sessions, total: sessions.length });
@@ -325,6 +358,7 @@ describe("SessionTreePanel", () => {
         <SessionTreePanel
           adapter={adapter}
           agentId="agent-1"
+          loadList
           title="Sessions"
         />,
       );
@@ -376,6 +410,7 @@ describe("SessionTreePanel", () => {
         <SessionTreePanel
           adapter={adapter}
           agentId="agent-1"
+          loadList
           title="Sessions"
         />,
       );
@@ -405,90 +440,4 @@ describe("SessionTreePanel", () => {
     });
   });
 
-  it("clears visible loading when a newer silent delete refetch completes", async () => {
-    const sessions = [
-      session({ id: "s-1", title: "First session", agentId: "agent-1" }),
-      session({ id: "s-2", title: "Second session", agentId: "agent-1" }),
-    ];
-    const visibleRefresh = deferred<AgentChatSessionList>();
-    const silentRefresh = deferred<AgentChatSessionList>();
-    const deletedSessionIds: string[] = [];
-    let refreshedListCalls = 0;
-    const firstAdapter: AgentChatAdapter = {
-      ...createAdapter(sessions),
-      async listSessions() {
-        return { sessions, total: sessions.length };
-      },
-    };
-    const refreshedAdapter: AgentChatAdapter = {
-      ...createAdapter(sessions),
-      async listSessions() {
-        refreshedListCalls += 1;
-        if (refreshedListCalls === 1) {
-          return visibleRefresh.promise;
-        }
-        return silentRefresh.promise;
-      },
-      async deleteSession(input) {
-        deletedSessionIds.push(input.sessionId);
-      },
-    };
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-
-    await act(async () => {
-      root?.render(
-        <SessionTreePanel
-          adapter={firstAdapter}
-          agentId="agent-1"
-          title="Sessions"
-        />,
-      );
-      await Promise.resolve();
-    });
-
-    await act(async () => {
-      root?.render(
-        <SessionTreePanel
-          adapter={refreshedAdapter}
-          agentId="agent-1"
-          title="Sessions"
-        />,
-      );
-      await Promise.resolve();
-    });
-
-    expect(container.textContent).toContain("First session");
-    expect(
-      container.querySelector('[aria-label="Loading sessions"]'),
-    ).not.toBeNull();
-
-    const deleteButton = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Delete session"]',
-    );
-
-    await act(async () => {
-      deleteButton?.click();
-      await Promise.resolve();
-    });
-
-    expect(deletedSessionIds).toEqual(["s-1"]);
-    expect(container.textContent).not.toContain("First session");
-    expect(container.textContent).toContain("Second session");
-
-    await act(async () => {
-      silentRefresh.resolve({ sessions: [sessions[1]], total: 1 });
-      await Promise.resolve();
-    });
-
-    expect(
-      container.querySelector('[aria-label="Loading sessions"]'),
-    ).toBeNull();
-
-    await act(async () => {
-      visibleRefresh.resolve({ sessions, total: sessions.length });
-      await Promise.resolve();
-    });
-  });
 });
