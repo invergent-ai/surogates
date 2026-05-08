@@ -186,6 +186,9 @@ function TreeNodeRow({
   const hasChildren = entry.children.length > 0;
   const isActive = entry.id === activeSessionId;
   const isRunning = entry.status === "active";
+  // The stop button is "Stop sub-agent" -- only show it on rows that are
+  // actually sub-agents (have a parent), not top-level user sessions.
+  const isSubAgent = entry.parentId != null;
   const title = entry.title ?? "New session";
   const subtitle = [
     entry.model ?? "default",
@@ -237,7 +240,7 @@ function TreeNodeRow({
           <div className="text-sm truncate">{title}</div>
           <div className="text-xs text-faint truncate">{subtitle}</div>
         </div>
-        {isRunning && canStop && (
+        {isRunning && canStop && isSubAgent && (
           <button
             type="button"
             className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive transition-all"
