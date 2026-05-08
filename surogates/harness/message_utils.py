@@ -7,7 +7,11 @@ creating synthetic tool results for skipped (interrupted) calls.
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def message_to_dict(message: Any) -> dict:
@@ -38,13 +42,17 @@ def message_to_dict(message: Any) -> dict:
             d["content"] = content
         tool_calls = getattr(message, "tool_calls", None)
         if tool_calls:
-            d["tool_calls"] = _serialise_tool_calls(tool_calls)
+            d["tool_calls"] = _ensure_parseable_tool_call_arguments(
+                _serialise_tool_calls(tool_calls)
+            )
         _copy_reasoning_fields(message, d)
         return d
 
     # Ensure tool_calls are serialisable plain dicts.
     if "tool_calls" in d and d["tool_calls"]:
-        d["tool_calls"] = _serialise_tool_calls(d["tool_calls"])
+        d["tool_calls"] = _ensure_parseable_tool_call_arguments(
+            _serialise_tool_calls(d["tool_calls"])
+        )
 
     # Preserve reasoning fields from the SDK object if not already in the dict.
     _copy_reasoning_fields(message, d)
@@ -88,6 +96,56 @@ def _serialise_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
                 tc_dict["extra_content"] = extra
             serialised_tcs.append(tc_dict)
     return serialised_tcs
+
+
+def _ensure_parseable_tool_call_arguments(
+    tool_calls: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return tool calls whose ``function.arguments`` are parseable JSON.
+
+    Replayed assistant messages with malformed argument strings cause OpenAI
+    400s before the harness has a chance to recover.  Replacing only the bad
+    argument payload keeps the tool-call/result pairing intact.
+    """
+    normalised: list[dict[str, Any]] = []
+    for tc in tool_calls:
+        tc_out = dict(tc)
+        fn = tc.get("function")
+        if isinstance(fn, dict):
+            fn_out = dict(fn)
+            args = fn_out.get("arguments", "")
+            if _is_parseable_json(args):
+                if not isinstance(args, str):
+                    fn_out["arguments"] = json.dumps(args, ensure_ascii=False)
+            else:
+                logger.warning(
+                    "Replacing malformed tool call arguments with {} for "
+                    "tool_call_id=%r tool=%r",
+                    tc.get("id") or tc.get("call_id"),
+                    fn.get("name"),
+                )
+                fn_out["arguments"] = "{}"
+            tc_out["function"] = fn_out
+        normalised.append(tc_out)
+    return normalised
+
+
+def _is_parseable_json(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        if not value.strip():
+            return False
+        try:
+            json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return False
+        return True
+    try:
+        json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _copy_reasoning_fields(message: Any, d: dict[str, Any]) -> None:
@@ -145,7 +203,7 @@ def reconstruct_message_from_deltas(
             tool_calls_acc[idx]
             for idx in sorted(tool_calls_acc.keys())
         ]
-        message["tool_calls"] = sorted_tcs
+        message["tool_calls"] = _ensure_parseable_tool_call_arguments(sorted_tcs)
 
     return message
 
