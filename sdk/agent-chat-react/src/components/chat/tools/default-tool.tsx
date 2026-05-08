@@ -5,7 +5,7 @@
 // a dedicated renderer.
 
 import { useState } from "react";
-import { ChevronRightIcon, CheckCircle2Icon, Loader2Icon, XCircleIcon, WrenchIcon } from "lucide-react";
+import { ChevronRightIcon, CheckCircle2Icon, Loader2Icon, XCircleIcon } from "lucide-react";
 import { cn } from "../../../lib/utils";
 import { formatArgs, truncate, effectiveStatus } from "./shared";
 import type { ToolCallInfo } from "../../../types";
