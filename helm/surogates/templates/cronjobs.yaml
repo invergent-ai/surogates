@@ -50,6 +50,11 @@ spec:
                     secretKeyRef:
                       name: {{ $fullname }}-s3
                       key: secret-key
+                - name: SUROGATES_STORAGE_REGION
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $fullname }}-s3
+                      key: region
                 {{- end }}
                 - name: SUROGATES_LOG_LEVEL
                   value: {{ .Values.logLevel | quote }}
@@ -116,6 +121,11 @@ spec:
                     secretKeyRef:
                       name: {{ $fullname }}-s3
                       key: secret-key
+                - name: SUROGATES_STORAGE_REGION
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $fullname }}-s3
+                      key: region
                 {{- end }}
                 - name: SUROGATES_LLM_MODEL
                   value: {{ .Values.llm.model | quote }}
