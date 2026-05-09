@@ -44,7 +44,7 @@ dependencies = [
     "kubernetes-asyncio>=31.0,<32.0",
     "slack-bolt>=1.20,<2.0",
     "python-telegram-bot>=21.0,<22.0",
-    "pillow>=10,<12",
+    "pillow>=10,<13",
     "croniter>=3.0,<7.0",
 ]
 scripts = { "surogates" = "surogates.cli.main:cli_main" }
