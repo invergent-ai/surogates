@@ -781,7 +781,7 @@ git commit -m "refactor: share session provisioning"
 - Modify: `surogates/orchestrator/worker.py`
 - Test: `tests/integration/test_scheduled_runner.py`
 
-- [ ] **Step 1: Add settings**
+- [x] **Step 1: Add settings**
 
 Modify `surogates/config.py`:
 
@@ -803,7 +803,7 @@ Add to `Settings`:
 scheduled_sessions: ScheduledSessionSettings = Field(default_factory=ScheduledSessionSettings)
 ```
 
-- [ ] **Step 2: Write failing runner integration test**
+- [x] **Step 2: Write failing runner integration test**
 
 Create `tests/integration/test_scheduled_runner.py`:
 
@@ -893,7 +893,7 @@ async def test_runner_creates_user_session_and_enqueues(session_factory, redis_c
     assert events[0].data["content"] == "/status check deployment"
 ```
 
-- [ ] **Step 3: Implement runner**
+- [x] **Step 3: Implement runner**
 
 Create `surogates/scheduled/runner.py`:
 
@@ -998,7 +998,7 @@ class ScheduledSessionRunner:
         await self._scheduled_store.mark_run_created(schedule, session_id=session.id)
 ```
 
-- [ ] **Step 4: Wire worker lifecycle**
+- [x] **Step 4: Wire worker lifecycle**
 
 Modify `surogates/orchestrator/worker.py` after `orchestrator = Orchestrator(...)`:
 
@@ -1037,7 +1037,7 @@ if scheduled_task is not None:
         pass
 ```
 
-- [ ] **Step 5: Verify Task 4**
+- [x] **Step 5: Verify Task 4**
 
 Run:
 
@@ -1047,7 +1047,7 @@ uv run pytest tests/integration/test_scheduled_runner.py -q
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit Task 4**
+- [x] **Step 6: Commit Task 4**
 
 ```bash
 git add surogates/config.py surogates/orchestrator/worker.py surogates/scheduled/runner.py tests/integration/test_scheduled_runner.py
