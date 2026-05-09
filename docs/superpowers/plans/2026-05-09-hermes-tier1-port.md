@@ -184,13 +184,13 @@ New or expanded tests:
 - [x] **Step 3: Port classifier types and rules**
   Port `FailoverReason`, `ClassifiedError`, `classify_api_error`, `extract_error_context`, and supporting pattern tables from `study/hermes-agent/agent/error_classifier.py` into `surogates/harness/error_classifier.py`. Keep Surogates-specific UI categories separate.
 
-- [ ] **Step 4: Use classifier in retry loop**
+- [x] **Step 4: Use classifier in retry loop**
   In `call_llm_with_retry`, replace ad hoc status/message branches with `classify_api_error(...)`. Use `retryable` for backoff, `should_compress` for context compression, `should_rotate` for credential rotation, and `should_fallback` for fallback activation. Keep existing thinking-signature recovery as a classifier reason rather than a separate branch.
 
 - [ ] **Step 5: Keep UI projection stable**
   Refactor `error_classify.py` so `classify_harness_error` maps `ClassifiedError.reason` to existing frontend categories (`rate_limit`, `auth_failed`, `context_overflow`, `network`, `provider_error`, `timeout`, `invalid_response`). Preserve current `ErrorInfo` fields and existing tests.
 
-- [ ] **Step 6: Verify retry behavior**
+- [x] **Step 6: Verify retry behavior**
   Run: `pytest tests/test_error_classifier_tier1.py tests/test_error_classify.py tests/test_harness_resilience.py tests/test_credential_pool.py -q`
   Expected: PASS, and retry decisions come from one classifier path.
 

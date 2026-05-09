@@ -23,6 +23,7 @@ from surogates.harness.message_utils import (
     message_to_dict,
     reconstruct_message_from_deltas,
 )
+from surogates.harness.error_classifier import FailoverReason, classify_api_error
 from surogates.harness.model_metadata import (
     get_next_probe_tier,
     parse_context_limit_from_error,
@@ -340,6 +341,19 @@ async def call_llm_with_retry(
                 for m in api_messages
                 if isinstance(m, dict)
             )
+            context_window = int(
+                getattr(context_compressor, "_context_window", 200_000)
+                if context_compressor is not None
+                else 200_000
+            )
+            classified = classify_api_error(
+                exc,
+                provider=str(create_kwargs.get("provider", "")),
+                model=str(create_kwargs.get("model", "")),
+                approx_tokens=approx_tokens,
+                context_length=context_window,
+                num_messages=len(api_messages),
+            )
 
             # ── Thinking block signature recovery ──────────────────
             # Anthropic signs thinking blocks against the full turn
@@ -349,10 +363,8 @@ async def call_llm_with_retry(
             # from all messages so the next retry sends no thinking
             # blocks at all.  One-shot -- don't retry infinitely.
             if (
-                status_code == 400
+                classified.reason == FailoverReason.thinking_signature
                 and not thinking_sig_retry_attempted
-                and "signature" in error_msg
-                and "thinking" in error_msg
             ):
                 thinking_sig_retry_attempted = True
                 stripped_count = 0
@@ -378,8 +390,7 @@ async def call_llm_with_retry(
                 # or switching credentials won't help.  Reduce context
                 # and compress.
                 _is_long_context_tier_error = (
-                    "extra usage" in error_msg
-                    and "long context" in error_msg
+                    classified.reason == FailoverReason.long_context_tier
                 )
                 if (
                     _is_long_context_tier_error
@@ -445,7 +456,8 @@ async def call_llm_with_retry(
 
             # ── 413 Payload too large ──────────────────────────────
             is_payload_too_large = (
-                status_code == 413
+                classified.reason == FailoverReason.payload_too_large
+                or status_code == 413
                 or "request entity too large" in error_msg
                 or "payload too large" in error_msg
                 or "error code: 413" in error_msg
@@ -476,8 +488,9 @@ async def call_llm_with_retry(
                 "prompt is too long",
                 "prompt exceeds max length",
             )
-            is_context_length_error = any(
-                phrase in error_msg for phrase in _CONTEXT_PHRASES
+            is_context_length_error = (
+                classified.reason == FailoverReason.context_overflow
+                or any(phrase in error_msg for phrase in _CONTEXT_PHRASES)
             )
 
             # Fallback heuristic: Anthropic sometimes returns a generic
@@ -624,6 +637,8 @@ async def call_llm_with_retry(
                 or "quota" in error_msg
             )
             is_retryable = (
+                classified.retryable
+                or
                 status_code in (429, 500, 502, 503, 529)
                 or is_transient_error(exc)
             )
