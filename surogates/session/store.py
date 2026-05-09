@@ -168,6 +168,37 @@ class SessionStore:
                 raise SessionNotFoundError(f"session {session_id} not found")
             await db.commit()
 
+    async def update_session_title_if_empty(
+        self,
+        session_id: UUID,
+        title: str,
+    ) -> bool:
+        """Set ``sessions.title`` only when it is currently empty."""
+        cleaned = title.strip()
+        if not cleaned:
+            return False
+
+        async with self._sf() as db:
+            result = await db.execute(
+                update(SessionRow)
+                .where(
+                    SessionRow.id == session_id,
+                    or_(SessionRow.title.is_(None), SessionRow.title == ""),
+                )
+                .values(title=cleaned, updated_at=func.now())
+            )
+            await db.commit()
+
+            if result.rowcount:
+                return True
+
+            exists = await db.execute(
+                select(SessionRow.id).where(SessionRow.id == session_id)
+            )
+            if exists.scalar_one_or_none() is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            return False
+
     async def list_sessions(
         self,
         org_id: UUID,

@@ -68,6 +68,7 @@ from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.tool_exec import execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.harness.tool_schemas import filter_schemas_for_tenant
+from surogates.harness.title_generator import maybe_generate_session_title
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import EventType
 from surogates.tools.builtin.expert_service import ExpertConsultationService
@@ -1312,6 +1313,12 @@ class AgentHarness:
                     messages.pop()
 
                 messages.append(assistant_message)
+                await self._maybe_generate_title(
+                    session=session,
+                    messages=messages,
+                    assistant_message=assistant_message,
+                    model=model_id,
+                )
 
                 # If the model emitted an SVG / HTML as a fenced code
                 # block instead of calling ``create_artifact``, promote
@@ -2626,6 +2633,29 @@ class AgentHarness:
                 "Failed to advance cursor at end of turn for %s",
                 session.id,
             )
+
+    async def _maybe_generate_title(
+        self,
+        *,
+        session: Session,
+        messages: list[dict],
+        assistant_message: dict,
+        model: str,
+    ) -> None:
+        """Best-effort auto-title generation for early user exchanges."""
+        try:
+            title = await maybe_generate_session_title(
+                store=self._store,
+                llm_client=self._llm,
+                session=session,
+                messages=messages,
+                assistant_message=assistant_message,
+                model=model,
+            )
+            if title:
+                logger.debug("Auto-generated title for session %s: %s", session.id, title)
+        except Exception:
+            logger.debug("Auto-title generation skipped for %s", session.id, exc_info=True)
 
     async def _complete_session(
         self,

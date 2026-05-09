@@ -84,6 +84,30 @@ async def test_update_session_status(session_store, session_factory):
     assert updated.status == "paused"
 
 
+async def test_update_session_title_if_empty_sets_once(session_store, session_factory):
+    """Generated titles are persisted without overwriting existing titles."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
+    )
+
+    assert await session_store.update_session_title_if_empty(
+        session.id,
+        "Debug Redis Failures",
+    ) is True
+    updated = await session_store.get_session(session.id)
+    assert updated.title == "Debug Redis Failures"
+
+    assert await session_store.update_session_title_if_empty(
+        session.id,
+        "Replacement Title",
+    ) is False
+    unchanged = await session_store.get_session(session.id)
+    assert unchanged.title == "Debug Redis Failures"
+
+
 async def test_list_sessions(session_store, session_factory):
     """Listing sessions for a user returns the correct count with pagination."""
     org_id = await create_org(session_factory)
