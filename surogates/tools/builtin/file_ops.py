@@ -1366,10 +1366,8 @@ def _apply_v4a_patch(patch_content: str) -> dict[str, Any]:
         +added line
         *** End Patch
     """
-    results: list[dict[str, Any]] = []
-    errors: list[str] = []
+    operations: list[tuple[str, str, list[str]]] = []
 
-    # Parse patch into file operations
     lines = patch_content.split("\n")
     current_file: str | None = None
     current_op: str | None = None  # "Update", "Add", "Delete"
@@ -1379,10 +1377,7 @@ def _apply_v4a_patch(patch_content: str) -> dict[str, Any]:
         # Skip begin/end markers
         if line.strip() in ("*** Begin Patch", "*** End Patch"):
             if current_file and current_hunks:
-                result = _apply_v4a_file_op(current_file, current_op or "Update", current_hunks)
-                results.append(result)
-                if result.get("error"):
-                    errors.append(result["error"])
+                operations.append((current_file, current_op or "Update", current_hunks))
             current_file = None
             current_op = None
             current_hunks = []
@@ -1393,10 +1388,7 @@ def _apply_v4a_patch(patch_content: str) -> dict[str, Any]:
         if m:
             # Flush previous file
             if current_file and current_hunks:
-                result = _apply_v4a_file_op(current_file, current_op or "Update", current_hunks)
-                results.append(result)
-                if result.get("error"):
-                    errors.append(result["error"])
+                operations.append((current_file, current_op or "Update", current_hunks))
             current_op = m.group(1)
             current_file = m.group(2).strip()
             current_hunks = []
@@ -1408,14 +1400,31 @@ def _apply_v4a_patch(patch_content: str) -> dict[str, Any]:
 
     # Flush final file
     if current_file and current_hunks:
-        result = _apply_v4a_file_op(current_file, current_op or "Update", current_hunks)
+        operations.append((current_file, current_op or "Update", current_hunks))
+
+    validation_errors = _validate_v4a_operations(operations)
+    if validation_errors:
+        return {
+            "status": "error",
+            "files": [],
+            "errors": [
+                "Patch validation failed (no files were modified):",
+                *validation_errors,
+            ],
+        }
+
+    results: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    for filepath, operation, hunk_lines in operations:
+        result = _apply_v4a_file_op(filepath, operation, hunk_lines)
         results.append(result)
         if result.get("error"):
             errors.append(result["error"])
 
     if errors:
         return {
-            "status": "partial" if results else "error",
+            "status": "partial",
             "files": results,
             "errors": errors,
         }
@@ -1423,6 +1432,96 @@ def _apply_v4a_patch(patch_content: str) -> dict[str, Any]:
         "status": "ok",
         "files": results,
     }
+
+
+def _validate_v4a_operations(
+    operations: list[tuple[str, str, list[str]]],
+) -> list[str]:
+    """Validate a parsed V4A patch without writing files."""
+    errors: list[str] = []
+    for filepath, operation, hunk_lines in operations:
+        expanded = os.path.expanduser(filepath)
+        resolved = str(Path(expanded).resolve())
+        if operation == "Update":
+            ok, error = _simulate_v4a_update(filepath, resolved, hunk_lines)
+            if not ok and error:
+                errors.append(error)
+        elif operation == "Delete":
+            if not os.path.exists(resolved):
+                errors.append(f"{filepath}: file not found for deletion")
+    return errors
+
+
+def _simulate_v4a_update(
+    filepath: str,
+    resolved: str,
+    hunk_lines: list[str],
+) -> tuple[bool, str | None]:
+    """Apply update hunks in memory and report the first missing match."""
+    if not os.path.exists(resolved):
+        return False, f"{filepath}: file not found"
+
+    try:
+        with open(resolved, encoding="utf-8") as fh:
+            original = fh.read()
+    except OSError as exc:
+        return False, f"{filepath}: failed to read: {exc}"
+
+    new_lines = original.split("\n")
+    current_idx = 0
+    i = 0
+    while i < len(hunk_lines):
+        line = hunk_lines[i]
+
+        if line.startswith("@@"):
+            hint = line.strip("@ \n")
+            if hint:
+                for j, orig_line in enumerate(new_lines[current_idx:], current_idx):
+                    if hint in orig_line:
+                        current_idx = j
+                        break
+            i += 1
+            continue
+
+        if line.startswith(" "):
+            context_text = line[1:]
+            found_idx = _find_v4a_line(new_lines, context_text, current_idx)
+            if found_idx is None:
+                return False, f"{filepath}: context line not found: {context_text!r}"
+            current_idx = found_idx + 1
+            i += 1
+            continue
+
+        if line.startswith("-"):
+            remove_text = line[1:]
+            found_idx = _find_v4a_line(new_lines, remove_text, max(0, current_idx - 1))
+            if found_idx is None:
+                return False, f"{filepath}: removal line not found: {remove_text!r}"
+            new_lines.pop(found_idx)
+            current_idx = found_idx
+            i += 1
+            continue
+
+        if line.startswith("+"):
+            new_lines.insert(current_idx, line[1:])
+            current_idx += 1
+            i += 1
+            continue
+
+        i += 1
+
+    return True, None
+
+
+def _find_v4a_line(lines: list[str], target: str, start: int) -> int | None:
+    """Find a V4A context/removal line using exact then stripped matching."""
+    for j in range(start, len(lines)):
+        if lines[j].rstrip() == target.rstrip():
+            return j
+    for j in range(start, len(lines)):
+        if lines[j].strip() == target.strip():
+            return j
+    return None
 
 
 def _apply_v4a_file_op(
