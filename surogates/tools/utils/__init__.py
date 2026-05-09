@@ -42,7 +42,7 @@ from surogates.tools.utils.patch_parser import (
     parse_v4a_patch,
 )
 from surogates.tools.utils.checkpoint_manager import CheckpointManager, format_checkpoint_list
-from surogates.tools.utils.url_safety import is_safe_url
+from surogates.tools.utils.url_safety import is_always_blocked_url, is_safe_url
 from surogates.tools.utils.website_policy import (
     WebsitePolicyError,
     check_website_access,
@@ -72,6 +72,7 @@ __all__ = [
     "apply_v4a_operations",
     "parse_v4a_patch",
     # url_safety
+    "is_always_blocked_url",
     "is_safe_url",
     # website_policy
     "WebsitePolicyError",
