@@ -19,6 +19,7 @@ from surogates.db.models import (
     Session,
     SessionCursor,
     SessionLease,
+    ScheduledSession,
     Skill,
     User,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "Session",
     "SessionCursor",
     "SessionLease",
+    "ScheduledSession",
     "Skill",
     "User",
 ]

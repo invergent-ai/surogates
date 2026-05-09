@@ -298,6 +298,7 @@ async def run_worker(settings: Settings) -> None:
 
     # Worker identity -- from K8s downward API or a generated fallback.
     worker_id = settings.worker_id or f"worker-{id(asyncio.get_event_loop()):x}"
+    settings.worker_id = worker_id
 
     # Resolve the org_id from config (required).
     if not settings.org_id:
@@ -539,6 +540,26 @@ async def run_worker(settings: Settings) -> None:
         poll_timeout=settings.worker.poll_timeout,
     )
 
+    scheduled_runner = None
+    scheduled_task = None
+    if settings.scheduled_sessions.enabled:
+        from surogates.scheduled.runner import ScheduledSessionRunner
+        from surogates.scheduled.store import ScheduledSessionStore
+        from surogates.storage.backend import create_backend
+
+        scheduled_runner = ScheduledSessionRunner(
+            settings=settings,
+            session_factory=session_factory,
+            session_store=session_store,
+            scheduled_store=ScheduledSessionStore(session_factory),
+            redis=redis_client,
+            storage=create_backend(settings),
+        )
+        scheduled_task = asyncio.create_task(
+            scheduled_runner.run_forever(),
+            name="scheduled-session-runner",
+        )
+
     health_server = await start_health_server(
         settings.health_port,
         lambda: infrastructure_readiness(redis_client, session_factory),
@@ -566,6 +587,14 @@ async def run_worker(settings: Settings) -> None:
     finally:
         # Cleanup
         logger.info("Worker %s shutting down", worker_id)
+        if scheduled_runner is not None:
+            await scheduled_runner.shutdown()
+        if scheduled_task is not None:
+            scheduled_task.cancel()
+            try:
+                await scheduled_task
+            except asyncio.CancelledError:
+                pass
         await health_server.stop()
         await sandbox_pool.destroy_all()
         mcp_proxy.shutdown_all()

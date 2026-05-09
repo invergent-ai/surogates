@@ -31,7 +31,7 @@ import {
 } from "../reui/timeline";
 import { Shimmer } from "../ai-elements/shimmer";
 import { ToolCallBlock } from "./tool-call-block";
-import { statusColorClass, effectiveStatus, toolErrorSummary } from "./tools/shared";
+import { statusColorClass, effectiveStatus, toolErrorSummary, parseArgs } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
 import { ChatComposer } from "./chat-composer";
 import { ArtifactBlock } from "./artifacts/artifact-block";
@@ -70,7 +70,7 @@ interface ChatThreadProps {
 
 type TimelineEntry =
   | { kind: "reasoning"; key: string; reasoning: string; isStreaming: boolean }
-  | { kind: "tool"; key: string; tc: ToolCallInfo }
+  | { kind: "tool"; key: string; tc: ToolCallInfo; resolvedArtifactName?: string }
   | { kind: "text"; key: string; content: string }
   | { kind: "thinking"; key: string }
   | { kind: "skill_invoked"; key: string; skill: string; stagedAt: string | null }
@@ -86,10 +86,17 @@ type TimelineEntry =
 /**
  * Flatten an assistant message into a list of timeline entries
  * (reasoning, tool calls, text content).
+ *
+ * ``artifactFallbacks`` maps a ``create_artifact`` tool-call id to the
+ * name of the matching ``artifact.created`` system message that has
+ * already landed. Used to backfill the timeline label during the brief
+ * race where ``tool.result`` arrives before the tool-call args have
+ * fully streamed.
  */
 function messageToEntries(
   msg: ChatMessageType,
   isLast: boolean,
+  artifactFallbacks: Record<string, string>,
 ): TimelineEntry[] {
   // System markers (skill.invoked, ...) become their own timeline entry --
   // a single row with a green dot + label, threaded into the assistant's
@@ -143,6 +150,23 @@ function messageToEntries(
 
   if (hasToolCalls) {
     for (const tc of msg.toolCalls!) {
+      if (tc.toolName === "create_artifact") {
+        // Skip the entry until either ``args.name`` parses or the matching
+        // ``artifact.created`` system message has landed. Avoids the brief
+        // "empty green dot" race where ``tool.result`` flips status to
+        // complete before the tool-call args have fully streamed in.
+        const resolvedName = parseArgs<{ name?: string }>(tc.args)?.name
+          ?? artifactFallbacks[tc.id];
+        const status = effectiveStatus(tc);
+        if (!resolvedName && status !== "error") continue;
+        entries.push({
+          kind: "tool",
+          key: tc.id,
+          tc,
+          resolvedArtifactName: resolvedName,
+        });
+        continue;
+      }
       entries.push({ kind: "tool", key: tc.id, tc });
     }
   }
@@ -392,7 +416,11 @@ function TimelineEntryItem({
             <CancelledToolRow tc={entry.tc} />
           ) : (
             <div className="space-y-1">
-              <ToolCallBlock tc={entry.tc} onFileSelect={onFileSelect} />
+              <ToolCallBlock
+                tc={entry.tc}
+                resolvedArtifactName={entry.resolvedArtifactName}
+                onFileSelect={onFileSelect}
+              />
               {failureSummary ? (
                 <div className="max-w-full truncate text-xs text-destructive" title={failureSummary}>
                   {failureSummary}
@@ -487,6 +515,7 @@ function AssistantGroup({
   totalMessages,
   isRunning,
   sessionId,
+  artifactFallbacks,
   onFileSelect,
   onRetry,
 }: {
@@ -495,6 +524,7 @@ function AssistantGroup({
   totalMessages: number;
   isRunning: boolean;
   sessionId: string | null;
+  artifactFallbacks: Record<string, string>;
   onFileSelect?: (path: string) => void;
   onRetry?: () => Promise<void>;
 }) {
@@ -502,7 +532,7 @@ function AssistantGroup({
   for (let i = 0; i < messages.length; i++) {
     const isLast = i === messages.length - 1
       && lastGlobalIndex === totalMessages - 1;
-    entries.push(...messageToEntries(messages[i], isLast));
+    entries.push(...messageToEntries(messages[i], isLast, artifactFallbacks));
   }
 
   // Whenever this is the tail assistant group and the session is still
@@ -608,6 +638,41 @@ export function ChatThread({
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
 
+  // Pair ``create_artifact`` tool calls to their matching
+  // ``artifact.created`` system messages by emission order across the
+  // whole thread (the events live in different group-buckets, but the
+  // 1:1 ordering is stable). The map is keyed by tool-call id so a
+  // ``create_artifact`` whose args have not yet streamed in can still
+  // render with the artifact's name as a fallback label.
+  //
+  // Errored and cancelled calls never emit ``artifact.created``, so they
+  // are excluded from the pairing — including them would slip the index
+  // and attribute a successful call's artifact name to a failed sibling.
+  const artifactFallbacks = useMemo<Record<string, string>>(() => {
+    const fallbacks: Record<string, string> = {};
+    const createArtifactToolCallIds: string[] = [];
+    let artifactIdx = 0;
+    for (const msg of messages) {
+      if (msg.role === "assistant" && msg.toolCalls) {
+        for (const tc of msg.toolCalls) {
+          if (tc.toolName === "create_artifact"
+              && !tc.cancelled
+              && tc.status !== "error") {
+            createArtifactToolCallIds.push(tc.id);
+          }
+        }
+      } else if (msg.role === "system" && msg.systemKind === "artifact") {
+        const tcId = createArtifactToolCallIds[artifactIdx];
+        if (tcId) {
+          const { name } = unpackArtifactMeta(msg.systemMeta, msg.content);
+          if (name) fallbacks[tcId] = name;
+        }
+        artifactIdx += 1;
+      }
+    }
+    return fallbacks;
+  }, [messages]);
+
   // Retry is only actionable for the most recent unresolved failure.
   // An error bubble (standalone system or inline assistant) is "active"
   // only when it is the tail of the message list — anything after it
@@ -686,6 +751,7 @@ export function ChatThread({
                     totalMessages={messages.length}
                     isRunning={isRunning}
                     sessionId={sessionId}
+                    artifactFallbacks={artifactFallbacks}
                     onFileSelect={onFileSelect}
                     onRetry={groupRetry}
                   />

@@ -22,7 +22,15 @@ import { SkillManageToolBlock } from "./tools/skill-manage-tool";
 import { CoordinatorToolBlock } from "./tools/coordinator-tools";
 import { DefaultToolBlock } from "./tools/default-tool";
 
-export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSelect?: (path: string) => void }) {
+export function ToolCallBlock({
+  tc,
+  resolvedArtifactName,
+  onFileSelect,
+}: {
+  tc: ToolCallInfo;
+  resolvedArtifactName?: string;
+  onFileSelect?: (path: string) => void;
+}) {
   switch (tc.toolName) {
     case "terminal":
       return <TerminalToolBlock tc={tc} />;
@@ -75,7 +83,7 @@ export function ToolCallBlock({ tc, onFileSelect }: { tc: ToolCallInfo; onFileSe
       return <ClarifyToolBlock tc={tc} />;
 
     case "create_artifact":
-      return <ArtifactToolBlock tc={tc} />;
+      return <ArtifactToolBlock tc={tc} resolvedName={resolvedArtifactName} />;
 
     case "delegate_task":
       return <DelegateToolBlock tc={tc} />;

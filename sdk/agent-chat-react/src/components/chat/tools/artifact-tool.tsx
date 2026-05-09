@@ -18,8 +18,17 @@
 import type { ToolCallInfo } from "../../../types";
 import { parseArgs, effectiveStatus } from "./shared";
 
-export function ArtifactToolBlock({ tc }: { tc: ToolCallInfo }) {
-  const args = parseArgs<{ name?: string; kind?: string }>(tc.args) ?? {};
+export function ArtifactToolBlock({
+  tc,
+  resolvedName,
+}: {
+  tc: ToolCallInfo;
+  // Name resolved by the caller (``args.name`` or the matching
+  // ``artifact.created`` fallback). When omitted, the component parses
+  // ``tc.args`` inline so it remains self-contained for callers that
+  // don't pre-resolve.
+  resolvedName?: string;
+}) {
   const status = effectiveStatus(tc);
 
   const label =
@@ -29,11 +38,14 @@ export function ArtifactToolBlock({ tc }: { tc: ToolCallInfo }) {
       ? "Creating artifact…"
       : "Created";
 
+  const name = resolvedName
+    ?? parseArgs<{ name?: string }>(tc.args)?.name;
+
   return (
     <div className="flex items-center gap-1.5 text-sm ">
       <span className="font-semibold text-foreground">{label}</span>
-      {args.name && (
-        <span className="text-muted-foreground truncate">{args.name}</span>
+      {name && (
+        <span className="text-muted-foreground truncate">{name}</span>
       )}
     </div>
   );

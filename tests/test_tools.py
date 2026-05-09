@@ -251,9 +251,12 @@ class TestToolRouterLocationResolution:
         gate = GovernanceGate()
         router = ToolRouter(reg, pool, gate)
 
-        for tool_name in ("memory", "skills_list", "skill_view", "skill_manage",
-                          "session_search", "web_search", "web_extract",
-                          "web_crawl", "clarify", "delegate_task", "todo", "process"):
+        for tool_name in (
+            "memory", "skills_list", "skill_view", "skill_manage",
+            "session_search", "web_search", "web_extract", "web_crawl",
+            "clarify", "delegate_task", "todo", "process", "cron_create",
+            "cron_delete", "cron_list",
+        ):
             assert router.resolve_location(tool_name) == ToolLocation.HARNESS, (
                 f"{tool_name} should resolve to HARNESS"
             )

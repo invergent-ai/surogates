@@ -54,6 +54,9 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "process": ToolLocation.HARNESS,
     "consult_expert": ToolLocation.HARNESS,
     "create_artifact": ToolLocation.HARNESS,
+    "cron_create": ToolLocation.HARNESS,
+    "cron_delete": ToolLocation.HARNESS,
+    "cron_list": ToolLocation.HARNESS,
     # Knowledge base tools (ops DB + Hub reads, no isolation needed)
     "kb_list_pages": ToolLocation.HARNESS,
     "kb_read_page": ToolLocation.HARNESS,

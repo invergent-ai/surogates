@@ -4,13 +4,15 @@ Tools are capabilities that the agent can invoke during a session. Every tool ca
 
 ## Overview
 
-Surogates comes with 16 builtin tools. Additional tools can be added via MCP servers (see [MCP Integration](../mcp-integration/index.md)).
+Surogates comes with builtin tools for memory, skills, delegation, web access,
+vision, artifacts, file operations, shell execution, and scheduling. Additional
+tools can be added via MCP servers (see [MCP Integration](../mcp-integration/index.md)).
 
 Tools run in one of three locations:
 
 | Location | Description | Examples |
 |---|---|---|
-| **Worker** | Runs inside the worker process. No sandbox needed. | memory, web search, skills, session search, delegation |
+| **Worker** | Runs inside the worker process. No sandbox needed. | memory, web search, skills, session search, delegation, cron scheduling |
 | **Sandbox** | Runs inside the session's isolated sandbox pod. | terminal, file operations, code execution, browser |
 | **MCP Proxy** | Forwarded to an external MCP server via the proxy. | Any tool registered by an MCP server |
 
@@ -138,6 +140,40 @@ Create, update, and delete skills. Includes validation (name, frontmatter, conte
 ### `todo` -- Task Tracking
 
 Per-session todo list for tracking progress on multi-step tasks.
+
+### `cron_create` / `cron_delete` / `cron_list` -- Scheduled Sessions
+
+Manage user-owned scheduled prompts. These are the tool equivalents behind
+recurring work such as reminders, polling, and `/loop` workflows. Schedules are
+stored in PostgreSQL, scoped to the current `org_id`, `user_id`, and `agent_id`,
+then picked up by that agent's worker and enqueued as fresh
+`channel="scheduled"` sessions.
+
+For user-facing slash commands, see [Commands](../commands/index.md).
+
+`cron_create` schedules a prompt or slash command.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `cron` | string | Five-field cron expression, for example `*/10 * * * *` |
+| `prompt` | string | Prompt or slash command to run when the schedule fires |
+| `recurring` | boolean | Whether to keep running after the first fire (default: `true`) |
+| `durable` | boolean | Accepted for Claude/Kairos compatibility; schedules are DB-backed in Surogates |
+| `name` | string | Optional display name |
+| `timezone` | string | IANA timezone for cron interpretation (default: `UTC`) |
+
+`cron_delete` cancels a schedule by `id`.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `id` | string | Scheduled session ID |
+
+`cron_list` lists active schedules for the current user and agent.
+
+Scheduled prompts are user-owned only. Service-account, anonymous, or
+system-only sessions cannot create user schedules. Prompts are scanned before
+persistence for prompt-injection markers, invisible Unicode, secret-exfiltration
+patterns, and destructive command patterns.
 
 ### `delegate_task` / `spawn_worker` -- Sub-Agent Delegation
 

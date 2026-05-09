@@ -145,6 +145,19 @@ The flush is a mini agent loop, not a simple file copy:
 4. The agent can call the `memory` tool (add/replace/remove entries in MEMORY.md and USER.md)
 5. After the agent finishes, memory files are copied to S3/Garage for durability
 
+## Scheduled Sessions
+
+Scheduled sessions are user-owned recurring prompts stored in PostgreSQL.
+Each agent worker ticks schedules for its own `agent_id`, claims due rows
+with `FOR UPDATE SKIP LOCKED`, creates a fresh `channel="scheduled"`
+session, emits the stored prompt as `user.message`, and enqueues that
+session on the agent's Redis work queue.
+
+Users can create short-lived loops with `/loop [interval] <prompt>`.
+Loops default to `10m` and expire after 3 days. Use `/loop list` and
+`/loop cancel <id>` to manage them. See [Commands](../commands/index.md)
+for the full slash-command reference.
+
 ## `training_collector` -- Expert Training Data Export
 
 The training collector extracts successful conversation trajectories from the event log and writes them as JSONL files to the tenant's Garage bucket.

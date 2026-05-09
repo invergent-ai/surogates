@@ -454,6 +454,17 @@ class SagaSettings(BaseSettings):
     retry_delay: float = 1.0
 
 
+class ScheduledSessionSettings(BaseSettings):
+    """Per-agent scheduled session ticker configuration."""
+
+    model_config = {"env_prefix": "SUROGATES_SCHEDULED_SESSIONS_"}
+
+    enabled: bool = True
+    tick_interval_seconds: int = 60
+    claim_limit: int = 10
+    claim_lease_seconds: int = 120
+
+
 class Settings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_"}
 
@@ -469,6 +480,9 @@ class Settings(BaseSettings):
     governance: GovernanceSettings = Field(default_factory=GovernanceSettings)
     saga: SagaSettings = Field(default_factory=SagaSettings)
     session_reset: SessionResetSettings = Field(default_factory=SessionResetSettings)
+    scheduled_sessions: ScheduledSessionSettings = Field(
+        default_factory=ScheduledSessionSettings,
+    )
     storage: StorageSettings = Field(default_factory=StorageSettings)
     slack: SlackSettings = Field(default_factory=SlackSettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)

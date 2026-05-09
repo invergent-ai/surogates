@@ -90,6 +90,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _format_loop_list(rows: list[Any]) -> str:
+    if not rows:
+        return "No active loops."
+    lines = ["Active loops:"]
+    for row in rows:
+        lines.append(
+            f"- `{row.id}` {row.schedule_display}: {row.prompt} "
+            f"(next: {row.next_run_at})"
+        )
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -566,6 +579,10 @@ class AgentHarness:
 
             if last_user_content == "/clear":
                 await self._handle_clear_command(session, lease)
+                return
+
+            if last_user_content.startswith("/loop"):
+                await self._handle_loop_command(session, last_user_content, lease)
                 return
 
             # 10b. Eager /<skill> expansion -- see slash_skill.expand_slash_skill.
@@ -2482,7 +2499,7 @@ class AgentHarness:
                     cost_usd=cost,
                 )
 
-            event_id = await self._store.emit_event(
+            await self._store.emit_event(
                 session.id,
                 EventType.LLM_RESPONSE,
                 {
@@ -2559,6 +2576,100 @@ class AgentHarness:
         )
         # Lease released by the outer wake() finally block.
 
+    async def _handle_loop_command(
+        self,
+        session: Session,
+        content: str,
+        lease: SessionLease,
+    ) -> None:
+        from surogates.scheduled.prompt_guard import (
+            ScheduledPromptBlocked,
+            validate_scheduled_prompt,
+        )
+        from surogates.scheduled.schedule import (
+            DEFAULT_LOOP_EXPIRY_DAYS,
+            parse_loop_command,
+            parse_schedule,
+        )
+        from surogates.scheduled.store import ScheduledSessionStore
+
+        if self._tenant.user_id is None:
+            message = "/loop schedules are available only for authenticated users."
+            await self._emit_loop_response(session, lease, message)
+            return
+
+        raw = content[len("/loop"):].strip()
+        store = ScheduledSessionStore(self._session_factory)
+        if not raw or raw == "help":
+            message = "Usage: /loop [interval] <prompt>. Example: /loop 5m /babysit-prs"
+        elif raw == "list":
+            rows = await store.list_for_user(
+                org_id=self._tenant.org_id,
+                user_id=self._tenant.user_id,
+                agent_id=session.agent_id,
+            )
+            message = _format_loop_list(rows)
+        elif raw.startswith("cancel "):
+            schedule_id_raw = raw.split(None, 1)[1].strip()
+            try:
+                schedule_id = UUID(schedule_id_raw)
+            except ValueError:
+                message = f"Loop {schedule_id_raw} was not found."
+            else:
+                deleted = await store.delete_for_user(
+                    schedule_id,
+                    org_id=self._tenant.org_id,
+                    user_id=self._tenant.user_id,
+                    agent_id=session.agent_id,
+                )
+                message = (
+                    f"Loop {schedule_id} cancelled."
+                    if deleted
+                    else f"Loop {schedule_id} was not found."
+                )
+        else:
+            try:
+                parsed = parse_loop_command(raw)
+                validate_scheduled_prompt(parsed.prompt, source="loop")
+                schedule = parse_schedule(parsed.interval, timezone_name="UTC")
+                created = await store.create_loop(
+                    org_id=self._tenant.org_id,
+                    user_id=self._tenant.user_id,
+                    agent_id=session.agent_id,
+                    prompt=parsed.prompt,
+                    schedule=schedule,
+                    created_from_session_id=session.id,
+                )
+                message = (
+                    f"Loop scheduled: `{created.id}`\n\n"
+                    f"- Prompt: {parsed.prompt}\n"
+                    f"- Cadence: {created.schedule_display}\n"
+                    f"- Next run: {created.next_run_at}\n"
+                    f"- Auto-expires: {DEFAULT_LOOP_EXPIRY_DAYS} days\n"
+                    f"- Cancel: `/loop cancel {created.id}`"
+                )
+            except (ValueError, ScheduledPromptBlocked) as exc:
+                message = str(exc)
+
+        await self._emit_loop_response(session, lease, message)
+
+    async def _emit_loop_response(
+        self,
+        session: Session,
+        lease: SessionLease,
+        message: str,
+    ) -> None:
+        event_id = await self._store.emit_event(
+            session.id,
+            EventType.LLM_RESPONSE,
+            {"message": {"role": "assistant", "content": message}},
+        )
+        await self._store.advance_harness_cursor(
+            session.id,
+            through_event_id=event_id,
+            lease_token=lease.lease_token,
+        )
+
     async def _handle_compress_command(
         self,
         session: Session,
@@ -2572,7 +2683,6 @@ class AgentHarness:
         result as an assistant message so the user sees what happened.
         """
         original_count = len(messages)
-        original_tokens = self._compressor.last_prompt_tokens or 0
 
         # Remove the /compress message itself — it's not real conversation.
         messages = [m for m in messages if not (
