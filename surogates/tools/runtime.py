@@ -63,6 +63,7 @@ class ToolRuntime:
             expert,
             file_ops,
             kb_tools,
+            loop_control,
             memory,
             session_search,
             skill_manager,
@@ -81,6 +82,7 @@ class ToolRuntime:
             web_search,
             file_ops,
             kb_tools,
+            loop_control,
             delegate,
             terminal,  # also registers the 'process' tool
             session_search,

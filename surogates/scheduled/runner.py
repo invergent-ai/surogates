@@ -72,6 +72,7 @@ class ScheduledSessionRunner:
     async def _run_one(self, schedule) -> None:
         fire_key = schedule.next_run_at.isoformat() if schedule.next_run_at else "now"
         idempotency_key = f"scheduled:{schedule.id}:{fire_key}"
+        is_dynamic_loop = schedule.schedule.get("kind") == "dynamic_loop"
         try:
             session = await create_agent_session(
                 store=self._session_store,
@@ -85,6 +86,7 @@ class ScheduledSessionRunner:
                 config={
                     "scheduled_session_id": str(schedule.id),
                     "scheduled_source": schedule.source,
+                    "scheduled_dynamic_loop": is_dynamic_loop,
                 },
                 idempotency_key=idempotency_key,
             )

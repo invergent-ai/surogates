@@ -96,9 +96,11 @@ def _format_loop_list(rows: list[Any]) -> str:
         return "No active loops."
     lines = ["Active loops:"]
     for row in rows:
+        reason = row.schedule.get("last_delay_reason") if row.schedule else None
+        suffix = f" (last wait: {reason})" if reason else ""
         lines.append(
             f"- `{row.id}` {row.schedule_display}: {row.prompt} "
-            f"(next: {row.next_run_at})"
+            f"(next: {row.next_run_at}){suffix}"
         )
     return "\n".join(lines)
 
@@ -880,6 +882,8 @@ class AgentHarness:
                 from surogates.tools.builtin.coordinator import WORKER_EXCLUDED_TOOLS
                 excluded = set(session.config.get("excluded_tools") or [])
                 excluded.update(WORKER_EXCLUDED_TOOLS)
+                if not session.config.get("scheduled_dynamic_loop"):
+                    excluded.add("loop_wait")
                 tool_filter = self._tools.tool_names - excluded
 
             tool_schemas = filter_schemas_for_tenant(
@@ -2587,7 +2591,9 @@ class AgentHarness:
             validate_scheduled_prompt,
         )
         from surogates.scheduled.schedule import (
+            DYNAMIC_LOOP_EXPIRY_DAYS,
             DEFAULT_LOOP_EXPIRY_DAYS,
+            parse_dynamic_loop_schedule,
             parse_loop_command,
             parse_schedule,
         )
@@ -2631,23 +2637,48 @@ class AgentHarness:
             try:
                 parsed = parse_loop_command(raw)
                 validate_scheduled_prompt(parsed.prompt, source="loop")
-                schedule = parse_schedule(parsed.interval, timezone_name="UTC")
-                created = await store.create_loop(
-                    org_id=self._tenant.org_id,
-                    user_id=self._tenant.user_id,
-                    agent_id=session.agent_id,
-                    prompt=parsed.prompt,
-                    schedule=schedule,
-                    created_from_session_id=session.id,
-                )
-                message = (
-                    f"Loop scheduled: `{created.id}`\n\n"
-                    f"- Prompt: {parsed.prompt}\n"
-                    f"- Cadence: {created.schedule_display}\n"
-                    f"- Next run: {created.next_run_at}\n"
-                    f"- Auto-expires: {DEFAULT_LOOP_EXPIRY_DAYS} days\n"
-                    f"- Cancel: `/loop cancel {created.id}`"
-                )
+                if parsed.interval is None:
+                    schedule = parse_dynamic_loop_schedule(timezone_name="UTC")
+                    created = await store.create_dynamic_loop(
+                        org_id=self._tenant.org_id,
+                        user_id=self._tenant.user_id,
+                        agent_id=session.agent_id,
+                        prompt=parsed.prompt,
+                        schedule=schedule,
+                        created_from_session_id=session.id,
+                    )
+                    message = (
+                        f"Loop scheduled: `{created.id}`\n\n"
+                        f"- Prompt: {parsed.prompt}\n"
+                        f"- Cadence: dynamic, chosen after each run with `loop_wait`\n"
+                        f"- Next run: {created.next_run_at}\n"
+                        f"- Auto-expires: {DYNAMIC_LOOP_EXPIRY_DAYS} days\n"
+                        f"- Cancel: `/loop cancel {created.id}`"
+                    )
+                else:
+                    schedule = parse_schedule(parsed.interval, timezone_name="UTC")
+                    created = await store.create_loop(
+                        org_id=self._tenant.org_id,
+                        user_id=self._tenant.user_id,
+                        agent_id=session.agent_id,
+                        prompt=parsed.prompt,
+                        schedule=schedule,
+                        created_from_session_id=session.id,
+                    )
+                    cadence_line = f"- Cadence: {created.schedule_display}\n"
+                    if schedule.adjusted_from:
+                        cadence_line += (
+                            f"- Requested cadence: {schedule.adjusted_from}; "
+                            f"using {created.schedule_display}\n"
+                        )
+                    message = (
+                        f"Loop scheduled: `{created.id}`\n\n"
+                        f"- Prompt: {parsed.prompt}\n"
+                        f"{cadence_line}"
+                        f"- Next run: {created.next_run_at}\n"
+                        f"- Auto-expires: {DEFAULT_LOOP_EXPIRY_DAYS} days\n"
+                        f"- Cancel: `/loop cancel {created.id}`"
+                    )
             except (ValueError, ScheduledPromptBlocked) as exc:
                 message = str(exc)
 
@@ -2935,6 +2966,8 @@ class AgentHarness:
                     exc_info=True,
                 )
 
+        await self._finalize_dynamic_loop_if_needed(session)
+
         # Advance cursor to the latest event.
         cursor_target = through_event_id if through_event_id is not None else event_id
         try:
@@ -2946,3 +2979,37 @@ class AgentHarness:
                 "Failed to advance cursor after session completion for %s",
                 session.id,
             )
+
+    async def _finalize_dynamic_loop_if_needed(self, session: Session) -> None:
+        if not session.config.get("scheduled_dynamic_loop"):
+            return
+        schedule_id_raw = session.config.get("scheduled_session_id")
+        if not schedule_id_raw or self._tenant.user_id is None:
+            return
+
+        from surogates.scheduled.schedule import DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS
+        from surogates.scheduled.store import ScheduledSessionStore
+
+        try:
+            schedule_id = UUID(str(schedule_id_raw))
+        except ValueError:
+            logger.warning("Invalid dynamic loop id in session config: %s", schedule_id_raw)
+            return
+
+        store = ScheduledSessionStore(self._session_factory)
+        try:
+            schedule = await store.get(schedule_id)
+        except KeyError:
+            return
+        if schedule.next_run_at is not None or schedule.last_session_id != session.id:
+            return
+
+        await store.mark_dynamic_run_finished(
+            schedule_id=schedule_id,
+            org_id=self._tenant.org_id,
+            user_id=self._tenant.user_id,
+            agent_id=session.agent_id,
+            session_id=session.id,
+            delay_seconds=DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS,
+            reason="The agent did not call loop_wait; using the fallback delay.",
+        )

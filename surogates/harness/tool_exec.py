@@ -993,6 +993,7 @@ async def execute_single_tool(
                 tools=tools,
                 tool_call_id=tool_call_id,
                 lease_token=lease.lease_token,
+                session_config=session.config,
             )
     except KeyError:
         tool_failed = True

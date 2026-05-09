@@ -3,7 +3,9 @@ from datetime import datetime, timezone
 import pytest
 
 from surogates.scheduled.schedule import (
+    DYNAMIC_LOOP_DISPLAY,
     LoopCommand,
+    parse_dynamic_loop_schedule,
     parse_loop_command,
     parse_schedule,
 )
@@ -26,18 +28,26 @@ def test_loop_leading_every_clause_parses_prompt() -> None:
 
 def test_loop_does_not_treat_plain_every_as_interval() -> None:
     parsed = parse_loop_command("check every PR")
-    assert parsed == LoopCommand(interval="10m", prompt="check every PR")
+    assert parsed == LoopCommand(interval=None, prompt="check every PR")
 
 
-def test_loop_default_interval() -> None:
+def test_loop_without_interval_is_dynamic() -> None:
     parsed = parse_loop_command("check queue health")
-    assert parsed == LoopCommand(interval="10m", prompt="check queue health")
+    assert parsed == LoopCommand(interval=None, prompt="check queue health")
+
+
+def test_parse_dynamic_loop_schedule() -> None:
+    parsed = parse_dynamic_loop_schedule(timezone_name="UTC")
+    assert parsed.kind == "dynamic_loop"
+    assert parsed.cron is None
+    assert parsed.display == DYNAMIC_LOOP_DISPLAY
 
 
 @pytest.mark.parametrize(
     ("expr", "cron"),
     [
         ("5m", "*/5 * * * *"),
+        ("7m", "*/6 * * * *"),
         ("90m", "0 */2 * * *"),
         ("2h", "0 */2 * * *"),
         ("1d", "0 0 */1 * *"),
@@ -50,6 +60,23 @@ def test_parse_interval_to_cron(expr: str, cron: str) -> None:
     assert parsed.kind == "cron"
     assert parsed.cron == cron
     assert parsed.display
+
+
+@pytest.mark.parametrize(
+    ("expr", "adjusted_from", "display"),
+    [
+        ("7m", "Every 7 minutes", "Every 6 minutes"),
+        ("90m", "Every 90 minutes", "Every 2 hours"),
+    ],
+)
+def test_parse_interval_records_adjusted_cadence(
+    expr: str,
+    adjusted_from: str,
+    display: str,
+) -> None:
+    parsed = parse_schedule(expr, timezone_name="UTC")
+    assert parsed.display == display
+    assert parsed.adjusted_from == adjusted_from
 
 
 def test_parse_raw_cron_and_compute_next_run() -> None:

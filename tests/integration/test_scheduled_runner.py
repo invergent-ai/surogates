@@ -4,7 +4,7 @@ import pytest
 
 from surogates.config import agent_queue_key
 from surogates.scheduled.runner import ScheduledSessionRunner
-from surogates.scheduled.schedule import parse_schedule
+from surogates.scheduled.schedule import parse_dynamic_loop_schedule, parse_schedule
 from surogates.scheduled.store import ScheduledSessionStore
 from surogates.session.events import EventType
 from surogates.session.store import SessionStore
@@ -81,3 +81,37 @@ async def test_runner_creates_user_session_and_enqueues(session_factory, redis_c
     events = await session_store.get_events(updated.last_session_id)
     assert events[0].type == EventType.USER_MESSAGE.value
     assert events[0].data["content"] == "/status check deployment"
+
+
+async def test_runner_marks_dynamic_loop_sessions(session_factory, redis_client):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    scheduled_store = ScheduledSessionStore(session_factory)
+    schedule = await scheduled_store.create_dynamic_loop(
+        org_id=org_id,
+        user_id=user_id,
+        agent_id="agent-a",
+        prompt="check CI",
+        schedule=parse_dynamic_loop_schedule(),
+        created_from_session_id=None,
+    )
+
+    queue = agent_queue_key("agent-a")
+    await redis_client.delete(queue)
+    session_store = SessionStore(session_factory, redis=redis_client)
+    runner = ScheduledSessionRunner(
+        settings=FakeSettings(),
+        session_factory=session_factory,
+        session_store=session_store,
+        scheduled_store=scheduled_store,
+        redis=redis_client,
+        storage=FakeStorage(),
+    )
+
+    processed = await runner.tick_once()
+    assert processed == 1
+
+    updated = await scheduled_store.get(schedule.id)
+    session = await session_store.get_session(updated.last_session_id)
+    assert session.config["scheduled_session_id"] == str(schedule.id)
+    assert session.config["scheduled_dynamic_loop"] is True

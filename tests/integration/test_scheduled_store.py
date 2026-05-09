@@ -2,7 +2,11 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from surogates.scheduled.schedule import parse_schedule
+from surogates.scheduled.schedule import (
+    DYNAMIC_LOOP_EXPIRY_DAYS,
+    parse_dynamic_loop_schedule,
+    parse_schedule,
+)
 from surogates.scheduled.store import ScheduledSessionStore
 
 from .conftest import create_org, create_user
@@ -90,3 +94,48 @@ async def test_mark_run_created_advances_or_expires(session_factory):
     updated = await store.get(created.id)
     assert updated.status == "completed"
     assert updated.run_count == 1
+
+
+async def test_dynamic_loop_lifecycle_waits_for_loop_wait(session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+
+    created = await store.create_dynamic_loop(
+        org_id=org_id,
+        user_id=user_id,
+        agent_id="agent-a",
+        prompt="check CI",
+        schedule=parse_dynamic_loop_schedule(),
+        created_from_session_id=None,
+    )
+
+    assert created.schedule["kind"] == "dynamic_loop"
+    assert created.next_run_at is not None
+    assert created.expires_at is not None
+    ttl = created.expires_at - created.created_at
+    assert timedelta(days=DYNAMIC_LOOP_EXPIRY_DAYS) - timedelta(seconds=1) <= ttl
+    assert ttl <= timedelta(days=DYNAMIC_LOOP_EXPIRY_DAYS, seconds=1)
+
+    claimed = (await store.claim_due(agent_id="agent-a", worker_id="w1", limit=1))[0]
+    await store.mark_run_created(claimed, session_id=created.id)
+
+    waiting = await store.get(created.id)
+    assert waiting.status == "active"
+    assert waiting.run_count == 1
+    assert waiting.next_run_at is None
+
+    await store.mark_dynamic_run_finished(
+        schedule_id=created.id,
+        org_id=org_id,
+        user_id=user_id,
+        agent_id="agent-a",
+        session_id=created.id,
+        delay_seconds=120,
+        reason="CI is still running",
+    )
+
+    updated = await store.get(created.id)
+    assert updated.next_run_at is not None
+    assert updated.schedule["last_delay_seconds"] == 120
+    assert updated.schedule["last_delay_reason"] == "CI is still running"
