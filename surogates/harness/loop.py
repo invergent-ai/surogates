@@ -1392,11 +1392,12 @@ class AgentHarness:
                 )
 
                 # A response without tool calls is the end of this turn.
-                # For sub-agent (delegated) sessions, this is also the end of
-                # the session — the parent is waiting on the final answer.
+                # For sub-agent (delegated) and scheduled sessions, this is
+                # also the end of the session: no user is expected to continue
+                # the same session interactively.
                 # For primary user sessions, the session stays 'active' so
                 # the user can send a follow-up message.
-                if session.parent_id is not None:
+                if session.parent_id is not None or session.channel == "scheduled":
                     await self._complete_session(
                         session, messages, lease, reason="completed",
                         through_event_id=event_id,

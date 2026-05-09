@@ -163,7 +163,10 @@ class ScheduledSessionStore:
         schedule_id: UUID,
     ) -> bool:
         schedule = await self.get(schedule_id)
-        next_run_at = _parsed_schedule(schedule).next_after(_utcnow())
+        if schedule.schedule.get("kind") == "dynamic_loop":
+            next_run_at = _utcnow()
+        else:
+            next_run_at = _parsed_schedule(schedule).next_after(_utcnow())
         async with self._sf() as db:
             result = await db.execute(
                 update(ScheduledSessionRow)
