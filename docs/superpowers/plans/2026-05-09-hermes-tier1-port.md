@@ -231,23 +231,23 @@ New or expanded tests:
 - Modify: `surogates/harness/tool_exec.py`
 - Test: `tests/test_tool_guardrails.py`
 
-- [ ] **Step 1: Write failing guardrail tests**
+- [x] **Step 1: Write failing guardrail tests**
   Cover repeated exact failures, repeated same-tool failures with different args, repeated idempotent read results, warning injection after two repeats, and hard halt after the configured threshold.
 
-- [ ] **Step 2: Run tests to verify failure**
+- [x] **Step 2: Run tests to verify failure**
   Run: `pytest tests/test_tool_guardrails.py -q`
   Expected: FAIL because no per-turn guardrail state exists.
 
-- [ ] **Step 3: Port guardrail module**
+- [x] **Step 3: Port guardrail module**
   Port `ToolGuardrailConfig`, `ToolCallSignature`, `ToolGuardrailDecision`, `ToolGuardrails`, `canonical_tool_args`, and result hashing from `study/hermes-agent/agent/tool_guardrails.py` into `surogates/harness/tool_guardrails.py`.
 
-- [ ] **Step 4: Wire before and after hooks**
+- [x] **Step 4: Wire before and after hooks**
   Create one `ToolGuardrails` instance per harness turn in `loop.py`. Call `before_call` before dispatch; if it returns a halt/block decision, append a synthetic tool result and stop executing the remaining repeated calls. Call `after_call` after each tool result; if it returns a warning, inject the guidance into the next model-visible tool result.
 
-- [ ] **Step 5: Preserve event semantics**
+- [x] **Step 5: Preserve event semantics**
   Emit normal `tool.call` and `tool.result` events for guardrail-generated responses so replay and audit stay consistent. Include a machine-readable `guardrail` object in the tool result JSON with `code`, `action`, and `count`.
 
-- [ ] **Step 6: Verify loop control**
+- [x] **Step 6: Verify loop control**
   Run: `pytest tests/test_tool_guardrails.py tests/test_harness_pending.py tests/test_budget.py -q`
   Expected: PASS, with loops stopped before exhausting the session budget.
 

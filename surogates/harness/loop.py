@@ -66,6 +66,7 @@ from surogates.harness.slash_skill import expand_slash_skill
 from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
 from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.tool_exec import execute_tool_calls
+from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.harness.tool_schemas import filter_schemas_for_tenant
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import EventType
@@ -718,6 +719,12 @@ class AgentHarness:
         incomplete_scratchpad_retries = 0  # retries for unclosed REASONING_SCRATCHPAD
         empty_response_retries = 0  # retries for empty LLM responses (no content, no tools, no reasoning)
         content_with_tools_cache = ContentWithToolsCache()
+        tool_guardrails = ToolGuardrails(
+            ToolGuardrailConfig.from_mapping(
+                session.config.get("tool_loop_guardrails")
+                if session.config else None
+            )
+        )
 
         # Subdirectory hint tracker -- discovers context files as the agent navigates.
         hint_tracker = SubdirectoryHintTracker(
@@ -930,6 +937,7 @@ class AgentHarness:
                     session_factory=self._session_factory,
                     saga=saga,
                     log_policy_allowed=self._log_policy_allowed,
+                    tool_guardrails=tool_guardrails,
                 )
 
             def _reset_streaming_executor() -> Callable[[dict[str, Any]], None]:
