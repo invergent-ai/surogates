@@ -4,7 +4,7 @@ Tools are capabilities that the agent can invoke during a session. Every tool ca
 
 ## Overview
 
-Surogates comes with 15 builtin tools. Additional tools can be added via MCP servers (see [MCP Integration](../mcp-integration/index.md)).
+Surogates comes with 16 builtin tools. Additional tools can be added via MCP servers (see [MCP Integration](../mcp-integration/index.md)).
 
 Tools run in one of three locations:
 
@@ -98,6 +98,16 @@ Backends: Tavily and Exa. Respects `robots.txt` and rate limits.
 | Parameter | Type | Description |
 |---|---|---|
 | `urls` | array | List of URLs to crawl |
+
+### `vision_analyze` -- Image Analysis
+
+Analyzes a workspace image, safe remote image URL, or `data:image` URL with the active vision-capable session model.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `image` | string | Workspace-relative path, HTTPS image URL, or `data:image` base64 URL |
+| `question` | string | What to inspect or answer about the image |
+| `detail` | string | `auto`, `low`, or `high` provider detail hint |
 
 ### `session_search` -- Conversation History Search
 

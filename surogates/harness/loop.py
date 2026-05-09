@@ -937,6 +937,8 @@ class AgentHarness:
                     sandbox_pool=self._sandbox_pool,
                     api_client=self._api_client,
                     session_factory=self._session_factory,
+                    llm_client=self._llm,
+                    model=model_id,
                     saga=saga,
                     log_policy_allowed=self._log_policy_allowed,
                     tool_guardrails=tool_guardrails,
@@ -1489,6 +1491,8 @@ class AgentHarness:
                     sandbox_pool=self._sandbox_pool,
                     api_client=self._api_client,
                     session_factory=self._session_factory,
+                    llm_client=self._llm,
+                    model=model_id,
                     saga=saga,
                     log_policy_allowed=self._log_policy_allowed,
                 )
