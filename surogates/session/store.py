@@ -266,7 +266,13 @@ class SessionStore:
         from surogates.trace import get_trace
 
         trace = get_trace()
+        # Redact sensitive data but preserve binary image payloads —
+        # the JWT regex in redact_sensitive_text falsely matches base64
+        # image fragments (e.g. "eyJ..." which is common in PNG data).
+        images_backup = data.get("images") if isinstance(data, dict) else None
         redacted_data = redact_sensitive_data(data)
+        if images_backup is not None and isinstance(redacted_data, dict):
+            redacted_data["images"] = images_backup
         row = EventRow(
             session_id=session_id,
             type=event_type.value,
