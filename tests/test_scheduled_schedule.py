@@ -19,6 +19,11 @@ def test_loop_trailing_every_clause_parses_prompt() -> None:
     assert parsed == LoopCommand(interval="20m", prompt="check deploys")
 
 
+def test_loop_leading_every_clause_parses_prompt() -> None:
+    parsed = parse_loop_command("every 1 minute get bitcoin price")
+    assert parsed == LoopCommand(interval="1m", prompt="get bitcoin price")
+
+
 def test_loop_does_not_treat_plain_every_as_interval() -> None:
     parsed = parse_loop_command("check every PR")
     assert parsed == LoopCommand(interval="10m", prompt="check every PR")

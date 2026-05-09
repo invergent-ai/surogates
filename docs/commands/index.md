@@ -60,6 +60,7 @@ Examples:
 
 ```text
 /loop 5m /babysit-prs
+/loop every 1 minute get bitcoin price
 /loop check deploys every 20m
 /loop check queue health
 ```
@@ -67,6 +68,7 @@ Examples:
 Parsing rules:
 
 - Leading interval: `/loop 5m check deploys` uses `5m`.
+- Leading `every` clause: `/loop every 1 minute get bitcoin price` uses `1m`.
 - Trailing `every` clause: `/loop check deploys every 20m` uses `20m`.
 - Default interval: `/loop check queue health` uses `10m`.
 

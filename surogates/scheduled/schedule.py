@@ -13,6 +13,12 @@ DEFAULT_LOOP_INTERVAL = "10m"
 DEFAULT_LOOP_EXPIRY_DAYS = 3
 
 _LEADING_INTERVAL_RE = re.compile(r"^(\d+)([smhd])(?:\s+)(.+)$", re.I | re.S)
+_LEADING_EVERY_RE = re.compile(
+    r"^every\s+(?P<num>\d+)\s*"
+    r"(?P<unit>s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)"
+    r"\s+(?P<prompt>.+)$",
+    re.I | re.S,
+)
 _TRAILING_EVERY_RE = re.compile(
     r"^(?P<prompt>.+?)\s+every\s+(?P<num>\d+)\s*"
     r"(?P<unit>s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\s*$",
@@ -62,6 +68,14 @@ def parse_loop_command(raw: str) -> LoopCommand:
         return LoopCommand(
             interval=f"{int(leading.group(1))}{leading.group(2).lower()}",
             prompt=leading.group(3).strip(),
+        )
+
+    leading_every = _LEADING_EVERY_RE.match(text)
+    if leading_every:
+        unit = _normalize_unit(leading_every.group("unit"))
+        return LoopCommand(
+            interval=f"{int(leading_every.group('num'))}{unit}",
+            prompt=leading_every.group("prompt").strip(),
         )
 
     trailing = _TRAILING_EVERY_RE.match(text)
