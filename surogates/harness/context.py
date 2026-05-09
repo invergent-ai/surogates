@@ -524,15 +524,28 @@ Use this exact structure:
     def _normalize_plan_sections(
         cls, summary: str, previous_summary: str | None = None,
     ) -> str:
-        """Rewrite plan sections so every content line is ``N. ...``.
+        """Rewrite plan sections so every top-level content line is ``N. ...``.
 
-        Already-indexed lines are preserved verbatim and their indices are
-        reserved.  Bullet markers are stripped.  Empty lines and bracketed
-        placeholder/example lines pass through unchanged.
+        Top-level lines (column 0) under a plan header are treated as
+        items: already-indexed lines pass through verbatim with their
+        index reserved; bare prose / bullet lines are stripped of any
+        bullet marker and assigned the next free index.
 
-        When ``previous_summary`` is supplied, indices observed in any of its
-        plan sections reserve those numbers so a new index does not collide
-        with one the previous summary still owns.
+        Indented lines (any leading whitespace on the raw line) are
+        treated as **continuations** of the item above them and pass
+        through unchanged — markdown sub-bullets, multi-line
+        descriptions, and code-block content are preserved as the model
+        wrote them.  This prevents the normaliser from inflating each
+        sub-bullet of a richly-described step into its own (collision-
+        prone) index.
+
+        Empty lines and bracketed placeholder/example lines pass
+        through unchanged.
+
+        When ``previous_summary`` is supplied, indices observed in any
+        of its plan sections (top-level or indented) reserve those
+        numbers so a new index does not collide with one the previous
+        summary still owns.
         """
 
         used: set[int] = set()
@@ -571,6 +584,14 @@ Use this exact structure:
                 continue
 
             if current_section is None or not stripped:
+                out.append(raw)
+                continue
+
+            # Indented lines are continuations of the item above (sub-bullets,
+            # multi-line descriptions, fenced code).  Pass through verbatim;
+            # do NOT re-index, do NOT extract numbers as new items.  Items
+            # at column 0 are the only candidates for the indexed contract.
+            if raw[:1] in (" ", "\t"):
                 out.append(raw)
                 continue
 
