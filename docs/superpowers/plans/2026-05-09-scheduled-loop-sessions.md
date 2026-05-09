@@ -4,7 +4,7 @@
 
 **Goal:** Add user-owned scheduled sessions and make `/loop` a default deterministic slash command for recurring agent work.
 
-**Architecture:** Store schedules in Postgres, scope them by `org_id`, `user_id`, and `agent_id`, and tick due schedules from each agent's existing worker process. Use `croniter` only for calendar math; Postgres remains the source of truth and the Redis per-agent queue remains the execution path.
+**Architecture:** Store schedules in Postgres, scope them by `org_id`, `user_id`, and `agent_id`, and tick due schedules from each agent's existing worker process. Expose Claude-style scheduling tools as native Surogates tools named `cron_create`, `cron_delete`, and `cron_list`; `/loop` is deterministic syntax sugar over the same store/service path rather than an LLM-parsed prompt. Use `croniter` only for calendar math; Postgres remains the source of truth and the Redis per-agent queue remains the execution path.
 
 **Tech Stack:** Python 3.12, SQLAlchemy async, PostgreSQL JSONB/timestamptz, Redis sorted-set work queues, `croniter`, pytest, pytest-asyncio, Surogates harness slash-command pipeline.
 
@@ -19,14 +19,14 @@
 - Create `surogates/scheduled/store.py`: database CRUD, due claiming, state transitions, run bookkeeping.
 - Create `surogates/scheduled/runner.py`: per-agent background ticker that creates sessions and enqueues them.
 - Create `surogates/session/provisioning.py`: shared session provisioning used by API routes and scheduled runner.
-- Create `surogates/tools/builtin/scheduled_session.py`: conversational scheduling tool.
+- Create `surogates/tools/builtin/cron.py`: model-facing `cron_create`, `cron_delete`, and `cron_list` tools equivalent to Claude's `CronCreate`, `CronDelete`, and `CronList`.
 - Modify `surogates/db/models.py`: add `ScheduledSession`.
 - Modify `surogates/db/__init__.py`: export `ScheduledSession`.
 - Modify `surogates/db/observability.sql`: add idempotent indexes and schema fixups for existing DBs.
 - Modify `surogates/config.py`: add `ScheduledSessionSettings`.
 - Modify `surogates/orchestrator/worker.py`: start/stop `ScheduledSessionRunner`.
-- Modify `surogates/tools/runtime.py`: register scheduled-session tool.
-- Modify `surogates/tools/router.py`: route `scheduled_session` to `HARNESS`.
+- Modify `surogates/tools/runtime.py`: register cron tools.
+- Modify `surogates/tools/router.py`: route `cron_create`, `cron_delete`, and `cron_list` to `HARNESS`.
 - Modify `surogates/harness/slash_skill.py`: reserve `/loop` as builtin.
 - Modify `surogates/harness/loop.py`: handle `/loop` before skill expansion.
 - Modify `surogates/api/routes/sessions.py` and `surogates/api/routes/prompts.py`: use shared session provisioning.
@@ -34,7 +34,7 @@
 - Test files:
   - `tests/test_scheduled_schedule.py`
   - `tests/test_scheduled_prompt_guard.py`
-  - `tests/test_scheduled_tool.py`
+  - `tests/test_cron_tools.py`
   - `tests/test_loop_command.py`
   - `tests/integration/test_scheduled_store.py`
   - `tests/integration/test_scheduled_runner.py`
@@ -338,7 +338,7 @@ _INVISIBLE_CHARS = {
 }
 
 
-def validate_scheduled_prompt(prompt: str, *, source: str = "scheduled_session") -> None:
+def validate_scheduled_prompt(prompt: str, *, source: str = "cron_create") -> None:
     text = (prompt or "").strip()
     if not text:
         raise ScheduledPromptBlocked("Scheduled prompt cannot be empty.")
@@ -1056,18 +1056,18 @@ git commit -m "feat: run scheduled sessions from agent workers"
 
 ---
 
-## Task 5: Conversational scheduled_session Tool
+## Task 5: Cron Scheduling Tools
 
 **Files:**
-- Create: `surogates/tools/builtin/scheduled_session.py`
+- Create: `surogates/tools/builtin/cron.py`
 - Modify: `surogates/tools/runtime.py`
 - Modify: `surogates/tools/router.py`
-- Test: `tests/test_scheduled_tool.py`
+- Test: `tests/test_cron_tools.py`
 - Test: `tests/test_tools.py`
 
-- [ ] **Step 1: Write failing tool tests**
+- [ ] **Step 1: Write failing cron tool tests**
 
-Create `tests/test_scheduled_tool.py`:
+Create `tests/test_cron_tools.py`:
 
 ```python
 import json
@@ -1076,12 +1076,17 @@ from uuid import uuid4
 
 import pytest
 
-from surogates.tools.builtin.scheduled_session import _scheduled_session_handler
+from surogates.tools.builtin.cron import (
+    _cron_create_handler,
+    _cron_delete_handler,
+    _cron_list_handler,
+)
 
 
 class FakeStore:
     def __init__(self):
         self.created = []
+        self.deleted = []
 
     async def create(self, **kwargs):
         row = SimpleNamespace(
@@ -1095,11 +1100,27 @@ class FakeStore:
         self.created.append(kwargs)
         return row
 
+    async def list_for_user(self, **kwargs):
+        return [
+            SimpleNamespace(
+                id=uuid4(),
+                name="Deploy check",
+                prompt="check deploy",
+                schedule_display="Every 10 minutes",
+                next_run_at=None,
+                status="active",
+            ),
+        ]
+
+    async def delete(self, **kwargs):
+        self.deleted.append(kwargs)
+        return True
+
 
 @pytest.mark.asyncio
-async def test_create_requires_user_context():
-    result = json.loads(await _scheduled_session_handler(
-        {"action": "create", "prompt": "check", "schedule": "10m"},
+async def test_cron_create_requires_user_context():
+    result = json.loads(await _cron_create_handler(
+        {"cron": "*/10 * * * *", "prompt": "check"},
         tenant=SimpleNamespace(org_id=uuid4(), user_id=None),
         scheduled_store=FakeStore(),
     ))
@@ -1108,15 +1129,14 @@ async def test_create_requires_user_context():
 
 
 @pytest.mark.asyncio
-async def test_create_schedule_success():
+async def test_cron_create_success():
     tenant = SimpleNamespace(org_id=uuid4(), user_id=uuid4())
     store = FakeStore()
-    result = json.loads(await _scheduled_session_handler(
+    result = json.loads(await _cron_create_handler(
         {
-            "action": "create",
-            "name": "Deploy check",
+            "cron": "*/10 * * * *",
             "prompt": "check deploy",
-            "schedule": "10m",
+            "recurring": True,
         },
         tenant=tenant,
         agent_id="agent-a",
@@ -1124,33 +1144,77 @@ async def test_create_schedule_success():
         scheduled_store=store,
     ))
     assert result["success"] is True
-    assert result["schedule"]["name"] == "Deploy check"
+    assert result["schedule"]["prompt"] == "check deploy"
     assert store.created[0]["agent_id"] == "agent-a"
+    assert store.created[0]["source"] == "tool"
+
+
+@pytest.mark.asyncio
+async def test_cron_list_returns_user_schedules():
+    tenant = SimpleNamespace(org_id=uuid4(), user_id=uuid4())
+    result = json.loads(await _cron_list_handler(
+        {},
+        tenant=tenant,
+        agent_id="agent-a",
+        scheduled_store=FakeStore(),
+    ))
+    assert result["success"] is True
+    assert result["schedules"][0]["name"] == "Deploy check"
+
+
+@pytest.mark.asyncio
+async def test_cron_delete_removes_user_schedule():
+    tenant = SimpleNamespace(org_id=uuid4(), user_id=uuid4())
+    store = FakeStore()
+    schedule_id = uuid4()
+    result = json.loads(await _cron_delete_handler(
+        {"id": str(schedule_id)},
+        tenant=tenant,
+        agent_id="agent-a",
+        scheduled_store=store,
+    ))
+    assert result["success"] is True
+    assert store.deleted[0]["schedule_id"] == schedule_id
 ```
 
-- [ ] **Step 2: Implement tool**
+- [ ] **Step 2: Implement cron tools**
 
-Create `surogates/tools/builtin/scheduled_session.py` with schema:
+Create `surogates/tools/builtin/cron.py` with three schemas:
 
 ```python
-_SCHEDULED_SESSION_SCHEMA = ToolSchema(
-    name="scheduled_session",
+_CRON_CREATE_SCHEMA = ToolSchema(
+    name="cron_create",
     description=(
-        "Manage user-owned scheduled agent sessions. Use create, list, pause, "
-        "resume, delete, or run_now for recurring reminders and workflows."
+        "Schedule a user-owned prompt or slash command to run later or on a recurring cron cadence."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["create", "list", "pause", "resume", "delete", "run_now"]},
-            "schedule_id": {"type": "string"},
-            "name": {"type": "string"},
+            "cron": {"type": "string", "description": "5-field cron expression, for example */10 * * * *"},
             "prompt": {"type": "string"},
-            "schedule": {"type": "string"},
+            "recurring": {"type": "boolean", "default": True},
+            "durable": {"type": "boolean", "default": False},
+            "name": {"type": "string"},
             "timezone": {"type": "string", "default": "UTC"},
         },
-        "required": ["action"],
+        "required": ["cron", "prompt"],
     },
+)
+
+_CRON_DELETE_SCHEMA = ToolSchema(
+    name="cron_delete",
+    description="Cancel a user-owned scheduled prompt by id.",
+    parameters={
+        "type": "object",
+        "properties": {"id": {"type": "string"}},
+        "required": ["id"],
+    },
+)
+
+_CRON_LIST_SCHEMA = ToolSchema(
+    name="cron_list",
+    description="List active user-owned scheduled prompts for this agent.",
+    parameters={"type": "object", "properties": {}},
 )
 ```
 
@@ -1159,31 +1223,39 @@ Handler rules:
 ```python
 tenant = kwargs.get("tenant")
 if tenant is None or getattr(tenant, "user_id", None) is None:
-    return json.dumps({"success": False, "error": "scheduled_session is user-owned only"})
+    return json.dumps({"success": False, "error": "Cron schedules are user-owned only"})
 store = kwargs.get("scheduled_store") or ScheduledSessionStore(kwargs["session_factory"])
 agent_id = kwargs.get("agent_id")
 ```
 
-For `create`, call `validate_scheduled_prompt`, `parse_schedule`, then `store.create(...)`.
+For `cron_create`, call `validate_scheduled_prompt`, `parse_schedule(arguments["cron"], timezone_name=timezone)`, then `store.create(...)`.
+
+For `cron_delete`, parse `id` as UUID and call `store.delete(org_id=tenant.org_id, user_id=tenant.user_id, agent_id=agent_id, schedule_id=id)`.
+
+For `cron_list`, call `store.list_for_user(org_id=tenant.org_id, user_id=tenant.user_id, agent_id=agent_id)` and return compact rows with `id`, `name`, `prompt`, `schedule`, `next_run_at`, and `status`.
+
+Register all three tools from `register(registry)`.
 
 - [ ] **Step 3: Register and route tool**
 
-Modify `surogates/tools/runtime.py` to import `scheduled_session` and add it to `modules`.
+Modify `surogates/tools/runtime.py` to import `cron` and add it to `modules`.
 
 Modify `surogates/tools/router.py`:
 
 ```python
-"scheduled_session": ToolLocation.HARNESS,
+"cron_create": ToolLocation.HARNESS,
+"cron_delete": ToolLocation.HARNESS,
+"cron_list": ToolLocation.HARNESS,
 ```
 
-Extend `tests/test_tools.py` HARNESS routing assertion to include `scheduled_session`.
+Extend `tests/test_tools.py` HARNESS routing assertion to include `cron_create`, `cron_delete`, and `cron_list`.
 
 - [ ] **Step 4: Verify Task 5**
 
 Run:
 
 ```bash
-uv run pytest tests/test_scheduled_tool.py tests/test_tools.py -q
+uv run pytest tests/test_cron_tools.py tests/test_tools.py -q
 ```
 
 Expected: all tests pass.
@@ -1191,8 +1263,8 @@ Expected: all tests pass.
 - [ ] **Step 5: Commit Task 5**
 
 ```bash
-git add surogates/tools/builtin/scheduled_session.py surogates/tools/runtime.py surogates/tools/router.py tests/test_scheduled_tool.py tests/test_tools.py
-git commit -m "feat: add scheduled session tool"
+git add surogates/tools/builtin/cron.py surogates/tools/runtime.py surogates/tools/router.py tests/test_cron_tools.py tests/test_tools.py
+git commit -m "feat: add cron scheduling tools"
 ```
 
 ---
@@ -1395,7 +1467,7 @@ Loops default to `10m` and expire after 3 days. Use `/loop list` and
 Run:
 
 ```bash
-uv run pytest tests/test_scheduled_schedule.py tests/test_scheduled_prompt_guard.py tests/test_scheduled_tool.py tests/test_loop_command.py tests/integration/test_scheduled_store.py tests/integration/test_scheduled_runner.py -q
+uv run pytest tests/test_scheduled_schedule.py tests/test_scheduled_prompt_guard.py tests/test_cron_tools.py tests/test_loop_command.py tests/integration/test_scheduled_store.py tests/integration/test_scheduled_runner.py -q
 ```
 
 Expected: all tests pass.
@@ -1421,8 +1493,7 @@ git commit -m "docs: describe scheduled sessions"
 
 ## Self-Review
 
-- [x] Spec coverage: includes DB-backed schedules, per-agent worker ticking, user-owned only, `/loop` default command, 3-day expiry, `scheduled_session` tool, prompt guard, tests, and docs.
+- [x] Spec coverage: includes DB-backed schedules, per-agent worker ticking, user-owned only, `/loop` default command, 3-day expiry, native `cron_create`/`cron_delete`/`cron_list` tools, prompt guard, tests, and docs.
 - [x] Placeholder scan: no task uses unresolved implementation placeholders; every code-writing task names concrete files and functions.
 - [x] Type consistency: `ScheduledSession`, `ScheduledSessionStore`, `ParsedSchedule`, `LoopCommand`, `ScheduledSessionRunner`, and `create_agent_session` names are consistent across tasks.
 - [x] Existing code fit: plan uses the current worker background-helper style, current tool registration/routing, current `SessionStore`, current `Base.metadata.create_all` migration style, and current event shape for `llm.response`.
-
