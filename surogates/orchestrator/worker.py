@@ -18,6 +18,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from surogates.harness.budget import IterationBudget
+from surogates.harness.auxiliary_client import build_summary_auxiliary_llm
 from surogates.harness.context import ContextCompressor
 from surogates.harness.loop import AgentHarness
 from surogates.harness.prompt import PromptBuilder
@@ -374,11 +375,18 @@ async def run_worker(settings: Settings) -> None:
             )
         model_id = settings.llm.model
         budget = IterationBudget(max_total=90)
+        summary_auxiliary = build_summary_auxiliary_llm(settings, tenant)
         compressor = ContextCompressor(
             model_id,
             base_url=settings.llm.base_url,
             api_key=settings.llm.api_key,
             model_overrides=settings.llm.models,
+            summary_model_override=(
+                summary_auxiliary.model if summary_auxiliary is not None else None
+            ),
+            summary_client=(
+                summary_auxiliary.client if summary_auxiliary is not None else None
+            ),
         )
 
         # User-scoped memory dir for interactive sessions, org-shared

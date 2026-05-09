@@ -216,6 +216,9 @@ class LLMSettings(BaseSettings):
     api_key: str = ""  # provider API key
     max_tokens: int | None = None
     temperature: float = 0.7
+    summary_model: str = ""  # cheap model for context compression summaries
+    summary_base_url: str = ""  # optional auxiliary endpoint for summaries
+    summary_api_key: str = ""  # optional auxiliary API key for summaries
 
     # Fallback chain — list of dicts with provider/model/api_key/base_url
     # Configured via config.yaml only (too complex for env vars)

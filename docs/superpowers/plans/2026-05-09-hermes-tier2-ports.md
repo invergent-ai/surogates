@@ -19,7 +19,7 @@ where Surogates already has a stronger local abstraction.
 9. [ ] Add MCP auth/session recovery and circuit breaker behavior.
 10. [x] Add OSV malware scan for tenant/admin stdio MCP package launches.
 11. [x] Add Redis-backed cross-session provider rate-limit guard.
-12. [ ] Add small tenant-aware auxiliary client path for context compression.
+12. [x] Add small tenant-aware auxiliary client path for context compression.
 13. [x] Add image-too-large detection and retry-by-shrinking image data URLs.
 14. [x] Add configurable tool output limit knobs.
 15. [x] Audit path traversal validators and consolidate on existing workspace sandbox utilities where appropriate.

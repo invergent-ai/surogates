@@ -110,6 +110,7 @@ class ContextCompressor:
         base_url: str = "",
         api_key: str = "",
         model_overrides: dict[str, dict] | None = None,
+        summary_client: Any | None = None,
     ) -> None:
         self._model_id = model_id
         info: ModelInfo | None = resolve_model_info(
@@ -162,6 +163,7 @@ class ContextCompressor:
         self.last_total_tokens = 0
 
         self.summary_model = summary_model_override or ""
+        self._summary_client = summary_client
 
         # Stores the previous compaction summary for iterative updates.
         self._previous_summary: Optional[str] = None
@@ -454,7 +456,8 @@ Use this exact structure:
             summariser_model = self._model_id
 
         try:
-            response = await llm_client.chat.completions.create(
+            client = self._summary_client or llm_client
+            response = await client.chat.completions.create(
                 model=summariser_model,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=summary_budget * 2,
