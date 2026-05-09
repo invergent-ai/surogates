@@ -113,6 +113,13 @@ def _is_write_denied(path: str) -> bool:
     return False
 
 
+def _resolve_user_path(path: str, workspace_path: str | None = None) -> str:
+    """Resolve a user-supplied path, enforcing workspace containment when set."""
+    if workspace_path:
+        return validate_workspace_path(workspace_path, path)
+    return str(Path(os.path.expanduser(path)).resolve())
+
+
 # ---------------------------------------------------------------------------
 # Image extensions — subset of binary that we can redirect to vision tools
 # ---------------------------------------------------------------------------
@@ -214,6 +221,10 @@ _LARGE_FILE_HINT_BYTES = 512_000  # 512 KB
 # ---------------------------------------------------------------------------
 from surogates.tools.utils.binary_extensions import BINARY_EXTENSIONS, has_binary_extension
 from surogates.tools.utils.tool_output_limits import get_max_bytes, get_max_lines
+from surogates.tools.utils.workspace_sandbox import (
+    WorkspaceSandboxError,
+    validate_path as validate_workspace_path,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -805,6 +816,7 @@ async def _read_file_handler(
     offset = max(arguments.get("offset", 1), 1)
     limit = min(arguments.get("limit", 500), get_max_lines())
     task_id = kwargs.get("task_id", "default")
+    workspace_path = kwargs.get("workspace_path")
 
     if not path:
         return _tool_error("No path provided")
@@ -821,7 +833,7 @@ async def _read_file_handler(
                 ),
             })
 
-        _resolved = Path(path).expanduser().resolve()
+        _resolved = Path(_resolve_user_path(path, workspace_path))
 
         # ── Image file guard ─────────────────────────────────────────
         # Images are never inlined — redirect to the vision tool.
@@ -1034,6 +1046,7 @@ async def _write_file_handler(
     path = arguments.get("path", "")
     content = arguments.get("content", "")
     task_id = kwargs.get("task_id", "default")
+    workspace_path = kwargs.get("workspace_path")
 
     if not path:
         return _tool_error("No path provided")
@@ -1049,10 +1062,8 @@ async def _write_file_handler(
         return _tool_error(sensitive_err)
 
     try:
-        stale_warning = _check_file_staleness(path, task_id)
-
-        expanded = os.path.expanduser(path)
-        resolved = str(Path(expanded).resolve())
+        resolved = _resolve_user_path(path, workspace_path)
+        stale_warning = _check_file_staleness(resolved, task_id)
 
         # Create parent directories automatically
         parent_dir = os.path.dirname(resolved) or "."
@@ -1084,13 +1095,13 @@ async def _write_file_handler(
             result_dict["_warning"] = stale_warning
 
         # Auto-lint after write
-        lint_result = _check_lint(path)
+        lint_result = _check_lint(resolved)
         if lint_result:
             result_dict["lint"] = lint_result
 
         # Refresh the stored timestamp so consecutive writes by this
         # task don't trigger false staleness warnings.
-        _update_read_timestamp(path, task_id)
+        _update_read_timestamp(resolved, task_id)
 
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as exc:
@@ -1119,6 +1130,7 @@ async def _patch_handler(
     replace_all = arguments.get("replace_all", False)
     patch_content = arguments.get("patch")
     task_id = kwargs.get("task_id", "default")
+    workspace_path = kwargs.get("workspace_path")
 
     # Check sensitive paths for both replace (explicit path) and V4A patch (extract paths)
     paths_to_check: list[str] = []
@@ -1143,10 +1155,15 @@ async def _patch_handler(
             return _tool_error(sensitive_err)
 
     try:
+        resolved_paths = {
+            p: _resolve_user_path(p, workspace_path)
+            for p in paths_to_check
+        }
+
         # Check staleness for all files this patch will touch.
         stale_warnings: list[str] = []
         for p in paths_to_check:
-            sw = _check_file_staleness(p, task_id)
+            sw = _check_file_staleness(resolved_paths[p], task_id)
             if sw:
                 stale_warnings.append(sw)
 
@@ -1154,13 +1171,15 @@ async def _patch_handler(
             if not patch_content:
                 return _tool_error("patch content required")
             # V4A patch mode — apply multi-file patches
-            result_dict = _apply_v4a_patch(patch_content)
+            result_dict = _apply_v4a_patch(patch_content, workspace_path)
         elif mode == "replace":
             if not path:
                 return _tool_error("path required")
             if old_string is None or new_string is None:
                 return _tool_error("old_string and new_string required")
-            result_dict = _apply_replace(path, old_string, new_string, replace_all)
+            result_dict = _apply_replace(
+                path, old_string, new_string, replace_all, workspace_path,
+            )
         else:
             return _tool_error(f"Unknown mode: {mode}")
 
@@ -1174,7 +1193,7 @@ async def _patch_handler(
         # Auto-lint after successful patch
         if not result_dict.get("error"):
             for p in paths_to_check:
-                lint_result = _check_lint(p)
+                lint_result = _check_lint(resolved_paths[p])
                 if lint_result and lint_result.get("status") != "skipped":
                     result_dict.setdefault("lint", {})[p] = lint_result
 
@@ -1182,7 +1201,7 @@ async def _patch_handler(
         # consecutive edits by this task don't trigger false warnings.
         if not result_dict.get("error"):
             for p in paths_to_check:
-                _update_read_timestamp(p, task_id)
+                _update_read_timestamp(resolved_paths[p], task_id)
 
         result_json = json.dumps(result_dict, ensure_ascii=False)
 
@@ -1204,6 +1223,7 @@ def _apply_replace(
     old_string: str,
     new_string: str,
     replace_all: bool,
+    workspace_path: str | None = None,
 ) -> dict[str, Any]:
     """Apply a find-and-replace edit to a single file.
 
@@ -1211,8 +1231,7 @@ def _apply_replace(
     matching strategies (9 total) to handle whitespace/indentation
     differences.  Returns a result dict.
     """
-    expanded = os.path.expanduser(path)
-    resolved = str(Path(expanded).resolve())
+    resolved = _resolve_user_path(path, workspace_path)
 
     if not os.path.exists(resolved):
         return {"error": f"File not found: {path}"}
@@ -1351,7 +1370,10 @@ def _apply_replace(
     }
 
 
-def _apply_v4a_patch(patch_content: str) -> dict[str, Any]:
+def _apply_v4a_patch(
+    patch_content: str,
+    workspace_path: str | None = None,
+) -> dict[str, Any]:
     """Apply a V4A-format multi-file patch.
 
     Parses the V4A patch format and applies each file operation
@@ -1403,7 +1425,7 @@ def _apply_v4a_patch(patch_content: str) -> dict[str, Any]:
     if current_file and current_hunks:
         operations.append((current_file, current_op or "Update", current_hunks))
 
-    validation_errors = _validate_v4a_operations(operations)
+    validation_errors = _validate_v4a_operations(operations, workspace_path)
     if validation_errors:
         return {
             "status": "error",
@@ -1418,7 +1440,9 @@ def _apply_v4a_patch(patch_content: str) -> dict[str, Any]:
     errors: list[str] = []
 
     for filepath, operation, hunk_lines in operations:
-        result = _apply_v4a_file_op(filepath, operation, hunk_lines)
+        result = _apply_v4a_file_op(
+            filepath, operation, hunk_lines, workspace_path,
+        )
         results.append(result)
         if result.get("error"):
             errors.append(result["error"])
@@ -1437,12 +1461,16 @@ def _apply_v4a_patch(patch_content: str) -> dict[str, Any]:
 
 def _validate_v4a_operations(
     operations: list[tuple[str, str, list[str]]],
+    workspace_path: str | None = None,
 ) -> list[str]:
     """Validate a parsed V4A patch without writing files."""
     errors: list[str] = []
     for filepath, operation, hunk_lines in operations:
-        expanded = os.path.expanduser(filepath)
-        resolved = str(Path(expanded).resolve())
+        try:
+            resolved = _resolve_user_path(filepath, workspace_path)
+        except WorkspaceSandboxError as exc:
+            errors.append(f"{filepath}: {exc}")
+            continue
         if operation == "Update":
             ok, error = _simulate_v4a_update(filepath, resolved, hunk_lines)
             if not ok and error:
@@ -1529,10 +1557,13 @@ def _apply_v4a_file_op(
     filepath: str,
     operation: str,
     hunk_lines: list[str],
+    workspace_path: str | None = None,
 ) -> dict[str, Any]:
     """Apply a single V4A file operation (Update, Add, or Delete)."""
-    expanded = os.path.expanduser(filepath)
-    resolved = str(Path(expanded).resolve())
+    try:
+        resolved = _resolve_user_path(filepath, workspace_path)
+    except WorkspaceSandboxError as exc:
+        return {"path": filepath, "error": str(exc)}
 
     if operation == "Delete":
         try:
@@ -1729,6 +1760,7 @@ async def _search_files_handler(
     output_mode = arguments.get("output_mode", "content")
     context = arguments.get("context", 0)
     task_id = kwargs.get("task_id", "default")
+    workspace_path = kwargs.get("workspace_path")
 
     # Map legacy target names
     target_map = {"grep": "content", "find": "files"}
@@ -1770,7 +1802,7 @@ async def _search_files_handler(
                 "already_searched": count,
             }, ensure_ascii=False)
 
-        expanded = os.path.expanduser(path)
+        expanded = _resolve_user_path(path, workspace_path)
 
         if target == "files":
             # Find files by glob pattern

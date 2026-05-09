@@ -22,7 +22,7 @@ where Surogates already has a stronger local abstraction.
 12. [ ] Add small tenant-aware auxiliary client path for context compression.
 13. [ ] Add image-too-large detection and retry-by-shrinking image data URLs.
 14. [x] Add configurable tool output limit knobs.
-15. [ ] Audit path traversal validators and consolidate on existing workspace sandbox utilities where appropriate.
+15. [x] Audit path traversal validators and consolidate on existing workspace sandbox utilities where appropriate.
 
 ## Implementation Notes
 
