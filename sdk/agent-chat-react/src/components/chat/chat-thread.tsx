@@ -364,8 +364,18 @@ function TimelineEntryItem({
   }
 
   if (entry.kind === "tool") {
+    const rawStatus = effectiveStatus(entry.tc);
+    // Failed ``create_artifact`` calls are almost always transient
+    // (malformed shape, stringified spec) and immediately retried by
+    // the model.  We hide the failure from the UI so the user sees a
+    // single coherent "Creating artifact… → Created" flow instead of a
+    // red error followed by a successful retry.  Treat the error as
+    // "still running" for both the timeline dot and the failure text.
+    const hideArtifactFailure =
+      rawStatus === "error" && entry.tc.toolName === "create_artifact";
+    const indicatorStatus = hideArtifactFailure ? "running" : rawStatus;
     const failureSummary =
-      effectiveStatus(entry.tc) === "error"
+      rawStatus === "error" && !hideArtifactFailure
         ? toolErrorSummary(entry.tc.result)
         : "";
     return (
@@ -373,7 +383,7 @@ function TimelineEntryItem({
         <TimelineHeader>
           <TimelineSeparator style={{ backgroundColor: "var(--color-border)" }} />
           <TimelineIndicator
-            className={cn("size-2 border-none", statusColorClass(effectiveStatus(entry.tc)))}
+            className={cn("size-2 border-none", statusColorClass(indicatorStatus))}
           />
         </TimelineHeader>
         <TimelineContent>
