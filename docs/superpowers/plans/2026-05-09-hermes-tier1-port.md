@@ -187,7 +187,7 @@ New or expanded tests:
 - [x] **Step 4: Use classifier in retry loop**
   In `call_llm_with_retry`, replace ad hoc status/message branches with `classify_api_error(...)`. Use `retryable` for backoff, `should_compress` for context compression, `should_rotate` for credential rotation, and `should_fallback` for fallback activation. Keep existing thinking-signature recovery as a classifier reason rather than a separate branch.
 
-- [ ] **Step 5: Keep UI projection stable**
+- [x] **Step 5: Keep UI projection stable**
   Refactor `error_classify.py` so `classify_harness_error` maps `ClassifiedError.reason` to existing frontend categories (`rate_limit`, `auth_failed`, `context_overflow`, `network`, `provider_error`, `timeout`, `invalid_response`). Preserve current `ErrorInfo` fields and existing tests.
 
 - [x] **Step 6: Verify retry behavior**

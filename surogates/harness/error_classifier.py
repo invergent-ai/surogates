@@ -145,6 +145,25 @@ def classify_api_error(
         values.update(overrides)
         return ClassifiedError(**values)
 
+    if error_type in {"AuthenticationError", "PermissionDeniedError"}:
+        return result(
+            FailoverReason.auth,
+            retryable=False,
+            should_rotate_credential=error_type == "AuthenticationError",
+            should_fallback=True,
+        )
+
+    if error_type == "RateLimitError":
+        return result(
+            FailoverReason.rate_limit,
+            retryable=True,
+            should_rotate_credential=True,
+            should_fallback=True,
+        )
+
+    if error_type == "APITimeoutError":
+        return result(FailoverReason.timeout, retryable=True)
+
     if status_code == 400 and "signature" in error_msg and "thinking" in error_msg:
         return result(FailoverReason.thinking_signature, retryable=True)
 
