@@ -1065,7 +1065,7 @@ git commit -m "feat: run scheduled sessions from agent workers"
 - Test: `tests/test_cron_tools.py`
 - Test: `tests/test_tools.py`
 
-- [ ] **Step 1: Write failing cron tool tests**
+- [x] **Step 1: Write failing cron tool tests**
 
 Create `tests/test_cron_tools.py`:
 
@@ -1177,7 +1177,7 @@ async def test_cron_delete_removes_user_schedule():
     assert store.deleted[0]["schedule_id"] == schedule_id
 ```
 
-- [ ] **Step 2: Implement cron tools**
+- [x] **Step 2: Implement cron tools**
 
 Create `surogates/tools/builtin/cron.py` with three schemas:
 
@@ -1236,7 +1236,7 @@ For `cron_list`, call `store.list_for_user(org_id=tenant.org_id, user_id=tenant.
 
 Register all three tools from `register(registry)`.
 
-- [ ] **Step 3: Register and route tool**
+- [x] **Step 3: Register and route tool**
 
 Modify `surogates/tools/runtime.py` to import `cron` and add it to `modules`.
 
@@ -1250,7 +1250,7 @@ Modify `surogates/tools/router.py`:
 
 Extend `tests/test_tools.py` HARNESS routing assertion to include `cron_create`, `cron_delete`, and `cron_list`.
 
-- [ ] **Step 4: Verify Task 5**
+- [x] **Step 4: Verify Task 5**
 
 Run:
 
@@ -1260,7 +1260,7 @@ uv run pytest tests/test_cron_tools.py tests/test_tools.py -q
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit Task 5**
+- [x] **Step 5: Commit Task 5**
 
 ```bash
 git add surogates/tools/builtin/cron.py surogates/tools/runtime.py surogates/tools/router.py tests/test_cron_tools.py tests/test_tools.py
