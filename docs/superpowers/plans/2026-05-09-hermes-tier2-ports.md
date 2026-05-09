@@ -15,8 +15,8 @@ where Surogates already has a stronger local abstraction.
 5. [x] Add fuzzy-match escape-drift detection.
 6. [x] Make V4A multi-file patch application two-phase.
 7. [x] Add thread-safety snapshots/locking to the tool registry.
-8. [ ] Port MCP OAuth state manager behavior in Surogates form: disk mtime reload, expiry seeding, 401 dedup.
-9. [ ] Add MCP auth/session recovery and circuit breaker behavior.
+8. [x] Port MCP OAuth state manager behavior in Surogates form: disk mtime reload, expiry seeding, 401 dedup.
+9. [x] Add MCP auth/session recovery and circuit breaker behavior.
 10. [x] Add OSV malware scan for tenant/admin stdio MCP package launches.
 11. [x] Add Redis-backed cross-session provider rate-limit guard.
 12. [x] Add small tenant-aware auxiliary client path for context compression.

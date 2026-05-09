@@ -41,6 +41,7 @@ import re
 import socket
 import sys
 import threading
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -179,6 +180,22 @@ def _write_json(path: Path, data: dict) -> None:
         raise
 
 
+def _file_mtime_ns(path: Path) -> int | None:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def _seed_token_expiry(data: dict) -> None:
+    """Persist absolute expiry so restarts do not restart token lifetime."""
+    if "expires_at" in data:
+        return
+    expires_in = data.get("expires_in")
+    if isinstance(expires_in, (int, float)) and expires_in > 0:
+        data["expires_at"] = time.time() + float(expires_in)
+
+
 # ---------------------------------------------------------------------------
 # TokenStorage -- persistent token/client-info on disk
 # ---------------------------------------------------------------------------
@@ -196,6 +213,10 @@ class TokenStorage:
     def __init__(self, server_name: str, token_dir: str | None = None):
         self._server_name = _safe_filename(server_name)
         self._token_dir_override = token_dir
+        self._tokens_cache: dict | None = None
+        self._tokens_mtime_ns: int | None = None
+        self._client_info_cache: dict | None = None
+        self._client_info_mtime_ns: int | None = None
 
     def _tokens_path(self) -> Path:
         return _get_token_dir(self._token_dir_override) / f"{self._server_name}.json"
@@ -206,7 +227,11 @@ class TokenStorage:
     # -- tokens ------------------------------------------------------------
 
     async def get_tokens(self) -> "OAuthToken | None":
-        data = _read_json(self._tokens_path())
+        data = self._read_cached_json(
+            self._tokens_path(),
+            cache_attr="_tokens_cache",
+            mtime_attr="_tokens_mtime_ns",
+        )
         if data is None:
             return None
         try:
@@ -216,13 +241,22 @@ class TokenStorage:
             return None
 
     async def set_tokens(self, tokens: "OAuthToken") -> None:
-        _write_json(self._tokens_path(), tokens.model_dump(exclude_none=True))
+        data = tokens.model_dump(exclude_none=True)
+        _seed_token_expiry(data)
+        path = self._tokens_path()
+        _write_json(path, data)
+        self._tokens_cache = data
+        self._tokens_mtime_ns = _file_mtime_ns(path)
         logger.debug("OAuth tokens saved for %s", self._server_name)
 
     # -- client info -------------------------------------------------------
 
     async def get_client_info(self) -> "OAuthClientInformationFull | None":
-        data = _read_json(self._client_info_path())
+        data = self._read_cached_json(
+            self._client_info_path(),
+            cache_attr="_client_info_cache",
+            mtime_attr="_client_info_mtime_ns",
+        )
         if data is None:
             return None
         try:
@@ -232,7 +266,11 @@ class TokenStorage:
             return None
 
     async def set_client_info(self, client_info: "OAuthClientInformationFull") -> None:
-        _write_json(self._client_info_path(), client_info.model_dump(exclude_none=True))
+        path = self._client_info_path()
+        data = client_info.model_dump(exclude_none=True)
+        _write_json(path, data)
+        self._client_info_cache = data
+        self._client_info_mtime_ns = _file_mtime_ns(path)
         logger.debug("OAuth client info saved for %s", self._server_name)
 
     # -- cleanup -----------------------------------------------------------
@@ -241,10 +279,34 @@ class TokenStorage:
         """Delete all stored OAuth state for this server."""
         for p in (self._tokens_path(), self._client_info_path()):
             p.unlink(missing_ok=True)
+        self._tokens_cache = None
+        self._tokens_mtime_ns = None
+        self._client_info_cache = None
+        self._client_info_mtime_ns = None
 
     def has_cached_tokens(self) -> bool:
         """Return True if we have tokens on disk (may be expired)."""
         return self._tokens_path().exists()
+
+    def _read_cached_json(
+        self,
+        path: Path,
+        *,
+        cache_attr: str,
+        mtime_attr: str,
+    ) -> dict | None:
+        mtime_ns = _file_mtime_ns(path)
+        if mtime_ns is None:
+            setattr(self, cache_attr, None)
+            setattr(self, mtime_attr, None)
+            return None
+        cached = getattr(self, cache_attr)
+        if cached is not None and getattr(self, mtime_attr) == mtime_ns:
+            return cached
+        data = _read_json(path)
+        setattr(self, cache_attr, data)
+        setattr(self, mtime_attr, mtime_ns if data is not None else None)
+        return data
 
 
 # ---------------------------------------------------------------------------
