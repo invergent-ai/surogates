@@ -22,6 +22,7 @@ from typing import Any, Optional
 from surogates.harness.model_metadata import (
     ModelInfo,
     estimate_tokens,
+    get_model_info,
     resolve_model_info,
 )
 
