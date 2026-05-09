@@ -174,14 +174,14 @@ New or expanded tests:
 - Test: `tests/test_harness_resilience.py`
 - Test: `tests/test_credential_pool.py`
 
-- [ ] **Step 1: Write failing classifier tests**
+- [x] **Step 1: Write failing classifier tests**
   Cover all Tier 1 bug cases from the drift analysis: Anthropic OAuth 1M-context beta forbidden, llama.cpp grammar rejection, 402 transient usage cap versus credits exhausted, SSL transient alerts versus server disconnect, server disconnect on large sessions as context overflow, bare Anthropic 400 as context overflow when the session is large, OpenRouter `metadata.raw` nested upstream errors, and Bedrock/Alibaba 429 patterns such as `throttlingexception` and `servicequotaexceededexception`.
 
-- [ ] **Step 2: Run tests to verify failure**
+- [x] **Step 2: Run tests to verify failure**
   Run: `pytest tests/test_error_classifier_tier1.py tests/test_error_classify.py tests/test_harness_resilience.py -q`
   Expected: FAIL because retry/compress/rotate/fallback decisions are currently split across string matches.
 
-- [ ] **Step 3: Port classifier types and rules**
+- [x] **Step 3: Port classifier types and rules**
   Port `FailoverReason`, `ClassifiedError`, `classify_api_error`, `extract_error_context`, and supporting pattern tables from `study/hermes-agent/agent/error_classifier.py` into `surogates/harness/error_classifier.py`. Keep Surogates-specific UI categories separate.
 
 - [ ] **Step 4: Use classifier in retry loop**
