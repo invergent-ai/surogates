@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import logging
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from datetime import datetime
 
@@ -15,8 +15,9 @@ from sqlalchemy import text as _sql_text
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
 from surogates.session.models import Session
+from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError, SessionStore
-from surogates.storage.tenant import agent_session_bucket, session_workspace_prefix
+from surogates.storage.tenant import session_workspace_prefix
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 
@@ -243,30 +244,11 @@ async def _create_session(
     config = body.config.copy()
     if body.system:
         config["system"] = body.system
-    if service_account_id is not None:
-        config["service_account_id"] = str(service_account_id)
 
-    # Expose vision capability so clients can toggle attachment UI.
-    from surogates.harness.model_metadata import get_model_info
-    model_info = get_model_info(model)
-    config["supports_vision"] = (
-        model_info.supports_vision if model_info is not None else False
-    )
-
-    # Each agent gets one bucket; each session owns a path in it.
-    session_id = uuid4()
-    storage_bucket = agent_session_bucket(settings.storage.bucket)
-
-    storage = request.app.state.storage
-    await storage.create_bucket(storage_bucket)
-
-    config["storage_bucket"] = storage_bucket
-    config["workspace_path"] = storage.resolve_workspace_path(
-        storage_bucket, session_id,
-    )
-
-    session = await store.create_session(
-        session_id=session_id,
+    session = await create_agent_session(
+        store=store,
+        storage=request.app.state.storage,
+        settings=settings,
         user_id=user_id,
         org_id=tenant.org_id,
         agent_id=settings.agent_id,

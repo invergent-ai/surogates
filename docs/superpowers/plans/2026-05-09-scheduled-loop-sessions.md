@@ -663,7 +663,7 @@ git commit -m "feat: add scheduled session store"
 - Modify: `surogates/api/routes/prompts.py`
 - Test: existing API and prompt tests.
 
-- [ ] **Step 1: Create provisioning helper**
+- [x] **Step 1: Create provisioning helper**
 
 Create `surogates/session/provisioning.py`:
 
@@ -723,7 +723,7 @@ async def create_agent_session(
     )
 ```
 
-- [ ] **Step 2: Refactor session route**
+- [x] **Step 2: Refactor session route**
 
 In `surogates/api/routes/sessions.py`, replace manual bucket/workspace creation in `_create_session` with `create_agent_session(...)`, preserving:
 
@@ -750,11 +750,11 @@ session = await create_agent_session(
 )
 ```
 
-- [ ] **Step 3: Refactor prompts route**
+- [x] **Step 3: Refactor prompts route**
 
 In `surogates/api/routes/prompts.py`, replace manual bucket/workspace creation with `create_agent_session(...)`, preserving `pipeline_metadata`, `service_account_id`, and idempotency handling.
 
-- [ ] **Step 4: Verify Task 3**
+- [x] **Step 4: Verify Task 3**
 
 Run:
 
@@ -764,7 +764,7 @@ uv run pytest tests/integration/test_api.py::test_create_session tests/integrati
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit Task 3**
+- [x] **Step 5: Commit Task 3**
 
 ```bash
 git add surogates/session/provisioning.py surogates/api/routes/sessions.py surogates/api/routes/prompts.py

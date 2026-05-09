@@ -17,7 +17,7 @@ out of training-data exports.
 from __future__ import annotations
 
 import logging
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -25,8 +25,8 @@ from sqlalchemy.exc import IntegrityError
 
 from surogates.config import enqueue_session
 from surogates.session.events import EventType
+from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionStore
-from surogates.storage.tenant import agent_session_bucket
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 
@@ -167,23 +167,17 @@ async def _submit_one(
         )
     model = settings.llm.model
 
-    session_id = uuid4()
-    bucket = agent_session_bucket(settings.storage.bucket)
-
-    storage = request.app.state.storage
-    await storage.create_bucket(bucket)
-
     config: dict = {
-        "storage_bucket": bucket,
-        "workspace_path": storage.resolve_workspace_path(bucket, session_id),
         "service_account_id": str(service_account_id),
     }
     if body.metadata:
         config["pipeline_metadata"] = body.metadata
 
     try:
-        session = await store.create_session(
-            session_id=session_id,
+        session = await create_agent_session(
+            store=store,
+            storage=request.app.state.storage,
+            settings=settings,
             user_id=None,
             org_id=tenant.org_id,
             agent_id=settings.agent_id,

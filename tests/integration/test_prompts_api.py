@@ -28,6 +28,7 @@ from surogates.tenant.credentials import CredentialVault
 from .conftest import create_org, create_user
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
+TEST_AGENT_ID = "default"
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +51,7 @@ async def app(session_factory, redis_client, pg_url, redis_url):
     application.state.redis = redis_client
     application.state.session_store = SessionStore(session_factory, redis=redis_client)
     application.state.settings = Settings()
+    application.state.settings.storage.bucket = f"test-agent-{uuid.uuid4()}"
     application.state.storage = create_backend(application.state.settings)
     application.state.credential_vault = CredentialVault(
         session_factory, Fernet.generate_key()
@@ -368,7 +370,7 @@ async def test_sa_session_jwt_reads_shared_memory(
     sa_session = await session_store.create_session(
         user_id=None,
         org_id=org_id,
-        agent_id="",
+        agent_id=TEST_AGENT_ID,
         channel="api",
         service_account_id=issued.id,
     )
@@ -407,14 +409,14 @@ async def test_sa_session_jwt_scoped_to_its_own_session(
     sess_a = await session_store.create_session(
         user_id=None,
         org_id=org_id,
-        agent_id="",
+        agent_id=TEST_AGENT_ID,
         channel="api",
         service_account_id=issued.id,
     )
     sess_b = await session_store.create_session(
         user_id=None,
         org_id=org_id,
-        agent_id="",
+        agent_id=TEST_AGENT_ID,
         channel="api",
         service_account_id=issued.id,
     )
@@ -459,7 +461,7 @@ async def test_sa_session_jwt_rejected_on_prompts_endpoint(
     sa_session = await session_store.create_session(
         user_id=None,
         org_id=org_id,
-        agent_id="",
+        agent_id=TEST_AGENT_ID,
         channel="api",
         service_account_id=issued.id,
     )
@@ -551,7 +553,7 @@ async def test_sa_session_jwt_rejected_after_revocation(
     sa_session = await session_store.create_session(
         user_id=None,
         org_id=org_id,
-        agent_id="",
+        agent_id=TEST_AGENT_ID,
         channel="api",
         service_account_id=issued.id,
     )
@@ -591,7 +593,7 @@ async def test_sa_session_jwt_writes_shared_memory(
     sa_session = await session_store.create_session(
         user_id=None,
         org_id=org_id,
-        agent_id="",
+        agent_id=TEST_AGENT_ID,
         channel="api",
         service_account_id=issued.id,
     )
