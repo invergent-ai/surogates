@@ -8,7 +8,7 @@ where Surogates already has a stronger local abstraction.
 
 ## Checklist
 
-1. [ ] Add response-side surrogate sanitization before persisted LLM responses.
+1. [x] Add response-side surrogate sanitization before persisted LLM responses.
 2. [ ] Add URL safety always-blocked cloud metadata floor.
 3. [ ] Skip credential pool rotation when only one available credential exists.
 4. [ ] Invalidate file read dedup entries on writes/patches and bound read tracker data.

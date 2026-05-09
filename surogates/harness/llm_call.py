@@ -33,7 +33,11 @@ from surogates.harness.prompt_cache import build_cache_extra_body, is_cacheable_
 from surogates.harness.provider import APIMode, detect_api_mode
 from surogates.harness.resilience import extract_api_error_context, summarize_api_error
 from surogates.harness.retry import jittered_backoff
-from surogates.harness.sanitize import sanitize_messages, sanitize_tool_pairs
+from surogates.harness.sanitize import (
+    sanitize_messages,
+    sanitize_response_message,
+    sanitize_tool_pairs,
+)
 from surogates.harness.stream_scrubbers import (
     StreamingContextScrubber,
     StreamingThinkScrubber,
@@ -400,6 +404,7 @@ async def call_llm_with_retry(
                 raise ValueError(
                     f"Invalid LLM response shape: expected dict, got {type(assistant_message).__name__}"
                 )
+            sanitize_response_message(assistant_message)
 
             # Empty response -- likely provider issue.  Try fallback
             # immediately instead of burning through retries.
@@ -1236,7 +1241,7 @@ async def call_llm_streaming_inner(
         usage_data["partial_tool_call"] = True
         usage_data["partial_tool_names"] = partial_tool_names
 
-    return assistant_message, usage_data
+    return sanitize_response_message(assistant_message), usage_data
 
 
 # ---------------------------------------------------------------------------
@@ -1288,4 +1293,4 @@ async def call_llm_non_streaming(
         "finish_reason": choice.finish_reason,
     }
 
-    return assistant_message_dict, usage_data
+    return sanitize_response_message(assistant_message_dict), usage_data
