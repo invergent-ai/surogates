@@ -51,7 +51,7 @@
 - Test: `tests/test_scheduled_schedule.py`
 - Test: `tests/test_scheduled_prompt_guard.py`
 
-- [ ] **Step 1: Add croniter dependency**
+- [x] **Step 1: Add croniter dependency**
 
 Add to `pyproject.toml` dependencies:
 
@@ -59,7 +59,7 @@ Add to `pyproject.toml` dependencies:
 "croniter>=3.0,<7.0",
 ```
 
-- [ ] **Step 2: Write failing schedule parser tests**
+- [x] **Step 2: Write failing schedule parser tests**
 
 Create `tests/test_scheduled_schedule.py`:
 
@@ -120,7 +120,7 @@ def test_parse_raw_cron_and_compute_next_run() -> None:
     assert next_run.isoformat().startswith("2026-05-11T09:00:00")
 ```
 
-- [ ] **Step 3: Implement schedule parser**
+- [x] **Step 3: Implement schedule parser**
 
 Create `surogates/scheduled/schedule.py`:
 
@@ -272,7 +272,7 @@ def apply_deterministic_jitter(run_at: datetime, schedule_id: str, *, period_sec
     return run_at + timedelta(seconds=offset)
 ```
 
-- [ ] **Step 4: Write failing prompt guard tests**
+- [x] **Step 4: Write failing prompt guard tests**
 
 Create `tests/test_scheduled_prompt_guard.py`:
 
@@ -306,7 +306,7 @@ def test_scheduled_prompt_hard_blocks(prompt: str) -> None:
         validate_scheduled_prompt(prompt)
 ```
 
-- [ ] **Step 5: Implement prompt guard**
+- [x] **Step 5: Implement prompt guard**
 
 Create `surogates/scheduled/prompt_guard.py`:
 
@@ -362,7 +362,7 @@ def validate_scheduled_prompt(prompt: str, *, source: str = "cron_create") -> No
         raise ScheduledPromptBlocked(f"Blocked: {explanation}")
 ```
 
-- [ ] **Step 6: Verify Task 1**
+- [x] **Step 6: Verify Task 1**
 
 Run:
 
@@ -372,7 +372,7 @@ uv run pytest tests/test_scheduled_schedule.py tests/test_scheduled_prompt_guard
 
 Expected: all tests pass.
 
-- [ ] **Step 7: Commit Task 1**
+- [x] **Step 7: Commit Task 1**
 
 ```bash
 git add pyproject.toml surogates/scheduled/__init__.py surogates/scheduled/schedule.py surogates/scheduled/prompt_guard.py tests/test_scheduled_schedule.py tests/test_scheduled_prompt_guard.py
