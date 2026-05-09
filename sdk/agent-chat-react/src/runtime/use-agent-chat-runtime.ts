@@ -273,6 +273,7 @@ export function useAgentChatRuntime({
     isLoadingHistory: state.isLoadingHistory,
     tokenUsage: state.tokenUsage,
     retryIndicator: state.retryIndicator,
+    workspaceRefreshKey: state.workspaceRefreshKey,
     send,
     stop,
     retry,

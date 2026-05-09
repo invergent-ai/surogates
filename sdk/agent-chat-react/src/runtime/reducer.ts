@@ -6,6 +6,7 @@ import type {
   AgentChatTokenUsage,
   AgentChatToolCallInfo,
 } from "../types";
+import { WORKSPACE_MUTATING_TOOLS } from "./events";
 
 export const EMPTY_TOKEN_USAGE: AgentChatTokenUsage = {
   inputTokens: 0,
@@ -30,6 +31,7 @@ export function createInitialAgentChatState(
     sessionDone: false,
     hadDeltas: false,
     terminal: false,
+    workspaceRefreshKey: 0,
   };
 }
 
@@ -104,11 +106,20 @@ export function applyAgentChatEvent(
     case "tool.call":
       return applyToolCall(nextState, event);
 
-    case "tool.result":
-      return withMessages(
-        nextState,
-        applyToolResult(nextState.messages, event.data),
-      );
+    case "tool.result": {
+      const toolCallId = stringValue(event.data.tool_call_id);
+      const toolName = findToolNameById(nextState.messages, toolCallId);
+      const messages = applyToolResult(nextState.messages, event.data);
+      const mutatesWorkspace =
+        toolName !== null && WORKSPACE_MUTATING_TOOLS.has(toolName);
+      return {
+        ...nextState,
+        messages,
+        workspaceRefreshKey: mutatesWorkspace
+          ? nextState.workspaceRefreshKey + 1
+          : nextState.workspaceRefreshKey,
+      };
+    }
 
     case "harness.wake":
     case "llm.request":
@@ -675,6 +686,18 @@ function hasUserAfterIndex(messages: AgentChatMessage[], idx: number): boolean {
     if (messages[i]?.role === "user") return true;
   }
   return false;
+}
+
+function findToolNameById(
+  messages: AgentChatMessage[],
+  toolCallId: string,
+): string | null {
+  if (!toolCallId) return null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const tc = messages[i]?.toolCalls?.find((c) => c.id === toolCallId);
+    if (tc) return tc.toolName;
+  }
+  return null;
 }
 
 function findLatestConsultExpertCall(

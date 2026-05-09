@@ -81,6 +81,7 @@ export function AgentChat({
             onSelectedPathChange={setWorkspacePath}
             collapsed={workspaceCollapsed}
             onCollapsedChange={setWorkspaceCollapsed}
+            refreshSignal={runtime.workspaceRefreshKey}
             disabled={disabled}
           />
         </section>

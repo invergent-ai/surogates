@@ -1,5 +1,12 @@
 import type { AgentChatEventType } from "../types";
 
+export const WORKSPACE_MUTATING_TOOLS: ReadonlySet<string> = new Set([
+  "terminal",
+  "write_file",
+  "patch",
+  "execute_code",
+]);
+
 export const AGENT_CHAT_LISTENED_EVENTS = [
   "user.message",
   "llm.request",

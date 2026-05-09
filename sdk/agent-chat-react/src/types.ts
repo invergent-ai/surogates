@@ -157,6 +157,7 @@ export interface AgentChatState {
   sessionDone: boolean;
   hadDeltas: boolean;
   terminal: boolean;
+  workspaceRefreshKey: number;
 }
 
 export type AgentChatArtifactKind =
@@ -358,6 +359,7 @@ export interface AgentChatRuntimeApi {
   isLoadingHistory: boolean;
   tokenUsage: AgentChatTokenUsage;
   retryIndicator: AgentChatRetryIndicator | null;
+  workspaceRefreshKey: number;
   send(content: string): Promise<void>;
   stop(): Promise<void>;
   retry(): Promise<void>;

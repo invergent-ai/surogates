@@ -52,6 +52,7 @@ interface WorkspacePanelProps {
   onSelectedPathChange: (path: string | null) => void;
   collapsed?: boolean;
   onCollapsedChange?: (collapsed: boolean) => void;
+  refreshSignal?: number;
   disabled?: boolean;
 }
 
@@ -160,6 +161,7 @@ export function WorkspacePanel({
   onSelectedPathChange,
   collapsed = false,
   onCollapsedChange,
+  refreshSignal = 0,
   disabled = false,
 }: WorkspacePanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -243,6 +245,14 @@ export function WorkspacePanel({
   useEffect(() => {
     void fetchTree();
   }, [fetchTree]);
+
+  useEffect(() => {
+    if (!sessionId || refreshSignal === 0) return;
+    const timer = setTimeout(() => {
+      void fetchTree();
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [refreshSignal, sessionId, fetchTree]);
 
   useEffect(() => {
     if (!sessionId) {
