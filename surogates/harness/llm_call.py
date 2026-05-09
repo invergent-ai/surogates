@@ -295,6 +295,20 @@ def extract_retry_after(exc: Exception) -> float | None:
     return None
 
 
+def _rate_limit_cooldown_seconds(
+    exc: Exception,
+    error_context: dict[str, Any] | None,
+) -> float | None:
+    retry_after = extract_retry_after(exc)
+    if retry_after is not None:
+        return retry_after
+    if isinstance(error_context, dict):
+        reset_at = error_context.get("reset_at")
+        if isinstance(reset_at, (int, float)):
+            return max(1.0, float(reset_at) - time.time())
+    return None
+
+
 async def interruptible_sleep(
     seconds: float,
     interrupt_flag_getter: Any,
@@ -336,6 +350,7 @@ async def call_llm_with_retry(
     on_stream_retry: (
         Callable[[], Callable[[dict[str, Any]], None] | None] | None
     ) = None,
+    rate_limit_guard: Any | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Call the LLM with retry, backoff, rate-limit handling, and credential rotation.
 
@@ -378,6 +393,14 @@ async def call_llm_with_retry(
         create_kwargs["messages"] = sanitize_tool_pairs(create_kwargs["messages"])
 
     for attempt in range(1, MAX_LLM_RETRIES + 1):
+        if rate_limit_guard is not None:
+            remaining = await rate_limit_guard.remaining_seconds()
+            if remaining is not None:
+                raise RuntimeError(
+                    "Provider is rate-limited for "
+                    f"{int(remaining)} more seconds; skipping API call."
+                )
+
         try:
             if streaming_enabled:
                 result = await call_llm_streaming(
@@ -514,6 +537,10 @@ async def call_llm_with_retry(
 
             # Rate limit (429)
             if status_code == 429:
+                if rate_limit_guard is not None:
+                    await rate_limit_guard.record_cooldown(
+                        _rate_limit_cooldown_seconds(exc, error_context),
+                    )
                 # ── Anthropic Sonnet long-context tier gate ──────────
                 # Anthropic returns HTTP 429 "Extra usage is required
                 # for long context requests" when a Claude Max (or

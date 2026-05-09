@@ -42,6 +42,7 @@ from surogates.harness.expert_routing import (
 from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
 from surogates.harness.message_utils import coerce_message_content, make_skipped_tool_result
 from surogates.harness.prompt_cache import SystemPromptCache
+from surogates.harness.rate_limit_guard import ProviderRateLimitGuard
 from surogates.harness.reasoning import (
     THINK_RE,
     ContentWithToolsCache,
@@ -974,6 +975,7 @@ class AgentHarness:
                         _reset_streaming_executor
                         if self._streaming_enabled else None
                     ),
+                    rate_limit_guard=self._provider_rate_limit_guard(),
                 )
             except Exception as exc:
                 logger.exception(
@@ -1778,6 +1780,26 @@ class AgentHarness:
         self._fallback_activated = activated
         return True
 
+    def _provider_rate_limit_guard(self) -> ProviderRateLimitGuard | None:
+        """Return a Redis-backed guard keyed to the active LLM provider."""
+        if self._redis is None:
+            return None
+
+        provider_key = ""
+        if self._primary_config:
+            provider_key = str(
+                self._primary_config.get("provider")
+                or self._primary_config.get("base_url")
+                or ""
+            )
+        if not provider_key:
+            provider_key = str(
+                getattr(self._llm, "base_url", "")
+                or self._current_model
+                or self._default_model
+            )
+        return ProviderRateLimitGuard(self._redis, provider_key)
+
     # ------------------------------------------------------------------
     # Invalid tool call detection (delegates to resilience module)
     # ------------------------------------------------------------------
@@ -2353,6 +2375,7 @@ class AgentHarness:
                     session, messages, system_prompt, lease,
                 ),
                 context_compressor=self._compressor,
+                rate_limit_guard=self._provider_rate_limit_guard(),
             )
 
             # Strip thinking blocks from the summary.

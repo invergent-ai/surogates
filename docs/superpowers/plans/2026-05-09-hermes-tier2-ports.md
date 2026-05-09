@@ -18,7 +18,7 @@ where Surogates already has a stronger local abstraction.
 8. [ ] Port MCP OAuth state manager behavior in Surogates form: disk mtime reload, expiry seeding, 401 dedup.
 9. [ ] Add MCP auth/session recovery and circuit breaker behavior.
 10. [x] Add OSV malware scan for tenant/admin stdio MCP package launches.
-11. [ ] Add Redis-backed cross-session provider rate-limit guard.
+11. [x] Add Redis-backed cross-session provider rate-limit guard.
 12. [ ] Add small tenant-aware auxiliary client path for context compression.
 13. [ ] Add image-too-large detection and retry-by-shrinking image data URLs.
 14. [x] Add configurable tool output limit knobs.
