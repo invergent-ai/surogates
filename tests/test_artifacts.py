@@ -556,6 +556,70 @@ class TestCreateArtifactHandler:
         assert json.loads(out)["success"] is True
         assert len(client.calls) == 1
 
+    async def test_json_encoded_spec_string_recovers_silently(self):
+        # Observed in production (session df8255b4-…): some models
+        # serialize the nested ``spec`` object as a JSON-encoded string.
+        # Before the fix, this fell through to "Missing required
+        # field(s): spec.chart_js" and the model misdiagnosed the cause
+        # as "function callbacks broke it".  Recover transparently when
+        # the string parses to an object so the chart renders on the
+        # first attempt.
+        client = _StubAPIClient()
+        spec_obj = {
+            "chart_js": {
+                "type": "line",
+                "data": {
+                    "labels": ["a", "b"],
+                    "datasets": [{"label": "x", "data": [1, 2]}],
+                },
+            },
+        }
+        out = await _create_artifact_handler(
+            {
+                "name": "Bitcoin Price",
+                "kind": "chart",
+                "spec": json.dumps(spec_obj),
+            },
+            api_client=client,
+        )
+        assert json.loads(out)["success"] is True
+        # The recovered dict — not the raw string — is what reaches the API.
+        assert client.calls == [
+            {"name": "Bitcoin Price", "kind": "chart", "spec": spec_obj}
+        ]
+
+    async def test_unparseable_string_spec_returns_precise_error(self):
+        # If the string truly isn't valid JSON, give a message that
+        # names the actual cause instead of the misleading
+        # "Missing required field(s)" that Guard 1 would emit.
+        client = _StubAPIClient()
+        out = await _create_artifact_handler(
+            {"name": "x", "kind": "chart", "spec": "not even close to json"},
+            api_client=client,
+        )
+        data = json.loads(out)
+        assert data["success"] is False
+        assert "must be a JSON object" in data["error"]
+        assert "not a string" in data["error"]
+        # Hint still carries the right shape for the kind.
+        assert "chart_js" in data["hint"]
+        assert client.calls == []
+
+    async def test_string_spec_decoding_to_non_dict_returns_precise_error(self):
+        # A JSON-parseable string that decodes to something other than
+        # an object (e.g. a list or a number) is still wrong, but the
+        # error must say so explicitly.
+        client = _StubAPIClient()
+        out = await _create_artifact_handler(
+            {"name": "x", "kind": "chart", "spec": "[1, 2, 3]"},
+            api_client=client,
+        )
+        data = json.loads(out)
+        assert data["success"] is False
+        assert "must be a JSON object" in data["error"]
+        assert "list" in data["error"]
+        assert client.calls == []
+
 
 # =========================================================================
 # Fenced-artifact promoter

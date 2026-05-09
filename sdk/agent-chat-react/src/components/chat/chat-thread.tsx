@@ -462,7 +462,7 @@ function TimelineEntryItem({
         <TimelineIndicator className="size-2 border-none bg-primary animate-pulse" />
       </TimelineHeader>
       <TimelineContent>
-        <Shimmer duration={5} className="text-sm text-foreground">Working on it...</Shimmer>
+        <Shimmer duration={3} spread={3} className="text-sm">Working on it...</Shimmer>
       </TimelineContent>
     </TimelineItem>
   );
@@ -474,6 +474,7 @@ function AssistantGroup({
   messages,
   lastGlobalIndex,
   totalMessages,
+  isRunning,
   sessionId,
   onFileSelect,
   onRetry,
@@ -481,6 +482,7 @@ function AssistantGroup({
   messages: ChatMessageType[];
   lastGlobalIndex: number;
   totalMessages: number;
+  isRunning: boolean;
   sessionId: string | null;
   onFileSelect?: (path: string) => void;
   onRetry?: () => Promise<void>;
@@ -490,6 +492,27 @@ function AssistantGroup({
     const isLast = i === messages.length - 1
       && lastGlobalIndex === totalMessages - 1;
     entries.push(...messageToEntries(messages[i], isLast));
+  }
+
+  // Whenever this is the tail assistant group and the session is still
+  // running, append a "Working on it..." row unless something visible is
+  // already in progress (a running tool, or messageToEntries already added
+  // a thinking entry for an empty streaming turn). This covers both the
+  // mid-stream pause between text and the next tool call AND the gap
+  // between LLM iterations after a turn has fully completed.
+  const isTailGroup = lastGlobalIndex === totalMessages - 1;
+  const lastEntry = entries[entries.length - 1];
+  const hasRunningTool = entries.some(
+    (e) => e.kind === "tool" && e.tc.status === "running",
+  );
+  const tailMsg = messages[messages.length - 1];
+  if (
+    isTailGroup
+    && isRunning
+    && !hasRunningTool
+    && lastEntry?.kind !== "thinking"
+  ) {
+    entries.push({ kind: "thinking", key: `${tailMsg.id}-tail-thinking` });
   }
 
   // Surface the classifier's error info inline below the timeline when
@@ -650,6 +673,7 @@ export function ChatThread({
                     messages={group.messages}
                     lastGlobalIndex={group.lastGlobalIndex}
                     totalMessages={messages.length}
+                    isRunning={isRunning}
                     sessionId={sessionId}
                     onFileSelect={onFileSelect}
                     onRetry={groupRetry}
@@ -659,7 +683,7 @@ export function ChatThread({
               {isRunning && messages.length > 0 && messages[messages.length - 1].role === "user" && (
                 <Message from="assistant">
                   <MessageContent>
-                    <Shimmer duration={5} className="text-sm">Working on it...</Shimmer>
+                    <Shimmer duration={3} spread={3} className="text-sm">Working on it...</Shimmer>
                   </MessageContent>
                 </Message>
               )}

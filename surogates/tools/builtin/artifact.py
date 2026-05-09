@@ -246,6 +246,31 @@ async def _create_artifact_handler(
 
     expected_keys = _SPEC_KEYS_BY_KIND[kind]
 
+    # Guard 0 — spec arrived as a JSON-encoded string.  Some models
+    # serialize the nested object as a string (e.g.
+    # ``"spec": "{\"chart_js\": ...}"``).  Recover transparently if it
+    # parses to an object so the model doesn't waste a retry on a
+    # silent-tic problem; emit a precise error otherwise instead of
+    # the misleading "Missing required field(s): spec.chart_js" that
+    # Guard 1 would produce for a non-dict spec.
+    if isinstance(spec, str) and spec.strip():
+        try:
+            decoded = json.loads(spec)
+        except json.JSONDecodeError:
+            return _error(
+                "`spec` must be a JSON object, not a string. Pass the "
+                "spec fields directly as an object — do not serialize "
+                "them to a string first.",
+                hint=f"Expected shape: {_SHAPE_EXAMPLE_BY_KIND[kind]}",
+            )
+        if not isinstance(decoded, dict):
+            return _error(
+                "`spec` must be a JSON object, not a "
+                f"{type(decoded).__name__}.",
+                hint=f"Expected shape: {_SHAPE_EXAMPLE_BY_KIND[kind]}",
+            )
+        spec = decoded
+
     # Guard 1 — spec missing entirely or not an object.  The LLM
     # sometimes calls the tool with only name+kind, expecting to supply
     # content later.  Not supported: one call must carry the full spec.
