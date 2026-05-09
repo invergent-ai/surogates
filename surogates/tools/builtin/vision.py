@@ -35,8 +35,10 @@ _SUPPORTED_MIME_TYPES = frozenset({
 VISION_ANALYZE_SCHEMA = ToolSchema(
     name="vision_analyze",
     description=(
-        "Analyze an image using the active vision-capable model. Accepts a "
-        "workspace file path, HTTPS image URL, or data:image base64 URL."
+        "Analyze an image from a workspace file path or HTTPS URL. "
+        "Do NOT use this tool for images the user attached to their message — "
+        "you can already see those directly. Only use this tool when you need "
+        "to fetch and analyze an image from a URL or a file in the workspace."
     ),
     parameters={
         "type": "object",

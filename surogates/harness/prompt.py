@@ -448,7 +448,11 @@ class PromptBuilder:
                 f"- **Context window**: {model_info.context_window:,} tokens"
             )
             if model_info.supports_vision:
-                parts.append("- **Vision**: supported")
+                parts.append(
+                    "- **Vision**: supported — you can see images attached "
+                    "to user messages directly. Do not use vision_analyze "
+                    "for images already in the conversation."
+                )
         else:
             parts.append(f"- **Model**: {model_id}")
 
