@@ -550,7 +550,13 @@ class AgentHarness:
                 (m for m in reversed(messages) if m.get("role") == "user"),
                 None,
             )
-            last_user_content = (last_user.get("content") or "").strip() if last_user else ""
+            _raw_content = last_user.get("content", "") if last_user else ""
+            if isinstance(_raw_content, list):
+                _raw_content = next(
+                    (p["text"] for p in _raw_content if p.get("type") == "text"),
+                    "",
+                )
+            last_user_content = (_raw_content or "").strip()
 
             if last_user_content == "/compress":
                 await self._handle_compress_command(
