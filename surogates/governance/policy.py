@@ -19,9 +19,16 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+# Matches POSIX shell variable references like ``$HOME`` or ``${HOME}``.
+# Bare ``$`` (no name following) and Windows ``%VAR%`` are intentionally
+# excluded — the former is harmless in a path, the latter is foreign to
+# our Linux sandboxes and would create false positives.
+_SHELL_VAR_RE: re.Pattern[str] = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
 
 from agent_os import PolicyEngine as AGTPolicyEngine
 from agent_os.egress_policy import EgressDecision, EgressPolicy, EgressRule
@@ -242,6 +249,20 @@ class GovernanceGate:
                 tool_name=tool_name,
             )
 
+        # Path-arg hygiene check — reject shell-variable patterns like
+        # ``$HOME`` or ``${HOME}`` in path-typed arguments before they can
+        # be taken literally by file tools and create directories named
+        # ``$HOME`` on disk.  Runs before the workspace sandbox check so
+        # the error message points at the real cause instead of an
+        # opaque "outside workspace" rejection.
+        hygiene_violation = self._check_path_arg_hygiene(
+            tool_name, arguments or {}
+        )
+        if hygiene_violation:
+            return PolicyDecision(
+                allowed=False, reason=hygiene_violation, tool_name=tool_name
+            )
+
         # Workspace sandbox check — enforced before all other checks.
         # Uses AGT ExecutionSandbox.check_file_access() with symlink
         # resolution and is_relative_to() containment.
@@ -298,6 +319,44 @@ class GovernanceGate:
             )
             self._sandbox_cache[workspace_path] = sandbox
         return sandbox
+
+    def _check_path_arg_hygiene(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> str | None:
+        """Reject path arguments containing shell-variable references.
+
+        Tool path arguments are passed verbatim to filesystem APIs — they
+        are never expanded by a shell.  When the model writes
+        ``$HOME/foo.py`` expecting expansion, the underlying ``open()``
+        call creates a directory literally named ``$HOME``.  Catching the
+        pattern here returns a clear, actionable error so the model
+        switches to a relative path on the next turn instead of cascading
+        through a dozen broken tool calls.
+
+        Returns a violation message if a shell-variable pattern is
+        present in any path-typed argument; ``None`` otherwise.
+        """
+        path_keys = _PATH_ARGUMENT_MAP.get(tool_name)
+        if not path_keys:
+            return None
+
+        for key in path_keys:
+            raw_path = arguments.get(key)
+            if not isinstance(raw_path, str) or not raw_path:
+                continue
+            match = _SHELL_VAR_RE.search(raw_path)
+            if match:
+                return (
+                    f"Path argument {key!r} contains shell variable "
+                    f"{match.group(0)!r} — paths are taken literally and "
+                    f"never expanded by a shell.  Use a relative path "
+                    f"(working directory is the workspace) or omit the "
+                    f"variable."
+                )
+
+        return None
 
     def _check_workspace_sandbox(
         self,

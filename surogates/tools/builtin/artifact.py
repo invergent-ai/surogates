@@ -256,11 +256,18 @@ async def _create_artifact_handler(
     if isinstance(spec, str) and spec.strip():
         try:
             decoded = json.loads(spec)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            # Distinguish a malformed spec string from a well-formed
+            # string that decodes to a non-dict.  The previous wording
+            # ("must be a JSON object, not a string") was misleading
+            # here — observed in production where the model retried
+            # with the same stringified shape because the message read
+            # as "stop passing it as a string" rather than "the string
+            # is malformed".  Surfacing the parser's position lets the
+            # model diagnose truncation on the next turn.
             return _error(
-                "`spec` must be a JSON object, not a string. Pass the "
-                "spec fields directly as an object — do not serialize "
-                "them to a string first.",
+                f"Invalid JSON in `spec` string: {exc.msg} "
+                f"(line {exc.lineno}, column {exc.colno}, char {exc.pos}).",
                 hint=f"Expected shape: {_SHAPE_EXAMPLE_BY_KIND[kind]}",
             )
         if not isinstance(decoded, dict):

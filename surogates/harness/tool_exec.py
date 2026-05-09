@@ -1066,8 +1066,15 @@ async def execute_single_tool(
         tool_use_id=tool_call_id,
     )
 
-    # Sanitise result content — replace workspace paths with __WORKSPACE__.
-    result_content = _sanitize_paths(result_content, workspace_path)
+    # Sanitise the event payload — frontend SSE consumers must not see
+    # real filesystem paths.  The LLM still receives the raw
+    # ``result_content`` so its mental map matches the sandbox: when a
+    # tool reports a path, the model can pass that exact path back into
+    # the next call.  Sanitising the LLM-facing string created the
+    # ``__WORKSPACE__`` confusion that triggered cascades of broken
+    # commands (literal ``$HOME`` directories, ``__WORKSPACE__`` treated
+    # as a real path, double-substitution of ``__WORKSPACE__/__WORKSPACE__``).
+    sanitized_content = _sanitize_paths(result_content, workspace_path)
 
     # Emit TOOL_RESULT event.
     result_event_id = await store.emit_event(
@@ -1076,7 +1083,7 @@ async def execute_single_tool(
         {
             "tool_call_id": tool_call_id,
             "name": tool_name,
-            "content": result_content,
+            "content": sanitized_content,
             "elapsed_ms": elapsed_ms,
         },
     )

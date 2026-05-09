@@ -589,9 +589,12 @@ class TestCreateArtifactHandler:
         ]
 
     async def test_unparseable_string_spec_returns_precise_error(self):
-        # If the string truly isn't valid JSON, give a message that
-        # names the actual cause instead of the misleading
-        # "Missing required field(s)" that Guard 1 would emit.
+        # If the string truly isn't valid JSON, the error must name the
+        # actual cause: invalid JSON, with the parse error.  Saying
+        # "must be a JSON object, not a string" is misleading here —
+        # observed in production where the model retried with the same
+        # stringified shape because the message read as "stop passing
+        # it as a string" rather than "the string is malformed".
         client = _StubAPIClient()
         out = await _create_artifact_handler(
             {"name": "x", "kind": "chart", "spec": "not even close to json"},
@@ -599,9 +602,30 @@ class TestCreateArtifactHandler:
         )
         data = json.loads(out)
         assert data["success"] is False
-        assert "must be a JSON object" in data["error"]
-        assert "not a string" in data["error"]
+        assert "invalid json" in data["error"].lower()
         # Hint still carries the right shape for the kind.
+        assert "chart_js" in data["hint"]
+        assert client.calls == []
+
+    async def test_truncated_string_spec_reports_parse_position(self):
+        # Real production failure mode: the model produces a long
+        # stringified spec for a chart, the streaming layer truncates
+        # mid-string, and ``json.loads`` raises a JSONDecodeError near
+        # the end.  The error message must surface the parse error
+        # (with position) so the model can diagnose truncation, instead
+        # of returning the misleading "must be a JSON object" text.
+        client = _StubAPIClient()
+        truncated = '{"chart_js": {"type": "line", "data": {"labels":'
+        out = await _create_artifact_handler(
+            {"name": "x", "kind": "chart", "spec": truncated},
+            api_client=client,
+        )
+        data = json.loads(out)
+        assert data["success"] is False
+        assert "invalid json" in data["error"].lower()
+        # Mentions the underlying parse problem (e.g. "expecting" or
+        # "delimiter") and the character position.
+        assert "char" in data["error"].lower() or "position" in data["error"].lower()
         assert "chart_js" in data["hint"]
         assert client.calls == []
 
