@@ -434,8 +434,8 @@ Use this exact structure:
 
 {_template_sections}"""
 
-        # Pick summariser model: prefer gpt-4o-mini, fall back to session model.
-        summariser_model = self.summary_model or "gpt-4o-mini"
+        # Pick summariser model: prefer surogate, fall back to session model.
+        summariser_model = self.summary_model or "surogate"
         info = get_model_info(summariser_model)
         if info is None:
             summariser_model = self._model_id
