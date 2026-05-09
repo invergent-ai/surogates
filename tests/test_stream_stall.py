@@ -159,5 +159,71 @@ async def test_watchdog_cancelled_cleanly_on_normal_completion(monkeypatch):
     assert msg["content"] == "Hello world"
 
 
+async def test_streaming_scrubs_split_think_and_memory_context_tags(monkeypatch):
+    """Split reasoning and memory-context tags are not emitted or persisted."""
+    monkeypatch.setattr(
+        "surogates.harness.llm_call.STREAM_STALE_TIMEOUT", 5.0,
+    )
+    monkeypatch.setattr(
+        "surogates.harness.llm_call.STREAM_CHUNK_POLL_INTERVAL", 0.1,
+    )
+
+    def _chunk(content=None, finish_reason=None):
+        delta = SimpleNamespace(content=content, role=None, tool_calls=None)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(delta=delta, finish_reason=finish_reason)],
+            model="gpt-4o",
+            usage=None,
+        )
+
+    class _Stream:
+        def __init__(self, chunks):
+            self._chunks = chunks
+            self._i = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._i >= len(self._chunks):
+                raise StopAsyncIteration
+            chunk = self._chunks[self._i]
+            self._i += 1
+            return chunk
+
+    stream = _Stream(
+        [
+            _chunk("Visible\n<th"),
+            _chunk("ink>hidden reasoning</think>\n"),
+            _chunk("Still visible <memory-"),
+            _chunk("context>hidden memory</memory-context> done"),
+            _chunk(finish_reason="stop"),
+        ]
+    )
+
+    llm_client = MagicMock()
+    llm_client.chat.completions.create = AsyncMock(return_value=stream)
+    store = AsyncMock()
+
+    msg, usage = await call_llm_streaming_inner(
+        session=_make_session(),
+        create_kwargs={"model": "gpt-4o", "messages": []},
+        iteration=1,
+        llm_client=llm_client,
+        store=store,
+        interrupt_check=lambda: False,
+    )
+
+    assert usage["finish_reason"] == "stop"
+    assert msg["content"] == "Visible\n\nStill visible  done"
+    emitted = "".join(
+        call.args[2].get("content", "")
+        for call in store.emit_event.await_args_list
+    )
+    assert emitted == msg["content"]
+    assert "hidden reasoning" not in emitted
+    assert "hidden memory" not in emitted
+
+
 # Module-level marker so pytest-asyncio collects the module correctly.
 pytestmark = pytest.mark.asyncio

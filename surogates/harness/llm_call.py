@@ -32,6 +32,10 @@ from surogates.harness.provider import APIMode, detect_api_mode
 from surogates.harness.resilience import extract_api_error_context, summarize_api_error
 from surogates.harness.retry import jittered_backoff
 from surogates.harness.sanitize import sanitize_messages, sanitize_tool_pairs
+from surogates.harness.stream_scrubbers import (
+    StreamingContextScrubber,
+    StreamingThinkScrubber,
+)
 from surogates.session.events import EventType
 
 if TYPE_CHECKING:
@@ -780,6 +784,8 @@ async def call_llm_streaming_inner(
 
     # Reasoning content from streaming deltas (DeepSeek, Qwen, Moonshot).
     reasoning_parts: list[str] = []
+    think_scrubber = StreamingThinkScrubber()
+    context_scrubber = StreamingContextScrubber()
 
     # Streaming tool execution: track which tool call slots have been
     # notified to the on_tool_call_complete callback.  A slot is
@@ -929,13 +935,15 @@ async def call_llm_streaming_inner(
             # Text content delta.
             text_delta = getattr(delta, "content", None)
             if text_delta:
-                content_parts.append(text_delta)
-                # Emit LLM_DELTA event.
-                await store.emit_event(
-                    session.id,
-                    EventType.LLM_DELTA,
-                    {"content": text_delta, "iteration": iteration},
-                )
+                visible_delta = context_scrubber.feed(think_scrubber.feed(text_delta))
+                if visible_delta:
+                    content_parts.append(visible_delta)
+                    # Emit LLM_DELTA event.
+                    await store.emit_event(
+                        session.id,
+                        EventType.LLM_DELTA,
+                        {"content": visible_delta, "iteration": iteration},
+                    )
 
             # Tool call deltas.
             # Ollama-compatible endpoints reuse index 0 for every tool call
@@ -1013,6 +1021,15 @@ async def call_llm_streaming_inner(
     # triggered the close, surface it as an interruption regardless.
     if stop_reason is not None:
         interrupted = True
+
+    tail_delta = context_scrubber.feed(think_scrubber.flush()) + context_scrubber.flush()
+    if tail_delta:
+        content_parts.append(tail_delta)
+        await store.emit_event(
+            session.id,
+            EventType.LLM_DELTA,
+            {"content": tail_delta, "iteration": iteration},
+        )
 
     # Notify any remaining tool call slots that haven't been reported yet.
     # This covers the last tool call in the batch (no higher index follows)
