@@ -31,6 +31,7 @@ from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.ansi_strip import strip_ansi
 from surogates.tools.utils.env_passthrough import get_all_passthrough, is_env_passthrough
 from surogates.tools.utils.process_registry import process_registry
+from surogates.tools.utils.tool_output_limits import get_max_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -268,11 +269,12 @@ def _build_child_env() -> dict[str, str]:
 
 def _truncate_output(output: str) -> str:
     """Truncate output to MAX_OUTPUT_CHARS using 40/60 head/tail split."""
-    if len(output) <= MAX_OUTPUT_CHARS:
+    max_output_chars = get_max_bytes()
+    if len(output) <= max_output_chars:
         return output
 
-    head_chars = int(MAX_OUTPUT_CHARS * 0.4)
-    tail_chars = MAX_OUTPUT_CHARS - head_chars
+    head_chars = int(max_output_chars * 0.4)
+    tail_chars = max_output_chars - head_chars
     omitted = len(output) - head_chars - tail_chars
     truncated_notice = (
         f"\n\n... [OUTPUT TRUNCATED - {omitted} chars omitted "

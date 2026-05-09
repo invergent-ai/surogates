@@ -213,6 +213,7 @@ _LARGE_FILE_HINT_BYTES = 512_000  # 512 KB
 # Binary file extensions — imported from shared utils module.
 # ---------------------------------------------------------------------------
 from surogates.tools.utils.binary_extensions import BINARY_EXTENSIONS, has_binary_extension
+from surogates.tools.utils.tool_output_limits import get_max_bytes, get_max_lines
 
 
 # ---------------------------------------------------------------------------
@@ -802,7 +803,7 @@ async def _read_file_handler(
     """
     path = arguments.get("path", "")
     offset = max(arguments.get("offset", 1), 1)
-    limit = min(arguments.get("limit", 500), 2000)
+    limit = min(arguments.get("limit", 500), get_max_lines())
     task_id = kwargs.get("task_id", "default")
 
     if not path:
@@ -935,7 +936,7 @@ async def _read_file_handler(
         # Note: we check the formatted content (with line-number prefixes),
         # not the raw file size, because that's what actually enters context.
         content_len = len(content)
-        max_chars = _DEFAULT_MAX_READ_CHARS
+        max_chars = get_max_bytes()
         if content_len > max_chars:
             return json.dumps({
                 "error": (

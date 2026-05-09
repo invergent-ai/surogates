@@ -144,6 +144,16 @@ class APISettings(BaseSettings):
     web_url: str = "https://surogates.k8s.localhost"  # Public URL for the web UI (used in pairing links, emails, etc.)
 
 
+class ToolOutputSettings(BaseSettings):
+    """Limits for model-visible tool output."""
+
+    model_config = {"env_prefix": "SUROGATES_TOOL_OUTPUT_"}
+
+    max_bytes: int = 50_000
+    max_lines: int = 2000
+    max_line_length: int = 2000
+
+
 # Prefix for the per-agent session work queue.  The full key is
 # ``surogates:work_queue:<agent_id>`` — one queue per agent so that many
 # agents can share a single Redis without stealing each other's sessions.
@@ -449,6 +459,7 @@ class Settings(BaseSettings):
     kb_hub: KBHubSettings = Field(default_factory=KBHubSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     api: APISettings = Field(default_factory=APISettings)
+    tool_output: ToolOutputSettings = Field(default_factory=ToolOutputSettings)
     worker: WorkerSettings = Field(default_factory=WorkerSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)

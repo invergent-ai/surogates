@@ -24,6 +24,13 @@ from surogates.tools.utils.tool_result_storage import (
     generate_preview,
     maybe_persist_tool_result,
 )
+from surogates.tools.utils.tool_output_limits import (
+    ToolOutputLimits,
+    get_max_bytes,
+    get_max_line_length,
+    get_max_lines,
+    get_tool_output_limits,
+)
 from surogates.tools.utils.binary_extensions import BINARY_EXTENSIONS, has_binary_extension
 from surogates.tools.utils.env_passthrough import (
     clear_env_passthrough,
@@ -89,6 +96,12 @@ __all__ = [
     "PINNED_THRESHOLDS",
     "BudgetConfig",
     "DEFAULT_BUDGET",
+    # tool_output_limits
+    "ToolOutputLimits",
+    "get_max_bytes",
+    "get_max_line_length",
+    "get_max_lines",
+    "get_tool_output_limits",
     # tool_result_storage
     "PERSISTED_OUTPUT_CLOSING_TAG",
     "PERSISTED_OUTPUT_TAG",
