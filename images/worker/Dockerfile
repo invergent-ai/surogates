@@ -97,6 +97,11 @@ RUN mkdir -p /etc/surogates/policies \
              /data/tenant-assets \
     && chown -R surogates:surogates /data/tenant-assets
 
+# ── Built-in platform skills ────────────────────────────────────────
+# Default skills ship with the agent image. Tenant/org/user skills can
+# still override these through the normal resource-loader precedence.
+COPY skills/ /etc/surogates/skills/
+
 USER surogates
 WORKDIR /opt/surogates
 

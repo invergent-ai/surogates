@@ -10,6 +10,7 @@ import pytest
 
 from surogates.harness.prompt import PromptBuilder
 from surogates.tenant.context import TenantContext
+from surogates.tools.loader import SkillDef
 
 
 def _make_tenant(tmp_path: Path, **overrides) -> TenantContext:
@@ -64,6 +65,66 @@ class TestPromptBuilderBuild:
         prompt = builder.build()
         assert "code_review" in prompt
         assert "Reviews code" in prompt
+
+    def test_skills_section_groups_regular_skills_by_category(self, tmp_path: Path):
+        tenant = _make_tenant(tmp_path)
+        skills = [
+            SkillDef(
+                name="ascii-art",
+                description="Make ASCII artwork.",
+                content="body",
+                source="platform",
+                category="creative",
+                category_description="Creative content generation.",
+            ),
+            SkillDef(
+                name="code-review",
+                description="Review code changes.",
+                content="body",
+                source="platform",
+                category="github",
+                category_description="GitHub workflows.",
+            ),
+        ]
+
+        builder = PromptBuilder(tenant, skills=skills)
+        section = builder._skills_section()
+
+        assert "## Skills (mandatory)" in section
+        assert "<available_skills>" in section
+        assert "  creative: Creative content generation." in section
+        assert "    - ascii-art: Make ASCII artwork." in section
+        assert "  github: GitHub workflows." in section
+        assert "    - code-review: Review code changes." in section
+
+    def test_skills_section_filters_conditional_skills(self, tmp_path: Path):
+        tenant = _make_tenant(tmp_path)
+        skills = [
+            SkillDef(
+                name="manual-web-search",
+                description="Manual search workflow.",
+                content="body",
+                source="platform",
+                fallback_for_tools=["web_search"],
+            ),
+            SkillDef(
+                name="browser-automation",
+                description="Browser workflow.",
+                content="body",
+                source="platform",
+                requires_tools=["browser"],
+            ),
+        ]
+
+        builder = PromptBuilder(
+            tenant,
+            skills=skills,
+            available_tools={"web_search"},
+        )
+        section = builder._skills_section()
+
+        assert "manual-web-search" not in section
+        assert "browser-automation" not in section
 
     def test_build_with_user_preferences(self, tmp_path: Path):
         tenant = _make_tenant(

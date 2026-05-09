@@ -364,7 +364,8 @@ class PromptBuilder:
         if not self.skills:
             return ""
 
-        regular_skills: list[str] = []
+        skills_by_category: dict[str, list[tuple[str, str]]] = {}
+        category_descriptions: dict[str, str] = {}
         expert_lines: list[str] = []
 
         from surogates.tools.loader import SkillDef
@@ -377,6 +378,12 @@ class PromptBuilder:
                 skill_type = skill.get("type", "skill")
                 expert_tools = skill.get("expert_tools") or []
                 expert_stats = skill.get("expert_stats") or {}
+                category = skill.get("category") or "general"
+                category_description = skill.get("category_description") or ""
+                fallback_for_tools = self._as_string_list(
+                    skill.get("fallback_for_tools"),
+                )
+                requires_tools = self._as_string_list(skill.get("requires_tools"))
             elif isinstance(skill, SkillDef):
                 name = skill.name
                 desc = skill.description
@@ -384,6 +391,10 @@ class PromptBuilder:
                 skill_type = skill.type
                 expert_tools = skill.expert_tools or []
                 expert_stats = {}
+                category = skill.category or "general"
+                category_description = skill.category_description or ""
+                fallback_for_tools = self._as_string_list(skill.fallback_for_tools)
+                requires_tools = self._as_string_list(skill.requires_tools)
             else:
                 name = str(skill)
                 desc = ""
@@ -391,6 +402,10 @@ class PromptBuilder:
                 skill_type = "skill"
                 expert_tools = []
                 expert_stats = {}
+                category = "general"
+                category_description = ""
+                fallback_for_tools = []
+                requires_tools = []
 
             safe_desc = self._sanitise(desc, f"skill:{name}")
 
@@ -409,16 +424,22 @@ class PromptBuilder:
                     entry += f"\n  Tools: {', '.join(expert_tools)}"
                 expert_lines.append(entry)
             else:
-                entry = f"- **{name}**"
-                if safe_desc:
-                    entry += f": {safe_desc}"
-                if trigger:
-                    entry += f" (trigger: {trigger})"
-                regular_skills.append(entry)
+                if not self._skill_visible(fallback_for_tools, requires_tools):
+                    continue
+                safe_category = self._sanitise(category, f"skill_category:{category}")
+                safe_category_desc = self._sanitise(
+                    category_description, f"skill_category:{category}",
+                )
+                if safe_category_desc:
+                    category_descriptions.setdefault(safe_category, safe_category_desc)
+                skills_by_category.setdefault(safe_category, []).append((name, safe_desc))
 
         sections: list[str] = []
-        if regular_skills:
-            sections.append("# Available Skills\n" + "\n".join(regular_skills))
+        if skills_by_category:
+            sections.append(self._regular_skills_prompt(
+                skills_by_category,
+                category_descriptions,
+            ))
         if expert_lines:
             sections.append(
                 "# Available Experts\n"
@@ -429,6 +450,84 @@ class PromptBuilder:
             )
 
         return "\n\n".join(sections)
+
+    def _skill_visible(
+        self,
+        fallback_for_tools: list[str],
+        requires_tools: list[str],
+    ) -> bool:
+        """Return whether a regular skill should appear for this toolset."""
+        if fallback_for_tools and all(
+            tool in self._available_tools for tool in fallback_for_tools
+        ):
+            return False
+        if requires_tools and not all(
+            tool in self._available_tools for tool in requires_tools
+        ):
+            return False
+        return True
+
+    def _regular_skills_prompt(
+        self,
+        skills_by_category: dict[str, list[tuple[str, str]]],
+        category_descriptions: dict[str, str],
+    ) -> str:
+        """Render regular skills in the Hermes-style mandatory index."""
+        index_lines: list[str] = []
+        for category in sorted(skills_by_category):
+            cat_desc = category_descriptions.get(category, "")
+            if cat_desc:
+                index_lines.append(f"  {category}: {cat_desc}")
+            else:
+                index_lines.append(f"  {category}:")
+
+            seen_names: set[str] = set()
+            for name, desc in sorted(
+                skills_by_category[category],
+                key=lambda item: item[0],
+            ):
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
+                if desc:
+                    index_lines.append(f"    - {name}: {desc}")
+                else:
+                    index_lines.append(f"    - {name}")
+
+        management_hint = ""
+        if "skill_manage" in self._available_tools:
+            management_hint = (
+                "\nIf a skill has issues, fix it with "
+                "`skill_manage(action='patch')`."
+            )
+
+        return (
+            "# Available Skills\n"
+            "## Skills (mandatory)\n"
+            "Before replying, scan the skills below. If a skill matches or is "
+            "even partially relevant to your task, you MUST load it with "
+            "`skill_view(name)` and follow its instructions. Err on the side "
+            "of loading: skills contain specialized commands, workflows, "
+            "project conventions, and quality standards that may differ from "
+            "general-purpose knowledge."
+            f"{management_hint}\n\n"
+            "<available_skills>\n"
+            + "\n".join(index_lines)
+            + "\n</available_skills>\n\n"
+            "Only proceed without loading a skill if genuinely none are relevant "
+            "to the task."
+        )
+
+    @staticmethod
+    def _as_string_list(value: Any) -> list[str]:
+        """Normalize optional list-ish skill metadata."""
+        if not value:
+            return []
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return []
 
     def _context_section(self) -> str:
         """Timestamp, model info, platform hints."""

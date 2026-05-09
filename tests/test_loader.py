@@ -86,6 +86,39 @@ class TestLoadSkillsFromDir:
         skills = loader._load_skills_from_dir(str(tmp_path / "nope"), "platform")
         assert skills == []
 
+    def test_category_description_from_description_md(self, tmp_path: Path):
+        skills_dir = tmp_path / "skills"
+        skill_dir = skills_dir / "creative" / "ascii-art"
+        skill_dir.mkdir(parents=True)
+        (skills_dir / "creative" / "DESCRIPTION.md").write_text(
+            "---\n"
+            "description: Creative content generation and visual design tools.\n"
+            "---\n",
+            encoding="utf-8",
+        )
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            "name: ascii-art\n"
+            "description: Make ASCII artwork.\n"
+            "---\n"
+            "Body\n",
+            encoding="utf-8",
+        )
+
+        loader = ResourceLoader(
+            platform_skills_dir=str(skills_dir),
+            platform_mcp_dir=str(tmp_path / "mcp"),
+        )
+
+        skills = loader._load_skills_from_dir(str(skills_dir), "platform")
+
+        assert len(skills) == 1
+        assert skills[0].category == "creative"
+        assert (
+            skills[0].category_description
+            == "Creative content generation and visual design tools."
+        )
+
 
 # =========================================================================
 # Merge precedence

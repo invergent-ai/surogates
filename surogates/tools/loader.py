@@ -121,6 +121,7 @@ class SkillDef:
     expert_max_iterations: int = 10  # iteration budget for expert mini-loop
     expert_status: str = EXPERT_STATUS_DRAFT  # draft → collecting → active → retired
     expert_tools: list[str] | None = None  # tools the expert can use in its mini-loop
+    category_description: str | None = None  # DESCRIPTION.md text for grouping
 
     @property
     def is_expert(self) -> bool:
@@ -571,6 +572,7 @@ class ResourceLoader:
 
         skills: list[SkillDef] = []
         seen_names: set[str] = set()
+        category_descriptions = _load_category_descriptions(directory)
 
         # Walk for SKILL.md files (directory-based layout).
         for root, dirs, files in os.walk(directory):
@@ -589,7 +591,12 @@ class ResourceLoader:
                     category = _get_category_from_path(skill_md, directory)
 
                     skills.append(
-                        _build_skill_def(parsed, source, category),
+                        _build_skill_def(
+                            parsed,
+                            source,
+                            category,
+                            category_descriptions.get(category or ""),
+                        ),
                     )
                 except Exception:
                     logger.exception("Failed to load skill from %s", skill_md)
@@ -1054,6 +1061,7 @@ def _build_skill_def(
     parsed: dict[str, Any],
     source: str,
     category: str | None = None,
+    category_description: str | None = None,
 ) -> SkillDef:
     """Construct a :class:`SkillDef` from parsed frontmatter data."""
     max_iter = parsed.get("expert_max_iterations")
@@ -1072,6 +1080,7 @@ def _build_skill_def(
         source=source,
         type=parsed.get("type", "skill"),
         category=category,
+        category_description=category_description,
         tags=parsed.get("tags"),
         platforms=parsed.get("platforms"),
         fallback_for_tools=parsed.get("fallback_for_tools"),
@@ -1185,17 +1194,75 @@ def _parse_skill_frontmatter(
 def _get_category_from_path(skill_md: Path, skills_dir: Path) -> str | None:
     """Extract category from skill path based on directory structure.
 
-    For paths like: skills_dir/mlops/axolotl/SKILL.md -> "mlops"
+    For paths like ``skills_dir/mlops/axolotl/SKILL.md`` return
+    ``"mlops"``.  Nested category paths are preserved:
+    ``skills_dir/mlops/evaluation/bench/SKILL.md`` returns
+    ``"mlops/evaluation"``.
     """
     try:
         rel_path = skill_md.relative_to(skills_dir)
         parts = rel_path.parts
-        # parts = ("category", "skill-name", "SKILL.md") -> category = parts[0]
+        # parts = ("category", "skill-name", "SKILL.md") -> category
         if len(parts) >= 3:
-            return parts[0]
+            return "/".join(parts[:-2])
     except ValueError:
         pass
     return None
+
+
+def _load_category_descriptions(skills_dir: Path) -> dict[str, str]:
+    """Return category descriptions from ``DESCRIPTION.md`` files.
+
+    Supports both Hermes-style frontmatter:
+
+    ``---\ndescription: ...\n---``
+
+    and plain Markdown body files.  The category key is the path from
+    ``skills_dir`` to the directory containing ``DESCRIPTION.md``.
+    """
+    descriptions: dict[str, str] = {}
+    if not skills_dir.is_dir():
+        return descriptions
+
+    for root, dirs, files in os.walk(skills_dir):
+        dirs[:] = [d for d in dirs if d not in EXCLUDED_SKILL_DIRS]
+        if "DESCRIPTION.md" not in files:
+            continue
+        desc_file = Path(root) / "DESCRIPTION.md"
+        try:
+            rel = desc_file.parent.relative_to(skills_dir)
+        except ValueError:
+            continue
+        if rel.parts in ((), (".",)):
+            continue
+
+        try:
+            text = desc_file.read_text(encoding="utf-8")
+        except OSError:
+            logger.debug("Could not read skill category description %s", desc_file)
+            continue
+
+        descriptions["/".join(rel.parts)] = _parse_description_text(text)
+
+    return descriptions
+
+
+def _parse_description_text(text: str) -> str:
+    """Extract a compact description from a DESCRIPTION.md file."""
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    if stripped.startswith("---"):
+        end_idx = stripped.find("---", 3)
+        if end_idx != -1:
+            frontmatter_text = stripped[3:end_idx].strip()
+            fm = _parse_yaml_or_simple(frontmatter_text)
+            desc = fm.get("description")
+            if desc:
+                return str(desc).strip().strip("'\"")
+            body = stripped[end_idx + 3:].strip()
+            return body
+    return stripped
 
 
 def _parse_yaml_or_simple(text: str) -> dict[str, Any]:
