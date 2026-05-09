@@ -1277,7 +1277,7 @@ git commit -m "feat: add cron scheduling tools"
 - Modify: `surogates/harness/loop.py`
 - Modify: `surogates/scheduled/store.py`
 
-- [ ] **Step 1: Reserve loop as builtin slash command**
+- [x] **Step 1: Reserve loop as builtin slash command**
 
 Modify `surogates/harness/slash_skill.py`:
 
@@ -1285,7 +1285,7 @@ Modify `surogates/harness/slash_skill.py`:
 _BUILTIN_SLASH_COMMANDS: Final[frozenset[str]] = frozenset({"clear", "compress", "loop"})
 ```
 
-- [ ] **Step 2: Add loop creation helper**
+- [x] **Step 2: Add loop creation helper**
 
 Add to `surogates/scheduled/store.py`:
 
@@ -1314,7 +1314,7 @@ async def create_loop(
     )
 ```
 
-- [ ] **Step 3: Write failing /loop handler tests**
+- [x] **Step 3: Write failing /loop handler tests**
 
 Create `tests/test_loop_command.py`:
 
@@ -1340,7 +1340,7 @@ def test_loop_command_parser_supports_slash_prompt() -> None:
 
 Add a focused harness test if an existing loop test scaffold exists; otherwise cover the core parsing and reserve behavior here, then rely on integration tests for the runner.
 
-- [ ] **Step 4: Handle /loop in harness**
+- [x] **Step 4: Handle /loop in harness**
 
 In `surogates/harness/loop.py`, after `/clear` and before eager slash-skill expansion:
 
@@ -1418,7 +1418,7 @@ async def _handle_loop_command(self, session: Session, content: str, lease: Sess
 
 Implement `_format_loop_list(rows)` in the same module or `surogates/scheduled/formatting.py`.
 
-- [ ] **Step 5: Verify Task 6**
+- [x] **Step 5: Verify Task 6**
 
 Run:
 
@@ -1428,7 +1428,7 @@ uv run pytest tests/test_loop_command.py tests/test_scheduled_schedule.py tests/
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit Task 6**
+- [x] **Step 6: Commit Task 6**
 
 ```bash
 git add surogates/harness/slash_skill.py surogates/harness/loop.py surogates/scheduled/store.py tests/test_loop_command.py

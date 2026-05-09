@@ -37,7 +37,11 @@ _SLASH_COMMAND_RE: Final = re.compile(
 )
 
 # Slash commands handled elsewhere in the loop -- never treat these as skills.
-_BUILTIN_SLASH_COMMANDS: Final[frozenset[str]] = frozenset({"clear", "compress"})
+_BUILTIN_SLASH_COMMANDS: Final[frozenset[str]] = frozenset({
+    "clear",
+    "compress",
+    "loop",
+})
 
 
 def parse_slash_command(text: str) -> tuple[str, str] | None:
