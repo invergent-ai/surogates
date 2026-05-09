@@ -2251,7 +2251,10 @@ class AgentHarness:
                             "type": "image_url",
                             "image_url": {"url": data_url, "detail": "auto"},
                         })
-                    messages.append({"role": "user", "content": blocks})
+                    user_msg = {"role": "user", "content": blocks}
+                    from surogates.harness.image_shrink import shrink_image_parts_in_messages
+                    shrink_image_parts_in_messages([user_msg])
+                    messages.append(user_msg)
                 else:
                     messages.append({"role": "user", "content": content})
 
