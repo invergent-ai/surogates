@@ -11,7 +11,7 @@ where Surogates already has a stronger local abstraction.
 1. [x] Add response-side surrogate sanitization before persisted LLM responses.
 2. [x] Add URL safety always-blocked cloud metadata floor.
 3. [x] Skip credential pool rotation when only one available credential exists.
-4. [ ] Invalidate file read dedup entries on writes/patches and bound read tracker data.
+4. [x] Invalidate file read dedup entries on writes/patches and bound read tracker data.
 5. [ ] Add fuzzy-match escape-drift detection.
 6. [ ] Make V4A multi-file patch application two-phase.
 7. [ ] Add thread-safety snapshots/locking to the tool registry.

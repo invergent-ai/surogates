@@ -306,6 +306,7 @@ def _is_expected_write_exception(exc: Exception) -> bool:
 # ---------------------------------------------------------------------------
 _read_tracker_lock = threading.Lock()
 _read_tracker: dict = {}
+_MAX_TRACKED_READ_ENTRIES = 1024
 
 
 def _init_task_data(task_id: str) -> dict:
@@ -380,6 +381,36 @@ def reset_file_dedup(task_id: str | None = None) -> None:
                     task_data["dedup"].clear()
 
 
+def _cap_read_tracker_data(task_data: dict) -> None:
+    """Bound per-task read tracking structures in long-running workers."""
+    read_history = task_data.get("read_history")
+    if isinstance(read_history, set):
+        while len(read_history) > _MAX_TRACKED_READ_ENTRIES:
+            read_history.pop()
+
+    for key in ("dedup", "read_timestamps"):
+        values = task_data.get(key)
+        if not isinstance(values, dict):
+            continue
+        while len(values) > _MAX_TRACKED_READ_ENTRIES:
+            oldest_key = next(iter(values))
+            del values[oldest_key]
+
+
+def _invalidate_dedup_for_path(resolved_path: str, task_id: str) -> None:
+    """Remove all cached read ranges for *resolved_path* in *task_id*."""
+    with _read_tracker_lock:
+        task_data = _read_tracker.get(task_id)
+        if not task_data:
+            return
+        dedup = task_data.get("dedup")
+        if not isinstance(dedup, dict):
+            return
+        stale_keys = [key for key in dedup if key[0] == resolved_path]
+        for key in stale_keys:
+            del dedup[key]
+
+
 def notify_other_tool_call(task_id: str = "default") -> None:
     """Reset consecutive read/search counter for a task.
 
@@ -408,10 +439,12 @@ def _update_read_timestamp(filepath: str, task_id: str) -> None:
         current_mtime = os.path.getmtime(resolved)
     except (OSError, ValueError):
         return
+    _invalidate_dedup_for_path(resolved, task_id)
     with _read_tracker_lock:
         task_data = _read_tracker.get(task_id)
         if task_data is not None:
             task_data.setdefault("read_timestamps", {})[resolved] = current_mtime
+            _cap_read_tracker_data(task_data)
 
 
 def _check_file_staleness(filepath: str, task_id: str) -> str | None:
@@ -959,6 +992,7 @@ async def _read_file_handler(
                 _mtime_now = os.path.getmtime(resolved_str)
                 task_data["dedup"][dedup_key] = _mtime_now
                 task_data.setdefault("read_timestamps", {})[resolved_str] = _mtime_now
+                _cap_read_tracker_data(task_data)
             except OSError:
                 pass  # Can't stat — skip tracking for this entry
 
