@@ -12,6 +12,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from surogates.tools.schema_sanitizer import sanitize_tool_schemas
+
 logger = logging.getLogger(__name__)
 
 
@@ -141,7 +143,7 @@ class ToolRegistry:
                     },
                 }
             )
-        return schemas
+        return sanitize_tool_schemas(schemas)
 
     # ------------------------------------------------------------------
     # Dispatch
