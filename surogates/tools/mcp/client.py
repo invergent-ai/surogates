@@ -838,6 +838,10 @@ class MCPServerTask:
 
         safe_env = _build_safe_env(user_env)
         command, safe_env = _resolve_stdio_command(command, safe_env)
+        from surogates.tools.mcp.osv_check import check_package_for_malware
+        malware_error = check_package_for_malware(command, args)
+        if malware_error:
+            raise ValueError(malware_error)
 
         server_params = StdioServerParameters(
             command=command,
