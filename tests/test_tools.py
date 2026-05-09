@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
@@ -80,6 +81,11 @@ class TestToolRegistryBasics:
         reg.register("a", _make_schema("a"), _async_handler)
         reg.register("b", _make_schema("b"), _async_handler)
         assert reg.tool_names == {"a", "b"}
+
+    def test_registry_has_reentrant_lock_for_dynamic_refresh(self):
+        reg = ToolRegistry()
+
+        assert isinstance(reg._lock, type(threading.RLock()))
 
 
 class TestToolRegistrySchemas:
