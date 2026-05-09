@@ -91,12 +91,45 @@ def fuzzy_find_and_replace(content: str, old_string: str, new_string: str,
                     f"Provide more context to make it unique, or use replace_all=True."
                 )
 
+            drift_error = _detect_escape_drift(
+                content, matches, old_string, new_string,
+            )
+            if drift_error:
+                return content, 0, drift_error
+
             # Perform replacement
             new_content = _apply_replacements(content, matches, new_string)
             return new_content, len(matches), None
 
     # No strategy found a match
     return content, 0, "Could not find a match for old_string in the file"
+
+
+def _detect_escape_drift(
+    content: str,
+    matches: List[Tuple[int, int]],
+    old_string: str,
+    new_string: str,
+) -> Optional[str]:
+    """Detect spurious backslash-quote artifacts before replacement."""
+    if "\\'" not in new_string and '\\"' not in new_string:
+        return None
+
+    matched_regions = "".join(content[start:end] for start, end in matches)
+    for suspect in ("\\'", '\\"'):
+        if (
+            suspect in old_string
+            and suspect in new_string
+            and suspect not in matched_regions
+        ):
+            plain = suspect[1]
+            return (
+                "Escape-drift detected: old_string and new_string contain "
+                f"the literal sequence {suspect!r}, but the matched file "
+                "content does not. Re-read the file and pass quote "
+                f"characters without backslash-escaping {plain!r}."
+            )
+    return None
 
 
 def _apply_replacements(content: str, matches: List[Tuple[int, int]], new_string: str) -> str:
