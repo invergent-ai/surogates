@@ -1969,7 +1969,7 @@ requires-dist = [
     { name = "kubernetes-asyncio", specifier = ">=31.0,<32.0" },
     { name = "openai", specifier = ">=1.30,<3.0" },
     { name = "passlib", extras = ["bcrypt"], specifier = ">=1.7,<2.0" },
-    { name = "pillow", specifier = ">=10,<12" },
+    { name = "pillow", specifier = ">=10,<13" },
     { name = "pydantic", specifier = ">=2.4,<3.0" },
     { name = "pydantic-settings", specifier = ">=2.0,<3.0" },
     { name = "python-jose", extras = ["cryptography"], specifier = ">=3.3,<4.0" },
