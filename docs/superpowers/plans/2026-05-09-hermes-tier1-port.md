@@ -61,20 +61,20 @@ New or expanded tests:
 - Modify: `surogates/session/store.py`
 - Test: `tests/test_redact.py`
 
-- [ ] **Step 1: Write failing redaction tests**
+- [x] **Step 1: Write failing redaction tests**
   Cover vendor API keys, `TOKEN=...` env-style assignments, URL query secrets, URL userinfo, JWTs, DB connection strings, private-key blocks, nested dict/list event payloads, and logging exception text.
 
-- [ ] **Step 2: Run tests to verify failure**
+- [x] **Step 2: Run tests to verify failure**
   Run: `pytest tests/test_redact.py -q`
   Expected: FAIL because `surogates.harness.redact` and event/log redaction hooks do not exist.
 
-- [ ] **Step 3: Port Hermes redaction module**
+- [x] **Step 3: Port Hermes redaction module**
   Port `redact_sensitive_text`, `redact_sensitive_data`, and `RedactingFormatter` from `study/hermes-agent/agent/redact.py` into `surogates/harness/redact.py`. Preserve always-on production redaction; expose a test-only override via function argument rather than a runtime opt-out.
 
-- [ ] **Step 4: Wire event and logging redaction**
+- [x] **Step 4: Wire event and logging redaction**
   In `SessionStore.emit_event`, store `redact_sensitive_data(data)` instead of raw `data`. In `logging_config.StructuredFormatter.format`, redact `record.getMessage()` and formatted exception text before JSON serialization. Keep trace fields unchanged.
 
-- [ ] **Step 5: Verify redaction**
+- [x] **Step 5: Verify redaction**
   Run: `pytest tests/test_redact.py tests/integration/test_audit_log.py -q`
   Expected: PASS, and no test snapshot contains raw secret values.
 
@@ -88,20 +88,20 @@ New or expanded tests:
 - Test: `tests/test_schema_sanitizer.py`
 - Test: `tests/test_tool_schemas.py`
 
-- [ ] **Step 1: Write failing sanitizer tests**
+- [x] **Step 1: Write failing sanitizer tests**
   Cover top-level `anyOf`/`oneOf`/`allOf` removal, `type: ["string", "null"]` collapse, nullable union collapse, object nodes with missing `properties`, primitive string schema nodes, and orphaned `required` entries.
 
-- [ ] **Step 2: Run tests to verify failure**
+- [x] **Step 2: Run tests to verify failure**
   Run: `pytest tests/test_schema_sanitizer.py tests/test_tool_schemas.py -q`
   Expected: FAIL because exported schemas still contain provider-hostile constructs.
 
-- [ ] **Step 3: Port sanitizer**
+- [x] **Step 3: Port sanitizer**
   Port `sanitize_tool_schemas`, `strip_nullable_unions`, and recursive node normalization from `study/hermes-agent/tools/schema_sanitizer.py` into `surogates/tools/schema_sanitizer.py`.
 
-- [ ] **Step 4: Wire schema export**
+- [x] **Step 4: Wire schema export**
   Call `sanitize_tool_schemas` from `ToolRegistry.get_schemas` before returning OpenAI-format schemas. Ensure MCP-loaded tool schemas pass through the same registry export path, or sanitize in `surogates/tools/mcp/client.py` immediately before registration if MCP bypasses `get_schemas`.
 
-- [ ] **Step 5: Verify schema compatibility**
+- [x] **Step 5: Verify schema compatibility**
   Run: `pytest tests/test_schema_sanitizer.py tests/test_tool_schemas.py tests/test_coerce.py -q`
   Expected: PASS with input schemas left unmutated unless a sanitized copy is returned.
 
@@ -115,20 +115,20 @@ New or expanded tests:
 - Test: `tests/test_stream_scrubbers.py`
 - Test: `tests/test_stream_stall.py`
 
-- [ ] **Step 1: Write failing scrubber tests**
+- [x] **Step 1: Write failing scrubber tests**
   Cover split tags across chunks for `<think>`, `<thinking>`, `<reasoning>`, `<thought>`, `<REASONING_SCRATCHPAD>`, and `<memory-context>`. Include cases where normal user-visible text mentions a tag mid-sentence and must not be suppressed.
 
-- [ ] **Step 2: Run tests to verify failure**
+- [x] **Step 2: Run tests to verify failure**
   Run: `pytest tests/test_stream_scrubbers.py -q`
   Expected: FAIL because only complete-string regex stripping exists.
 
-- [ ] **Step 3: Port scrubbers**
+- [x] **Step 3: Port scrubbers**
   Port Hermes `StreamingThinkScrubber` from `agent/think_scrubber.py` and `StreamingContextScrubber` from `agent/memory_manager.py` into `surogates/harness/stream_scrubbers.py`. Keep one-shot helpers in `reasoning.py` and `memory/manager.py` as wrappers for complete messages.
 
-- [ ] **Step 4: Wire streaming deltas**
+- [x] **Step 4: Wire streaming deltas**
   Instantiate fresh scrubbers inside each `call_llm_streaming_inner` call. Apply the think scrubber before appending/emitting text deltas, and apply the memory-context scrubber before emitting user-visible deltas. Keep provider-native `reasoning_content` deltas in `reasoning_parts`, but do not emit scrubbed reasoning as normal content.
 
-- [ ] **Step 5: Verify stream behavior**
+- [x] **Step 5: Verify stream behavior**
   Run: `pytest tests/test_stream_scrubbers.py tests/test_stream_stall.py tests/test_midstream_interrupt.py -q`
   Expected: PASS, with no leaked reasoning or memory-context text when boundaries are split across chunks.
 
@@ -141,23 +141,23 @@ New or expanded tests:
 - Test: `tests/test_tool_arg_repair.py`
 - Modify: `tests/test_harness_resilience.py`
 
-- [ ] **Step 1: Write failing tool-argument tests**
+- [x] **Step 1: Write failing tool-argument tests**
   Cover trailing commas, unescaped tabs/control characters, one missing closing brace, one extra closing brace, truncated arguments with `finish_reason == "tool_calls"`, and invalid arguments for high-impact tools such as `write_file` and `terminal`.
 
-- [ ] **Step 2: Run tests to verify failure**
+- [x] **Step 2: Run tests to verify failure**
   Run: `pytest tests/test_tool_arg_repair.py tests/test_harness_resilience.py -q`
   Expected: FAIL because malformed JSON falls back to `{}` or is handled as a generic invalid tool call.
 
-- [ ] **Step 3: Port repair helper**
+- [x] **Step 3: Port repair helper**
   Move Hermes `_repair_tool_call_arguments` logic from `run_agent.py` into `surogates/harness/tool_exec.py` as `repair_tool_call_arguments(raw_args: str, tool_name: str) -> str`. Use strict parsing first, then repair control characters, trailing commas, unclosed braces/brackets, excess braces/brackets, and tabs.
 
-- [ ] **Step 4: Stop executing partial tool calls**
+- [x] **Step 4: Stop executing partial tool calls**
   In `llm_call.py`, set `usage_data["partial_tool_call"] = True` when streaming ends with `finish_reason == "tool_calls"` and any accumulated tool argument is structurally incomplete. In `loop.py`, if `partial_tool_call` is true, append the assistant message and synthetic tool errors that ask the model to retry with complete arguments; do not execute any partial tool call.
 
-- [ ] **Step 5: Replace `{}` fallback**
+- [x] **Step 5: Replace `{}` fallback**
   In `execute_single_tool`, parse repaired arguments. If repair still fails, return a tool result containing `{"error": "Invalid JSON arguments: ..."}` and skip dispatch. Do not coerce or execute `{}` for malformed arguments.
 
-- [ ] **Step 6: Verify safety**
+- [x] **Step 6: Verify safety**
   Run: `pytest tests/test_tool_arg_repair.py tests/test_harness_resilience.py tests/test_streaming_executor.py -q`
   Expected: PASS, with malformed `write_file` and `terminal` calls never dispatched with empty arguments.
 

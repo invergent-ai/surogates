@@ -36,6 +36,7 @@ from surogates.harness.stream_scrubbers import (
     StreamingContextScrubber,
     StreamingThinkScrubber,
 )
+from surogates.harness.tool_exec import tool_call_arguments_look_incomplete
 from surogates.session.events import EventType
 
 if TYPE_CHECKING:
@@ -1031,6 +1032,16 @@ async def call_llm_streaming_inner(
             {"content": tail_delta, "iteration": iteration},
         )
 
+    partial_tool_names: list[str] = []
+    if finish_reason == "tool_calls":
+        for slot in sorted(tool_calls_acc):
+            entry = tool_calls_acc[slot]
+            fn = entry.get("function", {})
+            name = fn.get("name", "")
+            arguments = fn.get("arguments", "")
+            if name and tool_call_arguments_look_incomplete(arguments):
+                partial_tool_names.append(name)
+
     # Notify any remaining tool call slots that haven't been reported yet.
     # This covers the last tool call in the batch (no higher index follows)
     # and the case where only a single tool call was generated.
@@ -1061,6 +1072,9 @@ async def call_llm_streaming_inner(
         "output_tokens": output_tokens,
         "finish_reason": "interrupted" if interrupted else (finish_reason or "stop"),
     }
+    if partial_tool_names:
+        usage_data["partial_tool_call"] = True
+        usage_data["partial_tool_names"] = partial_tool_names
 
     return assistant_message, usage_data
 

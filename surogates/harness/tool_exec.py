@@ -141,6 +141,117 @@ SAGA_EXCLUDED_TOOLS: frozenset[str] = frozenset({
     "web_search",
 })
 
+
+def _escape_invalid_chars_in_json_strings(raw: str) -> str:
+    """Escape literal control characters inside JSON string values."""
+    out: list[str] = []
+    in_string = False
+    idx = 0
+    while idx < len(raw):
+        ch = raw[idx]
+        if in_string:
+            if ch == "\\" and idx + 1 < len(raw):
+                out.append(ch)
+                out.append(raw[idx + 1])
+                idx += 2
+                continue
+            if ch == '"':
+                in_string = False
+                out.append(ch)
+            elif ord(ch) < 0x20:
+                out.append(f"\\u{ord(ch):04x}")
+            else:
+                out.append(ch)
+        else:
+            if ch == '"':
+                in_string = True
+            out.append(ch)
+        idx += 1
+    return "".join(out)
+
+
+def tool_call_arguments_look_incomplete(raw_args: str) -> bool:
+    """Return True when argument JSON appears truncated mid-structure."""
+    raw = raw_args.strip() if isinstance(raw_args, str) else ""
+    if not raw:
+        return False
+    try:
+        json.loads(raw)
+        return False
+    except json.JSONDecodeError:
+        pass
+
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if not stack or stack[-1] != ch:
+                return bool(stack)
+            stack.pop()
+    return in_string or bool(stack)
+
+
+def repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
+    """Repair common model-generated JSON damage in tool-call arguments."""
+    raw = raw_args.strip() if isinstance(raw_args, str) else ""
+    if not raw or raw == "None":
+        return "{}"
+
+    try:
+        parsed = json.loads(raw, strict=False)
+        return json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+
+    candidates: list[str] = []
+    base = _escape_invalid_chars_in_json_strings(raw)
+    candidates.append(base)
+    candidates.append(re.sub(r",\s*([}\]])", r"\1", base))
+
+    for candidate in list(candidates):
+        fixed = candidate
+        open_curly = fixed.count("{") - fixed.count("}")
+        open_bracket = fixed.count("[") - fixed.count("]")
+        if open_curly > 0:
+            fixed += "}" * open_curly
+        if open_bracket > 0:
+            fixed += "]" * open_bracket
+        candidates.append(fixed)
+
+    for candidate in list(candidates):
+        fixed = candidate
+        for _ in range(50):
+            try:
+                parsed = json.loads(fixed)
+                logger.warning(
+                    "Repaired malformed tool_call arguments for %s",
+                    tool_name,
+                )
+                return json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
+            except json.JSONDecodeError as exc:
+                if exc.msg.startswith("Extra data"):
+                    fixed = fixed[:exc.pos].rstrip()
+                    continue
+                if fixed.endswith(("}", "]")):
+                    fixed = fixed[:-1].rstrip()
+                    continue
+                break
+
+    return raw
+
 # Patterns that indicate a terminal command may modify/delete files.
 _DESTRUCTIVE_PATTERNS = re.compile(
     r"""(?:^|\s|&&|\|\||;|`)(?:
@@ -482,9 +593,12 @@ async def execute_single_tool(
     tool_call_id: str = tc.get("id", "")
 
     # Parse arguments.
+    parse_error: json.JSONDecodeError | None = None
     try:
-        tool_args = json.loads(tool_args_raw) if tool_args_raw else {}
-    except json.JSONDecodeError:
+        repaired_args = repair_tool_call_arguments(tool_args_raw, tool_name)
+        tool_args = json.loads(repaired_args) if repaired_args else {}
+    except json.JSONDecodeError as exc:
+        parse_error = exc
         tool_args = {}
 
     # Coerce argument types to match JSON Schema declarations.
@@ -512,6 +626,36 @@ async def execute_single_tool(
         EventType.TOOL_CALL,
         tool_call_data,
     )
+
+    if parse_error is not None:
+        result_content = json.dumps(
+            {
+                "error": f"Invalid JSON arguments: {parse_error}",
+                "tool": tool_name,
+                "detail": str(parse_error),
+            },
+            ensure_ascii=False,
+        )
+        result_event_id = await store.emit_event(
+            session.id,
+            EventType.TOOL_RESULT,
+            {
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "content": result_content,
+                "elapsed_ms": 0,
+            },
+        )
+        await store.advance_harness_cursor(
+            session.id,
+            through_event_id=result_event_id,
+            lease_token=lease.lease_token,
+        )
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": result_content,
+        }
 
     # Workspace sandbox check — enforced at the governance layer before
     # the tool is dispatched.  Uses AGT ExecutionSandbox for path
