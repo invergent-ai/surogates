@@ -25,6 +25,7 @@ from surogates.harness.llm_call import (
     is_transient_error as _is_transient_error,
 )
 from surogates.harness.loop import AgentHarness
+from surogates.harness.resilience import try_rotate_credential
 from surogates.sandbox.pool import SandboxPool
 
 
@@ -109,6 +110,26 @@ class TestExtractRetryAfter:
             headers={"retry-after": "not-a-number"},
         )
         assert _extract_retry_after(exc) is None
+
+
+class TestCredentialRotation:
+    def test_single_credential_rate_limit_does_not_mark_exhausted(self) -> None:
+        pool = CredentialPool([PooledCredential(id="only", api_key="sk-only")])
+        llm_client = SimpleNamespace(base_url="https://api.example.com")
+
+        new_client, rotated = try_rotate_credential(
+            pool,
+            llm_client,  # type: ignore[arg-type]
+            429,
+            Exception("rate limited"),
+        )
+
+        assert rotated is False
+        assert new_client is None
+        current = pool.current()
+        assert current is not None
+        assert current.id == "only"
+        assert current.status == "ok"
 
 
 # ---------------------------------------------------------------------------
