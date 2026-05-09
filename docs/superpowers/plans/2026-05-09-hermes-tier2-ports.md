@@ -23,6 +23,7 @@ where Surogates already has a stronger local abstraction.
 13. [x] Add image-too-large detection and retry-by-shrinking image data URLs.
 14. [x] Add configurable tool output limit knobs.
 15. [x] Audit path traversal validators and consolidate on existing workspace sandbox utilities where appropriate.
+16. [x] Add harness-local `vision_analyze` for the active Surogate vision model.
 
 ## Implementation Notes
 

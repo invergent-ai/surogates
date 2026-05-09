@@ -129,8 +129,11 @@ class StreamingToolExecutor:
         sandbox_pool: SandboxPool | None = None,
         api_client: Any | None = None,
         session_factory: Any | None = None,
+        llm_client: Any | None = None,
+        model: str | None = None,
         saga: SagaOrchestrator | None = None,
         log_policy_allowed: bool = False,
+        tool_guardrails: Any | None = None,
     ) -> None:
         self._session = session
         self._lease = lease
@@ -146,7 +149,10 @@ class StreamingToolExecutor:
         self._sandbox_pool = sandbox_pool
         self._api_client = api_client
         self._session_factory = session_factory
+        self._llm_client = llm_client
+        self._model = model
         self._saga = saga
+        self._tool_guardrails = tool_guardrails
 
         self._tracked: list[TrackedTool] = []
         self._sibling_aborted: bool = False
@@ -316,6 +322,8 @@ class StreamingToolExecutor:
                 sandbox_pool=self._sandbox_pool,
                 api_client=self._api_client,
                 session_factory=self._session_factory,
+                llm_client=self._llm_client,
+                model=self._model,
                 saga=self._saga,
                 log_policy_allowed=self._log_policy_allowed,
             )
@@ -441,5 +449,3 @@ def _is_error_result(result: dict[str, Any]) -> bool:
         except (json.JSONDecodeError, TypeError):
             pass
     return False
-
-

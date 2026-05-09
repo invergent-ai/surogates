@@ -47,6 +47,7 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "web_search": ToolLocation.HARNESS,
     "web_extract": ToolLocation.HARNESS,
     "web_crawl": ToolLocation.HARNESS,
+    "vision_analyze": ToolLocation.HARNESS,
     "clarify": ToolLocation.HARNESS,
     "delegate_task": ToolLocation.HARNESS,
     "todo": ToolLocation.HARNESS,

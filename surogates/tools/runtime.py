@@ -68,6 +68,7 @@ class ToolRuntime:
             skills,
             terminal,
             todo,
+            vision,
             web_search,
         )
 
@@ -75,6 +76,7 @@ class ToolRuntime:
             memory,
             skills,
             skill_manager,
+            vision,
             web_search,
             file_ops,
             kb_tools,
