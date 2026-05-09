@@ -26,6 +26,7 @@ from surogates.db.models import (
     SessionCursor,
     SessionLease as LeaseRow,
 )
+from surogates.harness.redact import redact_sensitive_data
 from surogates.session.events import EventType
 from surogates.session.models import Event, Session, SessionLease
 
@@ -234,14 +235,15 @@ class SessionStore:
         from surogates.trace import get_trace
 
         trace = get_trace()
+        redacted_data = redact_sensitive_data(data)
         row = EventRow(
             session_id=session_id,
             type=event_type.value,
-            data=data,
+            data=redacted_data,
             trace_id=trace.trace_id if trace else None,
             span_id=trace.span_id if trace else None,
         )
-        counter_clause = _build_counter_update_clause(event_type, data)
+        counter_clause = _build_counter_update_clause(event_type, redacted_data)
 
         async with self._sf() as db:
             db.add(row)
@@ -268,7 +270,12 @@ class SessionStore:
         # Channel delivery: enqueue deliverable events to the outbox
         # for non-web channels (Slack, Teams, Telegram, etc.).
         if event_type in _DELIVERABLE_EVENTS:
-            await self._enqueue_channel_delivery(session_id, event_id, event_type, data)
+            await self._enqueue_channel_delivery(
+                session_id,
+                event_id,
+                event_type,
+                redacted_data,
+            )
 
         return event_id
 
