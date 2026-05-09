@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: camofox-browser
+  labels:
+    app.kubernetes.io/name: camofox-browser
+    app.kubernetes.io/component: browser
+    app.kubernetes.io/part-of: surogates
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: camofox-browser
+      app.kubernetes.io/component: browser
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: camofox-browser
+        app.kubernetes.io/component: browser
+        app.kubernetes.io/part-of: surogates
+    spec:
+      serviceAccountName: camofox-browser
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: camofox-browser
+          image: camofox-browser:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 9377
+              protocol: TCP
+            - name: novnc
+              containerPort: 6080
+              protocol: TCP
+          env:
+            - name: CAMOFOX_PORT
+              value: "9377"
+            - name: PORT
+              value: "9377"
+            - name: ENABLE_VNC
+              value: "1"
+            - name: NOVNC_PORT
+              value: "6080"
+            - name: CAMOFOX_PROFILE_DIR
+              value: /var/lib/camofox/profiles
+            - name: CAMOFOX_COOKIES_DIR
+              value: /var/lib/camofox/cookies
+            - name: CAMOFOX_TRACES_DIR
+              value: /var/lib/camofox/traces
+            - name: CAMOFOX_TRACES_MAX_BYTES
+              value: "52428800"
+            - name: CAMOFOX_TRACES_TTL_HOURS
+              value: "24"
+            - name: MAX_SESSIONS
+              value: "25"
+            - name: MAX_TABS_PER_SESSION
+              value: "8"
+            - name: MAX_CONCURRENT_PER_USER
+              value: "3"
+            - name: BROWSER_IDLE_TIMEOUT_MS
+              value: "300000"
+            - name: CAMOFOX_CRASH_REPORT_ENABLED
+              value: "false"
+            - name: CAMOFOX_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: camofox-browser-secret
+                  key: CAMOFOX_ACCESS_KEY
+                  optional: true
+            - name: CAMOFOX_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: camofox-browser-secret
+                  key: CAMOFOX_API_KEY
+                  optional: true
+            - name: CAMOFOX_ADMIN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: camofox-browser-secret
+                  key: CAMOFOX_ADMIN_KEY
+                  optional: true
+            - name: VNC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: camofox-browser-secret
+                  key: VNC_PASSWORD
+                  optional: true
+          volumeMounts:
+            - name: camofox-data
+              mountPath: /var/lib/camofox
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 4
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+      volumes:
+        - name: camofox-data
+          persistentVolumeClaim:
+            claimName: camofox-browser-data
