@@ -4,7 +4,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { PromptInputMessage } from "../ai-elements/prompt-input";
-import type { AgentChatSlashCommand, TokenUsage } from "../../types";
+import { useProviderAttachments } from "../ai-elements/prompt-input";
+import type { AgentChatImageAttachment, AgentChatSlashCommand, TokenUsage } from "../../types";
 import { useAgentChatAdapterContext } from "../../adapter-context";
 import {
   Context,
@@ -52,7 +53,7 @@ type SlashCommand = AgentChatSlashCommand;
 // ── Props ────────────────────────────────────────────────────────────
 
 interface ChatComposerProps {
-  onSend: (text: string) => void;
+  onSend: (text: string, images?: AgentChatImageAttachment[]) => void;
   onStop: () => void;
   isRunning: boolean;
   disabled?: boolean;
@@ -66,6 +67,40 @@ export function ChatComposer(props: ChatComposerProps) {
     <PromptInputProvider>
       <ChatComposerInner {...props} />
     </PromptInputProvider>
+  );
+}
+
+// ── Attachment preview strip ─────────────────────────────────────────
+
+function AttachmentPreviewStrip() {
+  const attachments = useProviderAttachments();
+  if (attachments.files.length === 0) return null;
+
+  return (
+    <div className="flex gap-2 px-3 pt-2 pb-1 flex-wrap">
+      {attachments.files.map((file) => (
+        <div key={file.id} className="relative group">
+          {file.mediaType?.startsWith("image/") && file.url ? (
+            <img
+              src={file.url}
+              alt={file.filename}
+              className="h-16 w-16 rounded-lg border border-border object-cover"
+            />
+          ) : (
+            <div className="h-16 w-16 rounded-lg border border-border bg-muted flex items-center justify-center text-[10px] text-muted-foreground truncate px-1">
+              {file.filename}
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => attachments.remove(file.id)}
+            className="absolute -top-1.5 -right-1.5 hidden group-hover:flex items-center justify-center w-4 h-4 rounded-full bg-destructive text-destructive-foreground text-[10px]"
+          >
+            &times;
+          </button>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -192,7 +227,15 @@ function ChatComposerInner({
     (message: PromptInputMessage) => {
       const text = message.text.trim();
       if (!text || isRunning || disabled) return;
-      onSend(text);
+
+      // Convert file attachments to image blocks.
+      const images: AgentChatImageAttachment[] = [];
+      for (const file of message.files) {
+        if (file.mediaType?.startsWith("image/") && file.url) {
+          images.push({ data: file.url, mimeType: file.mediaType });
+        }
+      }
+      onSend(text, images.length > 0 ? images : undefined);
     },
     [onSend, isRunning, disabled],
   );
@@ -205,8 +248,9 @@ function ChatComposerInner({
         setButtonMenuOpen(false);
       }
     }}>
+      <AttachmentPreviewStrip />
       <PopoverAnchor asChild>
-        <PromptInput onSubmit={handleSubmit}>
+        <PromptInput onSubmit={handleSubmit} accept="image/*" multiple>
           <PromptInputBody>
             <PromptInputTextarea
               placeholder={disabled ? "Session disabled" : "Send a message..."}

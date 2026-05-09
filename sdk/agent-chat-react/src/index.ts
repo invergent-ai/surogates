@@ -22,6 +22,7 @@ export type {
   AgentChatClarifyQuestion,
   AgentChatErrorCategory,
   AgentChatErrorInfo,
+  AgentChatImageAttachment,
   AgentChatEventStream,
   AgentChatEventType,
   AgentChatExpertFeedbackRating,

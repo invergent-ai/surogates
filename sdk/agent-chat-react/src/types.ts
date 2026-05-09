@@ -4,6 +4,13 @@ export type AgentChatMessageStatus = "complete" | "streaming" | "error";
 
 export type AgentChatSystemKind = "skill_invoked" | "artifact" | "error";
 
+export interface AgentChatImageAttachment {
+  /** data: URL (data:image/png;base64,...) or raw base64 string */
+  data: string;
+  /** MIME type, e.g. "image/png", "image/jpeg" */
+  mimeType?: string;
+}
+
 export interface AgentChatMessage {
   id: string;
   role: AgentChatRole;
@@ -15,6 +22,7 @@ export interface AgentChatMessage {
   systemKind?: AgentChatSystemKind;
   systemMeta?: Record<string, unknown>;
   errorInfo?: AgentChatErrorInfo;
+  images?: AgentChatImageAttachment[];
 }
 
 export interface AgentChatToolCallInfo {
@@ -298,6 +306,7 @@ export interface AgentChatAdapter {
   sendMessage(input: {
     sessionId: string;
     content: string;
+    images?: AgentChatImageAttachment[];
   }): Promise<{ eventId?: number; status?: string }>;
   pauseSession(input: { sessionId: string }): Promise<void>;
   retrySession(input: { sessionId: string }): Promise<AgentChatSession>;
@@ -360,7 +369,7 @@ export interface AgentChatRuntimeApi {
   tokenUsage: AgentChatTokenUsage;
   retryIndicator: AgentChatRetryIndicator | null;
   workspaceRefreshKey: number;
-  send(content: string): Promise<void>;
+  send(content: string, images?: AgentChatImageAttachment[]): Promise<void>;
   stop(): Promise<void>;
   retry(): Promise<void>;
   markSending(content: string): void;

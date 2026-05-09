@@ -41,9 +41,16 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
   },
 
   async sendMessage(input) {
+    const images = input.images?.length
+      ? input.images.map((img) => ({
+          data: img.data,
+          mime_type: img.mimeType ?? "image/png",
+        }))
+      : undefined;
     const response = await sessionsApi.sendMessage(
       input.sessionId,
       input.content,
+      images,
     );
     return { eventId: response.event_id, status: response.status };
   },

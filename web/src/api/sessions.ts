@@ -53,13 +53,18 @@ export async function createSession(
 export async function sendMessage(
   sessionId: string,
   content: string,
+  images?: { data: string; mime_type: string }[],
 ): Promise<{ event_id: number; status: string }> {
+  const payload: Record<string, unknown> = { content };
+  if (images?.length) {
+    payload.images = images;
+  }
   const response = await authFetch(
     `/api/v1/sessions/${sessionId}/messages`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify(payload),
     },
   );
   if (!response.ok) throw new Error("Failed to send message");

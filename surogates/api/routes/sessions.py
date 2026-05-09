@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 from uuid import UUID, uuid4
 
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text as _sql_text
 
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
@@ -49,8 +50,53 @@ class CreateSessionRequest(BaseModel):
     config: dict = Field(default_factory=dict)
 
 
+_ALLOWED_IMAGE_MIMES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+_MAX_IMAGES_PER_MESSAGE = 5
+_MAX_IMAGE_BYTES = 20_000_000  # 20 MB raw
+
+
+class ImageBlock(BaseModel):
+    """A single image attachment on a user message."""
+
+    data: str  # base64-encoded or data: URL
+    mime_type: str = "image/png"
+
+    @field_validator("mime_type")
+    @classmethod
+    def _validate_mime(cls, v: str) -> str:
+        if v not in _ALLOWED_IMAGE_MIMES:
+            raise ValueError(f"Unsupported image type: {v}")
+        return v
+
+
 class SendMessageRequest(BaseModel):
     content: str
+    images: list[ImageBlock] | None = None
+
+    @field_validator("images")
+    @classmethod
+    def _validate_images(
+        cls, v: list[ImageBlock] | None,
+    ) -> list[ImageBlock] | None:
+        if not v:
+            return v
+        if len(v) > _MAX_IMAGES_PER_MESSAGE:
+            raise ValueError(
+                f"Maximum {_MAX_IMAGES_PER_MESSAGE} images per message",
+            )
+        for img in v:
+            raw = img.data
+            if raw.startswith("data:"):
+                _, _, raw = raw.partition(",")
+            try:
+                decoded = base64.b64decode(raw, validate=True)
+            except Exception:
+                raise ValueError("Invalid base64 image data")
+            if len(decoded) > _MAX_IMAGE_BYTES:
+                raise ValueError(
+                    f"Image exceeds {_MAX_IMAGE_BYTES // 1_000_000}MB limit",
+                )
+        return v
 
 
 class SendMessageResponse(BaseModel):
@@ -200,6 +246,13 @@ async def _create_session(
     if service_account_id is not None:
         config["service_account_id"] = str(service_account_id)
 
+    # Expose vision capability so clients can toggle attachment UI.
+    from surogates.harness.model_metadata import get_model_info
+    model_info = get_model_info(model)
+    config["supports_vision"] = (
+        model_info.supports_vision if model_info is not None else False
+    )
+
     # Each agent gets one bucket; each session owns a path in it.
     session_id = uuid4()
     storage_bucket = agent_session_bucket(settings.storage.bucket)
@@ -339,10 +392,21 @@ async def send_message(
         )
 
     # Emit the user message event.
+    logger.info(
+        "send_message: content_len=%d images=%s",
+        len(body.content),
+        len(body.images) if body.images else 0,
+    )
+    event_data: dict = {"content": body.content}
+    if body.images:
+        event_data["images"] = [
+            {"data": img.data, "mime_type": img.mime_type}
+            for img in body.images
+        ]
     event_id = await store.emit_event(
         session_id,
         EventType.USER_MESSAGE,
-        {"content": body.content},
+        event_data,
     )
 
     # Enqueue the session for processing on its agent's dedicated queue.

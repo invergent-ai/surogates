@@ -65,7 +65,7 @@ export function AgentChat({
               messages={runtime.messages}
               isRunning={runtime.isRunning}
               isLoadingHistory={runtime.isLoadingHistory}
-              onSend={(content) => void runtime.send(content)}
+              onSend={(content, images) => void runtime.send(content, images)}
               onStop={() => void runtime.stop()}
               onRetry={runtime.retry}
               onFileSelect={handleFileSelect}

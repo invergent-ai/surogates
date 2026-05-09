@@ -40,6 +40,7 @@ import { cn } from "../../lib/utils";
 import { AlertTriangle, ChevronDown, ChevronRight, MessageSquareIcon } from "lucide-react";
 import { useState } from "react";
 import type {
+  AgentChatImageAttachment,
   ChatMessage as ChatMessageType,
   RetryIndicator,
   ToolCallInfo,
@@ -52,7 +53,7 @@ interface ChatThreadProps {
   messages: ChatMessageType[];
   isRunning: boolean;
   isLoadingHistory?: boolean;
-  onSend: (text: string) => void;
+  onSend: (text: string, images?: AgentChatImageAttachment[]) => void;
   onStop: () => void;
   onFileSelect?: (path: string) => void;
   disabled?: boolean;

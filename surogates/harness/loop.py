@@ -901,6 +901,35 @@ class AgentHarness:
                 # reasoning context with signature fields.
                 api_messages.append(api_msg)
 
+            # Strip image content blocks when the model lacks vision support.
+            from surogates.harness.model_metadata import get_model_info
+            _mi = get_model_info(model_id)
+            _has_images = any(
+                isinstance(m.get("content"), list) for m in api_messages
+            )
+            if _has_images:
+                logger.info(
+                    "Vision gate: model=%s info=%s supports_vision=%s",
+                    model_id,
+                    _mi is not None,
+                    _mi.supports_vision if _mi else "N/A",
+                )
+            if _mi is not None and not _mi.supports_vision:
+                for _msg in api_messages:
+                    _content = _msg.get("content")
+                    if isinstance(_content, list):
+                        _text_parts = [
+                            p for p in _content
+                            if p.get("type") != "image_url"
+                        ]
+                        if (
+                            len(_text_parts) == 1
+                            and _text_parts[0].get("type") == "text"
+                        ):
+                            _msg["content"] = _text_parts[0]["text"]
+                        else:
+                            _msg["content"] = _text_parts
+
             # Developer role swap for models that prefer it (e.g. GPT-5, Codex).
             api_messages = apply_developer_role(api_messages, model_id)
 
@@ -2198,7 +2227,27 @@ class AgentHarness:
 
             if etype == EventType.USER_MESSAGE.value:
                 content = event.data.get("content", "")
-                messages.append({"role": "user", "content": content})
+                images = event.data.get("images")
+                if images:
+                    logger.info(
+                        "User message has %d image(s), first mime: %s",
+                        len(images),
+                        images[0].get("mime_type", "?"),
+                    )
+                if images:
+                    blocks: list[dict] = [{"type": "text", "text": content}]
+                    for img in images:
+                        data_url = img["data"]
+                        if not data_url.startswith("data:"):
+                            mime = img.get("mime_type", "image/png")
+                            data_url = f"data:{mime};base64,{data_url}"
+                        blocks.append({
+                            "type": "image_url",
+                            "image_url": {"url": data_url, "detail": "auto"},
+                        })
+                    messages.append({"role": "user", "content": blocks})
+                else:
+                    messages.append({"role": "user", "content": content})
 
             elif etype == EventType.LLM_RESPONSE.value:
                 stored_message = event.data.get("message")
@@ -2354,6 +2403,25 @@ class AgentHarness:
                 api_msg.pop("finish_reason", None)
                 api_msg.pop("_thinking_prefill", None)
                 api_messages.append(api_msg)
+            # Strip image blocks for non-vision models (same as main loop).
+            from surogates.harness.model_metadata import get_model_info
+            _mi = get_model_info(model_id)
+            if _mi is not None and not _mi.supports_vision:
+                for _msg in api_messages:
+                    _content = _msg.get("content")
+                    if isinstance(_content, list):
+                        _text_parts = [
+                            p for p in _content
+                            if p.get("type") != "image_url"
+                        ]
+                        if (
+                            len(_text_parts) == 1
+                            and _text_parts[0].get("type") == "text"
+                        ):
+                            _msg["content"] = _text_parts[0]["text"]
+                        else:
+                            _msg["content"] = _text_parts
+
             api_messages = apply_developer_role(api_messages, model_id)
 
             create_kwargs: dict[str, Any] = {

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AgentChatAdapter,
   AgentChatEventStream,
+  AgentChatImageAttachment,
   AgentChatRuntimeApi,
   AgentChatState,
 } from "../types";
@@ -146,23 +147,27 @@ export function useAgentChatRuntime({
     };
   }, [adapter, clearReconnectTimer, closeStream, sessionId]);
 
-  const markSending = useCallback((content: string) => {
-    setState((prev) => ({
-      ...prev,
-      terminal: false,
-      isRunning: true,
-      messages: [
-        ...prev.messages,
-        {
-          id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          role: "user",
-          content,
-          createdAt: new Date(),
-          status: "complete",
-        },
-      ],
-    }));
-  }, []);
+  const markSending = useCallback(
+    (content: string, images?: AgentChatImageAttachment[]) => {
+      setState((prev) => ({
+        ...prev,
+        terminal: false,
+        isRunning: true,
+        messages: [
+          ...prev.messages,
+          {
+            id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            role: "user",
+            content,
+            createdAt: new Date(),
+            status: "complete",
+            images: images?.length ? images : undefined,
+          },
+        ],
+      }));
+    },
+    [],
+  );
 
   const markSendError = useCallback((errorText: string) => {
     setState((prev) => {
@@ -216,14 +221,14 @@ export function useAgentChatRuntime({
   }, []);
 
   const send = useCallback(
-    async (content: string) => {
-      markSending(content);
+    async (content: string, images?: AgentChatImageAttachment[]) => {
+      markSending(content, images);
 
       if (!sessionId) {
         try {
           const session = await adapter.createSession({ agentId });
           onSessionChange?.(session.id);
-          await adapter.sendMessage({ sessionId: session.id, content });
+          await adapter.sendMessage({ sessionId: session.id, content, images });
         } catch (error) {
           markSendError(error instanceof Error ? error.message : "send failed");
           throw error;
@@ -232,7 +237,7 @@ export function useAgentChatRuntime({
       }
 
       try {
-        await adapter.sendMessage({ sessionId, content });
+        await adapter.sendMessage({ sessionId, content, images });
       } catch (error) {
         markSendError(error instanceof Error ? error.message : "send failed");
         throw error;

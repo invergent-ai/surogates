@@ -29,7 +29,21 @@ export const ChatMessage = memo(function ChatMessage({
   if (message.role === "user") {
     return (
       <Message from="user">
-        <MessageContent>{message.content}</MessageContent>
+        <MessageContent>
+          {message.content}
+          {message.images && message.images.length > 0 && (
+            <div className="flex flex-wrap gap-2 mt-2">
+              {message.images.map((img, i) => (
+                <img
+                  key={i}
+                  src={img.data}
+                  alt="Attached"
+                  className="max-w-64 max-h-48 rounded-lg border border-border object-contain"
+                />
+              ))}
+            </div>
+          )}
+        </MessageContent>
       </Message>
     );
   }
