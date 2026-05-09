@@ -2499,7 +2499,7 @@ class AgentHarness:
                     cost_usd=cost,
                 )
 
-            event_id = await self._store.emit_event(
+            await self._store.emit_event(
                 session.id,
                 EventType.LLM_RESPONSE,
                 {
@@ -2683,7 +2683,6 @@ class AgentHarness:
         result as an assistant message so the user sees what happened.
         """
         original_count = len(messages)
-        original_tokens = self._compressor.last_prompt_tokens or 0
 
         # Remove the /compress message itself — it's not real conversation.
         messages = [m for m in messages if not (

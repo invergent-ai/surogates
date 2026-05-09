@@ -1444,7 +1444,7 @@ git commit -m "feat: add deterministic loop slash command"
 - Modify: `docs/index.md`
 - Test: existing scheduled/session/tool suites.
 
-- [ ] **Step 1: Document scheduled sessions**
+- [x] **Step 1: Document scheduled sessions**
 
 Add a section to `docs/background-jobs/index.md`:
 
@@ -1462,7 +1462,7 @@ Loops default to `10m` and expire after 3 days. Use `/loop list` and
 `/loop cancel <id>` to manage them.
 ```
 
-- [ ] **Step 2: Run focused verification**
+- [x] **Step 2: Run focused verification**
 
 Run:
 
@@ -1472,7 +1472,7 @@ uv run pytest tests/test_scheduled_schedule.py tests/test_scheduled_prompt_guard
 
 Expected: all tests pass.
 
-- [ ] **Step 3: Run regression verification**
+- [x] **Step 3: Run regression verification**
 
 Run:
 
@@ -1482,7 +1482,7 @@ uv run pytest tests/test_tools.py tests/integration/test_api.py::test_create_ses
 
 Expected: all tests pass.
 
-- [ ] **Step 4: Commit docs and final verification**
+- [x] **Step 4: Commit docs and final verification**
 
 ```bash
 git add docs/background-jobs/index.md docs/index.md

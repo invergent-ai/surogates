@@ -126,6 +126,8 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 
 ### [15. Background Jobs](background-jobs/index.md)
 - `cleanup_sessions` -- orphaned session prefix sweep
+- Scheduled sessions -- `/loop` recurring prompts and per-agent DB-backed ticking
+- `reset_idle_sessions` -- idle session reset with memory flush
 - `training_collector` -- expert training data export
 
 ### [16. Operations](operations/index.md)
