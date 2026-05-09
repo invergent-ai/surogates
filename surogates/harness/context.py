@@ -16,6 +16,7 @@ Improvements over v1:
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Optional
 
@@ -374,11 +375,17 @@ class ContextCompressor:
 
 ## Progress
 ### Done
-[Completed work — include specific file paths, commands run, results obtained]
+[Completed steps. Format: numbered list, one step per line, `N. <description> [Done]`. Use existing indices when updating from a previous summary; never renumber.
+Example:
+1. Wire OIDC discovery into auth middleware [Done]]
 ### In Progress
-[Work currently underway]
+[Steps currently underway. Format: numbered list, `N. <description> [In Progress]`. Use existing indices when updating from a previous summary; never renumber.
+Example:
+2. Run integration tests against Auth0 staging [In Progress]]
 ### Blocked
-[Any blockers or issues encountered]
+[Steps blocked on external action. Format: numbered list, `N. <description> [Blocked: <reason>]`. Use existing indices when updating from a previous summary; never renumber.
+Example:
+3. Deploy to staging [Blocked: missing AUTH_SECRET env var]]
 
 ## Key Decisions
 [Important technical decisions and why they were made]
@@ -393,7 +400,9 @@ class ContextCompressor:
 [Files read, modified, or created — with brief note on each]
 
 ## Remaining Work
-[What remains to be done — framed as context, not instructions]
+[Future steps not yet started. Format: numbered list, `N. <description>`. Shares the SAME index space as ### Done / ### In Progress / ### Blocked. New steps get the next free index in the shared sequence.
+Example:
+4. Add cache invalidation on token refresh]
 
 ## Critical Context
 [Any specific values, error messages, configuration details, or data that would be lost without explicit preservation]
@@ -402,6 +411,8 @@ class ContextCompressor:
 [Which tools were used, how they were used effectively, and any tool-specific discoveries]
 
 Target ~{summary_budget} tokens. Be specific — include file paths, command outputs, error messages, and concrete values rather than vague descriptions.
+
+INDEX RULES for the four plan sections (### Done, ### In Progress, ### Blocked, ## Remaining Work): they share ONE integer index space. Each step has a stable index. When a step's status changes (e.g. In Progress → Done), MOVE it between sections KEEPING its index. New steps append with the next free index. NEVER renumber an existing step.
 
 Write only the summary body. Do not include any preamble or prefix."""
 
@@ -419,6 +430,8 @@ NEW TURNS TO INCORPORATE:
 {content_to_summarize}
 
 Update the summary using this exact structure. PRESERVE all existing information that is still relevant. ADD new progress. Move items from "In Progress" to "Done" when completed. Move answered questions to "Resolved Questions". Remove information only if it is clearly obsolete.
+
+CRITICAL — PLAN STEP INDEX PRESERVATION: Preserve every step index that appears in the four plan sections of PREVIOUS SUMMARY (### Done, ### In Progress, ### Blocked, ## Remaining Work). When a step's status changes, MOVE it between sections KEEPING its existing index. NEVER renumber an existing step. Append new steps with the next free index after the highest index in PREVIOUS SUMMARY. The index of a step is its identity — changing it means the next assistant will treat it as a new step and may re-do completed work.
 
 {_template_sections}"""
         else:
@@ -451,6 +464,18 @@ Use this exact structure:
             if not isinstance(content, str):
                 content = str(content) if content else ""
             summary = content.strip()
+            # Fail-soft normalisation: if the summariser produced free-prose
+            # plan sections, rewrite them as numbered lists so step identity
+            # survives across compactions.
+            try:
+                summary = self._normalize_plan_sections(
+                    summary, previous_summary=self._previous_summary,
+                )
+            except Exception:
+                logger.warning(
+                    "Plan-section normaliser failed; accepting summary as-is.",
+                    exc_info=True,
+                )
             # Store for iterative updates on next compaction.
             self._previous_summary = summary
             self._summary_failure_cooldown_until = 0.0
@@ -464,6 +489,128 @@ Use this exact structure:
                 _SUMMARY_FAILURE_COOLDOWN_SECONDS,
             )
             return None
+
+    # ------------------------------------------------------------------
+    # Plan-section index normalisation
+    # ------------------------------------------------------------------
+    #
+    # The four plan sections (### Done, ### In Progress, ### Blocked,
+    # ## Remaining Work) share a single integer index space.  The
+    # summariser is prompted to preserve indices across compactions but
+    # smaller models (gpt-4o-mini, surogate) routinely produce free-prose
+    # bodies under these headers.  Free prose loses step identity:
+    # post-compaction the agent cannot tell "step 3: done" from
+    # "step 3: still pending", and re-does completed work.
+    #
+    # ``_normalize_plan_sections`` is a fail-soft post-pass: it walks the
+    # summary line-by-line and ensures every non-empty content line under
+    # one of the four plan headers begins with ``N. ``.  Existing indices
+    # are preserved verbatim.  When a previous summary is supplied (the
+    # iterative path), indices observed there reserve the corresponding
+    # numbers so newly-assigned indices don't collide.
+
+    _PLAN_HEADERS_INDENT = {
+        "### done": "[Done]",
+        "### in progress": "[In Progress]",
+        "### blocked": "[Blocked]",
+        "## remaining work": "",
+    }
+    _ANY_HEADER_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
+    _INDEXED_LINE_RE = re.compile(r"^\s*(\d+)\.\s+")
+    _BULLET_PREFIX_RE = re.compile(r"^[-*•]\s+")
+    _PLACEHOLDER_LINE_RE = re.compile(r"^\s*[\[\(]")
+
+    @classmethod
+    def _normalize_plan_sections(
+        cls, summary: str, previous_summary: str | None = None,
+    ) -> str:
+        """Rewrite plan sections so every content line is ``N. ...``.
+
+        Already-indexed lines are preserved verbatim and their indices are
+        reserved.  Bullet markers are stripped.  Empty lines and bracketed
+        placeholder/example lines pass through unchanged.
+
+        When ``previous_summary`` is supplied, indices observed in any of its
+        plan sections reserve those numbers so a new index does not collide
+        with one the previous summary still owns.
+        """
+
+        used: set[int] = set()
+        if previous_summary:
+            for line in previous_summary.splitlines():
+                m = cls._INDEXED_LINE_RE.match(line)
+                if m:
+                    try:
+                        used.add(int(m.group(1)))
+                    except ValueError:
+                        pass
+
+        next_index = max(used, default=0) + 1
+
+        def _take_index() -> int:
+            nonlocal next_index
+            while next_index in used:
+                next_index += 1
+            chosen = next_index
+            used.add(chosen)
+            next_index += 1
+            return chosen
+
+        out: list[str] = []
+        current_section: str | None = None  # one of the keys of _PLAN_HEADERS_INDENT, lowercased
+
+        for raw in summary.splitlines():
+            stripped = raw.strip()
+
+            if cls._ANY_HEADER_RE.match(raw):
+                normalised = stripped.lower()
+                current_section = (
+                    normalised if normalised in cls._PLAN_HEADERS_INDENT else None
+                )
+                out.append(raw)
+                continue
+
+            if current_section is None or not stripped:
+                out.append(raw)
+                continue
+
+            # Pass example / placeholder lines through unchanged so they
+            # don't get re-indexed by the normaliser.
+            if cls._PLACEHOLDER_LINE_RE.match(stripped):
+                out.append(raw)
+                continue
+
+            indexed = cls._INDEXED_LINE_RE.match(stripped)
+            if indexed:
+                try:
+                    used.add(int(indexed.group(1)))
+                except ValueError:
+                    pass
+                out.append(raw)
+                continue
+
+            # Strip leading bullet/asterisk markers.
+            cleaned = cls._BULLET_PREFIX_RE.sub("", stripped)
+            if not cleaned:
+                out.append(raw)
+                continue
+
+            # Skip lines that look like sub-headers/separators we missed.
+            if cleaned.startswith("`") and cleaned.endswith("`"):
+                out.append(raw)
+                continue
+
+            tag = cls._PLAN_HEADERS_INDENT[current_section]
+            # If the model already emitted a status tag in the prose, don't
+            # double-tag.
+            if tag and tag.lower() in cleaned.lower():
+                tag = ""
+            new_line = f"{_take_index()}. {cleaned}"
+            if tag:
+                new_line = f"{new_line} {tag}"
+            out.append(new_line)
+
+        return "\n".join(out)
 
     @staticmethod
     def _with_summary_prefix(summary: str) -> str:
