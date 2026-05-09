@@ -266,19 +266,19 @@ New or expanded tests:
 - Modify: `surogates/tools/registry.py`
 - Modify: `surogates/tools/schema_sanitizer.py`
 
-- [ ] **Step 1: Run focused Tier 1 suite**
+- [x] **Step 1: Run focused Tier 1 suite**
   Run: `pytest tests/test_redact.py tests/test_schema_sanitizer.py tests/test_stream_scrubbers.py tests/test_tool_arg_repair.py tests/test_error_classifier_tier1.py tests/test_stream_stall.py tests/test_midstream_retry.py tests/test_tool_guardrails.py -q`
   Expected: PASS.
 
-- [ ] **Step 2: Run adjacent harness/tool suite**
+- [x] **Step 2: Run adjacent harness/tool suite**
   Run: `pytest tests/test_error_classify.py tests/test_harness_resilience.py tests/test_retry.py tests/test_streaming_executor.py tests/test_tool_schemas.py tests/test_coerce.py tests/test_credential_pool.py tests/test_sanitize.py -q`
   Expected: PASS.
 
-- [ ] **Step 3: Run static diff checks**
+- [x] **Step 3: Run static diff checks**
   Run: `git diff --check`
   Expected: no whitespace errors.
 
-- [ ] **Step 4: Confirm Tier 1 coverage**
+- [x] **Step 4: Confirm Tier 1 coverage**
   Check each Tier 1 bullet in `docs/architecture/hermes-drift-analysis.md` against the tests above:
   `error_classifier.py`, `redact.py`, `tool_guardrails.py`, `schema_sanitizer.py`, streaming think/context scrubbers, mid-stream retry with tool call in flight, stale-stream timeout scaling, and JSON tool-arg repair all have a targeted test and a Surogates integration point.
 
