@@ -203,23 +203,23 @@ New or expanded tests:
 - Test: `tests/test_stream_stall.py`
 - Test: `tests/test_midstream_retry.py`
 
-- [ ] **Step 1: Write failing timeout and retry tests**
+- [x] **Step 1: Write failing timeout and retry tests**
   Cover default 180s stale timeout, 240s+ timeout for medium contexts, 300s+ timeout for >100k tokens, disabled stale timeout for local endpoints, and silent retry when a transient stream error occurs after at least one tool-call name has streamed but before complete arguments arrive.
 
-- [ ] **Step 2: Run tests to verify failure**
+- [x] **Step 2: Run tests to verify failure**
   Run: `pytest tests/test_stream_stall.py tests/test_midstream_retry.py -q`
   Expected: FAIL because timeout is a constant and partial tool-call stream drops end the call.
 
-- [ ] **Step 3: Add timeout policy**
+- [x] **Step 3: Add timeout policy**
   Add `compute_stream_stale_timeout(messages, base_url, model, explicit_timeout=None) -> float` in `llm_call.py` or `model_metadata.py`. Return `float("inf")` for local endpoints when the timeout is implicit, at least 300 seconds for requests above 100k estimated tokens, at least 240 seconds for large-but-under-100k requests, and the explicit configured timeout unchanged.
 
-- [ ] **Step 4: Track partial tool names**
+- [x] **Step 4: Track partial tool names**
   During streaming accumulation, maintain `partial_tool_names` whenever a tool name is present but arguments are incomplete. Return it in `usage_data` together with any stream exception classification.
 
-- [ ] **Step 5: Implement silent retry**
+- [x] **Step 5: Implement silent retry**
   In `call_llm_with_retry`, when the classifier marks a stream failure retryable and `partial_tool_names` is non-empty, close and replace the request client, emit a reconnect `llm.delta`, discard any streaming executor work for that response, and retry without appending the broken assistant message.
 
-- [ ] **Step 6: Verify stream resilience**
+- [x] **Step 6: Verify stream resilience**
   Run: `pytest tests/test_stream_stall.py tests/test_midstream_retry.py tests/test_streaming_executor.py -q`
   Expected: PASS, with partial tool-call stream drops retried silently and local endpoints no longer killed by the 180s default.
 

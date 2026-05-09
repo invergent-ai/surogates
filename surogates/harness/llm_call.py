@@ -18,6 +18,7 @@ import logging
 import os
 import time
 from typing import TYPE_CHECKING, Any, Callable
+from urllib.parse import urlparse
 
 from surogates.harness.message_utils import (
     message_to_dict,
@@ -54,6 +55,7 @@ MAX_LLM_RETRIES: int = 3
 # Stale stream detection timeout (seconds).  If no real streaming chunk
 # arrives within this window the stream is considered stale and will be
 # cancelled.  Configurable via ``SUROGATES_STREAM_STALE_TIMEOUT`` env var.
+STREAM_STALE_TIMEOUT_EXPLICIT: bool = "SUROGATES_STREAM_STALE_TIMEOUT" in os.environ
 STREAM_STALE_TIMEOUT: float = float(
     os.environ.get("SUROGATES_STREAM_STALE_TIMEOUT", "180.0")
 )
@@ -64,6 +66,101 @@ STREAM_STALE_TIMEOUT: float = float(
 # feel responsive; long enough that it doesn't burn CPU on a healthy
 # stream.
 STREAM_CHUNK_POLL_INTERVAL: float = 1.0
+
+_LOCAL_STREAM_HOSTS: frozenset[str] = frozenset({
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "0.0.0.0",
+    "host.docker.internal",
+})
+
+
+class PartialToolCallStreamError(ConnectionError):
+    """A retryable stream drop after tool names but before complete args."""
+
+    def __init__(self, partial_tool_names: list[str], original: BaseException) -> None:
+        self.partial_tool_names = partial_tool_names
+        self.original = original
+        names = ", ".join(partial_tool_names)
+        super().__init__(f"network connection lost after partial tool call: {names}")
+
+
+def compute_stream_stale_timeout(
+    messages: list[dict[str, Any]] | None,
+    *,
+    base_url: str = "",
+    model: str = "",
+    explicit_timeout: float | None = None,
+) -> float:
+    """Return the stale-stream watchdog timeout for one request."""
+    if explicit_timeout is not None:
+        return float(explicit_timeout)
+
+    if not STREAM_STALE_TIMEOUT_EXPLICIT and _is_local_base_url(base_url):
+        return float("inf")
+
+    approx_tokens = _estimate_message_tokens(messages or [])
+    timeout = STREAM_STALE_TIMEOUT
+    if approx_tokens > 100_000:
+        return max(timeout, 300.0)
+    if approx_tokens > 50_000:
+        return max(timeout, 240.0)
+    return timeout
+
+
+def _is_local_base_url(base_url: str) -> bool:
+    if not base_url:
+        return False
+    parsed = urlparse(base_url)
+    host = parsed.hostname
+    if host is None and "://" not in base_url:
+        host = base_url.split("/", 1)[0].rsplit(":", 1)[0]
+    return (host or "").lower() in _LOCAL_STREAM_HOSTS
+
+
+def _estimate_message_tokens(messages: list[dict[str, Any]]) -> int:
+    chars = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        chars += len(_message_content_as_text(message.get("content", "")))
+    return chars // 4
+
+
+def _message_content_as_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    return str(content) if content is not None else ""
+
+
+def _partial_tool_names_from_accumulator(
+    tool_calls_acc: dict[int, dict[str, Any]],
+    *,
+    treat_empty_args_as_partial: bool = False,
+) -> list[str]:
+    partial_tool_names: list[str] = []
+    for slot in sorted(tool_calls_acc):
+        entry = tool_calls_acc[slot]
+        fn = entry.get("function", {})
+        name = fn.get("name", "")
+        arguments = fn.get("arguments", "")
+        if name and (
+            tool_call_arguments_look_incomplete(arguments)
+            or (treat_empty_args_as_partial and not arguments)
+        ):
+            partial_tool_names.append(name)
+    return partial_tool_names
 
 # ---------------------------------------------------------------------------
 # Developer role routing
@@ -232,6 +329,9 @@ async def call_llm_with_retry(
     compress_context: Callable[..., Any] | None = None,
     context_compressor: Any | None = None,
     on_tool_call_complete: Callable[[dict[str, Any]], None] | None = None,
+    on_stream_retry: (
+        Callable[[], Callable[[dict[str, Any]], None] | None] | None
+    ) = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Call the LLM with retry, backoff, rate-limit handling, and credential rotation.
 
@@ -266,6 +366,7 @@ async def call_llm_with_retry(
     thinking_sig_retry_attempted = False
     compression_attempts = 0
     max_compression_attempts = 3
+    active_on_tool_call_complete = on_tool_call_complete
 
     # Pre-call sanitization: clean surrogates and fix orphaned tool pairs.
     if "messages" in create_kwargs:
@@ -283,7 +384,7 @@ async def call_llm_with_retry(
                     store=store,
                     interrupt_check=interrupt_check,
                     set_streaming_enabled=set_streaming_enabled,
-                    on_tool_call_complete=on_tool_call_complete,
+                    on_tool_call_complete=active_on_tool_call_complete,
                 )
             else:
                 result = await call_llm_non_streaming(
@@ -354,6 +455,32 @@ async def call_llm_with_retry(
                 context_length=context_window,
                 num_messages=len(api_messages),
             )
+
+            if isinstance(exc, PartialToolCallStreamError):
+                if not classified.retryable or attempt >= MAX_LLM_RETRIES:
+                    raise
+                await store.emit_event(
+                    session.id,
+                    EventType.LLM_DELTA,
+                    {
+                        "iteration": iteration,
+                        "reconnect": True,
+                        "partial_tool_names": exc.partial_tool_names,
+                    },
+                )
+                if on_stream_retry is not None:
+                    active_on_tool_call_complete = on_stream_retry()
+                wait = extract_retry_after(exc) or jittered_backoff(attempt)
+                logger.warning(
+                    "Stream dropped after partial tool call(s) %s "
+                    "(attempt %d/%d). Retrying in %.1fs",
+                    exc.partial_tool_names,
+                    attempt,
+                    MAX_LLM_RETRIES,
+                    wait,
+                )
+                await interruptible_sleep(wait, interrupt_check)
+                continue
 
             # ── Thinking block signature recovery ──────────────────
             # Anthropic signs thinking blocks against the full turn
@@ -718,6 +845,8 @@ async def call_llm_streaming(
             interrupt_check=interrupt_check,
             on_tool_call_complete=on_tool_call_complete,
         )
+    except PartialToolCallStreamError:
+        raise
     except Exception as exc:
         logger.warning(
             "Streaming failed for session %s (iteration %d), "
@@ -766,6 +895,20 @@ async def call_llm_streaming_inner(
     # Inject prompt cache extra_body for cacheable models.
     final_kwargs = dict(create_kwargs)
     model_id = final_kwargs.get("model", "")
+    base_url = str(
+        getattr(llm_client, "base_url", "")
+        or final_kwargs.get("base_url", "")
+        or ""
+    )
+    explicit_stale_timeout = (
+        STREAM_STALE_TIMEOUT if STREAM_STALE_TIMEOUT_EXPLICIT else None
+    )
+    stale_timeout = compute_stream_stale_timeout(
+        final_kwargs.get("messages", []),
+        base_url=base_url,
+        model=model_id,
+        explicit_timeout=explicit_stale_timeout,
+    )
     cache_extra = build_cache_extra_body(model_id)
     if cache_extra is not None:
         existing_extra = final_kwargs.get("extra_body") or {}
@@ -834,7 +977,8 @@ async def call_llm_streaming_inner(
             pass
 
     # Watchdog: wakes up every ``STREAM_CHUNK_POLL_INTERVAL`` to check
-    # whether the stream has gone silent past ``STREAM_STALE_TIMEOUT``
+    # whether the stream has gone silent past the request-specific
+    # stale timeout
     # or whether the caller asked us to interrupt.  Uses a plain
     # ``asyncio.Event`` to signal the main ``async for`` that it should
     # stop -- closing the response forces the iterator to raise, which
@@ -857,12 +1001,12 @@ async def call_llm_streaming_inner(
                 pass
 
             now = time.monotonic()
-            if (now - last_chunk_time) > STREAM_STALE_TIMEOUT:
+            if (now - last_chunk_time) > stale_timeout:
                 logger.warning(
                     "Stream stale for %.0fs (threshold %.0fs) — no chunks "
                     "received. Cancelling stream for session %s (iteration %d).",
                     now - last_chunk_time,
-                    STREAM_STALE_TIMEOUT,
+                    stale_timeout,
                     session.id,
                     iteration,
                 )
@@ -1016,12 +1160,19 @@ async def call_llm_streaming_inner(
                                     _notified_slots.add(prev_slot)
                                     on_tool_call_complete(prev_entry)
                         _highest_known_slot = idx
-    except Exception:
+    except Exception as exc:
         # The watchdog closed the stream (stale or interrupt) -- the
         # SDK's iterator raises when the underlying response is closed
         # mid-read.  We swallow only the close-induced error; any other
         # exception propagates normally.
         if stop_reason is None:
+            partial_tool_names = _partial_tool_names_from_accumulator(
+                tool_calls_acc,
+                treat_empty_args_as_partial=True,
+            )
+            if partial_tool_names:
+                await _close_stream()
+                raise PartialToolCallStreamError(partial_tool_names, exc) from exc
             raise
         interrupted = True
     finally:
@@ -1047,15 +1198,7 @@ async def call_llm_streaming_inner(
             {"content": tail_delta, "iteration": iteration},
         )
 
-    partial_tool_names: list[str] = []
-    if finish_reason == "tool_calls":
-        for slot in sorted(tool_calls_acc):
-            entry = tool_calls_acc[slot]
-            fn = entry.get("function", {})
-            name = fn.get("name", "")
-            arguments = fn.get("arguments", "")
-            if name and tool_call_arguments_look_incomplete(arguments):
-                partial_tool_names.append(name)
+    partial_tool_names = _partial_tool_names_from_accumulator(tool_calls_acc)
 
     # Notify any remaining tool call slots that haven't been reported yet.
     # This covers the last tool call in the batch (no higher index follows)
@@ -1087,6 +1230,8 @@ async def call_llm_streaming_inner(
         "output_tokens": output_tokens,
         "finish_reason": "interrupted" if interrupted else (finish_reason or "stop"),
     }
+    if interrupted and stop_reason is not None:
+        usage_data["stream_error_reason"] = stop_reason
     if partial_tool_names:
         usage_data["partial_tool_call"] = True
         usage_data["partial_tool_names"] = partial_tool_names

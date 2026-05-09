@@ -16,7 +16,10 @@ from uuid import uuid4
 
 import pytest
 
-from surogates.harness.llm_call import call_llm_streaming_inner
+from surogates.harness.llm_call import (
+    call_llm_streaming_inner,
+    compute_stream_stale_timeout,
+)
 
 
 def _make_session() -> SimpleNamespace:
@@ -58,6 +61,72 @@ class _BlockingStream:
         self._close_event.set()
 
 
+def test_stream_stale_timeout_defaults_to_180_seconds(monkeypatch):
+    monkeypatch.setattr("surogates.harness.llm_call.STREAM_STALE_TIMEOUT", 180.0)
+    monkeypatch.setattr(
+        "surogates.harness.llm_call.STREAM_STALE_TIMEOUT_EXPLICIT",
+        False,
+    )
+
+    timeout = compute_stream_stale_timeout(
+        [{"role": "user", "content": "short request"}],
+        base_url="https://api.openai.com/v1",
+        model="gpt-4o",
+    )
+
+    assert timeout == 180.0
+
+
+def test_stream_stale_timeout_scales_for_medium_and_large_contexts(monkeypatch):
+    monkeypatch.setattr("surogates.harness.llm_call.STREAM_STALE_TIMEOUT", 180.0)
+    monkeypatch.setattr(
+        "surogates.harness.llm_call.STREAM_STALE_TIMEOUT_EXPLICIT",
+        False,
+    )
+
+    medium_timeout = compute_stream_stale_timeout(
+        [{"role": "user", "content": "x" * 240_000}],
+        base_url="https://api.openai.com/v1",
+        model="gpt-4o",
+    )
+    large_timeout = compute_stream_stale_timeout(
+        [{"role": "user", "content": "x" * 420_000}],
+        base_url="https://api.openai.com/v1",
+        model="gpt-4o",
+    )
+
+    assert medium_timeout >= 240.0
+    assert large_timeout >= 300.0
+
+
+def test_stream_stale_timeout_disabled_for_implicit_local_endpoint(monkeypatch):
+    monkeypatch.setattr("surogates.harness.llm_call.STREAM_STALE_TIMEOUT", 180.0)
+    monkeypatch.setattr(
+        "surogates.harness.llm_call.STREAM_STALE_TIMEOUT_EXPLICIT",
+        False,
+    )
+
+    timeout = compute_stream_stale_timeout(
+        [{"role": "user", "content": "x" * 420_000}],
+        base_url="http://localhost:11434/v1",
+        model="llama3",
+    )
+
+    assert timeout == float("inf")
+
+
+def test_stream_stale_timeout_respects_explicit_timeout_for_local_endpoint():
+    timeout = compute_stream_stale_timeout(
+        [{"role": "user", "content": "x" * 420_000}],
+        base_url="http://127.0.0.1:8080/v1",
+        model="llama3",
+        explicit_timeout=42.0,
+    )
+
+    assert timeout == 42.0
+
+
+@pytest.mark.asyncio
 async def test_watchdog_closes_stale_stream(monkeypatch):
     """After STREAM_STALE_TIMEOUT of silence, the watchdog aborts the stream."""
     # Very short thresholds so the test doesn't wait 3 minutes.
@@ -97,6 +166,7 @@ async def test_watchdog_closes_stale_stream(monkeypatch):
     assert msg["content"] == "Hello"  # prefix content preserved
 
 
+@pytest.mark.asyncio
 async def test_watchdog_cancelled_cleanly_on_normal_completion(monkeypatch):
     """On a healthy stream the watchdog must exit without interfering."""
     monkeypatch.setattr(
@@ -159,6 +229,7 @@ async def test_watchdog_cancelled_cleanly_on_normal_completion(monkeypatch):
     assert msg["content"] == "Hello world"
 
 
+@pytest.mark.asyncio
 async def test_streaming_scrubs_split_think_and_memory_context_tags(monkeypatch):
     """Split reasoning and memory-context tags are not emitted or persisted."""
     monkeypatch.setattr(
@@ -223,7 +294,3 @@ async def test_streaming_scrubs_split_think_and_memory_context_tags(monkeypatch)
     assert emitted == msg["content"]
     assert "hidden reasoning" not in emitted
     assert "hidden memory" not in emitted
-
-
-# Module-level marker so pytest-asyncio collects the module correctly.
-pytestmark = pytest.mark.asyncio

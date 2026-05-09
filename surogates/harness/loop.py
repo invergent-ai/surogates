@@ -912,8 +912,9 @@ class AgentHarness:
             # (side-effecting) tools stay queued until get_all_results().
             streaming_executor: StreamingToolExecutor | None = None
             on_tool_call_cb: Callable[[dict[str, Any]], None] | None = None
-            if self._streaming_enabled:
-                streaming_executor = StreamingToolExecutor(
+
+            def _make_streaming_executor() -> StreamingToolExecutor:
+                return StreamingToolExecutor(
                     session=session,
                     lease=lease,
                     store=self._store,
@@ -930,6 +931,16 @@ class AgentHarness:
                     saga=saga,
                     log_policy_allowed=self._log_policy_allowed,
                 )
+
+            def _reset_streaming_executor() -> Callable[[dict[str, Any]], None]:
+                nonlocal streaming_executor
+                if streaming_executor is not None:
+                    streaming_executor.discard()
+                streaming_executor = _make_streaming_executor()
+                return streaming_executor.add_tool
+
+            if self._streaming_enabled:
+                streaming_executor = _make_streaming_executor()
                 on_tool_call_cb = streaming_executor.add_tool
 
             try:
@@ -950,6 +961,10 @@ class AgentHarness:
                     ),
                     context_compressor=self._compressor,
                     on_tool_call_complete=on_tool_call_cb,
+                    on_stream_retry=(
+                        _reset_streaming_executor
+                        if self._streaming_enabled else None
+                    ),
                 )
             except Exception as exc:
                 logger.exception(
