@@ -149,6 +149,8 @@ stored in PostgreSQL, scoped to the current `org_id`, `user_id`, and `agent_id`,
 then picked up by that agent's worker and enqueued as fresh
 `channel="scheduled"` sessions.
 
+For user-facing slash commands, see [Commands](../commands/index.md).
+
 `cron_create` schedules a prompt or slash command.
 
 | Parameter | Type | Description |

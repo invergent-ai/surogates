@@ -155,7 +155,8 @@ session on the agent's Redis work queue.
 
 Users can create short-lived loops with `/loop [interval] <prompt>`.
 Loops default to `10m` and expire after 3 days. Use `/loop list` and
-`/loop cancel <id>` to manage them.
+`/loop cancel <id>` to manage them. See [Commands](../commands/index.md)
+for the full slash-command reference.
 
 ## `training_collector` -- Expert Training Data Export
 
