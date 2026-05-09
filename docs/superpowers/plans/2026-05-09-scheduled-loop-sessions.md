@@ -391,7 +391,7 @@ git commit -m "feat: add scheduled session parsing and prompt guard"
 - Modify: `surogates/db/observability.sql`
 - Test: `tests/integration/test_scheduled_store.py`
 
-- [ ] **Step 1: Write failing integration tests for CRUD and claims**
+- [x] **Step 1: Write failing integration tests for CRUD and claims**
 
 Create `tests/integration/test_scheduled_store.py`:
 
@@ -490,7 +490,7 @@ async def test_mark_run_created_advances_or_expires(session_factory):
     assert updated.run_count == 1
 ```
 
-- [ ] **Step 2: Add ORM model**
+- [x] **Step 2: Add ORM model**
 
 Modify `surogates/db/models.py` after `DeliveryCursor`:
 
@@ -548,7 +548,7 @@ class ScheduledSession(Base):
     )
 ```
 
-- [ ] **Step 3: Add Pydantic model and store**
+- [x] **Step 3: Add Pydantic model and store**
 
 Create `surogates/scheduled/models.py`:
 
@@ -616,7 +616,7 @@ RETURNING s.*
 
 Use `ParsedSchedule.next_after(datetime.now(timezone.utc))` to compute `next_run_at`.
 
-- [ ] **Step 4: Add idempotent SQL fixups**
+- [x] **Step 4: Add idempotent SQL fixups**
 
 Modify `surogates/db/observability.sql`:
 
@@ -632,11 +632,11 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_lock
     ON scheduled_sessions (locked_until);
 ```
 
-- [ ] **Step 5: Export model**
+- [x] **Step 5: Export model**
 
 Modify `surogates/db/__init__.py` to import and include `ScheduledSession`.
 
-- [ ] **Step 6: Verify Task 2**
+- [x] **Step 6: Verify Task 2**
 
 Run:
 
@@ -646,7 +646,7 @@ uv run pytest tests/integration/test_scheduled_store.py -q
 
 Expected: all tests pass.
 
-- [ ] **Step 7: Commit Task 2**
+- [x] **Step 7: Commit Task 2**
 
 ```bash
 git add surogates/db/models.py surogates/db/__init__.py surogates/db/observability.sql surogates/scheduled/models.py surogates/scheduled/store.py tests/integration/test_scheduled_store.py

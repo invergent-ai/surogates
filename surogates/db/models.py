@@ -10,6 +10,7 @@ from typing import Any, Optional
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    DateTime,
     ForeignKey,
     Index,
     Integer,
@@ -422,6 +423,60 @@ class DeliveryCursor(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scheduled Sessions
+# ---------------------------------------------------------------------------
+
+
+class ScheduledSession(Base):
+    __tablename__ = "scheduled_sessions"
+    __table_args__ = (
+        Index("idx_scheduled_sessions_user", "org_id", "user_id", "agent_id"),
+        Index(
+            "idx_scheduled_sessions_due",
+            "agent_id",
+            "status",
+            "next_run_at",
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index("idx_scheduled_sessions_lock", "locked_until"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    schedule: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    schedule_display: Mapped[str] = mapped_column(Text, nullable=False)
+    timezone: Mapped[str] = mapped_column(Text, nullable=False, server_default="UTC")
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default="tool")
+    repeat_limit: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    run_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    next_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_session_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    locked_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_from_session_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
 

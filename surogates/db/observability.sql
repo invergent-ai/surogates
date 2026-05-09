@@ -94,6 +94,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_idempotency
     ON sessions (org_id, idempotency_key)
     WHERE idempotency_key IS NOT NULL;
 
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_user
+    ON scheduled_sessions (org_id, user_id, agent_id);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_due
+    ON scheduled_sessions (agent_id, status, next_run_at)
+    WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_lock
+    ON scheduled_sessions (locked_until);
+
 
 -- ----------------------------------------------------------------------------
 -- Tenant denormalization trigger
