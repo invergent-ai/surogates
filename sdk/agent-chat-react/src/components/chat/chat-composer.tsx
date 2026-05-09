@@ -149,6 +149,9 @@ function ChatComposerInner({
     const builtin: SlashCommand[] = [
       { value: "/clear", label: "/clear", description: "Clear conversation" },
       { value: "/compress", label: "/compress", description: "Compress context" },
+      { value: "/loop", label: "/loop", description: "Schedule recurring prompt" },
+      { value: "/loop list", label: "/loop list", description: "List active loops" },
+      { value: "/loop cancel", label: "/loop cancel", description: "Cancel a loop by ID" },
     ];
     return [...adapterCommands, ...builtin];
   }, [adapterCommands]);

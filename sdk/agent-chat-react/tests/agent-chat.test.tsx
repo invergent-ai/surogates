@@ -182,7 +182,7 @@ describe("AgentChat", () => {
     expect(container.textContent).not.toContain("Loading conversation");
   });
 
-  it("shows slash commands from the adapter from the composer command menu", async () => {
+  it("shows builtin and adapter slash commands from the composer command menu", async () => {
     const stream = new FakeEventStream();
     const adapter = createAdapter(stream);
     container = document.createElement("div");
@@ -203,6 +203,8 @@ describe("AgentChat", () => {
       await Promise.resolve();
     });
 
+    expect(document.body.textContent).toContain("/loop");
+    expect(document.body.textContent).toContain("Schedule recurring prompt");
     expect(document.body.textContent).toContain("/review");
     expect(document.body.textContent).toContain("Review the current work");
   });
