@@ -88,6 +88,18 @@ _CONTEXT_OVERFLOW_PATTERNS = (
     "maximum context length exceeded",
     "request entity too large",
 )
+_IMAGE_TOO_LARGE_PATTERNS = (
+    "image is too large",
+    "image too large",
+    "image exceeds",
+    "image size exceeds",
+    "image exceeds the maximum",
+    "images must be",
+    "maximum image size",
+    "too many pixels",
+    "5mb",
+    "5 mb",
+)
 _MODEL_NOT_FOUND_PATTERNS = ("model not found", "does not exist", "unknown model")
 _SSL_TRANSIENT_PATTERNS = (
     "tlsv1_alert_internal_error",
@@ -219,6 +231,13 @@ def classify_api_error(
             retryable=False,
             should_rotate_credential=status_code == 401,
             should_fallback=True,
+        )
+
+    if any(pattern in error_msg for pattern in _IMAGE_TOO_LARGE_PATTERNS):
+        return result(
+            FailoverReason.image_too_large,
+            retryable=True,
+            should_compress=False,
         )
 
     if status_code == 413:

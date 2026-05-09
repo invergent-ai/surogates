@@ -25,6 +25,7 @@ from surogates.harness.message_utils import (
     reconstruct_message_from_deltas,
 )
 from surogates.harness.error_classifier import FailoverReason, classify_api_error
+from surogates.harness.image_shrink import shrink_image_parts_in_messages
 from surogates.harness.model_metadata import (
     get_next_probe_tier,
     parse_context_limit_from_error,
@@ -612,6 +613,20 @@ async def call_llm_with_retry(
             elif status_code == 401:
                 if rotate_credential(status_code, exc, error_context):
                     continue
+
+            # ── Oversized image recovery ────────────────────────────
+            if classified.reason == FailoverReason.image_too_large:
+                shrink_count = shrink_image_parts_in_messages(
+                    create_kwargs.get("messages", []),
+                )
+                if shrink_count:
+                    logger.warning(
+                        "Image payload too large -- shrank %d image part(s) "
+                        "and retrying",
+                        shrink_count,
+                    )
+                    continue
+                raise
 
             # ── 413 Payload too large ──────────────────────────────
             is_payload_too_large = (
