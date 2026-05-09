@@ -55,6 +55,12 @@ def try_rotate_credential(
     if credential_pool is None:
         return None, False
 
+    if status_code == 429 and credential_pool.available_count() <= 1:
+        logger.info(
+            "Credential rotation skipped for 429: only one available credential"
+        )
+        return None, False
+
     # On 401, try refreshing the current credential first.
     if status_code == 401:
         refreshed = credential_pool.try_refresh_current()

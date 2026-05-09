@@ -113,6 +113,13 @@ def _is_write_denied(path: str) -> bool:
     return False
 
 
+def _resolve_user_path(path: str, workspace_path: str | None = None) -> str:
+    """Resolve a user-supplied path, enforcing workspace containment when set."""
+    if workspace_path:
+        return validate_workspace_path(workspace_path, path)
+    return str(Path(os.path.expanduser(path)).resolve())
+
+
 # ---------------------------------------------------------------------------
 # Image extensions — subset of binary that we can redirect to vision tools
 # ---------------------------------------------------------------------------
@@ -213,6 +220,11 @@ _LARGE_FILE_HINT_BYTES = 512_000  # 512 KB
 # Binary file extensions — imported from shared utils module.
 # ---------------------------------------------------------------------------
 from surogates.tools.utils.binary_extensions import BINARY_EXTENSIONS, has_binary_extension
+from surogates.tools.utils.tool_output_limits import get_max_bytes, get_max_lines
+from surogates.tools.utils.workspace_sandbox import (
+    WorkspaceSandboxError,
+    validate_path as validate_workspace_path,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +318,7 @@ def _is_expected_write_exception(exc: Exception) -> bool:
 # ---------------------------------------------------------------------------
 _read_tracker_lock = threading.Lock()
 _read_tracker: dict = {}
+_MAX_TRACKED_READ_ENTRIES = 1024
 
 
 def _init_task_data(task_id: str) -> dict:
@@ -380,6 +393,36 @@ def reset_file_dedup(task_id: str | None = None) -> None:
                     task_data["dedup"].clear()
 
 
+def _cap_read_tracker_data(task_data: dict) -> None:
+    """Bound per-task read tracking structures in long-running workers."""
+    read_history = task_data.get("read_history")
+    if isinstance(read_history, set):
+        while len(read_history) > _MAX_TRACKED_READ_ENTRIES:
+            read_history.pop()
+
+    for key in ("dedup", "read_timestamps"):
+        values = task_data.get(key)
+        if not isinstance(values, dict):
+            continue
+        while len(values) > _MAX_TRACKED_READ_ENTRIES:
+            oldest_key = next(iter(values))
+            del values[oldest_key]
+
+
+def _invalidate_dedup_for_path(resolved_path: str, task_id: str) -> None:
+    """Remove all cached read ranges for *resolved_path* in *task_id*."""
+    with _read_tracker_lock:
+        task_data = _read_tracker.get(task_id)
+        if not task_data:
+            return
+        dedup = task_data.get("dedup")
+        if not isinstance(dedup, dict):
+            return
+        stale_keys = [key for key in dedup if key[0] == resolved_path]
+        for key in stale_keys:
+            del dedup[key]
+
+
 def notify_other_tool_call(task_id: str = "default") -> None:
     """Reset consecutive read/search counter for a task.
 
@@ -408,10 +451,12 @@ def _update_read_timestamp(filepath: str, task_id: str) -> None:
         current_mtime = os.path.getmtime(resolved)
     except (OSError, ValueError):
         return
+    _invalidate_dedup_for_path(resolved, task_id)
     with _read_tracker_lock:
         task_data = _read_tracker.get(task_id)
         if task_data is not None:
             task_data.setdefault("read_timestamps", {})[resolved] = current_mtime
+            _cap_read_tracker_data(task_data)
 
 
 def _check_file_staleness(filepath: str, task_id: str) -> str | None:
@@ -769,8 +814,9 @@ async def _read_file_handler(
     """
     path = arguments.get("path", "")
     offset = max(arguments.get("offset", 1), 1)
-    limit = min(arguments.get("limit", 500), 2000)
+    limit = min(arguments.get("limit", 500), get_max_lines())
     task_id = kwargs.get("task_id", "default")
+    workspace_path = kwargs.get("workspace_path")
 
     if not path:
         return _tool_error("No path provided")
@@ -787,7 +833,7 @@ async def _read_file_handler(
                 ),
             })
 
-        _resolved = Path(path).expanduser().resolve()
+        _resolved = Path(_resolve_user_path(path, workspace_path))
 
         # ── Image file guard ─────────────────────────────────────────
         # Images are never inlined — redirect to the vision tool.
@@ -902,7 +948,7 @@ async def _read_file_handler(
         # Note: we check the formatted content (with line-number prefixes),
         # not the raw file size, because that's what actually enters context.
         content_len = len(content)
-        max_chars = _DEFAULT_MAX_READ_CHARS
+        max_chars = get_max_bytes()
         if content_len > max_chars:
             return json.dumps({
                 "error": (
@@ -959,6 +1005,7 @@ async def _read_file_handler(
                 _mtime_now = os.path.getmtime(resolved_str)
                 task_data["dedup"][dedup_key] = _mtime_now
                 task_data.setdefault("read_timestamps", {})[resolved_str] = _mtime_now
+                _cap_read_tracker_data(task_data)
             except OSError:
                 pass  # Can't stat — skip tracking for this entry
 
@@ -999,6 +1046,7 @@ async def _write_file_handler(
     path = arguments.get("path", "")
     content = arguments.get("content", "")
     task_id = kwargs.get("task_id", "default")
+    workspace_path = kwargs.get("workspace_path")
 
     if not path:
         return _tool_error("No path provided")
@@ -1014,10 +1062,8 @@ async def _write_file_handler(
         return _tool_error(sensitive_err)
 
     try:
-        stale_warning = _check_file_staleness(path, task_id)
-
-        expanded = os.path.expanduser(path)
-        resolved = str(Path(expanded).resolve())
+        resolved = _resolve_user_path(path, workspace_path)
+        stale_warning = _check_file_staleness(resolved, task_id)
 
         # Create parent directories automatically
         parent_dir = os.path.dirname(resolved) or "."
@@ -1049,13 +1095,13 @@ async def _write_file_handler(
             result_dict["_warning"] = stale_warning
 
         # Auto-lint after write
-        lint_result = _check_lint(path)
+        lint_result = _check_lint(resolved)
         if lint_result:
             result_dict["lint"] = lint_result
 
         # Refresh the stored timestamp so consecutive writes by this
         # task don't trigger false staleness warnings.
-        _update_read_timestamp(path, task_id)
+        _update_read_timestamp(resolved, task_id)
 
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as exc:
@@ -1084,6 +1130,7 @@ async def _patch_handler(
     replace_all = arguments.get("replace_all", False)
     patch_content = arguments.get("patch")
     task_id = kwargs.get("task_id", "default")
+    workspace_path = kwargs.get("workspace_path")
 
     # Check sensitive paths for both replace (explicit path) and V4A patch (extract paths)
     paths_to_check: list[str] = []
@@ -1108,10 +1155,15 @@ async def _patch_handler(
             return _tool_error(sensitive_err)
 
     try:
+        resolved_paths = {
+            p: _resolve_user_path(p, workspace_path)
+            for p in paths_to_check
+        }
+
         # Check staleness for all files this patch will touch.
         stale_warnings: list[str] = []
         for p in paths_to_check:
-            sw = _check_file_staleness(p, task_id)
+            sw = _check_file_staleness(resolved_paths[p], task_id)
             if sw:
                 stale_warnings.append(sw)
 
@@ -1119,13 +1171,15 @@ async def _patch_handler(
             if not patch_content:
                 return _tool_error("patch content required")
             # V4A patch mode — apply multi-file patches
-            result_dict = _apply_v4a_patch(patch_content)
+            result_dict = _apply_v4a_patch(patch_content, workspace_path)
         elif mode == "replace":
             if not path:
                 return _tool_error("path required")
             if old_string is None or new_string is None:
                 return _tool_error("old_string and new_string required")
-            result_dict = _apply_replace(path, old_string, new_string, replace_all)
+            result_dict = _apply_replace(
+                path, old_string, new_string, replace_all, workspace_path,
+            )
         else:
             return _tool_error(f"Unknown mode: {mode}")
 
@@ -1139,7 +1193,7 @@ async def _patch_handler(
         # Auto-lint after successful patch
         if not result_dict.get("error"):
             for p in paths_to_check:
-                lint_result = _check_lint(p)
+                lint_result = _check_lint(resolved_paths[p])
                 if lint_result and lint_result.get("status") != "skipped":
                     result_dict.setdefault("lint", {})[p] = lint_result
 
@@ -1147,7 +1201,7 @@ async def _patch_handler(
         # consecutive edits by this task don't trigger false warnings.
         if not result_dict.get("error"):
             for p in paths_to_check:
-                _update_read_timestamp(p, task_id)
+                _update_read_timestamp(resolved_paths[p], task_id)
 
         result_json = json.dumps(result_dict, ensure_ascii=False)
 
@@ -1169,6 +1223,7 @@ def _apply_replace(
     old_string: str,
     new_string: str,
     replace_all: bool,
+    workspace_path: str | None = None,
 ) -> dict[str, Any]:
     """Apply a find-and-replace edit to a single file.
 
@@ -1176,8 +1231,7 @@ def _apply_replace(
     matching strategies (9 total) to handle whitespace/indentation
     differences.  Returns a result dict.
     """
-    expanded = os.path.expanduser(path)
-    resolved = str(Path(expanded).resolve())
+    resolved = _resolve_user_path(path, workspace_path)
 
     if not os.path.exists(resolved):
         return {"error": f"File not found: {path}"}
@@ -1316,7 +1370,10 @@ def _apply_replace(
     }
 
 
-def _apply_v4a_patch(patch_content: str) -> dict[str, Any]:
+def _apply_v4a_patch(
+    patch_content: str,
+    workspace_path: str | None = None,
+) -> dict[str, Any]:
     """Apply a V4A-format multi-file patch.
 
     Parses the V4A patch format and applies each file operation
@@ -1332,10 +1389,8 @@ def _apply_v4a_patch(patch_content: str) -> dict[str, Any]:
         +added line
         *** End Patch
     """
-    results: list[dict[str, Any]] = []
-    errors: list[str] = []
+    operations: list[tuple[str, str, list[str]]] = []
 
-    # Parse patch into file operations
     lines = patch_content.split("\n")
     current_file: str | None = None
     current_op: str | None = None  # "Update", "Add", "Delete"
@@ -1345,10 +1400,7 @@ def _apply_v4a_patch(patch_content: str) -> dict[str, Any]:
         # Skip begin/end markers
         if line.strip() in ("*** Begin Patch", "*** End Patch"):
             if current_file and current_hunks:
-                result = _apply_v4a_file_op(current_file, current_op or "Update", current_hunks)
-                results.append(result)
-                if result.get("error"):
-                    errors.append(result["error"])
+                operations.append((current_file, current_op or "Update", current_hunks))
             current_file = None
             current_op = None
             current_hunks = []
@@ -1359,10 +1411,7 @@ def _apply_v4a_patch(patch_content: str) -> dict[str, Any]:
         if m:
             # Flush previous file
             if current_file and current_hunks:
-                result = _apply_v4a_file_op(current_file, current_op or "Update", current_hunks)
-                results.append(result)
-                if result.get("error"):
-                    errors.append(result["error"])
+                operations.append((current_file, current_op or "Update", current_hunks))
             current_op = m.group(1)
             current_file = m.group(2).strip()
             current_hunks = []
@@ -1374,14 +1423,33 @@ def _apply_v4a_patch(patch_content: str) -> dict[str, Any]:
 
     # Flush final file
     if current_file and current_hunks:
-        result = _apply_v4a_file_op(current_file, current_op or "Update", current_hunks)
+        operations.append((current_file, current_op or "Update", current_hunks))
+
+    validation_errors = _validate_v4a_operations(operations, workspace_path)
+    if validation_errors:
+        return {
+            "status": "error",
+            "files": [],
+            "errors": [
+                "Patch validation failed (no files were modified):",
+                *validation_errors,
+            ],
+        }
+
+    results: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    for filepath, operation, hunk_lines in operations:
+        result = _apply_v4a_file_op(
+            filepath, operation, hunk_lines, workspace_path,
+        )
         results.append(result)
         if result.get("error"):
             errors.append(result["error"])
 
     if errors:
         return {
-            "status": "partial" if results else "error",
+            "status": "partial",
             "files": results,
             "errors": errors,
         }
@@ -1391,14 +1459,111 @@ def _apply_v4a_patch(patch_content: str) -> dict[str, Any]:
     }
 
 
+def _validate_v4a_operations(
+    operations: list[tuple[str, str, list[str]]],
+    workspace_path: str | None = None,
+) -> list[str]:
+    """Validate a parsed V4A patch without writing files."""
+    errors: list[str] = []
+    for filepath, operation, hunk_lines in operations:
+        try:
+            resolved = _resolve_user_path(filepath, workspace_path)
+        except WorkspaceSandboxError as exc:
+            errors.append(f"{filepath}: {exc}")
+            continue
+        if operation == "Update":
+            ok, error = _simulate_v4a_update(filepath, resolved, hunk_lines)
+            if not ok and error:
+                errors.append(error)
+        elif operation == "Delete":
+            if not os.path.exists(resolved):
+                errors.append(f"{filepath}: file not found for deletion")
+    return errors
+
+
+def _simulate_v4a_update(
+    filepath: str,
+    resolved: str,
+    hunk_lines: list[str],
+) -> tuple[bool, str | None]:
+    """Apply update hunks in memory and report the first missing match."""
+    if not os.path.exists(resolved):
+        return False, f"{filepath}: file not found"
+
+    try:
+        with open(resolved, encoding="utf-8") as fh:
+            original = fh.read()
+    except OSError as exc:
+        return False, f"{filepath}: failed to read: {exc}"
+
+    new_lines = original.split("\n")
+    current_idx = 0
+    i = 0
+    while i < len(hunk_lines):
+        line = hunk_lines[i]
+
+        if line.startswith("@@"):
+            hint = line.strip("@ \n")
+            if hint:
+                for j, orig_line in enumerate(new_lines[current_idx:], current_idx):
+                    if hint in orig_line:
+                        current_idx = j
+                        break
+            i += 1
+            continue
+
+        if line.startswith(" "):
+            context_text = line[1:]
+            found_idx = _find_v4a_line(new_lines, context_text, current_idx)
+            if found_idx is None:
+                return False, f"{filepath}: context line not found: {context_text!r}"
+            current_idx = found_idx + 1
+            i += 1
+            continue
+
+        if line.startswith("-"):
+            remove_text = line[1:]
+            found_idx = _find_v4a_line(new_lines, remove_text, max(0, current_idx - 1))
+            if found_idx is None:
+                return False, f"{filepath}: removal line not found: {remove_text!r}"
+            new_lines.pop(found_idx)
+            current_idx = found_idx
+            i += 1
+            continue
+
+        if line.startswith("+"):
+            new_lines.insert(current_idx, line[1:])
+            current_idx += 1
+            i += 1
+            continue
+
+        i += 1
+
+    return True, None
+
+
+def _find_v4a_line(lines: list[str], target: str, start: int) -> int | None:
+    """Find a V4A context/removal line using exact then stripped matching."""
+    for j in range(start, len(lines)):
+        if lines[j].rstrip() == target.rstrip():
+            return j
+    for j in range(start, len(lines)):
+        if lines[j].strip() == target.strip():
+            return j
+    return None
+
+
 def _apply_v4a_file_op(
     filepath: str,
     operation: str,
     hunk_lines: list[str],
+    workspace_path: str | None = None,
 ) -> dict[str, Any]:
     """Apply a single V4A file operation (Update, Add, or Delete)."""
-    expanded = os.path.expanduser(filepath)
-    resolved = str(Path(expanded).resolve())
+    try:
+        resolved = _resolve_user_path(filepath, workspace_path)
+    except WorkspaceSandboxError as exc:
+        return {"path": filepath, "error": str(exc)}
 
     if operation == "Delete":
         try:
@@ -1595,6 +1760,7 @@ async def _search_files_handler(
     output_mode = arguments.get("output_mode", "content")
     context = arguments.get("context", 0)
     task_id = kwargs.get("task_id", "default")
+    workspace_path = kwargs.get("workspace_path")
 
     # Map legacy target names
     target_map = {"grep": "content", "find": "files"}
@@ -1636,7 +1802,7 @@ async def _search_files_handler(
                 "already_searched": count,
             }, ensure_ascii=False)
 
-        expanded = os.path.expanduser(path)
+        expanded = _resolve_user_path(path, workspace_path)
 
         if target == "files":
             # Find files by glob pattern

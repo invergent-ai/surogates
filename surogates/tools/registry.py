@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+from surogates.tools.schema_sanitizer import sanitize_tool_schemas
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +48,7 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._entries: dict[str, ToolEntry] = {}
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------------
     # Registration
@@ -64,16 +68,17 @@ class ToolRegistry:
         Raises :class:`ValueError` if a tool with the same name is
         already registered.
         """
-        if name in self._entries:
-            raise ValueError(f"Tool {name!r} is already registered")
-        self._entries[name] = ToolEntry(
-            name=name,
-            schema=schema,
-            handler=handler,
-            toolset=toolset,
-            is_async=is_async,
-            max_result_size=max_result_size,
-        )
+        with self._lock:
+            if name in self._entries:
+                raise ValueError(f"Tool {name!r} is already registered")
+            self._entries[name] = ToolEntry(
+                name=name,
+                schema=schema,
+                handler=handler,
+                toolset=toolset,
+                is_async=is_async,
+                max_result_size=max_result_size,
+            )
         logger.debug("Registered tool %s (toolset=%s)", name, toolset)
 
     def deregister(self, name: str) -> None:
@@ -81,7 +86,8 @@ class ToolRegistry:
 
         Silently succeeds if the tool does not exist.
         """
-        removed = self._entries.pop(name, None)
+        with self._lock:
+            removed = self._entries.pop(name, None)
         if removed is not None:
             logger.debug("Deregistered tool %s", name)
 
@@ -91,20 +97,24 @@ class ToolRegistry:
 
     def get(self, name: str) -> ToolEntry | None:
         """Return the :class:`ToolEntry` for *name*, or ``None``."""
-        return self._entries.get(name)
+        with self._lock:
+            return self._entries.get(name)
 
     def get_all(self) -> list[ToolEntry]:
         """Return every registered tool entry."""
-        return list(self._entries.values())
+        with self._lock:
+            return list(self._entries.values())
 
     def has(self, name: str) -> bool:
         """Return ``True`` if *name* is registered."""
-        return name in self._entries
+        with self._lock:
+            return name in self._entries
 
     @property
     def tool_names(self) -> set[str]:
         """The set of all registered tool names."""
-        return set(self._entries.keys())
+        with self._lock:
+            return set(self._entries.keys())
 
     # ------------------------------------------------------------------
     # Schema export
@@ -128,7 +138,9 @@ class ToolRegistry:
             }
         """
         schemas: list[dict[str, Any]] = []
-        for entry in self._entries.values():
+        with self._lock:
+            entries = list(self._entries.values())
+        for entry in entries:
             if names is not None and entry.name not in names:
                 continue
             schemas.append(
@@ -141,7 +153,7 @@ class ToolRegistry:
                     },
                 }
             )
-        return schemas
+        return sanitize_tool_schemas(schemas)
 
     # ------------------------------------------------------------------
     # Dispatch
@@ -161,7 +173,8 @@ class ToolRegistry:
 
         Raises :class:`KeyError` if no tool with *name* is registered.
         """
-        entry = self._entries.get(name)
+        with self._lock:
+            entry = self._entries.get(name)
         if entry is None:
             return json.dumps({"error": f"Unknown tool: {name}"})
 

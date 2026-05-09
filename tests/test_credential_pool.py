@@ -61,6 +61,12 @@ class TestCredentialPool:
         pool = CredentialPool([])
         assert pool.has_available() is False
 
+    def test_available_count(self) -> None:
+        pool = CredentialPool([_make_cred("a"), _make_cred("b")])
+        assert pool.available_count() == 2
+        pool.mark_exhausted_and_rotate(429)
+        assert pool.available_count() == 1
+
     def test_current_returns_none_when_empty(self) -> None:
         pool = CredentialPool([])
         assert pool.current() is None

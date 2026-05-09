@@ -67,6 +67,11 @@ class CredentialPool:
         with self._lock:
             return len(self._available_entries()) > 0
 
+    def available_count(self) -> int:
+        """Return the number of credentials not currently in cooldown."""
+        with self._lock:
+            return len(self._available_entries())
+
     def mark_exhausted_and_rotate(
         self,
         status_code: int,

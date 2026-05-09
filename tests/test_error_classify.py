@@ -69,6 +69,59 @@ class TestStatusCodeRouting:
         info = classify_harness_error(exc)
         assert info.category == "provider_error"
 
+    def test_402_usage_cap_projects_as_retryable_rate_limit(self) -> None:
+        exc = _with_status(
+            Exception("Usage limit exceeded, try again after reset"),
+            402,
+        )
+        info = classify_harness_error(exc)
+        assert info.category == "rate_limit"
+        assert info.retryable is True
+
+    def test_402_billing_projects_as_non_retryable_provider_error(self) -> None:
+        exc = _with_status(
+            Exception("Insufficient credits. Top up your credits."),
+            402,
+        )
+        info = classify_harness_error(exc)
+        assert info.category == "provider_error"
+        assert info.retryable is False
+
+    def test_oauth_long_context_beta_forbidden_projects_as_context_overflow(self) -> None:
+        exc = _with_status(
+            Exception("Long context beta is not yet available for OAuth tokens"),
+            400,
+        )
+        info = classify_harness_error(exc)
+        assert info.category == "context_overflow"
+        assert info.retryable is False
+
+    def test_llama_cpp_grammar_rejection_projects_as_invalid_response(self) -> None:
+        exc = _with_status(
+            Exception("error parsing grammar: json-schema-to-grammar failed"),
+            400,
+        )
+        info = classify_harness_error(exc)
+        assert info.category == "invalid_response"
+        assert info.retryable is True
+
+    def test_openrouter_raw_upstream_rate_limit_projects_as_rate_limit(self) -> None:
+        exc = _with_status(Exception("upstream error"), 400)
+        exc.body = {  # type: ignore[attr-defined]
+            "error": {
+                "message": "Provider returned error",
+                "metadata": {
+                    "raw": (
+                        '{"error":{"message":"ThrottlingException: '
+                        'servicequotaexceededexception"}}'
+                    )
+                },
+            }
+        }
+        info = classify_harness_error(exc)
+        assert info.category == "rate_limit"
+        assert info.retryable is True
+
 
 # ---------------------------------------------------------------------------
 # SDK exception class name routing

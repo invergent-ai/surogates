@@ -17,6 +17,7 @@ any crash can be recovered by replaying the log.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -41,6 +42,7 @@ from surogates.harness.expert_routing import (
 from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
 from surogates.harness.message_utils import coerce_message_content, make_skipped_tool_result
 from surogates.harness.prompt_cache import SystemPromptCache
+from surogates.harness.rate_limit_guard import ProviderRateLimitGuard
 from surogates.harness.reasoning import (
     THINK_RE,
     ContentWithToolsCache,
@@ -65,7 +67,9 @@ from surogates.harness.slash_skill import expand_slash_skill
 from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
 from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.tool_exec import execute_tool_calls
+from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.harness.tool_schemas import filter_schemas_for_tenant
+from surogates.harness.title_generator import maybe_generate_session_title
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import EventType
 from surogates.tools.builtin.expert_service import ExpertConsultationService
@@ -206,6 +210,32 @@ def _is_valid_json_args(tc: dict) -> bool:
         return isinstance(parsed, dict)
     except (ValueError, TypeError):
         return False
+
+
+def build_partial_tool_call_recovery_results(tool_calls: list[dict]) -> list[dict]:
+    """Build model-visible tool results for truncated tool-call arguments."""
+    results: list[dict] = []
+    for tc in tool_calls:
+        fn = tc.get("function", {})
+        tool_name = fn.get("name", "")
+        results.append(
+            {
+                "role": "tool",
+                "tool_call_id": tc.get("id", ""),
+                "content": json.dumps(
+                    {
+                        "error": (
+                            "Partial tool call arguments detected. The provider "
+                            "ended the response before the JSON arguments were "
+                            "complete. Retry this tool call with complete JSON."
+                        ),
+                        "tool": tool_name,
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+        )
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -691,6 +721,12 @@ class AgentHarness:
         incomplete_scratchpad_retries = 0  # retries for unclosed REASONING_SCRATCHPAD
         empty_response_retries = 0  # retries for empty LLM responses (no content, no tools, no reasoning)
         content_with_tools_cache = ContentWithToolsCache()
+        tool_guardrails = ToolGuardrails(
+            ToolGuardrailConfig.from_mapping(
+                session.config.get("tool_loop_guardrails")
+                if session.config else None
+            )
+        )
 
         # Subdirectory hint tracker -- discovers context files as the agent navigates.
         hint_tracker = SubdirectoryHintTracker(
@@ -885,8 +921,9 @@ class AgentHarness:
             # (side-effecting) tools stay queued until get_all_results().
             streaming_executor: StreamingToolExecutor | None = None
             on_tool_call_cb: Callable[[dict[str, Any]], None] | None = None
-            if self._streaming_enabled:
-                streaming_executor = StreamingToolExecutor(
+
+            def _make_streaming_executor() -> StreamingToolExecutor:
+                return StreamingToolExecutor(
                     session=session,
                     lease=lease,
                     store=self._store,
@@ -902,7 +939,18 @@ class AgentHarness:
                     session_factory=self._session_factory,
                     saga=saga,
                     log_policy_allowed=self._log_policy_allowed,
+                    tool_guardrails=tool_guardrails,
                 )
+
+            def _reset_streaming_executor() -> Callable[[dict[str, Any]], None]:
+                nonlocal streaming_executor
+                if streaming_executor is not None:
+                    streaming_executor.discard()
+                streaming_executor = _make_streaming_executor()
+                return streaming_executor.add_tool
+
+            if self._streaming_enabled:
+                streaming_executor = _make_streaming_executor()
                 on_tool_call_cb = streaming_executor.add_tool
 
             try:
@@ -923,6 +971,11 @@ class AgentHarness:
                     ),
                     context_compressor=self._compressor,
                     on_tool_call_complete=on_tool_call_cb,
+                    on_stream_retry=(
+                        _reset_streaming_executor
+                        if self._streaming_enabled else None
+                    ),
+                    rate_limit_guard=self._provider_rate_limit_guard(),
                 )
             except Exception as exc:
                 logger.exception(
@@ -1087,6 +1140,21 @@ class AgentHarness:
                 response_data,
             )
 
+            if tool_calls_raw and usage_data.get("partial_tool_call"):
+                logger.warning(
+                    "Session %s: partial tool-call arguments for %s; "
+                    "returning recovery tool results instead of executing",
+                    session.id,
+                    usage_data.get("partial_tool_names") or [],
+                )
+                if streaming_executor is not None:
+                    streaming_executor.discard()
+                self._budget.refund()
+                messages.append(assistant_message)
+                messages.extend(build_partial_tool_call_recovery_results(tool_calls_raw))
+                invalid_json_retries = 0
+                continue
+
             # 4a. Length continuation with prefix accumulation.
             # When finish_reason == "length", the response was truncated. We
             # accumulate the partial content and ask the model to continue.
@@ -1247,6 +1315,12 @@ class AgentHarness:
                     messages.pop()
 
                 messages.append(assistant_message)
+                await self._maybe_generate_title(
+                    session=session,
+                    messages=messages,
+                    assistant_message=assistant_message,
+                    model=model_id,
+                )
 
                 # If the model emitted an SVG / HTML as a fenced code
                 # block instead of calling ``create_artifact``, promote
@@ -1705,6 +1779,26 @@ class AgentHarness:
         self._primary_config = primary_config
         self._fallback_activated = activated
         return True
+
+    def _provider_rate_limit_guard(self) -> ProviderRateLimitGuard | None:
+        """Return a Redis-backed guard keyed to the active LLM provider."""
+        if self._redis is None:
+            return None
+
+        provider_key = ""
+        if self._primary_config:
+            provider_key = str(
+                self._primary_config.get("provider")
+                or self._primary_config.get("base_url")
+                or ""
+            )
+        if not provider_key:
+            provider_key = str(
+                getattr(self._llm, "base_url", "")
+                or self._current_model
+                or self._default_model
+            )
+        return ProviderRateLimitGuard(self._redis, provider_key)
 
     # ------------------------------------------------------------------
     # Invalid tool call detection (delegates to resilience module)
@@ -2281,6 +2375,7 @@ class AgentHarness:
                     session, messages, system_prompt, lease,
                 ),
                 context_compressor=self._compressor,
+                rate_limit_guard=self._provider_rate_limit_guard(),
             )
 
             # Strip thinking blocks from the summary.
@@ -2561,6 +2656,29 @@ class AgentHarness:
                 "Failed to advance cursor at end of turn for %s",
                 session.id,
             )
+
+    async def _maybe_generate_title(
+        self,
+        *,
+        session: Session,
+        messages: list[dict],
+        assistant_message: dict,
+        model: str,
+    ) -> None:
+        """Best-effort auto-title generation for early user exchanges."""
+        try:
+            title = await maybe_generate_session_title(
+                store=self._store,
+                llm_client=self._llm,
+                session=session,
+                messages=messages,
+                assistant_message=assistant_message,
+                model=model,
+            )
+            if title:
+                logger.debug("Auto-generated title for session %s: %s", session.id, title)
+        except Exception:
+            logger.debug("Auto-title generation skipped for %s", session.id, exc_info=True)
 
     async def _complete_session(
         self,

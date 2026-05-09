@@ -1,0 +1,198 @@
+"""Tests for automatic session title generation."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from uuid import uuid4
+
+import pytest
+
+from surogates.harness.title_generator import (
+    clean_generated_title,
+    generate_session_title,
+    maybe_generate_session_title,
+)
+from surogates.harness.loop import AgentHarness
+
+
+def _response(content: str):
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=content),
+            )
+        ]
+    )
+
+
+def test_clean_generated_title_removes_wrapping_noise() -> None:
+    assert clean_generated_title('"Title: Build a Billing Dashboard."') == (
+        "Build a Billing Dashboard"
+    )
+
+
+def test_clean_generated_title_limits_length() -> None:
+    raw = "x" * 100
+
+    title = clean_generated_title(raw)
+
+    assert len(title) == 80
+    assert title.endswith("...")
+
+
+@pytest.mark.asyncio
+async def test_generate_session_title_uses_auxiliary_chat_client() -> None:
+    llm_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(return_value=_response("Title: Debug Redis Failures."))
+            )
+        )
+    )
+
+    title = await generate_session_title(
+        llm_client=llm_client,
+        model="gpt-4o-mini",
+        user_message="Redis is timing out in production",
+        assistant_response="Let's inspect connection pool metrics.",
+    )
+
+    assert title == "Debug Redis Failures"
+    call_kwargs = llm_client.chat.completions.create.await_args.kwargs
+    assert call_kwargs["model"] == "gpt-4o-mini"
+    assert call_kwargs["stream"] is False
+    assert call_kwargs["max_tokens"] <= 32
+    assert "Redis is timing out" in call_kwargs["messages"][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_generate_session_title_returns_none_on_llm_failure() -> None:
+    llm_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(side_effect=RuntimeError("provider down"))
+            )
+        )
+    )
+
+    title = await generate_session_title(
+        llm_client=llm_client,
+        model="gpt-4o-mini",
+        user_message="hello",
+        assistant_response="hi",
+    )
+
+    assert title is None
+
+
+@pytest.mark.asyncio
+async def test_maybe_generate_session_title_skips_existing_title() -> None:
+    store = SimpleNamespace(update_session_title_if_empty=AsyncMock())
+    llm_client = SimpleNamespace()
+    session = SimpleNamespace(id=uuid4(), title="Existing", model="gpt-4o")
+
+    title = await maybe_generate_session_title(
+        store=store,
+        llm_client=llm_client,
+        session=session,
+        messages=[{"role": "user", "content": "build a chart"}],
+        assistant_message={"role": "assistant", "content": "Done."},
+        model="gpt-4o",
+    )
+
+    assert title is None
+    store.update_session_title_if_empty.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_maybe_generate_session_title_sets_title_for_first_exchange(monkeypatch) -> None:
+    store = SimpleNamespace(update_session_title_if_empty=AsyncMock(return_value=True))
+    llm_client = SimpleNamespace()
+    session = SimpleNamespace(id=uuid4(), title=None, model="gpt-4o")
+
+    async def fake_generate_session_title(**_kwargs):
+        return "Build Sales Chart"
+
+    monkeypatch.setattr(
+        "surogates.harness.title_generator.generate_session_title",
+        fake_generate_session_title,
+    )
+
+    title = await maybe_generate_session_title(
+        store=store,
+        llm_client=llm_client,
+        session=session,
+        messages=[{"role": "user", "content": "build a chart"}],
+        assistant_message={"role": "assistant", "content": "Done."},
+        model="gpt-4o",
+    )
+
+    assert title == "Build Sales Chart"
+    store.update_session_title_if_empty.assert_awaited_once_with(
+        session.id,
+        "Build Sales Chart",
+    )
+
+
+@pytest.mark.asyncio
+async def test_maybe_generate_session_title_skips_later_exchanges(monkeypatch) -> None:
+    store = SimpleNamespace(update_session_title_if_empty=AsyncMock())
+    llm_client = SimpleNamespace()
+    session = SimpleNamespace(id=uuid4(), title=None, model="gpt-4o")
+    generate = AsyncMock(return_value="Too Late")
+    monkeypatch.setattr(
+        "surogates.harness.title_generator.generate_session_title",
+        generate,
+    )
+
+    title = await maybe_generate_session_title(
+        store=store,
+        llm_client=llm_client,
+        session=session,
+        messages=[
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "answer"},
+            {"role": "user", "content": "second"},
+            {"role": "assistant", "content": "answer"},
+            {"role": "user", "content": "third"},
+        ],
+        assistant_message={"role": "assistant", "content": "Done."},
+        model="gpt-4o",
+    )
+
+    assert title is None
+    generate.assert_not_called()
+    store.update_session_title_if_empty.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_harness_title_hook_delegates_best_effort(monkeypatch) -> None:
+    harness = AgentHarness.__new__(AgentHarness)
+    harness._store = SimpleNamespace()
+    harness._llm = SimpleNamespace()
+
+    maybe_generate = AsyncMock(return_value="Build Sales Chart")
+    monkeypatch.setattr(
+        "surogates.harness.loop.maybe_generate_session_title",
+        maybe_generate,
+    )
+    session = SimpleNamespace(id=uuid4(), title=None)
+    assistant_message = {"role": "assistant", "content": "Done."}
+    messages = [{"role": "user", "content": "build a chart"}, assistant_message]
+
+    await harness._maybe_generate_title(
+        session=session,
+        messages=messages,
+        assistant_message=assistant_message,
+        model="gpt-4o",
+    )
+
+    maybe_generate.assert_awaited_once_with(
+        store=harness._store,
+        llm_client=harness._llm,
+        session=session,
+        messages=messages,
+        assistant_message=assistant_message,
+        model="gpt-4o",
+    )

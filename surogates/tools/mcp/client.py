@@ -131,6 +131,8 @@ _DEFAULT_TOOL_TIMEOUT = 120      # seconds for tool calls
 _DEFAULT_CONNECT_TIMEOUT = 60    # seconds for initial connection per server
 _MAX_RECONNECT_RETRIES = 5
 _MAX_BACKOFF_SECONDS = 60
+_DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3
+_DEFAULT_CIRCUIT_COOLDOWN_SECONDS = 60.0
 
 # Environment variables that are safe to pass to stdio subprocesses
 _SAFE_ENV_KEYS = frozenset({
@@ -183,6 +185,31 @@ def _sanitize_error(text: str) -> str:
     accidental credential exposure in tool error responses.
     """
     return _CREDENTIAL_PATTERN.sub("[REDACTED]", text)
+
+
+def _is_auth_error(exc: BaseException) -> bool:
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+    try:
+        if int(status) in (401, 403):
+            return True
+    except (TypeError, ValueError):
+        pass
+    text = str(exc).lower()
+    return any(
+        phrase in text
+        for phrase in (
+            "401",
+            "403",
+            "unauthorized",
+            "forbidden",
+            "session expired",
+            "token expired",
+            "invalid token",
+        )
+    )
 
 
 def _prepend_path(env: dict, directory: str) -> dict:
@@ -729,7 +756,10 @@ class MCPServerTask:
         "name", "session", "tool_timeout",
         "_task", "_ready", "_shutdown_event", "_tools", "_error", "_config",
         "_sampling", "_registered_tool_names", "_auth_type", "_refresh_lock",
-        "_registry", "_on_tools_changed",
+        "_registry", "_on_tools_changed", "_circuit_failure_count",
+        "_circuit_open_until", "_circuit_failure_threshold",
+        "_circuit_cooldown_seconds", "_auth_recovery_lock",
+        "_last_auth_recovery_at",
     )
 
     def __init__(self, name: str):
@@ -748,10 +778,50 @@ class MCPServerTask:
         self._refresh_lock = asyncio.Lock()
         self._registry: Optional[Any] = None
         self._on_tools_changed: Optional[Any] = None
+        self._circuit_failure_count = 0
+        self._circuit_open_until = 0.0
+        self._circuit_failure_threshold = _DEFAULT_CIRCUIT_FAILURE_THRESHOLD
+        self._circuit_cooldown_seconds = _DEFAULT_CIRCUIT_COOLDOWN_SECONDS
+        self._auth_recovery_lock = threading.Lock()
+        self._last_auth_recovery_at = 0.0
 
     def _is_http(self) -> bool:
         """Check if this server uses HTTP transport."""
         return "url" in self._config
+
+    def circuit_open_remaining(self) -> float:
+        """Return remaining circuit-open seconds, or 0 when calls may proceed."""
+        remaining = self._circuit_open_until - time.monotonic()
+        if remaining <= 0:
+            return 0.0
+        return remaining
+
+    def record_call_success(self) -> None:
+        """Reset circuit state after a successful transport-level tool call."""
+        self._circuit_failure_count = 0
+        self._circuit_open_until = 0.0
+
+    def record_call_failure(self) -> None:
+        """Record a transport-level tool-call failure and open if threshold hit."""
+        self._circuit_failure_count += 1
+        if self._circuit_failure_count >= self._circuit_failure_threshold:
+            self._circuit_open_until = (
+                time.monotonic() + self._circuit_cooldown_seconds
+            )
+
+    async def restart(self) -> None:
+        """Restart the MCP connection in the background MCP event loop."""
+        self._shutdown_event.set()
+        if self._task and not self._task.done():
+            await asyncio.wait_for(self._task, timeout=10)
+        self.session = None
+        self._error = None
+        self._ready = asyncio.Event()
+        self._shutdown_event = asyncio.Event()
+        self._task = asyncio.ensure_future(self.run(self._config))
+        await self._ready.wait()
+        if self._error:
+            raise self._error
 
     # ----- Dynamic tool discovery (notifications/tools/list_changed) -----
 
@@ -838,6 +908,10 @@ class MCPServerTask:
 
         safe_env = _build_safe_env(user_env)
         command, safe_env = _resolve_stdio_command(command, safe_env)
+        from surogates.tools.mcp.osv_check import check_package_for_malware
+        malware_error = check_package_for_malware(command, args)
+        if malware_error:
+            raise ValueError(malware_error)
 
         server_params = StdioServerParameters(
             command=command,
@@ -961,6 +1035,16 @@ class MCPServerTask:
         self._config = config
         self.tool_timeout = config.get("timeout", _DEFAULT_TOOL_TIMEOUT)
         self._auth_type = (config.get("auth") or "").lower().strip()
+        self._circuit_failure_threshold = _safe_numeric(
+            config.get("circuit_failure_threshold", _DEFAULT_CIRCUIT_FAILURE_THRESHOLD),
+            _DEFAULT_CIRCUIT_FAILURE_THRESHOLD,
+            int,
+        )
+        self._circuit_cooldown_seconds = _safe_numeric(
+            config.get("circuit_cooldown_seconds", _DEFAULT_CIRCUIT_COOLDOWN_SECONDS),
+            _DEFAULT_CIRCUIT_COOLDOWN_SECONDS,
+            float,
+        )
 
         # Set up sampling handler if enabled and SDK types are available
         sampling_config = config.get("sampling", {})
@@ -1177,6 +1261,14 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             return json.dumps({
                 "error": f"MCP server '{server_name}' is not connected"
             })
+        circuit_remaining = server.circuit_open_remaining()
+        if circuit_remaining > 0:
+            return json.dumps({
+                "error": (
+                    f"MCP server '{server_name}' circuit breaker is open; "
+                    f"retry after {int(circuit_remaining)} seconds."
+                )
+            })
 
         async def _call():
             result = await server.session.call_tool(tool_name, arguments=args)
@@ -1227,8 +1319,26 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             return json.dumps({"result": text_result})
 
         try:
-            return _run_on_mcp_loop(_call(), timeout=tool_timeout)
+            response = _run_on_mcp_loop(_call(), timeout=tool_timeout)
+            server.record_call_success()
+            return response
         except Exception as exc:
+            if server._auth_type == "oauth" and _is_auth_error(exc):
+                try:
+                    with server._auth_recovery_lock:
+                        now = time.monotonic()
+                        if now - server._last_auth_recovery_at > 1.0:
+                            _run_on_mcp_loop(
+                                server.restart(),
+                                timeout=max(tool_timeout, _DEFAULT_CONNECT_TIMEOUT),
+                            )
+                            server._last_auth_recovery_at = time.monotonic()
+                    response = _run_on_mcp_loop(_call(), timeout=tool_timeout)
+                    server.record_call_success()
+                    return response
+                except Exception as retry_exc:
+                    exc = retry_exc
+            server.record_call_failure()
             logger.error(
                 "MCP tool %s/%s call failed: %s",
                 server_name, tool_name, exc,

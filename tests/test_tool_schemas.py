@@ -13,6 +13,7 @@ from surogates.harness.prompt import PromptBuilder
 from surogates.harness.tool_schemas import filter_schemas_for_tenant
 from surogates.tenant.context import TenantContext
 from surogates.tools.loader import AgentDef
+from surogates.tools.registry import ToolRegistry, ToolSchema
 
 
 def _schema(name: str, properties: dict[str, Any]) -> dict[str, Any]:
@@ -111,3 +112,37 @@ def test_prompt_builder_has_agents() -> None:
     assert PromptBuilder(tenant, available_agents=[enabled]).has_agents is True
     # Disabled agents are filtered out in __init__.
     assert PromptBuilder(tenant, available_agents=[disabled]).has_agents is False
+
+
+def test_tool_registry_exports_sanitized_schema_without_mutating_entry() -> None:
+    registry = ToolRegistry()
+    raw_parameters = {
+        "type": "object",
+        "oneOf": [{"required": ["path"]}],
+        "properties": {
+            "path": {"type": ["string", "null"]},
+            "metadata": {"type": "object"},
+        },
+        "required": ["path", "ghost"],
+    }
+    registry.register(
+        "problem_tool",
+        ToolSchema(
+            name="problem_tool",
+            description="problem schema",
+            parameters=raw_parameters,
+        ),
+        handler=lambda args: args,
+    )
+
+    [exported] = registry.get_schemas()
+
+    params = exported["function"]["parameters"]
+    assert "oneOf" not in params
+    assert params["required"] == ["path"]
+    assert params["properties"]["path"]["type"] == "string"
+    assert params["properties"]["path"]["nullable"] is True
+    assert params["properties"]["metadata"] == {"type": "object", "properties": {}}
+    assert registry.get("problem_tool").schema.parameters is raw_parameters
+    assert "oneOf" in raw_parameters
+    assert raw_parameters["required"] == ["path", "ghost"]

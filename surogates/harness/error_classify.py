@@ -23,6 +23,12 @@ import asyncio
 from dataclasses import dataclass
 from typing import Final
 
+from surogates.harness.error_classifier import (
+    ClassifiedError,
+    FailoverReason,
+    classify_api_error,
+)
+
 __all__ = ["ErrorCategory", "ErrorInfo", "classify_harness_error"]
 
 # Categories are stored on events and read by the frontend; treat the
@@ -108,6 +114,39 @@ _TIMEOUT_EXC_NAMES: Final[frozenset[str]] = frozenset({
     "asyncio.TimeoutError",
 })
 
+_API_EXCEPTION_NAMES: Final[frozenset[str]] = frozenset({
+    "APIError",
+    "APIStatusError",
+    "APITimeoutError",
+    "AuthenticationError",
+    "BadRequestError",
+    "InternalServerError",
+    "NotFoundError",
+    "PermissionDeniedError",
+    "RateLimitError",
+})
+
+_API_REASON_CATEGORIES: Final[dict[FailoverReason, str]] = {
+    FailoverReason.auth: "auth_failed",
+    FailoverReason.auth_permanent: "auth_failed",
+    FailoverReason.rate_limit: "rate_limit",
+    FailoverReason.timeout: "timeout",
+    FailoverReason.context_overflow: "context_overflow",
+    FailoverReason.payload_too_large: "context_overflow",
+    FailoverReason.image_too_large: "context_overflow",
+    FailoverReason.long_context_tier: "context_overflow",
+    FailoverReason.oauth_long_context_beta_forbidden: "context_overflow",
+    FailoverReason.format_error: "invalid_response",
+    FailoverReason.thinking_signature: "invalid_response",
+    FailoverReason.llama_cpp_grammar_pattern: "invalid_response",
+    FailoverReason.billing: "provider_error",
+    FailoverReason.model_not_found: "provider_error",
+    FailoverReason.provider_policy_blocked: "provider_error",
+    FailoverReason.overloaded: "provider_error",
+    FailoverReason.server_error: "provider_error",
+    FailoverReason.unknown: "provider_error",
+}
+
 
 @dataclass(frozen=True)
 class ErrorInfo:
@@ -149,6 +188,21 @@ def classify_harness_error(exc: BaseException) -> ErrorInfo:
     error_msg_lower = error_msg.lower()
     type_name = type(exc).__name__
     module_name = type(exc).__module__ or ""
+
+    if isinstance(exc, Exception) and _should_use_api_classifier(
+        exc=exc,
+        status_code=status_code,
+        type_name=type_name,
+        module_name=module_name,
+    ):
+        classified = classify_api_error(exc)
+        category = _API_REASON_CATEGORIES.get(classified.reason, "provider_error")
+        return ErrorInfo(
+            category=category,
+            title=_CATEGORY_TITLES[category],
+            detail=_trim_detail(error_msg or type_name),
+            retryable=_api_projection_retryable(classified, category),
+        )
 
     category = _pick_category(
         exc=exc,
@@ -258,6 +312,30 @@ def _pick_category(
         return "provider_error"
 
     return "unknown"
+
+
+def _should_use_api_classifier(
+    *,
+    exc: BaseException,
+    status_code: int | None,
+    type_name: str,
+    module_name: str,
+) -> bool:
+    """Return whether ``exc`` has enough shape to be an LLM API error."""
+    if status_code is not None:
+        return True
+    if getattr(exc, "body", None) is not None:
+        return True
+    if type_name in _API_EXCEPTION_NAMES:
+        return True
+    return module_name.startswith(("openai", "anthropic"))
+
+
+def _api_projection_retryable(classified: ClassifiedError, category: str) -> bool:
+    """Preserve UI retry semantics while honoring central hard failures."""
+    if category in _NON_RETRYABLE:
+        return False
+    return classified.retryable
 
 
 def _extract_status_code(exc: BaseException) -> int | None:

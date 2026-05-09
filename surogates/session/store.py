@@ -26,6 +26,7 @@ from surogates.db.models import (
     SessionCursor,
     SessionLease as LeaseRow,
 )
+from surogates.harness.redact import redact_sensitive_data
 from surogates.session.events import EventType
 from surogates.session.models import Event, Session, SessionLease
 
@@ -167,6 +168,37 @@ class SessionStore:
                 raise SessionNotFoundError(f"session {session_id} not found")
             await db.commit()
 
+    async def update_session_title_if_empty(
+        self,
+        session_id: UUID,
+        title: str,
+    ) -> bool:
+        """Set ``sessions.title`` only when it is currently empty."""
+        cleaned = title.strip()
+        if not cleaned:
+            return False
+
+        async with self._sf() as db:
+            result = await db.execute(
+                update(SessionRow)
+                .where(
+                    SessionRow.id == session_id,
+                    or_(SessionRow.title.is_(None), SessionRow.title == ""),
+                )
+                .values(title=cleaned, updated_at=func.now())
+            )
+            await db.commit()
+
+            if result.rowcount:
+                return True
+
+            exists = await db.execute(
+                select(SessionRow.id).where(SessionRow.id == session_id)
+            )
+            if exists.scalar_one_or_none() is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            return False
+
     async def list_sessions(
         self,
         org_id: UUID,
@@ -234,14 +266,15 @@ class SessionStore:
         from surogates.trace import get_trace
 
         trace = get_trace()
+        redacted_data = redact_sensitive_data(data)
         row = EventRow(
             session_id=session_id,
             type=event_type.value,
-            data=data,
+            data=redacted_data,
             trace_id=trace.trace_id if trace else None,
             span_id=trace.span_id if trace else None,
         )
-        counter_clause = _build_counter_update_clause(event_type, data)
+        counter_clause = _build_counter_update_clause(event_type, redacted_data)
 
         async with self._sf() as db:
             db.add(row)
@@ -268,7 +301,12 @@ class SessionStore:
         # Channel delivery: enqueue deliverable events to the outbox
         # for non-web channels (Slack, Teams, Telegram, etc.).
         if event_type in _DELIVERABLE_EVENTS:
-            await self._enqueue_channel_delivery(session_id, event_id, event_type, data)
+            await self._enqueue_channel_delivery(
+                session_id,
+                event_id,
+                event_type,
+                redacted_data,
+            )
 
         return event_id
 

@@ -18,6 +18,12 @@ import time
 from typing import TYPE_CHECKING, Any, Callable
 
 from surogates.harness.message_utils import make_skipped_tool_result
+from surogates.harness.tool_guardrails import (
+    ToolGuardrailDecision,
+    ToolGuardrails,
+    append_toolguard_guidance,
+    toolguard_synthetic_result,
+)
 
 # ---------------------------------------------------------------------------
 # Path sanitisation — replace workspace absolute paths with __WORKSPACE__
@@ -140,6 +146,173 @@ SAGA_EXCLUDED_TOOLS: frozenset[str] = frozenset({
     "web_extract",
     "web_search",
 })
+
+
+def _escape_invalid_chars_in_json_strings(raw: str) -> str:
+    """Escape literal control characters inside JSON string values."""
+    out: list[str] = []
+    in_string = False
+    idx = 0
+    while idx < len(raw):
+        ch = raw[idx]
+        if in_string:
+            if ch == "\\" and idx + 1 < len(raw):
+                out.append(ch)
+                out.append(raw[idx + 1])
+                idx += 2
+                continue
+            if ch == '"':
+                in_string = False
+                out.append(ch)
+            elif ord(ch) < 0x20:
+                out.append(f"\\u{ord(ch):04x}")
+            else:
+                out.append(ch)
+        else:
+            if ch == '"':
+                in_string = True
+            out.append(ch)
+        idx += 1
+    return "".join(out)
+
+
+def tool_call_arguments_look_incomplete(raw_args: str) -> bool:
+    """Return True when argument JSON appears truncated mid-structure."""
+    raw = raw_args.strip() if isinstance(raw_args, str) else ""
+    if not raw:
+        return False
+    try:
+        json.loads(raw)
+        return False
+    except json.JSONDecodeError:
+        pass
+
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if not stack or stack[-1] != ch:
+                return bool(stack)
+            stack.pop()
+    return in_string or bool(stack)
+
+
+def repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
+    """Repair common model-generated JSON damage in tool-call arguments."""
+    raw = raw_args.strip() if isinstance(raw_args, str) else ""
+    if not raw or raw == "None":
+        return "{}"
+
+    try:
+        parsed = json.loads(raw, strict=False)
+        return json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+
+    candidates: list[str] = []
+    base = _escape_invalid_chars_in_json_strings(raw)
+    candidates.append(base)
+    candidates.append(re.sub(r",\s*([}\]])", r"\1", base))
+
+    for candidate in list(candidates):
+        fixed = candidate
+        open_curly = fixed.count("{") - fixed.count("}")
+        open_bracket = fixed.count("[") - fixed.count("]")
+        if open_curly > 0:
+            fixed += "}" * open_curly
+        if open_bracket > 0:
+            fixed += "]" * open_bracket
+        candidates.append(fixed)
+
+    for candidate in list(candidates):
+        fixed = candidate
+        for _ in range(50):
+            try:
+                parsed = json.loads(fixed)
+                logger.warning(
+                    "Repaired malformed tool_call arguments for %s",
+                    tool_name,
+                )
+                return json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
+            except json.JSONDecodeError as exc:
+                if exc.msg.startswith("Extra data"):
+                    fixed = fixed[:exc.pos].rstrip()
+                    continue
+                if fixed.endswith(("}", "]")):
+                    fixed = fixed[:-1].rstrip()
+                    continue
+                break
+
+    return raw
+
+
+def _parse_tool_args_for_guardrail(tc: dict[str, Any]) -> dict[str, Any]:
+    fn = tc.get("function", {})
+    tool_name = fn.get("name", "")
+    raw_args = fn.get("arguments", "")
+    try:
+        repaired = repair_tool_call_arguments(raw_args, tool_name)
+        parsed = json.loads(repaired) if repaired else {}
+        return parsed if isinstance(parsed, dict) else {}
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+
+
+async def _emit_guardrail_tool_result(
+    tc: dict[str, Any],
+    *,
+    decision: ToolGuardrailDecision,
+    session: Session,
+    lease: SessionLease,
+    store: SessionStore,
+) -> dict[str, str]:
+    fn = tc.get("function", {})
+    tool_name = fn.get("name", "")
+    tool_call_id = tc.get("id", "")
+    result_content = toolguard_synthetic_result(decision, tool_name=tool_name)
+
+    await store.emit_event(
+        session.id,
+        EventType.TOOL_CALL,
+        {
+            "tool_call_id": tool_call_id,
+            "name": tool_name,
+            "arguments": {},
+        },
+    )
+    result_event_id = await store.emit_event(
+        session.id,
+        EventType.TOOL_RESULT,
+        {
+            "tool_call_id": tool_call_id,
+            "name": tool_name,
+            "content": result_content,
+            "elapsed_ms": 0,
+        },
+    )
+    await store.advance_harness_cursor(
+        session.id,
+        through_event_id=result_event_id,
+        lease_token=lease.lease_token,
+    )
+    return {
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "content": result_content,
+    }
 
 # Patterns that indicate a terminal command may modify/delete files.
 _DESTRUCTIVE_PATTERNS = re.compile(
@@ -272,6 +445,7 @@ async def execute_tool_calls(
     session_factory: Any | None = None,
     saga: SagaOrchestrator | None = None,
     log_policy_allowed: bool = False,
+    tool_guardrails: ToolGuardrails | None = None,
 ) -> list[dict]:
     """Execute tool calls, choosing parallel vs sequential.
 
@@ -281,7 +455,7 @@ async def execute_tool_calls(
     ordering.  Read-only tools have no side effects to compensate,
     so they can still benefit from parallelism.
     """
-    if should_parallelize(tool_calls) and (
+    if tool_guardrails is None and should_parallelize(tool_calls) and (
         saga is None or _all_concurrency_safe(tool_calls)
     ):
         return await execute_tool_calls_concurrent(
@@ -318,6 +492,7 @@ async def execute_tool_calls(
         session_factory=session_factory,
         saga=saga,
         log_policy_allowed=log_policy_allowed,
+        tool_guardrails=tool_guardrails,
     )
 
 
@@ -339,6 +514,7 @@ async def execute_tool_calls_sequential(
     session_factory: Any | None = None,
     saga: SagaOrchestrator | None = None,
     log_policy_allowed: bool = False,
+    tool_guardrails: ToolGuardrails | None = None,
 ) -> list[dict]:
     """Execute tool calls one at a time, emitting events for each."""
     results: list[dict] = []
@@ -348,6 +524,23 @@ async def execute_tool_calls_sequential(
         if interrupt_check():
             results.append(make_skipped_tool_result(tc))
             continue
+
+        guardrail_args = _parse_tool_args_for_guardrail(tc)
+        tool_name = tc.get("function", {}).get("name", "")
+        if tool_guardrails is not None:
+            before = tool_guardrails.before_call(tool_name, guardrail_args)
+            if not before.allows_execution:
+                result_msg = await _emit_guardrail_tool_result(
+                    tc,
+                    decision=before,
+                    session=session,
+                    lease=lease,
+                    store=store,
+                )
+                results.append(result_msg)
+                if before.should_halt:
+                    break
+                continue
 
         result_msg = await execute_single_tool(
             tc,
@@ -366,7 +559,22 @@ async def execute_tool_calls_sequential(
             saga=saga,
             log_policy_allowed=log_policy_allowed,
         )
+        if tool_guardrails is not None:
+            after = tool_guardrails.after_call(
+                tool_name,
+                guardrail_args,
+                result_msg.get("content", ""),
+            )
+            result_msg = {
+                **result_msg,
+                "content": append_toolguard_guidance(
+                    result_msg.get("content", ""),
+                    after,
+                ),
+            }
         results.append(result_msg)
+        if tool_guardrails is not None and tool_guardrails.halt_decision is not None:
+            break
 
     return results
 
@@ -482,9 +690,12 @@ async def execute_single_tool(
     tool_call_id: str = tc.get("id", "")
 
     # Parse arguments.
+    parse_error: json.JSONDecodeError | None = None
     try:
-        tool_args = json.loads(tool_args_raw) if tool_args_raw else {}
-    except json.JSONDecodeError:
+        repaired_args = repair_tool_call_arguments(tool_args_raw, tool_name)
+        tool_args = json.loads(repaired_args) if repaired_args else {}
+    except json.JSONDecodeError as exc:
+        parse_error = exc
         tool_args = {}
 
     # Coerce argument types to match JSON Schema declarations.
@@ -512,6 +723,36 @@ async def execute_single_tool(
         EventType.TOOL_CALL,
         tool_call_data,
     )
+
+    if parse_error is not None:
+        result_content = json.dumps(
+            {
+                "error": f"Invalid JSON arguments: {parse_error}",
+                "tool": tool_name,
+                "detail": str(parse_error),
+            },
+            ensure_ascii=False,
+        )
+        result_event_id = await store.emit_event(
+            session.id,
+            EventType.TOOL_RESULT,
+            {
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "content": result_content,
+                "elapsed_ms": 0,
+            },
+        )
+        await store.advance_harness_cursor(
+            session.id,
+            through_event_id=result_event_id,
+            lease_token=lease.lease_token,
+        )
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": result_content,
+        }
 
     # Workspace sandbox check — enforced at the governance layer before
     # the tool is dispatched.  Uses AGT ExecutionSandbox for path

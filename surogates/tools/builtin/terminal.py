@@ -31,6 +31,11 @@ from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.ansi_strip import strip_ansi
 from surogates.tools.utils.env_passthrough import get_all_passthrough, is_env_passthrough
 from surogates.tools.utils.process_registry import process_registry
+from surogates.tools.utils.tool_output_limits import get_max_bytes
+from surogates.tools.utils.workspace_sandbox import (
+    WorkspaceSandboxError,
+    validate_workdir as validate_workspace_workdir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -268,11 +273,12 @@ def _build_child_env() -> dict[str, str]:
 
 def _truncate_output(output: str) -> str:
     """Truncate output to MAX_OUTPUT_CHARS using 40/60 head/tail split."""
-    if len(output) <= MAX_OUTPUT_CHARS:
+    max_output_chars = get_max_bytes()
+    if len(output) <= max_output_chars:
         return output
 
-    head_chars = int(MAX_OUTPUT_CHARS * 0.4)
-    tail_chars = MAX_OUTPUT_CHARS - head_chars
+    head_chars = int(max_output_chars * 0.4)
+    tail_chars = max_output_chars - head_chars
     omitted = len(output) - head_chars - tail_chars
     truncated_notice = (
         f"\n\n... [OUTPUT TRUNCATED - {omitted} chars omitted "
@@ -463,37 +469,29 @@ async def _terminal_handler(
                 requested_workdir = workspace_path
 
         if workspace_path:
-            from pathlib import Path
-
-            ws_root = Path(workspace_path).resolve()
-            if requested_workdir:
-                candidate = Path(requested_workdir)
-                if not candidate.is_absolute():
-                    candidate = ws_root / candidate
-                candidate = candidate.resolve()
-                if candidate.is_relative_to(ws_root):
-                    workdir = str(candidate)
-                else:
-                    logger.warning(
-                        "Blocked workdir outside workspace: %s (workspace: %s)",
-                        requested_workdir[:200],
-                        workspace_path[:200],
-                    )
-                    return json.dumps(
-                        {
-                            "output": "",
-                            "exit_code": -1,
-                            "error": (
-                                f"Blocked: workdir '{requested_workdir}' is "
-                                f"outside the session workspace. All commands "
-                                f"must run within the workspace directory."
-                            ),
-                            "status": "blocked",
-                        },
-                        ensure_ascii=False,
-                    )
-            else:
-                workdir = str(ws_root)
+            try:
+                workdir = validate_workspace_workdir(
+                    workspace_path,
+                    requested_workdir,
+                )
+            except WorkspaceSandboxError as exc:
+                logger.warning(
+                    "Blocked workdir outside workspace: %s (workspace: %s)",
+                    str(requested_workdir)[:200],
+                    workspace_path[:200],
+                )
+                return json.dumps(
+                    {
+                        "output": "",
+                        "exit_code": -1,
+                        "error": (
+                            f"Blocked: {exc} All commands must run within "
+                            "the workspace directory."
+                        ),
+                        "status": "blocked",
+                    },
+                    ensure_ascii=False,
+                )
         else:
             workdir = requested_workdir or _DEFAULT_CWD
 

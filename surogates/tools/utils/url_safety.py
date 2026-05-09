@@ -30,6 +30,20 @@ _BLOCKED_HOSTNAMES = frozenset({
     "metadata.goog",
 })
 
+# Cloud metadata / credential endpoints that are blocked regardless of any
+# future private-network allowlist. These endpoints are never legitimate
+# agent fetch targets.
+_ALWAYS_BLOCKED_IPS = frozenset({
+    ipaddress.ip_address("169.254.169.254"),  # AWS/GCP/Azure/DO/Oracle IMDS
+    ipaddress.ip_address("169.254.170.2"),    # AWS ECS task credentials
+    ipaddress.ip_address("169.254.169.253"),  # Azure IMDS wire server
+    ipaddress.ip_address("fd00:ec2::254"),    # AWS IMDS IPv6
+    ipaddress.ip_address("100.100.100.200"),  # Alibaba Cloud metadata
+})
+_ALWAYS_BLOCKED_NETWORKS = (
+    ipaddress.ip_network("169.254.0.0/16"),
+)
+
 # 100.64.0.0/10 (CGNAT / Shared Address Space, RFC 6598) is NOT covered by
 # ipaddress.is_private -- it returns False for both is_private and is_global.
 # Must be blocked explicitly. Used by carrier-grade NAT, Tailscale/WireGuard
@@ -39,6 +53,8 @@ _CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return True if the IP should be blocked for SSRF protection."""
+    if ip in _ALWAYS_BLOCKED_IPS or any(ip in net for net in _ALWAYS_BLOCKED_NETWORKS):
+        return True
     if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
         return True
     if ip.is_multicast or ip.is_unspecified:
@@ -49,6 +65,58 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return False
 
 
+def is_always_blocked_url(url: str) -> bool:
+    """Return True if *url* targets a non-negotiable metadata endpoint."""
+    try:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").strip().lower().rstrip(".")
+        if not hostname:
+            return False
+
+        if hostname in _BLOCKED_HOSTNAMES:
+            logger.warning("Blocked request to cloud metadata hostname: %s", hostname)
+            return True
+
+        try:
+            literal_ip = ipaddress.ip_address(hostname)
+        except ValueError:
+            literal_ip = None
+
+        if literal_ip is not None:
+            if literal_ip in _ALWAYS_BLOCKED_IPS or any(
+                literal_ip in net for net in _ALWAYS_BLOCKED_NETWORKS
+            ):
+                logger.warning("Blocked request to cloud metadata address: %s", hostname)
+                return True
+            return False
+
+        try:
+            addr_info = socket.getaddrinfo(
+                hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM
+            )
+        except socket.gaierror:
+            return False
+
+        for _, _, _, _, sockaddr in addr_info:
+            try:
+                resolved = ipaddress.ip_address(sockaddr[0])
+            except ValueError:
+                continue
+            if resolved in _ALWAYS_BLOCKED_IPS or any(
+                resolved in net for net in _ALWAYS_BLOCKED_NETWORKS
+            ):
+                logger.warning(
+                    "Blocked request to cloud metadata address: %s -> %s",
+                    hostname,
+                    sockaddr[0],
+                )
+                return True
+        return False
+    except Exception as exc:
+        logger.debug("Always-blocked URL check failed for %s: %s", url, exc)
+        return False
+
+
 def is_safe_url(url: str) -> bool:
     """Return True if the URL target is not a private/internal address.
 
@@ -57,12 +125,12 @@ def is_safe_url(url: str) -> bool:
     """
     try:
         parsed = urlparse(url)
-        hostname = (parsed.hostname or "").strip().lower()
+        hostname = (parsed.hostname or "").strip().lower().rstrip(".")
         if not hostname:
             return False
 
-        # Block known internal hostnames
-        if hostname in _BLOCKED_HOSTNAMES:
+        # Block known cloud metadata endpoints regardless of resolution.
+        if is_always_blocked_url(url):
             logger.warning("Blocked request to internal hostname: %s", hostname)
             return False
 

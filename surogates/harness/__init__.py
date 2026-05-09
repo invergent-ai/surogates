@@ -35,7 +35,6 @@ from surogates.harness.llm_call import (
     interruptible_sleep,
     is_transient_error,
 )
-from surogates.harness.loop import AgentHarness
 from surogates.harness.message_utils import (
     coerce_message_content,
     make_skipped_tool_result,
@@ -112,6 +111,15 @@ from surogates.harness.tool_exec import (
     paths_do_not_overlap,
     should_parallelize,
 )
+
+
+def __getattr__(name: str):
+    """Lazily expose heavy harness objects without import cycles."""
+    if name == "AgentHarness":
+        from surogates.harness.loop import AgentHarness
+
+        return AgentHarness
+    raise AttributeError(name)
 
 __all__ = [
     "APIMode",

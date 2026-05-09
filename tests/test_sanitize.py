@@ -13,6 +13,7 @@ import pytest
 from surogates.harness.sanitize import (
     cap_delegate_calls,
     deduplicate_tool_calls,
+    sanitize_response_message,
     sanitize_messages,
     sanitize_surrogates,
     sanitize_tool_pairs,
@@ -111,6 +112,29 @@ class TestSanitizeMessages:
         messages = [{"role": "user", "content": None}]
         result = sanitize_messages(messages)
         assert result[0]["content"] is None
+
+
+class TestSanitizeResponseMessage:
+    def test_sanitizes_response_content_and_reasoning_fields(self) -> None:
+        message = {
+            "role": "assistant",
+            "content": "reply\ud800",
+            "reasoning": "thinking\udfff",
+            "tool_calls": [{
+                "id": "call_1",
+                "function": {
+                    "name": "write_file",
+                    "arguments": '{"path": "x\ud800"}',
+                },
+            }],
+        }
+
+        result = sanitize_response_message(message)
+
+        assert result is message
+        assert message["content"] == "reply\ufffd"
+        assert message["reasoning"] == "thinking\ufffd"
+        assert "\ud800" not in message["tool_calls"][0]["function"]["arguments"]
 
 
 # ---------------------------------------------------------------------------

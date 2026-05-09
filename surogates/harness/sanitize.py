@@ -63,6 +63,33 @@ def sanitize_messages(messages: list[dict]) -> list[dict]:
     return messages
 
 
+def sanitize_response_message(message: dict) -> dict:
+    """Sanitize model response strings before persistence or replay.
+
+    Request-side sanitization keeps malformed historical context from
+    crashing API calls. Some providers can also emit lone surrogate code
+    points in fresh assistant output, so response messages need the same
+    treatment before they are written to the event store.
+    """
+    sanitize_messages([message])
+    for key in (
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details",
+    ):
+        value = message.get(key)
+        if isinstance(value, str):
+            message[key] = sanitize_surrogates(value)
+        elif isinstance(value, list):
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                for item_key, item_value in list(item.items()):
+                    if isinstance(item_value, str):
+                        item[item_key] = sanitize_surrogates(item_value)
+    return message
+
+
 # ---------------------------------------------------------------------------
 # Orphaned tool call / tool result pair fixup
 # ---------------------------------------------------------------------------

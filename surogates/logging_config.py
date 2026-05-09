@@ -18,6 +18,8 @@ import sys
 from datetime import datetime, timezone
 from typing import Any
 
+from surogates.harness.redact import redact_sensitive_text
+
 
 class _TraceFilter(logging.Filter):
     """Logging filter that injects trace context fields into every record."""
@@ -45,7 +47,7 @@ class StructuredFormatter(logging.Formatter):
             "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": redact_sensitive_text(record.getMessage()),
         }
 
         # Trace fields (injected by _TraceFilter).
@@ -59,7 +61,7 @@ class StructuredFormatter(logging.Formatter):
 
         # Exception info.
         if record.exc_info and record.exc_info[1] is not None:
-            entry["error"] = self.formatException(record.exc_info)
+            entry["error"] = redact_sensitive_text(self.formatException(record.exc_info))
 
         return json.dumps(entry, default=str)
 
