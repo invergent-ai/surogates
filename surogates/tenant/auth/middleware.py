@@ -18,6 +18,7 @@ Provides two integration points:
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
     from surogates.config import Settings
 
 __all__ = [
+    "authenticate_websocket_tenant",
     "get_current_tenant",
     "setup_auth_middleware",
 ]
@@ -70,6 +72,10 @@ _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
 # Every other protected path requires a JWT carrying a real user identity.
 _SERVICE_ACCOUNT_PATH_PREFIX: str = "/v1/api/"
 
+_QUERY_TOKEN_PATH_RE = re.compile(
+    r"^/v1/(api/)?sessions/[0-9a-fA-F-]{36}/(?:events|browser/live(?:/.*)?)$",
+)
+
 
 def _is_public(path: str) -> bool:
     """Return True when *path* should bypass the auth middleware."""
@@ -81,6 +87,23 @@ def _is_public(path: str) -> bool:
 def _is_service_account_path(path: str) -> bool:
     """Return True when the path is reachable with a service-account token."""
     return path.startswith(_SERVICE_ACCOUNT_PATH_PREFIX)
+
+
+def _allows_query_token(path: str) -> bool:
+    """Return True when a path may authenticate with ``?token=``.
+
+    Query-token auth is limited to browser primitives that cannot attach
+    custom headers: EventSource streams, live-view iframes, and live-view
+    WebSockets. Regular REST APIs must use the Authorization header.
+    """
+    return bool(_QUERY_TOKEN_PATH_RE.match(path))
+
+
+def _extract_bearer(auth_header: str) -> str:
+    if auth_header.lower().startswith("bearer "):
+        return auth_header[7:]
+    return ""
+
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -101,15 +124,16 @@ async def get_current_tenant(
     under :data:`_SERVICE_ACCOUNT_PATH_PREFIX`; presenting one anywhere
     else yields a 403.
 
-    The token may be supplied in the ``Authorization: Bearer`` header
-    or a ``?token=`` query parameter (SSE/WebSocket clients).
+    The token may be supplied in the ``Authorization: Bearer`` header or,
+    for the small allow-list in :func:`_allows_query_token`, a ``?token=``
+    query parameter.
 
     Attach to routes via ``Depends(get_current_tenant)``.
     """
     raw_token: str | None = None
     if credentials is not None:
         raw_token = credentials.credentials
-    else:
+    elif _allows_query_token(request.url.path):
         raw_token = request.query_params.get("token")
 
     if not raw_token:
@@ -122,8 +146,50 @@ async def get_current_tenant(
     session_factory: async_sessionmaker = request.app.state.session_factory
     tenant_assets_root: str = request.app.state.settings.tenant_assets_root
 
+    ctx = await _tenant_context_from_token(
+        session_factory,
+        raw_token,
+        tenant_assets_root,
+        path=request.url.path,
+    )
+    set_tenant(ctx)
+    return ctx
+
+
+async def authenticate_websocket_tenant(
+    app: "FastAPI",
+    *,
+    path: str,
+    token: str | None,
+) -> TenantContext:
+    """Authenticate a WebSocket query token and return its tenant context."""
+    if not token or not _allows_query_token(path):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication credentials.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    session_factory: async_sessionmaker = app.state.session_factory
+    tenant_assets_root: str = app.state.settings.tenant_assets_root
+    ctx = await _tenant_context_from_token(
+        session_factory,
+        token,
+        tenant_assets_root,
+        path=path,
+    )
+    set_tenant(ctx)
+    return ctx
+
+
+async def _tenant_context_from_token(
+    session_factory: async_sessionmaker,
+    raw_token: str,
+    tenant_assets_root: str,
+    *,
+    path: str,
+) -> TenantContext:
     if is_service_account_token(raw_token):
-        if not _is_service_account_path(request.url.path):
+        if not _is_service_account_path(path):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
@@ -134,7 +200,6 @@ async def get_current_tenant(
         ctx = await _build_service_account_context(
             session_factory, raw_token, tenant_assets_root
         )
-        set_tenant(ctx)
         return ctx
 
     try:
@@ -151,7 +216,6 @@ async def get_current_tenant(
         ctx = await _build_service_account_session_context(
             session_factory, payload, tenant_assets_root
         )
-        set_tenant(ctx)
         return ctx
 
     if token_type != "access":
@@ -188,7 +252,6 @@ async def get_current_tenant(
         permissions=frozenset(payload.get("permissions", [])),
         asset_root=asset_root,
     )
-    set_tenant(ctx)
     return ctx
 
 
@@ -290,13 +353,9 @@ def setup_auth_middleware(app: FastAPI, settings: Settings) -> None:
         if _is_public(path):
             return await call_next(request)
 
-        # Extract token from Authorization header or ?token= query param.
-        # SSE (EventSource) and WebSocket clients cannot set headers, so
-        # they pass the JWT as a query parameter instead.
         auth_header = request.headers.get("authorization", "")
-        if auth_header.lower().startswith("bearer "):
-            token = auth_header[7:]
-        else:
+        token = _extract_bearer(auth_header)
+        if not token and _allows_query_token(path):
             token = request.query_params.get("token", "")
 
         if not token:
@@ -316,89 +375,19 @@ def setup_auth_middleware(app: FastAPI, settings: Settings) -> None:
                 content={"detail": "Server misconfiguration."},
             )
 
-        # Service-account token branch.
-        if is_service_account_token(token):
-            if not _is_service_account_path(path):
-                return JSONResponse(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    content={
-                        "detail": (
-                            "Service-account tokens may only be used on "
-                            f"{_SERVICE_ACCOUNT_PATH_PREFIX}* routes."
-                        )
-                    },
-                )
-            try:
-                ctx = await _build_service_account_context(
-                    session_factory, token, settings.tenant_assets_root
-                )
-            except HTTPException as exc:
-                return JSONResponse(
-                    status_code=exc.status_code,
-                    content={"detail": exc.detail},
-                    headers=exc.headers or {},
-                )
-            set_tenant(ctx)
-            return await call_next(request)
-
-        # JWT branch.
         try:
-            payload = decode_token(token)
-        except InvalidTokenError as exc:
-            return JSONResponse(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                content={"detail": f"Invalid token: {exc}"},
-                headers={"WWW-Authenticate": "Bearer"},
+            ctx = await _tenant_context_from_token(
+                session_factory,
+                token,
+                settings.tenant_assets_root,
+                path=path,
             )
-
-        token_type = payload.get("type")
-
-        if token_type == "service_account_session":
-            try:
-                ctx = await _build_service_account_session_context(
-                    session_factory, payload, settings.tenant_assets_root
-                )
-            except HTTPException as exc:
-                return JSONResponse(
-                    status_code=exc.status_code,
-                    content={"detail": exc.detail},
-                    headers=exc.headers or {},
-                )
-            set_tenant(ctx)
-            return await call_next(request)
-
-        if token_type != "access":
+        except HTTPException as exc:
             return JSONResponse(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                content={
-                    "detail": "Only access tokens are accepted for API requests."
-                },
-                headers={"WWW-Authenticate": "Bearer"},
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+                headers=exc.headers or {},
             )
-
-        org_id = UUID(payload["org_id"])
-        user_id = UUID(payload["user_id"])
-
-        async with session_factory() as session:
-            org, user = await _load_org_and_user(session, org_id, user_id)
-
-        if org is None or user is None:
-            return JSONResponse(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                content={"detail": "Organisation or user not found."},
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-
-        asset_root = f"{settings.tenant_assets_root}/{org_id}"
-
-        ctx = TenantContext(
-            org_id=org_id,
-            user_id=user_id,
-            org_config=org.config or {},
-            user_preferences=user.preferences or {},
-            permissions=frozenset(payload.get("permissions", [])),
-            asset_root=asset_root,
-        )
         set_tenant(ctx)
 
         return await call_next(request)

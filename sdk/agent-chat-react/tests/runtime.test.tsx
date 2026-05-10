@@ -1,6 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
+import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
 import { useAgentChatRuntime } from "../src/runtime/use-agent-chat-runtime";
 import type {
   AgentChatAdapter,
@@ -60,6 +61,7 @@ function session(id: string, status: string = "active"): AgentChatSession {
 
 function createFakeAdapter(calls: AdapterCalls) {
   return {
+    ...NO_BROWSER_ADAPTER,
     async listSessions() {
       return { sessions: [], total: 0 };
     },

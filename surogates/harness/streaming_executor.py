@@ -47,6 +47,8 @@ if TYPE_CHECKING:
 
     from redis.asyncio import Redis
 
+    from surogates.browser.control import BrowserControlStore
+    from surogates.browser.pool import BrowserPool
     from surogates.governance.saga.orchestrator import SagaOrchestrator
     from surogates.harness.budget import IterationBudget
     from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
@@ -127,6 +129,8 @@ class StreamingToolExecutor:
         memory_manager: Any | None = None,
         hint_tracker: SubdirectoryHintTracker | None = None,
         sandbox_pool: SandboxPool | None = None,
+        browser_pool: BrowserPool | None = None,
+        browser_control: BrowserControlStore | None = None,
         api_client: Any | None = None,
         session_factory: Any | None = None,
         llm_client: Any | None = None,
@@ -147,6 +151,8 @@ class StreamingToolExecutor:
         self._memory_manager = memory_manager
         self._hint_tracker = hint_tracker
         self._sandbox_pool = sandbox_pool
+        self._browser_pool = browser_pool
+        self._browser_control = browser_control
         self._api_client = api_client
         self._session_factory = session_factory
         self._llm_client = llm_client
@@ -320,6 +326,8 @@ class StreamingToolExecutor:
                 memory_manager=self._memory_manager,
                 hint_tracker=self._hint_tracker,
                 sandbox_pool=self._sandbox_pool,
+                browser_pool=self._browser_pool,
+                browser_control=self._browser_control,
                 api_client=self._api_client,
                 session_factory=self._session_factory,
                 llm_client=self._llm_client,

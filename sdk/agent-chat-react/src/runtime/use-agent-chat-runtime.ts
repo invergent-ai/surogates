@@ -278,6 +278,7 @@ export function useAgentChatRuntime({
   }, [adapter, sessionId]);
 
   return {
+    state,
     session,
     messages: state.messages,
     isRunning: state.isRunning,

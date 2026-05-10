@@ -1,0 +1,120 @@
+"""Foundation tests: event types and config settings for the agent browser."""
+
+from __future__ import annotations
+
+import json
+import os
+
+import pytest
+
+from surogates.session.events import EventType
+
+
+def test_browser_event_types_exist() -> None:
+    assert EventType.BROWSER_PROVISIONED.value == "browser.provisioned"
+    assert EventType.BROWSER_DESTROYED.value == "browser.destroyed"
+
+
+def test_browser_settings_defaults(monkeypatch) -> None:
+    for key in list(os.environ):
+        if key.startswith("SUROGATES_BROWSER_"):
+            monkeypatch.delenv(key, raising=False)
+
+    from surogates.config import BrowserSettings
+
+    s = BrowserSettings()
+    assert not hasattr(s, "enabled")
+    assert s.backend == "process"
+    assert s.image == "ghcr.io/invergent-ai/surogates-agent-browser:latest"
+    assert s.rest_port_base == 30000
+    assert s.cdp_port_base == 31000
+    assert s.live_view_port_base == 32000
+    assert s.live_view_mode == "novnc"
+    assert s.pod_ready_timeout == 60
+    assert s.active_deadline_seconds == 3600
+    assert s.cpu == "1"
+    assert s.memory == "2Gi"
+    assert s.cpu_limit == "2"
+    assert s.memory_limit == "4Gi"
+
+
+def test_browser_settings_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("SUROGATES_BROWSER_REST_PORT_BASE", "40000")
+
+    from surogates.config import BrowserSettings
+
+    s = BrowserSettings()
+    assert s.rest_port_base == 40000
+
+
+def test_settings_includes_browser(monkeypatch) -> None:
+    for key in list(os.environ):
+        if key.startswith("SUROGATES_"):
+            monkeypatch.delenv(key, raising=False)
+
+    from surogates.config import Settings
+
+    s = Settings()
+    assert s.browser.backend == "process"
+
+
+def test_browser_status_values() -> None:
+    from surogates.browser.base import BrowserStatus
+
+    assert BrowserStatus.RUNNING.value == "running"
+    assert BrowserStatus.PENDING.value == "pending"
+    assert BrowserStatus.FAILED.value == "failed"
+    assert BrowserStatus.TERMINATED.value == "terminated"
+
+
+def test_browser_spec_defaults() -> None:
+    from surogates.browser.base import BrowserSpec
+
+    spec = BrowserSpec()
+    assert spec.image == "ghcr.io/invergent-ai/surogates-agent-browser:latest"
+    assert spec.cpu == "1"
+    assert spec.memory == "2Gi"
+    assert spec.cpu_limit == "2"
+    assert spec.memory_limit == "4Gi"
+    assert spec.pod_ready_timeout == 60
+    assert spec.active_deadline_seconds == 3600
+    assert spec.env == {}
+
+
+def test_browser_spec_overrides() -> None:
+    from surogates.browser.base import BrowserSpec
+
+    spec = BrowserSpec(image="custom:1", cpu="500m", env={"FOO": "bar"})
+    assert spec.image == "custom:1"
+    assert spec.cpu == "500m"
+    assert spec.env == {"FOO": "bar"}
+
+
+def test_browser_unavailable_result_shape() -> None:
+    from surogates.browser.base import browser_unavailable_result
+
+    payload = json.loads(browser_unavailable_result("kubelet busy"))
+    assert payload["error"] == "browser_unavailable"
+    assert payload["reason"] == "kubelet busy"
+    assert "guidance" in payload
+
+
+def test_browser_unavailable_error_classifies() -> None:
+    from surogates.browser.base import BrowserUnavailableError
+
+    exc = BrowserUnavailableError("docker pull failed", classification="image")
+    assert exc.reason == "docker pull failed"
+    assert exc.classification == "image"
+
+
+def test_browser_endpoint_helpers() -> None:
+    from surogates.browser.base import BrowserEndpoint
+
+    ep = BrowserEndpoint(
+        rest_url="http://10.0.0.5:30000",
+        cdp_url="ws://10.0.0.5:31000",
+        live_view_url="ws://10.0.0.5:32000",
+    )
+    assert ep.rest_url.endswith(":30000")
+    with pytest.raises(TypeError):
+        BrowserEndpoint(rest_url="http://x")  # type: ignore[call-arg]

@@ -24,6 +24,10 @@ from surogates.harness.loop import AgentHarness
 from surogates.harness.prompt import PromptBuilder
 from surogates.harness.prompt_library import default_library as default_prompt_library
 from surogates.health import infrastructure_readiness, start_health_server
+from surogates.browser.control import BrowserControlStore
+from surogates.browser.pool import BrowserPool
+from surogates.browser.process import ProcessBrowserBackend
+from surogates.browser.registry import BrowserRegistry
 from surogates.memory.manager import MemoryManager
 from surogates.memory.store import MemoryStore
 from surogates.orchestrator.dispatcher import Orchestrator
@@ -35,9 +39,28 @@ from surogates.tools.loader import ResourceLoader
 from surogates.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
-    from surogates.config import Settings
+    from surogates.config import BrowserSettings, Settings
 
 logger = logging.getLogger(__name__)
+
+
+def _build_browser_backend(settings: "BrowserSettings") -> Any:
+    """Build the configured browser backend without touching external services."""
+    if settings.backend == "kubernetes":
+        from surogates.browser.kubernetes import K8sBrowserBackend
+
+        return K8sBrowserBackend(
+            namespace=settings.k8s_namespace,
+            service_account=settings.k8s_service_account,
+            pod_ready_timeout=settings.pod_ready_timeout,
+            image=settings.image,
+        )
+    return ProcessBrowserBackend(
+        image=settings.image,
+        rest_port_base=settings.rest_port_base,
+        cdp_port_base=settings.cdp_port_base,
+        live_view_port_base=settings.live_view_port_base,
+    )
 
 
 async def _load_attached_kbs(
@@ -207,6 +230,30 @@ async def run_worker(settings: Settings) -> None:
     else:
         sandbox_backend = ProcessSandbox()
     sandbox_pool = SandboxPool(sandbox_backend)
+
+    # 4b. Browser pool -- one browser per session, lazily provisioned.
+    browser_backend = _build_browser_backend(settings.browser)
+    browser_registry = BrowserRegistry(redis_client)
+    browser_control = BrowserControlStore(redis_client)
+
+    async def _emit_browser_event(
+        session_id: str,
+        event_type: str,
+        data: dict[str, Any],
+    ) -> None:
+        from surogates.session.events import EventType
+
+        try:
+            await session_store.emit_event(UUID(session_id), EventType(event_type), data)
+        except Exception:
+            logger.exception("Failed to emit browser event %s", event_type)
+
+    browser_pool = BrowserPool(
+        backend=browser_backend,
+        registry=browser_registry,
+        event_emitter=_emit_browser_event,
+    )
+    logger.info("Agent browser ready (backend=%s)", settings.browser.backend)
 
     # 4a. Optionally initialize the ops DB connection used by the
     # KB navigation tools (kb_list_pages, kb_read_page). Skipped when
@@ -519,6 +566,8 @@ async def run_worker(settings: Settings) -> None:
             redis_client=redis_client,
             memory_manager=memory_manager,
             sandbox_pool=sandbox_pool,
+            browser_pool=browser_pool,
+            browser_control=browser_control,
             api_client=harness_api_client,
             default_model=model_id,
             session_factory=session_factory,
@@ -596,6 +645,7 @@ async def run_worker(settings: Settings) -> None:
             except asyncio.CancelledError:
                 pass
         await health_server.stop()
+        await browser_pool.destroy_all()
         await sandbox_pool.destroy_all()
         mcp_proxy.shutdown_all()
         if mcp_proxy_client is not None:

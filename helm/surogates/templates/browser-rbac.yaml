@@ -1,0 +1,10 @@
+{{- $fullname := include "surogates.fullname" . -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-browser
+  labels:
+    {{- include "surogates.fullLabels" (dict "root" . "component" "browser") | nindent 4 }}
+---
+# No Role/RoleBinding — the browser ServiceAccount has zero permissions.
+# The browser pod cannot list pods, read secrets, or interact with the K8s API.

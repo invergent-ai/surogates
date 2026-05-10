@@ -2,7 +2,12 @@ export type AgentChatRole = "user" | "assistant" | "system";
 
 export type AgentChatMessageStatus = "complete" | "streaming" | "error";
 
-export type AgentChatSystemKind = "skill_invoked" | "artifact" | "error";
+export type AgentChatSystemKind =
+  | "skill_invoked"
+  | "artifact"
+  | "error"
+  | "browser_marker"
+  | "browser_marker_warning";
 
 export interface AgentChatImageAttachment {
   /** data: URL (data:image/png;base64,...) or raw base64 string */
@@ -183,12 +188,32 @@ export type AgentChatEventType =
   | "expert.override"
   | "artifact.created"
   | "artifact.updated"
+  | "browser.provisioned"
+  | "browser.destroyed"
+  | "browser.control_granted"
+  | "browser.control_returned"
   | "clarify.response";
 
 export interface AgentChatRuntimeEvent {
   type: AgentChatEventType;
   eventId: number;
   data: Record<string, unknown>;
+}
+
+export interface AgentChatBrowserState {
+  status: "provisioning" | "live" | "user-control" | "closed";
+  controlOwner: string | null;
+}
+
+export interface AgentChatBrowserStateResponse {
+  status: "live" | "user-control";
+  controlOwner: string | null;
+  liveViewPath: string;
+}
+
+export interface AgentChatBrowserControlResponse {
+  outcome: "granted" | "refreshed" | "conflict";
+  ownerUserId: string;
 }
 
 export interface AgentChatState {
@@ -202,6 +227,7 @@ export interface AgentChatState {
   hadDeltas: boolean;
   terminal: boolean;
   workspaceRefreshKey: number;
+  browser: AgentChatBrowserState | null;
 }
 
 export type AgentChatArtifactKind =
@@ -406,9 +432,14 @@ export interface AgentChatAdapter {
     sessionId: string;
     after: number;
   }): AgentChatEventStream;
+  getBrowserState(sessionId: string): Promise<AgentChatBrowserStateResponse | null>;
+  acquireBrowserControl(sessionId: string): Promise<AgentChatBrowserControlResponse>;
+  releaseBrowserControl(sessionId: string): Promise<void>;
+  browserLiveViewUrl(sessionId: string): string;
 }
 
 export interface AgentChatRuntimeApi {
+  state: AgentChatState;
   session: AgentChatSession | null;
   messages: AgentChatMessage[];
   isRunning: boolean;

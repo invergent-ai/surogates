@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import logging
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from surogates.governance.policy import GovernanceGate, PolicyDecision
@@ -28,6 +28,10 @@ from surogates.sandbox.base import SandboxSpec
 from surogates.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from surogates.browser.control import BrowserControlStore
+    from surogates.browser.pool import BrowserPool
 
 
 class ToolLocation(str, Enum):
@@ -58,6 +62,17 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "cron_delete": ToolLocation.HARNESS,
     "cron_list": ToolLocation.HARNESS,
     "loop_wait": ToolLocation.HARNESS,
+    # Agent browser (separate resource from workspace sandbox)
+    "browser_navigate": ToolLocation.HARNESS,
+    "browser_get_state": ToolLocation.HARNESS,
+    "browser_screenshot": ToolLocation.HARNESS,
+    "browser_click": ToolLocation.HARNESS,
+    "browser_type": ToolLocation.HARNESS,
+    "browser_press_key": ToolLocation.HARNESS,
+    "browser_scroll": ToolLocation.HARNESS,
+    "browser_drag": ToolLocation.HARNESS,
+    "browser_wait": ToolLocation.HARNESS,
+    "browser_close": ToolLocation.HARNESS,
     # Knowledge base tools (ops DB + Hub reads, no isolation needed)
     "kb_list_pages": ToolLocation.HARNESS,
     "kb_read_page": ToolLocation.HARNESS,
@@ -139,6 +154,9 @@ class ToolRouter:
         tenant: Any,
         session_id: UUID,
         workspace_path: str | None = None,
+        browser_pool: "BrowserPool | None" = None,
+        browser_control: "BrowserControlStore | None" = None,
+        **extra_kwargs: Any,
     ) -> str:
         """Route a tool call through governance and dispatch.
 
@@ -195,6 +213,9 @@ class ToolRouter:
                     arguments,
                     tenant=tenant,
                     session_id=session_id,
+                    browser_pool=browser_pool,
+                    browser_control=browser_control,
+                    **extra_kwargs,
                 )
             case ToolLocation.SANDBOX:
                 # Lazily provision or reuse the session's sandbox.

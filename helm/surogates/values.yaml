@@ -104,6 +104,27 @@ sandbox:
   k8sExecutorPath: "/usr/local/bin/tool-executor"
   k8sS3Endpoint: ""
 
+# -- Agent browser
+browser:
+  backend: "kubernetes"
+  image: "ghcr.io/invergent-ai/surogates-agent-browser:latest"
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  podReadyTimeout: 60
+  activeDeadlineSeconds: 3600
+  serviceAccountSuffix: "browser"
+  k8sNamespace: ""
+  blockedCidrs: []
+  processPorts:
+    restBase: 30000
+    cdpBase: 31000
+    liveViewBase: 32000
+
 # -- Storage (S3-compatible)
 storage:
   backend: "local"
