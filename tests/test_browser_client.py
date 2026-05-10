@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import httpx
@@ -316,4 +317,48 @@ class TestClickType:
         handlers.append(("POST", "/computer/click_mouse", 200, {"ok": True}))
         handlers.append(("POST", "/computer/type", 200, {"ok": True}))
         await client.type_into_ref("@e2", "test@example.com")
+        assert client._snapshot_cache == {}
+
+
+class TestSmallActions:
+    async def test_press_key_single(self, client_with_transport) -> None:
+        client, handlers = client_with_transport
+        client._snapshot_cache["@e1"] = {"x": 1, "y": 1, "role": "button", "name": "Go"}
+        handlers.append(("POST", "/computer/press_key", 200, {"ok": True}))
+        await client.press_key("Enter")
+        assert client._snapshot_cache == {}
+
+    async def test_press_key_chord(self, client_with_transport) -> None:
+        client, _handlers = client_with_transport
+        captured: list[dict[str, Any]] = []
+
+        class CapturingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                captured.append(json.loads(request.content))
+                return httpx.Response(200, json={"ok": True})
+
+        client._http = httpx.AsyncClient(base_url=client.rest_url, transport=CapturingTransport())
+        await client.press_key("Ctrl+l")
+        assert captured[0]["keys"] == ["Ctrl+l"]
+
+    async def test_scroll_at(self, client_with_transport) -> None:
+        client, handlers = client_with_transport
+        client._snapshot_cache["@e1"] = {"x": 1, "y": 1, "role": "button", "name": "Go"}
+        handlers.append(("POST", "/computer/scroll", 200, {"ok": True}))
+        await client.scroll_at(640, 400, delta_y=300)
+        assert client._snapshot_cache == {}
+
+    async def test_drag(self, client_with_transport) -> None:
+        client, handlers = client_with_transport
+        client._snapshot_cache["@e1"] = {"x": 1, "y": 1, "role": "button", "name": "Go"}
+        handlers.append(("POST", "/computer/drag_mouse", 200, {"ok": True}))
+        await client.drag([(10, 10), (200, 200)])
+        assert client._snapshot_cache == {}
+
+    async def test_wait_sleeps(self, client_with_transport) -> None:
+        client, _ = client_with_transport
+        start = time.perf_counter()
+        await client.wait(50)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        assert 40 <= elapsed_ms < 500
         assert client._snapshot_cache == {}

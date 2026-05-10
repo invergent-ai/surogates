@@ -21,8 +21,8 @@
 - [x] Task 5: `KernelBrowserClient.get_state` with refs/cache — completed
 - [x] Task 6: `get_state` filters — completed
 - [x] Task 7: click/type client methods — completed
-- [ ] Task 8: key/scroll/drag/wait client methods — **in progress**
-- [ ] Task 9: screenshot client method — left to do
+- [x] Task 8: key/scroll/drag/wait client methods — completed
+- [ ] Task 9: screenshot client method — **in progress**
 - [ ] Task 10: `BrowserRegistry` — left to do
 - [ ] Task 11: `BrowserControlStore` — left to do
 - [ ] Task 12: `ProcessBrowserBackend` — left to do

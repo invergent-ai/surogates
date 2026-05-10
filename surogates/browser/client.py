@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -212,6 +213,43 @@ return {
         entry = self._resolve_ref(ref)
         await self.click_at(int(entry["x"]), int(entry["y"]))
         await self.type_text(text, **kwargs)
+
+    async def press_key(self, *keys: str, duration_ms: int = 0) -> None:
+        """Press one key or key chord."""
+
+        body: dict[str, Any] = {"keys": list(keys)}
+        if duration_ms:
+            body["duration"] = duration_ms
+        response = await self._http.post("/computer/press_key", json=body)
+        response.raise_for_status()
+        self._invalidate_snapshot_cache()
+
+    async def scroll_at(self, x: int, y: int, *, delta_x: int = 0, delta_y: int = 0) -> None:
+        """Scroll at viewport coordinates."""
+
+        response = await self._http.post(
+            "/computer/scroll",
+            json={"x": x, "y": y, "delta_x": delta_x, "delta_y": delta_y},
+        )
+        response.raise_for_status()
+        self._invalidate_snapshot_cache()
+
+    async def drag(self, path: list[tuple[int, int]], *, button: str = "left") -> None:
+        """Drag the mouse along a path of viewport coordinates."""
+
+        if len(path) < 2:
+            raise ValueError("drag path must contain at least two points")
+        body: dict[str, Any] = {"path": [list(point) for point in path], "smooth": False}
+        if button != "left":
+            body["button"] = button
+        response = await self._http.post("/computer/drag_mouse", json=body)
+        response.raise_for_status()
+        self._invalidate_snapshot_cache()
+
+    async def wait(self, ms: int) -> None:
+        """Sleep without changing browser state or cached refs."""
+
+        await asyncio.sleep(max(0, ms) / 1000.0)
 
     async def _playwright_execute(
         self,
