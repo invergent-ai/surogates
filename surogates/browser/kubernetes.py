@@ -125,3 +125,52 @@ class K8sBrowserBackend:
                 containers=[container],
             ),
         )
+
+    def _build_service_manifest(
+        self,
+        *,
+        browser_id: str,
+        service_name: str,
+        session_id: str,
+        org_id: str,
+        user_id: str,
+    ) -> client.V1Service:
+        """Build the ClusterIP Service manifest for a browser pod."""
+        labels = {
+            "app": "surogates-browser",
+            "surogates.ai/browser-id": browser_id,
+            "surogates.ai/session-id": session_id,
+            "surogates.ai/org-id": org_id,
+            "surogates.ai/user-id": user_id,
+        }
+        return client.V1Service(
+            metadata=client.V1ObjectMeta(
+                name=service_name,
+                namespace=self._namespace,
+                labels=labels,
+            ),
+            spec=client.V1ServiceSpec(
+                type="ClusterIP",
+                selector={
+                    "app": "surogates-browser",
+                    "surogates.ai/browser-id": browser_id,
+                },
+                ports=[
+                    client.V1ServicePort(
+                        name="rest",
+                        port=SERVICE_PORT_REST,
+                        target_port=SERVICE_PORT_REST,
+                    ),
+                    client.V1ServicePort(
+                        name="cdp",
+                        port=SERVICE_PORT_CDP,
+                        target_port=SERVICE_PORT_CDP,
+                    ),
+                    client.V1ServicePort(
+                        name="live-view",
+                        port=SERVICE_PORT_LIVE_VIEW,
+                        target_port=TARGET_PORT_LIVE_VIEW_NOVNC,
+                    ),
+                ],
+            ),
+        )

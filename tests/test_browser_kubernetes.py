@@ -114,3 +114,36 @@ class TestBuildPodManifest:
         )
 
         assert pod.spec.containers[0].image == "kernel-headful:test"
+
+
+class TestBuildServiceManifest:
+    def test_service_manifest_targets_browser_pod_labels(
+        self, backend: K8sBrowserBackend,
+    ) -> None:
+        svc = backend._build_service_manifest(
+            browser_id="browser-id",
+            service_name="browser-abc123",
+            session_id="session-1",
+            org_id="org-1",
+            user_id="user-1",
+        )
+
+        assert svc.metadata.name == "browser-abc123"
+        assert svc.metadata.namespace == "test-ns"
+        assert svc.metadata.labels == {
+            "app": "surogates-browser",
+            "surogates.ai/browser-id": "browser-id",
+            "surogates.ai/session-id": "session-1",
+            "surogates.ai/org-id": "org-1",
+            "surogates.ai/user-id": "user-1",
+        }
+        assert svc.spec.type == "ClusterIP"
+        assert svc.spec.selector == {
+            "app": "surogates-browser",
+            "surogates.ai/browser-id": "browser-id",
+        }
+        assert [(p.name, p.port, p.target_port) for p in svc.spec.ports] == [
+            ("rest", 10001, 10001),
+            ("cdp", 9222, 9222),
+            ("live-view", 443, 6080),
+        ]
