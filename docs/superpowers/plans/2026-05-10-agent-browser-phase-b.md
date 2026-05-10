@@ -5,7 +5,7 @@
 ## Implementation TODO
 
 - [x] **Plan review fixes** — corrected stale Phase B plan issues before implementation.
-- [ ] **Task 1: K8sBrowserBackend skeleton** — pending.
+- [x] **Task 1: K8sBrowserBackend skeleton** — completed.
 - [ ] **Task 2: Pod manifest builder** — pending.
 - [ ] **Task 3: Service manifest builder** — pending.
 - [ ] **Task 4: K8s provision lifecycle** — pending.
