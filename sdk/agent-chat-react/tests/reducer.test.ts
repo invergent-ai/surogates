@@ -171,4 +171,66 @@ describe("applyAgentChatEvent", () => {
       { question: "Pick one", answer: "A", is_other: false },
     ]);
   });
+
+  it("folds browser lifecycle events into browser state and timeline markers", () => {
+    const provisioned = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "browser.provisioned",
+      eventId: 21,
+      data: {},
+    });
+
+    expect(provisioned.browser).toEqual({
+      status: "live",
+      controlOwner: null,
+    });
+    expect(provisioned.messages.at(-1)).toMatchObject({
+      id: "browser-marker-21",
+      role: "system",
+      systemKind: "browser_marker",
+      status: "complete",
+    });
+    expect(provisioned.messages.at(-1)?.content).toMatch(/browser ready/i);
+
+    const granted = applyAgentChatEvent(provisioned, {
+      type: "browser.control_granted",
+      eventId: 22,
+      data: { owner_user_id: "user-1" },
+    });
+
+    expect(granted.browser).toEqual({
+      status: "user-control",
+      controlOwner: "user-1",
+    });
+    expect(granted.messages.at(-1)).toMatchObject({
+      id: "browser-marker-22",
+      role: "system",
+      systemKind: "browser_marker_warning",
+      status: "complete",
+    });
+    expect(granted.messages.at(-1)?.content).toMatch(/took control/i);
+
+    const returned = applyAgentChatEvent(granted, {
+      type: "browser.control_returned",
+      eventId: 23,
+      data: {},
+    });
+
+    expect(returned.browser).toEqual({
+      status: "live",
+      controlOwner: null,
+    });
+
+    const destroyed = applyAgentChatEvent(returned, {
+      type: "browser.destroyed",
+      eventId: 24,
+      data: {},
+    });
+
+    expect(destroyed.browser).toBeNull();
+    expect(destroyed.messages.at(-1)).toMatchObject({
+      id: "browser-marker-24",
+      systemKind: "browser_marker",
+    });
+    expect(destroyed.messages.at(-1)?.content).toMatch(/browser closed/i);
+  });
 });

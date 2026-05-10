@@ -32,5 +32,9 @@ export const AGENT_CHAT_LISTENED_EVENTS = [
   "expert.override",
   "artifact.created",
   "artifact.updated",
+  "browser.provisioned",
+  "browser.destroyed",
+  "browser.control_granted",
+  "browser.control_returned",
   "clarify.response",
 ] as const satisfies readonly AgentChatEventType[];

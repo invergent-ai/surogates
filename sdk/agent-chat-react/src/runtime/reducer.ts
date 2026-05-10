@@ -5,6 +5,7 @@ import type {
   AgentChatState,
   AgentChatTokenUsage,
   AgentChatToolCallInfo,
+  AgentChatBrowserState,
 } from "../types";
 import { WORKSPACE_MUTATING_TOOLS } from "./events";
 
@@ -32,6 +33,7 @@ export function createInitialAgentChatState(
     hadDeltas: false,
     terminal: false,
     workspaceRefreshKey: 0,
+    browser: null,
   };
 }
 
@@ -93,6 +95,27 @@ export function applyAgentChatEvent(
           },
         },
       ]);
+
+    case "browser.provisioned":
+      return applyBrowserEvent(nextState, event, {
+        status: "live",
+        controlOwner: null,
+      });
+
+    case "browser.control_granted":
+      return applyBrowserEvent(nextState, event, {
+        status: "user-control",
+        controlOwner: stringValue(event.data.owner_user_id) || null,
+      });
+
+    case "browser.control_returned":
+      return applyBrowserEvent(nextState, event, {
+        status: "live",
+        controlOwner: null,
+      });
+
+    case "browser.destroyed":
+      return applyBrowserEvent(nextState, event, null);
 
     case "llm.delta":
       return applyLlmDelta(nextState, event);
@@ -237,6 +260,50 @@ function applyUserMessage(
     status: "complete",
   });
   return next;
+}
+
+function applyBrowserEvent(
+  state: AgentChatState,
+  event: AgentChatRuntimeEvent,
+  browser: AgentChatBrowserState | null,
+): AgentChatState {
+  return withMessages(
+    { ...state, browser },
+    [...state.messages, browserMarker(event)],
+  );
+}
+
+function browserMarker(event: AgentChatRuntimeEvent): AgentChatMessage {
+  const labels: Record<string, { content: string; warning: boolean }> = {
+    "browser.provisioned": {
+      content: "Browser ready.",
+      warning: false,
+    },
+    "browser.control_granted": {
+      content: "A user took control of the browser.",
+      warning: true,
+    },
+    "browser.control_returned": {
+      content: "Browser control returned to the agent.",
+      warning: false,
+    },
+    "browser.destroyed": {
+      content: "Browser closed.",
+      warning: false,
+    },
+  };
+  const label = labels[event.type] ?? {
+    content: "Browser updated.",
+    warning: false,
+  };
+  return {
+    id: `browser-marker-${event.eventId}`,
+    role: "system",
+    content: label.content,
+    createdAt: new Date(),
+    status: "complete",
+    systemKind: label.warning ? "browser_marker_warning" : "browser_marker",
+  };
 }
 
 function applyLlmDelta(

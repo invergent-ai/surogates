@@ -2,7 +2,12 @@ export type AgentChatRole = "user" | "assistant" | "system";
 
 export type AgentChatMessageStatus = "complete" | "streaming" | "error";
 
-export type AgentChatSystemKind = "skill_invoked" | "artifact" | "error";
+export type AgentChatSystemKind =
+  | "skill_invoked"
+  | "artifact"
+  | "error"
+  | "browser_marker"
+  | "browser_marker_warning";
 
 export interface AgentChatImageAttachment {
   /** data: URL (data:image/png;base64,...) or raw base64 string */
@@ -183,12 +188,21 @@ export type AgentChatEventType =
   | "expert.override"
   | "artifact.created"
   | "artifact.updated"
+  | "browser.provisioned"
+  | "browser.destroyed"
+  | "browser.control_granted"
+  | "browser.control_returned"
   | "clarify.response";
 
 export interface AgentChatRuntimeEvent {
   type: AgentChatEventType;
   eventId: number;
   data: Record<string, unknown>;
+}
+
+export interface AgentChatBrowserState {
+  status: "provisioning" | "live" | "user-control" | "closed";
+  controlOwner: string | null;
 }
 
 export interface AgentChatState {
@@ -202,6 +216,7 @@ export interface AgentChatState {
   hadDeltas: boolean;
   terminal: boolean;
   workspaceRefreshKey: number;
+  browser: AgentChatBrowserState | null;
 }
 
 export type AgentChatArtifactKind =
