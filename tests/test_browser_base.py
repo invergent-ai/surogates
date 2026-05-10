@@ -25,7 +25,7 @@ def test_browser_settings_defaults(monkeypatch) -> None:
     s = BrowserSettings()
     assert not hasattr(s, "enabled")
     assert s.backend == "process"
-    assert s.image == "ghcr.io/onkernel/chromium-headful:stable"
+    assert s.image == "ghcr.io/invergent-ai/surogates-agent-browser:latest"
     assert s.rest_port_base == 30000
     assert s.cdp_port_base == 31000
     assert s.live_view_port_base == 32000
@@ -71,7 +71,7 @@ def test_browser_spec_defaults() -> None:
     from surogates.browser.base import BrowserSpec
 
     spec = BrowserSpec()
-    assert spec.image == "ghcr.io/onkernel/chromium-headful:stable"
+    assert spec.image == "ghcr.io/invergent-ai/surogates-agent-browser:latest"
     assert spec.cpu == "1"
     assert spec.memory == "2Gi"
     assert spec.cpu_limit == "2"

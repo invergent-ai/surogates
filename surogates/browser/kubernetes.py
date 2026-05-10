@@ -46,7 +46,7 @@ class K8sBrowserBackend:
         namespace: str = "surogates",
         service_account: str = "surogates-browser",
         pod_ready_timeout: int = 60,
-        image: str = "ghcr.io/onkernel/chromium-headful:stable",
+        image: str = "ghcr.io/invergent-ai/surogates-agent-browser:latest",
     ) -> None:
         self._namespace = namespace
         self._service_account = service_account

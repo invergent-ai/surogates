@@ -20,7 +20,9 @@ declare -A IMAGES=(
   [worker]="surogates-worker"
   [sandbox]="surogates-agent-sandbox"
   [s3fs]="surogates-s3fs"
+  [browser]="surogates-agent-browser"
 )
+PUSH="${PUSH:-1}"
 
 for dir in "${!IMAGES[@]}"; do
   name="${IMAGES[$dir]}"
@@ -44,7 +46,9 @@ for dir in "${!IMAGES[@]}"; do
     --file "$REPO_ROOT/images/$dir/Dockerfile" \
     "$REPO_ROOT"
 
-  docker push "$full:latest"
+  if [[ "$PUSH" == "1" ]]; then
+    docker push "$full:latest"
+  fi
   
   echo ""
 done

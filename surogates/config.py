@@ -289,7 +289,7 @@ class BrowserSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_BROWSER_"}
 
     backend: Literal["process", "kubernetes"] = "process"
-    image: str = "ghcr.io/onkernel/chromium-headful:stable"
+    image: str = "ghcr.io/invergent-ai/surogates-agent-browser:latest"
     rest_port_base: int = 30000
     cdp_port_base: int = 31000
     live_view_port_base: int = 32000

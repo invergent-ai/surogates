@@ -14,7 +14,7 @@
 - [x] **Task 7: K8s destroy lifecycle** — completed.
 - [x] **Task 8: find_by_session fallback primitive** — completed.
 - [x] **Task 9: Worker bootstrap wiring** — completed.
-- [ ] **Task 10: Browser image packaging** — pending.
+- [x] **Task 10: Browser image packaging** — completed.
 - [ ] **Task 11: Helm browser ServiceAccount** — pending.
 - [ ] **Task 12: Helm browser NetworkPolicy** — pending.
 - [ ] **Task 13: Helm worker RBAC services** — pending.
@@ -1390,13 +1390,13 @@ without waiting on upstream `:stable` tag movement.
 - [ ] **Step 1: Look up a fresh kernel-images digest to pin**
 
 ```bash
-docker pull ghcr.io/onkernel/chromium-headful:stable
+docker pull docker.io/onkernel/chromium-headful:4612d00
 docker inspect --format '{{index .RepoDigests 0}}' \
-    ghcr.io/onkernel/chromium-headful:stable
+    docker.io/onkernel/chromium-headful:4612d00
 ```
 
-Use the resulting `ghcr.io/onkernel/chromium-headful@sha256:...` string as
-the `FROM` line. Pinning by digest (not tag) protects us from `:stable`
+Use the resulting `docker.io/onkernel/chromium-headful@sha256:...` string
+as the `FROM` line. Pinning by digest (not tag) protects us from a tag
 moving under us between deploys.
 
 - [ ] **Step 2: Create the Dockerfile**
@@ -1416,14 +1416,14 @@ moving under us between deploys.
 # Or via the matrix: ./images/build.sh latest browser
 #
 # k3d/kind users can `kind load docker-image` after building.
-ARG UPSTREAM=ghcr.io/onkernel/chromium-headful:stable
+ARG UPSTREAM=docker.io/onkernel/chromium-headful@sha256:b7c0151ee94df4b5a5873605389727db456dbd7c98da74efa29c40eb238ac573
 FROM ${UPSTREAM}
 
 LABEL org.opencontainers.image.title="surogates-agent-browser" \
       org.opencontainers.image.description="Surogates per-session agent browser (kernel-images-derived)" \
       org.opencontainers.image.vendor="Invergent SA" \
       org.opencontainers.image.source="https://github.com/invergent-ai/surogates" \
-      org.opencontainers.image.base.name="ghcr.io/onkernel/chromium-headful"
+      org.opencontainers.image.base.name="docker.io/onkernel/chromium-headful"
 
 # Phase D profile sync uses /fs/upload_zstd + /fs/download_dir_zstd; zstd
 # must be present in the image for those endpoints to work.
@@ -1442,9 +1442,9 @@ USER kernel
 
 ```bash
 cd /work/surogates
-docker pull ghcr.io/onkernel/chromium-headful:stable
+docker pull docker.io/onkernel/chromium-headful:4612d00
 UPSTREAM_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' \
-    ghcr.io/onkernel/chromium-headful:stable)"
+    docker.io/onkernel/chromium-headful:4612d00)"
 sed -i "s|^ARG UPSTREAM=.*|ARG UPSTREAM=${UPSTREAM_DIGEST}|" \
     images/browser/Dockerfile
 docker build -f images/browser/Dockerfile \

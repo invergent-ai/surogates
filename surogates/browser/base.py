@@ -61,7 +61,7 @@ class BrowserEndpoint:
 class BrowserSpec:
     """Desired-state spec for provisioning a browser instance."""
 
-    image: str = "ghcr.io/onkernel/chromium-headful:stable"
+    image: str = "ghcr.io/invergent-ai/surogates-agent-browser:latest"
     cpu: str = "1"
     memory: str = "2Gi"
     cpu_limit: str = "2"
