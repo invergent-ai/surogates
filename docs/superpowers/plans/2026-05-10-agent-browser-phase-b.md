@@ -2,9 +2,29 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+## Implementation TODO
+
+- [x] **Plan review fixes** — corrected stale Phase B plan issues before implementation.
+- [ ] **Task 1: K8sBrowserBackend skeleton** — pending.
+- [ ] **Task 2: Pod manifest builder** — pending.
+- [ ] **Task 3: Service manifest builder** — pending.
+- [ ] **Task 4: K8s provision lifecycle** — pending.
+- [ ] **Task 5: BrowserBackend protocol alignment** — pending.
+- [ ] **Task 6: K8s status mapping** — pending.
+- [ ] **Task 7: K8s destroy lifecycle** — pending.
+- [ ] **Task 8: find_by_session fallback primitive** — pending.
+- [ ] **Task 9: Worker bootstrap wiring** — pending.
+- [ ] **Task 10: Browser image packaging** — pending.
+- [ ] **Task 11: Helm browser ServiceAccount** — pending.
+- [ ] **Task 12: Helm browser NetworkPolicy** — pending.
+- [ ] **Task 13: Helm worker RBAC services** — pending.
+- [ ] **Task 14: Helm values and worker env** — pending.
+- [ ] **Task 15: Opt-in K8s e2e** — pending.
+- [ ] **Final verification** — pending.
+
 **Goal:** Land the production deployment of the agent browser. Add a `K8sBrowserBackend` that provisions per-session pods + per-session Services in the cluster, wire it into the worker behind `browser.backend = "kubernetes"`, ship a custom `surogates-agent-browser` container image alongside the existing api/worker/sandbox/s3fs images, ship the helm chart pieces (browser ServiceAccount, NetworkPolicy, worker RBAC extensions, values defaults) for both the in-repo chart and the surogate-ops chart, and add a label-keyed `find_by_session` lookup that the Phase C API server uses as a stale-Redis fallback. End state: the same agent that drove a docker-launched browser in Phase A drives a per-session pod in K8s, with no behavioural change visible to the LLM.
 
-**Architecture:** `K8sBrowserBackend` mirrors `surogates/sandbox/kubernetes.py` for shape. One pod and one ClusterIP Service per session. The Service exposes three ports — `10001` (REST, used now by the worker), `9222` (CDP, reserved), `443 → 6080` (NoVNC live view, used by Phase C). Pods are labelled `surogates.ai/session-id`, `/org-id`, `/user-id`, `app=surogates-browser`. NetworkPolicy: ingress to browser pods from worker + api-server only; egress to internet so Chromium can browse. Worker RBAC: Roles for `pods` and `services` (create/get/list/watch/delete) on top of the existing sandbox RBAC.
+**Architecture:** `K8sBrowserBackend` mirrors `surogates/sandbox/kubernetes.py` for shape. One pod and one ClusterIP Service per session. The Service exposes three ports — `10001` (REST, used now by the worker), `9222` (CDP, reserved), `443 → 6080` (NoVNC live view, used by Phase C). Pods are labelled `app=surogates-browser`, `surogates.ai/session-id`, `/org-id`, `/user-id`; the Helm NetworkPolicy must select that literal `app=surogates-browser` label because these pods are created by Python, not a Helm Deployment. NetworkPolicy: ingress to browser pods from worker + api-server only; egress to internet so Chromium can browse. Worker RBAC: Roles for `pods` and `services` (create/get/list/watch/delete) on top of the existing sandbox RBAC.
 
 **Tech Stack:** kubernetes-asyncio (already a dep — see `surogates/sandbox/kubernetes.py`), pytest (mocked K8s API for unit tests, opt-in real-cluster integration test), helm (templates duplicated across the in-repo and surogate-ops charts).
 
@@ -22,6 +42,8 @@ surogates/browser/
 
 surogates/browser/registry.py     (no change — already supports the K8s fallback path
                                    because find_by_session lives on the backend)
+surogates/browser/base.py         (MODIFY — align BrowserBackend.provision protocol with
+                                   K8s labels and update BrowserSpec image default)
 
 surogates/orchestrator/worker.py  (MODIFY — instantiate K8sBrowserBackend when
                                    settings.browser.backend == "kubernetes")
@@ -38,8 +60,8 @@ images/build.sh                   (MODIFY — add "browser" → "surogates-agent
 helm/surogates/templates/
 ├── browser-rbac.yaml             (NEW — ServiceAccount for the browser pod)
 ├── browser-networkpolicy.yaml    (NEW — ingress: worker + api; egress: internet + DNS)
-├── worker-rbac.yaml              (MODIFY — add services and per-component pod verbs)
-├── _helpers.tpl                  (MODIFY — add browser component labels helper if needed)
+├── worker-rbac.yaml              (MODIFY — add services verbs for browser Services)
+├── worker-deployment.yaml        (MODIFY — pass SUROGATES_BROWSER_* env vars to worker)
 └── values.yaml                   (MODIFY — add browser.* knobs)
 
 # DUPLICATE every helm change into the surogate-ops chart:
@@ -47,7 +69,7 @@ helm/surogates/templates/
 ├── browser-rbac.yaml             (NEW — same content as in-repo chart)
 ├── browser-networkpolicy.yaml    (NEW)
 ├── worker-rbac.yaml              (MODIFY)
-├── _helpers.tpl                  (MODIFY if needed)
+├── worker-deployment.yaml        (MODIFY)
 └── values.yaml                   (MODIFY)
 
 tests/test_browser_kubernetes.py  (NEW — pod + service manifest builders, status mapping,
@@ -72,8 +94,9 @@ repo). The plan calls this out at every helm task.
 - `pytest` + `pytest-asyncio` (`asyncio_mode = "auto"`) — same as Phase A.
 - K8s mocks: pattern from `tests/test_k8s_sandbox.py` (`unittest.mock.MagicMock` and `AsyncMock` over the kubernetes-asyncio API client).
 - Manifest tests assert on the constructed `client.V1Pod` / `client.V1Service` object — not on the JSON serialisation. The `kubernetes_asyncio.client` types provide structured field access.
-- Commit at the end of every task with the message shown. For the helm tasks (9–12), commit twice — once in `/work/surogates`, once in `/work/surogate-ops`. Each task spells out both commits.
-- Run `pytest tests/test_browser_kubernetes.py -v` after every backend task. The full suite (`pytest tests/ -q`) at the end.
+- Commit at the end of every task with the message shown. For the helm tasks (11–14), commit twice — once in `/work/surogates`, once in `/work/surogate-ops`. Each task spells out both commits.
+- Use `uv run pytest ...` in this repo; `pytest` is not guaranteed to be on `PATH`.
+- Run `uv run pytest tests/test_browser_kubernetes.py -v` after every backend task. The full suite command is documented at the end, but this repo currently has unrelated integration failures when `storage.bucket` is unset, so trust focused browser + harness tests for this phase unless the environment has the full integration config.
 
 ---
 
@@ -101,7 +124,14 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from kubernetes_asyncio.client import ApiException
 
+from surogates.browser.base import (
+    BrowserEndpoint,
+    BrowserSpec,
+    BrowserStatus,
+    BrowserUnavailableError,
+)
 from surogates.browser.kubernetes import K8sBrowserBackend
 
 
@@ -134,7 +164,7 @@ class TestSkeleton:
         assert isinstance(api, k8s_client.CoreV1Api)
 ```
 
-- [ ] **Step 2: Run** — `pytest tests/test_browser_kubernetes.py -v` → 2 FAIL with `ImportError`.
+- [ ] **Step 2: Run** — `uv run pytest tests/test_browser_kubernetes.py -v` → 2 FAIL with `ImportError`.
 
 - [ ] **Step 3: Implement the skeleton**
 
@@ -290,6 +320,7 @@ class TestBuildPodManifest:
         c = pod.spec.containers[0]
         assert c.name == "browser"
         assert c.image == "kernel-headful:test"
+        assert c.image_pull_policy == "IfNotPresent"
         assert c.resources.requests == {"cpu": "500m", "memory": "1Gi"}
         assert c.resources.limits == {"cpu": "1", "memory": "2Gi"}
         # Three ports exposed for the Service to target.
@@ -356,6 +387,7 @@ class TestBuildPodManifest:
         container = client.V1Container(
             name="browser",
             image=image,
+            image_pull_policy="IfNotPresent",
             ports=[
                 client.V1ContainerPort(container_port=10001, name="rest"),
                 client.V1ContainerPort(container_port=9222, name="cdp"),
@@ -627,9 +659,10 @@ class TestProvision:
 
     # Note on the protocol: ``BrowserBackend.provision`` from Phase A
     # takes only ``spec``, but K8s provisioning needs labels (session,
-    # org, user). We extend the K8s class with named keyword args; the
-    # protocol stays compatible because callers (BrowserPool.ensure)
-    # know which backend they have.
+    # org, user). This direct K8s unit test is intentionally added before
+    # the protocol refactor; Task 5 immediately updates the shared
+    # protocol, BrowserPool, and ProcessBrowserBackend so runtime dispatch
+    # has one consistent call shape.
     async def provision(
         self,
         spec: BrowserSpec,
@@ -751,9 +784,13 @@ class TestProvision:
         )
 ```
 
-> Note on the protocol mismatch: Phase A's `BrowserBackend.provision(spec)` doesn't take labels. The Phase A `ProcessBrowserBackend` works without them. To keep the protocol clean *and* let K8s carry labels, we tweak the protocol in this task too — see Task 5.
+> Note on the protocol mismatch: after Task 4, direct calls to
+> `K8sBrowserBackend.provision(..., session_id=..., org_id=..., user_id=...)`
+> work, but `BrowserPool` still calls the Phase A protocol
+> `backend.provision(spec)`. Do not wire this backend into the worker until
+> Task 5 is complete.
 
-- [ ] **Step 4: Run** — `pytest tests/test_browser_kubernetes.py::TestProvision -v` → all PASS.
+- [ ] **Step 4: Run** — `uv run pytest tests/test_browser_kubernetes.py::TestProvision -v` → all PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -907,7 +944,7 @@ on every call.
 - [ ] **Step 7: Run all browser tests**
 
 ```bash
-pytest tests/test_browser_pool.py tests/test_browser_process.py tests/test_browser_kubernetes.py -v
+uv run pytest tests/test_browser_pool.py tests/test_browser_process.py tests/test_browser_kubernetes.py -v
 ```
 
 Expected: all PASS, including the new `TestProtocolAlignment::test_pool_forwards_session_to_k8s_provision`.
@@ -1286,12 +1323,15 @@ You'll find the `raise RuntimeError("browser.backend=kubernetes is reserved for 
 
 - [ ] **Step 2: Replace the guard with the real branch**
 
+Phase A currently imports `BrowserControlStore`, `BrowserPool`,
+`ProcessBrowserBackend`, and `BrowserRegistry` near the top of
+`surogates/orchestrator/worker.py`. Keep those imports. Add the
+`K8sBrowserBackend` import lazily inside the Kubernetes branch so workers
+running in process mode do not need to initialize any Kubernetes client
+state during import.
+
 ```python
     # Browser pool ---------------------------------------------------------
-    from surogates.browser.control import BrowserControlStore
-    from surogates.browser.pool import BrowserPool
-    from surogates.browser.registry import BrowserRegistry
-
     if settings.browser.backend == "kubernetes":
         from surogates.browser.kubernetes import K8sBrowserBackend
         browser_backend = K8sBrowserBackend(
@@ -1317,11 +1357,11 @@ You'll find the `raise RuntimeError("browser.backend=kubernetes is reserved for 
 - [ ] **Step 3: Run the broader test suite**
 
 ```bash
-pytest tests/ -k "browser or worker_bootstrap" -q
+uv run pytest tests/ -k "browser or worker_bootstrap" -q
 ```
 
 Expected: still green; no test attempts to actually create K8s resources
-(integration test in Task 13 is opt-in).
+(integration test in Task 15 is opt-in).
 
 - [ ] **Step 4: Commit**
 
@@ -1344,6 +1384,8 @@ without waiting on upstream `:stable` tag movement.
 - Create: `images/browser/Dockerfile`
 - Modify: `images/build.sh`
 - Modify: `surogates/config.py` (bump `BrowserSettings.image` default)
+- Modify: `surogates/browser/base.py` (bump `BrowserSpec.image` default)
+- Modify: `surogates/browser/kubernetes.py` (bump `K8sBrowserBackend` constructor default)
 
 - [ ] **Step 1: Look up a fresh kernel-images digest to pin**
 
@@ -1374,7 +1416,7 @@ moving under us between deploys.
 # Or via the matrix: ./images/build.sh latest browser
 #
 # k3d/kind users can `kind load docker-image` after building.
-ARG UPSTREAM=ghcr.io/onkernel/chromium-headful@sha256:REPLACE_WITH_PINNED_DIGEST
+ARG UPSTREAM=ghcr.io/onkernel/chromium-headful:stable
 FROM ${UPSTREAM}
 
 LABEL org.opencontainers.image.title="surogates-agent-browser" \
@@ -1400,11 +1442,17 @@ USER kernel
 
 ```bash
 cd /work/surogates
+docker pull ghcr.io/onkernel/chromium-headful:stable
+UPSTREAM_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' \
+    ghcr.io/onkernel/chromium-headful:stable)"
+sed -i "s|^ARG UPSTREAM=.*|ARG UPSTREAM=${UPSTREAM_DIGEST}|" \
+    images/browser/Dockerfile
 docker build -f images/browser/Dockerfile \
     -t ghcr.io/invergent-ai/surogates-agent-browser:latest .
 docker run --rm \
+    --entrypoint which \
     ghcr.io/invergent-ai/surogates-agent-browser:latest \
-    which zstd
+    zstd
 ```
 
 Expected: `/usr/bin/zstd` printed.
@@ -1424,15 +1472,35 @@ declare -A IMAGES=(
 )
 ```
 
+Also add a push guard so local verification does not require GHCR write
+credentials:
+
+```bash
+PUSH="${PUSH:-1}"
+```
+
+and replace the unconditional push:
+
+```bash
+docker push "$full:latest"
+```
+
+with:
+
+```bash
+if [[ "$PUSH" == "1" ]]; then
+  docker push "$full:latest"
+fi
+```
+
 - [ ] **Step 5: Verify the matrix can build just the browser image**
 
 ```bash
-./images/build.sh latest browser
+PUSH=0 ./images/build.sh latest browser
 ```
 
-Expected: only the browser image builds (and pushes — make sure you have
-ghcr push credentials configured if you don't want to skip the push;
-otherwise comment out the `docker push` line locally first).
+Expected: only the browser image builds; no push is attempted. To publish,
+run `./images/build.sh latest browser` with GHCR credentials configured.
 
 - [ ] **Step 6: Bump the `BrowserSettings.image` default**
 
@@ -1449,21 +1517,25 @@ to:
     image: str = "ghcr.io/invergent-ai/surogates-agent-browser:latest"
 ```
 
-Then update the corresponding default assertion in
-`tests/test_browser_base.py::test_browser_settings_defaults` and
-`tests/test_browser_base.py::test_browser_spec_defaults`:
+Also update:
+
+- `surogates/browser/base.py` — `BrowserSpec.image`
+- `surogates/browser/kubernetes.py` — `K8sBrowserBackend.__init__(image=...)`
+- corresponding default assertions in
+  `tests/test_browser_base.py::test_browser_settings_defaults` and
+  `tests/test_browser_base.py::test_browser_spec_defaults`
 
 ```python
     assert s.image == "ghcr.io/invergent-ai/surogates-agent-browser:latest"
 ```
 
-(There are two places — `BrowserSettings` and `BrowserSpec` — update both.
-`BrowserSpec.image` default also lives in `surogates/browser/base.py`.)
+(There are two test assertions — `BrowserSettings` and `BrowserSpec` —
+update both.)
 
 - [ ] **Step 7: Run the foundation tests**
 
 ```bash
-pytest tests/test_browser_base.py tests/test_browser_kubernetes.py -v
+uv run pytest tests/test_browser_base.py tests/test_browser_kubernetes.py -v
 ```
 
 Expected: all PASS.
@@ -1472,7 +1544,7 @@ Expected: all PASS.
 
 ```bash
 git add images/browser/Dockerfile images/build.sh \
-        surogates/config.py surogates/browser/base.py \
+        surogates/config.py surogates/browser/base.py surogates/browser/kubernetes.py \
         tests/test_browser_base.py
 git commit -m "feat(images): add surogates-agent-browser image + bump default"
 ```
@@ -1548,7 +1620,7 @@ git -C /work/surogate-ops commit -m "chore(helm): add browser ServiceAccount (ze
 
 ## Task 12: Helm — `browser-networkpolicy.yaml`
 
-> **Both charts.** Same parallel-update protocol as Task 10.
+> **Both charts.** Same parallel-update protocol as Task 11.
 
 Browser pod ingress: from worker + api-server only. Egress: DNS + the
 internet (Chromium needs to reach websites). This is the inverse of the
@@ -1570,7 +1642,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      {{- include "surogates.componentSelector" (dict "root" . "component" "browser") | nindent 6 }}
+      app: surogates-browser
   policyTypes:
     - Egress
     - Ingress
@@ -1616,10 +1688,10 @@ spec:
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
-            # Block the cluster pod CIDR via except-rules in production
-            # via Values.networkPolicy.browserBlockedCidrs if needed; we
-            # ship without exceptions because the policy is intentionally
-            # permissive on egress.
+            {{- with .Values.browser.blockedCidrs }}
+            except:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
       ports:
         - protocol: TCP
           port: 80
@@ -1634,7 +1706,9 @@ helm template /work/surogates/helm/surogates \
     --show-only templates/browser-networkpolicy.yaml
 ```
 
-Expected: a NetworkPolicy with the three ingress rules and two egress rules.
+Expected: a NetworkPolicy whose `spec.podSelector.matchLabels` is exactly
+`app: surogates-browser` (matching the Python-created pod labels), with
+two ingress rules and two egress rules.
 
 - [ ] **Step 3: Replicate to the surogate-ops chart**
 
@@ -1658,7 +1732,7 @@ git -C /work/surogate-ops commit -m "chore(helm): add browser NetworkPolicy (wor
 
 ---
 
-## Task 13: Helm — extend `worker-rbac.yaml` to allow Services + browser pods
+## Task 13: Helm — extend `worker-rbac.yaml` to allow browser Services
 
 > **Both charts.** Same parallel-update protocol.
 
@@ -1715,11 +1789,12 @@ git -C /work/surogate-ops commit -m "chore(helm): allow worker to create/delete 
 
 ---
 
-## Task 14: Helm — `values.yaml` and `_helpers.tpl` browser knobs
+## Task 14: Helm — `values.yaml` and worker browser env vars
 
-> **Both charts.** Some keys are shared, some chart-specific. Apply each
-> change to both files; double-check `_helpers.tpl` parity afterwards
-> with `diff`.
+> **Both charts.** Apply each values and worker deployment change to both
+> files. The browser pods are created by Python, so do **not** use Helm's
+> `componentSelector` helper to select them; the NetworkPolicy from Task 12
+> selects their literal `app: surogates-browser` label.
 
 - [ ] **Step 1: Inspect current values**
 
@@ -1758,6 +1833,7 @@ browser:
   # K8s-specific (process backend ignores these).
   serviceAccountSuffix: browser   # → {fullname}-browser
   k8sNamespace: ""                # empty = release namespace
+  blockedCidrs: []                # optional ipBlock.except entries for browser egress
 
   # Process backend (dev only). Ignored when backend=kubernetes.
   processPorts:
@@ -1766,43 +1842,69 @@ browser:
     liveViewBase: 32000
 ```
 
-- [ ] **Step 3: Verify the helper produces a label selector for `browser`**
+- [ ] **Step 3: Add browser env vars to the in-repo worker Deployment**
 
-```bash
-grep -n 'componentSelector' /work/surogates/helm/surogates/templates/_helpers.tpl
+In `/work/surogates/helm/surogates/templates/worker-deployment.yaml`, add
+these env vars immediately after the existing sandbox env block:
+
+```yaml
+            - name: SUROGATES_BROWSER_BACKEND
+              value: {{ .Values.browser.backend | quote }}
+            - name: SUROGATES_BROWSER_IMAGE
+              value: {{ .Values.browser.image | quote }}
+            - name: SUROGATES_BROWSER_CPU
+              value: {{ .Values.browser.resources.requests.cpu | quote }}
+            - name: SUROGATES_BROWSER_MEMORY
+              value: {{ .Values.browser.resources.requests.memory | quote }}
+            - name: SUROGATES_BROWSER_CPU_LIMIT
+              value: {{ .Values.browser.resources.limits.cpu | quote }}
+            - name: SUROGATES_BROWSER_MEMORY_LIMIT
+              value: {{ .Values.browser.resources.limits.memory | quote }}
+            - name: SUROGATES_BROWSER_POD_READY_TIMEOUT
+              value: {{ .Values.browser.podReadyTimeout | quote }}
+            - name: SUROGATES_BROWSER_ACTIVE_DEADLINE_SECONDS
+              value: {{ .Values.browser.activeDeadlineSeconds | quote }}
+            {{- if eq .Values.browser.backend "kubernetes" }}
+            - name: SUROGATES_BROWSER_K8S_NAMESPACE
+              value: {{ default .Release.Namespace .Values.browser.k8sNamespace | quote }}
+            - name: SUROGATES_BROWSER_K8S_SERVICE_ACCOUNT
+              value: {{ printf "%s-%s" $fullname .Values.browser.serviceAccountSuffix | quote }}
+            {{- else }}
+            - name: SUROGATES_BROWSER_REST_PORT_BASE
+              value: {{ .Values.browser.processPorts.restBase | quote }}
+            - name: SUROGATES_BROWSER_CDP_PORT_BASE
+              value: {{ .Values.browser.processPorts.cdpBase | quote }}
+            - name: SUROGATES_BROWSER_LIVE_VIEW_PORT_BASE
+              value: {{ .Values.browser.processPorts.liveViewBase | quote }}
+            {{- end }}
 ```
 
-The `componentSelector` helper takes a `component` key and emits the
-matching pod labels. The browser NetworkPolicy + the K8s backend's pod
-manifests both need this to resolve to `app: surogates-browser` (the
-label the K8sBrowserBackend writes).
-
-If the helper passes the component name directly into the label, no edit
-is needed. If it transforms the name, ensure that `component=browser`
-produces a selector matching `app: surogates-browser` (the Python code
-in `K8sBrowserBackend._build_pod_manifest` writes `app=surogates-browser`
-literally — adjust the helm helper or the Python label to align if
-they don't match).
-
-Verify with:
+Render the worker Deployment and verify the browser env block appears:
 
 ```bash
-helm template /work/surogates/helm/surogates --show-only templates/browser-networkpolicy.yaml | grep -A 2 podSelector
+helm template /work/surogates/helm/surogates --show-only templates/worker-deployment.yaml \
+  | grep -A 28 SUROGATES_BROWSER_BACKEND
 ```
 
-Expected: the `matchLabels` block names the same key/value the backend
-writes onto the pod. If not, fix the Python or the helper now (match
-in one place; the simplest is to make the K8sBrowserBackend label match
-whatever the helper emits — change the literal `"app": "surogates-browser"`
-in `_build_pod_manifest` and `_build_service_manifest` accordingly).
+- [ ] **Step 4: Verify browser NetworkPolicy label parity**
 
-Re-run the K8s backend tests after any change:
+Render the NetworkPolicy and verify it selects the literal label written by
+`K8sBrowserBackend._build_pod_manifest`:
 
 ```bash
-pytest tests/test_browser_kubernetes.py -v
+helm template /work/surogates/helm/surogates --show-only templates/browser-networkpolicy.yaml \
+  | grep -A 3 'podSelector:'
 ```
 
-- [ ] **Step 4: Replicate the values block to the surogate-ops chart**
+Expected:
+
+```yaml
+  podSelector:
+    matchLabels:
+      app: surogates-browser
+```
+
+- [ ] **Step 5: Replicate the values and worker env changes to the surogate-ops chart**
 
 Open `/work/surogate-ops/surogate_ops/agent_chart/values.yaml` and add
 the **same `browser:` block** in the same position. Use diff to confirm:
@@ -1814,20 +1916,26 @@ diff <(grep -A 30 '^browser:' /work/surogates/helm/surogates/values.yaml) \
 
 Expected: empty (identical content).
 
-- [ ] **Step 5: Commit in BOTH repos**
+Then apply the same `SUROGATES_BROWSER_*` env block to
+`/work/surogate-ops/surogate_ops/agent_chart/templates/worker-deployment.yaml`
+and render it:
+
+```bash
+helm template /work/surogate-ops/surogate_ops/agent_chart --show-only templates/worker-deployment.yaml \
+  | grep -A 28 SUROGATES_BROWSER_BACKEND
+```
+
+- [ ] **Step 6: Commit in BOTH repos**
 
 ```bash
 git -C /work/surogates add helm/surogates/values.yaml \
-                          helm/surogates/templates/_helpers.tpl
-git -C /work/surogates commit -m "chore(helm): add browser values + label parity with K8sBrowserBackend"
+                          helm/surogates/templates/worker-deployment.yaml
+git -C /work/surogates commit -m "chore(helm): add browser values and worker env"
 
 git -C /work/surogate-ops add surogate_ops/agent_chart/values.yaml \
-                              surogate_ops/agent_chart/templates/_helpers.tpl
-git -C /work/surogate-ops commit -m "chore(helm): add browser values + label parity with K8sBrowserBackend"
+                              surogate_ops/agent_chart/templates/worker-deployment.yaml
+git -C /work/surogate-ops commit -m "chore(helm): add browser values and worker env"
 ```
-
-(The `_helpers.tpl` add lines might be empty if no helper change was
-required — in that case, only `values.yaml` is staged.)
 
 ---
 
@@ -1838,13 +1946,14 @@ required — in that case, only `values.yaml` is staged.)
 - Modify: `pyproject.toml` (add `browser_e2e_k8s` marker)
 
 - [ ] **Step 1: Add the marker** in `pyproject.toml` under
-`[tool.pytest.ini_options]`:
+`[tool.pytest.ini_options]`. Preserve the existing Phase A marker and
+default deselection; do not replace the whole `markers` array.
 
 ```toml
+addopts = "-m 'not browser_e2e and not browser_e2e_k8s'"
 markers = [
-    # ...
-    "browser_e2e: requires Docker + kernel-images image (Phase A)",
-    "browser_e2e_k8s: requires kind/minikube and helm-installed surogates chart (Phase B)",
+    "browser_e2e: end-to-end agent browser tests requiring Docker and the kernel-images image (opt-in)",
+    "browser_e2e_k8s: end-to-end agent browser tests requiring kind/minikube and a K8s cluster (opt-in)",
 ]
 ```
 
@@ -1858,22 +1967,29 @@ markers = [
 Setup before running:
 
     kind create cluster --name surogates-test
+    PUSH=0 ./images/build.sh latest browser
+    kind load docker-image \
+        ghcr.io/invergent-ai/surogates-agent-browser:latest \
+        --name surogates-test
     helm install surogates /work/surogates/helm/surogates \
         --namespace surogates --create-namespace \
         --set browser.backend=kubernetes \
-        --set browser.image=ghcr.io/onkernel/chromium-headful:stable
+        --set browser.image=ghcr.io/invergent-ai/surogates-agent-browser:latest
 
 Run:
 
-    pytest -m browser_e2e_k8s tests/integration/test_browser_e2e_k8s.py -v
+    uv run pytest -m browser_e2e_k8s tests/integration/test_browser_e2e_k8s.py -v
 
 Skipped by default.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
+from collections.abc import AsyncIterator
 
+import httpx
 import pytest
 
 from surogates.browser.base import BrowserSpec
@@ -1885,6 +2001,7 @@ pytestmark = pytest.mark.browser_e2e_k8s
 
 NAMESPACE = os.environ.get("BROWSER_K8S_NAMESPACE", "surogates")
 SERVICE_ACCOUNT = os.environ.get("BROWSER_K8S_SA", "surogates-browser")
+LOCAL_REST_PORT = int(os.environ.get("BROWSER_K8S_LOCAL_REST_PORT", "39101"))
 IMAGE = os.environ.get(
     "BROWSER_E2E_IMAGE",
     "ghcr.io/invergent-ai/surogates-agent-browser:latest",
@@ -1915,15 +2032,55 @@ async def browser(backend):
         await backend.destroy(bid)
 
 
+@pytest.fixture()
+async def rest_url(backend, browser) -> AsyncIterator[str]:
+    bid, _endpoint = browser
+    service_name = backend._pods[bid].service_name
+    proc = await asyncio.create_subprocess_exec(
+        "kubectl",
+        "-n",
+        NAMESPACE,
+        "port-forward",
+        f"svc/{service_name}",
+        f"{LOCAL_REST_PORT}:10001",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        async with httpx.AsyncClient(timeout=1.0) as http:
+            for _ in range(120):
+                if proc.returncode is not None:
+                    stderr = (await proc.stderr.read()).decode(errors="replace")
+                    raise RuntimeError(f"kubectl port-forward exited: {stderr}")
+                try:
+                    resp = await http.get(f"http://127.0.0.1:{LOCAL_REST_PORT}/spec.json")
+                    if resp.status_code == 200:
+                        break
+                except Exception:
+                    await asyncio.sleep(0.25)
+            else:
+                raise RuntimeError("port-forward did not become ready")
+
+        yield f"http://127.0.0.1:{LOCAL_REST_PORT}"
+    finally:
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+
+
 async def test_provision_creates_running_pod(backend, browser) -> None:
     bid, _endpoint = browser
     from surogates.browser.base import BrowserStatus
     assert await backend.status(bid) == BrowserStatus.RUNNING
 
 
-async def test_navigate_through_service_dns(browser) -> None:
-    _bid, endpoint = browser
-    async with KernelBrowserClient(rest_url=endpoint.rest_url) as c:
+async def test_navigate_through_port_forward(rest_url) -> None:
+    # ClusterIP service DNS is not reachable from a local pytest process,
+    # so the e2e test uses kubectl port-forward to reach the REST service.
+    async with KernelBrowserClient(rest_url=rest_url) as c:
         out = await c.navigate("https://example.com")
         assert "Example" in out["title"]
 
@@ -1934,27 +2091,31 @@ async def test_find_by_session_returns_endpoint(backend, browser) -> None:
     assert found is not None
 ```
 
-- [ ] **Step 3: Run the suite without the marker** (default skip)
+- [ ] **Step 3: Verify the K8s e2e is skipped by default**
 
 ```bash
-pytest tests/ -q
+uv run pytest tests/test_browser_kubernetes.py \
+  tests/integration/test_browser_e2e_k8s.py -q
 ```
 
-Expected: full suite green, integration tests deselected.
+Expected: K8s unit tests pass and the opt-in real-cluster tests are
+deselected by the default `addopts`. Do not use the full integration suite
+as the only Phase B signal unless required environment config, including
+`storage.bucket`, is set.
 
 - [ ] **Step 4: Run the K8s e2e (optional, when a kind/minikube cluster is up)**
 
 ```bash
 kind create cluster --name surogates-test
+PUSH=0 ./images/build.sh latest browser
+kind load docker-image \
+    ghcr.io/invergent-ai/surogates-agent-browser:latest \
+    --name surogates-test
 helm install surogates /work/surogates/helm/surogates \
     --namespace surogates --create-namespace \
     --set browser.backend=kubernetes \
     --set browser.image=ghcr.io/invergent-ai/surogates-agent-browser:latest
-./images/build.sh latest browser
-kind load docker-image \
-    ghcr.io/invergent-ai/surogates-agent-browser:latest \
-    --name surogates-test
-pytest -m browser_e2e_k8s tests/integration/test_browser_e2e_k8s.py -v -s
+uv run pytest -m browser_e2e_k8s tests/integration/test_browser_e2e_k8s.py -v -s
 ```
 
 Expected: 3 tests PASS against the real cluster.
@@ -1979,19 +2140,31 @@ git -C /work/surogates commit -m "test(browser): add opt-in K8s e2e against real
 After all 15 tasks:
 
 ```bash
-# Full unit suite
-pytest tests/ -q
+# Focused Phase B verification
+uv run pytest \
+  tests/test_browser_base.py \
+  tests/test_browser_pool.py \
+  tests/test_browser_process.py \
+  tests/test_browser_kubernetes.py \
+  tests/test_browser_tools.py \
+  tests/test_harness_resilience.py \
+  tests/test_streaming_executor.py \
+  -q
 ```
 
-Expected: green; new K8s backend tests counted alongside existing.
+Expected: green; new K8s backend tests counted alongside existing browser
+and harness-dispatch coverage.
 
 ```bash
 # Switch the worker config to K8s mode and confirm bootstrap doesn't break
-SUROGATES_BROWSER_BACKEND=kubernetes pytest tests/ -q
+SUROGATES_BROWSER_BACKEND=kubernetes uv run pytest \
+  tests/test_browser_kubernetes.py tests/test_browser_tools.py -q
 ```
 
-Expected: still green — no test reaches K8s, the bootstrap branch is
-selected based on settings only.
+Expected: still green. Do not use the full integration suite as the only
+Phase B signal unless the environment also sets required integration config
+such as `storage.bucket`; otherwise unrelated feedback/session tests fail
+before browser code is exercised.
 
 Both helm charts render cleanly:
 
