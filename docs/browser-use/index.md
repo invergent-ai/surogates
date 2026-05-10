@@ -10,6 +10,27 @@ The browser is separate from the workspace sandbox. Sandbox tools operate on
 files and shell commands in `/workspace`; browser tools run in the worker and
 talk to a dedicated browser container or pod.
 
+## Quick Start
+
+Start a normal web chat session and ask for an interactive web task. For
+example:
+
+```text
+Open https://example.com in the browser, inspect the page, take a screenshot,
+and tell me the page title.
+```
+
+That prompt should cause the agent to call `browser_navigate`, then
+`browser_get_state` or `browser_screenshot`. When the first browser tool runs,
+the session provisions a browser and the web UI shows the live browser pane.
+
+For a task that exercises user control handoff, use a prompt like:
+
+```text
+Open my account settings page. If you reach a login, pause and let me take over
+the browser so I can sign in, then continue after I release control.
+```
+
 ## What It Is For
 
 Use browser tools when the task needs an interactive web page rather than static
