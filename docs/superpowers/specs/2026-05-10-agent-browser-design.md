@@ -558,7 +558,7 @@ Verifiable only end-to-end (deferred to manual + CI integration):
 The work is large enough to break into independently shippable phases. Each
 phase ends with a working subset behind a feature flag.
 
-1. **Phase A — backend skeleton.** `BrowserBackend` protocol +
+1. **Phase A — backend skeleton (COMPLETE).** `BrowserBackend` protocol +
    `ProcessBrowserBackend` (docker run) + `BrowserPool` + `BrowserRegistry`
    + `BrowserControlStore` + `KernelBrowserClient` + the discrete tools wired
    through `ToolRouter`. End state: agent can navigate, screenshot, click,
@@ -570,7 +570,7 @@ phase ends with a working subset behind a feature flag.
 3. **Phase C — UI: live view & thread rendering.** API server WS proxy,
    `/browser/state`, `/browser/control`. SPA right-pane stacked layout,
    activity group, take-control toggle. End state: user can watch and
-   take over.
+   take over. Agent notifies user to take over if it needs login.
 4. **Phase D — profile persistence & recording.** `ProfileSync`,
    `browser_record_start/stop`, `/recording/download` artifact upload. End
    state: logins persist across sessions; opt-in recording produces session
