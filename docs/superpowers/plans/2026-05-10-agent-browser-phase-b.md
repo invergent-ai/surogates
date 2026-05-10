@@ -20,7 +20,7 @@
 - [x] **Task 13: Helm worker RBAC services** — completed.
 - [x] **Task 14: Helm values and worker env** — completed.
 - [x] **Task 15: Opt-in K8s e2e** — completed.
-- [ ] **Final verification** — pending.
+- [x] **Final verification** — completed.
 
 **Goal:** Land the production deployment of the agent browser. Add a `K8sBrowserBackend` that provisions per-session pods + per-session Services in the cluster, wire it into the worker behind `browser.backend = "kubernetes"`, ship a custom `surogates-agent-browser` container image alongside the existing api/worker/sandbox/s3fs images, ship the helm chart pieces (browser ServiceAccount, NetworkPolicy, worker RBAC extensions, values defaults) for both the in-repo chart and the surogate-ops chart, and add a label-keyed `find_by_session` lookup that the Phase C API server uses as a stale-Redis fallback. End state: the same agent that drove a docker-launched browser in Phase A drives a per-session pod in K8s, with no behavioural change visible to the LLM.
 
