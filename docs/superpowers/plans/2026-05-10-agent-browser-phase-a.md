@@ -28,8 +28,8 @@
 - [x] Task 12: `ProcessBrowserBackend` — completed
 - [x] Task 13: `BrowserPool` — completed
 - [x] Task 14: navigate/get_state/close tools — completed
-- [ ] Task 15: click/type/press_key/scroll/drag/wait tools — **in progress**
-- [ ] Task 16: screenshot tool — left to do
+- [x] Task 15: click/type/press_key/scroll/drag/wait tools — completed
+- [ ] Task 16: screenshot tool — **in progress**
 - [ ] Task 17: router/runtime wiring — left to do
 - [ ] Task 18: dispatch kwargs threading — left to do
 - [ ] Task 19: worker bootstrap — left to do

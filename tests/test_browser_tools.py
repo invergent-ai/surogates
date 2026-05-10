@@ -82,6 +82,44 @@ class FakeClient:
         await self.close()
 
 
+class FakeClickClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple, dict[str, Any]]] = []
+
+    async def click_at(self, x: int, y: int, **kwargs: Any) -> None:
+        self.calls.append(("click_at", (x, y), kwargs))
+
+    async def click_ref(self, ref: str, **kwargs: Any) -> None:
+        self.calls.append(("click_ref", (ref,), kwargs))
+
+    async def type_text(self, text: str, **kwargs: Any) -> None:
+        self.calls.append(("type_text", (text,), kwargs))
+
+    async def type_into_ref(self, ref: str, text: str, **kwargs: Any) -> None:
+        self.calls.append(("type_into_ref", (ref, text), kwargs))
+
+    async def press_key(self, *keys: str, **kwargs: Any) -> None:
+        self.calls.append(("press_key", keys, kwargs))
+
+    async def scroll_at(self, x: int, y: int, **kwargs: Any) -> None:
+        self.calls.append(("scroll_at", (x, y), kwargs))
+
+    async def drag(self, path: list[tuple[int, int]], **kwargs: Any) -> None:
+        self.calls.append(("drag", (tuple(path),), kwargs))
+
+    async def wait(self, ms: int) -> None:
+        self.calls.append(("wait", (ms,), {}))
+
+    async def close(self) -> None:
+        pass
+
+    async def __aenter__(self) -> "FakeClickClient":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        pass
+
+
 @pytest.fixture()
 def tenant():
     return SimpleNamespace(
@@ -176,3 +214,143 @@ class TestCloseHandler:
         body = json.loads(result)
         assert body["closed"] is True
         assert pool.destroyed == [str(sid)]
+
+
+class TestClickHandler:
+    async def test_click_with_ref(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_click_handler
+
+        client = FakeClickClient()
+        await _browser_click_handler(
+            {"ref": "@e3"},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: client,
+        )
+        assert client.calls[0][0] == "click_ref"
+        assert client.calls[0][1] == ("@e3",)
+
+    async def test_click_with_coords(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_click_handler
+
+        client = FakeClickClient()
+        await _browser_click_handler(
+            {"x": 100, "y": 200},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: client,
+        )
+        assert client.calls[0][0] == "click_at"
+        assert client.calls[0][1] == (100, 200)
+
+    async def test_click_requires_ref_or_coords(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_click_handler
+
+        result = await _browser_click_handler(
+            {},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FakeClickClient(),
+        )
+        assert json.loads(result)["error"] == "invalid_arguments"
+
+
+class TestTypeHandler:
+    async def test_type_into_ref(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_type_handler
+
+        client = FakeClickClient()
+        await _browser_type_handler(
+            {"ref": "@e2", "text": "hello"},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: client,
+        )
+        assert client.calls[0][0] == "type_into_ref"
+        assert client.calls[0][1] == ("@e2", "hello")
+
+    async def test_type_at_focus(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_type_handler
+
+        client = FakeClickClient()
+        await _browser_type_handler(
+            {"text": "fallback"},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: client,
+        )
+        assert client.calls[0][0] == "type_text"
+
+
+class TestPressKey:
+    async def test_press_single(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_press_key_handler
+
+        client = FakeClickClient()
+        await _browser_press_key_handler(
+            {"keys": ["Enter"]},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: client,
+        )
+        assert client.calls[0][0] == "press_key"
+        assert client.calls[0][1] == ("Enter",)
+
+
+class TestScrollDragWait:
+    async def test_scroll(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_scroll_handler
+
+        client = FakeClickClient()
+        await _browser_scroll_handler(
+            {"x": 100, "y": 200, "delta_y": 300},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: client,
+        )
+        assert client.calls[0][0] == "scroll_at"
+        assert client.calls[0][2]["delta_y"] == 300
+
+    async def test_drag(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_drag_handler
+
+        client = FakeClickClient()
+        await _browser_drag_handler(
+            {"path": [[10, 10], [200, 200]]},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: client,
+        )
+        assert client.calls[0][0] == "drag"
+        assert client.calls[0][1] == (((10, 10), (200, 200)),)
+
+    async def test_wait_caps_at_30s(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_wait_handler
+
+        client = FakeClickClient()
+        await _browser_wait_handler(
+            {"ms": 999_999},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: client,
+        )
+        assert client.calls[0][0] == "wait"
+        assert client.calls[0][1] == (30_000,)
