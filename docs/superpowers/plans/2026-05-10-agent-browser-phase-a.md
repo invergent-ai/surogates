@@ -20,8 +20,8 @@
 - [x] Task 4: `KernelBrowserClient.navigate` — completed
 - [x] Task 5: `KernelBrowserClient.get_state` with refs/cache — completed
 - [x] Task 6: `get_state` filters — completed
-- [ ] Task 7: click/type client methods — **in progress**
-- [ ] Task 8: key/scroll/drag/wait client methods — left to do
+- [x] Task 7: click/type client methods — completed
+- [ ] Task 8: key/scroll/drag/wait client methods — **in progress**
 - [ ] Task 9: screenshot client method — left to do
 - [ ] Task 10: `BrowserRegistry` — left to do
 - [ ] Task 11: `BrowserControlStore` — left to do

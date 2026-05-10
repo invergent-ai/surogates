@@ -170,6 +170,49 @@ return {
             "tree": tree,
         }
 
+    async def click_at(
+        self,
+        x: int,
+        y: int,
+        *,
+        button: str = "left",
+        click_type: str = "click",
+        num_clicks: int = 1,
+    ) -> None:
+        """Click at viewport coordinates."""
+
+        body: dict[str, Any] = {"x": x, "y": y, "click_type": click_type}
+        if button != "left":
+            body["button"] = button
+        if num_clicks != 1:
+            body["num_clicks"] = num_clicks
+        response = await self._http.post("/computer/click_mouse", json=body)
+        response.raise_for_status()
+        self._invalidate_snapshot_cache()
+
+    async def click_ref(self, ref: str, **kwargs: Any) -> None:
+        """Click the cached center point for a `browser_get_state` ref."""
+
+        entry = self._resolve_ref(ref)
+        await self.click_at(int(entry["x"]), int(entry["y"]), **kwargs)
+
+    async def type_text(self, text: str, *, delay_ms: int = 0) -> None:
+        """Type text into the currently focused element."""
+
+        body: dict[str, Any] = {"text": text, "smooth": False}
+        if delay_ms:
+            body["delay"] = delay_ms
+        response = await self._http.post("/computer/type", json=body)
+        response.raise_for_status()
+        self._invalidate_snapshot_cache()
+
+    async def type_into_ref(self, ref: str, text: str, **kwargs: Any) -> None:
+        """Click a cached ref to focus it, then type text."""
+
+        entry = self._resolve_ref(ref)
+        await self.click_at(int(entry["x"]), int(entry["y"]))
+        await self.type_text(text, **kwargs)
+
     async def _playwright_execute(
         self,
         code: str,
@@ -190,6 +233,12 @@ return {
 
     def _invalidate_snapshot_cache(self) -> None:
         self._snapshot_cache.clear()
+
+    def _resolve_ref(self, ref: str) -> dict[str, Any]:
+        entry = self._snapshot_cache.get(ref)
+        if entry is None:
+            raise KeyError(f"Unknown ref {ref!r}; call browser_get_state to refresh refs")
+        return entry
 
     def _build_tree_and_cache(
         self,
