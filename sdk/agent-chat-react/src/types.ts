@@ -439,6 +439,7 @@ export interface AgentChatAdapter {
 }
 
 export interface AgentChatRuntimeApi {
+  state: AgentChatState;
   session: AgentChatSession | null;
   messages: AgentChatMessage[];
   isRunning: boolean;
