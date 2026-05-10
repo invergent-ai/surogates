@@ -6,9 +6,10 @@ capture screenshots. In the web channel, users can watch the live browser and
 temporarily take manual control for login, MFA, CAPTCHA, or other tasks where
 human input is required.
 
-The browser is separate from the workspace sandbox. Sandbox tools operate on
-files and shell commands in `/workspace`; browser tools run in the worker and
-talk to a dedicated browser container or pod.
+The browser is separate from the execution sandbox, but it mounts the same
+session workspace at `/workspace`. Sandbox tools operate on files and shell
+commands there; browser tools run in the worker and talk to a dedicated browser
+container or pod.
 
 ## Quick Start
 
@@ -183,9 +184,11 @@ can resolve live-view targets if Redis metadata is stale.
 
 ## Security Model
 
-Browser pods are intentionally not the workspace sandbox:
+Browser pods are intentionally not the execution sandbox:
 
-- They do not receive database, Redis, API, LLM, or tenant-storage credentials.
+- They do not receive database, Redis, API, or LLM credentials.
+- The browser container gets `/workspace`; in Kubernetes, an s3fs sidecar holds
+  session-scoped storage credentials for that mount.
 - Their ServiceAccount has no Kubernetes permissions.
 - The API server authenticates and authorizes all live-view and control traffic.
 - Browser tool calls pass through governance, including URL checks for

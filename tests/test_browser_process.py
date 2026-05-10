@@ -91,6 +91,28 @@ class TestProvision:
         assert ep1.rest_url.endswith(":30000")
         assert ep2.rest_url.endswith(":30001")
 
+    async def test_provision_mounts_workspace_when_configured(
+        self,
+        fake_spec_json_transport,
+        tmp_path,
+    ) -> None:
+        docker = FakeDocker()
+        backend = ProcessBrowserBackend(
+            image="i",
+            rest_port_base=30000,
+            cdp_port_base=31000,
+            live_view_port_base=32000,
+            docker=docker,
+            httpx_transport=fake_spec_json_transport,
+        )
+        await backend.provision(BrowserSpec(workspace_path=str(tmp_path)))
+
+        run_call = docker.calls[0]
+        joined = " ".join(run_call)
+        assert f"{tmp_path}:/workspace" in joined
+        assert "WORKSPACE_DIR=/workspace" in joined
+        assert "HOME=/workspace" in joined
+
     async def test_provision_cleans_up_container_when_readiness_times_out(self) -> None:
         class NeverReadyTransport(httpx.AsyncBaseTransport):
             async def handle_async_request(self, request: httpx.Request) -> httpx.Response:

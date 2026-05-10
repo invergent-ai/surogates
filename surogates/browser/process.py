@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 import httpx
@@ -98,7 +99,16 @@ class ProcessBrowserBackend:
             "--shm-size",
             "2g",
         ]
+        if spec.workspace_path:
+            workspace = Path(spec.workspace_path).resolve()
+            workspace.mkdir(parents=True, exist_ok=True)
+            args.extend(["-v", f"{workspace}:/workspace"])
+            args.extend(["-e", "WORKSPACE_DIR=/workspace"])
+            args.extend(["-e", "HOME=/workspace"])
+        reserved_env = {"HOME", "WORKSPACE_DIR"} if spec.workspace_path else set()
         for key, value in spec.env.items():
+            if key in reserved_env:
+                continue
             args.extend(["-e", f"{key}={value}"])
         args.append(image)
 

@@ -29,6 +29,18 @@ def backend() -> K8sBrowserBackend:
         service_account="test-browser-sa",
         pod_ready_timeout=5,
         image="kernel-headful:test",
+        storage_settings=type(
+            "StorageSettings",
+            (),
+            {
+                "access_key": "access",
+                "secret_key": "secret",
+                "endpoint": "https://s3.eu-west-1.amazonaws.com",
+                "region": "",
+            },
+        )(),
+        s3fs_image="s3fs:test",
+        s3_endpoint="http://s3.svc:9000",
     )
 
 
@@ -104,6 +116,53 @@ class TestBuildPodManifest:
         assert c.readiness_probe.period_seconds == 2
         assert c.readiness_probe.failure_threshold == 30
         assert {e.name: e.value for e in c.env}["EXTRA"] == "value"
+        assert len(pod.spec.containers) == 1
+        assert pod.spec.volumes is None
+
+    def test_pod_manifest_mounts_workspace_when_source_configured(
+        self, backend: K8sBrowserBackend,
+    ) -> None:
+        spec = BrowserSpec(
+            workspace_source_ref="s3://agent-bucket/sessions/session-1",
+        )
+        pod = backend._build_pod_manifest(
+            browser_id="browser-id",
+            pod_name="browser-abc123",
+            session_id="session-1",
+            org_id="org-1",
+            user_id="user-1",
+            secret_name="browser-s3-abc123",
+            spec=spec,
+        )
+
+        assert [(v.name, v.empty_dir is not None) for v in pod.spec.volumes] == [
+            ("workspace", True),
+        ]
+        browser_container = pod.spec.containers[0]
+        s3fs_container = pod.spec.containers[1]
+        assert browser_container.name == "browser"
+        assert [
+            (mount.name, mount.mount_path, mount.mount_propagation)
+            for mount in browser_container.volume_mounts
+        ] == [("workspace", "/workspace", "HostToContainer")]
+        assert {e.name: e.value for e in browser_container.env} == {
+            "HOME": "/workspace",
+            "WORKSPACE_DIR": "/workspace",
+        }
+
+        assert s3fs_container.name == "s3fs"
+        assert s3fs_container.image == "s3fs:test"
+        assert s3fs_container.security_context.privileged is True
+        assert s3fs_container.env_from[0].secret_ref.name == "browser-s3-abc123"
+        assert {e.name: e.value for e in s3fs_container.env} == {
+            "S3_BUCKET_PATH": "agent-bucket:/sessions/session-1",
+            "S3_ENDPOINT": "http://s3.svc:9000",
+            "S3_REGION": "eu-central-1",
+        }
+        assert [
+            (mount.name, mount.mount_path, mount.mount_propagation)
+            for mount in s3fs_container.volume_mounts
+        ] == [("workspace", "/workspace", "Bidirectional")]
 
     def test_pod_manifest_uses_backend_image_when_spec_image_blank(
         self, backend: K8sBrowserBackend,
@@ -115,6 +174,7 @@ class TestBuildPodManifest:
             session_id="session-1",
             org_id="org-1",
             user_id="user-1",
+            secret_name=None,
             spec=spec,
         )
 
@@ -159,6 +219,7 @@ class TestProvision:
         self, backend: K8sBrowserBackend, monkeypatch,
     ) -> None:
         api = MagicMock()
+        api.create_namespaced_secret = AsyncMock()
         api.create_namespaced_pod = AsyncMock()
         api.create_namespaced_service = AsyncMock()
 
@@ -171,7 +232,10 @@ class TestProvision:
         monkeypatch.setattr(backend, "_get_api", fake_get_api)
         monkeypatch.setattr(backend, "_wait_for_ready", fake_wait_ready)
 
-        spec = BrowserSpec(image="kernel-headful:test")
+        spec = BrowserSpec(
+            image="kernel-headful:test",
+            workspace_source_ref="s3://agent-bucket/sessions/sess-1",
+        )
         bid, endpoint = await backend.provision(
             spec,
             session_id="sess-1",
@@ -185,6 +249,7 @@ class TestProvision:
         assert endpoint.cdp_url == f"ws://{prefix}:9222"
         assert endpoint.live_view_url == f"ws://{prefix}:443"
 
+        assert api.create_namespaced_secret.call_count == 1
         assert api.create_namespaced_pod.call_count == 1
         assert api.create_namespaced_service.call_count == 1
         assert backend._pods[bid].status == BrowserStatus.RUNNING
@@ -193,11 +258,13 @@ class TestProvision:
         self, backend: K8sBrowserBackend, monkeypatch,
     ) -> None:
         api = MagicMock()
+        api.create_namespaced_secret = AsyncMock()
         api.create_namespaced_pod = AsyncMock()
         api.create_namespaced_service = AsyncMock(
             side_effect=ApiException(status=500, reason="boom"),
         )
         api.delete_namespaced_pod = AsyncMock()
+        api.delete_namespaced_secret = AsyncMock()
 
         async def fake_get_api() -> MagicMock:
             return api
@@ -210,23 +277,26 @@ class TestProvision:
 
         with pytest.raises(BrowserUnavailableError):
             await backend.provision(
-                BrowserSpec(),
+                BrowserSpec(workspace_source_ref="s3://agent-bucket/sessions/s"),
                 session_id="s",
                 org_id="o",
                 user_id="u",
             )
 
         assert api.delete_namespaced_pod.call_count == 1
+        assert api.delete_namespaced_secret.call_count == 1
         assert backend._pods == {}
 
     async def test_provision_rolls_back_when_pod_never_ready(
         self, backend: K8sBrowserBackend, monkeypatch,
     ) -> None:
         api = MagicMock()
+        api.create_namespaced_secret = AsyncMock()
         api.create_namespaced_pod = AsyncMock()
         api.create_namespaced_service = AsyncMock()
         api.delete_namespaced_pod = AsyncMock()
         api.delete_namespaced_service = AsyncMock()
+        api.delete_namespaced_secret = AsyncMock()
 
         async def fake_get_api() -> MagicMock:
             return api
@@ -239,7 +309,7 @@ class TestProvision:
 
         with pytest.raises(BrowserUnavailableError):
             await backend.provision(
-                BrowserSpec(),
+                BrowserSpec(workspace_source_ref="s3://agent-bucket/sessions/s"),
                 session_id="s",
                 org_id="o",
                 user_id="u",
@@ -247,6 +317,7 @@ class TestProvision:
 
         assert api.delete_namespaced_service.call_count == 1
         assert api.delete_namespaced_pod.call_count == 1
+        assert api.delete_namespaced_secret.call_count == 1
         assert backend._pods == {}
 
 
@@ -379,6 +450,7 @@ class TestDestroy:
             browser_id="bid",
             pod_name="browser-bid",
             service_name="browser-bid",
+            secret_name=None,
             namespace="test-ns",
             spec=BrowserSpec(),
             endpoint=BrowserEndpoint(rest_url="r", cdp_url="c", live_view_url="l"),
@@ -410,6 +482,7 @@ class TestDestroy:
             browser_id="bid",
             pod_name="browser-bid",
             service_name="browser-bid",
+            secret_name=None,
             namespace="test-ns",
             spec=BrowserSpec(),
             endpoint=BrowserEndpoint(rest_url="r", cdp_url="c", live_view_url="l"),

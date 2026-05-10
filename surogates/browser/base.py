@@ -69,6 +69,8 @@ class BrowserSpec:
     pod_ready_timeout: int = 60
     active_deadline_seconds: int = 3600
     timeout: int = 60
+    workspace_path: str | None = None
+    workspace_source_ref: str | None = None
     env: dict[str, str] = field(default_factory=dict)
 
 

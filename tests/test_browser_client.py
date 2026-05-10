@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import time
 from typing import Any
 
@@ -405,6 +406,36 @@ class TestScreenshot:
         result = await client.screenshot()
         assert result["png_bytes"].startswith(PNG_MAGIC)
         assert "annotations" not in result
+
+    async def test_screenshot_can_save_inside_browser_workspace(
+        self,
+        client_with_transport,
+    ) -> None:
+        client, _handlers = client_with_transport
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/playwright/execute"
+            payload = json.loads(request.content.decode())
+            assert "/workspace/browser-screenshots/capture.png" in payload["code"]
+            assert "toString('base64')" in payload["code"]
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "result": base64.b64encode(PNG_MAGIC + b"saved").decode(),
+                },
+            )
+
+        client._http = httpx.AsyncClient(
+            base_url=client.rest_url,
+            transport=httpx.MockTransport(handler),
+        )
+
+        result = await client.screenshot(
+            save_path="/workspace/browser-screenshots/capture.png",
+        )
+
+        assert result["png_bytes"] == PNG_MAGIC + b"saved"
 
     async def test_screenshot_with_annotate_runs_overlay_then_clears(
         self, client_with_transport

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from typing import Any
 
@@ -265,6 +266,7 @@ return {
         *,
         region: dict[str, int] | None = None,
         annotate: bool = False,
+        save_path: str | None = None,
     ) -> dict[str, Any]:
         """Capture a PNG screenshot, optionally with numbered ref overlays."""
 
@@ -276,12 +278,30 @@ return {
             await self._inject_overlay(annotations)
 
         try:
-            response = await self._http.post(
-                "/computer/screenshot",
-                json={} if region is None else {"region": region},
-            )
-            response.raise_for_status()
-            result: dict[str, Any] = {"png_bytes": response.content}
+            if save_path is not None:
+                options: dict[str, Any] = {"path": save_path}
+                if region is not None:
+                    options["clip"] = {
+                        "x": region["x"],
+                        "y": region["y"],
+                        "width": region["width"],
+                        "height": region["height"],
+                    }
+                encoded = await self._playwright_execute(
+                    "const options = "
+                    + json.dumps(options)
+                    + ";\n"
+                    + "const data = await page.screenshot(options);\n"
+                    + "return data.toString('base64');"
+                )
+                result: dict[str, Any] = {"png_bytes": base64.b64decode(encoded)}
+            else:
+                response = await self._http.post(
+                    "/computer/screenshot",
+                    json={} if region is None else {"region": region},
+                )
+                response.raise_for_status()
+                result = {"png_bytes": response.content}
             if annotations is not None:
                 result["annotations"] = annotations
             return result

@@ -30,6 +30,8 @@ class TestBuildBrowserBackend:
                 image="browser:k8s",
                 k8s_namespace="browser-ns",
                 k8s_service_account="browser-sa",
+                k8s_s3fs_image="s3fs:browser",
+                k8s_s3_endpoint="http://s3.svc:9000",
                 pod_ready_timeout=99,
             )
         )
@@ -37,4 +39,6 @@ class TestBuildBrowserBackend:
         assert backend._image == "browser:k8s"
         assert backend._namespace == "browser-ns"
         assert backend._service_account == "browser-sa"
+        assert backend._s3fs_image == "s3fs:browser"
+        assert backend._s3_endpoint == "http://s3.svc:9000"
         assert backend._pod_ready_timeout == 99

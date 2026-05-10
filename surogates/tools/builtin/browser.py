@@ -41,6 +41,8 @@ async def _resolve_session_browser(
     browser_pool: BrowserPool | None,
     browser_control: BrowserControlStore | None,
     spec: BrowserSpec | None = None,
+    workspace_path: str | None = None,
+    session_config: dict[str, Any] | None = None,
 ) -> tuple[str, BrowserEndpoint, dict[str, dict[str, Any]]] | str:
     if browser_pool is None or session_id is None:
         return browser_unavailable_result("browser pool not configured")
@@ -50,11 +52,20 @@ async def _resolve_session_browser(
         return _paused_by_user_result()
 
     try:
+        storage_bucket = (session_config or {}).get("storage_bucket")
+        browser_spec = spec or BrowserSpec(
+            workspace_path=workspace_path,
+            workspace_source_ref=(
+                f"s3://{storage_bucket}/sessions/{sid}"
+                if storage_bucket
+                else None
+            ),
+        )
         result = await browser_pool.ensure(
             session_id=sid,
             org_id=str(getattr(tenant, "org_id", "")) if tenant is not None else "",
             user_id=str(getattr(tenant, "user_id", "")) if tenant is not None else "",
-            spec=spec or BrowserSpec(),
+            spec=browser_spec,
         )
     except BrowserUnavailableError as exc:
         return browser_unavailable_result(exc.reason)
@@ -105,6 +116,8 @@ async def _browser_navigate_handler(
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
     _client_factory: Callable[..., Any] = _default_client_factory,
+    workspace_path: str | None = None,
+    session_config: dict[str, Any] | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -112,6 +125,8 @@ async def _browser_navigate_handler(
         session_id=session_id,
         browser_pool=browser_pool,
         browser_control=browser_control,
+        workspace_path=workspace_path,
+        session_config=session_config,
     )
     if isinstance(preflight, str):
         return preflight
@@ -149,6 +164,8 @@ async def _browser_get_state_handler(
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
     _client_factory: Callable[..., Any] = _default_client_factory,
+    workspace_path: str | None = None,
+    session_config: dict[str, Any] | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -156,6 +173,8 @@ async def _browser_get_state_handler(
         session_id=session_id,
         browser_pool=browser_pool,
         browser_control=browser_control,
+        workspace_path=workspace_path,
+        session_config=session_config,
     )
     if isinstance(preflight, str):
         return preflight
@@ -220,6 +239,8 @@ async def _browser_click_handler(
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
     _client_factory: Callable[..., Any] = _default_client_factory,
+    workspace_path: str | None = None,
+    session_config: dict[str, Any] | None = None,
     **_: Any,
 ) -> str:
     has_ref = "ref" in arguments
@@ -232,6 +253,8 @@ async def _browser_click_handler(
         session_id=session_id,
         browser_pool=browser_pool,
         browser_control=browser_control,
+        workspace_path=workspace_path,
+        session_config=session_config,
     )
     if isinstance(preflight, str):
         return preflight
@@ -274,6 +297,8 @@ async def _browser_type_handler(
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
     _client_factory: Callable[..., Any] = _default_client_factory,
+    workspace_path: str | None = None,
+    session_config: dict[str, Any] | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -281,6 +306,8 @@ async def _browser_type_handler(
         session_id=session_id,
         browser_pool=browser_pool,
         browser_control=browser_control,
+        workspace_path=workspace_path,
+        session_config=session_config,
     )
     if isinstance(preflight, str):
         return preflight
@@ -318,6 +345,8 @@ async def _browser_press_key_handler(
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
     _client_factory: Callable[..., Any] = _default_client_factory,
+    workspace_path: str | None = None,
+    session_config: dict[str, Any] | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -325,6 +354,8 @@ async def _browser_press_key_handler(
         session_id=session_id,
         browser_pool=browser_pool,
         browser_control=browser_control,
+        workspace_path=workspace_path,
+        session_config=session_config,
     )
     if isinstance(preflight, str):
         return preflight
@@ -357,6 +388,8 @@ async def _browser_scroll_handler(
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
     _client_factory: Callable[..., Any] = _default_client_factory,
+    workspace_path: str | None = None,
+    session_config: dict[str, Any] | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -364,6 +397,8 @@ async def _browser_scroll_handler(
         session_id=session_id,
         browser_pool=browser_pool,
         browser_control=browser_control,
+        workspace_path=workspace_path,
+        session_config=session_config,
     )
     if isinstance(preflight, str):
         return preflight
@@ -408,6 +443,8 @@ async def _browser_drag_handler(
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
     _client_factory: Callable[..., Any] = _default_client_factory,
+    workspace_path: str | None = None,
+    session_config: dict[str, Any] | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -415,6 +452,8 @@ async def _browser_drag_handler(
         session_id=session_id,
         browser_pool=browser_pool,
         browser_control=browser_control,
+        workspace_path=workspace_path,
+        session_config=session_config,
     )
     if isinstance(preflight, str):
         return preflight
@@ -443,6 +482,8 @@ async def _browser_wait_handler(
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
     _client_factory: Callable[..., Any] = _default_client_factory,
+    workspace_path: str | None = None,
+    session_config: dict[str, Any] | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -450,6 +491,8 @@ async def _browser_wait_handler(
         session_id=session_id,
         browser_pool=browser_pool,
         browser_control=browser_control,
+        workspace_path=workspace_path,
+        session_config=session_config,
     )
     if isinstance(preflight, str):
         return preflight
@@ -485,22 +528,27 @@ _MAX_BASE64_BYTES = 256 * 1024
 _SCREENSHOT_DIR = "browser-screenshots"
 
 
+def _new_screenshot_path() -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    filename = f"browser-screenshot-{timestamp}-{uuid4().hex[:8]}.png"
+    return f"{_SCREENSHOT_DIR}/{filename}"
+
+
 def _save_screenshot_to_workspace(
     png_bytes: bytes,
     *,
     workspace_path: str | None,
+    relative_path: str,
 ) -> str | None:
     if not workspace_path:
         return None
 
     workspace = Path(workspace_path).resolve()
-    target_dir = workspace / _SCREENSHOT_DIR
+    target = workspace / relative_path
+    target_dir = target.parent
     target_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    filename = f"browser-screenshot-{timestamp}-{uuid4().hex[:8]}.png"
-    target_path = target_dir / filename
-    target_path.write_bytes(png_bytes)
-    return f"{_SCREENSHOT_DIR}/{filename}"
+    target.write_bytes(png_bytes)
+    return relative_path
 
 
 async def _browser_screenshot_handler(
@@ -512,6 +560,7 @@ async def _browser_screenshot_handler(
     browser_control: BrowserControlStore | None = None,
     _client_factory: Callable[..., Any] = _default_client_factory,
     workspace_path: str | None = None,
+    session_config: dict[str, Any] | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -519,20 +568,41 @@ async def _browser_screenshot_handler(
         session_id=session_id,
         browser_pool=browser_pool,
         browser_control=browser_control,
+        workspace_path=workspace_path,
+        session_config=session_config,
     )
     if isinstance(preflight, str):
         return preflight
 
     _browser_id, endpoint, snapshot_cache = preflight
+    relative_path = _new_screenshot_path() if workspace_path else None
+    save_path = f"/workspace/{relative_path}" if relative_path else None
+    saved_in_browser = save_path is not None
     client = _make_client(_client_factory, endpoint, snapshot_cache)
     async with client:
-        result = await client.screenshot(
-            region=arguments.get("region"),
-            annotate=bool(arguments.get("annotate", False)),
-        )
+        try:
+            result = await client.screenshot(
+                region=arguments.get("region"),
+                annotate=bool(arguments.get("annotate", False)),
+                save_path=save_path,
+            )
+        except RuntimeError:
+            if save_path is None:
+                raise
+            saved_in_browser = False
+            result = await client.screenshot(
+                region=arguments.get("region"),
+                annotate=bool(arguments.get("annotate", False)),
+            )
 
     png_bytes = result["png_bytes"]
-    path = _save_screenshot_to_workspace(png_bytes, workspace_path=workspace_path)
+    path = relative_path
+    if relative_path is not None and not saved_in_browser:
+        path = _save_screenshot_to_workspace(
+            png_bytes,
+            workspace_path=workspace_path,
+            relative_path=relative_path,
+        )
     if len(png_bytes) > _MAX_BASE64_BYTES:
         body: dict[str, Any] = {
             "error": "screenshot_too_large_for_base64",

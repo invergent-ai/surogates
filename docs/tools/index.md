@@ -234,9 +234,10 @@ Delegate a subtask to a configured task-specialized expert model. The `expert` v
 
 Browser tools give the agent a session-scoped Chromium browser for interactive
 web tasks. They are harness-local tools backed by a separate browser
-container/pod, not by the workspace sandbox. See [Browser Use](../browser-use/index.md)
-for lifecycle, live view, user control handoff, deployment, and security
-details.
+container/pod, not by the execution sandbox. The browser mounts the same
+session workspace at `/workspace`, so downloads and saved screenshots are
+visible in the workspace. See [Browser Use](../browser-use/index.md) for
+lifecycle, live view, user control handoff, deployment, and security details.
 
 ### `browser_navigate` -- Browser Navigation
 

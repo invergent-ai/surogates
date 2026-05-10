@@ -44,7 +44,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _build_browser_backend(settings: "BrowserSettings") -> Any:
+def _build_browser_backend(
+    settings: "BrowserSettings",
+    *,
+    storage_settings: Any = None,
+) -> Any:
     """Build the configured browser backend without touching external services."""
     if settings.backend == "kubernetes":
         from surogates.browser.kubernetes import K8sBrowserBackend
@@ -54,6 +58,9 @@ def _build_browser_backend(settings: "BrowserSettings") -> Any:
             service_account=settings.k8s_service_account,
             pod_ready_timeout=settings.pod_ready_timeout,
             image=settings.image,
+            storage_settings=storage_settings,
+            s3fs_image=settings.k8s_s3fs_image,
+            s3_endpoint=settings.k8s_s3_endpoint,
         )
     return ProcessBrowserBackend(
         image=settings.image,
@@ -232,7 +239,10 @@ async def run_worker(settings: Settings) -> None:
     sandbox_pool = SandboxPool(sandbox_backend)
 
     # 4b. Browser pool -- one browser per session, lazily provisioned.
-    browser_backend = _build_browser_backend(settings.browser)
+    browser_backend = _build_browser_backend(
+        settings.browser,
+        storage_settings=settings.storage,
+    )
     browser_registry = BrowserRegistry(redis_client)
     browser_control = BrowserControlStore(redis_client)
 

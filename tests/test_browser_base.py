@@ -30,6 +30,8 @@ def test_browser_settings_defaults(monkeypatch) -> None:
     assert s.cdp_port_base == 31000
     assert s.live_view_port_base == 32000
     assert s.live_view_mode == "novnc"
+    assert s.k8s_s3fs_image == "ghcr.io/invergent-ai/surogates-s3fs:latest"
+    assert s.k8s_s3_endpoint == ""
     assert s.pod_ready_timeout == 60
     assert s.active_deadline_seconds == 3600
     assert s.cpu == "1"
@@ -78,15 +80,25 @@ def test_browser_spec_defaults() -> None:
     assert spec.memory_limit == "4Gi"
     assert spec.pod_ready_timeout == 60
     assert spec.active_deadline_seconds == 3600
+    assert spec.workspace_path is None
+    assert spec.workspace_source_ref is None
     assert spec.env == {}
 
 
 def test_browser_spec_overrides() -> None:
     from surogates.browser.base import BrowserSpec
 
-    spec = BrowserSpec(image="custom:1", cpu="500m", env={"FOO": "bar"})
+    spec = BrowserSpec(
+        image="custom:1",
+        cpu="500m",
+        workspace_path="/tmp/workspace",
+        workspace_source_ref="s3://bucket/sessions/session-1",
+        env={"FOO": "bar"},
+    )
     assert spec.image == "custom:1"
     assert spec.cpu == "500m"
+    assert spec.workspace_path == "/tmp/workspace"
+    assert spec.workspace_source_ref == "s3://bucket/sessions/session-1"
     assert spec.env == {"FOO": "bar"}
 
 

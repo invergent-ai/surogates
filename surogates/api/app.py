@@ -58,6 +58,9 @@ def _install_browser_api_dependencies(app: Any, settings: Any) -> None:
             service_account=settings.browser.k8s_service_account,
             pod_ready_timeout=settings.browser.pod_ready_timeout,
             image=settings.browser.image,
+            storage_settings=getattr(settings, "storage", None),
+            s3fs_image=settings.browser.k8s_s3fs_image,
+            s3_endpoint=settings.browser.k8s_s3_endpoint,
         )
 
     browser_registry = BrowserRegistry(app.state.redis)

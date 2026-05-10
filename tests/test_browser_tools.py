@@ -18,6 +18,7 @@ from surogates.browser.pool import EnsureResult
 class FakePool:
     def __init__(self) -> None:
         self.ensures: list[tuple[str, str, str]] = []
+        self.specs: list[BrowserSpec] = []
         self.destroyed: list[str] = []
         self._fixed_endpoint = BrowserEndpoint(
             rest_url="http://browser:30000",
@@ -34,6 +35,7 @@ class FakePool:
         spec: BrowserSpec,
     ) -> EnsureResult:
         self.ensures.append((session_id, org_id, user_id))
+        self.specs.append(spec)
         return EnsureResult(
             browser_id="b1",
             endpoint=self._fixed_endpoint,
@@ -134,7 +136,10 @@ class FakeScreenshotClient:
         *,
         region: dict[str, int] | None = None,
         annotate: bool = False,
+        save_path: str | None = None,
     ) -> dict[str, Any]:
+        if save_path is not None:
+            raise RuntimeError("save_path unsupported by fake")
         self.captured.append({"region": region, "annotate": annotate})
         result: dict[str, Any] = {"png_bytes": b"\x89PNG\r\n\x1a\nimg"}
         if annotate:
@@ -159,7 +164,10 @@ class FakeLargeScreenshotClient(FakeScreenshotClient):
         *,
         region: dict[str, int] | None = None,
         annotate: bool = False,
+        save_path: str | None = None,
     ) -> dict[str, Any]:
+        if save_path is not None:
+            raise RuntimeError("save_path unsupported by fake")
         self.captured.append({"region": region, "annotate": annotate})
         return {"png_bytes": b"\x89PNG\r\n\x1a\n" + (b"x" * 300_000)}
 
@@ -194,6 +202,28 @@ class TestNavigateHandler:
         assert body["title"] == "Test Page"
         assert pool.ensures == [(str(sid), str(tenant.org_id), str(tenant.user_id))]
         assert client.navigated_to == "https://example.com"
+
+    async def test_passes_workspace_mount_spec(self, tenant, tmp_path) -> None:
+        from surogates.tools.builtin.browser import _browser_navigate_handler
+
+        pool = FakePool()
+        session_id = uuid4()
+        await _browser_navigate_handler(
+            {"url": "https://example.com"},
+            tenant=tenant,
+            session_id=session_id,
+            browser_pool=pool,
+            browser_control=FakeControlStore(),
+            workspace_path=str(tmp_path),
+            session_config={"storage_bucket": "agent-bucket"},
+            _client_factory=lambda endpoint: FakeClient(),
+        )
+
+        assert pool.specs[0].workspace_path == str(tmp_path)
+        assert (
+            pool.specs[0].workspace_source_ref
+            == f"s3://agent-bucket/sessions/{session_id}"
+        )
 
     async def test_short_circuits_when_user_in_control(self, tenant) -> None:
         from surogates.tools.builtin.browser import _browser_navigate_handler

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
+from urllib.parse import urlparse
 
 from kubernetes_asyncio import client, config, watch
 from kubernetes_asyncio.client import ApiException
@@ -32,6 +35,7 @@ class _PodEntry:
     browser_id: str
     pod_name: str
     service_name: str
+    secret_name: str | None
     namespace: str
     spec: BrowserSpec
     endpoint: BrowserEndpoint
@@ -48,11 +52,17 @@ class K8sBrowserBackend:
         service_account: str = "surogates-browser",
         pod_ready_timeout: int = 60,
         image: str = "ghcr.io/invergent-ai/surogates-agent-browser:latest",
+        storage_settings: Any = None,
+        s3fs_image: str = "ghcr.io/invergent-ai/surogates-s3fs:latest",
+        s3_endpoint: str = "",
     ) -> None:
         self._namespace = namespace
         self._service_account = service_account
         self._pod_ready_timeout = pod_ready_timeout
         self._image = image
+        self._storage = storage_settings
+        self._s3fs_image = s3fs_image
+        self._s3_endpoint = s3_endpoint
         self._pods: dict[str, _PodEntry] = {}
         self._api: client.CoreV1Api | None = None
 
@@ -70,6 +80,9 @@ class K8sBrowserBackend:
         suffix = browser_id[:12]
         pod_name = f"browser-{suffix}"
         service_name = f"browser-{suffix}"
+        secret_name = (
+            f"browser-s3-{suffix}" if spec.workspace_source_ref else None
+        )
         endpoint = BrowserEndpoint(
             rest_url=f"http://{service_name}.{self._namespace}.svc:{SERVICE_PORT_REST}",
             cdp_url=f"ws://{service_name}.{self._namespace}.svc:{SERVICE_PORT_CDP}",
@@ -78,17 +91,23 @@ class K8sBrowserBackend:
             ),
         )
 
+        if secret_name is not None:
+            await self._create_s3_secret(api, secret_name)
+
         pod_manifest = self._build_pod_manifest(
             browser_id=browser_id,
             pod_name=pod_name,
             session_id=session_id,
             org_id=org_id,
             user_id=user_id,
+            secret_name=secret_name,
             spec=spec,
         )
         try:
             await api.create_namespaced_pod(self._namespace, pod_manifest)
         except ApiException as exc:
+            if secret_name is not None:
+                await self._delete_secret_safe(api, secret_name)
             raise BrowserUnavailableError(
                 f"Failed to create browser pod {pod_name}: {exc}",
             ) from exc
@@ -104,6 +123,8 @@ class K8sBrowserBackend:
             await api.create_namespaced_service(self._namespace, service_manifest)
         except ApiException as exc:
             await self._delete_pod_safe(api, pod_name)
+            if secret_name is not None:
+                await self._delete_secret_safe(api, secret_name)
             raise BrowserUnavailableError(
                 f"Failed to create browser service {service_name}: {exc}",
             ) from exc
@@ -113,6 +134,8 @@ class K8sBrowserBackend:
         except Exception as exc:
             await self._delete_service_safe(api, service_name)
             await self._delete_pod_safe(api, pod_name)
+            if secret_name is not None:
+                await self._delete_secret_safe(api, secret_name)
             raise BrowserUnavailableError(
                 f"Browser pod {pod_name} did not become ready: {exc}",
                 classification="readiness",
@@ -122,6 +145,7 @@ class K8sBrowserBackend:
             browser_id=browser_id,
             pod_name=pod_name,
             service_name=service_name,
+            secret_name=secret_name,
             namespace=self._namespace,
             spec=spec,
             endpoint=endpoint,
@@ -169,6 +193,8 @@ class K8sBrowserBackend:
         api = await self._get_api()
         await self._delete_service_safe(api, entry.service_name)
         await self._delete_pod_safe(api, entry.pod_name)
+        if entry.secret_name is not None:
+            await self._delete_secret_safe(api, entry.secret_name)
         logger.info(
             "Destroyed K8s browser %s (pod %s, service %s)",
             browser_id,
@@ -268,6 +294,7 @@ class K8sBrowserBackend:
         session_id: str,
         org_id: str,
         user_id: str,
+        secret_name: str | None = None,
         spec: BrowserSpec,
     ) -> client.V1Pod:
         """Build the browser pod manifest."""
@@ -282,6 +309,32 @@ class K8sBrowserBackend:
             client.V1EnvVar(name=key, value=value)
             for key, value in sorted(spec.env.items())
         ]
+        volume_mounts: list[client.V1VolumeMount] | None = None
+        volumes: list[client.V1Volume] | None = None
+        containers: list[client.V1Container]
+        if spec.workspace_source_ref:
+            volume_mounts = [
+                client.V1VolumeMount(
+                    name="workspace",
+                    mount_path="/workspace",
+                    mount_propagation="HostToContainer",
+                ),
+            ]
+            env_vars = [
+                client.V1EnvVar(name="HOME", value="/workspace"),
+                client.V1EnvVar(name="WORKSPACE_DIR", value="/workspace"),
+                *[
+                    env
+                    for env in env_vars
+                    if env.name not in {"HOME", "WORKSPACE_DIR"}
+                ],
+            ]
+            volumes = [
+                client.V1Volume(
+                    name="workspace",
+                    empty_dir=client.V1EmptyDirVolumeSource(),
+                ),
+            ]
         container = client.V1Container(
             name="browser",
             image=spec.image or self._image,
@@ -307,7 +360,17 @@ class K8sBrowserBackend:
                 limits={"cpu": spec.cpu_limit, "memory": spec.memory_limit},
             ),
             env=env_vars,
+            volume_mounts=volume_mounts,
         )
+        containers = [container]
+
+        if spec.workspace_source_ref:
+            containers.append(
+                self._build_s3fs_container(
+                    source_ref=spec.workspace_source_ref,
+                    secret_name=secret_name,
+                )
+            )
 
         return client.V1Pod(
             metadata=client.V1ObjectMeta(
@@ -322,9 +385,58 @@ class K8sBrowserBackend:
                 service_account_name=self._service_account,
                 active_deadline_seconds=spec.active_deadline_seconds,
                 restart_policy="Never",
-                containers=[container],
+                volumes=volumes,
+                containers=containers,
             ),
         )
+
+    def _build_s3fs_container(
+        self,
+        *,
+        source_ref: str,
+        secret_name: str | None,
+    ) -> client.V1Container:
+        if not secret_name:
+            raise ValueError("workspace_source_ref requires an S3 secret name")
+        session_bucket_path = self._session_bucket_path(source_ref)
+        s3_endpoint = self._s3_endpoint or ""
+        if not s3_endpoint and self._storage:
+            s3_endpoint = getattr(self._storage, "endpoint", "")
+        return client.V1Container(
+            name="s3fs",
+            image=self._s3fs_image,
+            security_context=client.V1SecurityContext(privileged=True),
+            env=[
+                client.V1EnvVar(name="S3_BUCKET_PATH", value=session_bucket_path),
+                client.V1EnvVar(name="S3_ENDPOINT", value=s3_endpoint),
+                client.V1EnvVar(
+                    name="S3_REGION",
+                    value=self._resolve_s3_region(s3_endpoint),
+                ),
+            ],
+            env_from=[
+                client.V1EnvFromSource(
+                    secret_ref=client.V1SecretEnvSource(name=secret_name),
+                ),
+            ],
+            volume_mounts=[
+                client.V1VolumeMount(
+                    name="workspace",
+                    mount_path="/workspace",
+                    mount_propagation="Bidirectional",
+                ),
+            ],
+        )
+
+    @staticmethod
+    def _session_bucket_path(source_ref: str) -> str:
+        if not source_ref.startswith("s3://"):
+            raise ValueError("workspace_source_ref must use s3://")
+        source = source_ref[5:].rstrip("/")
+        if "/" in source:
+            bucket, path = source.split("/", 1)
+            return f"{bucket}:/{path}"
+        return source
 
     async def _wait_for_ready(self, api: client.CoreV1Api, pod_name: str) -> None:
         """Watch the pod until it has a Ready condition or timeout."""
@@ -379,6 +491,37 @@ class K8sBrowserBackend:
                     exc,
                 )
 
+    async def _create_s3_secret(self, api: client.CoreV1Api, secret_name: str) -> None:
+        access_key = ""
+        secret_key = ""
+        if self._storage:
+            access_key = getattr(self._storage, "access_key", "")
+            secret_key = getattr(self._storage, "secret_key", "")
+
+        secret = client.V1Secret(
+            metadata=client.V1ObjectMeta(
+                name=secret_name,
+                namespace=self._namespace,
+                labels={"app": "surogates-browser"},
+            ),
+            string_data={
+                "AWS_ACCESS_KEY_ID": access_key,
+                "AWS_SECRET_ACCESS_KEY": secret_key,
+            },
+        )
+        try:
+            await api.create_namespaced_secret(self._namespace, secret)
+        except ApiException as exc:
+            if exc.status != 409:
+                raise
+
+    async def _delete_secret_safe(self, api: client.CoreV1Api, secret_name: str) -> None:
+        try:
+            await api.delete_namespaced_secret(secret_name, self._namespace)
+        except ApiException as exc:
+            if exc.status != 404:
+                logger.warning("Failed to delete browser secret %s: %s", secret_name, exc)
+
     @staticmethod
     def _is_pod_ready(pod: client.V1Pod) -> bool:
         if not pod.status or not pod.status.conditions:
@@ -402,6 +545,29 @@ class K8sBrowserBackend:
         if phase == "Succeeded":
             return BrowserStatus.TERMINATED
         return BrowserStatus.PENDING
+
+    _DEFAULT_REGION = "eu-central-1"
+
+    def _resolve_s3_region(self, s3_endpoint: str) -> str:
+        explicit = ""
+        if self._storage:
+            explicit = getattr(self._storage, "region", "") or ""
+        if explicit:
+            return explicit
+
+        host = ""
+        if s3_endpoint:
+            try:
+                host = urlparse(s3_endpoint).hostname or ""
+            except (ValueError, TypeError):
+                host = ""
+
+        if host.endswith(".amazonaws.com"):
+            match = re.match(r"^s3[.-]([a-z0-9-]+)\.amazonaws\.com$", host)
+            if match:
+                return match.group(1)
+
+        return self._DEFAULT_REGION
 
     def _build_service_manifest(
         self,
