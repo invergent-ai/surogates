@@ -4,11 +4,37 @@
 
 **Goal:** Land the worker-side foundation for the agent browser — a Python `KernelBrowserClient` that drives kernel-images via REST, a `BrowserPool` + Redis `BrowserRegistry`/`BrowserControlStore` for cross-process state, a `ProcessBrowserBackend` that runs kernel-images via `docker run` for local development, and the discrete `browser_*` tools wired into the harness — always enabled (no feature flag; the `backend` choice is the only environment switch). End state: an agent running locally can navigate, get_state, click, type, screenshot a real Chromium running in a Docker container.
 
-**Architecture:** New `surogates/browser/` package mirrors `surogates/sandbox/`. Tools dispatch as `ToolLocation.HARNESS` and call `BrowserPool.ensure()` then `KernelBrowserClient` over httpx against the pod's REST port. Cross-process metadata (worker writes, API server reads in Phase C) lives in Redis hashes/keys. K8s backend, live-view UI, profile sync, and recording are deferred to Phases B/C/D.
+**Architecture:** New `surogates/browser/` package mirrors `surogates/sandbox/`. Tools dispatch as `ToolLocation.HARNESS` and call `BrowserPool.ensure()` then `KernelBrowserClient` over httpx against the pod's REST port. Cross-tool refs live in a per-session cache owned by `BrowserPool` so `browser_get_state` and later `browser_click {"ref": ...}` can run through separate client instances safely. Cross-process metadata (worker writes, API server reads in Phase C) lives in Redis hashes/keys. K8s backend, live-view UI, profile sync, and recording are deferred to Phases B/C/D.
 
 **Tech Stack:** Python 3.12+, httpx (async HTTP), redis-py asyncio, pytest + pytest-asyncio, pydantic-settings, kernel-images Docker image (`ghcr.io/onkernel/chromium-headful:stable`).
 
 **Spec:** [`docs/superpowers/specs/2026-05-10-agent-browser-design.md`](../specs/2026-05-10-agent-browser-design.md)
+
+---
+
+## Phase A TODO
+
+- [ ] Task 1: Add browser event types and config settings — **in progress**
+- [ ] Task 2: Define `BrowserBackend` protocol and value types — left to do
+- [ ] Task 3: `KernelBrowserClient` skeleton — left to do
+- [ ] Task 4: `KernelBrowserClient.navigate` — left to do
+- [ ] Task 5: `KernelBrowserClient.get_state` with refs/cache — left to do
+- [ ] Task 6: `get_state` filters — left to do
+- [ ] Task 7: click/type client methods — left to do
+- [ ] Task 8: key/scroll/drag/wait client methods — left to do
+- [ ] Task 9: screenshot client method — left to do
+- [ ] Task 10: `BrowserRegistry` — left to do
+- [ ] Task 11: `BrowserControlStore` — left to do
+- [ ] Task 12: `ProcessBrowserBackend` — left to do
+- [ ] Task 13: `BrowserPool` — left to do
+- [ ] Task 14: navigate/get_state/close tools — left to do
+- [ ] Task 15: click/type/press_key/scroll/drag/wait tools — left to do
+- [ ] Task 16: screenshot tool — left to do
+- [ ] Task 17: router/runtime wiring — left to do
+- [ ] Task 18: dispatch kwargs threading — left to do
+- [ ] Task 19: worker bootstrap — left to do
+- [ ] Task 20: `AgentHarness` signature update — left to do
+- [ ] Task 21: opt-in e2e smoke — left to do
 
 ---
 
@@ -570,10 +596,10 @@ Wraps the kernel-images Go server's REST surface (see
 facade. Methods correspond 1:1 to the discrete tool surface (navigate,
 get_state, click, type, ...) defined in spec §5.
 
-Caches the most recent a11y snapshot per client so ``@e1``-style refs
-in subsequent calls (``click_ref``, ``type_ref``) resolve to coordinates
-locally without round-tripping. The cache is invalidated by every
-mutating action.
+Caches the most recent DOM-derived snapshot in a caller-supplied
+per-session dict so ``@e1``-style refs in subsequent calls
+(``click_ref``, ``type_ref``) resolve to coordinates locally without
+round-tripping. The cache is invalidated by every mutating action.
 """
 
 from __future__ import annotations
@@ -594,6 +620,7 @@ class KernelBrowserClient:
         rest_url: str,
         *,
         timeout: float = 30.0,
+        snapshot_cache: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.rest_url = rest_url.rstrip("/")
         self._timeout = timeout
@@ -603,7 +630,10 @@ class KernelBrowserClient:
         )
         self._closed = False
         # ref → (x, y, role, name) cache, populated by get_state.
-        self._snapshot_cache: dict[str, dict[str, Any]] = {}
+        # Browser tools create a fresh client per call, so production
+        # handlers pass the per-session dict owned by BrowserPool. Unit tests
+        # can omit it and get a client-local cache.
+        self._snapshot_cache = snapshot_cache if snapshot_cache is not None else {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -727,7 +757,7 @@ class TestNavigate:
         return body.get("result")
 
     def _invalidate_snapshot_cache(self) -> None:
-        """Drop the cached a11y snapshot. Called after every mutating action."""
+        """Drop the cached DOM snapshot. Called after every mutating action."""
         self._snapshot_cache.clear()
 ```
 
@@ -831,29 +861,69 @@ class TestGetState:
     # ------------------------------------------------------------------
 
     # The snapshot script runs inside the kernel-images browser context
-    # via /playwright/execute. It walks Playwright's accessibility tree,
-    # collects role/name/x/y/width/height for every node, and returns a
-    # flat list. Filtering happens client-side in ``get_state``.
+    # via /playwright/execute. Do NOT use page.accessibility.snapshot()
+    # for coordinates: Playwright's accessibility nodes are plain data,
+    # not ElementHandles, so they cannot provide bounding boxes. Instead
+    # scan visible DOM elements and compute an accessibility-inspired
+    # role/name plus viewport-relative bbox.
     _SNAPSHOT_SCRIPT = """
-const snapshot = await page.accessibility.snapshot({interestingOnly: false});
-const out = [];
-async function walk(node) {
-  if (!node) return;
-  let bbox = null;
-  if (node.elementHandle) {
-    try { bbox = await (await node.elementHandle()).boundingBox(); } catch (e) { bbox = null; }
+function roleOf(el) {
+  const explicit = el.getAttribute('role');
+  if (explicit) return explicit;
+  const tag = el.tagName.toLowerCase();
+  const type = (el.getAttribute('type') || '').toLowerCase();
+  if (tag === 'button') return 'button';
+  if (tag === 'a' && el.hasAttribute('href')) return 'link';
+  if (tag === 'textarea') return 'textbox';
+  if (tag === 'select') return 'combobox';
+  if (tag === 'input') {
+    if (type === 'checkbox') return 'checkbox';
+    if (type === 'radio') return 'radio';
+    if (type === 'range') return 'slider';
+    if (type === 'number') return 'spinbutton';
+    if (type === 'search') return 'searchbox';
+    return 'textbox';
   }
-  if (bbox) {
-    out.push({
-      role: node.role, name: node.name || "", value: node.value || "",
-      x: Math.round(bbox.x), y: Math.round(bbox.y),
-      width: Math.round(bbox.width), height: Math.round(bbox.height),
-      children_count: (node.children || []).length,
-    });
-  }
-  for (const c of (node.children || [])) await walk(c);
+  if (/^h[1-6]$/.test(tag)) return 'heading';
+  if (tag === 'img') return 'img';
+  return 'generic';
 }
-await walk(snapshot);
+
+function nameOf(el) {
+  const direct = el.getAttribute('aria-label')
+    || el.getAttribute('title')
+    || el.getAttribute('alt')
+    || el.getAttribute('placeholder')
+    || el.value
+    || el.innerText
+    || el.textContent
+    || '';
+  return String(direct).replace(/\\s+/g, ' ').trim().slice(0, 240);
+}
+
+function depthOf(el) {
+  let d = 0, cur = el;
+  while (cur && cur.parentElement) { d++; cur = cur.parentElement; }
+  return d;
+}
+
+const out = [];
+for (const el of Array.from(document.querySelectorAll('*'))) {
+  const style = window.getComputedStyle(el);
+  if (style.visibility === 'hidden' || style.display === 'none') continue;
+  const bbox = el.getBoundingClientRect();
+  if (!bbox || bbox.width <= 0 || bbox.height <= 0) continue;
+  out.push({
+    role: roleOf(el),
+    name: nameOf(el),
+    x: Math.round(bbox.x),
+    y: Math.round(bbox.y),
+    width: Math.round(bbox.width),
+    height: Math.round(bbox.height),
+    depth: depthOf(el),
+    children_count: el.children ? el.children.length : 0,
+  });
+}
 return {
   url: page.url(),
   title: await page.title(),
@@ -863,11 +933,11 @@ return {
 """
 
     async def get_state(self) -> dict[str, Any]:
-        """Return the current page's a11y tree with stable ``@e1``-style refs.
+        """Return the current page's DOM-derived tree with stable ``@e1`` refs.
 
         Refs are assigned in tree order before any filtering. Coordinates
-        are stored as bbox centres in the per-client cache so ``click_ref``
-        can resolve refs without re-snapshotting.
+        are stored as bbox centres in the shared per-session cache so
+        ``click_ref`` can resolve refs across separate tool calls.
         """
         raw = await self._playwright_execute(self._SNAPSHOT_SCRIPT)
         nodes = raw.get("nodes", [])
@@ -896,8 +966,11 @@ return {
                 "name": node.get("name", ""),
             }
 
-        # Replace (don't merge) — old refs become invalid.
-        self._snapshot_cache = new_cache
+        # Replace in-place (don't rebind): production clients receive the
+        # per-session dict owned by BrowserPool, so later tool calls must see
+        # the refreshed refs.
+        self._snapshot_cache.clear()
+        self._snapshot_cache.update(new_cache)
 
         return {
             "url": raw.get("url", ""),
@@ -1000,7 +1073,7 @@ list inside `client.py`; the test imports it from there if needed.
 
 ```python
     # Canonical set of interactive ARIA roles. Used by get_state(interactive_only=True).
-    # Borrowed from vercel-labs/agent-browser's snapshot UX (well-validated).
+    # Borrowed from browser-agent DOM snapshot UX patterns.
     _INTERACTIVE_ROLES: frozenset[str] = frozenset({
         "button", "link", "textbox", "combobox", "checkbox", "radio",
         "menuitem", "tab", "switch", "searchbox", "slider", "spinbutton",
@@ -1014,25 +1087,26 @@ list inside `client.py`; the test imports it from there if needed.
         max_depth: int | None = None,
         selector: str | None = None,
     ) -> dict[str, Any]:
-        """Return the current page's a11y tree with stable refs and filters.
+        """Return the current page's DOM-derived tree with stable refs and filters.
 
         Refs are assigned in tree order *before* filtering, so ``@e2``
         always points to the same DOM element no matter which filters
         the caller used. The cache always contains the full set of refs.
         """
-        # The snapshot script accepts an optional CSS selector to scope the tree.
-        snapshot_args = "{interestingOnly: false}"
-        prelude = ""
+        # Scope the DOM scan to an optional CSS selector. Use JSON encoding
+        # rather than f-string interpolation inside JavaScript.
+        script = self._SNAPSHOT_SCRIPT
         if selector:
-            prelude = (
-                f"const root = await page.$({selector!r}); "
-                "if (!root) throw new Error('selector matched no element');"
+            import json as _json
+            selector_json = _json.dumps(selector)
+            script = script.replace(
+                "for (const el of Array.from(document.querySelectorAll('*'))) {",
+                (
+                    f"const __root = document.querySelector({selector_json});\n"
+                    "if (!__root) throw new Error('selector matched no element');\n"
+                    "for (const el of Array.from(__root.querySelectorAll('*'))) {"
+                ),
             )
-            snapshot_args = "{interestingOnly: false, root: await root.elementHandle()}"
-        script = self._SNAPSHOT_SCRIPT.replace(
-            "page.accessibility.snapshot({interestingOnly: false})",
-            f"{prelude} page.accessibility.snapshot({snapshot_args})",
-        )
         raw = await self._playwright_execute(script)
         nodes = raw.get("nodes", [])
 
@@ -1071,7 +1145,9 @@ list inside `client.py`; the test imports it from there if needed.
                 continue
             tree.append(entry)
 
-        self._snapshot_cache = new_cache
+        # Replace in-place so BrowserPool's per-session cache object remains shared.
+        self._snapshot_cache.clear()
+        self._snapshot_cache.update(new_cache)
 
         return {
             "url": raw.get("url", ""),
@@ -1087,7 +1163,7 @@ list inside `client.py`; the test imports it from there if needed.
 
 ```bash
 git add surogates/browser/client.py tests/test_browser_client.py
-git commit -m "feat(browser): add a11y snapshot filters to get_state"
+git commit -m "feat(browser): add DOM snapshot filters to get_state"
 ```
 
 ---
@@ -1726,7 +1802,16 @@ class FakeRedis:
     async def get(self, key: str):
         return self.values.get(key)
 
-    async def set(self, key: str, value: str | bytes) -> bool:
+    async def set(
+        self,
+        key: str,
+        value: str | bytes,
+        *,
+        nx: bool = False,
+        ex: int | None = None,
+    ) -> bool:
+        if nx and key in self.values:
+            return False
         self.values[key] = value.encode() if isinstance(value, str) else value
         return True
 
@@ -1867,8 +1952,9 @@ class AcquireOutcome(str, Enum):
 
 
 class BrowserControlStore:
-    def __init__(self, redis: "Redis") -> None:
+    def __init__(self, redis: "Redis", *, ttl_seconds: int = 60) -> None:
         self._redis = redis
+        self._ttl_seconds = ttl_seconds
 
     async def acquire(
         self,
@@ -1882,19 +1968,33 @@ class BrowserControlStore:
         - **REFRESHED**: same user already held it; ``acquired_at`` updated.
         - **CONFLICT**: different user holds it; returned entry is the holder.
         """
-        existing = await self.get(session_id)
-        if existing is not None and existing.owner_user_id != user_id:
-            return AcquireOutcome.CONFLICT, existing
-
         entry = ControlEntry(
             owner_user_id=user_id,
             acquired_at=datetime.now(timezone.utc),
         )
-        await self._redis.set(_key(session_id), entry.to_json())
-        return (
-            AcquireOutcome.REFRESHED if existing is not None else AcquireOutcome.GRANTED,
-            entry,
+        key = _key(session_id)
+        # Atomic first acquisition. Without NX, two users can race through
+        # get()+set() and both believe they hold control. The TTL prevents a
+        # crashed browser-control client from pausing the agent indefinitely.
+        acquired = await self._redis.set(
+            key,
+            entry.to_json(),
+            nx=True,
+            ex=self._ttl_seconds,
         )
+        if acquired:
+            return AcquireOutcome.GRANTED, entry
+
+        existing = await self.get(session_id)
+        if existing is None:
+            # Key disappeared between SET NX and GET (e.g. manual release).
+            # Retry once recursively; this path is rare and bounded.
+            return await self.acquire(session_id, user_id)
+        if existing.owner_user_id != user_id:
+            return AcquireOutcome.CONFLICT, existing
+
+        await self._redis.set(key, entry.to_json(), ex=self._ttl_seconds)
+        return AcquireOutcome.REFRESHED, entry
 
     async def release(self, session_id: str, user_id: str) -> bool:
         """Release control held by *user_id*. Returns True iff a release happened."""
@@ -1962,7 +2062,7 @@ class FakeDocker:
     def __init__(self, ready_after_calls: int = 1) -> None:
         self.calls: list[list[str]] = []
         self.ready_after_calls = ready_after_calls
-        self._readyz_polls = 0
+        self._spec_json_polls = 0
         self._containers: dict[str, dict[str, Any]] = {}
 
     async def run(self, args: list[str]) -> tuple[int, bytes, bytes]:
@@ -1989,12 +2089,12 @@ class FakeDocker:
 
 
 @pytest.fixture()
-def fake_readyz_transport():
-    """Mock the kernel-images REST so /readyz returns 200 immediately."""
+def fake_spec_json_transport():
+    """Mock the kernel-images REST so /spec.json returns 200 immediately."""
 
     class T(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/readyz":
+            if request.url.path == "/spec.json":
                 return httpx.Response(200, json={"ready": True})
             return httpx.Response(404)
 
@@ -2003,7 +2103,7 @@ def fake_readyz_transport():
 
 class TestProvision:
     async def test_provision_runs_docker_and_returns_endpoint(
-        self, fake_readyz_transport
+        self, fake_spec_json_transport
     ) -> None:
         docker = FakeDocker()
         backend = ProcessBrowserBackend(
@@ -2012,7 +2112,7 @@ class TestProvision:
             cdp_port_base=31000,
             live_view_port_base=32000,
             docker=docker,
-            httpx_transport=fake_readyz_transport,
+            httpx_transport=fake_spec_json_transport,
         )
         spec = BrowserSpec(image="kernel-test:1", pod_ready_timeout=5)
         bid, endpoint = await backend.provision(spec)
@@ -2033,13 +2133,13 @@ class TestProvision:
         assert run_call[-1] == "kernel-test:1"
 
     async def test_provision_increments_port_for_second_browser(
-        self, fake_readyz_transport
+        self, fake_spec_json_transport
     ) -> None:
         docker = FakeDocker()
         backend = ProcessBrowserBackend(
             image="i", rest_port_base=30000, cdp_port_base=31000,
             live_view_port_base=32000,
-            docker=docker, httpx_transport=fake_readyz_transport,
+            docker=docker, httpx_transport=fake_spec_json_transport,
         )
         b1, ep1 = await backend.provision(BrowserSpec())
         b2, ep2 = await backend.provision(BrowserSpec())
@@ -2048,22 +2148,22 @@ class TestProvision:
 
 
 class TestStatus:
-    async def test_status_running(self, fake_readyz_transport) -> None:
+    async def test_status_running(self, fake_spec_json_transport) -> None:
         docker = FakeDocker()
         backend = ProcessBrowserBackend(
             image="i", rest_port_base=30000, cdp_port_base=31000,
             live_view_port_base=32000,
-            docker=docker, httpx_transport=fake_readyz_transport,
+            docker=docker, httpx_transport=fake_spec_json_transport,
         )
         bid, _ = await backend.provision(BrowserSpec())
         assert await backend.status(bid) == BrowserStatus.RUNNING
 
-    async def test_status_terminated_after_destroy(self, fake_readyz_transport) -> None:
+    async def test_status_terminated_after_destroy(self, fake_spec_json_transport) -> None:
         docker = FakeDocker()
         backend = ProcessBrowserBackend(
             image="i", rest_port_base=30000, cdp_port_base=31000,
             live_view_port_base=32000,
-            docker=docker, httpx_transport=fake_readyz_transport,
+            docker=docker, httpx_transport=fake_spec_json_transport,
         )
         bid, _ = await backend.provision(BrowserSpec())
         await backend.destroy(bid)
@@ -2071,12 +2171,12 @@ class TestStatus:
 
 
 class TestDestroy:
-    async def test_destroy_runs_stop_and_rm(self, fake_readyz_transport) -> None:
+    async def test_destroy_runs_stop_and_rm(self, fake_spec_json_transport) -> None:
         docker = FakeDocker()
         backend = ProcessBrowserBackend(
             image="i", rest_port_base=30000, cdp_port_base=31000,
             live_view_port_base=32000,
-            docker=docker, httpx_transport=fake_readyz_transport,
+            docker=docker, httpx_transport=fake_spec_json_transport,
         )
         bid, _ = await backend.provision(BrowserSpec())
         await backend.destroy(bid)
@@ -2084,12 +2184,12 @@ class TestDestroy:
         assert "stop" in verbs
         assert "rm" in verbs
 
-    async def test_destroy_unknown_is_noop(self, fake_readyz_transport) -> None:
+    async def test_destroy_unknown_is_noop(self, fake_spec_json_transport) -> None:
         docker = FakeDocker()
         backend = ProcessBrowserBackend(
             image="i", rest_port_base=30000, cdp_port_base=31000,
             live_view_port_base=32000,
-            docker=docker, httpx_transport=fake_readyz_transport,
+            docker=docker, httpx_transport=fake_spec_json_transport,
         )
         # Does not raise.
         await backend.destroy("never-provisioned")
@@ -2222,7 +2322,14 @@ class ProcessBrowserBackend:
             live_view_url=f"ws://127.0.0.1:{live_view_port}",
         )
 
-        await self._wait_ready(endpoint, spec.pod_ready_timeout)
+        try:
+            await self._wait_ready(endpoint, spec.pod_ready_timeout)
+        except Exception:
+            # Readiness failure after docker run would otherwise leak the
+            # container and its allocated ports.
+            await self._docker.run(["stop", container_id])
+            await self._docker.run(["rm", container_id])
+            raise
 
         self._entries[container_id] = _Entry(
             container_id=container_id,
@@ -2260,7 +2367,7 @@ class ProcessBrowserBackend:
         logger.info("Destroyed browser container %s", browser_id)
 
     async def _wait_ready(self, endpoint: BrowserEndpoint, timeout: int) -> None:
-        """Poll /readyz until the container responds (or timeout)."""
+        """Poll /spec.json until the container responds (or timeout)."""
         deadline = asyncio.get_running_loop().time() + timeout
         last_err: Exception | None = None
         async with httpx.AsyncClient(
@@ -2270,7 +2377,7 @@ class ProcessBrowserBackend:
         ) as http:
             while asyncio.get_running_loop().time() < deadline:
                 try:
-                    resp = await http.get("/readyz")
+                    resp = await http.get("/spec.json")
                     if resp.status_code == 200:
                         return
                 except Exception as exc:  # noqa: BLE001 — exhaustive retry
@@ -2283,15 +2390,28 @@ class ProcessBrowserBackend:
         )
 ```
 
-> Note: kernel-images doesn't currently expose `/readyz`; the actual readiness signal
-> is `/spec.json` (always 200 once the Go server is up). Use `/spec.json` in the
-> implementation. The test transport above mocks both paths.
+- [ ] **Step 4: Add a readiness-failure cleanup test** — append to `tests/test_browser_process.py`:
 
-Update the implementation `_wait_ready` to use `/spec.json`. Update the fixture
-in the test to also handle `/spec.json` (or change the fixture to match).
+```python
+class NeverReadyTransport(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"ready": False})
 
-- [ ] **Step 4: Adjust the fixture** — replace `/readyz` with `/spec.json` in both the
-test fixture and the implementation `_wait_ready` GET path.
+
+async def test_provision_cleans_up_container_when_readiness_times_out() -> None:
+    docker = FakeDocker()
+    backend = ProcessBrowserBackend(
+        image="i", rest_port_base=30000, cdp_port_base=31000,
+        live_view_port_base=32000,
+        docker=docker, httpx_transport=NeverReadyTransport(),
+    )
+    with pytest.raises(Exception):
+        await backend.provision(BrowserSpec(pod_ready_timeout=0))
+
+    verbs = [c[0] for c in docker.calls]
+    assert "stop" in verbs
+    assert "rm" in verbs
+```
 
 - [ ] **Step 5: Run** — all PASS.
 
@@ -2531,12 +2651,14 @@ class EnsureResult:
     browser_id: str
     endpoint: BrowserEndpoint
     newly_provisioned: bool
+    snapshot_cache: dict[str, dict[str, Any]]
 
 
 @dataclass(slots=True)
 class _Slot:
     browser_id: str
     endpoint: BrowserEndpoint
+    snapshot_cache: dict[str, dict[str, Any]]
 
 
 class BrowserPool:
@@ -2571,6 +2693,7 @@ class BrowserPool:
                         browser_id=slot.browser_id,
                         endpoint=slot.endpoint,
                         newly_provisioned=False,
+                        snapshot_cache=slot.snapshot_cache,
                     )
                 logger.warning(
                     "Browser %s for session %s is %s; reprovisioning",
@@ -2581,7 +2704,12 @@ class BrowserPool:
                 await self._registry.delete(session_id)
 
             browser_id, endpoint = await self._backend.provision(spec)
-            self._mapping[session_id] = _Slot(browser_id=browser_id, endpoint=endpoint)
+            slot = _Slot(
+                browser_id=browser_id,
+                endpoint=endpoint,
+                snapshot_cache={},
+            )
+            self._mapping[session_id] = slot
             await self._registry.set(BrowserEntry(
                 session_id=session_id,
                 org_id=org_id,
@@ -2600,6 +2728,7 @@ class BrowserPool:
                 browser_id=browser_id,
                 endpoint=endpoint,
                 newly_provisioned=True,
+                snapshot_cache=slot.snapshot_cache,
             )
 
     async def destroy_for_session(self, session_id: str) -> None:
@@ -2627,11 +2756,9 @@ class BrowserPool:
             except Exception:
                 logger.exception("Error destroying browser for session %s", sid)
 
-    def get_slot(self, session_id: str) -> tuple[str, BrowserEndpoint] | None:
+    def get_slot(self, session_id: str) -> _Slot | None:
         slot = self._mapping.get(session_id)
-        if slot is None:
-            return None
-        return slot.browser_id, slot.endpoint
+        return slot
 
     async def _session_lock(self, session_id: str) -> asyncio.Lock:
         async with self._global_lock:
@@ -2693,11 +2820,15 @@ class FakePool:
             cdp_url="ws://browser:31000",
             live_view_url="ws://browser:32000",
         )
+        self.snapshot_cache: dict[str, dict[str, Any]] = {}
 
     async def ensure(self, session_id: str, org_id: str, user_id: str, spec: BrowserSpec) -> EnsureResult:
         self.ensures.append((session_id, org_id, user_id))
         return EnsureResult(
-            browser_id="b1", endpoint=self._fixed_endpoint, newly_provisioned=True,
+            browser_id="b1",
+            endpoint=self._fixed_endpoint,
+            newly_provisioned=True,
+            snapshot_cache=self.snapshot_cache,
         )
 
     async def destroy_for_session(self, session_id: str) -> None:
@@ -2887,11 +3018,12 @@ async def _resolve_session_browser(
     browser_pool: BrowserPool | None,
     browser_control: BrowserControlStore | None,
     spec: BrowserSpec | None = None,
-) -> tuple[str, BrowserEndpoint] | str:
+) -> tuple[str, BrowserEndpoint, dict[str, dict[str, Any]]] | str:
     """Common pre-flight: control short-circuit + pool.ensure().
 
-    Returns either a ``(browser_id, endpoint)`` tuple ready for use, or
-    a JSON error string the handler should return as-is.
+    Returns either a ``(browser_id, endpoint, snapshot_cache)`` tuple ready
+    for use, or a JSON error string the handler should return as-is. The
+    cache is the per-session dict owned by BrowserPool.
     """
     if browser_pool is None or session_id is None:
         return browser_unavailable_result("browser pool not configured")
@@ -2914,11 +3046,29 @@ async def _resolve_session_browser(
         )
     except BrowserUnavailableError as exc:
         return browser_unavailable_result(exc.reason)
-    return result.browser_id, result.endpoint
+    return result.browser_id, result.endpoint, result.snapshot_cache
 
 
-def _default_client_factory(endpoint: BrowserEndpoint) -> KernelBrowserClient:
-    return KernelBrowserClient(rest_url=endpoint.rest_url)
+def _default_client_factory(
+    endpoint: BrowserEndpoint,
+    snapshot_cache: dict[str, dict[str, Any]],
+) -> KernelBrowserClient:
+    return KernelBrowserClient(
+        rest_url=endpoint.rest_url,
+        snapshot_cache=snapshot_cache,
+    )
+
+
+def _make_client(
+    factory: Callable[..., Any],
+    endpoint: BrowserEndpoint,
+    snapshot_cache: dict[str, dict[str, Any]],
+) -> Any:
+    """Create a client while preserving one-arg test factories."""
+    try:
+        return factory(endpoint, snapshot_cache)
+    except TypeError:
+        return factory(endpoint)
 
 
 # ---------------------------------------------------------------------------
@@ -2953,7 +3103,7 @@ async def _browser_navigate_handler(
     session_id: UUID | str | None = None,
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
-    _client_factory: Callable[[BrowserEndpoint], Any] = _default_client_factory,
+    _client_factory: Callable[..., Any] = _default_client_factory,
     **_: Any,
 ) -> str:
     pre = await _resolve_session_browser(
@@ -2965,9 +3115,9 @@ async def _browser_navigate_handler(
     )
     if isinstance(pre, str):  # error JSON
         return pre
-    _bid, endpoint = pre
+    _bid, endpoint, snapshot_cache = pre
 
-    client = _client_factory(endpoint)
+    client = _make_client(_client_factory, endpoint, snapshot_cache)
     try:
         async with client:
             out = await client.navigate(
@@ -3005,7 +3155,7 @@ async def _browser_get_state_handler(
     session_id: UUID | str | None = None,
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
-    _client_factory: Callable[[BrowserEndpoint], Any] = _default_client_factory,
+    _client_factory: Callable[..., Any] = _default_client_factory,
     **_: Any,
 ) -> str:
     pre = await _resolve_session_browser(
@@ -3014,9 +3164,9 @@ async def _browser_get_state_handler(
     )
     if isinstance(pre, str):
         return pre
-    _bid, endpoint = pre
+    _bid, endpoint, snapshot_cache = pre
 
-    client = _client_factory(endpoint)
+    client = _make_client(_client_factory, endpoint, snapshot_cache)
     async with client:
         state = await client.get_state(
             interactive_only=arguments.get("interactive_only", False),
@@ -3309,7 +3459,7 @@ async def _browser_click_handler(
     session_id: UUID | str | None = None,
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
-    _client_factory: Callable[[BrowserEndpoint], Any] = _default_client_factory,
+    _client_factory: Callable[..., Any] = _default_client_factory,
     **_: Any,
 ) -> str:
     pre = await _resolve_session_browser(
@@ -3318,7 +3468,7 @@ async def _browser_click_handler(
     )
     if isinstance(pre, str):
         return pre
-    _bid, endpoint = pre
+    _bid, endpoint, snapshot_cache = pre
 
     has_ref = "ref" in arguments
     has_coords = "x" in arguments and "y" in arguments
@@ -3331,7 +3481,7 @@ async def _browser_click_handler(
         "click_type": arguments.get("click_type", "click"),
         "num_clicks": arguments.get("num_clicks", 1),
     }
-    client = _client_factory(endpoint)
+    client = _make_client(_client_factory, endpoint, snapshot_cache)
     async with client:
         try:
             if has_ref:
@@ -3367,7 +3517,7 @@ async def _browser_type_handler(
     session_id: UUID | str | None = None,
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
-    _client_factory: Callable[[BrowserEndpoint], Any] = _default_client_factory,
+    _client_factory: Callable[..., Any] = _default_client_factory,
     **_: Any,
 ) -> str:
     pre = await _resolve_session_browser(
@@ -3376,9 +3526,9 @@ async def _browser_type_handler(
     )
     if isinstance(pre, str):
         return pre
-    _bid, endpoint = pre
+    _bid, endpoint, snapshot_cache = pre
 
-    client = _client_factory(endpoint)
+    client = _make_client(_client_factory, endpoint, snapshot_cache)
     async with client:
         if "ref" in arguments:
             await client.type_into_ref(
@@ -3413,7 +3563,7 @@ async def _browser_press_key_handler(
     session_id: UUID | str | None = None,
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
-    _client_factory: Callable[[BrowserEndpoint], Any] = _default_client_factory,
+    _client_factory: Callable[..., Any] = _default_client_factory,
     **_: Any,
 ) -> str:
     pre = await _resolve_session_browser(
@@ -3422,9 +3572,9 @@ async def _browser_press_key_handler(
     )
     if isinstance(pre, str):
         return pre
-    _bid, endpoint = pre
+    _bid, endpoint, snapshot_cache = pre
 
-    client = _client_factory(endpoint)
+    client = _make_client(_client_factory, endpoint, snapshot_cache)
     async with client:
         await client.press_key(*arguments["keys"],
                                duration_ms=arguments.get("duration_ms", 0))
@@ -3454,7 +3604,7 @@ async def _browser_scroll_handler(
     session_id: UUID | str | None = None,
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
-    _client_factory: Callable[[BrowserEndpoint], Any] = _default_client_factory,
+    _client_factory: Callable[..., Any] = _default_client_factory,
     **_: Any,
 ) -> str:
     pre = await _resolve_session_browser(
@@ -3463,9 +3613,9 @@ async def _browser_scroll_handler(
     )
     if isinstance(pre, str):
         return pre
-    _bid, endpoint = pre
+    _bid, endpoint, snapshot_cache = pre
 
-    client = _client_factory(endpoint)
+    client = _make_client(_client_factory, endpoint, snapshot_cache)
     async with client:
         await client.scroll_at(
             arguments["x"], arguments["y"],
@@ -3505,7 +3655,7 @@ async def _browser_drag_handler(
     session_id: UUID | str | None = None,
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
-    _client_factory: Callable[[BrowserEndpoint], Any] = _default_client_factory,
+    _client_factory: Callable[..., Any] = _default_client_factory,
     **_: Any,
 ) -> str:
     pre = await _resolve_session_browser(
@@ -3514,10 +3664,10 @@ async def _browser_drag_handler(
     )
     if isinstance(pre, str):
         return pre
-    _bid, endpoint = pre
+    _bid, endpoint, snapshot_cache = pre
 
     path = [(int(p[0]), int(p[1])) for p in arguments["path"]]
-    client = _client_factory(endpoint)
+    client = _make_client(_client_factory, endpoint, snapshot_cache)
     async with client:
         await client.drag(path, button=arguments.get("button", "left"))
     return json.dumps({"dragged": True, "points": len(path)})
@@ -3544,7 +3694,7 @@ async def _browser_wait_handler(
     session_id: UUID | str | None = None,
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
-    _client_factory: Callable[[BrowserEndpoint], Any] = _default_client_factory,
+    _client_factory: Callable[..., Any] = _default_client_factory,
     **_: Any,
 ) -> str:
     pre = await _resolve_session_browser(
@@ -3553,10 +3703,10 @@ async def _browser_wait_handler(
     )
     if isinstance(pre, str):
         return pre
-    _bid, endpoint = pre
+    _bid, endpoint, snapshot_cache = pre
 
     ms = min(int(arguments.get("ms", 0)), _MAX_WAIT_MS)
-    client = _client_factory(endpoint)
+    client = _make_client(_client_factory, endpoint, snapshot_cache)
     async with client:
         await client.wait(ms)
     return json.dumps({"waited_ms": ms})
@@ -3614,43 +3764,15 @@ git commit -m "feat(browser): add click/type/press_key/scroll/drag/wait tools"
 
 ---
 
-## Task 16: Browser tool — `browser_screenshot` (with artifact + annotate)
+## Task 16: Browser tool — `browser_screenshot` (bounded base64 + annotate)
 
 **Files:**
 - Modify: `surogates/tools/builtin/browser.py`
 - Modify: `tests/test_browser_tools.py`
 
-- [ ] **Step 1: Inspect the artifact API surface**
-
-Read `surogates/artifacts/store.py` to confirm the artifact create signature
-(method name, required fields, return type). Take note of the function the
-handler will call. Phase A's screenshot handler stores PNGs as session
-artifacts via this API; the test substitutes a fake.
-
-- [ ] **Step 2: Write the failing test** — append to `tests/test_browser_tools.py`:
+- [ ] **Step 1: Write the failing test** — append to `tests/test_browser_tools.py`:
 
 ```python
-class FakeArtifactStore:
-    def __init__(self) -> None:
-        self.created: list[dict[str, Any]] = []
-
-    async def create(
-        self,
-        *,
-        session_id: Any,
-        mime_type: str,
-        data: bytes,
-        metadata: dict[str, Any] | None = None,
-    ) -> str:
-        self.created.append({
-            "session_id": str(session_id),
-            "mime_type": mime_type,
-            "size": len(data),
-            "metadata": metadata or {},
-        })
-        return f"artifact-{len(self.created)}"
-
-
 class FakeScreenshotClient:
     def __init__(self) -> None:
         self.captured: list[dict[str, Any]] = []
@@ -3672,46 +3794,29 @@ class FakeScreenshotClient:
 
 
 class TestScreenshotHandler:
-    async def test_stores_png_as_artifact(self, tenant) -> None:
-        from surogates.tools.builtin.browser import _browser_screenshot_handler
-        store = FakeArtifactStore()
-        result = await _browser_screenshot_handler(
-            {},
-            tenant=tenant, session_id=uuid4(),
-            browser_pool=FakePool(),
-            browser_control=FakeControlStore(),
-            artifact_store=store,
-            _client_factory=lambda _: FakeScreenshotClient(),
-        )
-        body = json.loads(result)
-        assert body["artifact_id"] == "artifact-1"
-        assert body["mime_type"] == "image/png"
-        assert "annotations" not in body
-
     async def test_annotate_returns_annotations(self, tenant) -> None:
         from surogates.tools.builtin.browser import _browser_screenshot_handler
-        store = FakeArtifactStore()
         result = await _browser_screenshot_handler(
             {"annotate": True},
             tenant=tenant, session_id=uuid4(),
             browser_pool=FakePool(),
             browser_control=FakeControlStore(),
-            artifact_store=store,
             _client_factory=lambda _: FakeScreenshotClient(),
         )
         body = json.loads(result)
+        assert "base64" in body
+        assert body["mime_type"] == "image/png"
         assert body["annotations"] == [
             {"ref": "@e1", "label": 1, "role": "button", "name": "Go"},
         ]
 
-    async def test_no_artifact_store_returns_base64(self, tenant) -> None:
+    async def test_returns_base64_png(self, tenant) -> None:
         from surogates.tools.builtin.browser import _browser_screenshot_handler
         result = await _browser_screenshot_handler(
             {},
             tenant=tenant, session_id=uuid4(),
             browser_pool=FakePool(),
             browser_control=FakeControlStore(),
-            artifact_store=None,
             _client_factory=lambda _: FakeScreenshotClient(),
         )
         body = json.loads(result)
@@ -3719,9 +3824,9 @@ class TestScreenshotHandler:
         assert body["mime_type"] == "image/png"
 ```
 
-- [ ] **Step 3: Run** — 3 FAIL.
+- [ ] **Step 2: Run** — 2 FAIL.
 
-- [ ] **Step 4: Implement** — append to `surogates/tools/builtin/browser.py`:
+- [ ] **Step 3: Implement** — append to `surogates/tools/builtin/browser.py`:
 
 ```python
 import base64
@@ -3731,8 +3836,7 @@ import base64
 # ---------------------------------------------------------------------------
 
 SCREENSHOT_DESCRIPTION = (
-    "Capture a PNG screenshot of the page. Returns an artifact_id you can "
-    "reference later (or base64 in dev when no artifact store is wired). "
+    "Capture a PNG screenshot of the page as bounded base64. "
     "Pass annotate=true to overlay numbered labels on interactive elements; "
     "each label correlates with the @eN ref in the response 'annotations'."
 )
@@ -3753,7 +3857,9 @@ SCREENSHOT_SCHEMA = {
     "additionalProperties": False,
 }
 
-# Hard cap on bounded base64 fallback to avoid blowing up tool results.
+# Hard cap on base64 output to avoid blowing up tool results. Phase A does not
+# use ArtifactStore because the current artifact API stores typed JSON
+# artifacts (`name`, `kind`, `spec`), not arbitrary binary PNG payloads.
 _MAX_BASE64_BYTES = 256 * 1024
 
 
@@ -3764,8 +3870,7 @@ async def _browser_screenshot_handler(
     session_id: UUID | str | None = None,
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
-    artifact_store: Any = None,
-    _client_factory: Callable[[BrowserEndpoint], Any] = _default_client_factory,
+    _client_factory: Callable[..., Any] = _default_client_factory,
     **_: Any,
 ) -> str:
     pre = await _resolve_session_browser(
@@ -3774,50 +3879,39 @@ async def _browser_screenshot_handler(
     )
     if isinstance(pre, str):
         return pre
-    _bid, endpoint = pre
+    _bid, endpoint, snapshot_cache = pre
 
     annotate = bool(arguments.get("annotate", False))
     region = arguments.get("region")
 
-    client = _client_factory(endpoint)
+    client = _make_client(_client_factory, endpoint, snapshot_cache)
     async with client:
         out = await client.screenshot(region=region, annotate=annotate)
 
     png_bytes = out["png_bytes"]
     annotations = out.get("annotations")
 
-    if artifact_store is not None:
-        artifact_id = await artifact_store.create(
-            session_id=session_id,
-            mime_type="image/png",
-            data=png_bytes,
-            metadata={"source": "browser_screenshot",
-                      "annotated": annotate},
-        )
-        body: dict[str, Any] = {
-            "artifact_id": artifact_id,
-            "mime_type": "image/png",
+    if len(png_bytes) > _MAX_BASE64_BYTES:
+        return json.dumps({
+            "error": "screenshot_too_large_for_base64",
             "bytes": len(png_bytes),
-        }
-    else:
-        if len(png_bytes) > _MAX_BASE64_BYTES:
-            return json.dumps({
-                "error": "screenshot_too_large_for_base64",
-                "bytes": len(png_bytes),
-                "guidance": "configure artifact storage to receive larger screenshots",
-            })
-        body = {
-            "base64": base64.b64encode(png_bytes).decode(),
-            "mime_type": "image/png",
-            "bytes": len(png_bytes),
-        }
+            "guidance": (
+                "Screenshot binary artifacts are deferred to a later phase; "
+                "capture a smaller region or retry without annotation."
+            ),
+        })
+    body = {
+        "base64": base64.b64encode(png_bytes).decode(),
+        "mime_type": "image/png",
+        "bytes": len(png_bytes),
+    }
 
     if annotations is not None:
         body["annotations"] = annotations
     return json.dumps(body)
 ```
 
-- [ ] **Step 5: Wire into `register()`** — add to the bottom of the function:
+- [ ] **Step 4: Wire into `register()`** — add to the bottom of the function:
 
 ```python
     registry.register(
@@ -3828,13 +3922,13 @@ async def _browser_screenshot_handler(
     )
 ```
 
-- [ ] **Step 6: Run** — `pytest tests/test_browser_tools.py -v` → all PASS.
+- [ ] **Step 5: Run** — `pytest tests/test_browser_tools.py -v` → all PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add surogates/tools/builtin/browser.py tests/test_browser_tools.py
-git commit -m "feat(browser): add screenshot tool with artifact storage and annotate"
+git commit -m "feat(browser): add screenshot tool with bounded base64 and annotate"
 ```
 
 ---
@@ -4299,8 +4393,8 @@ Skipped by default. Run explicitly:
 
     pytest -m browser_e2e tests/integration/test_browser_e2e.py -v
 
-Mark and conftest fixture wiring for ``browser_e2e`` lives in
-tests/conftest.py — adds the marker to the ini.
+Marker and default deselection wiring for ``browser_e2e`` lives in
+``pyproject.toml``.
 """
 
 from __future__ import annotations
@@ -4363,12 +4457,16 @@ async def test_screenshot_returns_png(browser) -> None:
 
 - [ ] **Step 2: Add the marker to `pyproject.toml`**
 
-Inside `[tool.pytest.ini_options]`, append to the `markers` list:
+Inside `[tool.pytest.ini_options]`, add an explicit default marker filter and
+append to the `markers` list. A marker declaration alone does **not** skip or
+deselect tests; `addopts` is what keeps Docker-dependent tests out of the
+default suite.
 
 ```toml
 [tool.pytest.ini_options]
+asyncio_mode = "auto"
+addopts = "-m 'not browser_e2e'"
 markers = [
-    # ... existing markers ...
     "browser_e2e: end-to-end agent browser tests requiring Docker + kernel-images image (opt-in)",
 ]
 ```
@@ -4388,7 +4486,8 @@ pytest tests/ -q
 ```
 
 Expected: all earlier tests PASS; `tests/integration/test_browser_e2e.py`
-is collected but **deselected** (the marker isn't on the default selection).
+is collected but **deselected** by the `addopts = "-m 'not browser_e2e'"`
+filter.
 
 - [ ] **Step 5: Run the e2e test explicitly (optional, when Docker + image are available)**
 
@@ -4432,8 +4531,9 @@ pytest -m browser_e2e -v
 - **Backend skeleton** — `BrowserBackend` protocol, `BrowserSpec`,
   `BrowserStatus`, `BrowserUnavailableError`, `browser_unavailable_result`.
 - **`KernelBrowserClient`** — full coverage of the discrete Phase A
-  endpoints with httpx; `@e1`-style ref cache; snapshot filters;
-  annotated screenshots with overlay inject/remove.
+  endpoints with httpx; shared per-session `@e1`-style ref cache;
+  DOM-derived snapshot filters; annotated screenshots with overlay
+  inject/remove.
 - **`BrowserRegistry`** — Redis hash for cross-process pod metadata
   (consumed by API server in Phase C).
 - **`BrowserControlStore`** — Redis-backed user-control flag with
