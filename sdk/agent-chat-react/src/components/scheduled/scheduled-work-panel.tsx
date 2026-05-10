@@ -128,7 +128,7 @@ function ScheduledWorkRow({
     formatRelative(item.lastRunAt, "Last"),
     formatRuns(item.runCount),
     item.expiresAt ? formatRelative(item.expiresAt, "Expires") : null,
-  ].filter(Boolean).join(" · ");
+  ].filter(Boolean);
 
   return (
     <div className="group flex min-w-0 items-start gap-2 border-l-2 border-l-transparent px-3 py-2 text-sm transition-colors hover:border-l-primary hover:bg-input">
@@ -144,7 +144,15 @@ function ScheduledWorkRow({
                 {formatKind(item.kind)}
               </Badge>
             </div>
-            {meta && <div className="mt-0.5 truncate text-xs text-faint">{meta}</div>}
+            {meta.length > 0 && (
+              <div className="mt-0.5 space-y-0.5 text-xs text-faint">
+                {meta.map((line) => (
+                  <div key={line} className="truncate">
+                    {line}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
           {statusText && (
             <Badge variant="destructive" className="shrink-0">

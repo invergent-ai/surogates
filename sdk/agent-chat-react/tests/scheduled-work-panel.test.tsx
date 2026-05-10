@@ -147,6 +147,7 @@ describe("ScheduledWorkPanel", () => {
     expect(container.textContent).toContain("Cron");
     expect(container.textContent).toContain("Every 5 minutes");
     expect(container.textContent).toContain("7 runs");
+    expect(container.textContent).not.toContain(" · ");
     expect(
       (container.textContent ?? "").indexOf("Bitcoin monitor"),
     ).toBeLessThan((container.textContent ?? "").indexOf("Dynamic loop"));
