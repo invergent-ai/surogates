@@ -147,3 +147,99 @@ class TestBuildServiceManifest:
             ("cdp", 9222, 9222),
             ("live-view", 443, 6080),
         ]
+
+
+class TestProvision:
+    async def test_provision_creates_pod_and_service(
+        self, backend: K8sBrowserBackend, monkeypatch,
+    ) -> None:
+        api = MagicMock()
+        api.create_namespaced_pod = AsyncMock()
+        api.create_namespaced_service = AsyncMock()
+
+        async def fake_get_api() -> MagicMock:
+            return api
+
+        async def fake_wait_ready(api_inner, pod_name: str) -> None:
+            return None
+
+        monkeypatch.setattr(backend, "_get_api", fake_get_api)
+        monkeypatch.setattr(backend, "_wait_for_ready", fake_wait_ready)
+
+        spec = BrowserSpec(image="kernel-headful:test")
+        bid, endpoint = await backend.provision(
+            spec,
+            session_id="sess-1",
+            org_id="org-1",
+            user_id="user-1",
+        )
+
+        assert len(bid) == 32
+        prefix = f"browser-{bid[:12]}.test-ns.svc"
+        assert endpoint.rest_url == f"http://{prefix}:10001"
+        assert endpoint.cdp_url == f"ws://{prefix}:9222"
+        assert endpoint.live_view_url == f"ws://{prefix}:443"
+
+        assert api.create_namespaced_pod.call_count == 1
+        assert api.create_namespaced_service.call_count == 1
+        assert backend._pods[bid].status == BrowserStatus.RUNNING
+
+    async def test_provision_rolls_back_pod_on_service_failure(
+        self, backend: K8sBrowserBackend, monkeypatch,
+    ) -> None:
+        api = MagicMock()
+        api.create_namespaced_pod = AsyncMock()
+        api.create_namespaced_service = AsyncMock(
+            side_effect=ApiException(status=500, reason="boom"),
+        )
+        api.delete_namespaced_pod = AsyncMock()
+
+        async def fake_get_api() -> MagicMock:
+            return api
+
+        async def fake_wait_ready(api_inner, pod_name: str) -> None:
+            return None
+
+        monkeypatch.setattr(backend, "_get_api", fake_get_api)
+        monkeypatch.setattr(backend, "_wait_for_ready", fake_wait_ready)
+
+        with pytest.raises(BrowserUnavailableError):
+            await backend.provision(
+                BrowserSpec(),
+                session_id="s",
+                org_id="o",
+                user_id="u",
+            )
+
+        assert api.delete_namespaced_pod.call_count == 1
+        assert backend._pods == {}
+
+    async def test_provision_rolls_back_when_pod_never_ready(
+        self, backend: K8sBrowserBackend, monkeypatch,
+    ) -> None:
+        api = MagicMock()
+        api.create_namespaced_pod = AsyncMock()
+        api.create_namespaced_service = AsyncMock()
+        api.delete_namespaced_pod = AsyncMock()
+        api.delete_namespaced_service = AsyncMock()
+
+        async def fake_get_api() -> MagicMock:
+            return api
+
+        async def fake_wait_ready(api_inner, pod_name: str) -> None:
+            raise RuntimeError("did not become ready")
+
+        monkeypatch.setattr(backend, "_get_api", fake_get_api)
+        monkeypatch.setattr(backend, "_wait_for_ready", fake_wait_ready)
+
+        with pytest.raises(BrowserUnavailableError):
+            await backend.provision(
+                BrowserSpec(),
+                session_id="s",
+                org_id="o",
+                user_id="u",
+            )
+
+        assert api.delete_namespaced_service.call_count == 1
+        assert api.delete_namespaced_pod.call_count == 1
+        assert backend._pods == {}

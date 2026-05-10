@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from kubernetes_asyncio import client, config
+from kubernetes_asyncio import client, config, watch
+from kubernetes_asyncio.client import ApiException
 
 from surogates.browser.base import (
     BrowserEndpoint,
@@ -51,6 +54,86 @@ class K8sBrowserBackend:
         self._image = image
         self._pods: dict[str, _PodEntry] = {}
         self._api: client.CoreV1Api | None = None
+
+    async def provision(
+        self,
+        spec: BrowserSpec,
+        *,
+        session_id: str,
+        org_id: str,
+        user_id: str,
+    ) -> tuple[str, BrowserEndpoint]:
+        """Create a browser pod and Service, then wait for readiness."""
+        api = await self._get_api()
+        browser_id = uuid.uuid4().hex
+        suffix = browser_id[:12]
+        pod_name = f"browser-{suffix}"
+        service_name = f"browser-{suffix}"
+        endpoint = BrowserEndpoint(
+            rest_url=f"http://{service_name}.{self._namespace}.svc:{SERVICE_PORT_REST}",
+            cdp_url=f"ws://{service_name}.{self._namespace}.svc:{SERVICE_PORT_CDP}",
+            live_view_url=(
+                f"ws://{service_name}.{self._namespace}.svc:{SERVICE_PORT_LIVE_VIEW}"
+            ),
+        )
+
+        pod_manifest = self._build_pod_manifest(
+            browser_id=browser_id,
+            pod_name=pod_name,
+            session_id=session_id,
+            org_id=org_id,
+            user_id=user_id,
+            spec=spec,
+        )
+        try:
+            await api.create_namespaced_pod(self._namespace, pod_manifest)
+        except ApiException as exc:
+            raise BrowserUnavailableError(
+                f"Failed to create browser pod {pod_name}: {exc}",
+            ) from exc
+
+        service_manifest = self._build_service_manifest(
+            browser_id=browser_id,
+            service_name=service_name,
+            session_id=session_id,
+            org_id=org_id,
+            user_id=user_id,
+        )
+        try:
+            await api.create_namespaced_service(self._namespace, service_manifest)
+        except ApiException as exc:
+            await self._delete_pod_safe(api, pod_name)
+            raise BrowserUnavailableError(
+                f"Failed to create browser service {service_name}: {exc}",
+            ) from exc
+
+        try:
+            await self._wait_for_ready(api, pod_name)
+        except Exception as exc:
+            await self._delete_service_safe(api, service_name)
+            await self._delete_pod_safe(api, pod_name)
+            raise BrowserUnavailableError(
+                f"Browser pod {pod_name} did not become ready: {exc}",
+                classification="readiness",
+            ) from exc
+
+        self._pods[browser_id] = _PodEntry(
+            browser_id=browser_id,
+            pod_name=pod_name,
+            service_name=service_name,
+            namespace=self._namespace,
+            spec=spec,
+            endpoint=endpoint,
+            status=BrowserStatus.RUNNING,
+        )
+        logger.info(
+            "Provisioned K8s browser %s for session %s (pod %s, service %s)",
+            browser_id,
+            session_id,
+            pod_name,
+            service_name,
+        )
+        return browser_id, endpoint
 
     async def _get_api(self) -> client.CoreV1Api:
         """Return a cached Kubernetes CoreV1Api client."""
@@ -124,6 +207,68 @@ class K8sBrowserBackend:
                 restart_policy="Never",
                 containers=[container],
             ),
+        )
+
+    async def _wait_for_ready(self, api: client.CoreV1Api, pod_name: str) -> None:
+        """Watch the pod until it has a Ready condition or timeout."""
+        pod_watch = watch.Watch()
+        try:
+            async with asyncio.timeout(self._pod_ready_timeout):
+                async for event in pod_watch.stream(
+                    api.list_namespaced_pod,
+                    namespace=self._namespace,
+                    field_selector=f"metadata.name={pod_name}",
+                    timeout_seconds=self._pod_ready_timeout,
+                ):
+                    pod = event["object"]
+                    if self._is_pod_ready(pod):
+                        return
+                    phase = pod.status.phase if pod.status else "Unknown"
+                    if phase in {"Failed", "Succeeded"}:
+                        raise RuntimeError(
+                            f"Browser pod {pod_name} entered {phase} phase",
+                        )
+        except TimeoutError:
+            raise RuntimeError(
+                f"Browser pod {pod_name} did not become ready within "
+                f"{self._pod_ready_timeout}s",
+            )
+        finally:
+            pod_watch.stop()
+
+    async def _delete_pod_safe(self, api: client.CoreV1Api, pod_name: str) -> None:
+        try:
+            await api.delete_namespaced_pod(
+                pod_name,
+                self._namespace,
+                grace_period_seconds=5,
+            )
+        except ApiException as exc:
+            if exc.status != 404:
+                logger.warning("Failed to delete browser pod %s: %s", pod_name, exc)
+
+    async def _delete_service_safe(
+        self,
+        api: client.CoreV1Api,
+        service_name: str,
+    ) -> None:
+        try:
+            await api.delete_namespaced_service(service_name, self._namespace)
+        except ApiException as exc:
+            if exc.status != 404:
+                logger.warning(
+                    "Failed to delete browser service %s: %s",
+                    service_name,
+                    exc,
+                )
+
+    @staticmethod
+    def _is_pod_ready(pod: client.V1Pod) -> bool:
+        if not pod.status or not pod.status.conditions:
+            return False
+        return any(
+            condition.type == "Ready" and condition.status == "True"
+            for condition in pod.status.conditions
         )
 
     def _build_service_manifest(
