@@ -17,6 +17,7 @@ any crash can be recovered by replaying the log.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -91,6 +92,36 @@ if TYPE_CHECKING:
     from surogates.tenant.context import TenantContext
 
 logger = logging.getLogger(__name__)
+
+
+async def maybe_inject_browser_pause(
+    *,
+    session: Any,
+    browser_control: "BrowserControlStore | None",
+) -> str | None:
+    """Return a one-time pause notice while the user holds browser control."""
+    if browser_control is None:
+        return None
+
+    holder = await browser_control.held_by(str(session.id))
+    config = session.config if isinstance(getattr(session, "config", None), dict) else {}
+    if not isinstance(getattr(session, "config", None), dict):
+        with contextlib.suppress(Exception):
+            session.config = config
+
+    if holder is not None:
+        if config.get("browser_pause_msg_injected"):
+            return None
+        config["browser_pause_msg_injected"] = True
+        return (
+            "The user has taken control of the browser. Wait for them to "
+            "finish before continuing; browser_* tool calls will return "
+            "paused_by_user until they release control."
+        )
+
+    if config.get("browser_pause_msg_injected"):
+        config["browser_pause_msg_injected"] = False
+    return None
 
 
 def _format_loop_list(rows: list[Any]) -> str:
@@ -898,9 +929,17 @@ class AgentHarness:
             # Each message is cleaned for API compatibility: internal-only fields are stripped, reasoning
             # is passed back as ``reasoning_content`` for providers that need
             # it (Moonshot AI, Novita, OpenRouter).
+            browser_pause_notice = await maybe_inject_browser_pause(
+                session=session,
+                browser_control=self._browser_control,
+            )
             api_messages: list[dict] = [
                 {"role": "system", "content": system_prompt},
             ]
+            if browser_pause_notice:
+                api_messages.append(
+                    {"role": "system", "content": browser_pause_notice},
+                )
             # Prefilled context (few-shot examples, planning context)
             if prefill_messages:
                 api_messages.extend(prefill_messages)
