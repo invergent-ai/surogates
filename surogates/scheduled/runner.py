@@ -6,6 +6,7 @@ import logging
 from sqlalchemy.exc import IntegrityError
 
 from surogates.config import enqueue_session
+from surogates.scheduled.schedule import DYNAMIC_LOOP_STALE_RUN_SECONDS
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_agent_session
 
@@ -49,6 +50,17 @@ class ScheduledSessionRunner:
         self._running = False
 
     async def tick_once(self) -> int:
+        recovered = await self._scheduled_store.recover_stalled_dynamic_loops(
+            agent_id=self._settings.agent_id,
+            stale_seconds=DYNAMIC_LOOP_STALE_RUN_SECONDS,
+            limit=self._settings.scheduled_sessions.claim_limit,
+        )
+        for schedule in recovered:
+            logger.warning(
+                "Recovered stalled dynamic loop %s with fallback delay",
+                schedule.id,
+            )
+
         claimed = await self._scheduled_store.claim_due(
             agent_id=self._settings.agent_id,
             worker_id=self._settings.worker_id,

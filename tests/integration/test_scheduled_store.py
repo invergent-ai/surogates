@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import text
 
 from surogates.scheduled.schedule import (
     DYNAMIC_LOOP_EXPIRY_DAYS,
+    DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS,
     parse_dynamic_loop_schedule,
     parse_schedule,
 )
@@ -139,3 +141,55 @@ async def test_dynamic_loop_lifecycle_waits_for_loop_wait(session_factory):
     assert updated.next_run_at is not None
     assert updated.schedule["last_delay_seconds"] == 120
     assert updated.schedule["last_delay_reason"] == "CI is still running"
+
+
+async def test_recover_stalled_dynamic_loop_applies_fallback(
+    session_factory,
+    session_store,
+):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+
+    loop = await store.create_dynamic_loop(
+        org_id=org_id,
+        user_id=user_id,
+        agent_id="agent-a",
+        prompt="check CI",
+        schedule=parse_dynamic_loop_schedule(),
+        created_from_session_id=None,
+    )
+    run_session = await session_store.create_session(
+        user_id=user_id,
+        org_id=org_id,
+        agent_id="agent-a",
+        channel="scheduled",
+        config={
+            "scheduled_session_id": str(loop.id),
+            "scheduled_dynamic_loop": True,
+        },
+    )
+
+    claimed = (await store.claim_due(agent_id="agent-a", worker_id="w1", limit=1))[0]
+    await store.mark_run_created(claimed, session_id=run_session.id)
+
+    async with session_factory() as db:
+        await db.execute(
+            text(
+                "UPDATE sessions SET updated_at = now() - make_interval(secs => 10) "
+                "WHERE id = :sid"
+            ),
+            {"sid": run_session.id},
+        )
+        await db.commit()
+
+    recovered = await store.recover_stalled_dynamic_loops(
+        agent_id="agent-a",
+        stale_seconds=1,
+    )
+
+    assert [row.id for row in recovered] == [loop.id]
+    updated = await store.get(loop.id)
+    assert updated.next_run_at is not None
+    assert updated.schedule["last_delay_seconds"] == DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS
+    assert "stalled" in updated.schedule["last_delay_reason"]

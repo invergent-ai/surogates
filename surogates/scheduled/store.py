@@ -12,6 +12,7 @@ from surogates.scheduled.models import ScheduledSession
 from surogates.scheduled.schedule import (
     DYNAMIC_LOOP_EXPIRY_DAYS,
     DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS,
+    DYNAMIC_LOOP_STALE_RUN_SECONDS,
     DEFAULT_LOOP_EXPIRY_DAYS,
     ParsedSchedule,
     clamp_dynamic_loop_delay,
@@ -405,6 +406,77 @@ class ScheduledSessionStore:
             row.updated_at = now
             await db.commit()
             return True
+
+    async def recover_stalled_dynamic_loops(
+        self,
+        *,
+        agent_id: str,
+        stale_seconds: int = DYNAMIC_LOOP_STALE_RUN_SECONDS,
+        limit: int = 100,
+    ) -> list[ScheduledSession]:
+        now = _utcnow()
+        reason = (
+            "Previous dynamic loop run stalled; using the fallback delay."
+        )
+        query = text(
+            """
+            WITH stalled AS (
+                SELECT s.id
+                FROM scheduled_sessions s
+                JOIN sessions run_session ON run_session.id = s.last_session_id
+                LEFT JOIN session_leases active_lease
+                    ON active_lease.session_id = run_session.id
+                   AND active_lease.expires_at > now()
+                WHERE s.agent_id = :agent_id
+                  AND s.status = 'active'
+                  AND s.next_run_at IS NULL
+                  AND s.last_session_id IS NOT NULL
+                  AND s.schedule->>'kind' = 'dynamic_loop'
+                  AND (s.expires_at IS NULL OR s.expires_at > now())
+                  AND (
+                        run_session.status IN ('completed', 'failed', 'idle', 'archived')
+                     OR (
+                            run_session.status = 'active'
+                        AND active_lease.session_id IS NULL
+                        AND run_session.updated_at
+                            < now() - make_interval(secs => :stale_seconds)
+                        )
+                  )
+                ORDER BY s.last_run_at ASC NULLS FIRST
+                LIMIT :limit
+                FOR UPDATE OF s SKIP LOCKED
+            )
+            UPDATE scheduled_sessions s
+            SET next_run_at = now() + make_interval(secs => :delay_seconds),
+                schedule = s.schedule || jsonb_build_object(
+                    'last_delay_seconds', :delay_seconds,
+                    'last_delay_reason', CAST(:reason AS text),
+                    'last_delay_set_at', CAST(:set_at AS text)
+                ),
+                last_error = CAST(:reason AS text),
+                locked_by = NULL,
+                locked_until = NULL,
+                updated_at = now()
+            FROM stalled
+            WHERE s.id = stalled.id
+            RETURNING s.*
+            """
+        )
+        async with self._sf() as db:
+            result = await db.execute(
+                query,
+                {
+                    "agent_id": agent_id,
+                    "stale_seconds": int(stale_seconds),
+                    "limit": int(limit),
+                    "delay_seconds": DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS,
+                    "reason": reason,
+                    "set_at": now.isoformat(),
+                },
+            )
+            rows = [ScheduledSession.model_validate(dict(row._mapping)) for row in result]
+            await db.commit()
+        return rows
 
     async def _set_status(
         self,
