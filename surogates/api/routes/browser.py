@@ -7,6 +7,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from surogates.browser.control import AcquireOutcome
+from surogates.session.events import EventType
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 
@@ -17,6 +19,11 @@ class BrowserStateResponse(BaseModel):
     status: str
     control_owner: str | None
     live_view_path: str
+
+
+class BrowserControlRequest(BaseModel):
+    action: str
+    owner_user_id: str | None = None
 
 
 def _route_prefix(request: Request) -> str:
@@ -54,3 +61,75 @@ async def get_browser_state(
             f"{_route_prefix(request)}/sessions/{session_id}/browser/live/"
         ),
     )
+
+
+@router.post("/api/sessions/{session_id}/browser/control")
+@router.post("/sessions/{session_id}/browser/control")
+async def post_browser_control(
+    session_id: UUID,
+    body: BrowserControlRequest,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> dict[str, str]:
+    if body.action not in {"acquire", "release"}:
+        raise HTTPException(
+            status_code=400,
+            detail="action must be 'acquire' or 'release'",
+        )
+
+    resolver = request.app.state.browser_resolver
+    control = request.app.state.browser_control
+    emit = getattr(request.app.state, "session_event_emitter", None)
+    wake = getattr(request.app.state, "session_wake", None)
+    if emit is None or wake is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Browser control dependencies are not available.",
+        )
+
+    resolved = await resolver.resolve(
+        str(session_id),
+        expected_org_id=str(tenant.org_id),
+    )
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="No browser for session")
+
+    owner_user_id = body.owner_user_id if _route_prefix(request) == "/v1/api" else None
+    if owner_user_id is None and tenant.user_id is not None:
+        owner_user_id = str(tenant.user_id)
+    if owner_user_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Browser control requires a user identity.",
+        )
+
+    if body.action == "acquire":
+        outcome, entry = await control.acquire(str(session_id), owner_user_id)
+        if outcome == AcquireOutcome.GRANTED:
+            await emit(
+                str(session_id),
+                EventType.BROWSER_CONTROL_GRANTED,
+                {"session_id": str(session_id), "owner_user_id": entry.owner_user_id},
+            )
+            return {"outcome": "granted", "owner_user_id": entry.owner_user_id}
+        if outcome == AcquireOutcome.REFRESHED:
+            return {"outcome": "refreshed", "owner_user_id": entry.owner_user_id}
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "outcome": "conflict",
+                "holder_user_id": entry.owner_user_id,
+                "acquired_at": entry.acquired_at.isoformat(),
+            },
+        )
+
+    released = await control.release(str(session_id), owner_user_id)
+    if not released:
+        raise HTTPException(status_code=403, detail="not the holder")
+    await emit(
+        str(session_id),
+        EventType.BROWSER_CONTROL_RETURNED,
+        {"session_id": str(session_id), "released_by": owner_user_id},
+    )
+    await wake(str(session_id))
+    return {"outcome": "released"}

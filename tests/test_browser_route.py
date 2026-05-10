@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 import pytest
@@ -9,6 +10,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from surogates.browser.base import BrowserEndpoint
+from surogates.browser.control import AcquireOutcome, ControlEntry
 from surogates.browser.resolver import ResolvedBrowser
 from surogates.tenant.context import TenantContext
 
@@ -42,6 +44,34 @@ class StubControl:
 
     async def held_by(self, session_id: str) -> str | None:
         return self.flag.get(session_id)
+
+    async def acquire(
+        self,
+        session_id: str,
+        user_id: str,
+    ) -> tuple[AcquireOutcome, ControlEntry]:
+        existing = self.flag.get(session_id)
+        if existing is not None:
+            outcome = (
+                AcquireOutcome.REFRESHED
+                if existing == user_id
+                else AcquireOutcome.CONFLICT
+            )
+            return outcome, ControlEntry(
+                owner_user_id=existing,
+                acquired_at=datetime.now(timezone.utc),
+            )
+        self.flag[session_id] = user_id
+        return AcquireOutcome.GRANTED, ControlEntry(
+            owner_user_id=user_id,
+            acquired_at=datetime.now(timezone.utc),
+        )
+
+    async def release(self, session_id: str, user_id: str) -> bool:
+        if self.flag.get(session_id) != user_id:
+            return False
+        self.flag.pop(session_id, None)
+        return True
 
 
 @pytest.fixture()
@@ -147,3 +177,186 @@ class TestStateEndpoint:
             response = await client.get(f"/v1/sessions/{sid}/browser/state")
 
         assert response.status_code == 404
+
+
+class TestControlEndpoint:
+    async def test_acquire_when_unheld_emits_event(
+        self,
+        app_factory,
+    ) -> None:
+        build, resolver, _control = app_factory
+        sid = str(uuid4())
+        resolver.entries[sid] = _resolved(sid)
+        events: list[tuple[str, str, dict]] = []
+        app = build()
+        app.state.session_event_emitter = _event_recorder(events)
+        app.state.session_wake = _wake_noop
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                f"/v1/sessions/{sid}/browser/control",
+                json={"action": "acquire"},
+            )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "outcome": "granted",
+            "owner_user_id": str(USER_1),
+        }
+        assert events == [
+            (
+                sid,
+                "browser.control_granted",
+                {"session_id": sid, "owner_user_id": str(USER_1)},
+            )
+        ]
+
+    async def test_acquire_same_user_refreshes_without_event(
+        self,
+        app_factory,
+    ) -> None:
+        build, resolver, control = app_factory
+        sid = str(uuid4())
+        resolver.entries[sid] = _resolved(sid)
+        control.flag[sid] = str(USER_1)
+        events: list[tuple[str, str, dict]] = []
+        app = build()
+        app.state.session_event_emitter = _event_recorder(events)
+        app.state.session_wake = _wake_noop
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                f"/v1/sessions/{sid}/browser/control",
+                json={"action": "acquire"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["outcome"] == "refreshed"
+        assert events == []
+
+    async def test_acquire_different_user_returns_409(
+        self,
+        app_factory,
+    ) -> None:
+        build, resolver, control = app_factory
+        sid = str(uuid4())
+        resolver.entries[sid] = _resolved(sid)
+        holder = "20000000-0000-0000-0000-000000000001"
+        control.flag[sid] = holder
+        app = build()
+        app.state.session_event_emitter = _event_recorder([])
+        app.state.session_wake = _wake_noop
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                f"/v1/sessions/{sid}/browser/control",
+                json={"action": "acquire"},
+            )
+
+        assert response.status_code == 409
+        assert response.json()["detail"]["holder_user_id"] == holder
+
+    async def test_release_owner_succeeds_emits_event_and_wakes(
+        self,
+        app_factory,
+    ) -> None:
+        build, resolver, control = app_factory
+        sid = str(uuid4())
+        resolver.entries[sid] = _resolved(sid)
+        control.flag[sid] = str(USER_1)
+        events: list[tuple[str, str, dict]] = []
+        wakes: list[str] = []
+        app = build()
+        app.state.session_event_emitter = _event_recorder(events)
+        app.state.session_wake = _wake_recorder(wakes)
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                f"/v1/sessions/{sid}/browser/control",
+                json={"action": "release"},
+            )
+
+        assert response.status_code == 200
+        assert response.json() == {"outcome": "released"}
+        assert events == [
+            (
+                sid,
+                "browser.control_returned",
+                {"session_id": sid, "released_by": str(USER_1)},
+            )
+        ]
+        assert wakes == [sid]
+
+    async def test_release_non_owner_returns_403(
+        self,
+        app_factory,
+    ) -> None:
+        build, resolver, control = app_factory
+        sid = str(uuid4())
+        resolver.entries[sid] = _resolved(sid)
+        control.flag[sid] = "20000000-0000-0000-0000-000000000001"
+        events: list[tuple[str, str, dict]] = []
+        wakes: list[str] = []
+        app = build()
+        app.state.session_event_emitter = _event_recorder(events)
+        app.state.session_wake = _wake_recorder(wakes)
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                f"/v1/sessions/{sid}/browser/control",
+                json={"action": "release"},
+            )
+
+        assert response.status_code == 403
+        assert events == []
+        assert wakes == []
+
+    async def test_invalid_action_returns_400(self, app_factory) -> None:
+        build, resolver, _control = app_factory
+        sid = str(uuid4())
+        resolver.entries[sid] = _resolved(sid)
+
+        async with AsyncClient(
+            transport=ASGITransport(app=build()),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                f"/v1/sessions/{sid}/browser/control",
+                json={"action": "steal"},
+            )
+
+        assert response.status_code == 400
+
+
+def _event_recorder(events: list[tuple[str, str, dict]]):
+    async def emit(session_id: str, event_type, data: dict) -> None:
+        event_value = getattr(event_type, "value", event_type)
+        events.append((session_id, event_value, data))
+
+    return emit
+
+
+def _wake_recorder(wakes: list[str]):
+    async def wake(session_id: str) -> None:
+        wakes.append(session_id)
+
+    return wake
+
+
+async def _wake_noop(_session_id: str) -> None:
+    return None
