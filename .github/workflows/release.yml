@@ -46,6 +46,8 @@ jobs:
             name: surogates-agent-sandbox
           - dir: s3fs
             name: surogates-s3fs
+          - dir: browser
+            name: surogates-agent-browser
     steps:
       - uses: actions/checkout@v4
 

@@ -14,6 +14,21 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_includes images_needs, "npm"
   end
 
+  def test_docker_image_matrix_includes_browser_image
+    image_entries = @workflow
+      .fetch("jobs")
+      .fetch("images")
+      .fetch("strategy")
+      .fetch("matrix")
+      .fetch("include")
+
+    assert_includes image_entries, {
+      "dir" => "browser",
+      "name" => "surogates-agent-browser",
+    }
+    assert_path_exists "images/browser/Dockerfile"
+  end
+
   def test_npm_packages_publish_with_release_tag_version
     publish_step = @workflow
       .fetch("jobs")
