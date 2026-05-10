@@ -109,3 +109,5 @@ class EventType(str, Enum):
     # Agent browser lifecycle
     BROWSER_PROVISIONED = "browser.provisioned"
     BROWSER_DESTROYED = "browser.destroyed"
+    BROWSER_CONTROL_GRANTED = "browser.control_granted"
+    BROWSER_CONTROL_RETURNED = "browser.control_returned"
