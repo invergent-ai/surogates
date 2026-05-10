@@ -488,6 +488,28 @@ class TestScreenshotHandler:
         assert (tmp_path / body["path"]).read_bytes().startswith(b"\x89PNG")
         assert "base64" not in body
 
+    async def test_unwritable_workspace_does_not_fail_screenshot(
+        self,
+        tenant,
+        tmp_path,
+    ) -> None:
+        from surogates.tools.builtin.browser import _browser_screenshot_handler
+
+        workspace_file = tmp_path / "not-a-directory"
+        workspace_file.write_text("not a directory")
+        result = await _browser_screenshot_handler(
+            {},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            workspace_path=str(workspace_file),
+            _client_factory=lambda endpoint: FakeScreenshotClient(),
+        )
+        body = json.loads(result)
+        assert "base64" in body
+        assert "path" not in body
+
     async def test_annotate_returns_annotations(self, tenant) -> None:
         from surogates.tools.builtin.browser import _browser_screenshot_handler
 

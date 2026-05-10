@@ -113,6 +113,34 @@ class TestProvision:
         assert "WORKSPACE_DIR=/workspace" in joined
         assert "HOME=/workspace" in joined
 
+    async def test_provision_skips_unmountable_workspace(
+        self,
+        fake_spec_json_transport,
+        tmp_path,
+    ) -> None:
+        workspace_file = tmp_path / "not-a-directory"
+        workspace_file.write_text("not a directory")
+        docker = FakeDocker()
+        backend = ProcessBrowserBackend(
+            image="i",
+            rest_port_base=30000,
+            cdp_port_base=31000,
+            live_view_port_base=32000,
+            docker=docker,
+            httpx_transport=fake_spec_json_transport,
+        )
+
+        bid, endpoint = await backend.provision(
+            BrowserSpec(workspace_path=str(workspace_file)),
+        )
+
+        assert bid == "cid-1"
+        assert endpoint.rest_url == "http://127.0.0.1:30000"
+        run_call = docker.calls[0]
+        assert "-v" not in run_call
+        assert "WORKSPACE_DIR=/workspace" not in run_call
+        assert "HOME=/workspace" not in run_call
+
     async def test_provision_cleans_up_container_when_readiness_times_out(self) -> None:
         class NeverReadyTransport(httpx.AsyncBaseTransport):
             async def handle_async_request(self, request: httpx.Request) -> httpx.Response:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -19,6 +20,8 @@ from surogates.browser.client import KernelBrowserClient
 from surogates.browser.control import BrowserControlStore
 from surogates.browser.pool import BrowserPool
 from surogates.tools.registry import ToolRegistry, ToolSchema
+
+logger = logging.getLogger(__name__)
 
 
 def _paused_by_user_result() -> str:
@@ -546,8 +549,16 @@ def _save_screenshot_to_workspace(
     workspace = Path(workspace_path).resolve()
     target = workspace / relative_path
     target_dir = target.parent
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(png_bytes)
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(png_bytes)
+    except OSError as exc:
+        logger.warning(
+            "Could not save browser screenshot to workspace path %s: %s",
+            target,
+            exc,
+        )
+        return None
     return relative_path
 
 

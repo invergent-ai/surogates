@@ -99,13 +99,12 @@ class ProcessBrowserBackend:
             "--shm-size",
             "2g",
         ]
-        if spec.workspace_path:
-            workspace = Path(spec.workspace_path).resolve()
-            workspace.mkdir(parents=True, exist_ok=True)
+        workspace = self._mountable_workspace(spec.workspace_path)
+        if workspace is not None:
             args.extend(["-v", f"{workspace}:/workspace"])
             args.extend(["-e", "WORKSPACE_DIR=/workspace"])
             args.extend(["-e", "HOME=/workspace"])
-        reserved_env = {"HOME", "WORKSPACE_DIR"} if spec.workspace_path else set()
+        reserved_env = {"HOME", "WORKSPACE_DIR"} if workspace is not None else set()
         for key, value in spec.env.items():
             if key in reserved_env:
                 continue
@@ -141,6 +140,27 @@ class ProcessBrowserBackend:
         )
         logger.info("Provisioned browser container %s on REST port %s", container_id, rest_port)
         return container_id, endpoint
+
+    def _mountable_workspace(self, workspace_path: str | None) -> Path | None:
+        if not workspace_path:
+            return None
+        workspace = Path(workspace_path).resolve()
+        try:
+            workspace.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning(
+                "Skipping browser workspace bind mount for %s: %s",
+                workspace,
+                exc,
+            )
+            return None
+        if not workspace.is_dir():
+            logger.warning(
+                "Skipping browser workspace bind mount for %s: not a directory",
+                workspace,
+            )
+            return None
+        return workspace
 
     async def status(self, browser_id: str) -> BrowserStatus:
         if browser_id not in self._entries:
