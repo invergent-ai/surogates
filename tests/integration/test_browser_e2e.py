@@ -22,7 +22,7 @@ pytestmark = pytest.mark.browser_e2e
 
 E2E_IMAGE = os.environ.get(
     "BROWSER_E2E_IMAGE",
-    "ghcr.io/onkernel/chromium-headful:stable",
+    "ghcr.io/invergent-ai/surogates-agent-browser:latest",
 )
 
 
