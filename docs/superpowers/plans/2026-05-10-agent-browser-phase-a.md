@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Land the worker-side foundation for the agent browser — a Python `KernelBrowserClient` that drives kernel-images via REST, a `BrowserPool` + Redis `BrowserRegistry`/`BrowserControlStore` for cross-process state, a `ProcessBrowserBackend` that runs kernel-images via `docker run` for local development, and the discrete `browser_*` tools wired into the harness — all behind a `browser.enabled` feature flag. End state: an agent running locally can navigate, get_state, click, type, screenshot a real Chromium running in a Docker container.
+**Goal:** Land the worker-side foundation for the agent browser — a Python `KernelBrowserClient` that drives kernel-images via REST, a `BrowserPool` + Redis `BrowserRegistry`/`BrowserControlStore` for cross-process state, a `ProcessBrowserBackend` that runs kernel-images via `docker run` for local development, and the discrete `browser_*` tools wired into the harness — always enabled (no feature flag; the `backend` choice is the only environment switch). End state: an agent running locally can navigate, get_state, click, type, screenshot a real Chromium running in a Docker container.
 
 **Architecture:** New `surogates/browser/` package mirrors `surogates/sandbox/`. Tools dispatch as `ToolLocation.HARNESS` and call `BrowserPool.ensure()` then `KernelBrowserClient` over httpx against the pod's REST port. Cross-process metadata (worker writes, API server reads in Phase C) lives in Redis hashes/keys. K8s backend, live-view UI, profile sync, and recording are deferred to Phases B/C/D.
 
@@ -32,7 +32,7 @@ surogates/session/events.py  (MODIFY — add BROWSER_PROVISIONED, BROWSER_DESTRO
 surogates/governance/policy.py (MODIFY — extend URL arg map; no behavior change for existing tools)
 surogates/tools/router.py    (MODIFY — add browser tools to TOOL_LOCATIONS as HARNESS)
 surogates/tools/runtime.py   (MODIFY — register the browser module)
-surogates/orchestrator/worker.py (MODIFY — instantiate BrowserPool + Registry + Control when enabled)
+surogates/orchestrator/worker.py (MODIFY — always instantiate BrowserPool + Registry + Control)
 surogates/harness/tool_exec.py (MODIFY — thread browser_pool / browser_control into execute_single_tool)
 
 tests/test_browser_base.py        (NEW)
@@ -94,7 +94,9 @@ def test_browser_settings_defaults(monkeypatch) -> None:
     from surogates.config import BrowserSettings
 
     s = BrowserSettings()
-    assert s.enabled is False
+    # No `enabled` field — the browser is always on; backend choice is
+    # the only environment switch.
+    assert not hasattr(s, "enabled")
     assert s.backend == "process"
     assert s.image == "ghcr.io/onkernel/chromium-headful:stable"
     assert s.rest_port_base == 30000
@@ -110,13 +112,13 @@ def test_browser_settings_defaults(monkeypatch) -> None:
 
 
 def test_browser_settings_env_override(monkeypatch) -> None:
-    monkeypatch.setenv("SUROGATES_BROWSER_ENABLED", "true")
+    monkeypatch.setenv("SUROGATES_BROWSER_BACKEND", "kubernetes")
     monkeypatch.setenv("SUROGATES_BROWSER_REST_PORT_BASE", "40000")
 
     from surogates.config import BrowserSettings
 
     s = BrowserSettings()
-    assert s.enabled is True
+    assert s.backend == "kubernetes"
     assert s.rest_port_base == 40000
 
 
@@ -128,7 +130,7 @@ def test_settings_includes_browser(monkeypatch) -> None:
     from surogates.config import Settings
 
     s = Settings()
-    assert s.browser.enabled is False
+    assert s.browser.backend == "process"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -159,20 +161,21 @@ class BrowserSettings(BaseSettings):
     """Agent browser configuration.
 
     The browser is implemented as a separate per-session resource (see
-    spec §4). Disabled by default; when ``enabled`` is False the
-    ``browser_*`` tools are not registered with the runtime and never
-    appear in the LLM's tool list.
-
-    The ``backend`` choice follows the same dev/prod split as the
-    sandbox: ``"process"`` runs kernel-images via ``docker run`` on the
-    worker host (Phase A), ``"kubernetes"`` provisions per-session pods
+    spec §4). It is always enabled — there is no on/off switch. The
+    ``backend`` choice follows the same dev/prod split as the sandbox:
+    ``"process"`` runs kernel-images via ``docker run`` on the worker
+    host (Phase A), ``"kubernetes"`` provisions per-session pods
     (Phase B). When ``backend == "process"``, the three ``*_port_base``
     settings allocate host ports per session (base + N).
+
+    When the configured backend can't reach a running browser (e.g.,
+    a worker without Docker), tool calls return ``browser_unavailable``
+    and the agent learns to stop dispatching browser tools for that
+    session.
     """
 
     model_config = {"env_prefix": "SUROGATES_BROWSER_"}
 
-    enabled: bool = False
     backend: Literal["process", "kubernetes"] = "process"
     image: str = "ghcr.io/onkernel/chromium-headful:stable"
 
@@ -4093,7 +4096,7 @@ git commit -m "feat(browser): thread browser_pool / browser_control through tool
 
 ---
 
-## Task 19: Worker bootstrap — instantiate pool/registry/control when enabled
+## Task 19: Worker bootstrap — always instantiate pool/registry/control
 
 **Files:**
 - Modify: `surogates/orchestrator/worker.py`
@@ -4106,6 +4109,10 @@ function, immediately after imports + settings load).
 
 - [ ] **Step 2: Add browser bootstrap right after sandbox bootstrap**
 
+The browser pool is always instantiated. The `backend` setting is the
+only environment switch. Phase A only ships `process`; the `kubernetes`
+branch raises until Phase B fills it in.
+
 ```python
     # Sandbox pool (existing) ---------------------------------------------
     if settings.sandbox.backend == "kubernetes":
@@ -4115,48 +4122,45 @@ function, immediately after imports + settings load).
     sandbox_pool = SandboxPool(sandbox_backend)
 
     # Browser pool (Phase A) ----------------------------------------------
-    browser_pool: BrowserPool | None = None
-    browser_control: BrowserControlStore | None = None
-    if settings.browser.enabled:
-        from surogates.browser.control import BrowserControlStore
-        from surogates.browser.pool import BrowserPool
-        from surogates.browser.process import ProcessBrowserBackend
-        from surogates.browser.registry import BrowserRegistry
+    from surogates.browser.control import BrowserControlStore
+    from surogates.browser.pool import BrowserPool
+    from surogates.browser.process import ProcessBrowserBackend
+    from surogates.browser.registry import BrowserRegistry
 
-        if settings.browser.backend != "process":
-            raise RuntimeError(
-                f"Phase A only supports browser.backend=process; got "
-                f"{settings.browser.backend}. K8s lands in Phase B.",
+    if settings.browser.backend == "kubernetes":
+        raise RuntimeError(
+            "browser.backend=kubernetes is reserved for Phase B; "
+            "set browser.backend=process for Phase A.",
+        )
+    browser_backend = ProcessBrowserBackend(
+        image=settings.browser.image,
+        rest_port_base=settings.browser.rest_port_base,
+        cdp_port_base=settings.browser.cdp_port_base,
+        live_view_port_base=settings.browser.live_view_port_base,
+    )
+    browser_registry = BrowserRegistry(redis_client)
+    browser_control = BrowserControlStore(redis_client)
+
+    async def _emit_browser_event(
+        session_id: str, event_type: str, data: dict,
+    ) -> None:
+        from surogates.session.events import EventType
+        try:
+            from uuid import UUID
+            await session_store.emit_event(
+                UUID(session_id),
+                EventType(event_type),
+                data,
             )
-        browser_backend = ProcessBrowserBackend(
-            image=settings.browser.image,
-            rest_port_base=settings.browser.rest_port_base,
-            cdp_port_base=settings.browser.cdp_port_base,
-            live_view_port_base=settings.browser.live_view_port_base,
-        )
-        registry = BrowserRegistry(redis_client)
-        browser_control = BrowserControlStore(redis_client)
+        except Exception:  # noqa: BLE001 — best effort
+            logger.exception("Failed to emit browser event %s", event_type)
 
-        async def _emit_browser_event(
-            session_id: str, event_type: str, data: dict,
-        ) -> None:
-            from surogates.session.events import EventType
-            try:
-                from uuid import UUID
-                await session_store.emit_event(
-                    UUID(session_id),
-                    EventType(event_type),
-                    data,
-                )
-            except Exception:  # noqa: BLE001 — best effort
-                logger.exception("Failed to emit browser event %s", event_type)
-
-        browser_pool = BrowserPool(
-            backend=browser_backend,
-            registry=registry,
-            event_emitter=_emit_browser_event,
-        )
-        logger.info("Agent browser enabled (backend=%s)", settings.browser.backend)
+    browser_pool = BrowserPool(
+        backend=browser_backend,
+        registry=browser_registry,
+        event_emitter=_emit_browser_event,
+    )
+    logger.info("Agent browser ready (backend=%s)", settings.browser.backend)
 ```
 
 - [ ] **Step 3: Pass to `AgentHarness`**
@@ -4181,8 +4185,7 @@ two kwargs:
 Find the existing `await sandbox_pool.destroy_all()` shutdown block and add:
 
 ```python
-        if browser_pool is not None:
-            await browser_pool.destroy_all()
+        await browser_pool.destroy_all()
 ```
 
 - [ ] **Step 5: Verify by running the broader test suite**
@@ -4415,13 +4418,6 @@ pytest tests/ -q
 
 Expected: full suite green; new browser tests counted alongside existing.
 
-```bash
-SUROGATES_BROWSER_ENABLED=true pytest tests/ -q
-```
-
-Expected: still green — flipping the flag doesn't break anything because
-no integration test depends on a real container.
-
 Optional, when Docker + the image are available locally:
 
 ```bash
@@ -4450,10 +4446,12 @@ pytest -m browser_e2e -v
   `browser_screenshot`, `browser_click`, `browser_type`,
   `browser_press_key`, `browser_scroll`, `browser_drag`,
   `browser_wait`, `browser_close` — wired into router and runtime.
-- **`browser.enabled` feature flag** — when off, no tools are registered;
-  workers without browser support function as before.
+- **Always-on tool registration** — browser tools are always present in
+  the LLM's tool list; backend choice (`process` vs `kubernetes`) is
+  the only environment switch. When the backend can't reach a running
+  browser, calls return ``browser_unavailable`` with standard guidance.
 - **Worker bootstrap integration** — pool/registry/control instantiated
-  on startup when enabled; cleaned up on shutdown.
+  unconditionally on startup; cleaned up on shutdown.
 - **Opt-in e2e smoke test** — verifies the whole stack against a real
   Chromium when Docker is available.
 

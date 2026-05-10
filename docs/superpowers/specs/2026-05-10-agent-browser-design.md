@@ -511,10 +511,17 @@ peak. Capacity planning lives outside this spec.
 
 ## 12. Configuration
 
+The browser is always enabled — there is no on/off switch. The `backend`
+field is the only environment selector: `"process"` for local development
+(needs Docker on the worker host) and `"kubernetes"` for production. When
+no backend is reachable at runtime (e.g., dev worker without Docker), the
+tool calls return ``browser_unavailable`` with the standard guidance —
+the agent learns the failure class and stops dispatching browser tools
+within that session.
+
 ```yaml
 # config.dev.yaml — ProcessBrowserBackend (docker run)
 browser:
-  enabled: true
   backend: "process"
   image: "ghcr.io/onkernel/chromium-headful:stable"
   rest_port_base: 30000       # docker -p {base + N}:10001
@@ -524,7 +531,6 @@ browser:
 
 # config.prod.yaml — K8sBrowserBackend
 browser:
-  enabled: true
   backend: "kubernetes"
   namespace: "surogates"
   service_account: "surogates-browser"
@@ -541,8 +547,9 @@ browser:
   memory_limit: "4Gi"
 ```
 
-When `browser.enabled` is false, browser tools are unregistered and don't
-appear in the LLM's tool list at all.
+Tools are always registered. The cost of advertising browser tools that
+might fail at runtime is a small system-prompt token bump; the benefit
+is a single, consistent agent surface across deployments.
 
 ## 13. Testing
 
@@ -583,7 +590,10 @@ Verifiable only end-to-end (deferred to manual + CI integration):
 ## 14. Rollout
 
 The work is large enough to break into independently shippable phases. Each
-phase ends with a working subset behind a feature flag.
+phase ends with a working subset that exercises the same `BrowserBackend` /
+`BrowserPool` / `KernelBrowserClient` interfaces; later phases swap in
+richer backend implementations and add adjacent surfaces (UI, persistence)
+without rework in this layer.
 
 1. **Phase A — backend skeleton.** `BrowserBackend` protocol +
    `ProcessBrowserBackend` (docker run) + `BrowserPool` + `BrowserRegistry`
