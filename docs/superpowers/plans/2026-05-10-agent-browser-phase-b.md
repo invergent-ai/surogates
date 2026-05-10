@@ -16,7 +16,7 @@
 - [x] **Task 9: Worker bootstrap wiring** — completed.
 - [x] **Task 10: Browser image packaging** — completed.
 - [x] **Task 11: Helm browser ServiceAccount** — completed.
-- [ ] **Task 12: Helm browser NetworkPolicy** — pending.
+- [x] **Task 12: Helm browser NetworkPolicy** — completed.
 - [ ] **Task 13: Helm worker RBAC services** — pending.
 - [ ] **Task 14: Helm values and worker env** — pending.
 - [ ] **Task 15: Opt-in K8s e2e** — pending.
