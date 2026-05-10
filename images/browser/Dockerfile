@@ -41,7 +41,7 @@ RUN apt-get update \
         /etc/neko/neko.yaml \
     && rm -rf /var/lib/apt/lists/*
 
-COPY logo.svg /var/www/img/logo.b42d8ab7.svg
+COPY images/browser/logo.svg /var/www/img/logo.b42d8ab7.svg
 
 RUN sed -i \
         -e 's#<title>Kernel</title>#<title>Surogates Browser</title>#' \
