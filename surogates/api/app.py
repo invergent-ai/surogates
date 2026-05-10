@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
+from uuid import UUID
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,6 +41,53 @@ def _build_vault(encryption_key: str, session_factory) -> CredentialVault | None
         return None
 
 
+def _install_browser_api_dependencies(app: Any, settings: Any) -> None:
+    """Install API-side browser resolver/control dependencies on app.state."""
+    from surogates.browser.control import BrowserControlStore
+    from surogates.browser.registry import BrowserRegistry
+    from surogates.browser.resolver import BrowserResolver
+    from surogates.config import enqueue_session
+    from surogates.session.events import EventType
+
+    backend = None
+    if settings.browser.backend == "kubernetes":
+        from surogates.browser.kubernetes import K8sBrowserBackend
+
+        backend = K8sBrowserBackend(
+            namespace=settings.browser.k8s_namespace,
+            service_account=settings.browser.k8s_service_account,
+            pod_ready_timeout=settings.browser.pod_ready_timeout,
+            image=settings.browser.image,
+        )
+
+    browser_registry = BrowserRegistry(app.state.redis)
+    browser_control = BrowserControlStore(app.state.redis)
+    browser_resolver = BrowserResolver(registry=browser_registry, backend=backend)
+
+    async def emit_session_event(
+        session_id: str,
+        event_type: EventType | str,
+        data: dict,
+    ) -> None:
+        resolved_type = (
+            event_type if isinstance(event_type, EventType) else EventType(event_type)
+        )
+        await app.state.session_store.emit_event(
+            UUID(session_id),
+            resolved_type,
+            data,
+        )
+
+    async def wake_session(session_id: str) -> None:
+        await enqueue_session(app.state.redis, settings.agent_id, session_id)
+
+    app.state.browser_registry = browser_registry
+    app.state.browser_control = browser_control
+    app.state.browser_resolver = browser_resolver
+    app.state.session_event_emitter = emit_session_event
+    app.state.session_wake = wake_session
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown resources."""
@@ -67,6 +115,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     from surogates.channels.pairing import PairingStore
     app.state.pairing_store = PairingStore(redis=app.state.redis)
+    _install_browser_api_dependencies(app, settings)
 
     logger.info("Surogates API started (workers=%d)", settings.api.workers)
 
