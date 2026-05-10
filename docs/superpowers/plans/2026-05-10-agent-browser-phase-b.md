@@ -15,7 +15,7 @@
 - [x] **Task 8: find_by_session fallback primitive** — completed.
 - [x] **Task 9: Worker bootstrap wiring** — completed.
 - [x] **Task 10: Browser image packaging** — completed.
-- [ ] **Task 11: Helm browser ServiceAccount** — pending.
+- [x] **Task 11: Helm browser ServiceAccount** — completed.
 - [ ] **Task 12: Helm browser NetworkPolicy** — pending.
 - [ ] **Task 13: Helm worker RBAC services** — pending.
 - [ ] **Task 14: Helm values and worker env** — pending.
