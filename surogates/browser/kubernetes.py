@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from kubernetes_asyncio import client, config
 
@@ -15,6 +16,11 @@ from surogates.browser.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+SERVICE_PORT_REST = 10001
+SERVICE_PORT_CDP = 9222
+SERVICE_PORT_LIVE_VIEW = 443
+TARGET_PORT_LIVE_VIEW_NOVNC = 6080
 
 
 @dataclass
@@ -61,3 +67,61 @@ class K8sBrowserBackend:
                     ) from exc
             self._api = client.CoreV1Api()
         return self._api
+
+    def _build_pod_manifest(
+        self,
+        *,
+        browser_id: str,
+        pod_name: str,
+        session_id: str,
+        org_id: str,
+        user_id: str,
+        spec: BrowserSpec,
+    ) -> client.V1Pod:
+        """Build the browser pod manifest."""
+        labels = {
+            "app": "surogates-browser",
+            "surogates.ai/browser-id": browser_id,
+            "surogates.ai/session-id": session_id,
+            "surogates.ai/org-id": org_id,
+            "surogates.ai/user-id": user_id,
+        }
+        env_vars = [
+            client.V1EnvVar(name=key, value=value)
+            for key, value in sorted(spec.env.items())
+        ]
+        container = client.V1Container(
+            name="browser",
+            image=spec.image or self._image,
+            image_pull_policy="IfNotPresent",
+            ports=[
+                client.V1ContainerPort(container_port=SERVICE_PORT_REST, name="rest"),
+                client.V1ContainerPort(container_port=SERVICE_PORT_CDP, name="cdp"),
+                client.V1ContainerPort(
+                    container_port=TARGET_PORT_LIVE_VIEW_NOVNC,
+                    name="novnc",
+                ),
+            ],
+            resources=client.V1ResourceRequirements(
+                requests={"cpu": spec.cpu, "memory": spec.memory},
+                limits={"cpu": spec.cpu_limit, "memory": spec.memory_limit},
+            ),
+            env=env_vars,
+        )
+
+        return client.V1Pod(
+            metadata=client.V1ObjectMeta(
+                name=pod_name,
+                namespace=self._namespace,
+                labels=labels,
+                annotations={
+                    "surogates.ai/created-at": datetime.now(timezone.utc).isoformat(),
+                },
+            ),
+            spec=client.V1PodSpec(
+                service_account_name=self._service_account,
+                active_deadline_seconds=spec.active_deadline_seconds,
+                restart_policy="Never",
+                containers=[container],
+            ),
+        )
