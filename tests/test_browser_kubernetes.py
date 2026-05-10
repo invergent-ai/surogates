@@ -98,6 +98,11 @@ class TestBuildPodManifest:
             ("cdp", 9222),
             ("novnc", 6080),
         ]
+        assert c.readiness_probe is not None
+        assert c.readiness_probe.http_get.path == "/spec.json"
+        assert c.readiness_probe.http_get.port == 10001
+        assert c.readiness_probe.period_seconds == 2
+        assert c.readiness_probe.failure_threshold == 30
         assert {e.name: e.value for e in c.env}["EXTRA"] == "value"
 
     def test_pod_manifest_uses_backend_image_when_spec_image_blank(

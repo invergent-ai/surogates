@@ -294,6 +294,14 @@ class K8sBrowserBackend:
                     name="novnc",
                 ),
             ],
+            readiness_probe=client.V1Probe(
+                http_get=client.V1HTTPGetAction(
+                    path="/spec.json",
+                    port=SERVICE_PORT_REST,
+                ),
+                period_seconds=2,
+                failure_threshold=30,
+            ),
             resources=client.V1ResourceRequirements(
                 requests={"cpu": spec.cpu, "memory": spec.memory},
                 limits={"cpu": spec.cpu_limit, "memory": spec.memory_limit},
