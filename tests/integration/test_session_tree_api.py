@@ -10,8 +10,13 @@ import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
+from surogates.db.models import ScheduledSession as ScheduledSessionRow
+from surogates.db.models import Session as SessionRow
 from surogates.session.store import SessionStore
+from surogates.scheduled.schedule import parse_dynamic_loop_schedule
+from surogates.scheduled.store import ScheduledSessionStore
 from surogates.storage.backend import LocalBackend
 from surogates.tenant.auth.jwt import create_access_token
 from surogates.tenant.credentials import CredentialVault
@@ -332,3 +337,101 @@ async def test_children_authorization_blocks_other_tenant(
         headers={"Authorization": f"Bearer {token_b}"},
     )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# DELETE /v1/sessions/{id}
+# ---------------------------------------------------------------------------
+
+
+async def test_delete_parent_session_archives_descendants_and_cancels_schedules(
+    client: AsyncClient, app, session_factory, session_store,
+):
+    org_id, user_id, token = await _tenant(session_factory)
+    bucket = "delete-parent-session-tree"
+    await app.state.storage.create_bucket(bucket)
+
+    root = await session_store.create_session(
+        user_id=user_id,
+        org_id=org_id,
+        agent_id=_AGENT_ID,
+        config={"storage_bucket": bucket},
+    )
+    child = await session_store.create_session(
+        user_id=user_id,
+        org_id=org_id,
+        agent_id=_AGENT_ID,
+        parent_id=root.id,
+        channel="scheduled",
+        config={
+            "storage_bucket": bucket,
+            "scheduled_session_id": str(uuid.uuid4()),
+            "scheduled_dynamic_loop": True,
+        },
+    )
+    grandchild = await session_store.create_session(
+        user_id=user_id,
+        org_id=org_id,
+        agent_id=_AGENT_ID,
+        parent_id=child.id,
+        channel="worker",
+        config={"storage_bucket": bucket},
+    )
+
+    for session in (root, child, grandchild):
+        await app.state.storage.write_text(
+            bucket,
+            f"sessions/{session.id}/workspace.txt",
+            "delete me",
+        )
+
+    schedule_store = ScheduledSessionStore(session_factory)
+    root_schedule = await schedule_store.create_dynamic_loop(
+        org_id=org_id,
+        user_id=user_id,
+        agent_id=_AGENT_ID,
+        prompt="check bitcoin",
+        schedule=parse_dynamic_loop_schedule(),
+        created_from_session_id=root.id,
+    )
+    child_schedule = await schedule_store.create_dynamic_loop(
+        org_id=org_id,
+        user_id=user_id,
+        agent_id=_AGENT_ID,
+        prompt="nested loop",
+        schedule=parse_dynamic_loop_schedule(),
+        created_from_session_id=child.id,
+    )
+
+    resp = await client.delete(
+        f"/v1/sessions/{root.id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert resp.status_code == 204
+
+    async with session_factory() as db:
+        session_rows = await db.execute(
+            select(SessionRow)
+            .where(SessionRow.id.in_([root.id, child.id, grandchild.id]))
+            .order_by(SessionRow.created_at)
+        )
+        schedule_rows = await db.execute(
+            select(ScheduledSessionRow.id)
+            .where(ScheduledSessionRow.id.in_([root_schedule.id, child_schedule.id]))
+        )
+
+    sessions = session_rows.scalars().all()
+    schedules = schedule_rows.scalars().all()
+
+    assert [row.status for row in sessions] == [
+        "archived",
+        "archived",
+        "archived",
+    ]
+    assert schedules == []
+    for session in (root, child, grandchild):
+        assert not await app.state.storage.exists(
+            bucket,
+            f"sessions/{session.id}/workspace.txt",
+        )

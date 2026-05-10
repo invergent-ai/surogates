@@ -742,33 +742,47 @@ async def delete_session(
     session = await _get_session_for_tenant(request, session_id, tenant)
     require_user_writable_session(session)
 
-    await store.update_session_status(session_id, "archived")
-
-    # Interrupt the worker so it stops processing and destroys the sandbox pod.
-    redis = request.app.state.redis
-    import json as _json
-    await redis.publish(
-        f"{INTERRUPT_CHANNEL_PREFIX}:{session_id}",
-        _json.dumps({"reason": "session deleted"}),
+    archived_sessions = await store.archive_session_tree_and_delete_schedules(
+        session_id,
+        org_id=session.org_id,
+        agent_id=session.agent_id,
     )
 
-    # Delete the session's workspace objects without deleting the agent bucket.
+    # Interrupt workers so active parent/child harnesses stop processing and
+    # destroy any sandbox pods.
+    redis = request.app.state.redis
+    import json as _json
+    for archived_session in archived_sessions:
+        await redis.publish(
+            f"{INTERRUPT_CHANNEL_PREFIX}:{archived_session.id}",
+            _json.dumps({"reason": "session deleted"}),
+        )
+
+    # Delete each session's workspace objects without deleting the agent bucket.
     storage = request.app.state.storage
-    storage_bucket = session.config.get("storage_bucket")
-    if not storage_bucket:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Session {session_id} has no agent bucket.",
-        )
-    prefix = session_workspace_prefix(session_id)
-    try:
-        keys = await storage.list_keys(storage_bucket, prefix=prefix)
-        for key in keys:
-            await storage.delete(storage_bucket, key)
-    except Exception:
-        logger.warning(
-            "Failed to delete workspace prefix %s in bucket %s",
-            prefix,
-            storage_bucket,
-            exc_info=True,
-        )
+    for archived_session in archived_sessions:
+        storage_bucket = (archived_session.config or {}).get("storage_bucket")
+        if not storage_bucket:
+            if archived_session.id == session_id:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Session {session_id} has no agent bucket.",
+                )
+            logger.warning(
+                "Archived child session %s has no agent bucket; skipping "
+                "workspace cleanup",
+                archived_session.id,
+            )
+            continue
+        prefix = session_workspace_prefix(archived_session.id)
+        try:
+            keys = await storage.list_keys(storage_bucket, prefix=prefix)
+            for key in keys:
+                await storage.delete(storage_bucket, key)
+        except Exception:
+            logger.warning(
+                "Failed to delete workspace prefix %s in bucket %s",
+                prefix,
+                storage_bucket,
+                exc_info=True,
+            )

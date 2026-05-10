@@ -8,20 +8,19 @@ counter increments).
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
-
-logger = logging.getLogger(__name__)
 from uuid import UUID
 
 from sqlalchemy import and_, not_, select, text, update, delete, func, or_
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import (
     Event as EventRow,
+    ScheduledSession as ScheduledSessionRow,
     Session as SessionRow,
     SessionCursor,
     SessionLease as LeaseRow,
@@ -30,7 +29,7 @@ from surogates.harness.redact import redact_sensitive_data
 from surogates.session.events import EventType
 from surogates.session.models import Event, Session, SessionLease
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+logger = logging.getLogger(__name__)
 
 
 class SessionNotFoundError(Exception):
@@ -167,6 +166,80 @@ class SessionStore:
             if result.rowcount == 0:
                 raise SessionNotFoundError(f"session {session_id} not found")
             await db.commit()
+
+    async def archive_session_tree_and_delete_schedules(
+        self,
+        session_id: UUID,
+        *,
+        org_id: UUID,
+        agent_id: str,
+    ) -> list[Session]:
+        """Archive a session subtree and delete schedules tied to any node.
+
+        Session deletion is user-facing "remove from my workspace" semantics,
+        not physical event-log deletion.  For parent sessions, descendants must
+        disappear with the parent; otherwise scheduled-loop runs and
+        delegation children are left dangling in tree/list UIs.  Schedules are
+        physical job definitions, so rows created from or last run by the tree
+        are deleted in the same transaction.
+        """
+        async with self._sf() as db:
+            result = await db.execute(
+                text(
+                    """
+                    WITH RECURSIVE tree AS (
+                        SELECT *
+                        FROM sessions
+                        WHERE id = :session_id
+                          AND org_id = :org_id
+                          AND agent_id = :agent_id
+                        UNION ALL
+                        SELECT s.*
+                        FROM sessions s
+                        JOIN tree t ON s.parent_id = t.id
+                        WHERE s.org_id = :org_id
+                          AND s.agent_id = :agent_id
+                    )
+                    SELECT *
+                    FROM tree
+                    ORDER BY created_at
+                    """
+                ),
+                {
+                    "session_id": session_id,
+                    "org_id": org_id,
+                    "agent_id": agent_id,
+                },
+            )
+            rows = [dict(row._mapping) for row in result]
+            if not rows:
+                raise SessionNotFoundError(f"session {session_id} not found")
+
+            session_ids = [row["id"] for row in rows]
+            await db.execute(
+                delete(ScheduledSessionRow).where(
+                    ScheduledSessionRow.org_id == org_id,
+                    ScheduledSessionRow.agent_id == agent_id,
+                    or_(
+                        ScheduledSessionRow.created_from_session_id.in_(
+                            session_ids,
+                        ),
+                        ScheduledSessionRow.last_session_id.in_(session_ids),
+                    ),
+                )
+            )
+            await db.execute(
+                update(SessionRow)
+                .where(SessionRow.id.in_(session_ids))
+                .values(status="archived", updated_at=func.now())
+            )
+            await db.commit()
+
+        archived: list[Session] = []
+        for row in rows:
+            row["status"] = "archived"
+            archived.append(Session.model_validate(row))
+        return archived
 
     async def update_session_title_if_empty(
         self,
