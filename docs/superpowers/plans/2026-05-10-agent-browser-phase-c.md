@@ -4,7 +4,7 @@
 
 **Goal:** Make the agent's browser visible to the user. Add the API server endpoints for browser state and control acquisition (with the spec's three-branch conflict semantics), an authenticated HTTP/WebSocket proxy that streams the kernel-images NoVNC live view to the SPA with input-frame gating, the harness wake-on-release loop, and the SPA changes — a stacked right pane (`BrowserPane` above `WorkspacePanel`), a take-control toggle, an activity-group component that collapses consecutive `browser_*` tool calls in the chat thread, and inline event markers for the new `browser.*` lifecycle events. End state: the user can watch the agent drive the browser in real time and take over for CAPTCHAs, MFA, or login flows.
 
-**Architecture:** The API server is the only public surface. Browser pods stay on the cluster network. The SPA opens HTTP requests and a WebSocket against `/v1/sessions/{id}/browser/live/{path:path}` carrying its session JWT; the API server validates the JWT, resolves the pod via `BrowserResolver` (Redis primary, K8s label fallback from Phase B), and proxies bidirectionally. Inbound RFB ClientMessage frames of types `KeyEvent (4)`, `PointerEvent (5)`, and `ClientCutText (6)` are dropped unless `BrowserControlStore` records the connecting user as the holder. POST `/v1/sessions/{id}/browser/control` flips the flag and emits `BROWSER_CONTROL_GRANTED` / `BROWSER_CONTROL_RETURNED`; release also enqueues a wake on the session so the harness resumes.
+**Architecture:** The live agent API is the only surface that talks to browser pods, and browser pods stay on the cluster network. Direct Surogates clients use `/v1/sessions/{id}/browser/*`; surogate-ops users go through the existing ops backend proxy at `/api/sessions/{id}/browser/*`, which authenticates the ops user and calls the live agent API with the agent service account. The live API resolves the pod via `BrowserResolver` (Redis primary, K8s label fallback with tenant metadata), then proxies HTTP and WebSocket traffic bidirectionally. Inbound RFB ClientMessage frames of types `KeyEvent (4)`, `PointerEvent (5)`, and `ClientCutText (6)` are dropped unless `BrowserControlStore` records the connecting user as the holder. POST `/v1/sessions/{id}/browser/control` flips the flag and emits `BROWSER_CONTROL_GRANTED` / `BROWSER_CONTROL_RETURNED`; release also enqueues a wake on the session so the harness resumes.
 
 **Tech Stack:** FastAPI WebSocket routes (already used elsewhere — see `surogates/api/routes/`), httpx + websockets for upstream proxying, redis-py for cross-process state (already wired), React 19 + TypeScript in `@invergent/agent-chat-react` (the SDK published from `sdk/agent-chat-react/`), `@novnc/novnc` for the in-iframe client, vitest for SDK tests, pytest + ASGITransport for API tests.
 
@@ -14,7 +14,19 @@
 - [Phase A](2026-05-10-agent-browser-phase-a.md) — `BrowserPool`, `BrowserRegistry`, `BrowserControlStore`, `KernelBrowserClient`, all `browser_*` tools (control short-circuit included).
 - [Phase B](2026-05-10-agent-browser-phase-b.md) — `K8sBrowserBackend.find_by_session`, the surogates-agent-browser image, browser RBAC + NetworkPolicy, helm wiring.
 
-Phase C consumes those interfaces; nothing in Phase A or B needs to change.
+Phase C mostly consumes those interfaces. It adds one metadata-preserving
+K8s lookup wrapper around Phase B's `find_by_session` so API fallback
+resolution remains tenant-scoped.
+
+---
+
+## TODO
+
+- [x] **Completed:** Review/correct Phase C plan against the Phase A/B implementation.
+- [ ] **In progress:** Task 1 — add browser control event types.
+- [ ] **Still left to do:** Implement Task 1 through Task 18 in order, committing at each task boundary.
+- [ ] **Still left to do:** Run the backend, SDK, frontend, Helm, and opt-in K8s verification listed in Final verification.
+- [ ] **Completed:** Phase A and Phase B prerequisites exist on this branch.
 
 ---
 
@@ -24,13 +36,15 @@ Phase C consumes those interfaces; nothing in Phase A or B needs to change.
 surogates/browser/
 ├── resolver.py              (NEW — BrowserResolver: Registry primary + K8s fallback)
 ├── rfb.py                   (NEW — RFB ClientMessage type sniffer + frame gating helper)
+├── kubernetes.py            (MODIFY — expose tenant metadata in session fallback lookup)
 
 surogates/api/routes/
 └── browser.py               (NEW — GET /state, POST /control, HTTP/WS /live/{path})
 
-surogates/api/middleware/
-└── auth.py                  (MODIFY — accept ?token=<jwt> for iframe HTTP+WS, gated to
-                              /v1/sessions/{id}/browser/live/* paths only)
+surogates/tenant/auth/
+└── middleware.py            (MODIFY — restrict query-param JWT auth to SSE +
+                              browser live-view paths, and add a WebSocket
+                              tenant-auth helper)
 
 surogates/api/app.py          (MODIFY — register browser router)
 
@@ -74,6 +88,11 @@ sdk/agent-chat-react/src/
 └── adapter context                       (MODIFY — extend AgentChatAdapter with
                                             browser.getState / acquireControl /
                                             releaseControl + liveViewUrl helper)
+
+/work/surogate-ops/surogate_ops/server/routes/sessions.py
+                              (MODIFY — proxy browser state/control and live-view
+                              HTTP/WS through the ops backend, matching the
+                              existing workspace/artifact live-session proxy)
 
 sdk/agent-chat-react/tests/
 ├── browser-pane.test.tsx    (NEW)
@@ -175,12 +194,15 @@ git commit -m "feat(browser): add control_granted/control_returned event types"
 
 **Files:**
 - Create: `surogates/browser/resolver.py`
+- Modify: `surogates/browser/kubernetes.py`
 - Test: `tests/test_browser_resolver.py` (extend)
 
 `BrowserResolver` is the single API the API server uses to find a session's
 browser. It hits Redis first (fast, set by the worker on provision); on
-miss it asks the K8s backend's `find_by_session` (Phase B Task 8). It also
-verifies tenant scope before returning the entry.
+miss it asks the K8s backend for a label-derived registry entry. It verifies
+tenant scope before returning the entry. The fallback must not return an
+endpoint unless the pod labels include an `org_id` that matches the caller;
+otherwise a Redis miss could become a cross-tenant browser leak.
 
 - [ ] **Step 1: Write the failing tests** — append to `tests/test_browser_resolver.py`:
 
@@ -204,12 +226,10 @@ class FakeRegistry:
 
 class FakeBackend:
     def __init__(self) -> None:
-        self.found: dict[str, tuple[str, BrowserEndpoint]] = {}
+        self.found: dict[str, BrowserEntry] = {}
         self.calls: list[str] = []
 
-    async def find_by_session(
-        self, session_id: str,
-    ) -> tuple[str, BrowserEndpoint] | None:
+    async def find_entry_by_session(self, session_id: str) -> BrowserEntry | None:
         self.calls.append(session_id)
         return self.found.get(session_id)
 
@@ -250,22 +270,27 @@ class TestFallbackToBackend:
     async def test_uses_backend_when_registry_misses(self) -> None:
         reg = FakeRegistry()  # empty
         backend = FakeBackend()
-        backend.found["sess-1"] = (
-            "browser-id-x",
-            BrowserEndpoint(
-                rest_url="http://browser-x.svc:10001",
-                cdp_url="ws://browser-x.svc:9222",
-                live_view_url="ws://browser-x.svc:443",
-            ),
+        backend.found["sess-1"] = BrowserEntry(
+            session_id="sess-1", org_id="org-1", user_id="user-1",
+            rest_url="http://browser-x.svc:10001",
+            cdp_url="ws://browser-x.svc:9222",
+            live_view_url="ws://browser-x.svc:443",
+            provisioned_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
         )
         r = BrowserResolver(registry=reg, backend=backend)  # type: ignore[arg-type]
 
-        result = await r.resolve("sess-1", expected_org_id=None)  # admin lookup
+        result = await r.resolve("sess-1", expected_org_id="org-1")
         assert result is not None
         assert result.endpoint.rest_url == "http://browser-x.svc:10001"
-        # When the fallback succeeds we have no per-session metadata
-        # (org/user) to compare; resolver returns the result and lets the
-        # caller decide whether to trust it.
+        assert result.org_id == "org-1"
+        assert result.source == "k8s_fallback"
+
+    async def test_backend_tenant_mismatch_returns_none(self) -> None:
+        backend = FakeBackend()
+        backend.found["sess-1"] = _entry("sess-1", org="org-OTHER")
+        r = BrowserResolver(registry=FakeRegistry(), backend=backend)  # type: ignore[arg-type]
+
+        assert await r.resolve("sess-1", expected_org_id="org-1") is None
 
     async def test_returns_none_when_neither_path_finds(self) -> None:
         r = BrowserResolver(
@@ -299,14 +324,13 @@ API server flow:
      when it provisions).
   2. If the registry misses (Redis was flushed, the entry was evicted, or
      the API server is faster than the worker on a write race), fall back
-     to a label-keyed K8s lookup via the backend's ``find_by_session``.
+     to a label-keyed K8s lookup via the backend's ``find_entry_by_session``.
   3. If both miss, return None.
 
 Tenant scoping: when ``expected_org_id`` is supplied, registry hits whose
-``org_id`` doesn't match are treated as misses. The fallback path can't
-verify scope (K8s labels are trusted because only the worker writes them,
-but they encode the org_id; we still don't decode-and-compare to keep the
-code path simple — the caller validates after).
+``org_id`` doesn't match are treated as misses. The fallback path reconstructs
+the same metadata from K8s labels and applies the same comparison before it
+returns an endpoint.
 """
 
 from __future__ import annotations
@@ -322,19 +346,13 @@ logger = logging.getLogger(__name__)
 
 
 class _BackendWithFind(Protocol):
-    async def find_by_session(
-        self, session_id: str,
-    ) -> tuple[str, BrowserEndpoint] | None: ...
+    async def find_entry_by_session(self, session_id: str) -> BrowserEntry | None: ...
 
 
 @dataclass(slots=True)
 class ResolvedBrowser:
     session_id: str
     endpoint: BrowserEndpoint
-    # When the source is the registry we have full metadata.
-    # When the source is the backend fallback only browser_id + endpoint
-    # are reconstructed (org_id/user_id are still on pod labels but we
-    # don't read them in the fallback path — Phase C MVP).
     org_id: str | None = None
     user_id: str | None = None
     source: str = "registry"     # "registry" | "k8s_fallback"
@@ -379,22 +397,79 @@ class BrowserResolver:
         if self._backend is None:
             return None
 
-        found = await self._backend.find_by_session(session_id)
-        if found is None:
+        fallback_entry = await self._backend.find_entry_by_session(session_id)
+        if fallback_entry is None:
             return None
-        _bid, endpoint = found
+        if (
+            expected_org_id is not None
+            and fallback_entry.org_id != expected_org_id
+        ):
+            logger.warning(
+                "Browser K8s fallback hit for session %s but org %s != expected %s",
+                session_id, fallback_entry.org_id, expected_org_id,
+            )
+            return None
         return ResolvedBrowser(
-            session_id=session_id, endpoint=endpoint,
-            org_id=None, user_id=None, source="k8s_fallback",
+            session_id=fallback_entry.session_id,
+            endpoint=BrowserEndpoint(
+                rest_url=fallback_entry.rest_url,
+                cdp_url=fallback_entry.cdp_url,
+                live_view_url=fallback_entry.live_view_url,
+            ),
+            org_id=fallback_entry.org_id,
+            user_id=fallback_entry.user_id,
+            source="k8s_fallback",
         )
 ```
+
+In `surogates/browser/kubernetes.py`, add a metadata-preserving wrapper
+around Phase B's `find_by_session`:
+
+```python
+from datetime import datetime, timezone
+from surogates.browser.registry import BrowserEntry
+
+async def find_entry_by_session(self, session_id: str) -> BrowserEntry | None:
+    api = await self._get_api()
+    selector = f"app=surogates-browser,surogates.ai/session-id={session_id}"
+    result = await api.list_namespaced_pod(
+        self._namespace,
+        label_selector=selector,
+    )
+    items = list(getattr(result, "items", []) or [])
+    if not items:
+        return None
+
+    pod = items[0]
+    labels = pod.metadata.labels or {}
+    browser_id = labels.get("surogates.ai/browser-id")
+    org_id = labels.get("surogates.ai/org-id")
+    user_id = labels.get("surogates.ai/user-id")
+    service_name = pod.metadata.name
+    if not browser_id or not org_id or not user_id or not service_name:
+        return None
+
+    return BrowserEntry(
+        session_id=session_id,
+        org_id=org_id,
+        user_id=user_id,
+        rest_url=f"http://{service_name}.{self._namespace}.svc:{SERVICE_PORT_REST}",
+        cdp_url=f"ws://{service_name}.{self._namespace}.svc:{SERVICE_PORT_CDP}",
+        live_view_url=f"ws://{service_name}.{self._namespace}.svc:{SERVICE_PORT_LIVE_VIEW}",
+        provisioned_at=datetime.now(timezone.utc),
+    )
+```
+
+Keep Phase B's `find_by_session` method intact for existing tests; implement
+it by delegating to `find_entry_by_session` and returning
+`(browser_id, BrowserEndpoint)` if useful, or leave the existing code as-is.
 
 - [ ] **Step 4: Run** — all PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add surogates/browser/resolver.py tests/test_browser_resolver.py
+git add surogates/browser/resolver.py surogates/browser/kubernetes.py tests/test_browser_resolver.py
 git commit -m "feat(browser): add BrowserResolver with registry + K8s fallback"
 ```
 
@@ -545,9 +620,15 @@ from httpx import ASGITransport, AsyncClient
 
 
 @pytest.fixture()
-def app_factory(monkeypatch):
+def app_factory(monkeypatch, session_factory):
     """Build an isolated FastAPI app with a stubbed BrowserResolver
-    + BrowserControlStore + SessionStore."""
+    + BrowserControlStore + SessionStore.
+
+    Do not rely on create_app constructor kwargs; the real app factory
+    currently takes no dependency-injection parameters. Build the normal
+    app and override app.state after construction, matching the existing
+    tests/integration/test_api.py fixture style.
+    """
 
     from surogates.browser.base import BrowserEndpoint
     from surogates.browser.resolver import ResolvedBrowser
@@ -576,12 +657,10 @@ def app_factory(monkeypatch):
     control = StubControl()
 
     def _build():
-        app = create_app(
-            browser_resolver=resolver,
-            browser_control=control,
-            # ... other deps stubbed; reuse helpers from
-            # tests/integration/test_api.py::create_test_app if present.
-        )
+        app = create_app()
+        app.state.session_factory = session_factory
+        app.state.browser_resolver = resolver
+        app.state.browser_control = control
         return app
 
     return _build, resolver, control
@@ -694,11 +773,10 @@ class TestStateEndpoint:
         assert r.status_code == 404   # tenant mismatch; treat as not-found
 ```
 
-> Note: `create_app(browser_resolver=..., browser_control=...)` does not
-> exist yet — Task 4 adds those constructor kwargs. Also: existing tests
-> use `tests/integration/test_api.py::_create_test_tenant` and similar
-> helpers — reuse where possible. If a fixture doesn't exist, copy the
-> minimal version into the new test file.
+> Note: existing tests use `tests/integration/test_api.py::_create_test_tenant`
+> and similar helpers; reuse those helpers where possible. If direct import
+> would create an integration-test dependency cycle, copy only the minimal
+> tenant fixture code into this test file.
 
 - [ ] **Step 2: Run** — all FAIL.
 
@@ -710,9 +788,14 @@ class TestStateEndpoint:
 """Browser live-view + control endpoints (Phase C).
 
 Routes:
-  GET  /v1/sessions/{id}/browser/state    — provision status + control owner
-  POST /v1/sessions/{id}/browser/control  — acquire / release (Task 5)
+  GET  /v1/sessions/{id}/browser/state
+  GET  /v1/api/sessions/{id}/browser/state
+                                      — provision status + control owner
+  POST /v1/sessions/{id}/browser/control
+  POST /v1/api/sessions/{id}/browser/control
+                                      — acquire / release (Task 5)
   GET  /v1/sessions/{id}/browser/live/{path:path}
+  GET  /v1/api/sessions/{id}/browser/live/{path:path}
                                           — HTTP/WS proxy (Tasks 6-8)
 
 Resolution: every request goes through ``BrowserResolver`` (Registry
@@ -746,6 +829,10 @@ class BrowserStateResponse(BaseModel):
     "/sessions/{session_id}/browser/state",
     response_model=BrowserStateResponse,
 )
+@router.get(
+    "/api/sessions/{session_id}/browser/state",
+    response_model=BrowserStateResponse,
+)
 async def get_browser_state(
     session_id: UUID,
     request: Request,
@@ -766,29 +853,20 @@ async def get_browser_state(
         status="user-control" if holder else "live",
         control_owner=holder,
         rest_url=resolved.endpoint.rest_url,
-        live_view_path=f"/v1/sessions/{session_id}/browser/live/",
+        live_view_path=f"{'/v1/api' if request.url.path.startswith('/v1/api/') else '/v1'}/sessions/{session_id}/browser/live/",
     )
 ```
 
-- [ ] **Step 4: Wire dependencies into `app.state`**
+- [ ] **Step 4: Wire the router into `app.py`**
 
-Modify `surogates/api/app.py` `create_app` to accept `browser_resolver` and
-`browser_control` kwargs and stash them on `app.state`:
+Register the router in `surogates/api/app.py` alongside the other `/v1`
+routers. Do not add constructor kwargs to `create_app`; app dependencies are
+created in the lifespan startup path and tests override `app.state` directly.
 
 ```python
-def create_app(
-    *,
-    # ... existing kwargs ...
-    browser_resolver=None,
-    browser_control=None,
-):
-    app = FastAPI(...)
-    app.state.browser_resolver = browser_resolver
-    app.state.browser_control = browser_control
-    # ... existing wiring ...
-    from surogates.api.routes import browser as browser_routes
-    app.include_router(browser_routes.router, prefix="/v1", tags=["browser"])
-    return app
+from surogates.api.routes import browser as browser_routes
+
+app.include_router(browser_routes.router, prefix="/v1", tags=["browser"])
 ```
 
 - [ ] **Step 5: Run** — `pytest tests/test_browser_route.py -v` → 4 PASS.
@@ -874,38 +952,133 @@ class TestControlEndpoint:
     async def test_acquire_same_user_does_not_re_emit(
         self, app_factory, jwt_for_session, monkeypatch
     ) -> None:
-        # Configure control to return REFRESHED — no event should fire.
         from surogates.browser.control import AcquireOutcome, ControlEntry
-        # ... (same setup as previous test, but acquire returns REFRESHED)
-        # assert events do NOT include "browser.control_granted"
-        ...
+        build, resolver, control = app_factory
+        sid = str(uuid4())
+        _seed_browser(resolver, sid, org_id="org-1", user_id="user-1")
+        events: list[tuple[str, str, dict]] = []
+        control.acquire = _acquire_stub(AcquireOutcome.REFRESHED, "user-1")  # type: ignore[attr-defined]
+        app = build()
+        app.state.session_event_emitter = _event_recorder(events)
+        app.state.session_wake = _wake_noop
+        token = jwt_for_session(org_id="org-1", user_id="user-1")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                f"/v1/sessions/{sid}/browser/control",
+                json={"action": "acquire"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert r.status_code == 200
+        assert r.json()["outcome"] == "refreshed"
+        assert [t for _, t, _ in events] == []
 
     async def test_acquire_different_user_returns_409(
         self, app_factory, jwt_for_session, monkeypatch
     ) -> None:
-        # Configure control to return CONFLICT with holder.
-        # Assert response is 409 and body includes holder_user_id.
-        ...
+        from surogates.browser.control import AcquireOutcome
+        build, resolver, control = app_factory
+        sid = str(uuid4())
+        _seed_browser(resolver, sid, org_id="org-1", user_id="user-2")
+        control.acquire = _acquire_stub(AcquireOutcome.CONFLICT, "user-2")  # type: ignore[attr-defined]
+        app = build()
+        app.state.session_event_emitter = _event_recorder([])
+        app.state.session_wake = _wake_noop
+        token = jwt_for_session(org_id="org-1", user_id="user-1")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                f"/v1/sessions/{sid}/browser/control",
+                json={"action": "acquire"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert r.status_code == 409
+        assert r.json()["detail"]["holder_user_id"] == "user-2"
 
     async def test_release_owner_succeeds_and_wakes(
         self, app_factory, jwt_for_session
     ) -> None:
-        # Configure control.release → True.
-        # Assert response 200, browser.control_returned event emitted,
-        # session_wake invoked.
-        ...
+        build, resolver, control = app_factory
+        sid = str(uuid4())
+        _seed_browser(resolver, sid, org_id="org-1", user_id="user-1")
+        events: list[tuple[str, str, dict]] = []
+        wakes: list[str] = []
+        control.release = _release_stub(True)  # type: ignore[attr-defined]
+        app = build()
+        app.state.session_event_emitter = _event_recorder(events)
+        app.state.session_wake = _wake_recorder(wakes)
+        token = jwt_for_session(org_id="org-1", user_id="user-1")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                f"/v1/sessions/{sid}/browser/control",
+                json={"action": "release"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert r.status_code == 200
+        assert "browser.control_returned" in [t for _, t, _ in events]
+        assert wakes == [sid]
 
     async def test_release_non_owner_returns_403(
         self, app_factory, jwt_for_session
     ) -> None:
-        # Configure control.release → False.
-        # Assert response 403, no event, no wake.
-        ...
+        build, resolver, control = app_factory
+        sid = str(uuid4())
+        _seed_browser(resolver, sid, org_id="org-1", user_id="user-1")
+        events: list[tuple[str, str, dict]] = []
+        wakes: list[str] = []
+        control.release = _release_stub(False)  # type: ignore[attr-defined]
+        app = build()
+        app.state.session_event_emitter = _event_recorder(events)
+        app.state.session_wake = _wake_recorder(wakes)
+        token = jwt_for_session(org_id="org-1", user_id="user-1")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                f"/v1/sessions/{sid}/browser/control",
+                json={"action": "release"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert r.status_code == 403
+        assert events == []
+        assert wakes == []
 ```
 
-The full bodies of the second through fifth test methods follow the same
-shape as the first; expand them inline (no "similar to above" placeholder)
-when you write the test file.
+Add the helpers used by the tests above to the same test file:
+
+```python
+def _seed_browser(resolver, session_id: str, *, org_id: str, user_id: str) -> None:
+    from surogates.browser.base import BrowserEndpoint
+    from surogates.browser.resolver import ResolvedBrowser
+    resolver.entries[session_id] = ResolvedBrowser(
+        session_id=session_id,
+        endpoint=BrowserEndpoint(rest_url="r", cdp_url="c", live_view_url="l"),
+        org_id=org_id,
+        user_id=user_id,
+        source="registry",
+    )
+
+def _acquire_stub(outcome, owner_user_id: str):
+    from datetime import datetime, timezone
+    from surogates.browser.control import ControlEntry
+    async def acquire(_session_id: str, _user_id: str):
+        return outcome, ControlEntry(owner_user_id=owner_user_id, acquired_at=datetime.now(timezone.utc))
+    return acquire
+
+def _release_stub(value: bool):
+    async def release(_session_id: str, _user_id: str) -> bool:
+        return value
+    return release
+
+def _event_recorder(events: list[tuple[str, str, dict]]):
+    async def emit(session_id: str, event_type: str, data: dict) -> None:
+        events.append((session_id, event_type, data))
+    return emit
+
+def _wake_recorder(wakes: list[str]):
+    async def wake(session_id: str) -> None:
+        wakes.append(session_id)
+    return wake
+
+async def _wake_noop(_session_id: str) -> None:
+    return None
+```
 
 - [ ] **Step 2: Run** — 5 FAIL.
 
@@ -916,8 +1089,12 @@ Append to `surogates/api/routes/browser.py`:
 ```python
 class ControlActionRequest(BaseModel):
     action: str  # "acquire" | "release"
+    owner_user_id: str | None = None
+    # owner_user_id is only used on /v1/api/* service-account proxy calls
+    # from surogate-ops. Direct user JWT calls derive the owner from tenant.user_id.
 
 
+@router.post("/api/sessions/{session_id}/browser/control")
 @router.post("/sessions/{session_id}/browser/control")
 async def post_browser_control(
     session_id: UUID,
@@ -939,9 +1116,17 @@ async def post_browser_control(
     if resolved is None:
         raise HTTPException(404, detail="No browser for session")
 
+    owner_user_id = (
+        body.owner_user_id
+        if request.url.path.startswith("/v1/api/")
+        else (str(tenant.user_id) if tenant.user_id is not None else None)
+    )
+    if owner_user_id is None:
+        raise HTTPException(403, detail="browser control requires a user identity")
+
     if body.action == "acquire":
         from surogates.browser.control import AcquireOutcome
-        outcome, entry = await control.acquire(str(session_id), str(tenant.user_id))
+        outcome, entry = await control.acquire(str(session_id), owner_user_id)
         if outcome == AcquireOutcome.GRANTED:
             await emit(str(session_id), "browser.control_granted", {
                 "session_id": str(session_id),
@@ -960,35 +1145,36 @@ async def post_browser_control(
         )
 
     # release
-    released = await control.release(str(session_id), str(tenant.user_id))
+    released = await control.release(str(session_id), owner_user_id)
     if not released:
         raise HTTPException(403, detail="not the holder")
     await emit(str(session_id), "browser.control_returned", {
         "session_id": str(session_id),
         "released_by": str(tenant.user_id),
     })
-    wake(str(session_id))
+    await wake(str(session_id))
     return {"outcome": "released"}
 ```
 
-- [ ] **Step 4: Wire `session_event_emitter` and `session_wake` in `app.py`**
+- [ ] **Step 4: Use async `session_event_emitter` and `session_wake` callables**
 
-In `create_app`, accept two more callables:
+The route reads both callables from `app.state`; Task 10 wires the real
+versions during lifespan startup. Tests assign fakes directly:
 
 ```python
-def create_app(
-    *, ...
-    session_event_emitter=None,
-    session_wake=None,
-):
-    app = ...
-    app.state.session_event_emitter = session_event_emitter
-    app.state.session_wake = session_wake
+async def fake_emit(session_id: str, event_type: str, data: dict) -> None:
+    events.append((session_id, event_type, data))
+
+async def fake_wake(session_id: str) -> None:
+    wakes.append(session_id)
+
+app.state.session_event_emitter = fake_emit
+app.state.session_wake = fake_wake
 ```
 
-The real wiring happens in the API service entry point (`surogates/api/__init__.py`
-or the launcher module): emitter writes to the session store, wake calls
-`enqueue_session(redis_client, ...)` from `surogates.config`.
+The real wiring happens in `surogates/api/app.py` lifespan: emitter writes to
+`SessionStore.emit_event`; wake calls `enqueue_session(redis, settings.agent_id,
+session_id)`.
 
 - [ ] **Step 5: Run** — all PASS.
 
@@ -1002,16 +1188,20 @@ git commit -m "feat(browser): add POST /sessions/{id}/browser/control with confl
 
 ---
 
-## Task 6: Auth middleware accepts `?token=<jwt>` for live-view paths
+## Task 6: Auth accepts `?token=<jwt>` only for SSE and browser live-view paths
 
 **Files:**
-- Modify: `surogates/api/middleware/auth.py`
+- Modify: `surogates/tenant/auth/middleware.py`
 - Test: extension to `tests/test_browser_route.py` or a focused unit test
 
 Iframes can't easily send `Authorization` headers. To allow the SPA to
 embed `<iframe src="/v1/sessions/{id}/browser/live/vnc.html?token=...">`,
-the auth middleware accepts a query-param JWT — but only for paths under
-`/v1/sessions/{id}/browser/live/`. Other paths must use the header.
+the auth layer accepts a query-param JWT for live-view HTTP assets and the
+live-view WebSocket. Keep the existing SSE exception for
+`/v1/sessions/{id}/events` and `/v1/api/sessions/{id}/events`, but reject
+query-param JWTs everywhere else. The wrapper module
+`surogates/api/middleware/auth.py` only re-exports this implementation; do
+not edit the wrapper.
 
 - [ ] **Step 1: Write the failing test** — append:
 
@@ -1020,57 +1210,96 @@ class TestQueryParamAuth:
     async def test_live_view_accepts_token_query_param(
         self, app_factory, jwt_for_session
     ) -> None:
-        # Set up resolver so /live/* would otherwise reach the proxy.
-        # For this test we just need the auth check to pass — the proxy
-        # itself is verified in Tasks 7-8. Mock the proxy handler to
-        # return a sentinel response.
-        ...
+        build, resolver, control = app_factory
+        sid = str(uuid4())
+        _seed_browser(resolver, sid, org_id="org-1", user_id="user-1")
+        token = jwt_for_session(org_id="org-1", user_id="user-1")
+        app = build()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.get(
+                f"/v1/sessions/{sid}/browser/live/vnc.html",
+                params={"token": token},
+            )
+        # The proxy itself may 502 until Task 7; auth must not be the failure.
+        assert r.status_code != 401
 
     async def test_other_paths_reject_token_query_param(
         self, app_factory, jwt_for_session
     ) -> None:
-        # GET /v1/sessions/{id}/browser/state?token=... must reject
-        # (only header auth is accepted on this path).
-        ...
+        build, resolver, control = app_factory
+        sid = str(uuid4())
+        _seed_browser(resolver, sid, org_id="org-1", user_id="user-1")
+        token = jwt_for_session(org_id="org-1", user_id="user-1")
+        app = build()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.get(
+                f"/v1/sessions/{sid}/browser/state",
+                params={"token": token},
+            )
+        assert r.status_code == 401
+
+    async def test_sse_still_accepts_token_query_param(
+        self, app, jwt_for_session
+    ) -> None:
+        token = jwt_for_session(org_id="org-1", user_id="user-1")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.get(
+                "/v1/sessions/00000000-0000-0000-0000-000000000001/events",
+                params={"token": token},
+            )
+        assert r.status_code != 401
 ```
 
 - [ ] **Step 2: Run** — 2 FAIL.
 
-- [ ] **Step 3: Modify the middleware**
+- [ ] **Step 3: Modify the real auth implementation**
 
-In `surogates/api/middleware/auth.py`, add a path check before the existing
-header logic:
+In `surogates/tenant/auth/middleware.py`, add path helpers near the prefix
+constants:
 
 ```python
-LIVE_VIEW_PREFIX_RE = re.compile(
-    r"^/v1/sessions/[0-9a-f-]{36}/browser/live/",
+_QUERY_TOKEN_PATH_RE = re.compile(
+    r"^/v1/(api/)?sessions/[0-9a-f-]{36}/(?:events|browser/live/.*)$",
 )
 
-async def __call__(self, scope, receive, send):
-    if scope["type"] not in {"http", "websocket"}:
-        # ... pass-through
-        return await self.app(scope, receive, send)
+def _allows_query_token(path: str) -> bool:
+    return bool(_QUERY_TOKEN_PATH_RE.match(path))
 
-    # Existing header lookup ...
+def _extract_header_or_allowed_query_token(request: Request) -> str:
     auth_header = headers.get("authorization")
     token = _extract_bearer(auth_header)
-    if token is None:
-        # Live-view paths only: accept ?token=<jwt>.
-        path = scope.get("path", "")
-        if LIVE_VIEW_PREFIX_RE.match(path):
-            qs = parse_qs(scope.get("query_string", b"").decode())
-            if qs.get("token"):
-                token = qs["token"][0]
-    if token is None:
-        # ... existing 401 path
+    if token:
+        return token
+    if _allows_query_token(request.url.path):
+        return request.query_params.get("token", "")
+    return ""
 ```
 
-- [ ] **Step 4: Run** — both tests PASS.
+Use `_allows_query_token` in both `get_current_tenant` and the HTTP
+middleware branch. Preserve service-account token checks exactly as they are.
+
+Then add a WebSocket-specific helper in the same module for Task 8:
+
+```python
+async def authenticate_websocket_tenant(
+    app: FastAPI,
+    *,
+    path: str,
+    token: str | None,
+) -> TenantContext:
+    if not token or not _allows_query_token(path):
+        raise HTTPException(status_code=401, detail="Missing authentication credentials.")
+    # Reuse the JWT/service-account validation branches from get_current_tenant
+    # by factoring the common token-to-context code into a private helper.
+    return await _tenant_context_from_token(app.state.session_factory, token, app.state.settings.tenant_assets_root, path)
+```
+
+- [ ] **Step 4: Run** — query-token tests PASS and existing SSE tests still PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add surogates/api/middleware/auth.py tests/test_browser_route.py
+git add surogates/tenant/auth/middleware.py tests/test_browser_route.py
 git commit -m "feat(browser): accept ?token=<jwt> for live-view paths only"
 ```
 
@@ -1095,20 +1324,48 @@ class TestLiveViewHTTPProxy:
     async def test_vnc_html_is_proxied(
         self, app_factory, jwt_for_session, monkeypatch
     ) -> None:
-        # Stub httpx_proxy to return a fixed HTML body when the upstream
-        # request is /vnc.html. Assert the SPA receives the same body.
-        ...
+        build, resolver, control = app_factory
+        sid = str(uuid4())
+        _seed_browser(resolver, sid, org_id="org-1", user_id="user-1")
+        async def fake_request(self, method, url, **kwargs):
+            return httpx.Response(200, text="<html>vnc</html>", headers={"content-type": "text/html"})
+        monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+        app = build()
+        token = jwt_for_session(org_id="org-1", user_id="user-1")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.get(f"/v1/sessions/{sid}/browser/live/vnc.html", params={"token": token})
+        assert r.status_code == 200
+        assert r.text == "<html>vnc</html>"
 
     async def test_unknown_session_returns_404(self, app_factory, jwt_for_session) -> None:
-        # No registry entry → 404 even before reaching upstream.
-        ...
+        build, resolver, control = app_factory
+        app = build()
+        token = jwt_for_session(org_id="org-1", user_id="user-1")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.get(
+                "/v1/sessions/00000000-0000-0000-0000-000000000001/browser/live/vnc.html",
+                params={"token": token},
+            )
+        assert r.status_code == 404
 
     async def test_static_assets_use_token_query_param(
         self, app_factory, jwt_for_session
     ) -> None:
-        # /v1/sessions/{id}/browser/live/app.js?token=... reaches the proxy.
-        # Auth was verified in Task 6.
-        ...
+        build, resolver, control = app_factory
+        sid = str(uuid4())
+        _seed_browser(resolver, sid, org_id="org-1", user_id="user-1")
+        seen: list[str] = []
+        async def fake_request(self, method, url, **kwargs):
+            seen.append(str(url))
+            assert "token" not in kwargs.get("params", {})
+            return httpx.Response(200, text="console.log('vnc')", headers={"content-type": "application/javascript"})
+        monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+        app = build()
+        token = jwt_for_session(org_id="org-1", user_id="user-1")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.get(f"/v1/sessions/{sid}/browser/live/app.js", params={"token": token})
+        assert r.status_code == 200
+        assert seen and seen[0].endswith("/app.js")
 ```
 
 - [ ] **Step 2: Run** — 3 FAIL.
@@ -1120,6 +1377,10 @@ import httpx as _httpx
 from fastapi import Response
 
 
+@router.api_route(
+    "/api/sessions/{session_id}/browser/live/{path:path}",
+    methods=["GET", "POST", "OPTIONS"],
+)
 @router.api_route(
     "/sessions/{session_id}/browser/live/{path:path}",
     methods=["GET", "POST", "OPTIONS"],
@@ -1156,7 +1417,10 @@ async def proxy_live_view(
         r = await client.request(
             request.method, upstream_url,
             headers=fwd_headers,
-            params=dict(request.query_params),
+            params={
+                k: v for k, v in request.query_params.items()
+                if k != "token"
+            },
             content=body,
         )
 
@@ -1194,7 +1458,8 @@ This is the trickiest backend task. The proxy:
 
 1. Accepts a WS upgrade at `/v1/sessions/{id}/browser/live/websockify`
    (NoVNC's standard WS endpoint).
-2. Authenticates via header or query-param JWT (Task 6).
+2. Authenticates via query-param JWT using the WebSocket helper from Task 6;
+   Starlette's HTTP middleware does not run for WebSocket scopes.
 3. Resolves the browser pod via `BrowserResolver`.
 4. Opens an upstream WS to `{live_view_url}/websockify`.
 5. Pumps frames bidirectionally:
@@ -1270,9 +1535,11 @@ def proxy_app(upstream_server, monkeypatch):
     server, upstream_url = upstream_server
 
     app = FastAPI()
-    # ... wire the route, set app.state.browser_resolver to a stub
-    #     whose resolve() returns a ResolvedBrowser pointing at upstream_url,
-    #     set app.state.browser_control to a stub that lets tests flip the flag.
+    app.include_router(browser_routes.router, prefix="/v1")
+    app.state.browser_resolver = _Resolver(upstream_url)
+    app.state.browser_control = _Control()
+    app.state.session_factory = _session_factory_with_user()
+    app.state.settings = SimpleNamespace(tenant_assets_root="/tmp/surogates-test")
     return app
 
 
@@ -1372,7 +1639,8 @@ async def _serve_app(app) -> str:
 
     Use the standard uvicorn-in-asyncio pattern from
     tests/integration/conftest.py if a helper already exists; otherwise
-    inline a minimal version here.
+    implement this as an async fixture that yields the base URL and shuts
+    the server down in the fixture finalizer.
     """
     import uvicorn
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
@@ -1381,9 +1649,6 @@ async def _serve_app(app) -> str:
         await asyncio.sleep(0.01)
     sock = server.servers[0].sockets[0]
     base = f"http://{sock.getsockname()[0]}:{sock.getsockname()[1]}"
-    # Caller owns shutdown via fixture finalizer; for brevity this helper
-    # leaks the server until process exit. In a real conftest, hand back a
-    # cleanup callable.
     return base
 
 
@@ -1406,16 +1671,22 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 import websockets as _websockets
 from surogates.browser.rfb import is_input_frame
+from surogates.tenant.auth.middleware import authenticate_websocket_tenant
 
 
+@router.websocket("/api/sessions/{session_id}/browser/live/websockify")
 @router.websocket("/sessions/{session_id}/browser/live/websockify")
 async def proxy_live_view_ws(
     websocket: WebSocket,
     session_id: UUID,
 ):
-    # Auth runs in middleware; the tenant is already on websocket.scope.
-    tenant = websocket.scope.get("tenant")
-    if tenant is None:
+    try:
+        tenant = await authenticate_websocket_tenant(
+            websocket.app,
+            path=websocket.url.path,
+            token=websocket.query_params.get("token"),
+        )
+    except HTTPException:
         await websocket.close(code=4401, reason="unauthenticated")
         return
 
@@ -1631,22 +1902,23 @@ git commit -m "feat(browser): inject one-time pause notice when user holds contr
 ## Task 10: API server bootstrap — instantiate `BrowserResolver`, `BrowserControlStore`, emitter, wake
 
 **Files:**
-- Modify: `surogates/api/__init__.py` (or the module that creates the app)
+- Modify: `surogates/api/app.py`
 
 The API server entry point must build the dependencies and pass them to
-`create_app`. Mirrors the worker bootstrap pattern from Phase A Task 19 /
-Phase B Task 9.
+route handlers through `app.state`. The current API factory is
+`surogates/api/app.py:create_app`; `surogates/api/__init__.py` is not the
+dependency bootstrap point.
 
-- [ ] **Step 1: Locate the API entry point**
+- [ ] **Step 1: Verify the API bootstrap point**
 
 ```bash
-grep -n "create_app\|BrowserResolver\|BrowserControlStore" surogates/api/*.py
+grep -n "async def lifespan\\|def create_app\\|SessionStore" surogates/api/app.py
 ```
 
-The entry point file constructs Redis, the SessionStore, etc., and calls
-`create_app(...)`.
+Expected: `lifespan(app)` creates Redis, `SessionStore`, and other app-state
+dependencies.
 
-- [ ] **Step 2: Add the browser bootstrap**
+- [ ] **Step 2: Add the browser bootstrap inside `lifespan` after Redis and SessionStore**
 
 ```python
 from surogates.browser.control import BrowserControlStore
@@ -1665,6 +1937,7 @@ if settings.browser.backend == "kubernetes":
         image=settings.browser.image,
     )
 
+redis_client = app.state.redis
 browser_registry = BrowserRegistry(redis_client)
 browser_control = BrowserControlStore(redis_client)
 browser_resolver = BrowserResolver(registry=browser_registry, backend=backend)
@@ -1673,20 +1946,17 @@ browser_resolver = BrowserResolver(registry=browser_registry, backend=backend)
 async def emit_session_event(session_id: str, event_type: str, data: dict) -> None:
     from uuid import UUID
     from surogates.session.events import EventType
-    await session_store.emit_event(UUID(session_id), EventType(event_type), data)
+    await app.state.session_store.emit_event(UUID(session_id), EventType(event_type), data)
 
 
-def wake_session(session_id: str) -> None:
-    enqueue_session(redis_client, session_id, settings.agent_id)
+async def wake_session(session_id: str) -> None:
+    await enqueue_session(app.state.redis, settings.agent_id, session_id)
 
 
-app = create_app(
-    # ... existing kwargs ...
-    browser_resolver=browser_resolver,
-    browser_control=browser_control,
-    session_event_emitter=emit_session_event,
-    session_wake=wake_session,
-)
+app.state.browser_resolver = browser_resolver
+app.state.browser_control = browser_control
+app.state.session_event_emitter = emit_session_event
+app.state.session_wake = wake_session
 ```
 
 - [ ] **Step 3: Verify the API server starts cleanly**
@@ -1704,7 +1974,7 @@ Expected: `{"status":"ok"}` from the health check.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add surogates/api/__init__.py
+git add surogates/api/app.py
 git commit -m "feat(browser): wire BrowserResolver/Control/wake into API bootstrap"
 ```
 
@@ -1889,7 +2159,8 @@ function browserMarker(content: string, warning = false): AgentChatMessage {
     role: "system",
     systemKind: warning ? "browser_marker_warning" : "browser_marker",
     content,
-    createdAt: new Date().toISOString(),
+    createdAt: new Date(),
+    status: "complete",
   };
 }
 
@@ -1897,7 +2168,7 @@ case "browser.provisioned":
   return {
     ...state,
     browser: { status: "live", controlOwner: null },
-    messages: [...state.messages, browserMarker("⚡ browser ready")],
+    messages: [...state.messages, browserMarker("browser ready")],
   };
 case "browser.control_granted":
   return {
@@ -1907,7 +2178,7 @@ case "browser.control_granted":
       status: "user-control",
       controlOwner: (event.data.owner_user_id as string | undefined) ?? null,
     },
-    messages: [...state.messages, browserMarker("⚠ user took control", true)],
+    messages: [...state.messages, browserMarker("user took control", true)],
   };
 case "browser.control_returned":
   return {
@@ -1917,13 +2188,13 @@ case "browser.control_returned":
       status: "live",
       controlOwner: null,
     },
-    messages: [...state.messages, browserMarker("⚡ control returned to agent")],
+    messages: [...state.messages, browserMarker("control returned to agent")],
   };
 case "browser.destroyed":
   return {
     ...state,
     browser: null,
-    messages: [...state.messages, browserMarker("⚡ browser closed")],
+    messages: [...state.messages, browserMarker("browser closed")],
   };
 ```
 
@@ -1931,16 +2202,16 @@ Add the `systemKind` values to `AgentChatSystemKind` in `types.ts`:
 
 ```typescript
 export type AgentChatSystemKind =
-  | "info"
-  // ... existing kinds ...
+  | "skill_invoked"
+  | "artifact"
+  | "error"
   | "browser_marker"
   | "browser_marker_warning";
 ```
 
 `ChatThread` already renders system messages inline; `browser_marker`
-gets the standard subtle one-line treatment, `browser_marker_warning`
-gets the warning style (amber text + ⚠ icon — pattern already exists
-for other system messages of warning kind).
+gets the standard subtle one-line treatment, and
+`browser_marker_warning` gets the warning style.
 
 - [ ] **Step 6: Run** — all 6 tests PASS (4 from earlier + 2 new).
 
@@ -1962,13 +2233,16 @@ git commit -m "feat(sdk): fold browser.* events into reducer + inline markers"
 **Files:**
 - Modify: `sdk/agent-chat-react/src/types.ts`
 - Modify: `sdk/agent-chat-react/src/adapter-context.tsx`
+- Modify: `/work/surogate-ops/surogate_ops/server/routes/sessions.py`
 - Modify: surogate-ops adapter — `/work/surogate-ops/frontend/src/features/work/work-agent-chat-adapter.ts`
 
 The SDK doesn't speak HTTP directly — it goes through the adapter the host
 app provides. Phase C adds three browser methods to the adapter contract:
 `getBrowserState`, `acquireBrowserControl`, `releaseBrowserControl`. The
 SDK also exposes a `liveViewUrl(sessionId, token)` helper for building
-the iframe `src`.
+the iframe `src`. In surogate-ops these methods go through the existing
+ops backend proxy (`/api/sessions/...`), not directly to the live agent
+API's `/v1/...` routes.
 
 - [ ] **Step 1: Extend `AgentChatAdapter` in `src/types.ts`:**
 
@@ -1990,46 +2264,119 @@ export interface AgentChatAdapter {
 }
 ```
 
-- [ ] **Step 2: Implement in the surogate-ops adapter**
+- [ ] **Step 2: Add surogate-ops backend proxy routes**
+
+In `/work/surogate-ops/surogate_ops/server/routes/sessions.py`, add
+browser state/control routes beside the existing workspace/artifact
+live-session proxy routes:
+
+```python
+@router.get("/{session_id}/browser/state")
+async def get_live_browser_state(
+    session_id: str,
+    request: Request,
+    scope: SessionScope = Depends(resolve_session_scope),
+    ops_session: AsyncSession = Depends(get_session),
+):
+    client = await _build_live_agent_client(
+        scope.agent_id,
+        request,
+        ops_session,
+        **_scope_service_account_kwargs(scope),
+    )
+    return await _forward_json(
+        client,
+        "GET",
+        f"{_LIVE_API_PREFIX}/{session_id}/browser/state",
+    )
+
+@router.post("/{session_id}/browser/control")
+async def post_live_browser_control(
+    session_id: str,
+    body: dict[str, Any],
+    request: Request,
+    scope: SessionScope = Depends(resolve_session_scope),
+    ops_session: AsyncSession = Depends(get_session),
+    subject: str = Depends(get_current_subject),
+):
+    client = await _build_live_agent_client(
+        scope.agent_id,
+        request,
+        ops_session,
+        **_scope_service_account_kwargs(scope),
+    )
+    return await _forward_json(
+        client,
+        "POST",
+        f"{_LIVE_API_PREFIX}/{session_id}/browser/control",
+        json_body={**body, "owner_user_id": subject},
+    )
+```
+
+Also add HTTP and WebSocket proxy routes for
+`/{session_id}/browser/live/{path:path}` that forward to
+`f"{_LIVE_API_PREFIX}/{session_id}/browser/live/{path}"` using the
+service-account client. Strip the ops-side `token` query parameter before
+forwarding; the upstream live API is authenticated by the service-account
+client.
+
+- [ ] **Step 3: Implement in the surogate-ops adapter**
 
 `work-agent-chat-adapter.ts`:
 
 ```typescript
+import { authFetch } from "@/api/auth";
+import { getAuthToken } from "@/features/auth";
+
 async getBrowserState(sessionId: string) {
-  const r = await api.get(`/v1/sessions/${sessionId}/browser/state`);
+  const r = await authFetch(scopedSessionUrl(sessionId, "/browser/state", agentId));
   if (r.status === 404) return null;
+  if (!r.ok) throw new Error("Failed to fetch browser state");
+  const data = await r.json();
   return {
-    status: r.data.status,
-    controlOwner: r.data.control_owner,
-    liveViewPath: r.data.live_view_path,
+    status: data.status,
+    controlOwner: data.control_owner,
+    liveViewPath: data.live_view_path,
   };
 },
 
 async acquireBrowserControl(sessionId: string) {
-  const r = await api.post(
-    `/v1/sessions/${sessionId}/browser/control`,
-    { action: "acquire" },
+  const r = await request<{ outcome: string; owner_user_id: string }>(
+    scopedSessionUrl(sessionId, "/browser/control", agentId),
+    "Failed to acquire browser control",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "acquire" }),
+    },
   );
   return {
-    outcome: r.data.outcome as "granted" | "refreshed" | "conflict",
-    ownerUserId: r.data.owner_user_id,
+    outcome: r.outcome as "granted" | "refreshed" | "conflict",
+    ownerUserId: r.owner_user_id,
   };
 },
 
 async releaseBrowserControl(sessionId: string) {
-  await api.post(
-    `/v1/sessions/${sessionId}/browser/control`,
-    { action: "release" },
+  await request<unknown>(
+    scopedSessionUrl(sessionId, "/browser/control", agentId),
+    "Failed to release browser control",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "release" }),
+    },
   );
 },
 
 browserLiveViewUrl(sessionId: string) {
-  const token = getAccessToken(); // existing helper
-  return `${API_BASE}/v1/sessions/${sessionId}/browser/live/vnc.html?token=${encodeURIComponent(token)}`;
+  const token = getAuthToken();
+  return scopedSessionUrl(sessionId, "/browser/live/vnc.html", agentId, {
+    token: token ?? "",
+  });
 },
 ```
 
-- [ ] **Step 3: Add a default no-op for SDK consumers without a browser**
+- [ ] **Step 4: Add a default no-op for SDK consumers without a browser**
 
 Provide a default implementation in the SDK fallback adapter (the one used
 by the SDK's own tests + storybook). The simplest pattern is:
@@ -2043,7 +2390,7 @@ const NO_BROWSER: Pick<AgentChatAdapter, "getBrowserState" | "acquireBrowserCont
 };
 ```
 
-- [ ] **Step 4: Verify SDK tests still pass**
+- [ ] **Step 5: Verify SDK tests still pass**
 
 ```bash
 cd /work/surogates/sdk/agent-chat-react
@@ -2052,7 +2399,7 @@ pnpm test
 
 Expected: green; no test depends on the new methods yet.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 cd /work/surogates
@@ -2061,8 +2408,9 @@ git add sdk/agent-chat-react/src/types.ts \
 git commit -m "feat(sdk): add browser state/control methods to AgentChatAdapter"
 
 cd /work/surogate-ops
-git add frontend/src/features/work/work-agent-chat-adapter.ts
-git commit -m "feat(work): implement browser adapter methods"
+git add surogate_ops/server/routes/sessions.py \
+        frontend/src/features/work/work-agent-chat-adapter.ts
+git commit -m "feat(work): proxy browser state/control/live view"
 ```
 
 ---
@@ -2076,9 +2424,10 @@ git commit -m "feat(work): implement browser adapter methods"
 - Create: `sdk/agent-chat-react/src/components/browser/browser-status-dot.tsx`
 - Test: `sdk/agent-chat-react/tests/browser-pane.test.tsx`
 
-> Visual brief: pane has a header row (`⚡ Browser  ●  https://app.com/login`),
+> Visual brief: pane has a header row with a lucide `Zap` icon, `Browser`,
+> a status dot, and the current URL when available,
 > the iframe filling the body, and a controls bar at the bottom
-> (`[ Take control ]  ⏺ rec  ⋯ menu`). Match the existing minimal/terminal
+> (`Take control`, recording indicator, overflow menu). Match the existing minimal/terminal
 > aesthetic. Refer to spec §8.2 for the state-to-visual mapping.
 
 - [ ] **Step 1: Write the failing test** (component happy paths)
@@ -2213,6 +2562,7 @@ export function BrowserControlBar({ sessionId, hasControl, adapter }: Props) {
 
 ```typescript
 import { useMemo } from "react";
+import { Zap } from "lucide-react";
 import { BrowserControlBar } from "./browser-control-bar";
 import { BrowserLiveView } from "./browser-live-view";
 import { BrowserStatusDot } from "./browser-status-dot";
@@ -2233,7 +2583,8 @@ export function BrowserPane({ sessionId, state, adapter }: Props) {
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
       <header className="flex items-center gap-2 border-b border-line bg-card px-3 py-2 text-xs">
-        <span>⚡ Browser</span>
+        <Zap className="h-3 w-3" aria-hidden="true" />
+        <span>Browser</span>
         <BrowserStatusDot status={state.status} />
         {state.controlOwner && (
           <span className="text-amber-500">
@@ -2296,12 +2647,15 @@ it("renders only WorkspacePanel when no browser is provisioned", async () => {
 });
 
 it("stacks BrowserPane above WorkspacePanel when browser is live", async () => {
-  const adapter = makeMockAdapter({
-    browserState: { status: "live", controlOwner: null },
-  });
-  // The reducer is fed the SSE stream from the runtime; for the unit
-  // test we drive the reducer directly via a mock SSE.
-  // ... (drive a browser.provisioned event into the runtime).
+  const adapter = makeMockAdapter();
+  adapter.openEventStream = () => mockEventStream([
+    {
+      type: "browser.provisioned",
+      eventId: 1,
+      data: { session_id: "s", browser_id: "b" },
+    },
+  ]);
+  render(<AgentChat adapter={adapter} sessionId="s" />);
   await waitFor(() => {
     expect(screen.getByTestId("browser-pane")).toBeInTheDocument();
     expect(screen.getByTestId("workspace-panel")).toBeInTheDocument();
@@ -2326,11 +2680,30 @@ import { BrowserPane } from "./components/browser/browser-pane";
 const browserState = runtime.state.browser;
 
 return (
-  <AgentChatAdapterProvider value={...}>
+  <AgentChatAdapterProvider
+    value={{
+      adapter,
+      sessionId,
+      onFileSelect: handleFileSelect,
+    }}
+  >
     <TooltipProvider>
-      <section className="flex flex-1 min-h-0 overflow-hidden bg-background ...">
+      <section className="flex flex-1 min-h-0 overflow-hidden bg-background text-sm text-foreground">
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <ChatThread {...} />
+          <ChatThread
+            sessionId={sessionId}
+            messages={runtime.messages}
+            isRunning={runtime.isRunning}
+            isLoadingHistory={runtime.isLoadingHistory}
+            onSend={(content, images) => void runtime.send(content, images)}
+            onStop={() => void runtime.stop()}
+            onRetry={runtime.retry}
+            onFileSelect={handleFileSelect}
+            disabled={effectiveDisabled}
+            disabledReason={disabledReason}
+            tokenUsage={runtime.tokenUsage}
+            retryIndicator={runtime.retryIndicator}
+          />
         </div>
         <div data-testid="right-stack" className="flex flex-col">
           {browserState !== null && (
@@ -2343,7 +2716,16 @@ return (
             </div>
           )}
           <div data-testid="workspace-panel" className="flex-1 min-h-0">
-            <WorkspacePanel adapter={adapter} sessionId={sessionId} ... />
+            <WorkspacePanel
+              adapter={adapter}
+              sessionId={sessionId}
+              selectedPath={workspacePath}
+              onSelectedPathChange={setWorkspacePath}
+              collapsed={workspaceCollapsed}
+              onCollapsedChange={setWorkspaceCollapsed}
+              refreshSignal={runtime.workspaceRefreshKey}
+              disabled={effectiveDisabled}
+            />
           </div>
         </div>
       </section>
@@ -2389,9 +2771,9 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { BrowserActivityGroup } from "../src/components/browser/browser-activity-group";
 
 const calls = [
-  { id: "1", toolName: "browser_navigate", arguments: { url: "https://app.com" }, result: { url: "https://app.com" } },
-  { id: "2", toolName: "browser_click", arguments: { ref: "@e3" }, result: { clicked: true } },
-  { id: "3", toolName: "browser_type", arguments: { ref: "@e4", text: "x" }, result: { typed: true } },
+  { id: "1", toolName: "browser_navigate", args: "{\"url\":\"https://app.com\"}", result: "{\"url\":\"https://app.com\"}", status: "complete" },
+  { id: "2", toolName: "browser_click", args: "{\"ref\":\"@e3\"}", result: "{\"clicked\":true}", status: "complete" },
+  { id: "3", toolName: "browser_type", args: "{\"ref\":\"@e4\",\"text\":\"x\"}", result: "{\"typed\":true}", status: "complete" },
 ];
 
 describe("BrowserActivityGroup", () => {
@@ -2416,7 +2798,7 @@ describe("BrowserActivityGroup", () => {
   it("flags errors with a marker", () => {
     const withError = [
       ...calls,
-      { id: "4", toolName: "browser_click", arguments: {}, result: { error: "paused_by_user" } },
+      { id: "4", toolName: "browser_click", args: "{}", result: "{\"error\":\"paused_by_user\"}", status: "error" },
     ];
     render(<BrowserActivityGroup calls={withError} />);
     fireEvent.click(screen.getByRole("button", { name: /4 actions/ }));
@@ -2431,18 +2813,28 @@ describe("BrowserActivityGroup", () => {
 
 ```typescript
 import { useState } from "react";
-import { ChevronDown, ChevronRight, AlertCircle } from "lucide-react";
+import { ChevronDown, ChevronRight, AlertCircle, Zap } from "lucide-react";
 import type { AgentChatToolCallInfo } from "../../types";
 
 interface Props { calls: AgentChatToolCallInfo[] }
 
 function summarise(call: AgentChatToolCallInfo): string {
   const verb = call.toolName.replace(/^browser_/, "");
-  const args = call.arguments ?? {};
+  const args = parseJson(call.args);
   if ("ref" in args) return `${verb} ${args.ref}`;
   if ("url" in args) return `${verb} ${args.url}`;
   if ("text" in args) return `${verb} "${String(args.text).slice(0, 24)}"`;
   return verb;
+}
+
+function parseJson(raw?: string): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 export function BrowserActivityGroup({ calls }: Props) {
@@ -2457,7 +2849,8 @@ export function BrowserActivityGroup({ calls }: Props) {
         className="flex w-full items-center gap-2 px-3 py-2"
       >
         {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-        <span>⚡ browser</span>
+        <Zap className="h-3 w-3" aria-hidden="true" />
+        <span>browser</span>
         <span className="text-muted-foreground">
           ({calls.length} actions — latest: {summarise(latest)})
         </span>
@@ -2465,7 +2858,7 @@ export function BrowserActivityGroup({ calls }: Props) {
       {open && (
         <ul className="border-t border-line">
           {calls.map((c) => {
-            const result = c.result as { error?: string } | undefined;
+            const result = parseJson(c.result);
             const err = result?.error;
             return (
               <li
@@ -2508,9 +2901,12 @@ function groupBrowserCalls(messages: AgentChatMessage[]): RenderUnit[] {
   let buffer: AgentChatToolCallInfo[] = [];
 
   for (const m of messages) {
-    if (m.role === "tool" && m.toolCalls?.every(isBrowserCall)) {
-      buffer.push(...m.toolCalls);
-      continue;
+    if (m.role === "assistant" && m.toolCalls?.length) {
+      const allBrowser = m.toolCalls.every(isBrowserCall);
+      if (allBrowser) {
+        buffer.push(...m.toolCalls);
+        continue;
+      }
     }
     if (buffer.length > 0) {
       out.push({ kind: "browser_group", calls: buffer });
@@ -2566,13 +2962,17 @@ Add to the api-server NetworkPolicy's `egress:` block:
 - to:
     - podSelector:
         matchLabels:
-          {{- include "surogates.componentSelector" (dict "root" . "component" "browser") | nindent 14 }}
+          app: surogates-browser
   ports:
     - protocol: TCP
-      port: 6080
+      port: 443
     - protocol: TCP
       port: 10001
 ```
+
+Use the literal `app: surogates-browser` selector because Phase B browser
+pods are labeled that way. The Service exposes NoVNC on port `443`
+targeting pod port `6080`, so egress should allow `443` and `10001`.
 
 - [ ] **Step 3: Render and verify**
 
@@ -2663,7 +3063,7 @@ git -C /work/surogate-ops commit -m "chore(frontend): bump @invergent/agent-chat
 
 Setup:
   kind create cluster --name surogates-test
-  helm install surogates ... --set browser.backend=kubernetes
+  helm install surogates ./helm/surogates --set browser.backend=kubernetes
   ./images/build.sh latest browser
   kind load docker-image ghcr.io/invergent-ai/surogates-agent-browser:latest \
       --name surogates-test
@@ -2690,9 +3090,38 @@ TOKEN = os.environ.get("BROWSER_E2E_TOKEN", "")
 
 @pytest.fixture()
 async def session_with_browser():
-    # Create a session, send a user message that triggers a browser_*
-    # tool call so the worker provisions a browser. Wait for browser.provisioned.
-    ...
+    if not TOKEN:
+        pytest.skip("BROWSER_E2E_TOKEN is required")
+    async with AsyncClient(base_url=API_BASE, timeout=30.0) as c:
+        created = await c.post(
+            "/v1/sessions",
+            json={"model": os.environ.get("BROWSER_E2E_MODEL", "gpt-4.1-mini")},
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        )
+        assert created.status_code in {200, 201}, created.text
+        session_id = created.json()["id"]
+        sent = await c.post(
+            f"/v1/sessions/{session_id}/messages",
+            json={"content": "Open https://example.com in the browser, then stop."},
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        )
+        assert sent.status_code in {200, 202}, sent.text
+
+        deadline = asyncio.get_event_loop().time() + 120
+        last_event = 0
+        while asyncio.get_event_loop().time() < deadline:
+            events = await c.get(
+                f"/v1/sessions/{session_id}/events/poll",
+                params={"after": last_event},
+                headers={"Authorization": f"Bearer {TOKEN}"},
+            )
+            assert events.status_code == 200, events.text
+            for event in events.json().get("events", []):
+                last_event = max(last_event, int(event["id"]))
+                if event["type"] == "browser.provisioned":
+                    return session_id
+            await asyncio.sleep(1.0)
+    raise AssertionError("browser.provisioned was not observed within 120s")
 
 
 async def test_state_endpoint_returns_live_after_provision(session_with_browser) -> None:
