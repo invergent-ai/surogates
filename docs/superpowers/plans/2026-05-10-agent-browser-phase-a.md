@@ -29,8 +29,8 @@
 - [x] Task 13: `BrowserPool` — completed
 - [x] Task 14: navigate/get_state/close tools — completed
 - [x] Task 15: click/type/press_key/scroll/drag/wait tools — completed
-- [ ] Task 16: screenshot tool — **in progress**
-- [ ] Task 17: router/runtime wiring — left to do
+- [x] Task 16: screenshot tool — completed
+- [ ] Task 17: router/runtime wiring — **in progress**
 - [ ] Task 18: dispatch kwargs threading — left to do
 - [ ] Task 19: worker bootstrap — left to do
 - [ ] Task 20: `AgentHarness` signature update — left to do

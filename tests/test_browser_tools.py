@@ -120,6 +120,34 @@ class FakeClickClient:
         pass
 
 
+class FakeScreenshotClient:
+    def __init__(self) -> None:
+        self.captured: list[dict[str, Any]] = []
+
+    async def screenshot(
+        self,
+        *,
+        region: dict[str, int] | None = None,
+        annotate: bool = False,
+    ) -> dict[str, Any]:
+        self.captured.append({"region": region, "annotate": annotate})
+        result: dict[str, Any] = {"png_bytes": b"\x89PNG\r\n\x1a\nimg"}
+        if annotate:
+            result["annotations"] = [
+                {"ref": "@e1", "label": 1, "role": "button", "name": "Go"},
+            ]
+        return result
+
+    async def close(self) -> None:
+        pass
+
+    async def __aenter__(self) -> "FakeScreenshotClient":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        pass
+
+
 @pytest.fixture()
 def tenant():
     return SimpleNamespace(
@@ -354,3 +382,38 @@ class TestScrollDragWait:
         )
         assert client.calls[0][0] == "wait"
         assert client.calls[0][1] == (30_000,)
+
+
+class TestScreenshotHandler:
+    async def test_annotate_returns_annotations(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_screenshot_handler
+
+        result = await _browser_screenshot_handler(
+            {"annotate": True},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FakeScreenshotClient(),
+        )
+        body = json.loads(result)
+        assert "base64" in body
+        assert body["mime_type"] == "image/png"
+        assert body["annotations"] == [
+            {"ref": "@e1", "label": 1, "role": "button", "name": "Go"},
+        ]
+
+    async def test_returns_base64_png(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_screenshot_handler
+
+        result = await _browser_screenshot_handler(
+            {},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FakeScreenshotClient(),
+        )
+        body = json.loads(result)
+        assert "base64" in body
+        assert body["mime_type"] == "image/png"

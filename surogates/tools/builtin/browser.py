@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from typing import Any, Callable
 from uuid import UUID
@@ -456,6 +457,75 @@ async def _browser_wait_handler(
     return json.dumps({"waited_ms": ms})
 
 
+SCREENSHOT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "annotate": {"type": "boolean", "default": False},
+        "region": {
+            "type": "object",
+            "properties": {
+                "x": {"type": "integer"},
+                "y": {"type": "integer"},
+                "width": {"type": "integer"},
+                "height": {"type": "integer"},
+            },
+            "required": ["x", "y", "width", "height"],
+            "additionalProperties": False,
+        },
+    },
+    "additionalProperties": False,
+}
+
+_MAX_BASE64_BYTES = 256 * 1024
+
+
+async def _browser_screenshot_handler(
+    arguments: dict[str, Any],
+    *,
+    tenant: Any = None,
+    session_id: UUID | str | None = None,
+    browser_pool: BrowserPool | None = None,
+    browser_control: BrowserControlStore | None = None,
+    _client_factory: Callable[..., Any] = _default_client_factory,
+    **_: Any,
+) -> str:
+    preflight = await _resolve_session_browser(
+        tenant=tenant,
+        session_id=session_id,
+        browser_pool=browser_pool,
+        browser_control=browser_control,
+    )
+    if isinstance(preflight, str):
+        return preflight
+
+    _browser_id, endpoint, snapshot_cache = preflight
+    client = _make_client(_client_factory, endpoint, snapshot_cache)
+    async with client:
+        result = await client.screenshot(
+            region=arguments.get("region"),
+            annotate=bool(arguments.get("annotate", False)),
+        )
+
+    png_bytes = result["png_bytes"]
+    if len(png_bytes) > _MAX_BASE64_BYTES:
+        return json.dumps(
+            {
+                "error": "screenshot_too_large_for_base64",
+                "bytes": len(png_bytes),
+                "guidance": "Capture a smaller region or retry without annotation.",
+            }
+        )
+
+    body: dict[str, Any] = {
+        "base64": base64.b64encode(png_bytes).decode(),
+        "mime_type": "image/png",
+        "bytes": len(png_bytes),
+    }
+    if "annotations" in result:
+        body["annotations"] = result["annotations"]
+    return json.dumps(body)
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(
         name="browser_navigate",
@@ -551,5 +621,18 @@ def register(registry: ToolRegistry) -> None:
             parameters=WAIT_SCHEMA,
         ),
         handler=_browser_wait_handler,
+        toolset="browser",
+    )
+    registry.register(
+        name="browser_screenshot",
+        schema=ToolSchema(
+            name="browser_screenshot",
+            description=(
+                "Capture a bounded base64 PNG screenshot. Use annotate=true "
+                "to overlay numbered labels for cached refs."
+            ),
+            parameters=SCREENSHOT_SCHEMA,
+        ),
+        handler=_browser_screenshot_handler,
         toolset="browser",
     )
