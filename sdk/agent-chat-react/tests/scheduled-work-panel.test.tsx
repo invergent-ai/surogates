@@ -153,6 +153,47 @@ describe("ScheduledWorkPanel", () => {
     ).toBeLessThan((container.textContent ?? "").indexOf("Dynamic loop"));
   });
 
+  it("collapses and expands scheduled work from the header", async () => {
+    const adapter = createAdapter([
+      scheduledWork({
+        id: "loop-1",
+        kind: "dynamic_loop",
+        name: "Bitcoin monitor",
+      }),
+    ]);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<ScheduledWorkPanel adapter={adapter} agentId="agent-1" />);
+      await Promise.resolve();
+    });
+
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-expanded="true"]',
+    );
+    expect(toggle).not.toBeNull();
+    expect(container.textContent).toContain("Bitcoin monitor");
+
+    await act(async () => {
+      toggle?.click();
+      await Promise.resolve();
+    });
+
+    expect(toggle?.getAttribute("aria-expanded")).toBe("false");
+    expect(container.textContent).toContain("Scheduled Work");
+    expect(container.textContent).not.toContain("Bitcoin monitor");
+
+    await act(async () => {
+      toggle?.click();
+      await Promise.resolve();
+    });
+
+    expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+    expect(container.textContent).toContain("Bitcoin monitor");
+  });
+
   it("opens the last run from the row when available", async () => {
     const opened: string[] = [];
     const adapter = createAdapter([

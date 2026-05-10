@@ -13,6 +13,8 @@ import {
 import { formatDistanceToNow } from "date-fns";
 import {
   CalendarClockIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
   Trash2Icon,
 } from "lucide-react";
 import { Badge } from "../ui/badge";
@@ -249,6 +251,7 @@ export function ScheduledWorkPanel({
   const [error, setError] = useState<string | null>(null);
   const [hasEverLoaded, setHasEverLoaded] = useState(false);
   const [actionScheduleId, setActionScheduleId] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState(false);
   const mounted = useRef(true);
   const requestId = useRef(0);
   const lastFingerprint = useRef("");
@@ -364,26 +367,38 @@ export function ScheduledWorkPanel({
   if (!hasEverLoaded) return null;
   if (!adapter.listScheduledWork) return null;
 
+  const showBody = hideHeader || !collapsed;
+
   return (
     <section className="min-w-0 border-t border-line">
       {!hideHeader && (
-        <div className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold uppercase tracking-wide">
+        <button
+          type="button"
+          className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-foreground transition-colors hover:bg-input"
+          onClick={() => setCollapsed((current) => !current)}
+          aria-expanded={!collapsed}
+        >
           <CalendarClockIcon className="size-3.5" />
-          <span>{title}</span>
+          <span className="truncate">{title}</span>
           {activeCount > 0 && (
             <Badge variant="default" className="ml-auto">
               {activeCount}
             </Badge>
           )}
-        </div>
+          {collapsed ? (
+            <ChevronRightIcon className="size-3.5 shrink-0 text-faint" />
+          ) : (
+            <ChevronDownIcon className="size-3.5 shrink-0 text-faint" />
+          )}
+        </button>
       )}
-      {error && (
+      {showBody && error && (
         <div className="px-3 py-2 text-xs text-destructive">{error}</div>
       )}
-      {!error && items.length === 0 && (
+      {showBody && !error && items.length === 0 && (
         <div className="px-3 py-2 text-xs text-faint">No scheduled work</div>
       )}
-      {!error && items.length > 0 && (
+      {showBody && !error && items.length > 0 && (
         <div className={cn("pb-2", hideHeader && "pt-1")}>
           {items.map((item) => (
             <ScheduledWorkRow
