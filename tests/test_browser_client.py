@@ -109,3 +109,114 @@ class TestNavigate:
         )
         await client.navigate("https://example.com")
         assert client._snapshot_cache == {}
+
+
+class TestGetState:
+    async def test_get_state_returns_tree_with_refs(self, client_with_transport) -> None:
+        client, handlers = client_with_transport
+        handlers.append(
+            (
+                "POST",
+                "/playwright/execute",
+                200,
+                {
+                    "success": True,
+                    "result": {
+                        "url": "https://example.com/",
+                        "title": "Example",
+                        "viewport": {"width": 1280, "height": 800},
+                        "nodes": [
+                            {
+                                "role": "link",
+                                "name": "Settings",
+                                "x": 1130,
+                                "y": 24,
+                                "width": 80,
+                                "height": 32,
+                            },
+                            {
+                                "role": "button",
+                                "name": "New project",
+                                "x": 200,
+                                "y": 80,
+                                "width": 120,
+                                "height": 36,
+                            },
+                        ],
+                    },
+                },
+            )
+        )
+        state = await client.get_state()
+        assert state["url"] == "https://example.com/"
+        assert state["viewport"] == {"width": 1280, "height": 800}
+        assert state["tree"][0]["ref"] == "@e1"
+        assert state["tree"][0]["role"] == "link"
+        assert state["tree"][0]["name"] == "Settings"
+        assert state["tree"][1]["ref"] == "@e2"
+
+    async def test_get_state_populates_snapshot_cache(self, client_with_transport) -> None:
+        client, handlers = client_with_transport
+        handlers.append(
+            (
+                "POST",
+                "/playwright/execute",
+                200,
+                {
+                    "success": True,
+                    "result": {
+                        "url": "u",
+                        "title": "t",
+                        "viewport": {"width": 100, "height": 100},
+                        "nodes": [
+                            {
+                                "role": "button",
+                                "name": "Go",
+                                "x": 10,
+                                "y": 20,
+                                "width": 50,
+                                "height": 30,
+                            }
+                        ],
+                    },
+                },
+            )
+        )
+        await client.get_state()
+        cached = client._snapshot_cache["@e1"]
+        assert cached["x"] == 10 + 50 // 2
+        assert cached["y"] == 20 + 30 // 2
+        assert cached["role"] == "button"
+        assert cached["name"] == "Go"
+
+    async def test_get_state_overwrites_old_cache(self, client_with_transport) -> None:
+        client, handlers = client_with_transport
+        client._snapshot_cache["@e9"] = {"x": 0, "y": 0, "role": "stale", "name": "stale"}
+        handlers.append(
+            (
+                "POST",
+                "/playwright/execute",
+                200,
+                {
+                    "success": True,
+                    "result": {
+                        "url": "u",
+                        "title": "t",
+                        "viewport": {"width": 1, "height": 1},
+                        "nodes": [
+                            {
+                                "role": "button",
+                                "name": "fresh",
+                                "x": 1,
+                                "y": 1,
+                                "width": 0,
+                                "height": 0,
+                            }
+                        ],
+                    },
+                },
+            )
+        )
+        await client.get_state()
+        assert "@e9" not in client._snapshot_cache
+        assert "@e1" in client._snapshot_cache
