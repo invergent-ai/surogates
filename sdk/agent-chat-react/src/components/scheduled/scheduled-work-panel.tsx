@@ -1,11 +1,18 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type KeyboardEvent,
+  type MouseEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { formatDistanceToNow } from "date-fns";
 import {
   CalendarClockIcon,
-  ExternalLinkIcon,
   Trash2Icon,
 } from "lucide-react";
 import { Badge } from "../ui/badge";
@@ -122,6 +129,7 @@ function ScheduledWorkRow({
   const title = scheduleTitle(item);
   const statusText = item.status === "active" ? null : item.status;
   const showRunNow = canRunNow && isActive && canRunScheduleNow(item);
+  const lastSessionId = item.lastSessionId ?? null;
   const meta = [
     scheduleDisplay(item),
     formatRelative(item.nextRunAt, "Next"),
@@ -129,9 +137,32 @@ function ScheduledWorkRow({
     formatRuns(item.runCount),
     item.expiresAt ? formatRelative(item.expiresAt, "Expires") : null,
   ].filter(Boolean);
+  const openLastRun = () => {
+    if (lastSessionId) onOpenLastRun(lastSessionId);
+  };
+  const handleRowKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (!lastSessionId) return;
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    openLastRun();
+  };
+  const stopActionClick = (e: MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
+  };
 
   return (
-    <div className="group flex min-w-0 items-start gap-2 border-l-2 border-l-transparent px-3 py-2 text-sm transition-colors hover:border-l-primary hover:bg-input">
+    <div
+      className={cn(
+        "group flex min-w-0 items-start gap-2 border-l-2 border-l-transparent px-3 py-2 text-sm transition-colors hover:border-l-primary hover:bg-input",
+        lastSessionId && "cursor-pointer",
+      )}
+      onClick={openLastRun}
+      onKeyDown={handleRowKeyDown}
+      role={lastSessionId ? "button" : undefined}
+      tabIndex={lastSessionId ? 0 : undefined}
+      aria-label={lastSessionId ? `Open last run for ${title}` : undefined}
+      title={lastSessionId ? "Open last run" : undefined}
+    >
       <div className="mt-0.5 flex size-5 shrink-0 items-center justify-center text-faint">
         <CalendarClockIcon className="size-3.5" />
       </div>
@@ -167,22 +198,14 @@ function ScheduledWorkRow({
         )}
       </div>
       <div className="flex shrink-0 items-center gap-1">
-        {item.lastSessionId && (
-          <button
-            type="button"
-            className="rounded p-1 text-faint opacity-70 transition-all hover:bg-line hover:text-foreground group-hover:opacity-100"
-            onClick={() => onOpenLastRun(item.lastSessionId as string)}
-            aria-label="Open last run"
-            title="Open last run"
-          >
-            <ExternalLinkIcon className="size-3.5" />
-          </button>
-        )}
         {showRunNow && (
           <button
             type="button"
             className="rounded p-1 text-faint opacity-70 transition-all hover:bg-line hover:text-foreground disabled:pointer-events-none disabled:opacity-40 group-hover:opacity-100"
-            onClick={() => onRunNow(item.id)}
+            onClick={(e) => {
+              stopActionClick(e);
+              onRunNow(item.id);
+            }}
             aria-label="Run schedule now"
             title="Run schedule now"
             disabled={disabled}
@@ -194,7 +217,10 @@ function ScheduledWorkRow({
           <button
             type="button"
             className="rounded p-1 text-faint opacity-70 transition-all hover:bg-destructive/10 hover:text-destructive disabled:pointer-events-none disabled:opacity-40 group-hover:opacity-100"
-            onClick={() => onCancel(item.id)}
+            onClick={(e) => {
+              stopActionClick(e);
+              onCancel(item.id);
+            }}
             aria-label="Cancel schedule"
             title="Cancel schedule"
             disabled={disabled}

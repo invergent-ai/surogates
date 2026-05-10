@@ -153,7 +153,7 @@ describe("ScheduledWorkPanel", () => {
     ).toBeLessThan((container.textContent ?? "").indexOf("Dynamic loop"));
   });
 
-  it("opens the last run when available", async () => {
+  it("opens the last run from the row when available", async () => {
     const opened: string[] = [];
     const adapter = createAdapter([
       scheduledWork({
@@ -179,10 +179,14 @@ describe("ScheduledWorkPanel", () => {
     const openButton = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Open last run"]',
     );
-    expect(openButton).not.toBeNull();
+    expect(openButton).toBeNull();
+    const row = container.querySelector<HTMLElement>(
+      '[role="button"][aria-label="Open last run for Scheduled work"]',
+    );
+    expect(row).not.toBeNull();
 
     await act(async () => {
-      openButton?.click();
+      row?.click();
       await Promise.resolve();
     });
 
@@ -195,11 +199,13 @@ describe("ScheduledWorkPanel", () => {
         id: "one-shot-1",
         kind: "one_shot",
         name: "Deploy check",
+        lastSessionId: "run-1",
         repeatLimit: 1,
       }),
     ];
     const runs: string[] = [];
     const cancels: string[] = [];
+    const opened: string[] = [];
     const adapter: AgentChatAdapter = {
       ...createAdapter(items),
       async listScheduledWork() {
@@ -218,7 +224,13 @@ describe("ScheduledWorkPanel", () => {
     root = createRoot(container);
 
     await act(async () => {
-      root?.render(<ScheduledWorkPanel adapter={adapter} agentId="agent-1" />);
+      root?.render(
+        <ScheduledWorkPanel
+          adapter={adapter}
+          agentId="agent-1"
+          onSessionSelect={(sessionId) => opened.push(sessionId)}
+        />,
+      );
       await Promise.resolve();
     });
 
@@ -242,6 +254,7 @@ describe("ScheduledWorkPanel", () => {
 
     expect(runs).toEqual(["one-shot-1"]);
     expect(cancels).toEqual(["one-shot-1"]);
+    expect(opened).toEqual([]);
     expect(container.textContent).not.toContain("Deploy check");
   });
 
