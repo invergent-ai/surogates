@@ -5,6 +5,7 @@ import type {
   AgentChatAdapter,
   AgentChatEventStream,
   AgentChatEventType,
+  AgentChatScheduledWorkItem,
   AgentChatSession,
   AgentChatSlashCommand,
   AgentChatSseMessageEvent,
@@ -16,7 +17,7 @@ import { listSkills, type SkillSummary } from "@/api/skills";
 import * as sessionsApi from "@/api/sessions";
 import * as workspaceApi from "@/api/workspace";
 import { getAuthToken } from "@/features/auth";
-import type { Session } from "@/types/session";
+import type { ScheduledWorkItem, Session } from "@/types/session";
 
 export const surogatesWebChatAdapter: AgentChatAdapter = {
   async listSessions(input) {
@@ -89,6 +90,26 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
         updatedAt: node.updated_at,
       })),
     };
+  },
+
+  async listScheduledWork(input) {
+    const response = await sessionsApi.listScheduledWork({
+      status: input.status,
+      limit: input.limit,
+      offset: input.offset,
+    });
+    return {
+      total: response.total,
+      items: response.items.map(toAgentChatScheduledWorkItem),
+    };
+  },
+
+  async runScheduledWorkNow(input) {
+    await sessionsApi.runScheduledWorkNow(input.scheduleId);
+  },
+
+  async cancelScheduledWork(input) {
+    await sessionsApi.cancelScheduledWork(input.scheduleId);
   },
 
   async stopSession(input) {
@@ -198,6 +219,32 @@ export function toAgentChatSession(session: Session): AgentChatSession {
     estimatedCostUsd: session.estimated_cost_usd,
     createdAt: session.created_at,
     updatedAt: session.updated_at,
+  };
+}
+
+function toAgentChatScheduledWorkItem(
+  item: ScheduledWorkItem,
+): AgentChatScheduledWorkItem {
+  return {
+    id: item.id,
+    agentId: item.agent_id,
+    name: item.name,
+    prompt: item.prompt,
+    status: item.status,
+    kind: item.kind,
+    source: item.source,
+    scheduleDisplay: item.schedule_display,
+    timezone: item.timezone,
+    runCount: item.run_count,
+    repeatLimit: item.repeat_limit,
+    nextRunAt: item.next_run_at,
+    lastRunAt: item.last_run_at,
+    lastSessionId: item.last_session_id,
+    lastError: item.last_error,
+    expiresAt: item.expires_at,
+    createdFromSessionId: item.created_from_session_id,
+    createdAt: item.created_at,
+    updatedAt: item.updated_at,
   };
 }
 

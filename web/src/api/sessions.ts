@@ -7,6 +7,7 @@ import type {
   SessionChildrenResponse,
   SessionCreateRequest,
   SessionTreeResponse,
+  ScheduledWorkListResponse,
 } from "@/types/session";
 
 export interface SessionListResponse {
@@ -155,4 +156,52 @@ export async function getSessionChildren(
   );
   if (!response.ok) throw new Error("Failed to fetch session children");
   return (await response.json()) as SessionChildrenResponse;
+}
+
+export async function listScheduledWork(params?: {
+  status?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<ScheduledWorkListResponse> {
+  const search = new URLSearchParams();
+  if (params?.status) search.append("status", params.status);
+  if (params?.limit != null) search.append("limit", String(params.limit));
+  if (params?.offset != null) search.append("offset", String(params.offset));
+
+  const response = await authFetch(`/api/v1/scheduled-work?${search}`);
+  if (!response.ok) {
+    const err = (await response.json().catch(() => null)) as {
+      detail?: string;
+    } | null;
+    throw new Error(err?.detail ?? "Failed to fetch scheduled work");
+  }
+  return (await response.json()) as ScheduledWorkListResponse;
+}
+
+export async function runScheduledWorkNow(
+  scheduleId: string,
+): Promise<{ id: string; queued: boolean }> {
+  const response = await authFetch(
+    `/api/v1/scheduled-work/${scheduleId}/run-now`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    const err = (await response.json().catch(() => null)) as {
+      detail?: string;
+    } | null;
+    throw new Error(err?.detail ?? "Failed to run scheduled work");
+  }
+  return (await response.json()) as { id: string; queued: boolean };
+}
+
+export async function cancelScheduledWork(scheduleId: string): Promise<void> {
+  const response = await authFetch(`/api/v1/scheduled-work/${scheduleId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    const err = (await response.json().catch(() => null)) as {
+      detail?: string;
+    } | null;
+    throw new Error(err?.detail ?? "Failed to cancel scheduled work");
+  }
 }

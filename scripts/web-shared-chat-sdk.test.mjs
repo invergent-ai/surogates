@@ -67,6 +67,11 @@ for (const path of [
   );
   assert.match(
     navbarSource,
+    /ScheduledWorkPanel/,
+    "web sidebar should render the shared ScheduledWorkPanel",
+  );
+  assert.match(
+    navbarSource,
     /setActiveSession\(null\)/,
     "web New chat should clear the active session before opening /chat",
   );
@@ -87,6 +92,24 @@ for (const path of [
     /Auto-select first session|res\.sessions\[0\]\.id/,
     "fetchSessions must not auto-select an existing session; /chat is the unsaved draft state",
   );
+}
+
+{
+  const adapterSource = readFileSync(
+    repoPath("web/src/features/chat/surogates-web-chat-adapter.ts"),
+    "utf8",
+  );
+  for (const method of [
+    "listScheduledWork",
+    "runScheduledWorkNow",
+    "cancelScheduledWork",
+  ]) {
+    assert.match(
+      adapterSource,
+      new RegExp(`${method}\\(`),
+      `web chat adapter should implement ${method}`,
+    );
+  }
 }
 
 {
