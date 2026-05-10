@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -9,6 +10,23 @@ import httpx
 
 class KernelBrowserClient:
     """HTTP client for one kernel-images browser REST endpoint."""
+
+    _INTERACTIVE_ROLES: frozenset[str] = frozenset(
+        {
+            "button",
+            "link",
+            "textbox",
+            "combobox",
+            "checkbox",
+            "radio",
+            "menuitem",
+            "tab",
+            "switch",
+            "searchbox",
+            "slider",
+            "spinbutton",
+        }
+    )
 
     _SNAPSHOT_SCRIPT = """
 function roleOf(el) {
@@ -118,12 +136,29 @@ return {
         self._invalidate_snapshot_cache()
         return result
 
-    async def get_state(self) -> dict[str, Any]:
+    async def get_state(
+        self,
+        *,
+        interactive_only: bool = False,
+        compact: bool = False,
+        max_depth: int | None = None,
+        selector: str | None = None,
+    ) -> dict[str, Any]:
         """Return a DOM-derived page tree with stable refs and cached centers."""
 
-        raw = await self._playwright_execute(self._SNAPSHOT_SCRIPT)
+        raw = await self._playwright_execute(self._snapshot_script(selector))
         nodes = raw.get("nodes", [])
-        tree, new_cache = self._build_tree_and_cache(nodes)
+        full_tree, new_cache = self._build_tree_and_cache(nodes)
+        tree = [
+            entry
+            for entry in full_tree
+            if self._state_entry_visible(
+                entry,
+                interactive_only=interactive_only,
+                compact=compact,
+                max_depth=max_depth,
+            )
+        ]
 
         self._snapshot_cache.clear()
         self._snapshot_cache.update(new_cache)
@@ -174,7 +209,48 @@ return {
             role = str(node.get("role", ""))
             name = str(node.get("name", ""))
 
-            tree.append({"ref": ref, "role": role, "name": name, "x": center_x, "y": center_y})
+            entry: dict[str, Any] = {
+                "ref": ref,
+                "role": role,
+                "name": name,
+                "x": center_x,
+                "y": center_y,
+            }
+            depth = node.get("depth")
+            if depth is not None:
+                entry["depth"] = int(depth)
+            tree.append(entry)
             cache[ref] = {"x": center_x, "y": center_y, "role": role, "name": name}
 
         return tree, cache
+
+    def _state_entry_visible(
+        self,
+        entry: dict[str, Any],
+        *,
+        interactive_only: bool,
+        compact: bool,
+        max_depth: int | None,
+    ) -> bool:
+        role = str(entry.get("role", ""))
+        if interactive_only and role not in self._INTERACTIVE_ROLES:
+            return False
+        if compact and not entry.get("name") and role not in self._INTERACTIVE_ROLES:
+            return False
+        if max_depth is not None and int(entry.get("depth", 0)) > max_depth:
+            return False
+        return True
+
+    def _snapshot_script(self, selector: str | None) -> str:
+        if selector is None:
+            return self._SNAPSHOT_SCRIPT
+
+        selector_json = json.dumps(selector)
+        return self._SNAPSHOT_SCRIPT.replace(
+            "for (const el of Array.from(document.querySelectorAll('*'))) {",
+            (
+                f"const __root = document.querySelector({selector_json});\n"
+                "if (!__root) throw new Error('selector matched no element');\n"
+                "for (const el of Array.from(__root.querySelectorAll('*'))) {"
+            ),
+        )

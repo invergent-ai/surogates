@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -220,3 +221,56 @@ class TestGetState:
         await client.get_state()
         assert "@e9" not in client._snapshot_cache
         assert "@e1" in client._snapshot_cache
+
+
+class TestGetStateFilters:
+    @pytest.fixture()
+    def deep_response(self) -> dict[str, Any]:
+        return {
+            "success": True,
+            "result": {
+                "url": "u",
+                "title": "t",
+                "viewport": {"width": 1, "height": 1},
+                "nodes": [
+                    {"role": "generic", "name": "", "x": 0, "y": 0, "width": 0, "height": 0},
+                    {"role": "button", "name": "Go", "x": 10, "y": 10, "width": 1, "height": 1},
+                    {"role": "paragraph", "name": "", "x": 0, "y": 20, "width": 0, "height": 0},
+                    {"role": "link", "name": "Home", "x": 30, "y": 30, "width": 1, "height": 1},
+                ],
+            },
+        }
+
+    async def test_interactive_only_drops_structural_nodes(
+        self, client_with_transport, deep_response
+    ) -> None:
+        client, handlers = client_with_transport
+        handlers.append(("POST", "/playwright/execute", 200, deep_response))
+        state = await client.get_state(interactive_only=True)
+        roles = {node["role"] for node in state["tree"]}
+        assert roles == {"button", "link"}
+        assert state["tree"][0]["ref"] == "@e2"
+        assert state["tree"][1]["ref"] == "@e4"
+
+    async def test_filters_dont_corrupt_cache(self, client_with_transport, deep_response) -> None:
+        client, handlers = client_with_transport
+        handlers.append(("POST", "/playwright/execute", 200, deep_response))
+        await client.get_state(interactive_only=True)
+        assert set(client._snapshot_cache.keys()) == {"@e1", "@e2", "@e3", "@e4"}
+
+    async def test_max_depth_truncates(self, client_with_transport, deep_response) -> None:
+        client, handlers = client_with_transport
+        deep_response = {
+            "success": True,
+            "result": {
+                **deep_response["result"],
+                "nodes": [
+                    {**node, "depth": depth}
+                    for node, depth in zip(deep_response["result"]["nodes"], [0, 1, 1, 3])
+                ],
+            },
+        }
+        handlers.append(("POST", "/playwright/execute", 200, deep_response))
+        state = await client.get_state(max_depth=2)
+        assert len(state["tree"]) == 3
+        assert all(node["ref"] != "@e4" for node in state["tree"])
