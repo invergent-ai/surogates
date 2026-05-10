@@ -78,6 +78,8 @@ if TYPE_CHECKING:
     from openai import AsyncOpenAI
     from redis.asyncio import Redis
 
+    from surogates.browser.control import BrowserControlStore
+    from surogates.browser.pool import BrowserPool
     from surogates.harness.budget import IterationBudget
     from surogates.harness.context import ContextCompressor
     from surogates.harness.prompt import PromptBuilder
@@ -299,6 +301,8 @@ class AgentHarness:
         system_prompt_cache: SystemPromptCache | None = None,
         memory_manager: MemoryManager | None = None,
         sandbox_pool: SandboxPool | None = None,
+        browser_pool: BrowserPool | None = None,
+        browser_control: BrowserControlStore | None = None,
         checkpoints_enabled: bool = False,
         saga_enabled: bool = False,
         saga_settings: Any | None = None,
@@ -317,6 +321,8 @@ class AgentHarness:
         self._prompt = prompt_builder
         self._redis: Redis | None = redis_client
         self._sandbox_pool: SandboxPool | None = sandbox_pool
+        self._browser_pool: BrowserPool | None = browser_pool
+        self._browser_control: BrowserControlStore | None = browser_control
         self._api_client = api_client
         self._session_factory = session_factory
 
@@ -988,6 +994,8 @@ class AgentHarness:
                     memory_manager=self._memory_manager,
                     hint_tracker=hint_tracker,
                     sandbox_pool=self._sandbox_pool,
+                    browser_pool=self._browser_pool,
+                    browser_control=self._browser_control,
                     api_client=self._api_client,
                     session_factory=self._session_factory,
                     llm_client=self._llm,
@@ -1543,6 +1551,8 @@ class AgentHarness:
                     memory_manager=self._memory_manager,
                     hint_tracker=hint_tracker,
                     sandbox_pool=self._sandbox_pool,
+                    browser_pool=self._browser_pool,
+                    browser_control=self._browser_control,
                     api_client=self._api_client,
                     session_factory=self._session_factory,
                     llm_client=self._llm,

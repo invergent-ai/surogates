@@ -454,3 +454,36 @@ class TestToolWiring:
         from surogates.governance.policy import _URL_ARGUMENT_MAP
 
         assert "url" in _URL_ARGUMENT_MAP["browser_navigate"]
+
+
+class TestRouterDispatch:
+    async def test_router_dispatches_browser_navigate(self, tenant) -> None:
+        from surogates.governance.policy import GovernanceGate, PolicyDecision
+        from surogates.tools.registry import ToolRegistry
+        from surogates.tools.router import ToolRouter
+        from surogates.tools.runtime import ToolRuntime
+
+        registry = ToolRegistry()
+        ToolRuntime(registry).register_builtins()
+
+        class AllowAll(GovernanceGate):
+            def __init__(self) -> None:
+                pass
+
+            def check(self, *args: Any, **kwargs: Any) -> PolicyDecision:
+                return PolicyDecision(allowed=True, reason="test", tool_name=str(args[0]))
+
+        result = await ToolRouter(
+            registry=registry,
+            sandbox_pool=None,  # type: ignore[arg-type]
+            governance=AllowAll(),
+        ).execute(
+            name="browser_navigate",
+            arguments={"url": "https://example.com"},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FakeClient(),
+        )
+        assert json.loads(result)["url"] == "https://example.com"
