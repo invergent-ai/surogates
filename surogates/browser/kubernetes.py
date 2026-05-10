@@ -159,6 +159,22 @@ class K8sBrowserBackend:
         entry.status = self._map_pod_status(pod)
         return entry.status
 
+    async def destroy(self, browser_id: str) -> None:
+        """Delete a browser Service and pod if this worker knows about them."""
+        entry = self._pods.pop(browser_id, None)
+        if entry is None:
+            return
+
+        api = await self._get_api()
+        await self._delete_service_safe(api, entry.service_name)
+        await self._delete_pod_safe(api, entry.pod_name)
+        logger.info(
+            "Destroyed K8s browser %s (pod %s, service %s)",
+            browser_id,
+            entry.pod_name,
+            entry.service_name,
+        )
+
     async def _get_api(self) -> client.CoreV1Api:
         """Return a cached Kubernetes CoreV1Api client."""
         if self._api is None:

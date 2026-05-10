@@ -11,7 +11,7 @@
 - [x] **Task 4: K8s provision lifecycle** — completed.
 - [x] **Task 5: BrowserBackend protocol alignment** — completed.
 - [x] **Task 6: K8s status mapping** — completed.
-- [ ] **Task 7: K8s destroy lifecycle** — pending.
+- [x] **Task 7: K8s destroy lifecycle** — completed.
 - [ ] **Task 8: find_by_session fallback primitive** — pending.
 - [ ] **Task 9: Worker bootstrap wiring** — pending.
 - [ ] **Task 10: Browser image packaging** — pending.

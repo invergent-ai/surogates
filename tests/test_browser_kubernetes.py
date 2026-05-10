@@ -354,3 +354,62 @@ class TestStatus:
         self, backend: K8sBrowserBackend,
     ) -> None:
         assert await backend.status("never") == BrowserStatus.TERMINATED
+
+
+class TestDestroy:
+    async def test_destroy_deletes_service_and_pod(
+        self, backend: K8sBrowserBackend, monkeypatch,
+    ) -> None:
+        from surogates.browser.kubernetes import _PodEntry
+
+        api = MagicMock()
+        api.delete_namespaced_pod = AsyncMock()
+        api.delete_namespaced_service = AsyncMock()
+
+        async def fake_get_api() -> MagicMock:
+            return api
+
+        monkeypatch.setattr(backend, "_get_api", fake_get_api)
+        backend._pods["bid"] = _PodEntry(
+            browser_id="bid",
+            pod_name="browser-bid",
+            service_name="browser-bid",
+            namespace="test-ns",
+            spec=BrowserSpec(),
+            endpoint=BrowserEndpoint(rest_url="r", cdp_url="c", live_view_url="l"),
+        )
+
+        await backend.destroy("bid")
+
+        assert api.delete_namespaced_service.call_count == 1
+        assert api.delete_namespaced_pod.call_count == 1
+        assert "bid" not in backend._pods
+
+    async def test_destroy_unknown_is_noop(self, backend: K8sBrowserBackend) -> None:
+        await backend.destroy("never")
+
+    async def test_destroy_swallows_404(
+        self, backend: K8sBrowserBackend, monkeypatch,
+    ) -> None:
+        from surogates.browser.kubernetes import _PodEntry
+
+        api = MagicMock()
+        api.delete_namespaced_pod = AsyncMock(side_effect=ApiException(status=404))
+        api.delete_namespaced_service = AsyncMock(side_effect=ApiException(status=404))
+
+        async def fake_get_api() -> MagicMock:
+            return api
+
+        monkeypatch.setattr(backend, "_get_api", fake_get_api)
+        backend._pods["bid"] = _PodEntry(
+            browser_id="bid",
+            pod_name="browser-bid",
+            service_name="browser-bid",
+            namespace="test-ns",
+            spec=BrowserSpec(),
+            endpoint=BrowserEndpoint(rest_url="r", cdp_url="c", live_view_url="l"),
+        )
+
+        await backend.destroy("bid")
+
+        assert "bid" not in backend._pods
