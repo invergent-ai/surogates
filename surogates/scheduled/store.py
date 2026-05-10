@@ -122,6 +122,9 @@ class ScheduledSessionStore:
         user_id: UUID,
         agent_id: str,
         include_inactive: bool = False,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[ScheduledSession]:
         stmt = (
             select(ScheduledSessionRow)
@@ -132,8 +135,14 @@ class ScheduledSessionStore:
             )
             .order_by(ScheduledSessionRow.created_at.desc())
         )
-        if not include_inactive:
+        if status and status != "all":
+            stmt = stmt.where(ScheduledSessionRow.status == status)
+        elif not include_inactive:
             stmt = stmt.where(ScheduledSessionRow.status == "active")
+        if offset > 0:
+            stmt = stmt.offset(offset)
+        if limit is not None:
+            stmt = stmt.limit(limit)
         async with self._sf() as db:
             result = await db.execute(stmt)
             rows = result.scalars().all()

@@ -146,6 +146,7 @@ def create_app() -> FastAPI:
         health,
         memory,
         prompts,
+        scheduled_work,
         sessions,
         skills,
         tools,
@@ -167,6 +168,7 @@ def create_app() -> FastAPI:
     app.include_router(agents.router, prefix="/v1", tags=["agents"])
     app.include_router(memory.router, prefix="/v1", tags=["memory"])
     app.include_router(prompts.router, prefix="/v1", tags=["prompts"])
+    app.include_router(scheduled_work.router, prefix="/v1", tags=["scheduled-work"])
     app.include_router(transparency.router, prefix="/v1", tags=["transparency"])
     app.include_router(website.router, prefix="/v1", tags=["website"])
     app.include_router(workspace.router, prefix="/v1", tags=["workspace"])
