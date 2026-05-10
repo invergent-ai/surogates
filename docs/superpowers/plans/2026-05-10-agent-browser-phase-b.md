@@ -18,7 +18,7 @@
 - [x] **Task 11: Helm browser ServiceAccount** — completed.
 - [x] **Task 12: Helm browser NetworkPolicy** — completed.
 - [x] **Task 13: Helm worker RBAC services** — completed.
-- [ ] **Task 14: Helm values and worker env** — pending.
+- [x] **Task 14: Helm values and worker env** — completed.
 - [ ] **Task 15: Opt-in K8s e2e** — pending.
 - [ ] **Final verification** — pending.
 
