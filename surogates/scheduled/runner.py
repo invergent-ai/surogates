@@ -119,6 +119,7 @@ class ScheduledSessionRunner:
                     "scheduled_source": schedule.source,
                     "scheduled_dynamic_loop": is_dynamic_loop,
                 },
+                parent_id=schedule.created_from_session_id,
                 idempotency_key=idempotency_key,
             )
         except IntegrityError:

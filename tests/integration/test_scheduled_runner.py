@@ -118,6 +118,51 @@ async def test_runner_marks_dynamic_loop_sessions(session_factory, redis_client)
     assert session.config["scheduled_dynamic_loop"] is True
 
 
+async def test_runner_links_scheduled_run_to_origin_session(
+    session_factory,
+    redis_client,
+):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    scheduled_store = ScheduledSessionStore(session_factory)
+    session_store = SessionStore(session_factory, redis=redis_client)
+    origin = await session_store.create_session(
+        user_id=user_id,
+        org_id=org_id,
+        agent_id="agent-a",
+        channel="web",
+    )
+    schedule = await scheduled_store.create(
+        org_id=org_id,
+        user_id=user_id,
+        agent_id="agent-a",
+        name="Health",
+        prompt="check health",
+        schedule=parse_schedule("10m"),
+        source="loop",
+        created_from_session_id=origin.id,
+        next_run_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+
+    queue = agent_queue_key("agent-a")
+    await redis_client.delete(queue)
+    runner = ScheduledSessionRunner(
+        settings=FakeSettings(),
+        session_factory=session_factory,
+        session_store=session_store,
+        scheduled_store=scheduled_store,
+        redis=redis_client,
+        storage=FakeStorage(),
+    )
+
+    processed = await runner.tick_once()
+
+    assert processed == 1
+    updated = await scheduled_store.get(schedule.id)
+    child = await session_store.get_session(updated.last_session_id)
+    assert child.parent_id == origin.id
+
+
 async def test_runner_requeues_stalled_dynamic_loop_sessions(
     session_factory,
     redis_client,

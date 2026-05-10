@@ -105,6 +105,10 @@ def _format_loop_list(rows: list[Any]) -> str:
     return "\n".join(lines)
 
 
+def _should_notify_parent_on_completion(session: Any) -> bool:
+    return session.parent_id is not None and session.channel != "scheduled"
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -2950,7 +2954,9 @@ class AgentHarness:
             )
 
         # Notify parent session if this is a worker (child) session.
-        if session.parent_id is not None:
+        # Scheduled loop runs use parent_id for traceability in the session
+        # tree, but should not wake the parent as if they were sub-agent work.
+        if _should_notify_parent_on_completion(session):
             from surogates.harness.worker_notify import notify_parent_on_completion
             try:
                 await notify_parent_on_completion(
