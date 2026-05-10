@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -61,3 +63,49 @@ class TestClientLifecycle:
         client = KernelBrowserClient(rest_url="http://x:10001/")
         assert client.rest_url == "http://x:10001"
         await client.close()
+
+
+class TestNavigate:
+    async def test_navigate_returns_url_and_title(self, client_with_transport) -> None:
+        client, handlers = client_with_transport
+        handlers.append(
+            (
+                "POST",
+                "/playwright/execute",
+                200,
+                {
+                    "success": True,
+                    "result": {"url": "https://example.com/", "title": "Example"},
+                },
+            )
+        )
+        result = await client.navigate("https://example.com")
+        assert result["url"] == "https://example.com/"
+        assert result["title"] == "Example"
+
+    async def test_navigate_propagates_kernel_error(self, client_with_transport) -> None:
+        client, handlers = client_with_transport
+        handlers.append(
+            (
+                "POST",
+                "/playwright/execute",
+                200,
+                {"success": False, "error": "ERR_NAME_NOT_RESOLVED"},
+            )
+        )
+        with pytest.raises(RuntimeError, match="ERR_NAME_NOT_RESOLVED"):
+            await client.navigate("https://nope.invalid")
+
+    async def test_navigate_invalidates_snapshot_cache(self, client_with_transport) -> None:
+        client, handlers = client_with_transport
+        client._snapshot_cache["@e1"] = {"x": 10, "y": 10, "role": "button", "name": "x"}
+        handlers.append(
+            (
+                "POST",
+                "/playwright/execute",
+                200,
+                {"success": True, "result": {"url": "https://example.com/", "title": "Example"}},
+            )
+        )
+        await client.navigate("https://example.com")
+        assert client._snapshot_cache == {}

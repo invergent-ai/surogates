@@ -17,8 +17,8 @@
 - [x] Task 1: Add browser event types and config settings — completed
 - [x] Task 2: Define `BrowserBackend` protocol and value types — completed
 - [x] Task 3: `KernelBrowserClient` skeleton — completed
-- [ ] Task 4: `KernelBrowserClient.navigate` — **in progress**
-- [ ] Task 5: `KernelBrowserClient.get_state` with refs/cache — left to do
+- [x] Task 4: `KernelBrowserClient.navigate` — completed
+- [ ] Task 5: `KernelBrowserClient.get_state` with refs/cache — **in progress**
 - [ ] Task 6: `get_state` filters — left to do
 - [ ] Task 7: click/type client methods — left to do
 - [ ] Task 8: key/scroll/drag/wait client methods — left to do

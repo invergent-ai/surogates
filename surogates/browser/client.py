@@ -39,3 +39,35 @@ class KernelBrowserClient:
 
     async def __aexit__(self, *exc: Any) -> None:
         await self.close()
+
+    async def navigate(self, url: str, *, wait_until: str = "load") -> dict[str, Any]:
+        """Navigate to a URL and return the final URL and title."""
+
+        code = (
+            "await page.goto({url!r}, {{waitUntil: {wait_until!r}}});\n"
+            "return {{ url: page.url(), title: await page.title() }};"
+        ).format(url=url, wait_until=wait_until)
+        result = await self._playwright_execute(code)
+        self._invalidate_snapshot_cache()
+        return result
+
+    async def _playwright_execute(
+        self,
+        code: str,
+        *,
+        timeout_sec: int = 60,
+    ) -> Any:
+        """POST to /playwright/execute and unwrap kernel-images' envelope."""
+
+        response = await self._http.post(
+            "/playwright/execute",
+            json={"code": code, "timeout_sec": timeout_sec},
+        )
+        response.raise_for_status()
+        body = response.json()
+        if not body.get("success", False):
+            raise RuntimeError(body.get("error") or "playwright execute failed")
+        return body.get("result")
+
+    def _invalidate_snapshot_cache(self) -> None:
+        self._snapshot_cache.clear()
