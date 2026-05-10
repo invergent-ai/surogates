@@ -27,8 +27,8 @@
 - [x] Task 11: `BrowserControlStore` — completed
 - [x] Task 12: `ProcessBrowserBackend` — completed
 - [x] Task 13: `BrowserPool` — completed
-- [ ] Task 14: navigate/get_state/close tools — **in progress**
-- [ ] Task 15: click/type/press_key/scroll/drag/wait tools — left to do
+- [x] Task 14: navigate/get_state/close tools — completed
+- [ ] Task 15: click/type/press_key/scroll/drag/wait tools — **in progress**
 - [ ] Task 16: screenshot tool — left to do
 - [ ] Task 17: router/runtime wiring — left to do
 - [ ] Task 18: dispatch kwargs threading — left to do
