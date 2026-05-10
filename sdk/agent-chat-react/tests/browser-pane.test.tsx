@@ -63,6 +63,34 @@ describe("BrowserPane", () => {
     expect(iframe?.getAttribute("src")).toBe("about:blank#browser-live");
   });
 
+  it("opens the browser live view in a full-page dialog", async () => {
+    const node = renderPane(
+      <BrowserPane
+        sessionId="s"
+        state={{ status: "live", controlOwner: null }}
+        adapter={liveAdapter}
+      />,
+    );
+
+    const maximizeButton = node.querySelector<HTMLButtonElement>(
+      'button[aria-label="Maximize browser"]',
+    );
+    expect(maximizeButton).not.toBeNull();
+
+    await act(async () => {
+      maximizeButton?.click();
+    });
+
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]');
+    const iframe = document.body.querySelector<HTMLIFrameElement>(
+      '[data-testid="browser-fullscreen-iframe"]',
+    );
+
+    expect(dialog).not.toBeNull();
+    expect(dialog?.textContent).toContain("Browser");
+    expect(iframe?.getAttribute("src")).toBe("about:blank#browser-live");
+  });
+
   it("shows Take control button in live state", () => {
     const node = renderPane(
       <BrowserPane
@@ -110,6 +138,7 @@ describe("BrowserPane", () => {
 
     expect(node.textContent).toMatch(/browser live view is unavailable/i);
     expect(node.querySelector('[data-testid="browser-iframe"]')).toBeNull();
+    expect(node.querySelector('button[aria-label="Maximize browser"]')).toBeNull();
     expect(node.textContent).not.toContain("Take control");
   });
 });
