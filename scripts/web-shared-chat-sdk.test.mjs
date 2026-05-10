@@ -103,6 +103,10 @@ for (const path of [
     "listScheduledWork",
     "runScheduledWorkNow",
     "cancelScheduledWork",
+    "getBrowserState",
+    "acquireBrowserControl",
+    "releaseBrowserControl",
+    "browserLiveViewUrl",
   ]) {
     assert.match(
       adapterSource,
@@ -110,6 +114,25 @@ for (const path of [
       `web chat adapter should implement ${method}`,
     );
   }
+  assert.match(
+    adapterSource,
+    /\/browser\/live\//,
+    "web chat adapter should point the browser iframe at the live-view root",
+  );
+}
+
+{
+  const viteConfig = readFileSync(repoPath("web/vite.config.ts"), "utf8");
+  const apiProxyStart = viteConfig.indexOf('"/api"');
+  const wsProxyStart = viteConfig.indexOf('"/ws"');
+  assert.ok(apiProxyStart >= 0, "web Vite config should define an /api proxy");
+  assert.ok(wsProxyStart > apiProxyStart, "web Vite config should define /ws after /api");
+  const apiProxyConfig = viteConfig.slice(apiProxyStart, wsProxyStart);
+  assert.match(
+    apiProxyConfig,
+    /ws:\s*true/,
+    "web Vite /api proxy must forward browser live-view websocket upgrades",
+  );
 }
 
 {

@@ -116,6 +116,28 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     await sessionsApi.stopSession(input.sessionId);
   },
 
+  async getBrowserState(sessionId) {
+    const state = await sessionsApi.getBrowserState(sessionId);
+    if (state === null) return null;
+    return {
+      status: state.status,
+      controlOwner: state.control_owner,
+      liveViewPath: state.live_view_path,
+    };
+  },
+
+  async acquireBrowserControl(sessionId) {
+    const response = await sessionsApi.acquireBrowserControl(sessionId);
+    return {
+      outcome: response.outcome,
+      ownerUserId: response.owner_user_id,
+    };
+  },
+
+  async releaseBrowserControl(sessionId) {
+    await sessionsApi.releaseBrowserControl(sessionId);
+  },
+
   async getArtifact(input) {
     return await getArtifact(input.sessionId, input.artifactId);
   },
@@ -186,6 +208,16 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     url.searchParams.set("after", String(input.after));
     if (token) url.searchParams.set("token", token);
     return wrapEventSource(new EventSource(url.toString()));
+  },
+
+  browserLiveViewUrl(sessionId) {
+    const url = new URL(
+      `/api/v1/sessions/${sessionId}/browser/live/`,
+      window.location.origin,
+    );
+    const token = getAuthToken();
+    if (token) url.searchParams.set("token", token);
+    return url.pathname + url.search;
   },
 };
 

@@ -15,6 +15,17 @@ export interface SessionListResponse {
   total: number;
 }
 
+export interface BrowserStateResponse {
+  status: "live" | "user-control";
+  control_owner: string | null;
+  live_view_path: string;
+}
+
+export interface BrowserControlResponse {
+  outcome: "granted" | "refreshed" | "conflict";
+  owner_user_id: string;
+}
+
 export async function listSessions(params?: {
   limit?: number;
   offset?: number;
@@ -136,6 +147,44 @@ export async function retrySession(sessionId: string): Promise<Session> {
  */
 export async function stopSession(sessionId: string): Promise<void> {
   return pauseSession(sessionId);
+}
+
+export async function getBrowserState(
+  sessionId: string,
+): Promise<BrowserStateResponse | null> {
+  const response = await authFetch(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/browser/state`,
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error("Failed to fetch browser state");
+  return (await response.json()) as BrowserStateResponse;
+}
+
+export async function acquireBrowserControl(
+  sessionId: string,
+): Promise<BrowserControlResponse> {
+  const response = await authFetch(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/browser/control`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "acquire" }),
+    },
+  );
+  if (!response.ok) throw new Error("Failed to acquire browser control");
+  return (await response.json()) as BrowserControlResponse;
+}
+
+export async function releaseBrowserControl(sessionId: string): Promise<void> {
+  const response = await authFetch(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/browser/control`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "release" }),
+    },
+  );
+  if (!response.ok) throw new Error("Failed to release browser control");
 }
 
 export async function getSessionTree(
