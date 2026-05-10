@@ -38,8 +38,9 @@ resolution remains tenant-scoped.
 - [x] **Completed:** Task 13 — add SDK BrowserPane component.
 - [x] **Completed:** Task 14 — stack BrowserPane above WorkspacePanel in the SDK layout.
 - [x] **Completed:** Task 15 — add collapsed browser activity groups in the chat thread.
-- [ ] **In progress:** Task 16 — verify Helm/API egress for live-view proxy.
-- [ ] **Still left to do:** Implement Task 16 through Task 18 in order, committing at each task boundary.
+- [x] **Completed:** Task 16 — verify Helm/API egress for live-view proxy (no api-server NetworkPolicy exists; no chart change required).
+- [ ] **In progress:** Task 17 — bump SDK version and frontend pin.
+- [ ] **Still left to do:** Implement Task 17 through Task 18 in order, committing at each task boundary.
 - [ ] **Still left to do:** Run the backend, SDK, frontend, Helm, and opt-in K8s verification listed in Final verification.
 - [ ] **Completed:** Phase A and Phase B prerequisites exist on this branch.
 
