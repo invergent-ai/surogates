@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { Maximize2Icon, ZapIcon } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Maximize2Icon, PlayIcon, ZapIcon } from "lucide-react";
 import { BrowserControlBar } from "./browser-control-bar";
 import { BrowserLiveView } from "./browser-live-view";
 import { BrowserStatusDot } from "./browser-status-dot";
@@ -30,6 +30,7 @@ interface BrowserPaneProps {
 
 export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
+  const [inlinePreviewOpen, setInlinePreviewOpen] = useState(false);
   const hasLiveViewAdapter =
     typeof adapter.browserLiveViewUrl === "function";
   const hasControlAdapter =
@@ -41,6 +42,11 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
   }, [adapter, hasLiveViewAdapter, sessionId]);
   const hasLiveView = state.status !== "provisioning" && state.status !== "closed";
   const canOpenFullscreen = hasLiveView && Boolean(liveViewUrl);
+
+  useEffect(() => {
+    setFullscreenOpen(false);
+    setInlinePreviewOpen(false);
+  }, [sessionId]);
 
   return (
     <>
@@ -86,8 +92,20 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
             <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">
               Browser closed.
             </div>
-          ) : liveViewUrl ? (
+          ) : liveViewUrl && inlinePreviewOpen ? (
             <BrowserLiveView src={liveViewUrl} />
+          ) : liveViewUrl ? (
+            <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">
+              <button
+                type="button"
+                aria-label="Open browser live preview"
+                className="inline-flex items-center gap-2 border border-line bg-card px-3 py-2 text-xs font-medium text-foreground transition-colors hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={() => setInlinePreviewOpen(true)}
+              >
+                <PlayIcon className="size-3.5" aria-hidden="true" />
+                <span>Open live preview</span>
+              </button>
+            </div>
           ) : (
             <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">
               Browser live view is unavailable.

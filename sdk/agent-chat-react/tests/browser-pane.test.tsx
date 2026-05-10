@@ -48,7 +48,7 @@ function renderPane(element: React.ReactElement) {
 }
 
 describe("BrowserPane", () => {
-  it("renders an iframe in live state", () => {
+  it("mounts the inline live-view iframe only after the preview is opened", async () => {
     const node = renderPane(
       <BrowserPane
         sessionId="s"
@@ -56,6 +56,17 @@ describe("BrowserPane", () => {
         adapter={liveAdapter}
       />,
     );
+
+    expect(node.querySelector('[data-testid="browser-iframe"]')).toBeNull();
+
+    const openButton = node.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open browser live preview"]',
+    );
+    expect(openButton).not.toBeNull();
+
+    await act(async () => {
+      openButton?.click();
+    });
 
     const iframe = node.querySelector<HTMLIFrameElement>(
       '[data-testid="browser-iframe"]',
@@ -138,6 +149,9 @@ describe("BrowserPane", () => {
 
     expect(node.textContent).toMatch(/browser live view is unavailable/i);
     expect(node.querySelector('[data-testid="browser-iframe"]')).toBeNull();
+    expect(
+      node.querySelector('button[aria-label="Open browser live preview"]'),
+    ).toBeNull();
     expect(node.querySelector('button[aria-label="Maximize browser"]')).toBeNull();
     expect(node.textContent).not.toContain("Take control");
   });

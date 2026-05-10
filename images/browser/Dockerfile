@@ -2,6 +2,7 @@
 #
 # Minimal additions on top of upstream:
 #   - zstd for Phase D profile sync compression
+#   - lower-cost Neko live-view capture defaults
 #   - Surogates branding for the embedded Neko live-view shell
 #   - Surogates OCI labels
 
@@ -36,6 +37,8 @@ RUN apt-get update \
         /kernel-envoy-proxy.crt \
     && sed -i 's/^autostart=false$/autostart=true/' \
         /etc/supervisor/conf.d/services/neko.conf \
+    && sed -i 's/screen: "1920x1080@25"/screen: "1280x720@10"/' \
+        /etc/neko/neko.yaml \
     && rm -rf /var/lib/apt/lists/*
 
 COPY logo.svg /var/www/img/logo.b42d8ab7.svg
