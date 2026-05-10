@@ -30,8 +30,8 @@
 - [x] Task 14: navigate/get_state/close tools — completed
 - [x] Task 15: click/type/press_key/scroll/drag/wait tools — completed
 - [x] Task 16: screenshot tool — completed
-- [ ] Task 17: router/runtime wiring — **in progress**
-- [ ] Task 18: dispatch kwargs threading — left to do
+- [x] Task 17: router/runtime wiring — completed
+- [ ] Task 18: dispatch kwargs threading — **in progress**
 - [ ] Task 19: worker bootstrap — left to do
 - [ ] Task 20: `AgentHarness` signature update — left to do
 - [ ] Task 21: opt-in e2e smoke — left to do

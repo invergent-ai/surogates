@@ -417,3 +417,40 @@ class TestScreenshotHandler:
         body = json.loads(result)
         assert "base64" in body
         assert body["mime_type"] == "image/png"
+
+
+BROWSER_TOOL_NAMES = [
+    "browser_navigate",
+    "browser_get_state",
+    "browser_screenshot",
+    "browser_click",
+    "browser_type",
+    "browser_press_key",
+    "browser_scroll",
+    "browser_drag",
+    "browser_wait",
+    "browser_close",
+]
+
+
+class TestToolWiring:
+    def test_router_locates_browser_tools_in_harness(self) -> None:
+        from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
+
+        for tool in BROWSER_TOOL_NAMES:
+            assert TOOL_LOCATIONS[tool] == ToolLocation.HARNESS, tool
+
+    def test_runtime_registers_browser_tools(self) -> None:
+        from surogates.tools.registry import ToolRegistry
+        from surogates.tools.runtime import ToolRuntime
+
+        registry = ToolRegistry()
+        ToolRuntime(registry).register_builtins()
+
+        for tool in BROWSER_TOOL_NAMES:
+            assert registry.has(tool), tool
+
+    def test_governance_url_arg_includes_browser_navigate(self) -> None:
+        from surogates.governance.policy import _URL_ARGUMENT_MAP
+
+        assert "url" in _URL_ARGUMENT_MAP["browser_navigate"]
