@@ -3,6 +3,7 @@ import { AgentChatAdapterProvider } from "./adapter-context";
 import { ChatThread } from "./components/chat/chat-thread";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { WorkspacePanel } from "./components/workspace/workspace-panel";
+import { isScheduledRunSession } from "./lib/sessions";
 import { useAgentChatRuntime } from "./runtime/use-agent-chat-runtime";
 import type {
   AgentChatAdapter,
@@ -36,6 +37,11 @@ export function AgentChat({
     sessionId,
     onSessionChange,
   });
+  const isReadOnlySession = isScheduledRunSession(runtime.session);
+  const effectiveDisabled = disabled || isReadOnlySession;
+  const disabledReason = isReadOnlySession
+    ? "Scheduled run is read-only"
+    : undefined;
 
   useEffect(() => {
     onMessagesChange?.(runtime.messages);
@@ -69,7 +75,8 @@ export function AgentChat({
               onStop={() => void runtime.stop()}
               onRetry={runtime.retry}
               onFileSelect={handleFileSelect}
-              disabled={disabled}
+              disabled={effectiveDisabled}
+              disabledReason={disabledReason}
               tokenUsage={runtime.tokenUsage}
               retryIndicator={runtime.retryIndicator}
             />
@@ -82,7 +89,7 @@ export function AgentChat({
             collapsed={workspaceCollapsed}
             onCollapsedChange={setWorkspaceCollapsed}
             refreshSignal={runtime.workspaceRefreshKey}
-            disabled={disabled}
+            disabled={effectiveDisabled}
           />
         </section>
       </TooltipProvider>

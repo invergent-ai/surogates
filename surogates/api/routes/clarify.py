@@ -13,6 +13,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 
+from surogates.api.session_guards import require_user_writable_session
 from surogates.session.events import EventType
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -115,6 +116,7 @@ async def respond_to_clarify(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
+    require_user_writable_session(session)
 
     # Sanity-check the tool_call_id format -- short, printable, no newlines.
     tc_id = tool_call_id.strip()

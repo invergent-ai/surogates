@@ -42,7 +42,10 @@ class FakeEventStream implements AgentChatEventStream {
   }
 }
 
-function createAdapter(stream: FakeEventStream) {
+function createAdapter(
+  stream: FakeEventStream,
+  options: { session?: AgentChatSession } = {},
+) {
   return {
     async listSessions() {
       return { sessions: [], total: 0 };
@@ -51,7 +54,7 @@ function createAdapter(stream: FakeEventStream) {
       return session("created");
     },
     async getSession(input) {
-      return session(input.sessionId);
+      return options.session ?? session(input.sessionId);
     },
     async sendMessage() {
       return { eventId: 1, status: "accepted" };
@@ -121,8 +124,11 @@ function createAdapter(stream: FakeEventStream) {
   } satisfies AgentChatAdapter;
 }
 
-function session(id: string): AgentChatSession {
-  return { id, status: "active" };
+function session(
+  id: string,
+  overrides: Partial<AgentChatSession> = {},
+): AgentChatSession {
+  return { id, status: "active", ...overrides };
 }
 
 let root: Root | null = null;
@@ -718,5 +724,33 @@ describe("AgentChat", () => {
 
     expect(container.textContent).toContain("No workspace files");
     expect(container.textContent).not.toContain("old-session.txt");
+  });
+
+  it("renders scheduled run sessions as read-only", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream, {
+      session: session("loop-run-1", {
+        channel: "scheduled",
+        config: { scheduled_session_id: "loop-1" },
+      }),
+    });
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="loop-run-1" />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector("textarea");
+    const uploadButton = container.querySelector(
+      'button[aria-label="Upload files"]',
+    ) as HTMLButtonElement | null;
+
+    expect(textarea?.disabled).toBe(true);
+    expect(textarea?.placeholder).toBe("Scheduled run is read-only");
+    expect(uploadButton?.disabled).toBe(true);
   });
 });

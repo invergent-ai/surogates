@@ -4,6 +4,7 @@ import type {
   AgentChatEventStream,
   AgentChatImageAttachment,
   AgentChatRuntimeApi,
+  AgentChatSession,
   AgentChatState,
 } from "../types";
 import { AGENT_CHAT_LISTENED_EVENTS } from "./events";
@@ -28,6 +29,7 @@ export function useAgentChatRuntime({
   const [state, setState] = useState<AgentChatState>(() =>
     createInitialAgentChatState({ isLoadingHistory: Boolean(sessionId) }),
   );
+  const [session, setSession] = useState<AgentChatSession | null>(null);
   const stateRef = useRef(state);
   const streamRef = useRef<AgentChatEventStream | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -57,6 +59,7 @@ export function useAgentChatRuntime({
     closeStream();
 
     if (!sessionId) {
+      setSession(null);
       setState(createInitialAgentChatState());
       return;
     }
@@ -117,20 +120,22 @@ export function useAgentChatRuntime({
           isLoadingHistory: true,
         });
     stateRef.current = initialState;
+    setSession(null);
     setState(initialState);
     connect(0);
 
     adapter
       .getSession({ sessionId })
-      .then((session) => {
+      .then((loadedSession) => {
         if (cancelled) return;
-        if (session.messageCount === 0) {
+        setSession(loadedSession);
+        if (loadedSession.messageCount === 0) {
           setState((prev) => ({
             ...prev,
             isLoadingHistory: false,
           }));
         }
-        if (isTerminalStatus(session.status)) {
+        if (isTerminalStatus(loadedSession.status)) {
           setState((prev) => ({
             ...prev,
             terminal: true,
@@ -273,6 +278,7 @@ export function useAgentChatRuntime({
   }, [adapter, sessionId]);
 
   return {
+    session,
     messages: state.messages,
     isRunning: state.isRunning,
     isLoadingHistory: state.isLoadingHistory,

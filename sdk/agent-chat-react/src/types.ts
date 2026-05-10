@@ -365,6 +365,7 @@ export interface AgentChatAdapter {
 }
 
 export interface AgentChatRuntimeApi {
+  session: AgentChatSession | null;
   messages: AgentChatMessage[];
   isRunning: boolean;
   isLoadingHistory: boolean;

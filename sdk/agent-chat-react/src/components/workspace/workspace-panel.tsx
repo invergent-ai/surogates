@@ -326,7 +326,7 @@ export function WorkspacePanel({
 
   const handleDelete = useCallback(
     async (path: string) => {
-      if (!sessionId) return;
+      if (disabled || !sessionId) return;
       try {
         await adapter.deleteWorkspaceFile({ sessionId, path });
         if (selectedPath === path) {
@@ -342,7 +342,7 @@ export function WorkspacePanel({
         setDeleteTarget(null);
       }
     },
-    [adapter, fetchTree, onSelectedPathChange, selectedPath, sessionId],
+    [adapter, disabled, fetchTree, onSelectedPathChange, selectedPath, sessionId],
   );
 
   const onResizeStart = useCallback(
@@ -425,7 +425,9 @@ export function WorkspacePanel({
           <div className="truncate text-sm font-medium text-foreground">
             {rootName}
           </div>
-          <div className="truncate text-xs text-faint">Workspace</div>
+          <div className="truncate text-xs text-faint">
+            {disabled ? "Workspace - Read-only" : "Workspace"}
+          </div>
         </div>
         <Tooltip>
           <TooltipTrigger asChild>
@@ -555,7 +557,7 @@ export function WorkspacePanel({
               })
             : null
         }
-        onDelete={file ? () => setDeleteTarget(file.path) : null}
+        onDelete={file && !disabled ? () => setDeleteTarget(file.path) : null}
         onClose={() => {
           onSelectedPathChange(null);
           setFile(null);

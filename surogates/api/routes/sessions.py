@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text as _sql_text
 
+from surogates.api.session_guards import require_user_writable_session
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
 from surogates.session.models import Session
@@ -339,6 +340,7 @@ async def send_message(
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant)
+    require_user_writable_session(session)
 
     if session.status not in ("active", "idle", "failed", "paused"):
         raise HTTPException(
@@ -666,6 +668,7 @@ async def resume_session(
     """Resume a paused session."""
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant)
+    require_user_writable_session(session)
 
     if session.status != "paused":
         raise HTTPException(
@@ -701,6 +704,7 @@ async def retry_session(
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant)
+    require_user_writable_session(session)
 
     if session.status not in ("failed", "paused"):
         raise HTTPException(
@@ -736,6 +740,7 @@ async def delete_session(
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant)
+    require_user_writable_session(session)
 
     await store.update_session_status(session_id, "archived")
 
