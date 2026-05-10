@@ -23,8 +23,8 @@
 - [x] Task 7: click/type client methods — completed
 - [x] Task 8: key/scroll/drag/wait client methods — completed
 - [x] Task 9: screenshot client method — completed
-- [ ] Task 10: `BrowserRegistry` — **in progress**
-- [ ] Task 11: `BrowserControlStore` — left to do
+- [x] Task 10: `BrowserRegistry` — completed
+- [ ] Task 11: `BrowserControlStore` — **in progress**
 - [ ] Task 12: `ProcessBrowserBackend` — left to do
 - [ ] Task 13: `BrowserPool` — left to do
 - [ ] Task 14: navigate/get_state/close tools — left to do
