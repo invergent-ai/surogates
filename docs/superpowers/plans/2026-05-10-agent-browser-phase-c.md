@@ -35,8 +35,9 @@ resolution remains tenant-scoped.
 - [x] **Completed:** Task 10 — wire browser resolver/control dependencies into API startup.
 - [x] **Completed:** Task 11 — fold browser lifecycle events into SDK reducer.
 - [x] **Completed:** Task 12 — extend SDK adapter and ops backend browser proxy.
-- [ ] **In progress:** Task 13 — add SDK BrowserPane component.
-- [ ] **Still left to do:** Implement Task 13 through Task 18 in order, committing at each task boundary.
+- [x] **Completed:** Task 13 — add SDK BrowserPane component.
+- [ ] **In progress:** Task 14 — stack BrowserPane above WorkspacePanel in the SDK layout.
+- [ ] **Still left to do:** Implement Task 14 through Task 18 in order, committing at each task boundary.
 - [ ] **Still left to do:** Run the backend, SDK, frontend, Helm, and opt-in K8s verification listed in Final verification.
 - [ ] **Completed:** Phase A and Phase B prerequisites exist on this branch.
 
