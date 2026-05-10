@@ -13,6 +13,7 @@ The web chat UI is a browser-based interface designed as a terminal-like experie
 | **Expert delegations** | When the agent delegates to an expert, the expert's mini-loop is shown as a nested interaction. |
 | **File uploads** | Attach images, documents, and other files to your messages. |
 | **Workspace browser** | Browse and view files in the session's workspace. |
+| **Browser live view** | Watch the agent's session-scoped browser and temporarily take control for login, MFA, CAPTCHA, or other manual steps. See [Browser Use](../browser-use/index.md). |
 | **Auto-reconnect** | If the connection drops, the UI reconnects and replays missed events automatically. No data loss. |
 
 ## Usage

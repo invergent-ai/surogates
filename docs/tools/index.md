@@ -12,8 +12,8 @@ Tools run in one of three locations:
 
 | Location | Description | Examples |
 |---|---|---|
-| **Worker** | Runs inside the worker process. No sandbox needed. | memory, web search, skills, session search, delegation, cron scheduling, loop control |
-| **Sandbox** | Runs inside the session's isolated sandbox pod. | terminal, file operations, code execution, browser |
+| **Worker** | Runs inside the worker process. No workspace sandbox needed. | memory, web search, skills, browser, session search, delegation, cron scheduling, loop control |
+| **Sandbox** | Runs inside the session's isolated sandbox pod. | terminal, file operations, code execution |
 | **MCP Proxy** | Forwarded to an external MCP server via the proxy. | Any tool registered by an MCP server |
 
 ## Builtin Tools Reference
@@ -230,13 +230,26 @@ Delegate a subtask to a configured task-specialized expert model. The `expert` v
 | `task` | string | What the expert should do |
 | `context` | string | Relevant context (optional) |
 
+### Browser Tools
+
+Browser tools give the agent a session-scoped Chromium browser for interactive
+web tasks. They are harness-local tools backed by a separate browser
+container/pod, not by the workspace sandbox. See [Browser Use](../browser-use/index.md)
+for lifecycle, live view, user control handoff, deployment, and security
+details.
+
 ### `browser_navigate` -- Browser Navigation
 
-Navigate to a URL and return page content.
+Navigate to a URL and return the final URL and page title.
 
 | Parameter | Type | Description |
 |---|---|---|
 | `url` | string | URL to navigate to |
+| `wait_until` | string | Optional wait mode: `load`, `domcontentloaded`, or `networkidle` |
+
+Other browser tools include `browser_get_state`, `browser_click`,
+`browser_type`, `browser_press_key`, `browser_scroll`, `browser_drag`,
+`browser_wait`, `browser_screenshot`, and `browser_close`.
 
 ### `create_artifact` -- Inline Chat Artifact
 

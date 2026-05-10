@@ -59,6 +59,12 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - Builtin tools reference
 - Tool argument coercion
 
+### [7a. Browser Use](browser-use/index.md)
+- Session-scoped agent browser lifecycle
+- Browser tool reference and live view behavior
+- User control handoff for login, MFA, and CAPTCHA flows
+- Browser deployment, configuration, and security model
+
 ### [8. Commands](commands/index.md)
 - Builtin slash commands: `/clear`, `/compress`, `/loop`
 - Dynamic skill commands: `/<skill-name> [args...]`
