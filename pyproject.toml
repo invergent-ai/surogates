@@ -75,6 +75,10 @@ cache-keys = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+addopts = "-m 'not browser_e2e'"
+markers = [
+    "browser_e2e: end-to-end agent browser tests requiring Docker and the kernel-images image (opt-in)",
+]
 
 [dependency-groups]
 dev = [

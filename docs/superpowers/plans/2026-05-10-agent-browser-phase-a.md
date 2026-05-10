@@ -34,7 +34,7 @@
 - [x] Task 18: dispatch kwargs threading — completed
 - [x] Task 19: worker bootstrap — completed
 - [x] Task 20: `AgentHarness` signature update — completed
-- [ ] Task 21: opt-in e2e smoke — **in progress**
+- [x] Task 21: opt-in e2e smoke — completed
 
 ---
 
