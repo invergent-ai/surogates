@@ -130,50 +130,54 @@ export function SessionSidebar() {
         </Button>
       </div>
 
-      <div className="flex-1 overflow-y-auto py-1">
-        {collapsed ? (
-          sessions.map((session) => {
-            const isActive = session.id === activeSessionId;
-            return (
-              <button
-                key={session.id}
-                type="button"
-                onClick={() => handleSelectSession(session.id)}
-                aria-label={session.title ?? "New session"}
-                className={cn(
-                  "flex items-center justify-center w-full py-2 transition-colors border-l-2",
-                  isActive
-                    ? "bg-line text-foreground border-l-primary"
-                    : "bg-transparent text-subtle hover:bg-input hover:text-foreground border-l-transparent",
-                )}
-              >
-                <MessageSquareIcon className="w-4 h-4 shrink-0" />
-              </button>
-            );
-          })
-        ) : (
-          <SessionTreePanel
-            adapter={surogatesWebChatAdapter}
-            loadList
-            sessionId={activeSessionId ?? undefined}
-            activeSessionId={activeSessionId ?? undefined}
-            hideHeader
-            onSessionSelect={handleSelectSession}
-            onSessionDelete={handleSessionDeleted}
-          />
-        )}
-        {!collapsed && !sessionsLoading && sessions.length === 0 && (
-          <div className="px-4 py-8 text-center text-sm text-faint">
-            No sessions yet
-          </div>
-        )}
+      <div className="min-h-0 flex-1 flex flex-col">
+        <div className="min-h-0 flex-1 overflow-y-auto py-1">
+          {collapsed ? (
+            sessions.map((session) => {
+              const isActive = session.id === activeSessionId;
+              return (
+                <button
+                  key={session.id}
+                  type="button"
+                  onClick={() => handleSelectSession(session.id)}
+                  aria-label={session.title ?? "New session"}
+                  className={cn(
+                    "flex items-center justify-center w-full py-2 transition-colors border-l-2",
+                    isActive
+                      ? "bg-line text-foreground border-l-primary"
+                      : "bg-transparent text-subtle hover:bg-input hover:text-foreground border-l-transparent",
+                  )}
+                >
+                  <MessageSquareIcon className="w-4 h-4 shrink-0" />
+                </button>
+              );
+            })
+          ) : (
+            <SessionTreePanel
+              adapter={surogatesWebChatAdapter}
+              loadList
+              sessionId={activeSessionId ?? undefined}
+              activeSessionId={activeSessionId ?? undefined}
+              hideHeader
+              onSessionSelect={handleSelectSession}
+              onSessionDelete={handleSessionDeleted}
+            />
+          )}
+          {!collapsed && !sessionsLoading && sessions.length === 0 && (
+            <div className="px-4 py-8 text-center text-sm text-faint">
+              No sessions yet
+            </div>
+          )}
+        </div>
         {!collapsed && (
-          <ScheduledWorkPanel
-            adapter={surogatesWebChatAdapter}
-            onSessionSelect={handleSelectSession}
-            onScheduleCancel={handleScheduleChanged}
-            onScheduleRunNow={handleScheduleChanged}
-          />
+          <div className="shrink-0 max-h-[45%] overflow-y-auto">
+            <ScheduledWorkPanel
+              adapter={surogatesWebChatAdapter}
+              onSessionSelect={handleSelectSession}
+              onScheduleCancel={handleScheduleChanged}
+              onScheduleRunNow={handleScheduleChanged}
+            />
+          </div>
         )}
       </div>
 
