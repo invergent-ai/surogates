@@ -57,6 +57,8 @@ if TYPE_CHECKING:
     from redis.asyncio import Redis
 
     from surogates.governance.saga.orchestrator import SagaOrchestrator
+    from surogates.browser.control import BrowserControlStore
+    from surogates.browser.pool import BrowserPool
     from surogates.harness.budget import IterationBudget
     from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
     from surogates.sandbox.pool import SandboxPool
@@ -441,6 +443,8 @@ async def execute_tool_calls(
     memory_manager: Any | None = None,
     hint_tracker: SubdirectoryHintTracker | None = None,
     sandbox_pool: SandboxPool | None = None,
+    browser_pool: BrowserPool | None = None,
+    browser_control: BrowserControlStore | None = None,
     api_client: Any | None = None,
     session_factory: Any | None = None,
     llm_client: Any | None = None,
@@ -473,6 +477,8 @@ async def execute_tool_calls(
             memory_manager=memory_manager,
             hint_tracker=hint_tracker,
             sandbox_pool=sandbox_pool,
+            browser_pool=browser_pool,
+            browser_control=browser_control,
             api_client=api_client,
             session_factory=session_factory,
             llm_client=llm_client,
@@ -492,6 +498,8 @@ async def execute_tool_calls(
         memory_manager=memory_manager,
         hint_tracker=hint_tracker,
         sandbox_pool=sandbox_pool,
+        browser_pool=browser_pool,
+        browser_control=browser_control,
         api_client=api_client,
         session_factory=session_factory,
         llm_client=llm_client,
@@ -516,6 +524,8 @@ async def execute_tool_calls_sequential(
     memory_manager: Any | None = None,
     hint_tracker: SubdirectoryHintTracker | None = None,
     sandbox_pool: SandboxPool | None = None,
+    browser_pool: BrowserPool | None = None,
+    browser_control: BrowserControlStore | None = None,
     api_client: Any | None = None,
     session_factory: Any | None = None,
     llm_client: Any | None = None,
@@ -562,6 +572,8 @@ async def execute_tool_calls_sequential(
             memory_manager=memory_manager,
             hint_tracker=hint_tracker,
             sandbox_pool=sandbox_pool,
+            browser_pool=browser_pool,
+            browser_control=browser_control,
             api_client=api_client,
             session_factory=session_factory,
             llm_client=llm_client,
@@ -603,6 +615,8 @@ async def execute_tool_calls_concurrent(
     memory_manager: Any | None = None,
     hint_tracker: SubdirectoryHintTracker | None = None,
     sandbox_pool: SandboxPool | None = None,
+    browser_pool: BrowserPool | None = None,
+    browser_control: BrowserControlStore | None = None,
     api_client: Any | None = None,
     session_factory: Any | None = None,
     llm_client: Any | None = None,
@@ -647,6 +661,8 @@ async def execute_tool_calls_concurrent(
                 memory_manager=memory_manager,
                 hint_tracker=hint_tracker,
                 sandbox_pool=sandbox_pool,
+                browser_pool=browser_pool,
+                browser_control=browser_control,
                 api_client=api_client,
                 session_factory=session_factory,
                 llm_client=llm_client,
@@ -678,6 +694,8 @@ async def execute_single_tool(
     memory_manager: Any | None = None,
     hint_tracker: SubdirectoryHintTracker | None = None,
     sandbox_pool: SandboxPool | None = None,
+    browser_pool: BrowserPool | None = None,
+    browser_control: BrowserControlStore | None = None,
     api_client: Any | None = None,
     session_factory: Any | None = None,
     llm_client: Any | None = None,
@@ -985,6 +1003,8 @@ async def execute_single_tool(
                 budget=budget,
                 memory_manager=memory_manager,
                 sandbox_pool=sandbox_pool,
+                browser_pool=browser_pool,
+                browser_control=browser_control,
                 workspace_path=workspace_path,
                 api_client=api_client,
                 session_factory=session_factory,

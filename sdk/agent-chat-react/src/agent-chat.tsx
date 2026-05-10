@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { AgentChatAdapterProvider } from "./adapter-context";
+import { BrowserPane } from "./components/browser/browser-pane";
 import { ChatThread } from "./components/chat/chat-thread";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { WorkspacePanel } from "./components/workspace/workspace-panel";
@@ -42,6 +43,7 @@ export function AgentChat({
   const disabledReason = isReadOnlySession
     ? "Scheduled run is read-only"
     : undefined;
+  const browserState = runtime.state.browser;
 
   useEffect(() => {
     onMessagesChange?.(runtime.messages);
@@ -81,16 +83,27 @@ export function AgentChat({
               retryIndicator={runtime.retryIndicator}
             />
           </div>
-          <WorkspacePanel
-            adapter={adapter}
-            sessionId={sessionId}
-            selectedPath={workspacePath}
-            onSelectedPathChange={setWorkspacePath}
-            collapsed={workspaceCollapsed}
-            onCollapsedChange={setWorkspaceCollapsed}
-            refreshSignal={runtime.workspaceRefreshKey}
-            disabled={effectiveDisabled}
-          />
+          <div data-testid="right-stack" className="flex min-h-0 shrink-0 flex-col">
+            {browserState !== null && sessionId && (
+              <div className="min-h-0 flex-1 border-b border-line">
+                <BrowserPane
+                  sessionId={sessionId}
+                  state={browserState}
+                  adapter={adapter}
+                />
+              </div>
+            )}
+            <WorkspacePanel
+              adapter={adapter}
+              sessionId={sessionId}
+              selectedPath={workspacePath}
+              onSelectedPathChange={setWorkspacePath}
+              collapsed={workspaceCollapsed}
+              onCollapsedChange={setWorkspaceCollapsed}
+              refreshSignal={runtime.workspaceRefreshKey}
+              disabled={effectiveDisabled}
+            />
+          </div>
         </section>
       </TooltipProvider>
     </AgentChatAdapterProvider>

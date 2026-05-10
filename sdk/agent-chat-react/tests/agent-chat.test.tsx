@@ -1,6 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
+import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
 import { AgentChat } from "../src/agent-chat";
 import type {
   AgentChatAdapter,
@@ -47,6 +48,7 @@ function createAdapter(
   options: { session?: AgentChatSession } = {},
 ) {
   return {
+    ...NO_BROWSER_ADAPTER,
     async listSessions() {
       return { sessions: [], total: 0 };
     },
@@ -244,6 +246,53 @@ describe("AgentChat", () => {
 
     expect(container.textContent).toContain("src/main.py");
     expect(container.textContent).toContain("print('hi')");
+  });
+
+  it("renders only WorkspacePanel when no browser is provisioned", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[data-testid="workspace-panel"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="browser-pane"]')).toBeNull();
+  });
+
+  it("stacks BrowserPane above WorkspacePanel when browser is live", async () => {
+    const stream = new FakeEventStream();
+    const adapter = {
+      ...createAdapter(stream),
+      browserLiveViewUrl() {
+        return "about:blank#browser-live";
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    act(() => {
+      stream.emit("browser.provisioned", 10, { session_id: "s-1" });
+    });
+
+    const browserPane = container.querySelector('[data-testid="browser-pane"]');
+    const workspacePanel = container.querySelector('[data-testid="workspace-panel"]');
+    expect(browserPane).not.toBeNull();
+    expect(workspacePanel).not.toBeNull();
+    expect(
+      browserPane!.compareDocumentPosition(workspacePanel!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("opens the workspace by default and can collapse and expand it", async () => {

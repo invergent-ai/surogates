@@ -192,7 +192,7 @@ governance-checked like any other tool.
 |---|---|---|
 | `browser_navigate` | `/playwright/execute` (`page.goto`) | Navigate to URL; returns final URL + page title |
 | `browser_get_state` | `/playwright/execute` (a11y snapshot) | Default perception: structured a11y tree with `@e1`-style refs, plus URL and title |
-| `browser_screenshot` | `/computer/screenshot` | PNG of viewport (or region); returns artifact metadata or base64 fallback |
+| `browser_screenshot` | `/computer/screenshot` (+ `/playwright/execute` when `annotate=true`) | PNG of viewport (or region); supports `annotate` for numbered overlay; returns artifact metadata or base64 fallback |
 | `browser_click` | `/computer/click_mouse` | Click by coords or by `@ref` (resolved via cached a11y snapshot) |
 | `browser_type` | `/computer/type` | Type text; supports `@ref` to focus first |
 | `browser_press_key` | `/computer/press_key` | Press named key(s) — Tab, Enter, ctrl+l, etc. |
@@ -212,8 +212,12 @@ Binary outputs are never returned as raw bytes in tool results:
 
 - `browser_screenshot` stores the PNG through the existing artifact/session
   storage path and returns `{ "artifact_id", "mime_type": "image/png",
-  "width", "height" }`. In local/dev mode without storage, it may return
-  bounded base64 with an explicit byte limit.
+  "width", "height", "annotations" }`. The `annotations` field is present
+  only when the call passed `annotate: true` and contains the
+  `[{ ref, label, role, name, bbox }, ...]` list correlating each numbered
+  overlay with its `@e1`-style ref from the cached a11y snapshot. In
+  local/dev mode without artifact storage, the handler may return bounded
+  base64 with an explicit byte limit.
 - `browser_record_stop` calls `/recording/stop`, polls
   `/recording/download?id=...` until the MP4 is ready (handling `202
   Retry-After`), uploads the file as a session artifact, then optionally calls
@@ -241,6 +245,29 @@ resolves to the cached coords; the cache invalidates on any action that may
 mutate the DOM (click, type, navigate, key press) — the LLM is expected to
 call `browser_get_state` again after such actions. `browser_screenshot` is
 available when the tree isn't enough (visual layouts, CAPTCHAs).
+
+A full a11y tree of a complex page can run 50KB+ of structural noise. To
+keep tool results tight, `browser_get_state` accepts optional output filters
+(borrowed from vercel-labs/agent-browser's well-validated snapshot UX):
+
+| Parameter | Type | Default | Effect |
+|---|---|---|---|
+| `interactive_only` | bool | `false` | Drop non-interactive nodes (keep buttons, links, inputs, comboboxes, tabs, menuitems, etc.); structural roles like `generic`, `region`, `paragraph` are dropped unless they have an interactive child. |
+| `compact` | bool | `false` | Collapse subtrees that have no interactive descendants and no accessible name. |
+| `max_depth` | int | unlimited | Truncate the tree at the given depth. |
+| `selector` | string | `null` | Scope the tree to a CSS-selected subtree. |
+
+Refs (`@e1`, `@e2`, ...) are assigned **before filtering** so the same ref
+always points to the same DOM element regardless of which filters were
+applied. Two filtered snapshots of the same page produce a consistent
+ref→coords mapping in the client cache.
+
+`browser_screenshot` likewise accepts an `annotate: bool` parameter. When
+true, the client first runs `browser_get_state(interactive_only=true)` (if
+no snapshot is cached), then draws numbered `[N]` overlays on each
+interactive element using a Playwright-injected canvas before capturing.
+Each `[N]` corresponds to `@eN` so the LLM can reason visually and act via
+the same refs without re-snapshotting.
 
 ## 6. Persistence — per-tenant profile
 
@@ -484,10 +511,17 @@ peak. Capacity planning lives outside this spec.
 
 ## 12. Configuration
 
+The browser is always enabled — there is no on/off switch. The `backend`
+field is the only environment selector: `"process"` for local development
+(needs Docker on the worker host) and `"kubernetes"` for production. When
+no backend is reachable at runtime (e.g., dev worker without Docker), the
+tool calls return ``browser_unavailable`` with the standard guidance —
+the agent learns the failure class and stops dispatching browser tools
+within that session.
+
 ```yaml
 # config.dev.yaml — ProcessBrowserBackend (docker run)
 browser:
-  enabled: true
   backend: "process"
   image: "ghcr.io/onkernel/chromium-headful:stable"
   rest_port_base: 30000       # docker -p {base + N}:10001
@@ -497,7 +531,6 @@ browser:
 
 # config.prod.yaml — K8sBrowserBackend
 browser:
-  enabled: true
   backend: "kubernetes"
   namespace: "surogates"
   service_account: "surogates-browser"
@@ -514,8 +547,9 @@ browser:
   memory_limit: "4Gi"
 ```
 
-When `browser.enabled` is false, browser tools are unregistered and don't
-appear in the LLM's tool list at all.
+Tools are always registered. The cost of advertising browser tools that
+might fail at runtime is a small system-prompt token bump; the benefit
+is a single, consistent agent surface across deployments.
 
 ## 13. Testing
 
@@ -556,7 +590,10 @@ Verifiable only end-to-end (deferred to manual + CI integration):
 ## 14. Rollout
 
 The work is large enough to break into independently shippable phases. Each
-phase ends with a working subset behind a feature flag.
+phase ends with a working subset that exercises the same `BrowserBackend` /
+`BrowserPool` / `KernelBrowserClient` interfaces; later phases swap in
+richer backend implementations and add adjacent surfaces (UI, persistence)
+without rework in this layer.
 
 1. **Phase A — backend skeleton (COMPLETE).** `BrowserBackend` protocol +
    `ProcessBrowserBackend` (docker run) + `BrowserPool` + `BrowserRegistry`
@@ -589,6 +626,14 @@ phase ends with a working subset behind a feature flag.
 - **Browser-use compatibility.** Hermes' `browser_use` provider integrates
   with the browser-use library. We could wrap kernel-images CDP behind the
   browser-use API for users who already have prompts tuned for it. Not v1.
+- **vercel-labs/agent-browser interop.** Their `--provider kernel` flag
+  targets kernel.sh's hosted control plane (`api.onkernel.com`) and is not
+  usable against our self-hosted pods without writing a kernel.sh-API-
+  compatible shim. Their `--cdp <url>` mode would work directly against our
+  pods but would force us to ship a 30–50 MB Rust binary in the worker
+  image and pay subprocess-per-call overhead. Not pursued; we reuse their
+  design choices (refs, snapshot filters, annotated screenshots) directly
+  in our Python client instead.
 - **CAPTCHA solver provider integrations.** Out of scope; user takes over
   via live view in v1.
 - **Pod warm pool.** Pre-provision N idle browser pods to amortize cold-start

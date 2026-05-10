@@ -10,6 +10,27 @@ export interface AgentChatAdapterContextValue {
 const AgentChatAdapterContext =
   createContext<AgentChatAdapterContextValue | null>(null);
 
+export const NO_BROWSER_ADAPTER: Pick<
+  AgentChatAdapter,
+  | "getBrowserState"
+  | "acquireBrowserControl"
+  | "releaseBrowserControl"
+  | "browserLiveViewUrl"
+> = {
+  async getBrowserState() {
+    return null;
+  },
+  async acquireBrowserControl() {
+    throw new Error("Browser control is not supported by this adapter.");
+  },
+  async releaseBrowserControl() {
+    // Releasing unsupported browser control is intentionally a no-op.
+  },
+  browserLiveViewUrl() {
+    return "";
+  },
+};
+
 export const AgentChatAdapterProvider = AgentChatAdapterContext.Provider;
 
 export function useAgentChatAdapterContext(): AgentChatAdapterContextValue {

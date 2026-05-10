@@ -17,6 +17,7 @@ any crash can be recovered by replaying the log.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -78,6 +79,8 @@ if TYPE_CHECKING:
     from openai import AsyncOpenAI
     from redis.asyncio import Redis
 
+    from surogates.browser.control import BrowserControlStore
+    from surogates.browser.pool import BrowserPool
     from surogates.harness.budget import IterationBudget
     from surogates.harness.context import ContextCompressor
     from surogates.harness.prompt import PromptBuilder
@@ -89,6 +92,36 @@ if TYPE_CHECKING:
     from surogates.tenant.context import TenantContext
 
 logger = logging.getLogger(__name__)
+
+
+async def maybe_inject_browser_pause(
+    *,
+    session: Any,
+    browser_control: "BrowserControlStore | None",
+) -> str | None:
+    """Return a one-time pause notice while the user holds browser control."""
+    if browser_control is None:
+        return None
+
+    holder = await browser_control.held_by(str(session.id))
+    config = session.config if isinstance(getattr(session, "config", None), dict) else {}
+    if not isinstance(getattr(session, "config", None), dict):
+        with contextlib.suppress(Exception):
+            session.config = config
+
+    if holder is not None:
+        if config.get("browser_pause_msg_injected"):
+            return None
+        config["browser_pause_msg_injected"] = True
+        return (
+            "The user has taken control of the browser. Wait for them to "
+            "finish before continuing; browser_* tool calls will return "
+            "paused_by_user until they release control."
+        )
+
+    if config.get("browser_pause_msg_injected"):
+        config["browser_pause_msg_injected"] = False
+    return None
 
 
 def _format_loop_list(rows: list[Any]) -> str:
@@ -299,6 +332,8 @@ class AgentHarness:
         system_prompt_cache: SystemPromptCache | None = None,
         memory_manager: MemoryManager | None = None,
         sandbox_pool: SandboxPool | None = None,
+        browser_pool: BrowserPool | None = None,
+        browser_control: BrowserControlStore | None = None,
         checkpoints_enabled: bool = False,
         saga_enabled: bool = False,
         saga_settings: Any | None = None,
@@ -317,6 +352,8 @@ class AgentHarness:
         self._prompt = prompt_builder
         self._redis: Redis | None = redis_client
         self._sandbox_pool: SandboxPool | None = sandbox_pool
+        self._browser_pool: BrowserPool | None = browser_pool
+        self._browser_control: BrowserControlStore | None = browser_control
         self._api_client = api_client
         self._session_factory = session_factory
 
@@ -892,9 +929,17 @@ class AgentHarness:
             # Each message is cleaned for API compatibility: internal-only fields are stripped, reasoning
             # is passed back as ``reasoning_content`` for providers that need
             # it (Moonshot AI, Novita, OpenRouter).
+            browser_pause_notice = await maybe_inject_browser_pause(
+                session=session,
+                browser_control=self._browser_control,
+            )
             api_messages: list[dict] = [
                 {"role": "system", "content": system_prompt},
             ]
+            if browser_pause_notice:
+                api_messages.append(
+                    {"role": "system", "content": browser_pause_notice},
+                )
             # Prefilled context (few-shot examples, planning context)
             if prefill_messages:
                 api_messages.extend(prefill_messages)
@@ -988,6 +1033,8 @@ class AgentHarness:
                     memory_manager=self._memory_manager,
                     hint_tracker=hint_tracker,
                     sandbox_pool=self._sandbox_pool,
+                    browser_pool=self._browser_pool,
+                    browser_control=self._browser_control,
                     api_client=self._api_client,
                     session_factory=self._session_factory,
                     llm_client=self._llm,
@@ -1543,6 +1590,8 @@ class AgentHarness:
                     memory_manager=self._memory_manager,
                     hint_tracker=hint_tracker,
                     sandbox_pool=self._sandbox_pool,
+                    browser_pool=self._browser_pool,
+                    browser_control=self._browser_control,
                     api_client=self._api_client,
                     session_factory=self._session_factory,
                     llm_client=self._llm,

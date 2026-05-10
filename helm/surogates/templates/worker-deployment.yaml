@@ -63,6 +63,35 @@ spec:
             - name: SUROGATES_SANDBOX_K8S_S3FS_IMAGE
               value: {{ include "surogates.image" (dict "root" . "name" "s3fs") | quote }}
             {{- end }}
+            - name: SUROGATES_BROWSER_BACKEND
+              value: {{ .Values.browser.backend | quote }}
+            - name: SUROGATES_BROWSER_IMAGE
+              value: {{ .Values.browser.image | quote }}
+            - name: SUROGATES_BROWSER_CPU
+              value: {{ .Values.browser.resources.requests.cpu | quote }}
+            - name: SUROGATES_BROWSER_MEMORY
+              value: {{ .Values.browser.resources.requests.memory | quote }}
+            - name: SUROGATES_BROWSER_CPU_LIMIT
+              value: {{ .Values.browser.resources.limits.cpu | quote }}
+            - name: SUROGATES_BROWSER_MEMORY_LIMIT
+              value: {{ .Values.browser.resources.limits.memory | quote }}
+            - name: SUROGATES_BROWSER_POD_READY_TIMEOUT
+              value: {{ .Values.browser.podReadyTimeout | quote }}
+            - name: SUROGATES_BROWSER_ACTIVE_DEADLINE_SECONDS
+              value: {{ .Values.browser.activeDeadlineSeconds | quote }}
+            {{- if eq .Values.browser.backend "kubernetes" }}
+            - name: SUROGATES_BROWSER_K8S_NAMESPACE
+              value: {{ default .Release.Namespace .Values.browser.k8sNamespace | quote }}
+            - name: SUROGATES_BROWSER_K8S_SERVICE_ACCOUNT
+              value: {{ printf "%s-%s" $fullname .Values.browser.serviceAccountSuffix | quote }}
+            {{- else }}
+            - name: SUROGATES_BROWSER_REST_PORT_BASE
+              value: {{ .Values.browser.processPorts.restBase | quote }}
+            - name: SUROGATES_BROWSER_CDP_PORT_BASE
+              value: {{ .Values.browser.processPorts.cdpBase | quote }}
+            - name: SUROGATES_BROWSER_LIVE_VIEW_PORT_BASE
+              value: {{ .Values.browser.processPorts.liveViewBase | quote }}
+            {{- end }}
             - name: SUROGATES_WORKER_API_BASE_URL
               value: {{ include "surogates.apiServiceUrl" . | quote }}
             - name: SUROGATES_WORKER_USE_API_FOR_HARNESS_TOOLS

@@ -382,6 +382,7 @@ export function WorkspacePanel({
   if (collapsed) {
     return (
       <aside
+        data-testid="workspace-panel"
         role="button"
         tabIndex={0}
         className="relative z-10 flex min-h-0 w-10 shrink-0 cursor-pointer items-center justify-center border-l border-muted-foreground/20 bg-card text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
@@ -401,6 +402,7 @@ export function WorkspacePanel({
 
   return (
     <aside
+      data-testid="workspace-panel"
       className="relative z-10 flex min-h-0 flex-col overflow-hidden border-l border-muted-foreground/20 bg-card"
       style={{ width, minWidth: MIN_WIDTH, maxWidth: MAX_WIDTH }}
     >
