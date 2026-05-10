@@ -123,7 +123,8 @@ class TestBuildPodManifest:
         assert pod.spec.volumes is None
 
     def test_latest_browser_image_uses_always_pull_policy(
-        self, backend: K8sBrowserBackend,
+        self,
+        backend: K8sBrowserBackend,
     ) -> None:
         pod = backend._build_pod_manifest(
             browser_id="browser-id",
@@ -131,13 +132,16 @@ class TestBuildPodManifest:
             session_id="session-1",
             org_id="org-1",
             user_id="user-1",
-            spec=BrowserSpec(image="ghcr.io/invergent-ai/surogates-agent-browser:latest"),
+            spec=BrowserSpec(
+                image="ghcr.io/invergent-ai/surogates-agent-browser:latest"
+            ),
         )
 
         assert pod.spec.containers[0].image_pull_policy == "Always"
 
     def test_digest_browser_image_uses_if_not_present_pull_policy(
-        self, backend: K8sBrowserBackend,
+        self,
+        backend: K8sBrowserBackend,
     ) -> None:
         pod = backend._build_pod_manifest(
             browser_id="browser-id",
