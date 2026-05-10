@@ -6,7 +6,6 @@ import { formatDistanceToNow } from "date-fns";
 import {
   CalendarClockIcon,
   ExternalLinkIcon,
-  PlayIcon,
   Trash2Icon,
 } from "lucide-react";
 import { Badge } from "../ui/badge";
@@ -77,6 +76,15 @@ function scheduleTitle(item: AgentChatScheduledWorkItem): string {
   return item.prompt;
 }
 
+function canRunScheduleNow(item: AgentChatScheduledWorkItem): boolean {
+  return item.repeatLimit === 1;
+}
+
+function scheduleDisplay(item: AgentChatScheduledWorkItem): string | null {
+  if (item.kind === "dynamic_loop") return null;
+  return item.scheduleDisplay;
+}
+
 function sortScheduledWork(
   items: AgentChatScheduledWorkItem[],
 ): AgentChatScheduledWorkItem[] {
@@ -113,8 +121,9 @@ function ScheduledWorkRow({
   const disabled = actionScheduleId === item.id;
   const title = scheduleTitle(item);
   const statusText = item.status === "active" ? null : item.status;
+  const showRunNow = canRunNow && isActive && canRunScheduleNow(item);
   const meta = [
-    item.scheduleDisplay,
+    scheduleDisplay(item),
     formatRelative(item.nextRunAt, "Next"),
     formatRelative(item.lastRunAt, "Last"),
     formatRuns(item.runCount),
@@ -127,18 +136,22 @@ function ScheduledWorkRow({
         <CalendarClockIcon className="size-3.5" />
       </div>
       <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-2">
-          <div className="truncate text-foreground">{title}</div>
-          <Badge variant="secondary" className="shrink-0">
-            {formatKind(item.kind)}
-          </Badge>
+        <div className="flex min-w-0 items-start gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-foreground">{title}</div>
+            <div className="mt-0.5 flex min-w-0 items-center gap-2">
+              <Badge variant="secondary" className="shrink-0">
+                {formatKind(item.kind)}
+              </Badge>
+            </div>
+            {meta && <div className="mt-0.5 truncate text-xs text-faint">{meta}</div>}
+          </div>
           {statusText && (
             <Badge variant="destructive" className="shrink-0">
               {statusText}
             </Badge>
           )}
         </div>
-        <div className="mt-0.5 truncate text-xs text-faint">{meta}</div>
         {item.lastError && (
           <div className="mt-1 line-clamp-2 text-xs text-destructive">
             {item.lastError}
@@ -157,7 +170,7 @@ function ScheduledWorkRow({
             <ExternalLinkIcon className="size-3.5" />
           </button>
         )}
-        {canRunNow && isActive && (
+        {showRunNow && (
           <button
             type="button"
             className="rounded p-1 text-faint opacity-70 transition-all hover:bg-line hover:text-foreground disabled:pointer-events-none disabled:opacity-40 group-hover:opacity-100"
@@ -166,7 +179,7 @@ function ScheduledWorkRow({
             title="Run schedule now"
             disabled={disabled}
           >
-            <PlayIcon className="size-3.5" />
+            <CalendarClockIcon className="size-3.5" />
           </button>
         )}
         {canCancel && isActive && (

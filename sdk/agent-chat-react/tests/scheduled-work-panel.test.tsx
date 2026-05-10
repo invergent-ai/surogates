@@ -139,11 +139,17 @@ describe("ScheduledWorkPanel", () => {
     expect(container.textContent).toContain("Scheduled Work");
     expect(container.textContent).toContain("Bitcoin monitor");
     expect(container.textContent).toContain("Dynamic loop");
-    expect(container.textContent).toContain("Dynamic loop (1 minute to 1 hour)");
+    expect(container.textContent).not.toContain(
+      "Dynamic loop (1 minute to 1 hour)",
+    );
+    expect(container.textContent).toContain("Next");
     expect(container.textContent).toContain("Deploy check");
     expect(container.textContent).toContain("Cron");
     expect(container.textContent).toContain("Every 5 minutes");
     expect(container.textContent).toContain("7 runs");
+    expect(
+      (container.textContent ?? "").indexOf("Bitcoin monitor"),
+    ).toBeLessThan((container.textContent ?? "").indexOf("Dynamic loop"));
   });
 
   it("opens the last run when available", async () => {
@@ -185,8 +191,10 @@ describe("ScheduledWorkPanel", () => {
   it("runs and cancels schedules through adapter actions", async () => {
     let items = [
       scheduledWork({
-        id: "cron-1",
+        id: "one-shot-1",
+        kind: "one_shot",
         name: "Deploy check",
+        repeatLimit: 1,
       }),
     ];
     const runs: string[] = [];
@@ -231,9 +239,43 @@ describe("ScheduledWorkPanel", () => {
       await Promise.resolve();
     });
 
-    expect(runs).toEqual(["cron-1"]);
-    expect(cancels).toEqual(["cron-1"]);
+    expect(runs).toEqual(["one-shot-1"]);
+    expect(cancels).toEqual(["one-shot-1"]);
     expect(container.textContent).not.toContain("Deploy check");
+  });
+
+  it("does not show run-now for recurring loop schedules", async () => {
+    const adapter: AgentChatAdapter = {
+      ...createAdapter([
+        scheduledWork({
+          id: "loop-1",
+          kind: "dynamic_loop",
+          name: "Bitcoin monitor",
+          repeatLimit: null,
+        }),
+      ]),
+      async runScheduledWorkNow() {
+        throw new Error("loop schedules should not expose run-now");
+      },
+      async cancelScheduledWork() {},
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<ScheduledWorkPanel adapter={adapter} agentId="agent-1" />);
+      await Promise.resolve();
+    });
+
+    const runButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Run schedule now"]',
+    );
+    const cancelButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Cancel schedule"]',
+    );
+    expect(runButton).toBeNull();
+    expect(cancelButton).not.toBeNull();
   });
 
   it("does not render when the adapter does not support scheduled work", async () => {
