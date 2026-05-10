@@ -124,6 +124,40 @@ export interface AgentChatSessionTree {
   total: number;
 }
 
+export type AgentChatScheduledWorkKind =
+  | "cron"
+  | "dynamic_loop"
+  | "one_shot"
+  | "scheduled"
+  | (string & {});
+
+export interface AgentChatScheduledWorkItem {
+  id: string;
+  agentId?: string | null;
+  name?: string | null;
+  prompt: string;
+  status: "active" | "paused" | "completed" | "failed" | string;
+  kind?: AgentChatScheduledWorkKind | null;
+  source?: string | null;
+  scheduleDisplay: string;
+  timezone?: string | null;
+  runCount: number;
+  repeatLimit?: number | null;
+  nextRunAt?: string | null;
+  lastRunAt?: string | null;
+  lastSessionId?: string | null;
+  lastError?: string | null;
+  expiresAt?: string | null;
+  createdFromSessionId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentChatScheduledWorkList {
+  items: AgentChatScheduledWorkItem[];
+  total: number;
+}
+
 export type AgentChatEventType =
   | "user.message"
   | "llm.request"
@@ -315,6 +349,16 @@ export interface AgentChatAdapter {
   deleteSession?(input: { sessionId: string }): Promise<void>;
   getSessionTree?(input: { sessionId: string }): Promise<AgentChatSessionTree>;
   stopSession?(input: { sessionId: string }): Promise<void>;
+  listScheduledWork?(input: {
+    agentId?: string;
+    status?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<AgentChatScheduledWorkList>;
+  runScheduledWorkNow?(input: {
+    scheduleId: string;
+  }): Promise<{ sessionId?: string } | void>;
+  cancelScheduledWork?(input: { scheduleId: string }): Promise<void>;
   getArtifact(input: {
     sessionId: string;
     artifactId: string;
@@ -382,6 +426,8 @@ export interface AgentChatRuntimeApi {
 export type ChatMessage = AgentChatMessage;
 export type SessionTreeNode = AgentChatSessionTreeNode;
 export type SessionTree = AgentChatSessionTree;
+export type ScheduledWorkItem = AgentChatScheduledWorkItem;
+export type ScheduledWorkList = AgentChatScheduledWorkList;
 export type ToolCallInfo = AgentChatToolCallInfo;
 export type TokenUsage = AgentChatTokenUsage;
 export type RetryIndicator = AgentChatRetryIndicator;
