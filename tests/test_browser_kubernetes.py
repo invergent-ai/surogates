@@ -52,7 +52,9 @@ class TestSkeleton:
         assert backend._image == "kernel-headful:test"
         assert backend._pods == {}
 
-    async def test_get_api_caches(self, backend: K8sBrowserBackend, monkeypatch) -> None:
+    async def test_get_api_caches(
+        self, backend: K8sBrowserBackend, monkeypatch
+    ) -> None:
         from kubernetes_asyncio import client as k8s_client, config as k8s_config
 
         monkeypatch.setattr(k8s_config, "load_incluster_config", lambda: None)
@@ -64,7 +66,8 @@ class TestSkeleton:
 
 class TestBuildPodManifest:
     def test_pod_manifest_has_identity_labels_and_container_spec(
-        self, backend: K8sBrowserBackend,
+        self,
+        backend: K8sBrowserBackend,
     ) -> None:
         spec = BrowserSpec(
             image="kernel-headful:test",
@@ -119,8 +122,46 @@ class TestBuildPodManifest:
         assert len(pod.spec.containers) == 1
         assert pod.spec.volumes is None
 
+    def test_latest_browser_image_uses_always_pull_policy(
+        self,
+        backend: K8sBrowserBackend,
+    ) -> None:
+        pod = backend._build_pod_manifest(
+            browser_id="browser-id",
+            pod_name="browser-abc123",
+            session_id="session-1",
+            org_id="org-1",
+            user_id="user-1",
+            spec=BrowserSpec(
+                image="ghcr.io/invergent-ai/surogates-agent-browser:latest"
+            ),
+        )
+
+        assert pod.spec.containers[0].image_pull_policy == "Always"
+
+    def test_digest_browser_image_uses_if_not_present_pull_policy(
+        self,
+        backend: K8sBrowserBackend,
+    ) -> None:
+        pod = backend._build_pod_manifest(
+            browser_id="browser-id",
+            pod_name="browser-abc123",
+            session_id="session-1",
+            org_id="org-1",
+            user_id="user-1",
+            spec=BrowserSpec(
+                image=(
+                    "ghcr.io/invergent-ai/surogates-agent-browser"
+                    "@sha256:0123456789abcdef"
+                ),
+            ),
+        )
+
+        assert pod.spec.containers[0].image_pull_policy == "IfNotPresent"
+
     def test_pod_manifest_mounts_workspace_when_source_configured(
-        self, backend: K8sBrowserBackend,
+        self,
+        backend: K8sBrowserBackend,
     ) -> None:
         spec = BrowserSpec(
             workspace_source_ref="s3://agent-bucket/sessions/session-1",
@@ -165,7 +206,8 @@ class TestBuildPodManifest:
         ] == [("workspace", "/workspace", "Bidirectional")]
 
     def test_pod_manifest_uses_backend_image_when_spec_image_blank(
-        self, backend: K8sBrowserBackend,
+        self,
+        backend: K8sBrowserBackend,
     ) -> None:
         spec = BrowserSpec(image="")
         pod = backend._build_pod_manifest(
@@ -183,7 +225,8 @@ class TestBuildPodManifest:
 
 class TestBuildServiceManifest:
     def test_service_manifest_targets_browser_pod_labels(
-        self, backend: K8sBrowserBackend,
+        self,
+        backend: K8sBrowserBackend,
     ) -> None:
         svc = backend._build_service_manifest(
             browser_id="browser-id",
@@ -216,7 +259,9 @@ class TestBuildServiceManifest:
 
 class TestProvision:
     async def test_provision_creates_pod_and_service(
-        self, backend: K8sBrowserBackend, monkeypatch,
+        self,
+        backend: K8sBrowserBackend,
+        monkeypatch,
     ) -> None:
         api = MagicMock()
         api.create_namespaced_secret = AsyncMock()
@@ -255,7 +300,9 @@ class TestProvision:
         assert backend._pods[bid].status == BrowserStatus.RUNNING
 
     async def test_provision_rolls_back_pod_on_service_failure(
-        self, backend: K8sBrowserBackend, monkeypatch,
+        self,
+        backend: K8sBrowserBackend,
+        monkeypatch,
     ) -> None:
         api = MagicMock()
         api.create_namespaced_secret = AsyncMock()
@@ -288,7 +335,9 @@ class TestProvision:
         assert backend._pods == {}
 
     async def test_provision_rolls_back_when_pod_never_ready(
-        self, backend: K8sBrowserBackend, monkeypatch,
+        self,
+        backend: K8sBrowserBackend,
+        monkeypatch,
     ) -> None:
         api = MagicMock()
         api.create_namespaced_secret = AsyncMock()
@@ -323,7 +372,9 @@ class TestProvision:
 
 class TestProtocolAlignment:
     async def test_pool_forwards_session_to_k8s_provision(
-        self, backend: K8sBrowserBackend, monkeypatch,
+        self,
+        backend: K8sBrowserBackend,
+        monkeypatch,
     ) -> None:
         from surogates.browser.pool import BrowserPool
         from surogates.browser.registry import BrowserEntry
@@ -369,7 +420,9 @@ class TestProtocolAlignment:
 
 
 class TestStatus:
-    async def test_status_running(self, backend: K8sBrowserBackend, monkeypatch) -> None:
+    async def test_status_running(
+        self, backend: K8sBrowserBackend, monkeypatch
+    ) -> None:
         backend._pods["bid"] = MagicMock(
             pod_name="browser-bid",
             namespace="test-ns",
@@ -389,7 +442,9 @@ class TestStatus:
         assert backend._pods["bid"].status == BrowserStatus.RUNNING
 
     async def test_status_pending_when_phase_pending(
-        self, backend: K8sBrowserBackend, monkeypatch,
+        self,
+        backend: K8sBrowserBackend,
+        monkeypatch,
     ) -> None:
         backend._pods["bid"] = MagicMock(
             pod_name="browser-bid",
@@ -409,7 +464,9 @@ class TestStatus:
         assert await backend.status("bid") == BrowserStatus.PENDING
 
     async def test_status_terminated_when_pod_404(
-        self, backend: K8sBrowserBackend, monkeypatch,
+        self,
+        backend: K8sBrowserBackend,
+        monkeypatch,
     ) -> None:
         backend._pods["bid"] = MagicMock(
             pod_name="browser-bid",
@@ -427,14 +484,17 @@ class TestStatus:
         assert "bid" not in backend._pods
 
     async def test_status_unknown_returns_terminated(
-        self, backend: K8sBrowserBackend,
+        self,
+        backend: K8sBrowserBackend,
     ) -> None:
         assert await backend.status("never") == BrowserStatus.TERMINATED
 
 
 class TestDestroy:
     async def test_destroy_deletes_service_and_pod(
-        self, backend: K8sBrowserBackend, monkeypatch,
+        self,
+        backend: K8sBrowserBackend,
+        monkeypatch,
     ) -> None:
         from surogates.browser.kubernetes import _PodEntry
 
@@ -466,7 +526,9 @@ class TestDestroy:
         await backend.destroy("never")
 
     async def test_destroy_swallows_404(
-        self, backend: K8sBrowserBackend, monkeypatch,
+        self,
+        backend: K8sBrowserBackend,
+        monkeypatch,
     ) -> None:
         from surogates.browser.kubernetes import _PodEntry
 
@@ -495,7 +557,9 @@ class TestDestroy:
 
 class TestFindBySession:
     async def test_find_entry_returns_tenant_metadata(
-        self, backend: K8sBrowserBackend, monkeypatch,
+        self,
+        backend: K8sBrowserBackend,
+        monkeypatch,
     ) -> None:
         pod = MagicMock()
         pod.metadata.name = "browser-abcdef123456"
@@ -524,7 +588,9 @@ class TestFindBySession:
         assert entry.live_view_url == "ws://browser-abcdef123456.test-ns.svc:443"
 
     async def test_find_returns_endpoint(
-        self, backend: K8sBrowserBackend, monkeypatch,
+        self,
+        backend: K8sBrowserBackend,
+        monkeypatch,
     ) -> None:
         pod = MagicMock()
         pod.metadata.name = "browser-abcdef123456"
@@ -552,7 +618,9 @@ class TestFindBySession:
         assert endpoint.live_view_url == "ws://browser-abcdef123456.test-ns.svc:443"
 
     async def test_find_returns_none_when_no_match(
-        self, backend: K8sBrowserBackend, monkeypatch,
+        self,
+        backend: K8sBrowserBackend,
+        monkeypatch,
     ) -> None:
         api = MagicMock()
         api.list_namespaced_pod = AsyncMock(return_value=MagicMock(items=[]))
@@ -564,7 +632,9 @@ class TestFindBySession:
         assert await backend.find_by_session("sess-missing") is None
 
     async def test_find_uses_correct_label_selector(
-        self, backend: K8sBrowserBackend, monkeypatch,
+        self,
+        backend: K8sBrowserBackend,
+        monkeypatch,
     ) -> None:
         api = MagicMock()
         api.list_namespaced_pod = AsyncMock(return_value=MagicMock(items=[]))

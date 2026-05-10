@@ -30,6 +30,15 @@ SERVICE_PORT_LIVE_VIEW = 443
 TARGET_PORT_LIVE_VIEW = 8080
 
 
+def _image_pull_policy(image: str) -> str:
+    if "@" in image:
+        return "IfNotPresent"
+    image_name = image.rsplit("/", 1)[-1]
+    if ":" not in image_name or image_name.endswith(":latest"):
+        return "Always"
+    return "IfNotPresent"
+
+
 @dataclass
 class _PodEntry:
     browser_id: str
@@ -80,9 +89,7 @@ class K8sBrowserBackend:
         suffix = browser_id[:12]
         pod_name = f"browser-{suffix}"
         service_name = f"browser-{suffix}"
-        secret_name = (
-            f"browser-s3-{suffix}" if spec.workspace_source_ref else None
-        )
+        secret_name = f"browser-s3-{suffix}" if spec.workspace_source_ref else None
         endpoint = BrowserEndpoint(
             rest_url=f"http://{service_name}.{self._namespace}.svc:{SERVICE_PORT_REST}",
             cdp_url=f"ws://{service_name}.{self._namespace}.svc:{SERVICE_PORT_CDP}",
@@ -323,11 +330,7 @@ class K8sBrowserBackend:
             env_vars = [
                 client.V1EnvVar(name="HOME", value="/workspace"),
                 client.V1EnvVar(name="WORKSPACE_DIR", value="/workspace"),
-                *[
-                    env
-                    for env in env_vars
-                    if env.name not in {"HOME", "WORKSPACE_DIR"}
-                ],
+                *[env for env in env_vars if env.name not in {"HOME", "WORKSPACE_DIR"}],
             ]
             volumes = [
                 client.V1Volume(
@@ -338,7 +341,7 @@ class K8sBrowserBackend:
         container = client.V1Container(
             name="browser",
             image=spec.image or self._image,
-            image_pull_policy="IfNotPresent",
+            image_pull_policy=_image_pull_policy(spec.image or self._image),
             ports=[
                 client.V1ContainerPort(container_port=SERVICE_PORT_REST, name="rest"),
                 client.V1ContainerPort(container_port=SERVICE_PORT_CDP, name="cdp"),
@@ -515,12 +518,16 @@ class K8sBrowserBackend:
             if exc.status != 409:
                 raise
 
-    async def _delete_secret_safe(self, api: client.CoreV1Api, secret_name: str) -> None:
+    async def _delete_secret_safe(
+        self, api: client.CoreV1Api, secret_name: str
+    ) -> None:
         try:
             await api.delete_namespaced_secret(secret_name, self._namespace)
         except ApiException as exc:
             if exc.status != 404:
-                logger.warning("Failed to delete browser secret %s: %s", secret_name, exc)
+                logger.warning(
+                    "Failed to delete browser secret %s: %s", secret_name, exc
+                )
 
     @staticmethod
     def _is_pod_ready(pod: client.V1Pod) -> bool:
