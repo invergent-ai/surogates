@@ -75,8 +75,19 @@ class BrowserSpec:
 class BrowserBackend(Protocol):
     """Backend-agnostic browser lifecycle protocol."""
 
-    async def provision(self, spec: BrowserSpec) -> tuple[str, BrowserEndpoint]:
-        """Create a browser instance and return its id and endpoint."""
+    async def provision(
+        self,
+        spec: BrowserSpec,
+        *,
+        session_id: str,
+        org_id: str,
+        user_id: str,
+    ) -> tuple[str, BrowserEndpoint]:
+        """Create a browser instance and return its id and endpoint.
+
+        Kubernetes-backed instances use session/org/user ids as labels.
+        Local process instances accept them for protocol parity and ignore them.
+        """
         ...
 
     async def status(self, browser_id: str) -> BrowserStatus:

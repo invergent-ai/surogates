@@ -243,3 +243,50 @@ class TestProvision:
         assert api.delete_namespaced_service.call_count == 1
         assert api.delete_namespaced_pod.call_count == 1
         assert backend._pods == {}
+
+
+class TestProtocolAlignment:
+    async def test_pool_forwards_session_to_k8s_provision(
+        self, backend: K8sBrowserBackend, monkeypatch,
+    ) -> None:
+        from surogates.browser.pool import BrowserPool
+        from surogates.browser.registry import BrowserEntry
+
+        api = MagicMock()
+        api.create_namespaced_pod = AsyncMock()
+        api.create_namespaced_service = AsyncMock()
+
+        async def fake_get_api() -> MagicMock:
+            return api
+
+        async def fake_wait_ready(api_inner, pod_name: str) -> None:
+            return None
+
+        monkeypatch.setattr(backend, "_get_api", fake_get_api)
+        monkeypatch.setattr(backend, "_wait_for_ready", fake_wait_ready)
+
+        class FakeRegistry:
+            def __init__(self) -> None:
+                self.entries: dict[str, BrowserEntry] = {}
+
+            async def set(self, entry: BrowserEntry) -> None:
+                self.entries[entry.session_id] = entry
+
+            async def get(self, session_id: str) -> BrowserEntry | None:
+                return self.entries.get(session_id)
+
+            async def delete(self, session_id: str) -> None:
+                self.entries.pop(session_id, None)
+
+        pool = BrowserPool(backend=backend, registry=FakeRegistry())  # type: ignore[arg-type]
+        await pool.ensure(
+            session_id="sess-7",
+            org_id="org-7",
+            user_id="user-7",
+            spec=BrowserSpec(),
+        )
+
+        pod_arg = api.create_namespaced_pod.call_args.args[1]
+        assert pod_arg.metadata.labels["surogates.ai/session-id"] == "sess-7"
+        assert pod_arg.metadata.labels["surogates.ai/org-id"] == "org-7"
+        assert pod_arg.metadata.labels["surogates.ai/user-id"] == "user-7"

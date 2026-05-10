@@ -67,7 +67,15 @@ class ProcessBrowserBackend:
         self._next_offset = 0
         self._lock = asyncio.Lock()
 
-    async def provision(self, spec: BrowserSpec) -> tuple[str, BrowserEndpoint]:
+    async def provision(
+        self,
+        spec: BrowserSpec,
+        *,
+        session_id: str = "",
+        org_id: str = "",
+        user_id: str = "",
+    ) -> tuple[str, BrowserEndpoint]:
+        _ = (session_id, org_id, user_id)
         async with self._lock:
             offset = self._next_offset
             self._next_offset += 1

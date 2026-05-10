@@ -78,7 +78,12 @@ class BrowserPool:
                 self._mapping.pop(session_id, None)
                 await self._registry.delete(session_id)
 
-            browser_id, endpoint = await self._backend.provision(spec)
+            browser_id, endpoint = await self._backend.provision(
+                spec,
+                session_id=session_id,
+                org_id=org_id,
+                user_id=user_id,
+            )
             slot = _Slot(browser_id=browser_id, endpoint=endpoint, snapshot_cache={})
             self._mapping[session_id] = slot
             await self._registry.set(

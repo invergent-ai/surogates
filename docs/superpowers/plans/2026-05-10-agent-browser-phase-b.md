@@ -9,7 +9,7 @@
 - [x] **Task 2: Pod manifest builder** — completed.
 - [x] **Task 3: Service manifest builder** — completed.
 - [x] **Task 4: K8s provision lifecycle** — completed.
-- [ ] **Task 5: BrowserBackend protocol alignment** — pending.
+- [x] **Task 5: BrowserBackend protocol alignment** — completed.
 - [ ] **Task 6: K8s status mapping** — pending.
 - [ ] **Task 7: K8s destroy lifecycle** — pending.
 - [ ] **Task 8: find_by_session fallback primitive** — pending.

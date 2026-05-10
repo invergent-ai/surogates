@@ -18,11 +18,20 @@ class FakeBackend:
         self.destroys: list[str] = []
         self.status_overrides: dict[str, BrowserStatus] = {}
         self.fail_provision: BrowserUnavailableError | None = None
+        self.provision_labels: list[tuple[str, str, str]] = []
 
-    async def provision(self, spec: BrowserSpec) -> tuple[str, BrowserEndpoint]:
+    async def provision(
+        self,
+        spec: BrowserSpec,
+        *,
+        session_id: str = "",
+        org_id: str = "",
+        user_id: str = "",
+    ) -> tuple[str, BrowserEndpoint]:
         if self.fail_provision is not None:
             raise self.fail_provision
         self.provisions += 1
+        self.provision_labels.append((session_id, org_id, user_id))
         bid = f"b{self.provisions}"
         return bid, BrowserEndpoint(
             rest_url=f"http://x:{30000 + self.provisions}",
@@ -67,6 +76,7 @@ class TestEnsure:
         assert result.newly_provisioned is True
         assert result.endpoint.rest_url == "http://x:30001"
         assert backend.provisions == 1
+        assert backend.provision_labels == [("sess-1", "o", "u")]
         assert "sess-1" in registry.entries
 
     async def test_second_call_reuses(self) -> None:
