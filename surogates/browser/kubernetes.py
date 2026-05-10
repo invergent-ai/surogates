@@ -175,6 +175,37 @@ class K8sBrowserBackend:
             entry.service_name,
         )
 
+    async def find_by_session(
+        self,
+        session_id: str,
+    ) -> tuple[str, BrowserEndpoint] | None:
+        """Resolve a browser endpoint by session label."""
+        api = await self._get_api()
+        selector = f"app=surogates-browser,surogates.ai/session-id={session_id}"
+        result = await api.list_namespaced_pod(
+            self._namespace,
+            label_selector=selector,
+        )
+        items = list(getattr(result, "items", []) or [])
+        if not items:
+            return None
+
+        pod = items[0]
+        labels = pod.metadata.labels or {}
+        browser_id = labels.get("surogates.ai/browser-id")
+        service_name = pod.metadata.name
+        if not browser_id or not service_name:
+            return None
+
+        endpoint = BrowserEndpoint(
+            rest_url=f"http://{service_name}.{self._namespace}.svc:{SERVICE_PORT_REST}",
+            cdp_url=f"ws://{service_name}.{self._namespace}.svc:{SERVICE_PORT_CDP}",
+            live_view_url=(
+                f"ws://{service_name}.{self._namespace}.svc:{SERVICE_PORT_LIVE_VIEW}"
+            ),
+        )
+        return browser_id, endpoint
+
     async def _get_api(self) -> client.CoreV1Api:
         """Return a cached Kubernetes CoreV1Api client."""
         if self._api is None:

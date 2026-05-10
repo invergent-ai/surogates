@@ -413,3 +413,62 @@ class TestDestroy:
         await backend.destroy("bid")
 
         assert "bid" not in backend._pods
+
+
+class TestFindBySession:
+    async def test_find_returns_endpoint(
+        self, backend: K8sBrowserBackend, monkeypatch,
+    ) -> None:
+        pod = MagicMock()
+        pod.metadata.name = "browser-abcdef123456"
+        pod.metadata.labels = {
+            "app": "surogates-browser",
+            "surogates.ai/browser-id": "abcdef1234567890",
+            "surogates.ai/session-id": "sess-x",
+            "surogates.ai/org-id": "org-x",
+            "surogates.ai/user-id": "user-x",
+        }
+        api = MagicMock()
+        api.list_namespaced_pod = AsyncMock(return_value=MagicMock(items=[pod]))
+
+        async def fake_get_api() -> MagicMock:
+            return api
+
+        monkeypatch.setattr(backend, "_get_api", fake_get_api)
+        result = await backend.find_by_session("sess-x")
+
+        assert result is not None
+        bid, endpoint = result
+        assert bid == "abcdef1234567890"
+        assert endpoint.rest_url == "http://browser-abcdef123456.test-ns.svc:10001"
+        assert endpoint.cdp_url == "ws://browser-abcdef123456.test-ns.svc:9222"
+        assert endpoint.live_view_url == "ws://browser-abcdef123456.test-ns.svc:443"
+
+    async def test_find_returns_none_when_no_match(
+        self, backend: K8sBrowserBackend, monkeypatch,
+    ) -> None:
+        api = MagicMock()
+        api.list_namespaced_pod = AsyncMock(return_value=MagicMock(items=[]))
+
+        async def fake_get_api() -> MagicMock:
+            return api
+
+        monkeypatch.setattr(backend, "_get_api", fake_get_api)
+        assert await backend.find_by_session("sess-missing") is None
+
+    async def test_find_uses_correct_label_selector(
+        self, backend: K8sBrowserBackend, monkeypatch,
+    ) -> None:
+        api = MagicMock()
+        api.list_namespaced_pod = AsyncMock(return_value=MagicMock(items=[]))
+
+        async def fake_get_api() -> MagicMock:
+            return api
+
+        monkeypatch.setattr(backend, "_get_api", fake_get_api)
+        await backend.find_by_session("sess-y")
+
+        kwargs = api.list_namespaced_pod.call_args.kwargs
+        selector = kwargs.get("label_selector", "")
+        assert "app=surogates-browser" in selector
+        assert "surogates.ai/session-id=sess-y" in selector
