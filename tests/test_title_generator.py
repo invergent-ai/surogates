@@ -67,6 +67,35 @@ async def test_generate_session_title_uses_auxiliary_chat_client() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generate_session_title_retries_without_optional_params() -> None:
+    create = AsyncMock(
+        side_effect=[
+            TypeError("unexpected keyword argument 'max_tokens'"),
+            _response("Debug Redis Failures"),
+        ]
+    )
+    llm_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=create)
+        )
+    )
+
+    title = await generate_session_title(
+        llm_client=llm_client,
+        model="gpt-5",
+        user_message="Redis is timing out in production",
+        assistant_response="Let's inspect connection pool metrics.",
+    )
+
+    assert title == "Debug Redis Failures"
+    first_call = create.await_args_list[0].kwargs
+    retry_call = create.await_args_list[1].kwargs
+    assert first_call["max_tokens"] <= 32
+    assert "max_tokens" not in retry_call
+    assert "temperature" not in retry_call
+
+
+@pytest.mark.asyncio
 async def test_generate_session_title_returns_none_on_llm_failure() -> None:
     llm_client = SimpleNamespace(
         chat=SimpleNamespace(
