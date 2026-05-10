@@ -20,7 +20,9 @@ exposing:
 - **CDP** on port `9222` (Playwright/Puppeteer-compatible).
 - **REST API** on port `10001` (computer actions, recording, file ops, process
   exec, Playwright code execution, structured "capture session" events).
-- **Live view** on port `443` (NoVNC and WebRTC).
+- **Live view** internally on NoVNC `:6080` or WebRTC `:8080`; Unikraft maps
+  those to external `:443`, while our K8s Service performs the equivalent
+  internal port mapping.
 
 Kernel-images is itself a sandbox image — one container per browser session.
 That maps cleanly onto the Surogates "one sandbox per session" model and lets
@@ -60,10 +62,18 @@ scratch.
 
 ### 4.1 Components
 
-A new `BrowserPool` (sibling to `SandboxPool`) maps `session_id → browser_pod`.
-Lazy provisioning on the first `browser_*` tool call; destroyed on session
-end. Browser tools run **harness-local** (in the worker process) and call the
-browser pod's REST API over the cluster network via a thin Python client.
+A new worker-local `BrowserPool` (sibling to `SandboxPool`) owns provisioning
+and teardown. Because the API server also needs to resolve browser pods for
+state and live-view proxying, pod metadata is mirrored into a shared
+`BrowserRegistry` keyed by `session_id` (Redis hash in v1, reconstructable
+from K8s labels as a fallback). Lazy provisioning happens on the first
+`browser_*` tool call; teardown happens on explicit close, session completion,
+interrupt/reset cleanup, or pod deadline expiry.
+
+Browser tools run **harness-local** (in the worker process) and call the
+browser pod's REST API over the cluster network via a thin Python client. API
+routes never talk to the worker's in-memory pool; they read `BrowserRegistry`
+and proxy to the registered Service address.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -77,7 +87,8 @@ browser pod's REST API over the cluster network via a thin Python client.
 │  │ BrowserPool (session_id → pod)       │◀────┘ ensure() before │
 │  │ - ensure(session_id, spec)            │       first call     │
 │  │ - destroy_for_session(session_id)     │                      │
-│  │ - profile rsync on provision/teardown │                      │
+│  │ - writes BrowserRegistry              │                      │
+│  │ - profile sync on provision/teardown  │                      │
 │  └──────────────────────────────────────┘                      │
 └─────────────────────────────────────────────────────────────────┘
                   │ K8s API (create/delete pod)
@@ -90,10 +101,13 @@ browser pod's REST API over the cluster network via a thin Python client.
 │  │    Chromium + Xorg + Mutter + supervisor                     │
 │  │    REST API on :10001                                        │
 │  │    CDP on :9222                                              │
-│  │    Live view (NoVNC/WebRTC) on :443                          │
+│  │    NoVNC on :6080  (v1)                                      │
+│  │    WebRTC on :8080 (future, ENABLE_WEBRTC=true)              │
 │  │    /home/kernel/profile/  ← user-data-dir                    │
 │  │                                                              │
 │  Service: browser-{id[:12]}.surogates.svc                       │
+│    - port 443 → targetPort 6080 for NoVNC                       │
+│    - port 10001 → targetPort 10001 for REST                     │
 │  NetworkPolicy: ingress only from worker + api-server           │
 └─────────────────────────────────────────────────────────────────┘
                   ▲
@@ -101,8 +115,10 @@ browser pod's REST API over the cluster network via a thin Python client.
                   │
 ┌─────────────────────────────────────────────────────────────────┐
 │ API Server                                                       │
-│  GET /v1/sessions/{id}/browser/state ← provision status         │
-│  WS  /v1/sessions/{id}/browser/live  ← live-view WS proxy       │
+│  BrowserRegistry (Redis): session_id → service URL/status       │
+│  BrowserControlStore (Redis): session_id → user-control flag    │
+│  GET /v1/sessions/{id}/browser/state ← registry + control       │
+│  HTTP/WS /v1/sessions/{id}/browser/live/* ← NoVNC proxy         │
 │  POST /v1/sessions/{id}/browser/control ← acquire/release      │
 └─────────────────────────────────────────────────────────────────┘
                   ▲
@@ -111,8 +127,11 @@ browser pod's REST API over the cluster network via a thin Python client.
               [Web Chat UI]
 ```
 
-The user's browser only ever talks to the API server. The browser pod stays
-on the cluster network, reachable from worker and api-server only.
+The user's browser only ever talks to the API server. The browser pod stays on
+the cluster network, reachable from worker and api-server only. Browser pods
+are labeled with `surogates/session-id`, `surogates/org-id`, and
+`surogates/user-id` so API fallback lookup and orphan cleanup do not depend
+solely on worker memory.
 
 ### 4.2 New module layout
 
@@ -121,9 +140,11 @@ surogates/browser/
 ├── __init__.py
 ├── client.py        # KernelBrowserClient — httpx wrapper around kernel-images REST API
 ├── pool.py          # BrowserPool — session_id → pod_url + lifecycle
+├── registry.py      # BrowserRegistry — shared Redis/K8s metadata for API proxy lookup
+├── control.py       # BrowserControlStore — shared user-control flag + helpers
 ├── kubernetes.py    # K8sBrowserBackend — provisions browser pods
 ├── process.py       # ProcessBrowserBackend — runs kernel-images via docker for dev
-├── profile.py       # ProfileSync — rsync tenant profile to/from S3 via /fs/upload_zstd
+├── profile.py       # ProfileSync — sync tenant profile to/from S3 via /fs/upload_zstd
 └── base.py          # BrowserBackend protocol, BrowserSpec, BrowserStatus
 ```
 
@@ -145,10 +166,19 @@ New API routes for browser state, live-view WS proxy, and control acquisition.
 `ToolLocation.HARNESS` for every browser tool. The router does not go through
 `SandboxPool`. Each handler:
 
-1. Calls `BrowserPool.ensure(session_id, spec)` — provisions on first call.
-2. Builds a `KernelBrowserClient` bound to the pod URL.
-3. Issues the corresponding REST call.
-4. Returns the result as a JSON string (the standard tool-result shape).
+1. Checks `BrowserControlStore`; if user control is active, returns
+   `{"error": "paused_by_user", "guidance": "..."}` without touching the pod.
+2. Calls `BrowserPool.ensure(session_id, spec)` — provisions on first call and
+   writes/refreshes the shared `BrowserRegistry` entry.
+3. Builds a `KernelBrowserClient` bound to the pod REST URL.
+4. Issues the corresponding REST call.
+5. Returns the result as a JSON string (the standard tool-result shape).
+
+The control-store short-circuit applies to **every** `browser_*` tool,
+including `browser_close`. The agent must not yank the browser while the
+user is mid-task; tearing down the pod is itself an action the user might
+want to refuse, so the same `paused_by_user` response is returned. If the
+agent needs to close the browser, the user has to release control first.
 
 This keeps the existing `SandboxPool` logic untouched. The browser pod is a
 separate resource with a separate lifecycle.
@@ -162,7 +192,7 @@ governance-checked like any other tool.
 |---|---|---|
 | `browser_navigate` | `/playwright/execute` (`page.goto`) | Navigate to URL; returns final URL + page title |
 | `browser_get_state` | `/playwright/execute` (a11y snapshot) | Default perception: structured a11y tree with `@e1`-style refs, plus URL and title |
-| `browser_screenshot` | `/computer/screenshot` | PNG of viewport (or region); on-demand vision escape hatch |
+| `browser_screenshot` | `/computer/screenshot` | PNG of viewport (or region); returns artifact metadata or base64 fallback |
 | `browser_click` | `/computer/click_mouse` | Click by coords or by `@ref` (resolved via cached a11y snapshot) |
 | `browser_type` | `/computer/type` | Type text; supports `@ref` to focus first |
 | `browser_press_key` | `/computer/press_key` | Press named key(s) — Tab, Enter, ctrl+l, etc. |
@@ -170,13 +200,24 @@ governance-checked like any other tool.
 | `browser_drag` | `/computer/drag_mouse` | Drag along a path |
 | `browser_wait` | (in-process sleep) | Wait N ms — for animations / async loads |
 | `browser_record_start` | `/recording/start` | Begin mp4 capture |
-| `browser_record_stop` | `/recording/stop` | Stop mp4 capture; uploads recording artifact to session bucket |
+| `browser_record_stop` | `/recording/stop` + `/recording/download` | Stop mp4 capture; downloads MP4 and uploads artifact to session bucket |
 | `browser_close` | (BrowserPool.destroy_for_session) | Explicit close before session end |
 
 Tools land in `surogates/tools/builtin/browser.py` (one file, single
 responsibility — registrations + handlers thin enough to fit). Each handler
 delegates to `KernelBrowserClient`. The `@ref → coords` resolution lives in
 the client since it caches the last a11y snapshot per browser pod.
+
+Binary outputs are never returned as raw bytes in tool results:
+
+- `browser_screenshot` stores the PNG through the existing artifact/session
+  storage path and returns `{ "artifact_id", "mime_type": "image/png",
+  "width", "height" }`. In local/dev mode without storage, it may return
+  bounded base64 with an explicit byte limit.
+- `browser_record_stop` calls `/recording/stop`, polls
+  `/recording/download?id=...` until the MP4 is ready (handling `202
+  Retry-After`), uploads the file as a session artifact, then optionally calls
+  `/recording/delete`.
 
 ### 5.1 Perception model
 
@@ -228,10 +269,13 @@ wins. (Acceptable — multi-session-per-user-with-shared-profile is uncommon
 and adds locking complexity. Document it; revisit if a real complaint
 appears.)
 
-## 7. Live view — WebSocket proxy
+## 7. Live view — HTTP/WebSocket proxy
 
-The API server acts as a WebSocket proxy between the SPA and the browser
-pod's port 443.
+The API server acts as an authenticated HTTP/WebSocket proxy between the SPA
+and the browser pod's live-view Service port. In v1 the upstream is NoVNC:
+the Kubernetes Service exposes `:443` but routes to container `targetPort:
+6080`. WebRTC remains future work and would route service `:443` to container
+`targetPort: 8080` with the extra ICE/TURN configuration it requires.
 
 ### 7.1 API endpoints
 
@@ -240,13 +284,14 @@ GET  /v1/sessions/{id}/browser/state
   → 200 { status: "live"|"provisioning"|"closed", url, title, control_owner }
   → 404 if no browser provisioned
 
-WS   /v1/sessions/{id}/browser/live
-  ← Upgrade with session JWT
+HTTP/WS /v1/sessions/{id}/browser/live/{path:path}
+  ← HTTP request or WS upgrade with session JWT
   → API server validates JWT
-  → API server resolves browser pod via BrowserPool
-  → API server opens upstream WS to browser-{id[:12]}.surogates.svc:443
-  → Bidirectional pump
-  → Honor browser_user_control flag for input frames
+  → API server resolves browser pod via BrowserRegistry
+  → API server proxies upstream to browser-{id[:12]}.surogates.svc:443
+    (Service targetPort 6080 for NoVNC v1)
+  → HTTP assets stream normally; websocket traffic uses a bidirectional pump
+  → Honor BrowserControlStore flag for websocket input frames
 
 POST /v1/sessions/{id}/browser/control
   body: { action: "acquire" | "release" }
@@ -260,22 +305,36 @@ but lacks a runtime toggle. We start the container in interactive mode and
 gate input at the proxy:
 
 - Outbound (pod → user) frames are always forwarded.
-- Inbound (user → pod) frames carrying input events are dropped unless the
-  session's `browser_user_control` flag is true.
+- Inbound (user → pod) frames carrying input events are dropped unless
+  `BrowserControlStore` says the user owns browser control.
 
-For NoVNC, "input frames" are RFB messages with types `KeyEvent (4)` or
-`PointerEvent (5)`. For WebRTC, input goes over a separate data channel that
-we gate at the data-channel multiplexer. We start with NoVNC for v1
-(simpler proxy) and add WebRTC in a follow-up.
+For NoVNC, "input frames" are RFB ClientMessage types `KeyEvent (4)`,
+`PointerEvent (5)`, and `ClientCutText (6)` — the last is clipboard paste,
+which is also user-originating input and must be dropped when control is
+not granted. Other ClientMessage types (`SetPixelFormat`, `SetEncodings`,
+`FramebufferUpdateRequest`) are forwarded so the read-only client can still
+negotiate framebuffer updates. For WebRTC, input goes over a separate data
+channel that we gate at the data-channel multiplexer. We start with NoVNC
+for v1 (simpler proxy) and add WebRTC in a follow-up.
 
 ### 7.3 Control flow
 
 User-control acquisition:
 
 1. SPA POSTs `/v1/sessions/{id}/browser/control { action: "acquire" }`.
-2. API server sets session-level flag `browser_user_control: true`. Emits
-   `BROWSER_CONTROL_GRANTED` event.
-3. WS proxy starts forwarding input frames.
+2. API server validates the session owner, then resolves the current
+   `BrowserControlStore[session_id]` entry:
+   - **Unheld:** set `{ owner_user_id, acquired_at }`, emit
+     `BROWSER_CONTROL_GRANTED`, return `200`.
+   - **Held by the same user (different tab/device):** treat as idempotent
+     refresh — update `acquired_at`, do **not** re-emit
+     `BROWSER_CONTROL_GRANTED`, return `200`. Both tabs receive input.
+   - **Held by a different user with session access:** return `409 Conflict`
+     with `{ "holder_user_id", "acquired_at" }` so the SPA can surface
+     "another user is currently controlling this browser." No event emitted.
+     Sessions are usually single-user, but we don't want a silent steal if
+     two users share access (e.g., admin shadowing).
+3. On grant, the WS proxy starts forwarding input frames.
 4. Worker's next `browser_*` tool call short-circuits with
    `{"error": "paused_by_user", "guidance": "..."}`.
 5. A one-time system-injected message ("The user has taken control of the
@@ -285,13 +344,15 @@ User-control acquisition:
 User-control release:
 
 1. SPA POSTs `{ action: "release" }`.
-2. API server clears flag, emits `BROWSER_CONTROL_RETURNED`, queues a wake
-   on the session via the orchestrator's Redis queue.
+2. API server clears the `BrowserControlStore` entry, emits
+   `BROWSER_CONTROL_RETURNED`, queues a wake on the session via the
+   orchestrator's Redis queue.
 3. Worker resumes naturally on next iteration; browser tools succeed again.
 
 The worker is **not suspended** — it just gets `paused_by_user` from any
-browser tool while the user has control. Same pattern as
-`sandbox_unavailable_result` (`surogates/sandbox/base.py`).
+browser tool while the user has control. The control check must read shared
+runtime state on every browser-tool call, not `session.config`, because the
+harness loop holds an in-memory session snapshot during a wake.
 
 ## 8. UI design — web chat SPA
 
@@ -363,7 +424,8 @@ not full cards):
 The SPA already subscribes to `/v1/sessions/{id}/events`. New event types are
 added to the existing stream; the right-pane reducer listens for browser.*
 events and updates state. No new SSE endpoint; the live view runs over its
-own dedicated WS at `/v1/sessions/{id}/browser/live`.
+own dedicated proxy at `/v1/sessions/{id}/browser/live/{path}` (HTTP for
+NoVNC's static assets, WS upgrade for the framebuffer stream).
 
 ## 9. Events
 
@@ -390,7 +452,8 @@ the grouping client-side based on consecutive tool names.
 |---|---|
 | Browser pod scope | NetworkPolicy: ingress from worker + api-server only; egress unrestricted (browser needs internet) |
 | Live-view auth | API server validates session JWT before opening WS; user can only view their own session's browser |
-| Input gating | API server proxy drops input frames unless `browser_user_control` is true |
+| Input gating | API server proxy drops input frames unless `BrowserControlStore` grants control to the connected user |
+| Browser metadata integrity | API server reads BrowserRegistry by session id and verifies `org_id`/`user_id` before proxying; K8s fallback lookup uses pod labels |
 | Profile secrets | Cookies/auth tokens stay in tenant Garage bucket; never in worker memory beyond the rsync window; never logged |
 | Profile cross-tenant leak | Profile path is keyed by `org_id` + `user_id`; ProfileSync validates tenant scope before upload/download |
 | Sandbox escape via browser | Browser pod has no DB/Redis credentials, no other tenant access; if compromised, blast radius is the user's profile + the live session |
@@ -427,7 +490,10 @@ browser:
   enabled: true
   backend: "process"
   image: "ghcr.io/onkernel/chromium-headful:stable"
-  port_base: 30000   # docker -p {port_base + N}:443
+  rest_port_base: 30000       # docker -p {base + N}:10001
+  cdp_port_base: 31000        # docker -p {base + N}:9222
+  live_view_port_base: 32000  # docker -p {base + N}:6080 (NoVNC v1)
+  live_view_mode: "novnc"
 
 # config.prod.yaml — K8sBrowserBackend
 browser:
@@ -436,6 +502,10 @@ browser:
   namespace: "surogates"
   service_account: "surogates-browser"
   image: "ghcr.io/onkernel/chromium-headful:stable"
+  live_view_mode: "novnc"
+  service_port: 443
+  live_view_target_port: 6080
+  rest_target_port: 10001
   pod_ready_timeout: 60
   active_deadline_seconds: 3600
   cpu: "1"
@@ -454,15 +524,25 @@ Verifiable without a real K8s cluster or Chromium:
 - `KernelBrowserClient` — unit tests against an httpx mock for every endpoint
   (request shape, response parsing, error handling).
 - `BrowserPool` — provisioning logic, ensure-or-reprovision, destroy on
-  session end. Mock backend.
+  session end, and registry writes/removals. Mock backend.
+- `BrowserRegistry` — Redis read/write/delete, stale-entry handling, and K8s
+  label fallback lookup.
+- `BrowserControlStore` — acquire/release ownership checks, per-call tool
+  short-circuit behavior, and wake enqueue on release.
 - `ProfileSync` — upload/download round-trip with `LocalBackend` + a mock
   kernel-images `/fs/*` server.
 - `K8sBrowserBackend` — pod manifest builder, status mapping (the same
   pattern as existing `tests/test_kubernetes_sandbox.py`).
-- API server `/browser/control` flag mutation, event emission.
+- API server `/browser/control` control-store mutation, event emission.
+- API server `/browser/state` reads BrowserRegistry and validates tenant scope.
 - WS proxy frame gating — synthetic NoVNC frames in/out, assert input frames
   dropped unless control flag is set.
 - `paused_by_user` short-circuit in browser tool handlers.
+- `browser_screenshot` stores PNG artifact metadata or returns bounded base64
+  in local/dev fallback.
+- `browser_record_stop` calls stop, handles `202 Retry-After` from
+  `/recording/download`, uploads MP4 artifact, and optionally deletes the
+  remote recorder output.
 - Frontend: storybook entries for the right-pane states, the take-control
   toggle, and the activity group collapse/expand.
 
@@ -479,20 +559,21 @@ The work is large enough to break into independently shippable phases. Each
 phase ends with a working subset behind a feature flag.
 
 1. **Phase A — backend skeleton.** `BrowserBackend` protocol +
-   `ProcessBrowserBackend` (docker run) + `BrowserPool` + `KernelBrowserClient`
-   + the discrete tools wired through `ToolRouter`. End state: agent can
-   navigate, screenshot, click, type via dev backend; no live view, no
-   profile, no recording.
+   `ProcessBrowserBackend` (docker run) + `BrowserPool` + `BrowserRegistry`
+   + `BrowserControlStore` + `KernelBrowserClient` + the discrete tools wired
+   through `ToolRouter`. End state: agent can navigate, screenshot, click,
+   type via dev backend; no live view UI, no profile, no recording.
 2. **Phase B — Kubernetes backend.** `K8sBrowserBackend`, pod manifests,
-   NetworkPolicy, ServiceAccount RBAC. End state: phase-A capabilities work
-   in a K8s cluster.
+   Service port mappings, labels, NetworkPolicy, ServiceAccount RBAC. End
+   state: phase-A capabilities work in a K8s cluster and API can resolve pods
+   through BrowserRegistry/K8s fallback.
 3. **Phase C — UI: live view & thread rendering.** API server WS proxy,
    `/browser/state`, `/browser/control`. SPA right-pane stacked layout,
    activity group, take-control toggle. End state: user can watch and
    take over.
 4. **Phase D — profile persistence & recording.** `ProfileSync`,
-   `browser_record_start/stop`, recording artifact upload. End state:
-   logins persist across sessions; opt-in recording produces session
+   `browser_record_start/stop`, `/recording/download` artifact upload. End
+   state: logins persist across sessions; opt-in recording produces session
    artifacts.
 
 ## 15. Open questions / future work
