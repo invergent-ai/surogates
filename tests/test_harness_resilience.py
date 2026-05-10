@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -27,6 +28,7 @@ from surogates.harness.llm_call import (
 from surogates.harness.loop import AgentHarness
 from surogates.harness.resilience import try_rotate_credential
 from surogates.sandbox.pool import SandboxPool
+from surogates.session.models import Session
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +214,101 @@ def _make_harness(**overrides: Any) -> AgentHarness:
         prompt_builder=defaults["prompt_builder"],
         sandbox_pool=defaults["sandbox_pool"],
     )
+
+
+def _session_with_config(config: dict[str, Any]) -> Session:
+    now = datetime.now(timezone.utc)
+    return Session(
+        id=uuid4(),
+        user_id=uuid4(),
+        org_id=uuid4(),
+        agent_id="agent-1",
+        channel="scheduled" if config.get("scheduled_dynamic_loop") else "web",
+        status="active",
+        config=config,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+class TestDynamicLoopToolPolicy:
+    """Dynamic loop sessions expose loop_wait but not scheduler creation tools."""
+
+    def test_dynamic_loop_sessions_cannot_create_nested_cron_schedules(self) -> None:
+        from surogates.tools.registry import ToolRegistry, ToolSchema
+
+        reg = ToolRegistry()
+        for name in ("cron_create", "cron_delete", "cron_list", "loop_wait", "web_search"):
+            reg.register(
+                name,
+                ToolSchema(name=name, description="test", parameters={}),
+                lambda _: "{}",
+            )
+        harness = _make_harness(tool_registry=reg)
+        session = _session_with_config({
+            "scheduled_dynamic_loop": True,
+            "scheduled_session_id": str(uuid4()),
+        })
+
+        tool_names = harness._tool_filter_for_session(session)
+
+        assert tool_names is not None
+        assert "loop_wait" in tool_names
+        assert "web_search" in tool_names
+        assert "cron_create" not in tool_names
+        assert "cron_delete" not in tool_names
+        assert "cron_list" not in tool_names
+
+    def test_successful_loop_wait_is_terminal_for_dynamic_loop_run(self) -> None:
+        harness = _make_harness()
+        session = _session_with_config({
+            "scheduled_dynamic_loop": True,
+            "scheduled_session_id": str(uuid4()),
+        })
+        tool_calls = [
+            {
+                "id": "call-wait",
+                "function": {
+                    "name": "loop_wait",
+                    "arguments": '{"delay_seconds":300,"reason":"done"}',
+                },
+            }
+        ]
+        tool_results = [
+            {
+                "role": "tool",
+                "tool_call_id": "call-wait",
+                "content": '{"success": true, "delay_seconds": 300}',
+            }
+        ]
+
+        assert harness._dynamic_loop_wait_succeeded(
+            session, tool_calls, tool_results,
+        ) is True
+
+    def test_failed_loop_wait_is_not_terminal(self) -> None:
+        harness = _make_harness()
+        session = _session_with_config({
+            "scheduled_dynamic_loop": True,
+            "scheduled_session_id": str(uuid4()),
+        })
+        tool_calls = [
+            {
+                "id": "call-wait",
+                "function": {"name": "loop_wait", "arguments": "{}"},
+            }
+        ]
+        tool_results = [
+            {
+                "role": "tool",
+                "tool_call_id": "call-wait",
+                "content": '{"success": false, "error": "bad delay"}',
+            }
+        ]
+
+        assert harness._dynamic_loop_wait_succeeded(
+            session, tool_calls, tool_results,
+        ) is False
 
 
 class TestFindInvalidToolCalls:

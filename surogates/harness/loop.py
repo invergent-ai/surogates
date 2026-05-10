@@ -137,6 +137,11 @@ _EMPTY_RESPONSE_NUDGE: str = (
     "output (SVG, HTML, chart, table, markdown document), invoke "
     "create_artifact — do NOT paste the content as a code fence.]"
 )
+_DYNAMIC_LOOP_EXCLUDED_TOOLS: frozenset[str] = frozenset({
+    "cron_create",
+    "cron_delete",
+    "cron_list",
+})
 
 # Fenced-block kinds the post-response promoter is willing to turn into
 # an artifact when the model emits one in place of a ``create_artifact``
@@ -876,19 +881,7 @@ class AgentHarness:
             #   tools — they're useless without the coordinator prompt and
             #   would confuse the LLM.
             # - Sessions with explicit allowed_tools get exactly those.
-            tool_filter: set[str] | None = None
-            if session.config.get("coordinator"):
-                # Coordinator: all tools, no restrictions.
-                tool_filter = None
-            elif session.config.get("allowed_tools"):
-                tool_filter = set(session.config["allowed_tools"])
-            else:
-                from surogates.tools.builtin.coordinator import WORKER_EXCLUDED_TOOLS
-                excluded = set(session.config.get("excluded_tools") or [])
-                excluded.update(WORKER_EXCLUDED_TOOLS)
-                if not session.config.get("scheduled_dynamic_loop"):
-                    excluded.add("loop_wait")
-                tool_filter = self._tools.tool_names - excluded
+            tool_filter = self._tool_filter_for_session(session)
 
             tool_schemas = filter_schemas_for_tenant(
                 self._tools.get_schemas(names=tool_filter),
@@ -1558,6 +1551,10 @@ class AgentHarness:
                     log_policy_allowed=self._log_policy_allowed,
                 )
 
+            dynamic_loop_wait_done = self._dynamic_loop_wait_succeeded(
+                session, tool_calls_raw, tool_results,
+            )
+
             # 7a. Reset nudge counters when relevant tools are used
             for tr_tc in tool_calls_raw:
                 tc_name = tr_tc.get("function", {}).get("name", "")
@@ -1589,6 +1586,16 @@ class AgentHarness:
                     self._memory_manager.sync_all(user_content, assistant_content)
                 except Exception:
                     logger.debug("Memory manager sync_all failed", exc_info=True)
+
+            if dynamic_loop_wait_done:
+                await self._complete_session(
+                    session,
+                    messages,
+                    lease,
+                    reason="loop_wait",
+                    cost_tracker=cost_tracker,
+                )
+                return
 
             # 9. Check if compression is needed.
             if self._compressor.should_compress(messages, system_prompt):
@@ -1874,6 +1881,70 @@ class AgentHarness:
     ) -> list[tuple[dict[str, Any], str]]:
         """Return list of (tool_call, error_message) for invalid calls."""
         return find_invalid_tool_calls(tool_calls, self._tools)
+
+    def _tool_filter_for_session(self, session: Session) -> set[str] | None:
+        """Return the tool allow-list for a session."""
+        config = session.config or {}
+        explicit_allowed = bool(config.get("allowed_tools"))
+
+        if config.get("coordinator"):
+            tool_filter: set[str] | None = None
+        elif explicit_allowed:
+            tool_filter = set(config["allowed_tools"])
+        else:
+            from surogates.tools.builtin.coordinator import WORKER_EXCLUDED_TOOLS
+
+            excluded = set(config.get("excluded_tools") or [])
+            excluded.update(WORKER_EXCLUDED_TOOLS)
+            tool_filter = set(self._tools.tool_names) - excluded
+
+        if config.get("scheduled_dynamic_loop"):
+            if tool_filter is None:
+                tool_filter = set(self._tools.tool_names)
+            else:
+                tool_filter = set(tool_filter)
+            tool_filter.difference_update(_DYNAMIC_LOOP_EXCLUDED_TOOLS)
+            if "loop_wait" in self._tools.tool_names:
+                tool_filter.add("loop_wait")
+            return tool_filter
+
+        if tool_filter is not None and not explicit_allowed:
+            tool_filter = set(tool_filter)
+            tool_filter.discard("loop_wait")
+        return tool_filter
+
+    @staticmethod
+    def _dynamic_loop_wait_succeeded(
+        session: Session,
+        tool_calls: list[dict[str, Any]],
+        tool_results: list[dict[str, Any]],
+    ) -> bool:
+        """Return true when a dynamic loop child successfully scheduled its next run."""
+        if not (session.config or {}).get("scheduled_dynamic_loop"):
+            return False
+
+        loop_wait_ids = {
+            str(tool_call.get("id") or "")
+            for tool_call in tool_calls
+            if tool_call.get("function", {}).get("name") == "loop_wait"
+        }
+        if not loop_wait_ids:
+            return False
+
+        for result in tool_results:
+            if str(result.get("tool_call_id") or "") not in loop_wait_ids:
+                continue
+            content = result.get("content")
+            if not isinstance(content, str):
+                continue
+            try:
+                payload = json.loads(content)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(payload, dict) and payload.get("success") is True:
+                return True
+
+        return False
 
     # ------------------------------------------------------------------
     # Budget pressure warning (delegates to resilience module)

@@ -190,7 +190,13 @@ interval. It is not a general scheduling API; normal sessions should use
 After a dynamic loop run completes, the schedule remains active and the next
 `channel="scheduled"` session fires at `now + delay_seconds`. If the agent does
 not call `loop_wait`, Surogates applies a 10-minute fallback delay. Dynamic
-loops auto-expire after 7 days and can be listed or cancelled with
+loops auto-expire after 7 days.
+
+Calling `loop_wait` is terminal for the current dynamic loop run: after the
+tool succeeds, the scheduled child session is completed instead of continuing
+to call more tools. Dynamic loop child sessions do not expose `cron_create`,
+`cron_list`, or `cron_delete`, which prevents a loop iteration from creating
+nested schedules. Users can manage dynamic loops from normal sessions with
 `/loop list`, `/loop cancel <id>`, `cron_list`, and `cron_delete`.
 
 ### `delegate_task` / `spawn_worker` -- Sub-Agent Delegation
