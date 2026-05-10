@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI
+import httpx
 from httpx import ASGITransport, AsyncClient
 
 from surogates.browser.base import BrowserEndpoint
@@ -341,6 +342,93 @@ class TestControlEndpoint:
             )
 
         assert response.status_code == 400
+
+
+class TestLiveViewHTTPProxy:
+    async def test_vnc_html_is_proxied(self, app_factory, monkeypatch) -> None:
+        from surogates.api.routes import browser as browser_routes
+
+        build, resolver, _control = app_factory
+        sid = str(uuid4())
+        resolver.entries[sid] = _resolved(sid)
+        seen: list[str] = []
+
+        async def fake_request(method, url, **kwargs):
+            seen.append(str(url))
+            return httpx.Response(
+                status_code=200,
+                text="<html>vnc</html>",
+                headers={"content-type": "text/html"},
+            )
+
+        monkeypatch.setattr(
+            browser_routes,
+            "_proxy_live_view_request",
+            fake_request,
+            raising=False,
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=build()),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(f"/v1/sessions/{sid}/browser/live/vnc.html")
+
+        assert response.status_code == 200
+        assert response.text == "<html>vnc</html>"
+        assert seen == ["http://browser-x.svc:443/vnc.html"]
+
+    async def test_unknown_session_returns_404(self, app_factory) -> None:
+        build, _resolver, _control = app_factory
+
+        async with AsyncClient(
+            transport=ASGITransport(app=build()),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                "/v1/sessions/00000000-0000-0000-0000-000000000001/browser/live/vnc.html",
+            )
+
+        assert response.status_code == 404
+
+    async def test_static_asset_strips_token_query_param(
+        self,
+        app_factory,
+        monkeypatch,
+    ) -> None:
+        from surogates.api.routes import browser as browser_routes
+
+        build, resolver, _control = app_factory
+        sid = str(uuid4())
+        resolver.entries[sid] = _resolved(sid)
+        params_seen: list[dict[str, str]] = []
+
+        async def fake_request(method, url, **kwargs):
+            params_seen.append(dict(kwargs.get("params", {})))
+            return httpx.Response(
+                status_code=200,
+                text="console.log('vnc')",
+                headers={"content-type": "application/javascript"},
+            )
+
+        monkeypatch.setattr(
+            browser_routes,
+            "_proxy_live_view_request",
+            fake_request,
+            raising=False,
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=build()),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                f"/v1/sessions/{sid}/browser/live/app.js",
+                params={"token": "secret", "cache": "1"},
+            )
+
+        assert response.status_code == 200
+        assert params_seen == [{"cache": "1"}]
 
 
 def _event_recorder(events: list[tuple[str, str, dict]]):

@@ -29,8 +29,9 @@ resolution remains tenant-scoped.
 - [x] **Completed:** Task 4 — add browser state API route.
 - [x] **Completed:** Task 5 — add browser control API route.
 - [x] **Completed:** Task 6 — restrict query-param auth and add WebSocket auth helper.
-- [ ] **In progress:** Task 7 — proxy NoVNC static assets through the API server.
-- [ ] **Still left to do:** Implement Task 7 through Task 18 in order, committing at each task boundary.
+- [x] **Completed:** Task 7 — proxy NoVNC static assets through the API server.
+- [ ] **In progress:** Task 8 — add live-view WebSocket proxy with input gating.
+- [ ] **Still left to do:** Implement Task 8 through Task 18 in order, committing at each task boundary.
 - [ ] **Still left to do:** Run the backend, SDK, frontend, Helm, and opt-in K8s verification listed in Final verification.
 - [ ] **Completed:** Phase A and Phase B prerequisites exist on this branch.
 

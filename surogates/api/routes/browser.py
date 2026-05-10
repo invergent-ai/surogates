@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from uuid import UUID
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from surogates.browser.control import AcquireOutcome
@@ -28,6 +30,11 @@ class BrowserControlRequest(BaseModel):
 
 def _route_prefix(request: Request) -> str:
     return "/v1/api" if request.url.path.startswith("/v1/api/") else "/v1"
+
+
+async def _proxy_live_view_request(method: str, url: str, **kwargs) -> httpx.Response:
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        return await client.request(method, url, **kwargs)
 
 
 @router.get(
@@ -133,3 +140,71 @@ async def post_browser_control(
     )
     await wake(str(session_id))
     return {"outcome": "released"}
+
+
+@router.api_route(
+    "/api/sessions/{session_id}/browser/live/{path:path}",
+    methods=["GET", "POST", "OPTIONS"],
+)
+@router.api_route(
+    "/sessions/{session_id}/browser/live/{path:path}",
+    methods=["GET", "POST", "OPTIONS"],
+)
+async def proxy_live_view(
+    session_id: UUID,
+    path: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> Response:
+    resolver = request.app.state.browser_resolver
+    resolved = await resolver.resolve(
+        str(session_id),
+        expected_org_id=str(tenant.org_id),
+    )
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="No browser for session")
+
+    upstream_base = (
+        resolved.endpoint.live_view_url
+        .replace("ws://", "http://", 1)
+        .replace("wss://", "https://", 1)
+        .rstrip("/")
+    )
+    upstream_url = f"{upstream_base}/{path}" if path else f"{upstream_base}/"
+    forward_headers = {
+        key: value
+        for key, value in request.headers.items()
+        if key.lower()
+        not in {"host", "authorization", "cookie", "connection", "content-length"}
+    }
+    forward_params = {
+        key: value
+        for key, value in request.query_params.items()
+        if key != "token"
+    }
+
+    try:
+        upstream = await _proxy_live_view_request(
+            request.method,
+            upstream_url,
+            headers=forward_headers,
+            params=forward_params,
+            content=await request.body(),
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Browser live view is unreachable.",
+        ) from exc
+
+    response_headers = {
+        key: value
+        for key, value in upstream.headers.items()
+        if key.lower()
+        not in {"connection", "transfer-encoding", "content-encoding"}
+    }
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        headers=response_headers,
+    )
