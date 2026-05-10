@@ -290,3 +290,67 @@ class TestProtocolAlignment:
         assert pod_arg.metadata.labels["surogates.ai/session-id"] == "sess-7"
         assert pod_arg.metadata.labels["surogates.ai/org-id"] == "org-7"
         assert pod_arg.metadata.labels["surogates.ai/user-id"] == "user-7"
+
+
+class TestStatus:
+    async def test_status_running(self, backend: K8sBrowserBackend, monkeypatch) -> None:
+        backend._pods["bid"] = MagicMock(
+            pod_name="browser-bid",
+            namespace="test-ns",
+            status=BrowserStatus.PENDING,
+        )
+        running_pod = MagicMock()
+        running_pod.status.phase = "Running"
+        running_pod.status.conditions = [MagicMock(type="Ready", status="True")]
+        api = MagicMock()
+        api.read_namespaced_pod = AsyncMock(return_value=running_pod)
+
+        async def fake_get_api() -> MagicMock:
+            return api
+
+        monkeypatch.setattr(backend, "_get_api", fake_get_api)
+        assert await backend.status("bid") == BrowserStatus.RUNNING
+        assert backend._pods["bid"].status == BrowserStatus.RUNNING
+
+    async def test_status_pending_when_phase_pending(
+        self, backend: K8sBrowserBackend, monkeypatch,
+    ) -> None:
+        backend._pods["bid"] = MagicMock(
+            pod_name="browser-bid",
+            namespace="test-ns",
+            status=BrowserStatus.PENDING,
+        )
+        pending_pod = MagicMock()
+        pending_pod.status.phase = "Pending"
+        pending_pod.status.conditions = []
+        api = MagicMock()
+        api.read_namespaced_pod = AsyncMock(return_value=pending_pod)
+
+        async def fake_get_api() -> MagicMock:
+            return api
+
+        monkeypatch.setattr(backend, "_get_api", fake_get_api)
+        assert await backend.status("bid") == BrowserStatus.PENDING
+
+    async def test_status_terminated_when_pod_404(
+        self, backend: K8sBrowserBackend, monkeypatch,
+    ) -> None:
+        backend._pods["bid"] = MagicMock(
+            pod_name="browser-bid",
+            namespace="test-ns",
+            status=BrowserStatus.RUNNING,
+        )
+        api = MagicMock()
+        api.read_namespaced_pod = AsyncMock(side_effect=ApiException(status=404))
+
+        async def fake_get_api() -> MagicMock:
+            return api
+
+        monkeypatch.setattr(backend, "_get_api", fake_get_api)
+        assert await backend.status("bid") == BrowserStatus.TERMINATED
+        assert "bid" not in backend._pods
+
+    async def test_status_unknown_returns_terminated(
+        self, backend: K8sBrowserBackend,
+    ) -> None:
+        assert await backend.status("never") == BrowserStatus.TERMINATED

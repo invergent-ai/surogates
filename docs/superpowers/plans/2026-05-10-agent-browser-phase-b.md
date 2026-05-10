@@ -10,7 +10,7 @@
 - [x] **Task 3: Service manifest builder** — completed.
 - [x] **Task 4: K8s provision lifecycle** — completed.
 - [x] **Task 5: BrowserBackend protocol alignment** — completed.
-- [ ] **Task 6: K8s status mapping** — pending.
+- [x] **Task 6: K8s status mapping** — completed.
 - [ ] **Task 7: K8s destroy lifecycle** — pending.
 - [ ] **Task 8: find_by_session fallback primitive** — pending.
 - [ ] **Task 9: Worker bootstrap wiring** — pending.

@@ -135,6 +135,30 @@ class K8sBrowserBackend:
         )
         return browser_id, endpoint
 
+    async def status(self, browser_id: str) -> BrowserStatus:
+        """Read the pod phase and map it to a browser lifecycle status."""
+        entry = self._pods.get(browser_id)
+        if entry is None:
+            return BrowserStatus.TERMINATED
+
+        api = await self._get_api()
+        try:
+            pod = await api.read_namespaced_pod(entry.pod_name, self._namespace)
+        except ApiException as exc:
+            if exc.status == 404:
+                self._pods.pop(browser_id, None)
+                return BrowserStatus.TERMINATED
+            logger.warning(
+                "Status check for browser %s failed (HTTP %s); trusting cached %s",
+                browser_id,
+                exc.status,
+                entry.status,
+            )
+            return entry.status
+
+        entry.status = self._map_pod_status(pod)
+        return entry.status
+
     async def _get_api(self) -> client.CoreV1Api:
         """Return a cached Kubernetes CoreV1Api client."""
         if self._api is None:
@@ -270,6 +294,21 @@ class K8sBrowserBackend:
             condition.type == "Ready" and condition.status == "True"
             for condition in pod.status.conditions
         )
+
+    @staticmethod
+    def _map_pod_status(pod: client.V1Pod) -> BrowserStatus:
+        if not pod.status:
+            return BrowserStatus.PENDING
+        phase = pod.status.phase
+        if phase == "Running" and K8sBrowserBackend._is_pod_ready(pod):
+            return BrowserStatus.RUNNING
+        if phase == "Pending":
+            return BrowserStatus.PENDING
+        if phase in {"Failed", "Unknown"}:
+            return BrowserStatus.FAILED
+        if phase == "Succeeded":
+            return BrowserStatus.TERMINATED
+        return BrowserStatus.PENDING
 
     def _build_service_manifest(
         self,
