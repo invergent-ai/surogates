@@ -30,6 +30,15 @@ SERVICE_PORT_LIVE_VIEW = 443
 TARGET_PORT_LIVE_VIEW = 8080
 
 
+def _image_pull_policy(image: str) -> str:
+    if "@" in image:
+        return "IfNotPresent"
+    image_name = image.rsplit("/", 1)[-1]
+    if ":" not in image_name or image_name.endswith(":latest"):
+        return "Always"
+    return "IfNotPresent"
+
+
 @dataclass
 class _PodEntry:
     browser_id: str
@@ -338,7 +347,7 @@ class K8sBrowserBackend:
         container = client.V1Container(
             name="browser",
             image=spec.image or self._image,
-            image_pull_policy="IfNotPresent",
+            image_pull_policy=_image_pull_policy(spec.image or self._image),
             ports=[
                 client.V1ContainerPort(container_port=SERVICE_PORT_REST, name="rest"),
                 client.V1ContainerPort(container_port=SERVICE_PORT_CDP, name="cdp"),
