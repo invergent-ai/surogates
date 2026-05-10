@@ -204,6 +204,12 @@ class PromptBuilder:
             parts.append(self._prompts.get("guidance/expert"))
         if "create_artifact" in self._available_tools:
             parts.append(self._prompts.get("guidance/artifact"))
+        if (
+            "loop_wait" in self._available_tools
+            and self._session is not None
+            and self._session.config.get("scheduled_dynamic_loop")
+        ):
+            parts.append(self._prompts.get("guidance/loop_wait"))
 
         # Coordinator guidance — injected when the session is in coordinator mode.
         if (

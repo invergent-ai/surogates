@@ -57,6 +57,7 @@ interface ChatComposerProps {
   onStop: () => void;
   isRunning: boolean;
   disabled?: boolean;
+  disabledReason?: string;
   tokenUsage?: TokenUsage;
 }
 
@@ -111,6 +112,7 @@ function ChatComposerInner({
   onStop,
   isRunning,
   disabled = false,
+  disabledReason,
   tokenUsage,
 }: ChatComposerProps) {
   const { adapter } = useAgentChatAdapterContext();
@@ -256,7 +258,11 @@ function ChatComposerInner({
         <PromptInput onSubmit={handleSubmit} accept="image/*" multiple>
           <PromptInputBody>
             <PromptInputTextarea
-              placeholder={disabled ? "Session disabled" : "Send a message..."}
+              placeholder={
+                disabled
+                  ? disabledReason ?? "Session disabled"
+                  : "Send a message..."
+              }
               disabled={disabled}
               onKeyDown={handleKeyDown}
             />

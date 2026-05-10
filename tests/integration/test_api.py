@@ -86,6 +86,21 @@ async def _create_test_tenant(
     return org_id, user_id, token, email
 
 
+async def _create_scheduled_run_session(app, session_factory, org_id, user_id):
+    store = SessionStore(session_factory)
+    return await store.create_session(
+        user_id=user_id,
+        org_id=org_id,
+        agent_id=app.state.settings.agent_id,
+        channel="scheduled",
+        model=app.state.settings.llm.model,
+        config={
+            "storage_bucket": app.state.settings.storage.bucket,
+            "scheduled_session_id": str(uuid.uuid4()),
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
@@ -1187,3 +1202,126 @@ async def test_admin_mcp_list_cross_org_for_admin(
     names = {s["name"] for s in resp.json()["servers"]}
     assert "a-server" in names
     assert "b-server" not in names
+
+
+# ---------------------------------------------------------------------------
+# Scheduled run sessions
+# ---------------------------------------------------------------------------
+
+
+async def test_scheduled_run_session_rejects_manual_message(
+    app, client: AsyncClient, session_factory
+):
+    """Loop child sessions are transcript/workspace records, not live chats."""
+    org_id, user_id, token, _ = await _create_test_tenant(session_factory)
+    session = await _create_scheduled_run_session(
+        app, session_factory, org_id, user_id
+    )
+
+    resp = await client.post(
+        f"/v1/sessions/{session.id}/messages",
+        json={"content": "continue manually"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert resp.status_code == 409
+    assert "read-only" in resp.json()["detail"]
+
+
+async def test_scheduled_run_session_rejects_retry_and_delete(
+    app, client: AsyncClient, session_factory
+):
+    """Users must not mutate a scheduled child session into an ad-hoc run."""
+    org_id, user_id, token, _ = await _create_test_tenant(session_factory)
+    session = await _create_scheduled_run_session(
+        app, session_factory, org_id, user_id
+    )
+    store = SessionStore(session_factory)
+    await store.update_session_status(session.id, "failed")
+
+    retry_resp = await client.post(
+        f"/v1/sessions/{session.id}/retry",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    delete_resp = await client.delete(
+        f"/v1/sessions/{session.id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert retry_resp.status_code == 409
+    assert "read-only" in retry_resp.json()["detail"]
+    assert delete_resp.status_code == 409
+    assert "read-only" in delete_resp.json()["detail"]
+
+
+async def test_scheduled_run_session_rejects_workspace_writes(
+    app, client: AsyncClient, session_factory
+):
+    """Scheduled run workspaces are inspectable but user read-only."""
+    org_id, user_id, token, _ = await _create_test_tenant(session_factory)
+    session = await _create_scheduled_run_session(
+        app, session_factory, org_id, user_id
+    )
+    bucket = app.state.settings.storage.bucket
+    await app.state.storage.write(
+        bucket,
+        session_workspace_key(session.id, "note.txt"),
+        b"existing",
+    )
+
+    tree_resp = await client.get(
+        f"/v1/sessions/{session.id}/workspace/tree",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    file_resp = await client.get(
+        f"/v1/sessions/{session.id}/workspace/file",
+        params={"path": "note.txt"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    download_resp = await client.get(
+        f"/v1/sessions/{session.id}/workspace/download",
+        params={"path": "note.txt"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    upload_resp = await client.post(
+        f"/v1/sessions/{session.id}/workspace/upload",
+        files={"file": ("upload.txt", b"new content", "text/plain")},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    delete_resp = await client.delete(
+        f"/v1/sessions/{session.id}/workspace/file",
+        params={"path": "note.txt"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert tree_resp.status_code == 200
+    assert file_resp.status_code == 200
+    assert download_resp.status_code == 200
+    assert upload_resp.status_code == 409
+    assert "read-only" in upload_resp.json()["detail"]
+    assert delete_resp.status_code == 409
+    assert "read-only" in delete_resp.json()["detail"]
+
+
+async def test_scheduled_run_session_rejects_clarify_response(
+    app, client: AsyncClient, session_factory
+):
+    """Clarify answers are also interactive user input and remain blocked."""
+    org_id, user_id, token, _ = await _create_test_tenant(session_factory)
+    session = await _create_scheduled_run_session(
+        app, session_factory, org_id, user_id
+    )
+
+    resp = await client.post(
+        f"/v1/sessions/{session.id}/clarify/tool-1/respond",
+        json={
+            "responses": [
+                {"question": "Proceed?", "answer": "yes", "is_other": False},
+            ],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert resp.status_code == 409
+    assert "read-only" in resp.json()["detail"]

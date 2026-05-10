@@ -6,6 +6,7 @@ import logging
 from sqlalchemy.exc import IntegrityError
 
 from surogates.config import enqueue_session
+from surogates.scheduled.schedule import DYNAMIC_LOOP_STALE_RUN_SECONDS
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_agent_session
 
@@ -49,6 +50,36 @@ class ScheduledSessionRunner:
         self._running = False
 
     async def tick_once(self) -> int:
+        retryable = await self._scheduled_store.find_retryable_stalled_dynamic_loop_runs(
+            agent_id=self._settings.agent_id,
+            stale_seconds=DYNAMIC_LOOP_STALE_RUN_SECONDS,
+            limit=self._settings.scheduled_sessions.claim_limit,
+        )
+        for schedule in retryable:
+            if schedule.last_session_id is None:
+                continue
+            await enqueue_session(
+                self._redis,
+                schedule.agent_id,
+                schedule.last_session_id,
+            )
+            logger.warning(
+                "Requeued stalled dynamic loop session %s for schedule %s",
+                schedule.last_session_id,
+                schedule.id,
+            )
+
+        recovered = await self._scheduled_store.recover_stalled_dynamic_loops(
+            agent_id=self._settings.agent_id,
+            stale_seconds=DYNAMIC_LOOP_STALE_RUN_SECONDS,
+            limit=self._settings.scheduled_sessions.claim_limit,
+        )
+        for schedule in recovered:
+            logger.warning(
+                "Recovered terminal dynamic loop %s with fallback delay",
+                schedule.id,
+            )
+
         claimed = await self._scheduled_store.claim_due(
             agent_id=self._settings.agent_id,
             worker_id=self._settings.worker_id,
@@ -72,6 +103,7 @@ class ScheduledSessionRunner:
     async def _run_one(self, schedule) -> None:
         fire_key = schedule.next_run_at.isoformat() if schedule.next_run_at else "now"
         idempotency_key = f"scheduled:{schedule.id}:{fire_key}"
+        is_dynamic_loop = schedule.schedule.get("kind") == "dynamic_loop"
         try:
             session = await create_agent_session(
                 store=self._session_store,
@@ -85,7 +117,9 @@ class ScheduledSessionRunner:
                 config={
                     "scheduled_session_id": str(schedule.id),
                     "scheduled_source": schedule.source,
+                    "scheduled_dynamic_loop": is_dynamic_loop,
                 },
+                parent_id=schedule.created_from_session_id,
                 idempotency_key=idempotency_key,
             )
         except IntegrityError:

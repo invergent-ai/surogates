@@ -87,8 +87,10 @@ function treeFingerprint(nodes: AgentChatSessionTreeNode[]): string {
     .map(
       (n) =>
         `${n.id}:${n.parentId ?? ""}:${n.status}:${n.agentType ?? ""}:${
-          n.messageCount ?? 0
-        }:${n.toolCallCount ?? 0}:${n.updatedAt}`,
+          n.runKind ?? ""
+        }:${n.title ?? ""}:${n.messageCount ?? 0}:${n.toolCallCount ?? 0}:${
+          n.updatedAt
+        }`,
     )
     .join("|");
 }
@@ -100,6 +102,7 @@ function sessionToTreeNode(session: AgentChatSession): AgentChatSessionTreeNode 
     parentId: session.parentId ?? null,
     agentId: session.agentId,
     channel: session.channel,
+    runKind: session.runKind ?? deriveRunKind(session.channel, session.config),
     status: session.status,
     title: session.title,
     model: session.model,
@@ -161,6 +164,29 @@ function formatSessionTime(value: string): string {
   return formatDistanceToNow(date, { addSuffix: true });
 }
 
+function deriveRunKind(
+  channel: string | null | undefined,
+  config: Record<string, unknown> | undefined,
+): string | null {
+  if (channel === "scheduled" && config?.scheduled_dynamic_loop === true) {
+    return "dynamic_loop";
+  }
+  if (channel === "scheduled") return "scheduled";
+  return null;
+}
+
+function formatRunKind(value: string | null | undefined): string | null {
+  if (value === "dynamic_loop") return "Loop";
+  if (value === "scheduled") return "Scheduled";
+  return null;
+}
+
+function fallbackSessionTitle(entry: AgentChatSessionTreeNode): string {
+  if (entry.runKind === "dynamic_loop") return "Loop run";
+  if (entry.runKind === "scheduled") return "Scheduled run";
+  return "New session";
+}
+
 function TreeNodeRow({
   entry,
   depth,
@@ -186,11 +212,13 @@ function TreeNodeRow({
   const hasChildren = entry.children.length > 0;
   const isActive = entry.id === activeSessionId;
   const isRunning = entry.status === "active";
-  // The stop button is "Stop sub-agent" -- only show it on rows that are
-  // actually sub-agents (have a parent), not top-level user sessions.
-  const isSubAgent = entry.parentId != null;
-  const title = entry.title ?? "New session";
+  // Only child sessions can be stopped from the tree; top-level sessions use
+  // the main composer stop control.
+  const isChildSession = entry.parentId != null;
+  const title = entry.title ?? fallbackSessionTitle(entry);
   const subtitle = [
+    formatRunKind(entry.runKind),
+    entry.agentType,
     entry.model ?? "default",
     formatSessionTime(entry.updatedAt),
   ].filter(Boolean).join(" · ");
@@ -240,7 +268,7 @@ function TreeNodeRow({
           <div className="text-sm truncate">{title}</div>
           <div className="text-xs text-faint truncate">{subtitle}</div>
         </div>
-        {isRunning && canStop && isSubAgent && (
+        {isRunning && canStop && isChildSession && (
           <button
             type="button"
             className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive transition-all"
@@ -248,8 +276,8 @@ function TreeNodeRow({
               e.stopPropagation();
               onStop(entry.id);
             }}
-            aria-label="Stop sub-agent"
-            title="Stop sub-agent"
+            aria-label="Stop child session"
+            title="Stop child session"
           >
             <SquareIcon className="w-3 h-3" fill="currentColor" />
           </button>

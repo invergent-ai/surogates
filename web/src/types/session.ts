@@ -178,6 +178,7 @@ export interface SessionTreeNode {
   depth: number;
   agent_id: string;
   agent_type: string | null;
+  run_kind: "dynamic_loop" | "scheduled" | string | null;
   channel: string;
   status: "active" | "paused" | "completed" | "failed";
   title: string | null;
@@ -195,5 +196,32 @@ export interface SessionTreeResponse {
 
 export interface SessionChildrenResponse {
   children: SessionTreeNode[];
+  total: number;
+}
+
+export interface ScheduledWorkItem {
+  id: string;
+  agent_id: string;
+  name: string | null;
+  prompt: string;
+  status: "active" | "paused" | "completed" | "failed" | string;
+  kind: "cron" | "dynamic_loop" | "one_shot" | "scheduled" | string;
+  source: string | null;
+  schedule_display: string;
+  timezone: string | null;
+  run_count: number;
+  repeat_limit: number | null;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  last_session_id: string | null;
+  last_error: string | null;
+  expires_at: string | null;
+  created_from_session_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScheduledWorkListResponse {
+  items: ScheduledWorkItem[];
   total: number;
 }

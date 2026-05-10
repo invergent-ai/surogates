@@ -12,7 +12,7 @@ Tools run in one of three locations:
 
 | Location | Description | Examples |
 |---|---|---|
-| **Worker** | Runs inside the worker process. No sandbox needed. | memory, web search, skills, session search, delegation, cron scheduling |
+| **Worker** | Runs inside the worker process. No sandbox needed. | memory, web search, skills, session search, delegation, cron scheduling, loop control |
 | **Sandbox** | Runs inside the session's isolated sandbox pod. | terminal, file operations, code execution, browser |
 | **MCP Proxy** | Forwarded to an external MCP server via the proxy. | Any tool registered by an MCP server |
 
@@ -144,7 +144,7 @@ Per-session todo list for tracking progress on multi-step tasks.
 ### `cron_create` / `cron_delete` / `cron_list` -- Scheduled Sessions
 
 Manage user-owned scheduled prompts. These are the tool equivalents behind
-recurring work such as reminders, polling, and `/loop` workflows. Schedules are
+cron-backed work such as reminders and fixed polling workflows. Schedules are
 stored in PostgreSQL, scoped to the current `org_id`, `user_id`, and `agent_id`,
 then picked up by that agent's worker and enqueued as fresh
 `channel="scheduled"` sessions.
@@ -174,6 +174,30 @@ Scheduled prompts are user-owned only. Service-account, anonymous, or
 system-only sessions cannot create user schedules. Prompts are scanned before
 persistence for prompt-injection markers, invisible Unicode, secret-exfiltration
 patterns, and destructive command patterns.
+
+### `loop_wait` -- Dynamic Loop Control
+
+Sets the next delay for a dynamic `/loop` run. This tool is exposed only inside
+scheduled sessions that were created by `/loop <prompt>` without a fixed
+interval. It is not a general scheduling API; normal sessions should use
+`cron_create` or the `/loop` command.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `delay_seconds` | integer | Seconds to wait before the next run. Values are clamped to 60 through 3600 |
+| `reason` | string | Brief explanation for the selected delay |
+
+After a dynamic loop run completes, the schedule remains active and the next
+`channel="scheduled"` session fires at `now + delay_seconds`. If the agent does
+not call `loop_wait`, Surogates applies a 10-minute fallback delay. Dynamic
+loops auto-expire after 7 days.
+
+Calling `loop_wait` is terminal for the current dynamic loop run: after the
+tool succeeds, the scheduled child session is completed instead of continuing
+to call more tools. Dynamic loop child sessions do not expose `cron_create`,
+`cron_list`, or `cron_delete`, which prevents a loop iteration from creating
+nested schedules. Users can manage dynamic loops from normal sessions with
+`/loop list`, `/loop cancel <id>`, `cron_list`, and `cron_delete`.
 
 ### `delegate_task` / `spawn_worker` -- Sub-Agent Delegation
 

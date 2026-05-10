@@ -57,6 +57,7 @@ interface ChatThreadProps {
   onStop: () => void;
   onFileSelect?: (path: string) => void;
   disabled?: boolean;
+  disabledReason?: string;
   tokenUsage?: TokenUsage;
   // Transient indicator shown during provider retries.  Cleared by the
   // hook on the next successful llm.request/response or on session.fail.
@@ -632,6 +633,7 @@ export function ChatThread({
   onStop,
   onFileSelect,
   disabled = false,
+  disabledReason,
   tokenUsage,
   retryIndicator,
   onRetry,
@@ -776,13 +778,23 @@ export function ChatThread({
             <RetryBanner indicator={retryIndicator} />
           </div>
         )}
-        <ChatComposer
-          onSend={onSend}
-          onStop={onStop}
-          isRunning={isRunning}
-          disabled={disabled}
-          tokenUsage={tokenUsage}
-        />
+        {disabled && disabledReason ? (
+          <div
+            className="rounded border border-line bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
+            role="status"
+          >
+            {disabledReason}
+          </div>
+        ) : (
+          <ChatComposer
+            onSend={onSend}
+            onStop={onStop}
+            isRunning={isRunning}
+            disabled={disabled}
+            disabledReason={disabledReason}
+            tokenUsage={tokenUsage}
+          />
+        )}
       </div>
     </div>
   );

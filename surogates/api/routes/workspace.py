@@ -20,6 +20,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFil
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from surogates.api.session_guards import require_user_writable_session
+from surogates.session.models import Session
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.backend import StorageBackend
 from surogates.storage.tenant import session_workspace_key, session_workspace_prefix
@@ -187,10 +189,10 @@ def _require_service_account_api_route(
         )
 
 
-async def _get_storage_bucket(
+async def _get_workspace_session_and_bucket(
     store: SessionStore, session_id: UUID, tenant: TenantContext,
-) -> str:
-    """Resolve and validate the agent bucket for workspace access."""
+) -> tuple[Session, str]:
+    """Resolve and validate the session and agent bucket for workspace access."""
     try:
         session = await store.get_session(session_id)
     except SessionNotFoundError:
@@ -211,6 +213,14 @@ async def _get_storage_bucket(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Session {session_id} has no agent bucket.",
         )
+    return session, bucket
+
+
+async def _get_storage_bucket(
+    store: SessionStore, session_id: UUID, tenant: TenantContext,
+) -> str:
+    """Resolve and validate the agent bucket for workspace reads."""
+    _, bucket = await _get_workspace_session_and_bucket(store, session_id, tenant)
     return bucket
 
 
@@ -458,7 +468,10 @@ async def upload_file(
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     storage = _get_storage(request)
-    bucket = await _get_storage_bucket(store, session_id, tenant)
+    session, bucket = await _get_workspace_session_and_bucket(
+        store, session_id, tenant
+    )
+    require_user_writable_session(session)
 
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")
@@ -542,7 +555,10 @@ async def delete_file(
     _validate_path(path)
     store = _get_session_store(request)
     storage = _get_storage(request)
-    bucket = await _get_storage_bucket(store, session_id, tenant)
+    session, bucket = await _get_workspace_session_and_bucket(
+        store, session_id, tenant
+    )
+    require_user_writable_session(session)
 
     storage_key = session_workspace_key(session_id, path)
     if not await storage.exists(bucket, storage_key):

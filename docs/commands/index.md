@@ -53,7 +53,7 @@ Use this when a long session should be compacted before continuing.
 
 ### `/loop [interval] <prompt>`
 
-Schedules a recurring user-owned prompt. The scheduled prompt becomes a fresh
+Schedules a user-owned loop. The scheduled prompt becomes a fresh
 `channel="scheduled"` session each time it fires.
 
 Examples:
@@ -70,16 +70,22 @@ Parsing rules:
 - Leading interval: `/loop 5m check deploys` uses `5m`.
 - Leading `every` clause: `/loop every 1 minute get bitcoin price` uses `1m`.
 - Trailing `every` clause: `/loop check deploys every 20m` uses `20m`.
-- Default interval: `/loop check queue health` uses `10m`.
+- No interval: `/loop check queue health` creates a dynamic loop. The agent
+  picks the next delay after each run with `loop_wait`.
 
 Supported interval units:
 
 | Unit | Meaning | Notes |
 |---|---|---|
 | `s` | seconds | Rounded up to whole minutes |
-| `m` | minutes | `N <= 59` maps to `*/N * * * *`; larger values round up to hours |
+| `m` | minutes | Clean minute steps map to `*/N * * * *`; uneven values round to a clean cadence |
 | `h` | hours | `N <= 23` maps to `0 */N * * *`; larger values round up to days |
 | `d` | days | Maps to `0 0 */N * *` |
+
+Cron step syntax only represents minute intervals that divide evenly into an
+hour. Requests such as `7m` are rounded to the nearest clean cadence, and the
+confirmation tells the user what Surogates picked. Requests such as `90m` round
+up to hours.
 
 Loop behavior:
 
@@ -88,7 +94,10 @@ Loop behavior:
 - Stores schedules in PostgreSQL scoped by `org_id`, `user_id`, and `agent_id`.
 - Runs from the owning agent worker, which claims due rows with
   `FOR UPDATE SKIP LOCKED`.
-- Auto-expires loop-created schedules after 3 days.
+- Fixed-interval loops auto-expire after 3 days.
+- Dynamic loops auto-expire after 7 days. Each run must call `loop_wait` with a
+  next delay between 1 minute and 1 hour; if it does not, Surogates applies a
+  10-minute fallback delay.
 - Accepts slash commands as prompts, so `/loop 5m /some-skill args` works.
 - Scans prompts before persistence for prompt-injection markers, invisible
   Unicode, secret-exfiltration patterns, and destructive command patterns.

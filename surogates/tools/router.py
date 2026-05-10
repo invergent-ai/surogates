@@ -57,6 +57,7 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "cron_create": ToolLocation.HARNESS,
     "cron_delete": ToolLocation.HARNESS,
     "cron_list": ToolLocation.HARNESS,
+    "loop_wait": ToolLocation.HARNESS,
     # Knowledge base tools (ops DB + Hub reads, no isolation needed)
     "kb_list_pages": ToolLocation.HARNESS,
     "kb_read_page": ToolLocation.HARNESS,

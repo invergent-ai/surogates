@@ -128,6 +128,17 @@ class _Store:
     async def update_session_status(self, session_id: UUID, status: str) -> None:
         self.status_updates.append((session_id, status))
 
+    async def archive_session_tree_and_delete_schedules(
+        self,
+        session_id: UUID,
+        *,
+        org_id: UUID,
+        agent_id: str,
+    ) -> list[SimpleNamespace]:
+        self.status_updates.append((session_id, "archived"))
+        self.session.status = "archived"
+        return [self.session]
+
 
 def _tenant(org_id: UUID, user_id: UUID | None = None) -> TenantContext:
     return TenantContext(
@@ -218,6 +229,7 @@ async def test_delete_session_deletes_session_prefix_not_agent_bucket():
         org_id=org_id,
         agent_id="support-bot",
         status="active",
+        channel="web",
         config={"storage_bucket": "ops-agent-bucket"},
     )
     storage = _RecordingStorage()
@@ -246,6 +258,7 @@ async def test_workspace_upload_read_tree_and_delete_use_session_prefix():
         org_id=org_id,
         agent_id="support-bot",
         status="active",
+        channel="web",
         config={"storage_bucket": "ops-agent-bucket"},
     )
     storage = _RecordingStorage()

@@ -96,11 +96,17 @@ def _format_loop_list(rows: list[Any]) -> str:
         return "No active loops."
     lines = ["Active loops:"]
     for row in rows:
+        reason = row.schedule.get("last_delay_reason") if row.schedule else None
+        suffix = f" (last wait: {reason})" if reason else ""
         lines.append(
             f"- `{row.id}` {row.schedule_display}: {row.prompt} "
-            f"(next: {row.next_run_at})"
+            f"(next: {row.next_run_at}){suffix}"
         )
     return "\n".join(lines)
+
+
+def _should_notify_parent_on_completion(session: Any) -> bool:
+    return session.parent_id is not None and session.channel != "scheduled"
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +137,11 @@ _EMPTY_RESPONSE_NUDGE: str = (
     "output (SVG, HTML, chart, table, markdown document), invoke "
     "create_artifact — do NOT paste the content as a code fence.]"
 )
+_DYNAMIC_LOOP_EXCLUDED_TOOLS: frozenset[str] = frozenset({
+    "cron_create",
+    "cron_delete",
+    "cron_list",
+})
 
 # Fenced-block kinds the post-response promoter is willing to turn into
 # an artifact when the model emits one in place of a ``create_artifact``
@@ -870,17 +881,7 @@ class AgentHarness:
             #   tools — they're useless without the coordinator prompt and
             #   would confuse the LLM.
             # - Sessions with explicit allowed_tools get exactly those.
-            tool_filter: set[str] | None = None
-            if session.config.get("coordinator"):
-                # Coordinator: all tools, no restrictions.
-                tool_filter = None
-            elif session.config.get("allowed_tools"):
-                tool_filter = set(session.config["allowed_tools"])
-            else:
-                from surogates.tools.builtin.coordinator import WORKER_EXCLUDED_TOOLS
-                excluded = set(session.config.get("excluded_tools") or [])
-                excluded.update(WORKER_EXCLUDED_TOOLS)
-                tool_filter = self._tools.tool_names - excluded
+            tool_filter = self._tool_filter_for_session(session)
 
             tool_schemas = filter_schemas_for_tenant(
                 self._tools.get_schemas(names=tool_filter),
@@ -1388,11 +1389,12 @@ class AgentHarness:
                 )
 
                 # A response without tool calls is the end of this turn.
-                # For sub-agent (delegated) sessions, this is also the end of
-                # the session — the parent is waiting on the final answer.
+                # For sub-agent (delegated) and scheduled sessions, this is
+                # also the end of the session: no user is expected to continue
+                # the same session interactively.
                 # For primary user sessions, the session stays 'active' so
                 # the user can send a follow-up message.
-                if session.parent_id is not None:
+                if session.parent_id is not None or session.channel == "scheduled":
                     await self._complete_session(
                         session, messages, lease, reason="completed",
                         through_event_id=event_id,
@@ -1549,6 +1551,10 @@ class AgentHarness:
                     log_policy_allowed=self._log_policy_allowed,
                 )
 
+            dynamic_loop_wait_done = self._dynamic_loop_wait_succeeded(
+                session, tool_calls_raw, tool_results,
+            )
+
             # 7a. Reset nudge counters when relevant tools are used
             for tr_tc in tool_calls_raw:
                 tc_name = tr_tc.get("function", {}).get("name", "")
@@ -1580,6 +1586,16 @@ class AgentHarness:
                     self._memory_manager.sync_all(user_content, assistant_content)
                 except Exception:
                     logger.debug("Memory manager sync_all failed", exc_info=True)
+
+            if dynamic_loop_wait_done:
+                await self._complete_session(
+                    session,
+                    messages,
+                    lease,
+                    reason="loop_wait",
+                    cost_tracker=cost_tracker,
+                )
+                return
 
             # 9. Check if compression is needed.
             if self._compressor.should_compress(messages, system_prompt):
@@ -1865,6 +1881,70 @@ class AgentHarness:
     ) -> list[tuple[dict[str, Any], str]]:
         """Return list of (tool_call, error_message) for invalid calls."""
         return find_invalid_tool_calls(tool_calls, self._tools)
+
+    def _tool_filter_for_session(self, session: Session) -> set[str] | None:
+        """Return the tool allow-list for a session."""
+        config = session.config or {}
+        explicit_allowed = bool(config.get("allowed_tools"))
+
+        if config.get("coordinator"):
+            tool_filter: set[str] | None = None
+        elif explicit_allowed:
+            tool_filter = set(config["allowed_tools"])
+        else:
+            from surogates.tools.builtin.coordinator import WORKER_EXCLUDED_TOOLS
+
+            excluded = set(config.get("excluded_tools") or [])
+            excluded.update(WORKER_EXCLUDED_TOOLS)
+            tool_filter = set(self._tools.tool_names) - excluded
+
+        if config.get("scheduled_dynamic_loop"):
+            if tool_filter is None:
+                tool_filter = set(self._tools.tool_names)
+            else:
+                tool_filter = set(tool_filter)
+            tool_filter.difference_update(_DYNAMIC_LOOP_EXCLUDED_TOOLS)
+            if "loop_wait" in self._tools.tool_names:
+                tool_filter.add("loop_wait")
+            return tool_filter
+
+        if tool_filter is not None and not explicit_allowed:
+            tool_filter = set(tool_filter)
+            tool_filter.discard("loop_wait")
+        return tool_filter
+
+    @staticmethod
+    def _dynamic_loop_wait_succeeded(
+        session: Session,
+        tool_calls: list[dict[str, Any]],
+        tool_results: list[dict[str, Any]],
+    ) -> bool:
+        """Return true when a dynamic loop child successfully scheduled its next run."""
+        if not (session.config or {}).get("scheduled_dynamic_loop"):
+            return False
+
+        loop_wait_ids = {
+            str(tool_call.get("id") or "")
+            for tool_call in tool_calls
+            if tool_call.get("function", {}).get("name") == "loop_wait"
+        }
+        if not loop_wait_ids:
+            return False
+
+        for result in tool_results:
+            if str(result.get("tool_call_id") or "") not in loop_wait_ids:
+                continue
+            content = result.get("content")
+            if not isinstance(content, str):
+                continue
+            try:
+                payload = json.loads(content)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(payload, dict) and payload.get("success") is True:
+                return True
+
+        return False
 
     # ------------------------------------------------------------------
     # Budget pressure warning (delegates to resilience module)
@@ -2587,7 +2667,9 @@ class AgentHarness:
             validate_scheduled_prompt,
         )
         from surogates.scheduled.schedule import (
+            DYNAMIC_LOOP_EXPIRY_DAYS,
             DEFAULT_LOOP_EXPIRY_DAYS,
+            parse_dynamic_loop_schedule,
             parse_loop_command,
             parse_schedule,
         )
@@ -2595,7 +2677,9 @@ class AgentHarness:
 
         if self._tenant.user_id is None:
             message = "/loop schedules are available only for authenticated users."
-            await self._emit_loop_response(session, lease, message)
+            await self._emit_loop_response(
+                session, lease, message, user_content=content,
+            )
             return
 
         raw = content[len("/loop"):].strip()
@@ -2631,39 +2715,79 @@ class AgentHarness:
             try:
                 parsed = parse_loop_command(raw)
                 validate_scheduled_prompt(parsed.prompt, source="loop")
-                schedule = parse_schedule(parsed.interval, timezone_name="UTC")
-                created = await store.create_loop(
-                    org_id=self._tenant.org_id,
-                    user_id=self._tenant.user_id,
-                    agent_id=session.agent_id,
-                    prompt=parsed.prompt,
-                    schedule=schedule,
-                    created_from_session_id=session.id,
-                )
-                message = (
-                    f"Loop scheduled: `{created.id}`\n\n"
-                    f"- Prompt: {parsed.prompt}\n"
-                    f"- Cadence: {created.schedule_display}\n"
-                    f"- Next run: {created.next_run_at}\n"
-                    f"- Auto-expires: {DEFAULT_LOOP_EXPIRY_DAYS} days\n"
-                    f"- Cancel: `/loop cancel {created.id}`"
-                )
+                if parsed.interval is None:
+                    schedule = parse_dynamic_loop_schedule(timezone_name="UTC")
+                    created = await store.create_dynamic_loop(
+                        org_id=self._tenant.org_id,
+                        user_id=self._tenant.user_id,
+                        agent_id=session.agent_id,
+                        prompt=parsed.prompt,
+                        schedule=schedule,
+                        created_from_session_id=session.id,
+                    )
+                    message = (
+                        f"Loop scheduled: `{created.id}`\n\n"
+                        f"- Prompt: {parsed.prompt}\n"
+                        f"- Cadence: dynamic, chosen after each run with `loop_wait`\n"
+                        f"- Next run: {created.next_run_at}\n"
+                        f"- Auto-expires: {DYNAMIC_LOOP_EXPIRY_DAYS} days\n"
+                        f"- Cancel: `/loop cancel {created.id}`"
+                    )
+                else:
+                    schedule = parse_schedule(parsed.interval, timezone_name="UTC")
+                    created = await store.create_loop(
+                        org_id=self._tenant.org_id,
+                        user_id=self._tenant.user_id,
+                        agent_id=session.agent_id,
+                        prompt=parsed.prompt,
+                        schedule=schedule,
+                        created_from_session_id=session.id,
+                    )
+                    cadence_line = f"- Cadence: {created.schedule_display}\n"
+                    if schedule.adjusted_from:
+                        cadence_line += (
+                            f"- Requested cadence: {schedule.adjusted_from}; "
+                            f"using {created.schedule_display}\n"
+                        )
+                    message = (
+                        f"Loop scheduled: `{created.id}`\n\n"
+                        f"- Prompt: {parsed.prompt}\n"
+                        f"{cadence_line}"
+                        f"- Next run: {created.next_run_at}\n"
+                        f"- Auto-expires: {DEFAULT_LOOP_EXPIRY_DAYS} days\n"
+                        f"- Cancel: `/loop cancel {created.id}`"
+                    )
             except (ValueError, ScheduledPromptBlocked) as exc:
                 message = str(exc)
 
-        await self._emit_loop_response(session, lease, message)
+        await self._emit_loop_response(
+            session, lease, message, user_content=content,
+        )
 
     async def _emit_loop_response(
         self,
         session: Session,
         lease: SessionLease,
         message: str,
+        *,
+        user_content: str | None = None,
     ) -> None:
+        assistant_message = {"role": "assistant", "content": message}
         event_id = await self._store.emit_event(
             session.id,
             EventType.LLM_RESPONSE,
-            {"message": {"role": "assistant", "content": message}},
+            {"message": assistant_message},
         )
+        if user_content:
+            await self._maybe_generate_title(
+                session=session,
+                messages=[
+                    {"role": "user", "content": user_content},
+                    assistant_message,
+                ],
+                assistant_message=assistant_message,
+                model=self._current_model or session.model or self._default_model,
+            )
         await self._store.advance_harness_cursor(
             session.id,
             through_event_id=event_id,
@@ -2918,7 +3042,9 @@ class AgentHarness:
             )
 
         # Notify parent session if this is a worker (child) session.
-        if session.parent_id is not None:
+        # Scheduled loop runs use parent_id for traceability in the session
+        # tree, but should not wake the parent as if they were sub-agent work.
+        if _should_notify_parent_on_completion(session):
             from surogates.harness.worker_notify import notify_parent_on_completion
             try:
                 await notify_parent_on_completion(
@@ -2935,6 +3061,8 @@ class AgentHarness:
                     exc_info=True,
                 )
 
+        await self._finalize_dynamic_loop_if_needed(session)
+
         # Advance cursor to the latest event.
         cursor_target = through_event_id if through_event_id is not None else event_id
         try:
@@ -2946,3 +3074,37 @@ class AgentHarness:
                 "Failed to advance cursor after session completion for %s",
                 session.id,
             )
+
+    async def _finalize_dynamic_loop_if_needed(self, session: Session) -> None:
+        if not session.config.get("scheduled_dynamic_loop"):
+            return
+        schedule_id_raw = session.config.get("scheduled_session_id")
+        if not schedule_id_raw or self._tenant.user_id is None:
+            return
+
+        from surogates.scheduled.schedule import DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS
+        from surogates.scheduled.store import ScheduledSessionStore
+
+        try:
+            schedule_id = UUID(str(schedule_id_raw))
+        except ValueError:
+            logger.warning("Invalid dynamic loop id in session config: %s", schedule_id_raw)
+            return
+
+        store = ScheduledSessionStore(self._session_factory)
+        try:
+            schedule = await store.get(schedule_id)
+        except KeyError:
+            return
+        if schedule.next_run_at is not None or schedule.last_session_id != session.id:
+            return
+
+        await store.mark_dynamic_run_finished(
+            schedule_id=schedule_id,
+            org_id=self._tenant.org_id,
+            user_id=self._tenant.user_id,
+            agent_id=session.agent_id,
+            session_id=session.id,
+            delay_seconds=DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS,
+            reason="The agent did not call loop_wait; using the fallback delay.",
+        )

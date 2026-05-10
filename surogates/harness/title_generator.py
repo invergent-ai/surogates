@@ -48,30 +48,79 @@ async def generate_session_title(
     if not user_snippet or not assistant_snippet:
         return None
 
+    messages = [
+        {"role": "system", "content": _TITLE_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"User: {user_snippet}\n\n"
+                f"Assistant: {assistant_snippet}"
+            ),
+        },
+    ]
+    kwargs = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": 32,
+        "temperature": 0.3,
+        "timeout": timeout,
+        "stream": False,
+    }
+    extra_body = _title_extra_body(model)
+    if extra_body is not None:
+        kwargs["extra_body"] = extra_body
+
     try:
         response = await llm_client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": _TITLE_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        f"User: {user_snippet}\n\n"
-                        f"Assistant: {assistant_snippet}"
-                    ),
-                },
-            ],
-            max_tokens=32,
-            temperature=0.3,
-            timeout=timeout,
-            stream=False,
+            **kwargs,
         )
         content = response.choices[0].message.content
         return clean_generated_title(content)
     except Exception as exc:
+        if _looks_like_optional_param_rejection(exc):
+            try:
+                retry_kwargs = {
+                    key: value
+                    for key, value in kwargs.items()
+                    if key not in {"max_tokens", "temperature", "extra_body"}
+                }
+                response = await llm_client.chat.completions.create(
+                    **retry_kwargs,
+                )
+                content = response.choices[0].message.content
+                return clean_generated_title(content)
+            except Exception as retry_exc:
+                logger.warning(
+                    "Session title generation failed after compatibility retry: %s",
+                    retry_exc,
+                )
+                logger.debug(
+                    "Session title generation retry traceback",
+                    exc_info=True,
+                )
+                return None
         logger.warning("Session title generation failed: %s", exc)
         logger.debug("Session title generation traceback", exc_info=True)
         return None
+
+
+def _looks_like_optional_param_rejection(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "max_tokens" in text
+        or "temperature" in text
+        or "extra_body" in text
+        or "chat_template_kwargs" in text
+        or "unsupported parameter" in text
+        or "unexpected keyword" in text
+        or "unrecognized request argument" in text
+    )
+
+
+def _title_extra_body(model: str) -> dict[str, Any] | None:
+    if model.lower() == "surogate":
+        return {"chat_template_kwargs": {"enable_thinking": False}}
+    return None
 
 
 async def maybe_generate_session_title(
