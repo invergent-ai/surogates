@@ -749,8 +749,8 @@ describe("AgentChat", () => {
       'button[aria-label="Upload files"]',
     ) as HTMLButtonElement | null;
 
-    expect(textarea?.disabled).toBe(true);
-    expect(textarea?.placeholder).toBe("Scheduled run is read-only");
+    expect(textarea).toBeNull();
+    expect(container.textContent).toContain("Scheduled run is read-only");
     expect(uploadButton?.disabled).toBe(true);
   });
 });
