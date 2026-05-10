@@ -416,6 +416,35 @@ class TestDestroy:
 
 
 class TestFindBySession:
+    async def test_find_entry_returns_tenant_metadata(
+        self, backend: K8sBrowserBackend, monkeypatch,
+    ) -> None:
+        pod = MagicMock()
+        pod.metadata.name = "browser-abcdef123456"
+        pod.metadata.labels = {
+            "app": "surogates-browser",
+            "surogates.ai/browser-id": "abcdef1234567890",
+            "surogates.ai/session-id": "sess-x",
+            "surogates.ai/org-id": "org-x",
+            "surogates.ai/user-id": "user-x",
+        }
+        api = MagicMock()
+        api.list_namespaced_pod = AsyncMock(return_value=MagicMock(items=[pod]))
+
+        async def fake_get_api() -> MagicMock:
+            return api
+
+        monkeypatch.setattr(backend, "_get_api", fake_get_api)
+        entry = await backend.find_entry_by_session("sess-x")
+
+        assert entry is not None
+        assert entry.session_id == "sess-x"
+        assert entry.org_id == "org-x"
+        assert entry.user_id == "user-x"
+        assert entry.rest_url == "http://browser-abcdef123456.test-ns.svc:10001"
+        assert entry.cdp_url == "ws://browser-abcdef123456.test-ns.svc:9222"
+        assert entry.live_view_url == "ws://browser-abcdef123456.test-ns.svc:443"
+
     async def test_find_returns_endpoint(
         self, backend: K8sBrowserBackend, monkeypatch,
     ) -> None:

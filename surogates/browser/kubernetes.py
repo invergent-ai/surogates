@@ -17,6 +17,7 @@ from surogates.browser.base import (
     BrowserStatus,
     BrowserUnavailableError,
 )
+from surogates.browser.registry import BrowserEntry
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,51 @@ class K8sBrowserBackend:
         session_id: str,
     ) -> tuple[str, BrowserEndpoint] | None:
         """Resolve a browser endpoint by session label."""
+        found = await self._find_pod_by_session(session_id)
+        if found is None:
+            return None
+        browser_id, _org_id, _user_id, service_name = found
+        if not browser_id or not service_name:
+            return None
+        return (
+            browser_id,
+            BrowserEndpoint(
+                rest_url=f"http://{service_name}.{self._namespace}.svc:{SERVICE_PORT_REST}",
+                cdp_url=f"ws://{service_name}.{self._namespace}.svc:{SERVICE_PORT_CDP}",
+                live_view_url=(
+                    f"ws://{service_name}.{self._namespace}.svc:{SERVICE_PORT_LIVE_VIEW}"
+                ),
+            ),
+        )
+
+    async def find_entry_by_session(self, session_id: str) -> BrowserEntry | None:
+        """Resolve browser metadata by session label.
+
+        This variant preserves org/user labels for API-side tenant checks.
+        """
+        found = await self._find_pod_by_session(session_id)
+        if found is None:
+            return None
+        browser_id, org_id, user_id, service_name = found
+        if not browser_id or not org_id or not user_id or not service_name:
+            return None
+
+        return BrowserEntry(
+            session_id=session_id,
+            org_id=org_id,
+            user_id=user_id,
+            rest_url=f"http://{service_name}.{self._namespace}.svc:{SERVICE_PORT_REST}",
+            cdp_url=f"ws://{service_name}.{self._namespace}.svc:{SERVICE_PORT_CDP}",
+            live_view_url=(
+                f"ws://{service_name}.{self._namespace}.svc:{SERVICE_PORT_LIVE_VIEW}"
+            ),
+            provisioned_at=datetime.now(timezone.utc),
+        )
+
+    async def _find_pod_by_session(
+        self,
+        session_id: str,
+    ) -> tuple[str | None, str | None, str | None, str | None] | None:
         api = await self._get_api()
         selector = f"app=surogates-browser,surogates.ai/session-id={session_id}"
         result = await api.list_namespaced_pod(
@@ -189,22 +235,14 @@ class K8sBrowserBackend:
         items = list(getattr(result, "items", []) or [])
         if not items:
             return None
-
         pod = items[0]
         labels = pod.metadata.labels or {}
-        browser_id = labels.get("surogates.ai/browser-id")
-        service_name = pod.metadata.name
-        if not browser_id or not service_name:
-            return None
-
-        endpoint = BrowserEndpoint(
-            rest_url=f"http://{service_name}.{self._namespace}.svc:{SERVICE_PORT_REST}",
-            cdp_url=f"ws://{service_name}.{self._namespace}.svc:{SERVICE_PORT_CDP}",
-            live_view_url=(
-                f"ws://{service_name}.{self._namespace}.svc:{SERVICE_PORT_LIVE_VIEW}"
-            ),
+        return (
+            labels.get("surogates.ai/browser-id"),
+            labels.get("surogates.ai/org-id"),
+            labels.get("surogates.ai/user-id"),
+            pod.metadata.name,
         )
-        return browser_id, endpoint
 
     async def _get_api(self) -> client.CoreV1Api:
         """Return a cached Kubernetes CoreV1Api client."""
