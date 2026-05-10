@@ -153,6 +153,17 @@ class FakeScreenshotClient:
         pass
 
 
+class FakeLargeScreenshotClient(FakeScreenshotClient):
+    async def screenshot(
+        self,
+        *,
+        region: dict[str, int] | None = None,
+        annotate: bool = False,
+    ) -> dict[str, Any]:
+        self.captured.append({"region": region, "annotate": annotate})
+        return {"png_bytes": b"\x89PNG\r\n\x1a\n" + (b"x" * 300_000)}
+
+
 @pytest.fixture()
 def tenant():
     return SimpleNamespace(
@@ -408,6 +419,45 @@ class TestScrollDragWait:
 
 
 class TestScreenshotHandler:
+    async def test_saves_png_to_workspace(self, tenant, tmp_path) -> None:
+        from surogates.tools.builtin.browser import _browser_screenshot_handler
+
+        result = await _browser_screenshot_handler(
+            {},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            workspace_path=str(tmp_path),
+            _client_factory=lambda endpoint: FakeScreenshotClient(),
+        )
+        body = json.loads(result)
+        assert body["path"].startswith("browser-screenshots/")
+        assert body["path"].endswith(".png")
+        assert (tmp_path / body["path"]).read_bytes() == b"\x89PNG\r\n\x1a\nimg"
+
+    async def test_oversized_png_is_still_saved_to_workspace(
+        self,
+        tenant,
+        tmp_path,
+    ) -> None:
+        from surogates.tools.builtin.browser import _browser_screenshot_handler
+
+        result = await _browser_screenshot_handler(
+            {},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            workspace_path=str(tmp_path),
+            _client_factory=lambda endpoint: FakeLargeScreenshotClient(),
+        )
+        body = json.loads(result)
+        assert body["error"] == "screenshot_too_large_for_base64"
+        assert body["path"].startswith("browser-screenshots/")
+        assert (tmp_path / body["path"]).read_bytes().startswith(b"\x89PNG")
+        assert "base64" not in body
+
     async def test_annotate_returns_annotations(self, tenant) -> None:
         from surogates.tools.builtin.browser import _browser_screenshot_handler
 

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from surogates.browser.base import (
     BrowserEndpoint,
@@ -480,6 +482,25 @@ SCREENSHOT_SCHEMA = {
 }
 
 _MAX_BASE64_BYTES = 256 * 1024
+_SCREENSHOT_DIR = "browser-screenshots"
+
+
+def _save_screenshot_to_workspace(
+    png_bytes: bytes,
+    *,
+    workspace_path: str | None,
+) -> str | None:
+    if not workspace_path:
+        return None
+
+    workspace = Path(workspace_path).resolve()
+    target_dir = workspace / _SCREENSHOT_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    filename = f"browser-screenshot-{timestamp}-{uuid4().hex[:8]}.png"
+    target_path = target_dir / filename
+    target_path.write_bytes(png_bytes)
+    return f"{_SCREENSHOT_DIR}/{filename}"
 
 
 async def _browser_screenshot_handler(
@@ -490,6 +511,7 @@ async def _browser_screenshot_handler(
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
     _client_factory: Callable[..., Any] = _default_client_factory,
+    workspace_path: str | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -510,20 +532,28 @@ async def _browser_screenshot_handler(
         )
 
     png_bytes = result["png_bytes"]
+    path = _save_screenshot_to_workspace(png_bytes, workspace_path=workspace_path)
     if len(png_bytes) > _MAX_BASE64_BYTES:
-        return json.dumps(
-            {
-                "error": "screenshot_too_large_for_base64",
-                "bytes": len(png_bytes),
-                "guidance": "Capture a smaller region or retry without annotation.",
-            }
-        )
+        body: dict[str, Any] = {
+            "error": "screenshot_too_large_for_base64",
+            "bytes": len(png_bytes),
+            "mime_type": "image/png",
+            "guidance": (
+                "Screenshot was saved to the session workspace. Capture a "
+                "smaller region if inline base64 is required."
+            ),
+        }
+        if path is not None:
+            body["path"] = path
+        return json.dumps(body)
 
     body: dict[str, Any] = {
         "base64": base64.b64encode(png_bytes).decode(),
         "mime_type": "image/png",
         "bytes": len(png_bytes),
     }
+    if path is not None:
+        body["path"] = path
     if "annotations" in result:
         body["annotations"] = result["annotations"]
     return json.dumps(body)

@@ -86,9 +86,10 @@ Every call still passes through governance before execution.
 such as `@e3`, which `browser_click` and `browser_type` can use later. After
 navigation or large page changes, call `browser_get_state` again to refresh refs.
 
-`browser_screenshot` returns base64 PNG data only when the screenshot is small
-enough for the event stream. Capture a smaller `region` if the full viewport is
-too large.
+`browser_screenshot` saves each PNG in the session workspace under
+`browser-screenshots/`. It also returns base64 PNG data when the screenshot is
+small enough for the event stream. Capture a smaller `region` if inline base64
+is required and the full viewport is too large.
 
 ## Live View And User Control
 
