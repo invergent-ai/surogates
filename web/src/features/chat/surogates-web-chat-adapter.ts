@@ -217,6 +217,7 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     );
     const token = getAuthToken();
     if (token) url.searchParams.set("token", token);
+    url.searchParams.set("pwd", "admin");
     return url.pathname + url.search;
   },
 };

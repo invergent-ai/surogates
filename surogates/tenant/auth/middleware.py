@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
     from surogates.config import Settings
 
 __all__ = [
+    "LIVE_VIEW_TOKEN_COOKIE",
     "authenticate_websocket_tenant",
     "get_current_tenant",
     "setup_auth_middleware",
@@ -75,6 +77,10 @@ _SERVICE_ACCOUNT_PATH_PREFIX: str = "/v1/api/"
 _QUERY_TOKEN_PATH_RE = re.compile(
     r"^/v1/(api/)?sessions/[0-9a-fA-F-]{36}/(?:events|browser/live(?:/.*)?)$",
 )
+_LIVE_VIEW_PATH_RE = re.compile(
+    r"^/v1/(api/)?sessions/[0-9a-fA-F-]{36}/browser/live(?:/.*)?$",
+)
+LIVE_VIEW_TOKEN_COOKIE = "surogates_browser_live_token"
 
 
 def _is_public(path: str) -> bool:
@@ -97,6 +103,26 @@ def _allows_query_token(path: str) -> bool:
     WebSockets. Regular REST APIs must use the Authorization header.
     """
     return bool(_QUERY_TOKEN_PATH_RE.match(path))
+
+
+def _allows_live_view_cookie(path: str) -> bool:
+    return bool(_LIVE_VIEW_PATH_RE.match(path))
+
+
+def _query_or_live_view_cookie_token(
+    *,
+    path: str,
+    query_params: Mapping[str, str],
+    cookies: Mapping[str, str],
+) -> str | None:
+    if not _allows_query_token(path):
+        return None
+    token = query_params.get("token")
+    if token:
+        return token
+    if _allows_live_view_cookie(path):
+        return cookies.get(LIVE_VIEW_TOKEN_COOKIE)
+    return None
 
 
 def _extract_bearer(auth_header: str) -> str:
@@ -134,7 +160,11 @@ async def get_current_tenant(
     if credentials is not None:
         raw_token = credentials.credentials
     elif _allows_query_token(request.url.path):
-        raw_token = request.query_params.get("token")
+        raw_token = _query_or_live_view_cookie_token(
+            path=request.url.path,
+            query_params=request.query_params,
+            cookies=request.cookies,
+        )
 
     if not raw_token:
         raise HTTPException(
@@ -161,8 +191,15 @@ async def authenticate_websocket_tenant(
     *,
     path: str,
     token: str | None,
+    cookies: Mapping[str, str] | None = None,
 ) -> TenantContext:
     """Authenticate a WebSocket query token and return its tenant context."""
+    if not token:
+        token = _query_or_live_view_cookie_token(
+            path=path,
+            query_params={},
+            cookies=cookies or {},
+        )
     if not token or not _allows_query_token(path):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -355,8 +392,12 @@ def setup_auth_middleware(app: FastAPI, settings: Settings) -> None:
 
         auth_header = request.headers.get("authorization", "")
         token = _extract_bearer(auth_header)
-        if not token and _allows_query_token(path):
-            token = request.query_params.get("token", "")
+        if not token:
+            token = _query_or_live_view_cookie_token(
+                path=path,
+                query_params=request.query_params,
+                cookies=request.cookies,
+            ) or ""
 
         if not token:
             return JSONResponse(

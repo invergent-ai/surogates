@@ -119,6 +119,11 @@ for (const path of [
     /\/browser\/live\//,
     "web chat adapter should point the browser iframe at the live-view root",
   );
+  assert.match(
+    adapterSource,
+    /searchParams\.set\("pwd",\s*"admin"\)/,
+    "web chat adapter should pass Neko's auto-login password",
+  );
 }
 
 {

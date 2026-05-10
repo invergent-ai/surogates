@@ -19,6 +19,7 @@ from surogates.browser.control import AcquireOutcome
 from surogates.browser.rfb import is_input_frame
 from surogates.session.events import EventType
 from surogates.tenant.auth.middleware import (
+    LIVE_VIEW_TOKEN_COOKIE,
     authenticate_websocket_tenant,
     get_current_tenant,
 )
@@ -252,11 +253,21 @@ async def proxy_live_view(
         if key.lower()
         not in {"connection", "transfer-encoding", "content-encoding"}
     }
-    return Response(
+    response = Response(
         content=upstream.content,
         status_code=upstream.status_code,
         headers=response_headers,
     )
+    token = request.query_params.get("token")
+    if token:
+        response.set_cookie(
+            LIVE_VIEW_TOKEN_COOKIE,
+            token,
+            max_age=30 * 60,
+            httponly=True,
+            samesite="lax",
+        )
+    return response
 
 
 @router.websocket("/api/sessions/{session_id}/browser/live/{path:path}")
@@ -271,6 +282,7 @@ async def proxy_live_view_ws(
             websocket.app,
             path=websocket.url.path,
             token=websocket.query_params.get("token"),
+            cookies=websocket.cookies,
         )
     except HTTPException:
         await websocket.close(code=4401, reason="unauthenticated")

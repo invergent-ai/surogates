@@ -430,6 +430,44 @@ class TestLiveViewHTTPProxy:
         assert response.status_code == 200
         assert params_seen == [{"cache": "1"}]
 
+    async def test_token_query_sets_live_view_cookie(
+        self,
+        app_factory,
+        monkeypatch,
+    ) -> None:
+        from surogates.api.routes import browser as browser_routes
+        from surogates.tenant.auth.middleware import LIVE_VIEW_TOKEN_COOKIE
+
+        build, resolver, _control = app_factory
+        sid = str(uuid4())
+        resolver.entries[sid] = _resolved(sid)
+
+        async def fake_request(method, url, **kwargs):
+            return httpx.Response(
+                status_code=200,
+                text="<html>neko</html>",
+                headers={"content-type": "text/html"},
+            )
+
+        monkeypatch.setattr(
+            browser_routes,
+            "_proxy_live_view_request",
+            fake_request,
+            raising=False,
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=build()),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                f"/v1/sessions/{sid}/browser/live/",
+                params={"token": "jwt"},
+            )
+
+        assert response.status_code == 200
+        assert response.cookies.get(LIVE_VIEW_TOKEN_COOKIE) == "jwt"
+
 
 def _event_recorder(events: list[tuple[str, str, dict]]):
     async def emit(session_id: str, event_type, data: dict) -> None:
