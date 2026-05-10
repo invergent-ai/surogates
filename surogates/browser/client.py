@@ -30,6 +30,8 @@ class KernelBrowserClient:
     )
 
     _SNAPSHOT_SCRIPT = """
+const __surogatesSelector = __SUROGATES_SELECTOR__;
+const __surogatesSnapshot = await page.evaluate((selector) => {
 function roleOf(el) {
   const explicit = el.getAttribute('role');
   if (explicit) return explicit;
@@ -72,7 +74,9 @@ function depthOf(el) {
 }
 
 const out = [];
-for (const el of Array.from(document.querySelectorAll('*'))) {
+const root = selector === null ? document : document.querySelector(selector);
+if (!root) throw new Error('selector matched no element');
+for (const el of Array.from(root.querySelectorAll('*'))) {
   const style = window.getComputedStyle(el);
   if (style.visibility === 'hidden' || style.display === 'none') continue;
   const bbox = el.getBoundingClientRect();
@@ -89,10 +93,15 @@ for (const el of Array.from(document.querySelectorAll('*'))) {
   });
 }
 return {
+  viewport: {width: window.innerWidth, height: window.innerHeight},
+  nodes: out,
+};
+}, __surogatesSelector);
+return {
   url: page.url(),
   title: await page.title(),
-  viewport: page.viewportSize() || {width: 0, height: 0},
-  nodes: out,
+  viewport: page.viewportSize() || __surogatesSnapshot.viewport,
+  nodes: __surogatesSnapshot.nodes,
 };
 """
 
@@ -358,17 +367,9 @@ return {
         return True
 
     def _snapshot_script(self, selector: str | None) -> str:
-        if selector is None:
-            return self._SNAPSHOT_SCRIPT
-
-        selector_json = json.dumps(selector)
         return self._SNAPSHOT_SCRIPT.replace(
-            "for (const el of Array.from(document.querySelectorAll('*'))) {",
-            (
-                f"const __root = document.querySelector({selector_json});\n"
-                "if (!__root) throw new Error('selector matched no element');\n"
-                "for (const el of Array.from(__root.querySelectorAll('*'))) {"
-            ),
+            "__SUROGATES_SELECTOR__",
+            json.dumps(selector),
         )
 
     def _build_annotations(self) -> list[dict[str, Any]]:

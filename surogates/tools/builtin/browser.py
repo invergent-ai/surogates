@@ -161,12 +161,15 @@ async def _browser_get_state_handler(
     _browser_id, endpoint, snapshot_cache = preflight
     client = _make_client(_client_factory, endpoint, snapshot_cache)
     async with client:
-        state = await client.get_state(
-            interactive_only=arguments.get("interactive_only", False),
-            compact=arguments.get("compact", False),
-            max_depth=arguments.get("max_depth"),
-            selector=arguments.get("selector"),
-        )
+        try:
+            state = await client.get_state(
+                interactive_only=arguments.get("interactive_only", False),
+                compact=arguments.get("compact", False),
+                max_depth=arguments.get("max_depth"),
+                selector=arguments.get("selector"),
+            )
+        except RuntimeError as exc:
+            return json.dumps({"error": "get_state_failed", "detail": str(exc)})
     return json.dumps(state)
 
 

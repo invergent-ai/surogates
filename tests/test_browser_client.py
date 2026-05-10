@@ -116,6 +116,38 @@ class TestNavigate:
 
 
 class TestGetState:
+    async def test_get_state_executes_dom_snapshot_inside_page_evaluate(self) -> None:
+        captured: list[dict[str, Any]] = []
+
+        class CapturingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                captured.append(json.loads(request.content))
+                return httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "result": {
+                            "url": "u",
+                            "title": "t",
+                            "viewport": {"width": 1, "height": 1},
+                            "nodes": [],
+                        },
+                    },
+                )
+
+        client = KernelBrowserClient(rest_url="http://browser-test:10001")
+        client._http = httpx.AsyncClient(
+            base_url=client.rest_url,
+            transport=CapturingTransport(),
+        )
+
+        await client.get_state()
+
+        code = captured[0]["code"]
+        assert "await page.evaluate" in code
+        assert code.index("await page.evaluate") < code.index("document.querySelector")
+        assert code.index("await page.evaluate") < code.index("root.querySelectorAll")
+
     async def test_get_state_returns_tree_with_refs(self, client_with_transport) -> None:
         client, handlers = client_with_transport
         handlers.append(

@@ -82,6 +82,11 @@ class FakeClient:
         await self.close()
 
 
+class FailingStateClient(FakeClient):
+    async def get_state(self, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("document is not defined")
+
+
 class FakeClickClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple, dict[str, Any]]] = []
@@ -224,6 +229,24 @@ class TestGetStateHandler:
         body = json.loads(result)
         assert "tree" in body
         assert body["url"] == "http://example.com/"
+
+    async def test_returns_structured_error_when_state_snapshot_fails(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_get_state_handler
+
+        result = await _browser_get_state_handler(
+            {},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FailingStateClient(),
+        )
+
+        body = json.loads(result)
+        assert body == {
+            "error": "get_state_failed",
+            "detail": "document is not defined",
+        }
 
 
 class TestCloseHandler:
