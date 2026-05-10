@@ -41,7 +41,8 @@ resolution remains tenant-scoped.
 - [x] **Completed:** Task 16 — verify Helm/API egress for live-view proxy (no api-server NetworkPolicy exists; no chart change required).
 - [x] **Completed:** Task 17 — bump SDK version and frontend pin.
 - [x] **Completed:** Task 18 — add opt-in real-cluster Phase C browser E2E test.
-- [ ] **In progress:** Run final backend, SDK, frontend, and Helm verification.
+- [x] **Completed:** Run final SDK, frontend, Helm, and Phase C backend verification.
+- [ ] **Still left to do:** Investigate unrelated full-suite backend failures in feedback/scheduled-store tests before relying on `uv run pytest tests/ -q` as a whole-suite gate.
 - [ ] **Still left to do:** Run the backend, SDK, frontend, Helm, and opt-in K8s verification listed in Final verification.
 - [ ] **Completed:** Phase A and Phase B prerequisites exist on this branch.
 
