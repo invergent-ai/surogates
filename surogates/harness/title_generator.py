@@ -66,6 +66,9 @@ async def generate_session_title(
         "timeout": timeout,
         "stream": False,
     }
+    extra_body = _title_extra_body(model)
+    if extra_body is not None:
+        kwargs["extra_body"] = extra_body
 
     try:
         response = await llm_client.chat.completions.create(
@@ -79,7 +82,7 @@ async def generate_session_title(
                 retry_kwargs = {
                     key: value
                     for key, value in kwargs.items()
-                    if key not in {"max_tokens", "temperature"}
+                    if key not in {"max_tokens", "temperature", "extra_body"}
                 }
                 response = await llm_client.chat.completions.create(
                     **retry_kwargs,
@@ -106,10 +109,18 @@ def _looks_like_optional_param_rejection(exc: Exception) -> bool:
     return (
         "max_tokens" in text
         or "temperature" in text
+        or "extra_body" in text
+        or "chat_template_kwargs" in text
         or "unsupported parameter" in text
         or "unexpected keyword" in text
         or "unrecognized request argument" in text
     )
+
+
+def _title_extra_body(model: str) -> dict[str, Any] | None:
+    if model.lower() == "surogate":
+        return {"chat_template_kwargs": {"enable_thinking": False}}
+    return None
 
 
 async def maybe_generate_session_title(

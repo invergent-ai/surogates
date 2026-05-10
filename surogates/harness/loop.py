@@ -2677,7 +2677,9 @@ class AgentHarness:
 
         if self._tenant.user_id is None:
             message = "/loop schedules are available only for authenticated users."
-            await self._emit_loop_response(session, lease, message)
+            await self._emit_loop_response(
+                session, lease, message, user_content=content,
+            )
             return
 
         raw = content[len("/loop"):].strip()
@@ -2758,19 +2760,34 @@ class AgentHarness:
             except (ValueError, ScheduledPromptBlocked) as exc:
                 message = str(exc)
 
-        await self._emit_loop_response(session, lease, message)
+        await self._emit_loop_response(
+            session, lease, message, user_content=content,
+        )
 
     async def _emit_loop_response(
         self,
         session: Session,
         lease: SessionLease,
         message: str,
+        *,
+        user_content: str | None = None,
     ) -> None:
+        assistant_message = {"role": "assistant", "content": message}
         event_id = await self._store.emit_event(
             session.id,
             EventType.LLM_RESPONSE,
-            {"message": {"role": "assistant", "content": message}},
+            {"message": assistant_message},
         )
+        if user_content:
+            await self._maybe_generate_title(
+                session=session,
+                messages=[
+                    {"role": "user", "content": user_content},
+                    assistant_message,
+                ],
+                assistant_message=assistant_message,
+                model=self._current_model or session.model or self._default_model,
+            )
         await self._store.advance_harness_cursor(
             session.id,
             through_event_id=event_id,

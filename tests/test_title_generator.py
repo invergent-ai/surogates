@@ -63,7 +63,32 @@ async def test_generate_session_title_uses_auxiliary_chat_client() -> None:
     assert call_kwargs["model"] == "gpt-4o-mini"
     assert call_kwargs["stream"] is False
     assert call_kwargs["max_tokens"] <= 32
+    assert "extra_body" not in call_kwargs
     assert "Redis is timing out" in call_kwargs["messages"][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_generate_session_title_disables_thinking_for_surogate_model() -> None:
+    llm_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(return_value=_response("Bitcoin Price Loop"))
+            )
+        )
+    )
+
+    title = await generate_session_title(
+        llm_client=llm_client,
+        model="surogate",
+        user_message="watch the bitcoin price",
+        assistant_response="Loop scheduled.",
+    )
+
+    assert title == "Bitcoin Price Loop"
+    call_kwargs = llm_client.chat.completions.create.await_args.kwargs
+    assert call_kwargs["extra_body"] == {
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
 
 
 @pytest.mark.asyncio
@@ -93,6 +118,34 @@ async def test_generate_session_title_retries_without_optional_params() -> None:
     assert first_call["max_tokens"] <= 32
     assert "max_tokens" not in retry_call
     assert "temperature" not in retry_call
+
+
+@pytest.mark.asyncio
+async def test_generate_session_title_retry_removes_thinking_extra_body() -> None:
+    create = AsyncMock(
+        side_effect=[
+            RuntimeError("unsupported parameter: chat_template_kwargs"),
+            _response("Bitcoin Price Loop"),
+        ]
+    )
+    llm_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=create)
+        )
+    )
+
+    title = await generate_session_title(
+        llm_client=llm_client,
+        model="surogate",
+        user_message="watch the bitcoin price",
+        assistant_response="Loop scheduled.",
+    )
+
+    assert title == "Bitcoin Price Loop"
+    first_call = create.await_args_list[0].kwargs
+    retry_call = create.await_args_list[1].kwargs
+    assert "extra_body" in first_call
+    assert "extra_body" not in retry_call
 
 
 @pytest.mark.asyncio
@@ -223,5 +276,43 @@ async def test_harness_title_hook_delegates_best_effort(monkeypatch) -> None:
         session=session,
         messages=messages,
         assistant_message=assistant_message,
+        model="gpt-4o",
+    )
+
+
+@pytest.mark.asyncio
+async def test_loop_command_response_generates_title(monkeypatch) -> None:
+    harness = AgentHarness.__new__(AgentHarness)
+    harness._store = SimpleNamespace(
+        emit_event=AsyncMock(return_value=42),
+        advance_harness_cursor=AsyncMock(),
+    )
+    harness._llm = SimpleNamespace()
+    harness._current_model = None
+    harness._default_model = "gpt-4o"
+    maybe_generate = AsyncMock(return_value="Track Bitcoin Volatility")
+    monkeypatch.setattr(
+        "surogates.harness.loop.maybe_generate_session_title",
+        maybe_generate,
+    )
+    session = SimpleNamespace(id=uuid4(), title=None, model="gpt-4o")
+    lease = SimpleNamespace(lease_token=uuid4())
+
+    await harness._emit_loop_response(
+        session,
+        lease,
+        "Loop scheduled.",
+        user_content="/loop check bitcoin volatility",
+    )
+
+    maybe_generate.assert_awaited_once_with(
+        store=harness._store,
+        llm_client=harness._llm,
+        session=session,
+        messages=[
+            {"role": "user", "content": "/loop check bitcoin volatility"},
+            {"role": "assistant", "content": "Loop scheduled."},
+        ],
+        assistant_message={"role": "assistant", "content": "Loop scheduled."},
         model="gpt-4o",
     )
