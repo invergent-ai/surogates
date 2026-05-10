@@ -26,7 +26,8 @@
                 "SUROGATES_CONFIG": "${workspaceFolder}/config.dev.yaml",
                 "SUROGATES_PLATFORM_MCP_DIR": "${workspaceFolder}/.dev/mcp",
                 "SUROGATES_GOVERNANCE_PLATFORM_POLICY_PATH": "${workspaceFolder}/.dev/policies",
-                "TAVILY_API_KEY": "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"
+                "TAVILY_API_KEY": "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",
+                "KUBECONFIG": "/home/flavius/.surogate/kubeconfig"
             }
         },
         {
