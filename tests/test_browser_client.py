@@ -11,6 +11,8 @@ import pytest
 
 from surogates.browser.client import KernelBrowserClient
 
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
 
 @pytest.fixture()
 def mock_transport():
@@ -362,3 +364,39 @@ class TestSmallActions:
         elapsed_ms = (time.perf_counter() - start) * 1000
         assert 40 <= elapsed_ms < 500
         assert client._snapshot_cache == {}
+
+
+class TestScreenshot:
+    async def test_screenshot_returns_png_bytes(self, client_with_transport) -> None:
+        client, handlers = client_with_transport
+        handlers.append(("POST", "/computer/screenshot", 200, PNG_MAGIC + b"fakepngbody"))
+        result = await client.screenshot()
+        assert result["png_bytes"].startswith(PNG_MAGIC)
+        assert "annotations" not in result
+
+    async def test_screenshot_with_annotate_runs_overlay_then_clears(
+        self, client_with_transport
+    ) -> None:
+        client, _ = client_with_transport
+        client._snapshot_cache["@e1"] = {"x": 100, "y": 50, "role": "button", "name": "Go"}
+        client._snapshot_cache["@e2"] = {"x": 200, "y": 50, "role": "link", "name": "Help"}
+        seen_paths: list[str] = []
+
+        class TracingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                seen_paths.append(request.url.path)
+                if request.url.path == "/computer/screenshot":
+                    return httpx.Response(200, content=PNG_MAGIC + b"img")
+                if request.url.path == "/playwright/execute":
+                    return httpx.Response(200, json={"success": True, "result": True})
+                return httpx.Response(404)
+
+        client._http = httpx.AsyncClient(base_url=client.rest_url, transport=TracingTransport())
+        result = await client.screenshot(annotate=True)
+
+        assert seen_paths.count("/playwright/execute") == 2
+        assert seen_paths.count("/computer/screenshot") == 1
+        assert result["annotations"] == [
+            {"ref": "@e1", "label": 1, "role": "button", "name": "Go"},
+            {"ref": "@e2", "label": 2, "role": "link", "name": "Help"},
+        ]

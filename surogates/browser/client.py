@@ -251,6 +251,35 @@ return {
 
         await asyncio.sleep(max(0, ms) / 1000.0)
 
+    async def screenshot(
+        self,
+        *,
+        region: dict[str, int] | None = None,
+        annotate: bool = False,
+    ) -> dict[str, Any]:
+        """Capture a PNG screenshot, optionally with numbered ref overlays."""
+
+        annotations: list[dict[str, Any]] | None = None
+        if annotate:
+            if not self._snapshot_cache:
+                await self.get_state(interactive_only=True)
+            annotations = self._build_annotations()
+            await self._inject_overlay(annotations)
+
+        try:
+            response = await self._http.post(
+                "/computer/screenshot",
+                json={} if region is None else {"region": region},
+            )
+            response.raise_for_status()
+            result: dict[str, Any] = {"png_bytes": response.content}
+            if annotations is not None:
+                result["annotations"] = annotations
+            return result
+        finally:
+            if annotate:
+                await self._remove_overlay()
+
     async def _playwright_execute(
         self,
         code: str,
@@ -340,4 +369,60 @@ return {
                 "if (!__root) throw new Error('selector matched no element');\n"
                 "for (const el of Array.from(__root.querySelectorAll('*'))) {"
             ),
+        )
+
+    def _build_annotations(self) -> list[dict[str, Any]]:
+        annotations: list[dict[str, Any]] = []
+        for label, (ref, entry) in enumerate(
+            sorted(self._snapshot_cache.items(), key=lambda item: int(item[0][2:])),
+            start=1,
+        ):
+            annotations.append(
+                {
+                    "ref": ref,
+                    "label": label,
+                    "role": entry.get("role", ""),
+                    "name": entry.get("name", ""),
+                }
+            )
+        return annotations
+
+    async def _inject_overlay(self, annotations: list[dict[str, Any]]) -> None:
+        overlay_data = [
+            {"label": annotation["label"], **self._snapshot_cache[annotation["ref"]]}
+            for annotation in annotations
+        ]
+        overlay_json = json.dumps(overlay_data)
+        code = f"""
+await page.evaluate((items) => {{
+  document.getElementById('surogates-overlay')?.remove();
+  const c = document.createElement('canvas');
+  c.id = 'surogates-overlay';
+  c.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647';
+  c.width = window.innerWidth;
+  c.height = window.innerHeight;
+  document.documentElement.appendChild(c);
+  const g = c.getContext('2d');
+  g.font = 'bold 14px sans-serif';
+  for (const item of items) {{
+    g.fillStyle = 'rgba(255,215,0,0.9)';
+    g.fillRect(item.x - 12, item.y - 10, 24, 20);
+    g.fillStyle = 'black';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText(String(item.label), item.x, item.y);
+  }}
+}}, {overlay_json});
+return true;
+"""
+        await self._playwright_execute(code)
+
+    async def _remove_overlay(self) -> None:
+        await self._playwright_execute(
+            """
+await page.evaluate(() => {
+  document.getElementById('surogates-overlay')?.remove();
+});
+return true;
+"""
         )
