@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+import websockets
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
+from fastapi import WebSocketDisconnect
 from fastapi.responses import Response
 from pydantic import BaseModel
 
 from surogates.browser.control import AcquireOutcome
+from surogates.browser.rfb import is_input_frame
 from surogates.session.events import EventType
-from surogates.tenant.auth.middleware import get_current_tenant
+from surogates.tenant.auth.middleware import (
+    authenticate_websocket_tenant,
+    get_current_tenant,
+)
 from surogates.tenant.context import TenantContext
 
 router = APIRouter()
@@ -35,6 +43,25 @@ def _route_prefix(request: Request) -> str:
 async def _proxy_live_view_request(method: str, url: str, **kwargs) -> httpx.Response:
     async with httpx.AsyncClient(timeout=30.0) as client:
         return await client.request(method, url, **kwargs)
+
+
+async def _connect_live_view_ws(url: str):
+    return await websockets.connect(url, subprotocols=["binary"])
+
+
+async def _should_forward_client_frame(
+    *,
+    session_id: str,
+    tenant: TenantContext,
+    control,
+    frame: bytes,
+) -> bool:
+    if not is_input_frame(frame):
+        return True
+    if tenant.user_id is None:
+        return False
+    holder = await control.held_by(session_id)
+    return holder == str(tenant.user_id)
 
 
 @router.get(
@@ -208,3 +235,92 @@ async def proxy_live_view(
         status_code=upstream.status_code,
         headers=response_headers,
     )
+
+
+@router.websocket("/api/sessions/{session_id}/browser/live/websockify")
+@router.websocket("/sessions/{session_id}/browser/live/websockify")
+async def proxy_live_view_ws(
+    websocket: WebSocket,
+    session_id: UUID,
+) -> None:
+    try:
+        tenant = await authenticate_websocket_tenant(
+            websocket.app,
+            path=websocket.url.path,
+            token=websocket.query_params.get("token"),
+        )
+    except HTTPException:
+        await websocket.close(code=4401, reason="unauthenticated")
+        return
+
+    resolver = websocket.app.state.browser_resolver
+    control = websocket.app.state.browser_control
+    resolved = await resolver.resolve(
+        str(session_id),
+        expected_org_id=str(tenant.org_id),
+    )
+    if resolved is None:
+        await websocket.close(code=4404, reason="no browser")
+        return
+
+    upstream_url = f"{resolved.endpoint.live_view_url.rstrip('/')}/websockify"
+    try:
+        upstream = await _connect_live_view_ws(upstream_url)
+    except Exception:
+        await websocket.close(code=4502, reason="upstream unavailable")
+        return
+
+    requested_protocols = websocket.headers.get("sec-websocket-protocol", "")
+    await websocket.accept(
+        subprotocol="binary" if "binary" in requested_protocols else None,
+    )
+
+    async def client_to_upstream() -> None:
+        try:
+            while True:
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    return
+                if message.get("bytes") is not None:
+                    frame = message["bytes"]
+                elif message.get("text") is not None:
+                    frame = message["text"].encode()
+                else:
+                    continue
+                if await _should_forward_client_frame(
+                    session_id=str(session_id),
+                    tenant=tenant,
+                    control=control,
+                    frame=frame,
+                ):
+                    await upstream.send(frame)
+        except WebSocketDisconnect:
+            return
+
+    async def upstream_to_client() -> None:
+        async for frame in upstream:
+            if isinstance(frame, str):
+                frame = frame.encode()
+            await websocket.send_bytes(frame)
+
+    tasks = [
+        asyncio.create_task(client_to_upstream()),
+        asyncio.create_task(upstream_to_client()),
+    ]
+    try:
+        done, pending = await asyncio.wait(
+            tasks,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        for task in done:
+            task.result()
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        with contextlib.suppress(Exception):
+            await upstream.close()
+        with contextlib.suppress(Exception):
+            await websocket.close()
