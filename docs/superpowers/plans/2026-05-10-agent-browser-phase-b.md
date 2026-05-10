@@ -13,7 +13,7 @@
 - [x] **Task 6: K8s status mapping** — completed.
 - [x] **Task 7: K8s destroy lifecycle** — completed.
 - [x] **Task 8: find_by_session fallback primitive** — completed.
-- [ ] **Task 9: Worker bootstrap wiring** — pending.
+- [x] **Task 9: Worker bootstrap wiring** — completed.
 - [ ] **Task 10: Browser image packaging** — pending.
 - [ ] **Task 11: Helm browser ServiceAccount** — pending.
 - [ ] **Task 12: Helm browser NetworkPolicy** — pending.
