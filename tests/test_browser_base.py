@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
+
+import pytest
 
 from surogates.session.events import EventType
 
@@ -53,3 +56,65 @@ def test_settings_includes_browser(monkeypatch) -> None:
 
     s = Settings()
     assert s.browser.backend == "process"
+
+
+def test_browser_status_values() -> None:
+    from surogates.browser.base import BrowserStatus
+
+    assert BrowserStatus.RUNNING.value == "running"
+    assert BrowserStatus.PENDING.value == "pending"
+    assert BrowserStatus.FAILED.value == "failed"
+    assert BrowserStatus.TERMINATED.value == "terminated"
+
+
+def test_browser_spec_defaults() -> None:
+    from surogates.browser.base import BrowserSpec
+
+    spec = BrowserSpec()
+    assert spec.image == "ghcr.io/onkernel/chromium-headful:stable"
+    assert spec.cpu == "1"
+    assert spec.memory == "2Gi"
+    assert spec.cpu_limit == "2"
+    assert spec.memory_limit == "4Gi"
+    assert spec.pod_ready_timeout == 60
+    assert spec.active_deadline_seconds == 3600
+    assert spec.env == {}
+
+
+def test_browser_spec_overrides() -> None:
+    from surogates.browser.base import BrowserSpec
+
+    spec = BrowserSpec(image="custom:1", cpu="500m", env={"FOO": "bar"})
+    assert spec.image == "custom:1"
+    assert spec.cpu == "500m"
+    assert spec.env == {"FOO": "bar"}
+
+
+def test_browser_unavailable_result_shape() -> None:
+    from surogates.browser.base import browser_unavailable_result
+
+    payload = json.loads(browser_unavailable_result("kubelet busy"))
+    assert payload["error"] == "browser_unavailable"
+    assert payload["reason"] == "kubelet busy"
+    assert "guidance" in payload
+
+
+def test_browser_unavailable_error_classifies() -> None:
+    from surogates.browser.base import BrowserUnavailableError
+
+    exc = BrowserUnavailableError("docker pull failed", classification="image")
+    assert exc.reason == "docker pull failed"
+    assert exc.classification == "image"
+
+
+def test_browser_endpoint_helpers() -> None:
+    from surogates.browser.base import BrowserEndpoint
+
+    ep = BrowserEndpoint(
+        rest_url="http://10.0.0.5:30000",
+        cdp_url="ws://10.0.0.5:31000",
+        live_view_url="ws://10.0.0.5:32000",
+    )
+    assert ep.rest_url.endswith(":30000")
+    with pytest.raises(TypeError):
+        BrowserEndpoint(rest_url="http://x")  # type: ignore[call-arg]
