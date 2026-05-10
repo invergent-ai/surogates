@@ -30,6 +30,7 @@ import {
   TimelineSeparator,
 } from "../reui/timeline";
 import { Shimmer } from "../ai-elements/shimmer";
+import { BrowserActivityGroup } from "../browser/browser-activity-group";
 import { ToolCallBlock } from "./tool-call-block";
 import { statusColorClass, effectiveStatus, toolErrorSummary, parseArgs } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
@@ -72,6 +73,7 @@ interface ChatThreadProps {
 type TimelineEntry =
   | { kind: "reasoning"; key: string; reasoning: string; isStreaming: boolean }
   | { kind: "tool"; key: string; tc: ToolCallInfo; resolvedArtifactName?: string }
+  | { kind: "browser_activity"; key: string; calls: ToolCallInfo[] }
   | { kind: "text"; key: string; content: string }
   | { kind: "thinking"; key: string }
   | { kind: "skill_invoked"; key: string; skill: string; stagedAt: string | null }
@@ -192,6 +194,37 @@ function messageToEntries(
   }
 
   return entries;
+}
+
+function groupBrowserActivityEntries(entries: TimelineEntry[]): TimelineEntry[] {
+  const grouped: TimelineEntry[] = [];
+  let buffer: ToolCallInfo[] = [];
+
+  const flush = () => {
+    if (buffer.length === 0) return;
+    grouped.push({
+      kind: "browser_activity",
+      key: `browser-activity-${buffer[0]?.id}-${buffer[buffer.length - 1]?.id}`,
+      calls: buffer,
+    });
+    buffer = [];
+  };
+
+  for (const entry of entries) {
+    if (entry.kind === "tool" && isBrowserToolCall(entry.tc)) {
+      buffer.push(entry.tc);
+      continue;
+    }
+    flush();
+    grouped.push(entry);
+  }
+
+  flush();
+  return grouped;
+}
+
+function isBrowserToolCall(call: ToolCallInfo): boolean {
+  return call.toolName.startsWith("browser_");
 }
 
 /** A run of consecutive messages grouped by role.
@@ -434,6 +467,20 @@ function TimelineEntryItem({
     );
   }
 
+  if (entry.kind === "browser_activity") {
+    return (
+      <TimelineItem step={step}>
+        <TimelineHeader>
+          <TimelineSeparator style={{ backgroundColor: "var(--color-border)" }} />
+          <TimelineIndicator className="size-2 border-none bg-amber-500" />
+        </TimelineHeader>
+        <TimelineContent>
+          <BrowserActivityGroup calls={entry.calls} />
+        </TimelineContent>
+      </TimelineItem>
+    );
+  }
+
   if (entry.kind === "text") {
     return (
       <TimelineItem step={step}>
@@ -529,12 +576,13 @@ function AssistantGroup({
   onFileSelect?: (path: string) => void;
   onRetry?: () => Promise<void>;
 }) {
-  const entries: TimelineEntry[] = [];
+  let entries: TimelineEntry[] = [];
   for (let i = 0; i < messages.length; i++) {
     const isLast = i === messages.length - 1
       && lastGlobalIndex === totalMessages - 1;
     entries.push(...messageToEntries(messages[i], isLast, artifactFallbacks));
   }
+  entries = groupBrowserActivityEntries(entries);
 
   // Whenever this is the tail assistant group and the session is still
   // running, append a "Working on it..." row unless something visible is
