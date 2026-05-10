@@ -14,8 +14,8 @@
 
 ## Phase A TODO
 
-- [ ] Task 1: Add browser event types and config settings — **in progress**
-- [ ] Task 2: Define `BrowserBackend` protocol and value types — left to do
+- [x] Task 1: Add browser event types and config settings — completed
+- [ ] Task 2: Define `BrowserBackend` protocol and value types — **in progress**
 - [ ] Task 3: `KernelBrowserClient` skeleton — left to do
 - [ ] Task 4: `KernelBrowserClient.navigate` — left to do
 - [ ] Task 5: `KernelBrowserClient.get_state` with refs/cache — left to do

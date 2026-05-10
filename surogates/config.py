@@ -278,6 +278,32 @@ class SandboxSettings(BaseSettings):
     k8s_s3_endpoint: str = ""
 
 
+class BrowserSettings(BaseSettings):
+    """Agent browser configuration.
+
+    The browser is implemented as a separate per-session resource. It is
+    always available to the worker; ``backend`` selects the local-development
+    process backend or the future Kubernetes backend.
+    """
+
+    model_config = {"env_prefix": "SUROGATES_BROWSER_"}
+
+    backend: Literal["process", "kubernetes"] = "process"
+    image: str = "ghcr.io/onkernel/chromium-headful:stable"
+    rest_port_base: int = 30000
+    cdp_port_base: int = 31000
+    live_view_port_base: int = 32000
+    live_view_mode: Literal["novnc", "webrtc"] = "novnc"
+    k8s_namespace: str = "surogates"
+    k8s_service_account: str = "surogates-browser"
+    pod_ready_timeout: int = 60
+    active_deadline_seconds: int = 3600
+    cpu: str = "1"
+    memory: str = "2Gi"
+    cpu_limit: str = "2"
+    memory_limit: str = "4Gi"
+
+
 class TransparencySettings(BaseSettings):
     """EU AI Act Art. 13/50 transparency enforcement."""
 
@@ -477,6 +503,7 @@ class Settings(BaseSettings):
     worker: WorkerSettings = Field(default_factory=WorkerSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
+    browser: BrowserSettings = Field(default_factory=BrowserSettings)
     governance: GovernanceSettings = Field(default_factory=GovernanceSettings)
     saga: SagaSettings = Field(default_factory=SagaSettings)
     session_reset: SessionResetSettings = Field(default_factory=SessionResetSettings)

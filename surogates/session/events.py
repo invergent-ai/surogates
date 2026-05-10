@@ -105,3 +105,7 @@ class EventType(str, Enum):
     SAGA_STEP_FAILED = "saga.step_failed"
     SAGA_COMPENSATE = "saga.compensate"
     SAGA_COMPLETE = "saga.complete"
+
+    # Agent browser lifecycle
+    BROWSER_PROVISIONED = "browser.provisioned"
+    BROWSER_DESTROYED = "browser.destroyed"
