@@ -424,24 +424,13 @@ class ScheduledSessionStore:
                 SELECT s.id
                 FROM scheduled_sessions s
                 JOIN sessions run_session ON run_session.id = s.last_session_id
-                LEFT JOIN session_leases active_lease
-                    ON active_lease.session_id = run_session.id
-                   AND active_lease.expires_at > now()
                 WHERE s.agent_id = :agent_id
                   AND s.status = 'active'
                   AND s.next_run_at IS NULL
                   AND s.last_session_id IS NOT NULL
                   AND s.schedule->>'kind' = 'dynamic_loop'
                   AND (s.expires_at IS NULL OR s.expires_at > now())
-                  AND (
-                        run_session.status IN ('completed', 'failed', 'idle', 'archived')
-                     OR (
-                            run_session.status = 'active'
-                        AND active_lease.session_id IS NULL
-                        AND run_session.updated_at
-                            < now() - make_interval(secs => :stale_seconds)
-                        )
-                  )
+                  AND run_session.status IN ('completed', 'failed', 'idle', 'archived')
                 ORDER BY s.last_run_at ASC NULLS FIRST
                 LIMIT :limit
                 FOR UPDATE OF s SKIP LOCKED
@@ -476,6 +465,47 @@ class ScheduledSessionStore:
             )
             rows = [ScheduledSession.model_validate(dict(row._mapping)) for row in result]
             await db.commit()
+        return rows
+
+    async def find_retryable_stalled_dynamic_loop_runs(
+        self,
+        *,
+        agent_id: str,
+        stale_seconds: int = DYNAMIC_LOOP_STALE_RUN_SECONDS,
+        limit: int = 100,
+    ) -> list[ScheduledSession]:
+        query = text(
+            """
+            SELECT s.*
+            FROM scheduled_sessions s
+            JOIN sessions run_session ON run_session.id = s.last_session_id
+            LEFT JOIN session_leases active_lease
+                ON active_lease.session_id = run_session.id
+               AND active_lease.expires_at > now()
+            WHERE s.agent_id = :agent_id
+              AND s.status = 'active'
+              AND s.next_run_at IS NULL
+              AND s.last_session_id IS NOT NULL
+              AND s.schedule->>'kind' = 'dynamic_loop'
+              AND (s.expires_at IS NULL OR s.expires_at > now())
+              AND run_session.status = 'active'
+              AND active_lease.session_id IS NULL
+              AND run_session.updated_at
+                    < now() - make_interval(secs => :stale_seconds)
+            ORDER BY s.last_run_at ASC NULLS FIRST
+            LIMIT :limit
+            """
+        )
+        async with self._sf() as db:
+            result = await db.execute(
+                query,
+                {
+                    "agent_id": agent_id,
+                    "stale_seconds": int(stale_seconds),
+                    "limit": int(limit),
+                },
+            )
+            rows = [ScheduledSession.model_validate(dict(row._mapping)) for row in result]
         return rows
 
     async def _set_status(

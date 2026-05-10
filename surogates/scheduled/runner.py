@@ -50,6 +50,25 @@ class ScheduledSessionRunner:
         self._running = False
 
     async def tick_once(self) -> int:
+        retryable = await self._scheduled_store.find_retryable_stalled_dynamic_loop_runs(
+            agent_id=self._settings.agent_id,
+            stale_seconds=DYNAMIC_LOOP_STALE_RUN_SECONDS,
+            limit=self._settings.scheduled_sessions.claim_limit,
+        )
+        for schedule in retryable:
+            if schedule.last_session_id is None:
+                continue
+            await enqueue_session(
+                self._redis,
+                schedule.agent_id,
+                schedule.last_session_id,
+            )
+            logger.warning(
+                "Requeued stalled dynamic loop session %s for schedule %s",
+                schedule.last_session_id,
+                schedule.id,
+            )
+
         recovered = await self._scheduled_store.recover_stalled_dynamic_loops(
             agent_id=self._settings.agent_id,
             stale_seconds=DYNAMIC_LOOP_STALE_RUN_SECONDS,
@@ -57,7 +76,7 @@ class ScheduledSessionRunner:
         )
         for schedule in recovered:
             logger.warning(
-                "Recovered stalled dynamic loop %s with fallback delay",
+                "Recovered terminal dynamic loop %s with fallback delay",
                 schedule.id,
             )
 

@@ -118,7 +118,7 @@ async def test_runner_marks_dynamic_loop_sessions(session_factory, redis_client)
     assert session.config["scheduled_dynamic_loop"] is True
 
 
-async def test_runner_recovers_stalled_dynamic_loops(
+async def test_runner_requeues_stalled_dynamic_loop_sessions(
     session_factory,
     redis_client,
     monkeypatch,
@@ -166,6 +166,8 @@ async def test_runner_recovers_stalled_dynamic_loops(
         )
         await db.commit()
 
+    queue = agent_queue_key("agent-a")
+    await redis_client.delete(queue)
     runner = ScheduledSessionRunner(
         settings=FakeSettings(),
         session_factory=session_factory,
@@ -178,8 +180,7 @@ async def test_runner_recovers_stalled_dynamic_loops(
     processed = await runner.tick_once()
 
     assert processed == 0
+    score = await redis_client.zscore(queue, str(run_session.id))
+    assert score is not None
     updated = await scheduled_store.get(schedule.id)
-    assert updated.next_run_at is not None
-    assert updated.schedule["last_delay_reason"].startswith(
-        "Previous dynamic loop run stalled",
-    )
+    assert updated.next_run_at is None

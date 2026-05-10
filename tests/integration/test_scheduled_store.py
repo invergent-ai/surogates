@@ -143,7 +143,50 @@ async def test_dynamic_loop_lifecycle_waits_for_loop_wait(session_factory):
     assert updated.schedule["last_delay_reason"] == "CI is still running"
 
 
-async def test_recover_stalled_dynamic_loop_applies_fallback(
+async def test_terminal_dynamic_loop_without_wait_gets_fallback(
+    session_factory,
+    session_store,
+):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+
+    loop = await store.create_dynamic_loop(
+        org_id=org_id,
+        user_id=user_id,
+        agent_id="agent-a",
+        prompt="check CI",
+        schedule=parse_dynamic_loop_schedule(),
+        created_from_session_id=None,
+    )
+    run_session = await session_store.create_session(
+        user_id=user_id,
+        org_id=org_id,
+        agent_id="agent-a",
+        channel="scheduled",
+        config={
+            "scheduled_session_id": str(loop.id),
+            "scheduled_dynamic_loop": True,
+        },
+    )
+
+    claimed = (await store.claim_due(agent_id="agent-a", worker_id="w1", limit=1))[0]
+    await store.mark_run_created(claimed, session_id=run_session.id)
+    await session_store.update_session_status(run_session.id, "completed")
+
+    recovered = await store.recover_stalled_dynamic_loops(
+        agent_id="agent-a",
+        stale_seconds=1,
+    )
+
+    assert [row.id for row in recovered] == [loop.id]
+    updated = await store.get(loop.id)
+    assert updated.next_run_at is not None
+    assert updated.schedule["last_delay_seconds"] == DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS
+    assert "fallback" in updated.schedule["last_delay_reason"]
+
+
+async def test_find_retryable_stalled_dynamic_loop_runs(
     session_factory,
     session_store,
 ):
@@ -183,13 +226,13 @@ async def test_recover_stalled_dynamic_loop_applies_fallback(
         )
         await db.commit()
 
-    recovered = await store.recover_stalled_dynamic_loops(
+    retryable = await store.find_retryable_stalled_dynamic_loop_runs(
         agent_id="agent-a",
         stale_seconds=1,
     )
 
-    assert [row.id for row in recovered] == [loop.id]
+    assert [(row.id, row.last_session_id) for row in retryable] == [
+        (loop.id, run_session.id),
+    ]
     updated = await store.get(loop.id)
-    assert updated.next_run_at is not None
-    assert updated.schedule["last_delay_seconds"] == DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS
-    assert "stalled" in updated.schedule["last_delay_reason"]
+    assert updated.next_run_at is None
