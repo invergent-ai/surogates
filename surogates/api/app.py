@@ -140,6 +140,7 @@ def create_app() -> FastAPI:
         agents,
         artifacts,
         auth,
+        browser,
         clarify,
         events,
         feedback,
@@ -173,6 +174,7 @@ def create_app() -> FastAPI:
     app.include_router(website.router, prefix="/v1", tags=["website"])
     app.include_router(workspace.router, prefix="/v1", tags=["workspace"])
     app.include_router(artifacts.router, prefix="/v1", tags=["artifacts"])
+    app.include_router(browser.router, prefix="/v1", tags=["browser"])
     app.include_router(clarify.router, prefix="/v1", tags=["clarify"])
     app.include_router(admin.router, prefix="/v1/admin", tags=["admin"])
     app.include_router(admin_mcp.router, prefix="/v1/admin", tags=["admin"])

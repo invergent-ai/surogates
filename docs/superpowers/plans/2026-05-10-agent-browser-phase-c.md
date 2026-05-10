@@ -26,8 +26,9 @@ resolution remains tenant-scoped.
 - [x] **Completed:** Task 1 — add browser control event types.
 - [x] **Completed:** Task 2 — add tenant-scoped BrowserResolver with K8s fallback.
 - [x] **Completed:** Task 3 — add RFB input-frame gating helper.
-- [ ] **In progress:** Task 4 — add browser state API route.
-- [ ] **Still left to do:** Implement Task 4 through Task 18 in order, committing at each task boundary.
+- [x] **Completed:** Task 4 — add browser state API route.
+- [ ] **In progress:** Task 5 — add browser control API route.
+- [ ] **Still left to do:** Implement Task 5 through Task 18 in order, committing at each task boundary.
 - [ ] **Still left to do:** Run the backend, SDK, frontend, Helm, and opt-in K8s verification listed in Final verification.
 - [ ] **Completed:** Phase A and Phase B prerequisites exist on this branch.
 
