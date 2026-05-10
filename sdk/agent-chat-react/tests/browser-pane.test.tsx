@@ -98,4 +98,18 @@ describe("BrowserPane", () => {
 
     expect(node.textContent).toMatch(/starting browser/i);
   });
+
+  it("does not crash when an older adapter lacks browser view methods", () => {
+    const node = renderPane(
+      <BrowserPane
+        sessionId="s"
+        state={{ status: "live", controlOwner: null }}
+        adapter={{} as typeof liveAdapter}
+      />,
+    );
+
+    expect(node.textContent).toMatch(/browser live view is unavailable/i);
+    expect(node.querySelector('[data-testid="browser-iframe"]')).toBeNull();
+    expect(node.textContent).not.toContain("Take control");
+  });
 });

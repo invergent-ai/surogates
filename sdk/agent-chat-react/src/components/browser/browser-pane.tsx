@@ -17,10 +17,15 @@ interface BrowserPaneProps {
 }
 
 export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
-  const liveViewUrl = useMemo(
-    () => adapter.browserLiveViewUrl(sessionId),
-    [adapter, sessionId],
-  );
+  const hasLiveViewAdapter =
+    typeof adapter.browserLiveViewUrl === "function";
+  const hasControlAdapter =
+    typeof adapter.acquireBrowserControl === "function" &&
+    typeof adapter.releaseBrowserControl === "function";
+  const liveViewUrl = useMemo(() => {
+    if (!hasLiveViewAdapter) return "";
+    return adapter.browserLiveViewUrl(sessionId);
+  }, [adapter, hasLiveViewAdapter, sessionId]);
   const hasLiveView = state.status !== "provisioning" && state.status !== "closed";
 
   return (
@@ -47,11 +52,15 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
           <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">
             Browser closed.
           </div>
-        ) : (
+        ) : liveViewUrl ? (
           <BrowserLiveView src={liveViewUrl} />
+        ) : (
+          <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">
+            Browser live view is unavailable.
+          </div>
         )}
       </div>
-      {hasLiveView && (
+      {hasLiveView && hasControlAdapter && (
         <BrowserControlBar
           sessionId={sessionId}
           hasControl={state.status === "user-control"}
