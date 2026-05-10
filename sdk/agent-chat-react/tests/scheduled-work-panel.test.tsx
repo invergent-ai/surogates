@@ -1,6 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
+import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
 import { ScheduledWorkPanel } from "../src/components/scheduled/scheduled-work-panel";
 import type {
   AgentChatAdapter,
@@ -49,6 +50,7 @@ function scheduledWork(
 
 function createAdapter(items: AgentChatScheduledWorkItem[]): AgentChatAdapter {
   return {
+    ...NO_BROWSER_ADAPTER,
     async listSessions(): Promise<AgentChatSessionList> {
       return { sessions: [], total: 0 };
     },

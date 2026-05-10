@@ -1,6 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
+import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
 import { SessionTreePanel } from "../src/components/sessions/session-tree-panel";
 import type {
   AgentChatAdapter,
@@ -27,6 +28,7 @@ function session(input: Partial<AgentChatSession> & { id: string }): AgentChatSe
 
 function createAdapter(sessions: AgentChatSession[]) {
   return {
+    ...NO_BROWSER_ADAPTER,
     async listSessions() {
       return { sessions, total: sessions.length };
     },

@@ -1,6 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
+import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
 import { AgentChat } from "../src/agent-chat";
 import type {
   AgentChatAdapter,
@@ -47,6 +48,7 @@ function createAdapter(
   options: { session?: AgentChatSession } = {},
 ) {
   return {
+    ...NO_BROWSER_ADAPTER,
     async listSessions() {
       return { sessions: [], total: 0 };
     },

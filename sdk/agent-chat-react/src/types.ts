@@ -205,6 +205,17 @@ export interface AgentChatBrowserState {
   controlOwner: string | null;
 }
 
+export interface AgentChatBrowserStateResponse {
+  status: "live" | "user-control";
+  controlOwner: string | null;
+  liveViewPath: string;
+}
+
+export interface AgentChatBrowserControlResponse {
+  outcome: "granted" | "refreshed" | "conflict";
+  ownerUserId: string;
+}
+
 export interface AgentChatState {
   messages: AgentChatMessage[];
   isRunning: boolean;
@@ -421,6 +432,10 @@ export interface AgentChatAdapter {
     sessionId: string;
     after: number;
   }): AgentChatEventStream;
+  getBrowserState(sessionId: string): Promise<AgentChatBrowserStateResponse | null>;
+  acquireBrowserControl(sessionId: string): Promise<AgentChatBrowserControlResponse>;
+  releaseBrowserControl(sessionId: string): Promise<void>;
+  browserLiveViewUrl(sessionId: string): string;
 }
 
 export interface AgentChatRuntimeApi {
