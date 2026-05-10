@@ -52,6 +52,24 @@ async def _connect_live_view_ws(url: str):
     return await websockets.connect(url, subprotocols=["binary"])
 
 
+def _live_view_client_payload(message: dict[str, Any]) -> str | bytes | None:
+    if message.get("bytes") is not None:
+        return message["bytes"]
+    if message.get("text") is not None:
+        return message["text"]
+    return None
+
+
+async def _send_live_view_frame_to_client(
+    websocket: WebSocket,
+    frame: str | bytes,
+) -> None:
+    if isinstance(frame, str):
+        await websocket.send_text(frame)
+        return
+    await websocket.send_bytes(frame)
+
+
 def _live_view_query_pairs(query_params: Any) -> list[tuple[str, str]]:
     if hasattr(query_params, "multi_items"):
         items = query_params.multi_items()
@@ -320,27 +338,25 @@ async def proxy_live_view_ws(
                 message = await websocket.receive()
                 if message["type"] == "websocket.disconnect":
                     return
-                if message.get("bytes") is not None:
-                    frame = message["bytes"]
-                elif message.get("text") is not None:
-                    frame = message["text"].encode()
-                else:
+                frame = _live_view_client_payload(message)
+                if frame is None:
                     continue
-                if await _should_forward_client_frame(
-                    session_id=str(session_id),
-                    tenant=tenant,
-                    control=control,
-                    frame=frame,
-                ):
+                allowed = True
+                if isinstance(frame, bytes):
+                    allowed = await _should_forward_client_frame(
+                        session_id=str(session_id),
+                        tenant=tenant,
+                        control=control,
+                        frame=frame,
+                    )
+                if allowed:
                     await upstream.send(frame)
         except WebSocketDisconnect:
             return
 
     async def upstream_to_client() -> None:
         async for frame in upstream:
-            if isinstance(frame, str):
-                frame = frame.encode()
-            await websocket.send_bytes(frame)
+            await _send_live_view_frame_to_client(websocket, frame)
 
     tasks = [
         asyncio.create_task(client_to_upstream()),

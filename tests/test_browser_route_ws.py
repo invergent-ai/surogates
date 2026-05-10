@@ -7,6 +7,8 @@ from uuid import UUID
 from starlette.datastructures import QueryParams
 
 from surogates.api.routes.browser import (
+    _live_view_client_payload,
+    _send_live_view_frame_to_client,
     _live_view_upstream_ws_url,
     _should_forward_client_frame,
 )
@@ -24,6 +26,17 @@ class FakeControl:
     async def held_by(self, session_id: str) -> str | None:
         self.calls.append(session_id)
         return self.holder
+
+
+class FakeWebSocket:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str | bytes]] = []
+
+    async def send_text(self, frame: str) -> None:
+        self.sent.append(("text", frame))
+
+    async def send_bytes(self, frame: bytes) -> None:
+        self.sent.append(("bytes", frame))
 
 
 def _tenant(user_id: UUID | None = USER_1) -> TenantContext:
@@ -119,3 +132,27 @@ class TestLiveViewUpstreamWsUrl:
             )
             == "ws://browser:8080/api/ws?foo=bar&foo=baz"
         )
+
+
+class TestLiveViewWebSocketFrameTypes:
+    async def test_sends_upstream_text_frames_to_browser_as_text(self) -> None:
+        websocket = FakeWebSocket()
+
+        await _send_live_view_frame_to_client(websocket, '{"event":"member/list"}')
+
+        assert websocket.sent == [("text", '{"event":"member/list"}')]
+
+    async def test_sends_upstream_binary_frames_to_browser_as_binary(self) -> None:
+        websocket = FakeWebSocket()
+
+        await _send_live_view_frame_to_client(websocket, b"\x02frame")
+
+        assert websocket.sent == [("bytes", b"\x02frame")]
+
+    def test_preserves_browser_text_frames_for_upstream(self) -> None:
+        assert _live_view_client_payload({"text": '{"event":"client/heartbeat"}'}) == (
+            '{"event":"client/heartbeat"}'
+        )
+
+    def test_preserves_browser_binary_frames_for_upstream(self) -> None:
+        assert _live_view_client_payload({"bytes": b"\x04frame"}) == b"\x04frame"
