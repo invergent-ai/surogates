@@ -97,7 +97,7 @@ is required and the full viewport is too large.
 The web UI shows a browser pane once a session provisions a browser. The user's
 browser never talks directly to the browser pod. It talks to the API server,
 which authenticates the request, checks tenant/session scope, resolves the
-browser, and proxies the NoVNC live view.
+browser, and proxies the browser live view.
 
 Users can acquire browser control from the live view. While user control is held:
 
@@ -118,7 +118,7 @@ Browser live view and control endpoints are part of the session API:
 | `GET /v1/sessions/{id}/browser/state` | Resolve the session browser and return `live` or `user-control` status plus the live-view path. |
 | `POST /v1/sessions/{id}/browser/control` | Acquire or release manual browser control. Body: `{"action":"acquire"}` or `{"action":"release"}`. |
 | `GET /v1/sessions/{id}/browser/live/{path}` | Proxy live-view HTTP assets through the API server. |
-| `WS /v1/sessions/{id}/browser/live/websockify` | Proxy the NoVNC websocket stream through the API server. |
+| `WS /v1/sessions/{id}/browser/live/{path}` | Proxy live-view websocket paths through the API server. |
 
 The API also exposes `/v1/api/sessions/...` variants for internal callers. Normal
 service-account clients should not use the interactive browser endpoints.

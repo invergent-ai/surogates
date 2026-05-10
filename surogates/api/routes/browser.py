@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from typing import Any
+from urllib.parse import urlencode
 from uuid import UUID
 
 import httpx
@@ -47,6 +49,30 @@ async def _proxy_live_view_request(method: str, url: str, **kwargs) -> httpx.Res
 
 async def _connect_live_view_ws(url: str):
     return await websockets.connect(url, subprotocols=["binary"])
+
+
+def _live_view_query_pairs(query_params: Any) -> list[tuple[str, str]]:
+    if hasattr(query_params, "multi_items"):
+        items = query_params.multi_items()
+    else:
+        items = query_params.items()
+    return [(key, value) for key, value in items if key != "token"]
+
+
+def _live_view_upstream_ws_url(
+    live_view_url: str,
+    path: str,
+    query_params: Any | None = None,
+) -> str:
+    upstream_base = live_view_url.rstrip("/")
+    upstream_path = path.lstrip("/")
+    upstream_url = (
+        f"{upstream_base}/{upstream_path}" if upstream_path else f"{upstream_base}/"
+    )
+    if query_params is None:
+        return upstream_url
+    query = urlencode(_live_view_query_pairs(query_params))
+    return f"{upstream_url}?{query}" if query else upstream_url
 
 
 async def _should_forward_client_frame(
@@ -204,11 +230,7 @@ async def proxy_live_view(
         if key.lower()
         not in {"host", "authorization", "cookie", "connection", "content-length"}
     }
-    forward_params = {
-        key: value
-        for key, value in request.query_params.items()
-        if key != "token"
-    }
+    forward_params = _live_view_query_pairs(request.query_params)
 
     try:
         upstream = await _proxy_live_view_request(
@@ -237,11 +259,12 @@ async def proxy_live_view(
     )
 
 
-@router.websocket("/api/sessions/{session_id}/browser/live/websockify")
-@router.websocket("/sessions/{session_id}/browser/live/websockify")
+@router.websocket("/api/sessions/{session_id}/browser/live/{path:path}")
+@router.websocket("/sessions/{session_id}/browser/live/{path:path}")
 async def proxy_live_view_ws(
     websocket: WebSocket,
     session_id: UUID,
+    path: str,
 ) -> None:
     try:
         tenant = await authenticate_websocket_tenant(
@@ -263,7 +286,11 @@ async def proxy_live_view_ws(
         await websocket.close(code=4404, reason="no browser")
         return
 
-    upstream_url = f"{resolved.endpoint.live_view_url.rstrip('/')}/websockify"
+    upstream_url = _live_view_upstream_ws_url(
+        resolved.endpoint.live_view_url,
+        path,
+        websocket.query_params,
+    )
     try:
         upstream = await _connect_live_view_ws(upstream_url)
     except Exception:

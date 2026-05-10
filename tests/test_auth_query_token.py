@@ -19,13 +19,13 @@ def test_query_token_allowed_for_api_sse() -> None:
 
 def test_query_token_allowed_for_browser_live_view() -> None:
     assert _allows_query_token(
-        "/v1/sessions/00000000-0000-0000-0000-000000000001/browser/live/vnc.html",
+        "/v1/sessions/00000000-0000-0000-0000-000000000001/browser/live/",
     )
 
 
 def test_query_token_allowed_for_api_browser_live_view() -> None:
     assert _allows_query_token(
-        "/v1/api/sessions/00000000-0000-0000-0000-000000000001/browser/live/websockify",
+        "/v1/api/sessions/00000000-0000-0000-0000-000000000001/browser/live/ws",
     )
 
 

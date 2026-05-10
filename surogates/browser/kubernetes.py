@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 SERVICE_PORT_REST = 10001
 SERVICE_PORT_CDP = 9222
 SERVICE_PORT_LIVE_VIEW = 443
-TARGET_PORT_LIVE_VIEW_NOVNC = 6080
+TARGET_PORT_LIVE_VIEW = 8080
 
 
 @dataclass
@@ -343,8 +343,8 @@ class K8sBrowserBackend:
                 client.V1ContainerPort(container_port=SERVICE_PORT_REST, name="rest"),
                 client.V1ContainerPort(container_port=SERVICE_PORT_CDP, name="cdp"),
                 client.V1ContainerPort(
-                    container_port=TARGET_PORT_LIVE_VIEW_NOVNC,
-                    name="novnc",
+                    container_port=TARGET_PORT_LIVE_VIEW,
+                    name="live-view",
                 ),
             ],
             readiness_probe=client.V1Probe(
@@ -612,7 +612,7 @@ class K8sBrowserBackend:
                     client.V1ServicePort(
                         name="live-view",
                         port=SERVICE_PORT_LIVE_VIEW,
-                        target_port=TARGET_PORT_LIVE_VIEW_NOVNC,
+                        target_port=TARGET_PORT_LIVE_VIEW,
                     ),
                 ],
             ),

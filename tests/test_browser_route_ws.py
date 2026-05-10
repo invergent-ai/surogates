@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from surogates.api.routes.browser import _should_forward_client_frame
+from starlette.datastructures import QueryParams
+
+from surogates.api.routes.browser import (
+    _live_view_upstream_ws_url,
+    _should_forward_client_frame,
+)
 from surogates.tenant.context import TenantContext
 
 
@@ -57,6 +62,7 @@ class TestShouldForwardClientFrame:
         )
 
         assert allowed is True
+        assert control.calls == ["sess-1"]
 
     async def test_forwards_non_input_without_control_lookup(self) -> None:
         control = FakeControl(holder=None)
@@ -82,3 +88,34 @@ class TestShouldForwardClientFrame:
         )
 
         assert allowed is False
+        assert control.calls == []
+
+
+class TestLiveViewUpstreamWsUrl:
+    def test_builds_websocket_url_for_any_live_view_path(self) -> None:
+        assert (
+            _live_view_upstream_ws_url("ws://browser:8080", "api/ws")
+            == "ws://browser:8080/api/ws"
+        )
+
+    def test_preserves_websockify_path_for_legacy_clients(self) -> None:
+        assert (
+            _live_view_upstream_ws_url("ws://browser:8080/", "websockify")
+            == "ws://browser:8080/websockify"
+        )
+
+    def test_builds_root_websocket_url(self) -> None:
+        assert (
+            _live_view_upstream_ws_url("ws://browser:8080/", "")
+            == "ws://browser:8080/"
+        )
+
+    def test_preserves_live_view_query_params_except_token(self) -> None:
+        assert (
+            _live_view_upstream_ws_url(
+                "ws://browser:8080",
+                "api/ws",
+                QueryParams("token=secret&foo=bar&foo=baz"),
+            )
+            == "ws://browser:8080/api/ws?foo=bar&foo=baz"
+        )

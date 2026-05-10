@@ -108,7 +108,7 @@ class TestBuildPodManifest:
         assert [(p.name, p.container_port) for p in c.ports] == [
             ("rest", 10001),
             ("cdp", 9222),
-            ("novnc", 6080),
+            ("live-view", 8080),
         ]
         assert c.readiness_probe is not None
         assert c.readiness_probe.http_get.path == "/spec.json"
@@ -210,7 +210,7 @@ class TestBuildServiceManifest:
         assert [(p.name, p.port, p.target_port) for p in svc.spec.ports] == [
             ("rest", 10001, 10001),
             ("cdp", 9222, 9222),
-            ("live-view", 443, 6080),
+            ("live-view", 443, 8080),
         ]
 
 

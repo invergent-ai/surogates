@@ -33,6 +33,8 @@ RUN apt-get update \
         /run \
         /recordings \
         /kernel-envoy-proxy.crt \
+    && sed -i 's/^autostart=false$/autostart=true/' \
+        /etc/supervisor/conf.d/services/neko.conf \
     && rm -rf /var/lib/apt/lists/*
 
 # Keep the upstream runtime user. The headful wrapper starts supervisord as root

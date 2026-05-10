@@ -95,7 +95,7 @@ class ProcessBrowserBackend:
             "-p",
             f"{cdp_port}:9222",
             "-p",
-            f"{live_view_port}:6080",
+            f"{live_view_port}:8080",
             "--shm-size",
             "2g",
         ]

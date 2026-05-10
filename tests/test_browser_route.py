@@ -357,7 +357,7 @@ class TestLiveViewHTTPProxy:
             seen.append(str(url))
             return httpx.Response(
                 status_code=200,
-                text="<html>vnc</html>",
+                text="<html>neko</html>",
                 headers={"content-type": "text/html"},
             )
 
@@ -372,11 +372,11 @@ class TestLiveViewHTTPProxy:
             transport=ASGITransport(app=build()),
             base_url="http://test",
         ) as client:
-            response = await client.get(f"/v1/sessions/{sid}/browser/live/vnc.html")
+            response = await client.get(f"/v1/sessions/{sid}/browser/live/")
 
         assert response.status_code == 200
-        assert response.text == "<html>vnc</html>"
-        assert seen == ["http://browser-x.svc:443/vnc.html"]
+        assert response.text == "<html>neko</html>"
+        assert seen == ["http://browser-x.svc:443/"]
 
     async def test_unknown_session_returns_404(self, app_factory) -> None:
         build, _resolver, _control = app_factory
@@ -386,7 +386,7 @@ class TestLiveViewHTTPProxy:
             base_url="http://test",
         ) as client:
             response = await client.get(
-                "/v1/sessions/00000000-0000-0000-0000-000000000001/browser/live/vnc.html",
+                "/v1/sessions/00000000-0000-0000-0000-000000000001/browser/live/",
             )
 
         assert response.status_code == 404
@@ -407,7 +407,7 @@ class TestLiveViewHTTPProxy:
             params_seen.append(dict(kwargs.get("params", {})))
             return httpx.Response(
                 status_code=200,
-                text="console.log('vnc')",
+                text="console.log('neko')",
                 headers={"content-type": "application/javascript"},
             )
 

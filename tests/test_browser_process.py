@@ -71,7 +71,7 @@ class TestProvision:
         joined = " ".join(run_call)
         assert "30000:10001" in joined
         assert "31000:9222" in joined
-        assert "32000:6080" in joined
+        assert "32000:8080" in joined
         assert run_call[-1] == "kernel-test:1"
 
     async def test_provision_increments_port_for_second_browser(

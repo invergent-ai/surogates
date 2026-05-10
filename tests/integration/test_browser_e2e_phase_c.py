@@ -132,7 +132,7 @@ async def test_acquire_then_release_round_trip(session_with_browser: str) -> Non
 async def test_live_view_html_is_served(session_with_browser: str) -> None:
     async with AsyncClient(base_url=API_BASE, timeout=30.0) as client:
         response = await client.get(
-            f"/v1/sessions/{session_with_browser}/browser/live/vnc.html",
+            f"/v1/sessions/{session_with_browser}/browser/live/",
             params={"token": TOKEN},
         )
     assert response.status_code == 200, response.text
@@ -144,7 +144,7 @@ async def test_websocket_connects_and_receives_server_frame(
 ) -> None:
     ws_url = (
         API_BASE.replace("http", "ws", 1)
-        + f"/v1/sessions/{session_with_browser}/browser/live/websockify"
+        + f"/v1/sessions/{session_with_browser}/browser/live/ws"
         + f"?token={TOKEN}"
     )
     async with websockets.connect(ws_url, subprotocols=["binary"]) as websocket:
