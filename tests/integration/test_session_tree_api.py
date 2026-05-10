@@ -145,10 +145,42 @@ async def test_tree_returns_nested_descendants(
     assert by_id[str(child1.id)]["agent_type"] == "researcher"
     assert by_id[str(child2.id)]["agent_type"] is None
     assert by_id[str(grandchild.id)]["agent_type"] == "analyzer"
+    assert by_id[str(child1.id)]["run_kind"] is None
 
     # Every node shares the root's root_session_id.
     for n in data["nodes"]:
         assert n["root_session_id"] == str(root.id)
+
+
+async def test_tree_marks_dynamic_loop_runs(
+    client: AsyncClient, session_factory, session_store,
+):
+    org_id, user_id, token = await _tenant(session_factory)
+
+    root = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id=_AGENT_ID,
+    )
+    loop_run = await session_store.create_session(
+        user_id=user_id,
+        org_id=org_id,
+        agent_id=_AGENT_ID,
+        parent_id=root.id,
+        channel="scheduled",
+        config={
+            "scheduled_session_id": str(uuid.uuid4()),
+            "scheduled_dynamic_loop": True,
+        },
+    )
+
+    resp = await client.get(
+        f"/v1/sessions/{root.id}/tree",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    by_id = {n["id"]: n for n in resp.json()["nodes"]}
+
+    assert by_id[str(root.id)]["run_kind"] is None
+    assert by_id[str(loop_run.id)]["run_kind"] == "dynamic_loop"
 
 
 async def test_tree_returns_full_root_tree_when_called_with_subagent_id(

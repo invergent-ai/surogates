@@ -178,6 +178,7 @@ export interface SessionTreeNode {
   depth: number;
   agent_id: string;
   agent_type: string | null;
+  run_kind: "dynamic_loop" | "scheduled" | string | null;
   channel: string;
   status: "active" | "paused" | "completed" | "failed";
   title: string | null;

@@ -78,6 +78,7 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
         depth: node.depth,
         agentId: node.agent_id,
         agentType: node.agent_type,
+        runKind: node.run_kind,
         channel: node.channel,
         status: node.status,
         title: node.title,
@@ -189,6 +190,7 @@ export function toAgentChatSession(session: Session): AgentChatSession {
     model: session.model,
     config: session.config,
     parentId: session.parent_id,
+    runKind: deriveRunKind(session.channel, session.config),
     messageCount: session.message_count,
     toolCallCount: session.tool_call_count,
     inputTokens: session.input_tokens,
@@ -197,6 +199,17 @@ export function toAgentChatSession(session: Session): AgentChatSession {
     createdAt: session.created_at,
     updatedAt: session.updated_at,
   };
+}
+
+function deriveRunKind(
+  channel: string | null | undefined,
+  config: Record<string, unknown> | null | undefined,
+): string | null {
+  if (channel === "scheduled" && config?.scheduled_dynamic_loop === true) {
+    return "dynamic_loop";
+  }
+  if (channel === "scheduled") return "scheduled";
+  return null;
 }
 
 function wrapEventSource(source: EventSource): AgentChatEventStream {

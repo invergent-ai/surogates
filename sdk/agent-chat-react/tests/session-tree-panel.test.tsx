@@ -211,6 +211,83 @@ describe("SessionTreePanel", () => {
     expect(container.textContent).not.toContain("web");
   });
 
+  it("labels dynamic loop children in the active session tree", async () => {
+    const adapter: AgentChatAdapter = {
+      ...createAdapter([
+        session({
+          id: "parent",
+          title: "Bitcoin monitor",
+          agentId: "agent-1",
+        }),
+      ]),
+      async getSessionTree() {
+        return {
+          total: 2,
+          nodes: [
+            {
+              id: "parent",
+              parentId: null,
+              rootSessionId: "parent",
+              depth: 0,
+              agentId: "agent-1",
+              channel: "web",
+              status: "active",
+              title: "Bitcoin monitor",
+              model: "surogate",
+              messageCount: 1,
+              toolCallCount: 0,
+              createdAt: "2026-01-01T00:00:00Z",
+              updatedAt: "2026-01-01T00:00:00Z",
+            },
+            {
+              id: "loop-run",
+              parentId: "parent",
+              rootSessionId: "parent",
+              depth: 1,
+              agentId: "agent-1",
+              channel: "scheduled",
+              runKind: "dynamic_loop",
+              status: "active",
+              title: null,
+              model: "surogate",
+              messageCount: 1,
+              toolCallCount: 1,
+              createdAt: "2026-01-01T00:01:00Z",
+              updatedAt: "2026-01-01T00:01:00Z",
+            },
+          ],
+        };
+      },
+      async stopSession() {},
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <SessionTreePanel
+          adapter={adapter}
+          agentId="agent-1"
+          loadList
+          sessionId="parent"
+          activeSessionId="parent"
+          title="Sessions"
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Bitcoin monitor");
+    expect(container.textContent).toContain("Loop run");
+    expect(container.textContent).toContain("Loop · surogate");
+    expect(container.textContent).not.toContain("New session");
+    expect(
+      container.querySelector('[title="Stop child session"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[title="Stop sub-agent"]')).toBeNull();
+  });
+
   it("keeps the session list visible while selecting another session refetches", async () => {
     const sessions = [
       session({ id: "s-1", title: "First session", agentId: "agent-1" }),

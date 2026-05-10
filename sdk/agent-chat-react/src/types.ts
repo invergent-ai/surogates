@@ -86,6 +86,7 @@ export interface AgentChatSession {
   model?: string | null;
   config?: Record<string, unknown>;
   parentId?: string | null;
+  runKind?: string | null;
   messageCount?: number;
   toolCallCount?: number;
   inputTokens?: number;
@@ -107,6 +108,7 @@ export interface AgentChatSessionTreeNode {
   depth?: number;
   agentId?: string | null;
   agentType?: string | null;
+  runKind?: string | null;
   channel?: string | null;
   status: "active" | "paused" | "completed" | "failed" | string;
   title?: string | null;

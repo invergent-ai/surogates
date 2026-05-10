@@ -119,6 +119,7 @@ class SessionTreeNode(BaseModel):
     depth: int
     agent_id: str
     agent_type: str | None = None  # from session.config.agent_type
+    run_kind: str | None = None  # derived from channel/config, e.g. dynamic_loop
     channel: str
     status: str
     title: str | None = None
@@ -437,13 +438,15 @@ def _tree_node_from_row(row: dict) -> SessionTreeNode:
     Promotes ``session.config["agent_type"]`` to a first-class field so
     the UI can render sub-agent badges without a second round-trip.
     """
+    config = row["config"] or {}
     return SessionTreeNode(
         id=row["session_id"],
         parent_id=row.get("parent_id"),
         root_session_id=row["root_session_id"],
         depth=row["depth"],
         agent_id=row["agent_id"],
-        agent_type=row["config"].get("agent_type"),
+        agent_type=config.get("agent_type"),
+        run_kind=_session_run_kind(row["channel"], config),
         channel=row["channel"],
         status=row["status"],
         title=row.get("title"),
@@ -453,6 +456,14 @@ def _tree_node_from_row(row: dict) -> SessionTreeNode:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _session_run_kind(channel: str, config: dict) -> str | None:
+    if channel == "scheduled" and config.get("scheduled_dynamic_loop") is True:
+        return "dynamic_loop"
+    if channel == "scheduled":
+        return "scheduled"
+    return None
 
 
 @router.get(
