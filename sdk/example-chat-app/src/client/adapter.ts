@@ -93,6 +93,18 @@ export function createExampleChatAdapter(baseUrl = "/api"): AgentChatAdapter {
         ),
       );
     },
+    async getBrowserState() {
+      return null;
+    },
+    async acquireBrowserControl() {
+      throw new Error("Browser control is not supported by the example app.");
+    },
+    async releaseBrowserControl() {
+      // The example app does not provision browser sessions.
+    },
+    browserLiveViewUrl() {
+      return "";
+    },
   };
 }
 
