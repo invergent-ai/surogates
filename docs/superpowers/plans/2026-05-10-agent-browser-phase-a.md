@@ -25,8 +25,8 @@
 - [x] Task 9: screenshot client method — completed
 - [x] Task 10: `BrowserRegistry` — completed
 - [x] Task 11: `BrowserControlStore` — completed
-- [ ] Task 12: `ProcessBrowserBackend` — **in progress**
-- [ ] Task 13: `BrowserPool` — left to do
+- [x] Task 12: `ProcessBrowserBackend` — completed
+- [ ] Task 13: `BrowserPool` — **in progress**
 - [ ] Task 14: navigate/get_state/close tools — left to do
 - [ ] Task 15: click/type/press_key/scroll/drag/wait tools — left to do
 - [ ] Task 16: screenshot tool — left to do
