@@ -32,9 +32,9 @@
 - [x] Task 16: screenshot tool — completed
 - [x] Task 17: router/runtime wiring — completed
 - [x] Task 18: dispatch kwargs threading — completed
-- [ ] Task 19: worker bootstrap — **in progress**
-- [ ] Task 20: `AgentHarness` signature update — left to do
-- [ ] Task 21: opt-in e2e smoke — left to do
+- [x] Task 19: worker bootstrap — completed
+- [x] Task 20: `AgentHarness` signature update — completed
+- [ ] Task 21: opt-in e2e smoke — **in progress**
 
 ---
 
