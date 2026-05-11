@@ -15,7 +15,7 @@
 - [x] **Completed:** Task 1 - Add four new `EventType` values.
 - [x] **Completed:** Task 2 - Add `InboxItem` ORM model and indexes.
 - [x] **Completed:** Task 3 - Build inbox payload parser.
-- [ ] **In progress:** Task 4 - Extend `SessionStore.emit_event` to mirror inbox events.
+- [x] **Completed:** Task 4 - Extend `SessionStore.emit_event` to mirror inbox events.
 
 ---
 

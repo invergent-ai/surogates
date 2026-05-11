@@ -23,8 +23,8 @@ async def _seed_session_and_event(session_store, session_factory):
     )
     event_id = await session_store.emit_event(
         session.id,
-        EventType.INBOX_TASK_COMPLETE,
-        {"title": "Task complete"},
+        EventType.USER_MESSAGE,
+        {"content": "seed event"},
     )
     return session, event_id
 

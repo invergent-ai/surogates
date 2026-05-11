@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import (
     Event as EventRow,
+    InboxItem,
     ScheduledSession as ScheduledSessionRow,
     Session as SessionRow,
     SessionCursor,
@@ -27,6 +28,7 @@ from surogates.db.models import (
 )
 from surogates.harness.redact import redact_sensitive_data
 from surogates.session.events import EventType
+from surogates.session.inbox_payload import build_inbox_row
 from surogates.session.models import Event, Session, SessionLease
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,14 @@ class LeaseNotHeldError(Exception):
 # Web channel reads from the events table directly via SSE.
 _DELIVERABLE_EVENTS = frozenset({
     EventType.LLM_RESPONSE,
+})
+
+
+_INBOX_EVENTS = frozenset({
+    EventType.INBOX_INPUT_REQUIRED,
+    EventType.INBOX_TASK_COMPLETE,
+    EventType.INBOX_GOVERNANCE_GATE,
+    EventType.INBOX_PROGRESS_CHECKIN,
 })
 
 
@@ -354,6 +364,7 @@ class SessionStore:
             span_id=trace.span_id if trace else None,
         )
         counter_clause = _build_counter_update_clause(event_type, redacted_data)
+        inbox_publish: tuple[int, str, UUID] | None = None
 
         async with self._sf() as db:
             db.add(row)
@@ -365,6 +376,35 @@ class SessionStore:
                 text(f"UPDATE sessions SET {counter_clause} WHERE id = :id"),  # noqa: S608
                 {"id": session_id},
             )
+
+            if event_type in _INBOX_EVENTS:
+                session_row = await db.get(SessionRow, session_id)
+                if session_row is not None and session_row.user_id is not None:
+                    inbox_row = build_inbox_row(
+                        event_type=event_type,
+                        event_data=redacted_data,
+                        session_id=str(session_id),
+                    )
+                    if inbox_row is not None:
+                        item = InboxItem(
+                            org_id=session_row.org_id,
+                            user_id=session_row.user_id,
+                            session_id=session_id,
+                            source_event_id=event_id,
+                            kind=inbox_row.kind,
+                            title=inbox_row.title,
+                            body=inbox_row.body,
+                            payload=inbox_row.payload,
+                            action_ref=inbox_row.action_ref,
+                        )
+                        db.add(item)
+                        await db.flush()
+                        inbox_publish = (
+                            item.id,
+                            inbox_row.kind,
+                            session_row.user_id,
+                        )
+
             await db.commit()
 
         # Notify SSE subscribers via Redis pub/sub (best-effort).
@@ -373,6 +413,17 @@ class SessionStore:
                 await self._redis.publish(
                     f"surogates:session:{session_id}",
                     f"{event_id}:{event_type.value}",
+                )
+            except Exception:
+                pass
+
+        # Notify inbox subscribers after commit so consumers can read the row.
+        if inbox_publish is not None and self._redis is not None:
+            item_id, kind, user_id = inbox_publish
+            try:
+                await self._redis.publish(
+                    f"surogates:inbox:{user_id}",
+                    f"{item_id}:{kind}",
                 )
             except Exception:
                 pass
