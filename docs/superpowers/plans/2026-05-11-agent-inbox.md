@@ -26,7 +26,7 @@
 ## Phase 6 TODO
 
 - [x] **Completed:** Task 23 - Add clarify inbox end-to-end integration test.
-- [ ] **In progress:** Task 24 - Add governance and completion inbox end-to-end integration tests.
+- [x] **Completed:** Task 24 - Add governance and completion inbox end-to-end integration tests.
 
 ## Phase 3 TODO
 
