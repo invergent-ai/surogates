@@ -6,10 +6,12 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   ScheduledWorkPanel,
   SessionTreePanel,
+  useInboxUnreadCount,
 } from "@invergent/agent-chat-react";
 import {
   PlusIcon,
   MessageSquareIcon,
+  InboxIcon,
   LogOutIcon,
   SunIcon,
   MoonIcon,
@@ -22,7 +24,7 @@ import { useAppStore } from "@/stores/app-store";
 import { logout } from "@/api/auth";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { surogatesWebChatAdapter } from "@/features/chat/surogates-web-chat-adapter";
+import { surogatesWebChatAdapter } from "@/features/chat";
 
 export function SessionSidebar() {
   const navigate = useNavigate();
@@ -37,6 +39,7 @@ export function SessionSidebar() {
   const sessionsLoading = useAppStore((s) => s.sessionsLoading);
   const user = useAppStore((s) => s.user);
   const { theme, setTheme } = useTheme();
+  const { unreadCount } = useInboxUnreadCount(surogatesWebChatAdapter);
 
   function handleNewSession() {
     setActiveSession(null);
@@ -127,6 +130,29 @@ export function SessionSidebar() {
         >
           <UsersIcon className="w-4 h-4" />
           {!collapsed && "Sub-agents"}
+        </Button>
+        <Button
+          variant="ghost"
+          onClick={() => void navigate({ to: "/inbox" })}
+          className={cn(
+            "w-full gap-2 mt-1 relative",
+            collapsed ? "justify-center px-0" : "justify-start",
+          )}
+        >
+          <InboxIcon className="w-4 h-4" />
+          {!collapsed && "Inbox"}
+          {unreadCount > 0 && (
+            <span
+              className={cn(
+                "inline-flex h-5 min-w-5 items-center justify-center bg-primary px-1 text-[0.625rem] font-semibold text-primary-foreground",
+                collapsed
+                  ? "absolute right-1 top-0 h-4 min-w-4 px-0.5 text-[0.55rem]"
+                  : "ml-auto",
+              )}
+            >
+              {unreadCount > 99 ? "99+" : unreadCount}
+            </span>
+          )}
         </Button>
       </div>
 

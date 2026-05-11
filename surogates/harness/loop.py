@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import traceback
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID
 
@@ -147,6 +148,50 @@ def _format_loop_list(rows: list[Any]) -> str:
             f"(next: {row.next_run_at}){suffix}"
         )
     return "\n".join(lines)
+
+
+def _last_assistant_message_excerpt(
+    messages: list[dict[str, Any]],
+    limit: int = 500,
+) -> str:
+    """Return the latest assistant text as a compact summary."""
+
+    for message in reversed(messages):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content") or ""
+        if isinstance(content, list):
+            content = " ".join(
+                str(part.get("text", ""))
+                for part in content
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") in {"text", "output_text"}
+                )
+            )
+        text = str(content).strip()
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 3)].rstrip() + "..."
+    return ""
+
+
+def _seconds_since(value: Any) -> int:
+    if not isinstance(value, datetime):
+        return 0
+    created_at = value
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return max(
+        0,
+        int((datetime.now(timezone.utc) - created_at).total_seconds()),
+    )
+
+
+def _as_aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _should_notify_parent_on_completion(session: Any) -> bool:
@@ -1632,6 +1677,17 @@ class AgentHarness:
 
             # 8. Append tool results to messages.
             messages.extend(tool_results)
+            last_tool_name = ""
+            for tc in reversed(tool_calls_raw):
+                last_tool_name = tc.get("function", {}).get("name", "")
+                if last_tool_name:
+                    break
+            await self._maybe_emit_progress_checkin(
+                session,
+                messages,
+                iteration_count=iteration,
+                last_tool=last_tool_name,
+            )
 
             # 8a. Memory manager: sync turn to external providers.
             if self._memory_manager is not None:
@@ -3055,6 +3111,50 @@ class AgentHarness:
         except Exception:
             logger.debug("Auto-title generation skipped for %s", session.id, exc_info=True)
 
+    async def _maybe_emit_progress_checkin(
+        self,
+        session: Session,
+        messages: list[dict],
+        *,
+        iteration_count: int,
+        last_tool: str | None = None,
+    ) -> None:
+        """Emit an inbox progress check-in when the configured interval elapses."""
+
+        interval = (session.config or {}).get("inbox_checkin_interval_seconds")
+        if not interval:
+            return
+        try:
+            interval_seconds = int(interval)
+        except (TypeError, ValueError):
+            return
+        if interval_seconds <= 0:
+            return
+
+        latest = await self._store.last_event_at(
+            session.id,
+            EventType.INBOX_PROGRESS_CHECKIN,
+        )
+        created_at = session.created_at
+        reference = latest or created_at
+        if not isinstance(reference, datetime):
+            return
+
+        now = datetime.now(timezone.utc)
+        if (now - _as_aware_utc(reference)).total_seconds() < interval_seconds:
+            return
+
+        await self._store.emit_event(
+            session.id,
+            EventType.INBOX_PROGRESS_CHECKIN,
+            {
+                "progress_summary": _last_assistant_message_excerpt(messages),
+                "iterations": iteration_count,
+                "last_tool": last_tool or "",
+                "elapsed_seconds": _seconds_since(created_at),
+            },
+        )
+
     async def _complete_session(
         self,
         session: Session,
@@ -3092,6 +3192,21 @@ class AgentHarness:
             EventType.SESSION_COMPLETE,
             complete_data,
         )
+        inbox_event_id = await self._store.emit_event(
+            session.id,
+            EventType.INBOX_TASK_COMPLETE,
+            {
+                "outcome": (
+                    "success"
+                    if reason in {"stop", "done", "complete", "completed"}
+                    else reason
+                ),
+                "summary": _last_assistant_message_excerpt(messages),
+                "duration_seconds": _seconds_since(session.created_at),
+                "session_title": session.title or "Task complete",
+                "error": None,
+            },
+        )
         try:
             await self._store.update_session_status(session.id, "completed")
         except Exception:
@@ -3124,7 +3239,9 @@ class AgentHarness:
         await self._finalize_dynamic_loop_if_needed(session)
 
         # Advance cursor to the latest event.
-        cursor_target = through_event_id if through_event_id is not None else event_id
+        cursor_target = (
+            through_event_id if through_event_id is not None else inbox_event_id
+        )
         try:
             await self._store.advance_harness_cursor(
                 session.id, cursor_target, lease.lease_token,

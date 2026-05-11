@@ -645,6 +645,12 @@ async def run_worker(settings: Settings) -> None:
             name="scheduled-session-runner",
         )
 
+    from surogates.jobs.inbox_expire import run_expire_loop
+    inbox_expire_task = asyncio.create_task(
+        run_expire_loop(session_store),
+        name="inbox-expire-sweeper",
+    )
+
     health_server = await start_health_server(
         settings.health_port,
         lambda: infrastructure_readiness(redis_client, session_factory),
@@ -680,6 +686,11 @@ async def run_worker(settings: Settings) -> None:
                 await scheduled_task
             except asyncio.CancelledError:
                 pass
+        inbox_expire_task.cancel()
+        try:
+            await inbox_expire_task
+        except asyncio.CancelledError:
+            pass
         await health_server.stop()
         await browser_pool.destroy_all()
         await sandbox_pool.destroy_all()

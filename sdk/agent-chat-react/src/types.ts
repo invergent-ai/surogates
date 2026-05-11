@@ -163,6 +163,65 @@ export interface AgentChatScheduledWorkList {
   total: number;
 }
 
+export type AgentChatInboxKind =
+  | "input_required"
+  | "task_complete"
+  | "governance_gate"
+  | "progress_checkin"
+  | (string & {});
+
+export type AgentChatInboxStatus =
+  | "pending"
+  | "acknowledged"
+  | "responded"
+  | "expired"
+  | (string & {});
+
+export interface AgentChatInboxItem {
+  id: number;
+  orgId: string;
+  userId: string;
+  sessionId: string;
+  sourceEventId: number;
+  kind: AgentChatInboxKind;
+  status: AgentChatInboxStatus;
+  title: string;
+  body: string | null;
+  payload: Record<string, unknown>;
+  actionRef: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+  readAt: string | null;
+  respondedAt: string | null;
+}
+
+export interface AgentChatInboxList {
+  items: AgentChatInboxItem[];
+  nextCursor: string | null;
+}
+
+export interface AgentChatInboxListInput {
+  status?: AgentChatInboxStatus;
+  kind?: AgentChatInboxKind;
+  sessionId?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface AgentChatInboxStreamEvent {
+  data: string;
+  lastEventId?: string;
+}
+
+export interface AgentChatInboxEventStream {
+  addEventListener(
+    type: "item" | "snapshot",
+    listener: (event: AgentChatInboxStreamEvent) => void,
+  ): void;
+  close(): void;
+  onerror: (() => void) | null;
+}
+
 export type AgentChatEventType =
   | "user.message"
   | "llm.request"
@@ -390,6 +449,15 @@ export interface AgentChatAdapter {
     scheduleId: string;
   }): Promise<{ sessionId?: string } | void>;
   cancelScheduledWork?(input: { scheduleId: string }): Promise<void>;
+  listInbox?(input?: AgentChatInboxListInput): Promise<AgentChatInboxList>;
+  getInboxItem?(input: { itemId: number }): Promise<AgentChatInboxItem>;
+  markInboxItemRead?(input: { itemId: number }): Promise<AgentChatInboxItem>;
+  acknowledgeInboxItem?(input: { itemId: number }): Promise<AgentChatInboxItem>;
+  respondGovernanceInboxItem?(input: {
+    itemId: number;
+    decision: "approve" | "reject";
+  }): Promise<AgentChatInboxItem>;
+  openInboxStream?(): AgentChatInboxEventStream;
   getArtifact(input: {
     sessionId: string;
     artifactId: string;
@@ -467,6 +535,8 @@ export type SessionTreeNode = AgentChatSessionTreeNode;
 export type SessionTree = AgentChatSessionTree;
 export type ScheduledWorkItem = AgentChatScheduledWorkItem;
 export type ScheduledWorkList = AgentChatScheduledWorkList;
+export type InboxItem = AgentChatInboxItem;
+export type InboxList = AgentChatInboxList;
 export type ToolCallInfo = AgentChatToolCallInfo;
 export type TokenUsage = AgentChatTokenUsage;
 export type RetryIndicator = AgentChatRetryIndicator;

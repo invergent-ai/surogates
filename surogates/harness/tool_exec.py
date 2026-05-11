@@ -53,6 +53,11 @@ def _sanitize_paths(data: Any, workspace_path: str | None) -> Any:
         return [_sanitize_paths(v, workspace_path) for v in data]
     return data
 
+def _truncate_args(arguments: Any, limit: int = 500) -> str:
+    raw = json.dumps(arguments, default=str, sort_keys=True)
+    if len(raw) <= limit:
+        return raw
+    return raw[: max(0, limit - 3)] + "..."
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -820,10 +825,25 @@ async def execute_single_tool(
                 EventType.POLICY_DENIED,
                 policy_denied_event(tool_name, decision.reason or ""),
             )
+            if decision.overridable:
+                await store.emit_event(
+                    session.id,
+                    EventType.INBOX_GOVERNANCE_GATE,
+                    {
+                        "tool_name": tool_name,
+                        "tool_call_id": tool_call_id,
+                        "arguments_excerpt": _truncate_args(sanitized_args),
+                        "deny_reason": decision.reason or "",
+                        "policy_id": decision.policy_id,
+                    },
+                )
 
-            result_content = json.dumps({
-                "error": f"Blocked: {decision.reason}",
-            })
+            result_payload = {"error": f"Blocked: {decision.reason}"}
+            if decision.overridable:
+                result_payload["error"] = "policy_blocked_overridable"
+                result_payload["message"] = decision.reason
+                result_payload["tool_call_id"] = tool_call_id
+            result_content = json.dumps(result_payload)
 
             result_event_id = await store.emit_event(
                 session.id,

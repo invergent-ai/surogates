@@ -334,6 +334,16 @@ async def _clarify_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     except ClarifySchemaError as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
+    await session_store.emit_event(
+        session_id,
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": str(tool_call_id),
+            "questions": questions,
+            "context": arguments.get("context", ""),
+        },
+    )
+
     outcome = await _wait_for_response(
         session_id=session_id,
         tool_call_id=str(tool_call_id),

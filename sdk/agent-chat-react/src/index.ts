@@ -5,10 +5,14 @@ export {
 } from "./adapter-context";
 export { useAgentChatRuntime } from "./runtime/use-agent-chat-runtime";
 export { MessageResponse } from "./components/ai-elements/message";
+export { InboxPanel } from "./components/inbox/inbox-panel";
+export { useInboxUnreadCount } from "./components/inbox/use-inbox-unread-count";
 export { ScheduledWorkPanel } from "./components/scheduled/scheduled-work-panel";
 export { SessionTreePanel } from "./components/sessions/session-tree-panel";
 export type { AgentChatProps } from "./agent-chat";
 export type { AgentChatAdapterContextValue } from "./adapter-context";
+export type { InboxPanelProps } from "./components/inbox/inbox-panel";
+export type { InboxUnreadCountState } from "./components/inbox/use-inbox-unread-count";
 export type { MessageResponseProps } from "./components/ai-elements/message";
 export type { ScheduledWorkPanelProps } from "./components/scheduled/scheduled-work-panel";
 export type { SessionTreePanelProps } from "./components/sessions/session-tree-panel";
@@ -24,6 +28,13 @@ export type {
   AgentChatClarifyQuestion,
   AgentChatErrorCategory,
   AgentChatErrorInfo,
+  AgentChatInboxEventStream,
+  AgentChatInboxItem,
+  AgentChatInboxKind,
+  AgentChatInboxList,
+  AgentChatInboxListInput,
+  AgentChatInboxStatus,
+  AgentChatInboxStreamEvent,
   AgentChatImageAttachment,
   AgentChatEventStream,
   AgentChatEventType,
@@ -62,6 +73,8 @@ export type {
   RetryIndicator,
   ScheduledWorkItem,
   ScheduledWorkList,
+  InboxItem,
+  InboxList,
   ErrorInfo,
   ArtifactKind,
   ArtifactPayload,

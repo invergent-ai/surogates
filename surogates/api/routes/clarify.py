@@ -12,8 +12,10 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import func, update
 
 from surogates.api.session_guards import require_user_writable_session
+from surogates.db.models import InboxItem
 from surogates.session.events import EventType
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -139,4 +141,23 @@ async def respond_to_clarify(
         "Clarify response recorded for session=%s tool_call_id=%s event_id=%s",
         session_id, tc_id, event_id,
     )
+    try:
+        async with store._sf() as db:
+            await db.execute(
+                update(InboxItem)
+                .where(
+                    InboxItem.session_id == session_id,
+                    InboxItem.kind == "input_required",
+                    InboxItem.action_ref["tool_call_id"].as_string() == tc_id,
+                    InboxItem.status == "pending",
+                )
+                .values(
+                    status="responded",
+                    responded_at=func.now(),
+                    updated_at=func.now(),
+                )
+            )
+            await db.commit()
+    except Exception:
+        logger.exception("Failed to mark clarify inbox item responded.")
     return ClarifyResponseReply(event_id=event_id)

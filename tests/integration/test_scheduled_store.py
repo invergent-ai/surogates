@@ -193,11 +193,12 @@ async def test_find_retryable_stalled_dynamic_loop_runs(
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     store = ScheduledSessionStore(session_factory)
+    agent_id = "agent-retryable-stalled"
 
     loop = await store.create_dynamic_loop(
         org_id=org_id,
         user_id=user_id,
-        agent_id="agent-a",
+        agent_id=agent_id,
         prompt="check CI",
         schedule=parse_dynamic_loop_schedule(),
         created_from_session_id=None,
@@ -205,7 +206,7 @@ async def test_find_retryable_stalled_dynamic_loop_runs(
     run_session = await session_store.create_session(
         user_id=user_id,
         org_id=org_id,
-        agent_id="agent-a",
+        agent_id=agent_id,
         channel="scheduled",
         config={
             "scheduled_session_id": str(loop.id),
@@ -213,7 +214,7 @@ async def test_find_retryable_stalled_dynamic_loop_runs(
         },
     )
 
-    claimed = (await store.claim_due(agent_id="agent-a", worker_id="w1", limit=1))[0]
+    claimed = (await store.claim_due(agent_id=agent_id, worker_id="w1", limit=1))[0]
     await store.mark_run_created(claimed, session_id=run_session.id)
 
     async with session_factory() as db:
@@ -227,7 +228,7 @@ async def test_find_retryable_stalled_dynamic_loop_runs(
         await db.commit()
 
     retryable = await store.find_retryable_stalled_dynamic_loop_runs(
-        agent_id="agent-a",
+        agent_id=agent_id,
         stale_seconds=1,
     )
 
