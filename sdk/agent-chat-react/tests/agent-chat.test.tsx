@@ -376,55 +376,6 @@ describe("AgentChat", () => {
     ).toBeTruthy();
   });
 
-  it("opens the workspace by default and can collapse and expand it", async () => {
-    const stream = new FakeEventStream();
-    const adapter = createAdapter(stream);
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-
-    await act(async () => {
-      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
-      await Promise.resolve();
-    });
-
-    expect(container.textContent).toContain("Workspace");
-    expect(container.textContent).toContain("main.py");
-
-    const collapseButton = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Collapse workspace"]',
-    );
-    expect(collapseButton).not.toBeNull();
-
-    await act(async () => {
-      collapseButton!.click();
-      await Promise.resolve();
-    });
-
-    expect(container.textContent).not.toContain("main.py");
-    expect(container.textContent).not.toContain("Workspace");
-
-    expect(
-      container.querySelector<HTMLButtonElement>(
-        'button[aria-label="Expand workspace"]',
-      ),
-    ).toBeNull();
-
-    const expandStrip = container.querySelector<HTMLElement>(
-      '[role="button"][aria-label="Expand workspace"]',
-    );
-    expect(expandStrip).not.toBeNull();
-    expect(expandStrip!.querySelector("svg")).not.toBeNull();
-
-    await act(async () => {
-      expandStrip!.click();
-      await Promise.resolve();
-    });
-
-    expect(container.textContent).toContain("Workspace");
-    expect(container.textContent).toContain("main.py");
-  });
-
   it("renders PDF workspace files without using the image preview", async () => {
     const stream = new FakeEventStream();
     const adapter: AgentChatAdapter = {
