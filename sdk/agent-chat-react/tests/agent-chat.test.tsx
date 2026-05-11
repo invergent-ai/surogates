@@ -296,6 +296,7 @@ describe("AgentChat", () => {
       '[data-testid="workspace-panel-frame"]',
     );
     expect(browserPane).not.toBeNull();
+    expect((layout as HTMLElement | null)?.style.direction).toBe("ltr");
     expect(layout?.className).toContain("grid");
     expect((layout as HTMLElement | null)?.style.gridTemplateColumns).toBe(
       "minmax(0, 1fr) 440px",

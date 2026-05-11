@@ -76,8 +76,11 @@ export function AgentChat({
           }
           style={
             hasBrowserPanel
-              ? { gridTemplateColumns: "minmax(0, 1fr) 440px" }
-              : undefined
+              ? {
+                  direction: "ltr",
+                  gridTemplateColumns: "minmax(0, 1fr) 440px",
+                }
+              : { direction: "ltr" }
           }
         >
           <div
