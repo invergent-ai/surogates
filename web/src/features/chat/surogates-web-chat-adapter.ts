@@ -142,6 +142,10 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     );
   },
 
+  async respondActionRequiredInboxItem(input) {
+    return await inboxApi.respondActionRequiredInboxItem(input.itemId);
+  },
+
   openInboxStream() {
     const token = getAuthToken();
     const url = new URL("/api/v1/inbox/stream", window.location.origin);

@@ -130,3 +130,17 @@ export async function respondGovernanceInboxItem(
   }
   return toInboxItem((await response.json()) as InboxItemResponse);
 }
+
+export async function respondActionRequiredInboxItem(
+  itemId: number,
+): Promise<AgentChatInboxItem> {
+  const response = await authFetch(`/api/v1/inbox/${itemId}/respond`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ completed: true }),
+  });
+  if (!response.ok) {
+    return parseError(response, "Failed to respond to inbox item");
+  }
+  return toInboxItem((await response.json()) as InboxItemResponse);
+}
