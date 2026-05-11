@@ -355,28 +355,68 @@ class K8sBrowserBackend:
             client.V1EnvVar(name=key, value=value)
             for key, value in sorted(spec.env.items())
         ]
-        volume_mounts: list[client.V1VolumeMount] | None = None
-        volumes: list[client.V1Volume] | None = None
+        runtime_volume_mounts = [
+            client.V1VolumeMount(
+                name="browser-runtime",
+                mount_path="/var/log/supervisord",
+                sub_path="supervisord",
+            ),
+            client.V1VolumeMount(
+                name="browser-runtime",
+                mount_path="/etc/envoy/certs",
+                sub_path="envoy-certs",
+            ),
+        ]
+        volume_mounts: list[client.V1VolumeMount] = [*runtime_volume_mounts]
+        volumes: list[client.V1Volume] = [
+            client.V1Volume(
+                name="browser-runtime",
+                empty_dir=client.V1EmptyDirVolumeSource(),
+            ),
+        ]
         containers: list[client.V1Container]
         if spec.workspace_source_ref:
-            volume_mounts = [
+            volume_mounts.extend([
                 client.V1VolumeMount(
                     name="workspace",
                     mount_path="/workspace",
                     mount_propagation="HostToContainer",
                 ),
-            ]
+            ])
             env_vars = [
                 client.V1EnvVar(name="HOME", value="/workspace"),
                 client.V1EnvVar(name="WORKSPACE_DIR", value="/workspace"),
                 *[env for env in env_vars if env.name not in {"HOME", "WORKSPACE_DIR"}],
             ]
-            volumes = [
+            volumes.append(
                 client.V1Volume(
                     name="workspace",
                     empty_dir=client.V1EmptyDirVolumeSource(),
+                )
+            )
+        init_container = client.V1Container(
+            name="browser-runtime-init",
+            image=spec.image or self._image,
+            image_pull_policy=_image_pull_policy(spec.image or self._image),
+            command=[
+                "/bin/sh",
+                "-c",
+                (
+                    "mkdir -p "
+                    "/browser-runtime/supervisord/chromedriver "
+                    "/browser-runtime/envoy-certs && "
+                    "chown -R 1000:1000 /browser-runtime && "
+                    "chmod -R 0770 /browser-runtime"
                 ),
-            ]
+            ],
+            security_context=client.V1SecurityContext(run_as_user=0),
+            volume_mounts=[
+                client.V1VolumeMount(
+                    name="browser-runtime",
+                    mount_path="/browser-runtime",
+                ),
+            ],
+        )
         container = client.V1Container(
             name="browser",
             image=spec.image or self._image,
@@ -428,6 +468,7 @@ class K8sBrowserBackend:
                 active_deadline_seconds=spec.active_deadline_seconds,
                 restart_policy="Never",
                 volumes=volumes,
+                init_containers=[init_container],
                 containers=containers,
             ),
         )

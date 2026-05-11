@@ -102,6 +102,13 @@ class TestBuildPodManifest:
         assert pod.spec.service_account_name == "test-browser-sa"
         assert pod.spec.restart_policy == "Never"
         assert pod.spec.active_deadline_seconds == 1800
+        assert len(pod.spec.init_containers) == 1
+        init = pod.spec.init_containers[0]
+        assert init.name == "browser-runtime-init"
+        assert init.image == "kernel-headful:test"
+        assert init.security_context.run_as_user == 0
+        assert init.volume_mounts[0].name == "browser-runtime"
+        assert init.volume_mounts[0].mount_path == "/browser-runtime"
 
         c = pod.spec.containers[0]
         assert c.name == "browser"
@@ -120,8 +127,17 @@ class TestBuildPodManifest:
         assert c.readiness_probe.period_seconds == 2
         assert c.readiness_probe.failure_threshold == 30
         assert {e.name: e.value for e in c.env}["EXTRA"] == "value"
+        assert [
+            (mount.name, mount.mount_path, mount.sub_path)
+            for mount in c.volume_mounts
+        ] == [
+            ("browser-runtime", "/var/log/supervisord", "supervisord"),
+            ("browser-runtime", "/etc/envoy/certs", "envoy-certs"),
+        ]
         assert len(pod.spec.containers) == 1
-        assert pod.spec.volumes is None
+        assert [(v.name, v.empty_dir is not None) for v in pod.spec.volumes] == [
+            ("browser-runtime", True),
+        ]
 
     def test_latest_browser_image_uses_always_pull_policy(
         self,
@@ -178,14 +194,22 @@ class TestBuildPodManifest:
         )
 
         assert [(v.name, v.empty_dir is not None) for v in pod.spec.volumes] == [
+            ("browser-runtime", True),
             ("workspace", True),
         ]
         browser_container = pod.spec.containers[0]
         s3fs_container = pod.spec.containers[1]
         assert browser_container.name == "browser"
         assert [
+            (mount.name, mount.mount_path, mount.sub_path)
+            for mount in browser_container.volume_mounts[:2]
+        ] == [
+            ("browser-runtime", "/var/log/supervisord", "supervisord"),
+            ("browser-runtime", "/etc/envoy/certs", "envoy-certs"),
+        ]
+        assert [
             (mount.name, mount.mount_path, mount.mount_propagation)
-            for mount in browser_container.volume_mounts
+            for mount in browser_container.volume_mounts[2:]
         ] == [("workspace", "/workspace", "HostToContainer")]
         assert {e.name: e.value for e in browser_container.env} == {
             "HOME": "/workspace",
