@@ -5,6 +5,8 @@ import type {
   AgentChatAdapter,
   AgentChatEventStream,
   AgentChatEventType,
+  AgentChatInboxEventStream,
+  AgentChatInboxStreamEvent,
   AgentChatScheduledWorkItem,
   AgentChatSession,
   AgentChatSlashCommand,
@@ -13,6 +15,7 @@ import type {
 import { getArtifact } from "@/api/artifacts";
 import { submitClarifyResponse as submitClarifyResponseApi } from "@/api/clarify";
 import { submitExpertFeedback as submitExpertFeedbackApi } from "@/api/feedback";
+import * as inboxApi from "@/api/inbox";
 import { listSkills, type SkillSummary } from "@/api/skills";
 import * as sessionsApi from "@/api/sessions";
 import * as workspaceApi from "@/api/workspace";
@@ -110,6 +113,36 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
 
   async cancelScheduledWork(input) {
     await sessionsApi.cancelScheduledWork(input.scheduleId);
+  },
+
+  async listInbox(input) {
+    return await inboxApi.listInbox(input);
+  },
+
+  async getInboxItem(input) {
+    return await inboxApi.getInboxItem(input.itemId);
+  },
+
+  async markInboxItemRead(input) {
+    return await inboxApi.markInboxItemRead(input.itemId);
+  },
+
+  async acknowledgeInboxItem(input) {
+    return await inboxApi.acknowledgeInboxItem(input.itemId);
+  },
+
+  async respondGovernanceInboxItem(input) {
+    return await inboxApi.respondGovernanceInboxItem(
+      input.itemId,
+      input.decision,
+    );
+  },
+
+  openInboxStream() {
+    const token = getAuthToken();
+    const url = new URL("/api/v1/inbox/stream", window.location.origin);
+    if (token) url.searchParams.set("token", token);
+    return wrapInboxEventSource(new EventSource(url.toString()));
   },
 
   async stopSession(input) {
@@ -298,6 +331,34 @@ function wrapEventSource(source: EventSource): AgentChatEventStream {
     addEventListener(
       type: AgentChatEventType,
       listener: (event: AgentChatSseMessageEvent) => void,
+    ) {
+      source.addEventListener(type, (event) => {
+        const message = event as MessageEvent<string>;
+        listener({
+          data: message.data,
+          lastEventId: message.lastEventId,
+        });
+      });
+    },
+    close() {
+      source.close();
+    },
+    get onerror() {
+      return errorHandler;
+    },
+    set onerror(handler: (() => void) | null) {
+      errorHandler = handler;
+      source.onerror = handler ? () => handler() : null;
+    },
+  };
+}
+
+function wrapInboxEventSource(source: EventSource): AgentChatInboxEventStream {
+  let errorHandler: (() => void) | null = null;
+  return {
+    addEventListener(
+      type: "item" | "snapshot",
+      listener: (event: AgentChatInboxStreamEvent) => void,
     ) {
       source.addEventListener(type, (event) => {
         const message = event as MessageEvent<string>;

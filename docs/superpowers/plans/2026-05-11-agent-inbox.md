@@ -20,8 +20,8 @@
 - [x] **Completed:** Task 18 - Add shared SDK inbox stream/unread hook.
 - [x] **Completed:** Task 19 - Add shared SDK inbox list view.
 - [x] **Completed:** Task 20 - Add shared SDK per-kind inbox detail views.
-- [ ] **In progress:** Task 21 - Add web auth-backed API client and `/inbox` route using SDK components.
-- [ ] **Left to do:** Task 22 - Add Inbox sidebar item with live unread badge using SDK hook.
+- [x] **Completed:** Task 21 - Add web auth-backed API client and `/inbox` route using SDK components.
+- [ ] **In progress:** Task 22 - Add Inbox sidebar item with live unread badge using SDK hook.
 
 ## Phase 3 TODO
 
