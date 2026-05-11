@@ -31,7 +31,8 @@ def _build_vault(encryption_key: str, session_factory) -> CredentialVault | None
         return None
     try:
         return CredentialVault(
-            session_factory, encryption_key=encryption_key.encode("utf-8"),
+            session_factory,
+            encryption_key=encryption_key.encode("utf-8"),
         )
     except ValueError:
         logger.error(
@@ -87,6 +88,7 @@ def _install_browser_api_dependencies(app: Any, settings: Any) -> None:
     app.state.browser_registry = browser_registry
     app.state.browser_control = browser_control
     app.state.browser_resolver = browser_resolver
+    app.state.browser_backend = backend
     app.state.session_event_emitter = emit_session_event
     app.state.session_wake = wake_session
 
@@ -108,15 +110,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = settings
     app.state.session_factory = async_session_factory(engine)
     app.state.redis = Redis.from_url(settings.redis.url)
-    app.state.session_store = SessionStore(app.state.session_factory, redis=app.state.redis)
+    app.state.session_store = SessionStore(
+        app.state.session_factory, redis=app.state.redis
+    )
     app.state.audit_store = AuditStore(app.state.session_factory)
     app.state.storage = create_backend(settings)
 
     app.state.credential_vault = _build_vault(
-        settings.encryption_key, app.state.session_factory,
+        settings.encryption_key,
+        app.state.session_factory,
     )
 
     from surogates.channels.pairing import PairingStore
+
     app.state.pairing_store = PairingStore(redis=app.state.redis)
     _install_browser_api_dependencies(app, settings)
 
@@ -156,7 +162,11 @@ def create_app() -> FastAPI:
     # --- structured logging ------------------------------------------------
     from surogates.logging_config import configure_logging
 
-    configure_logging(level=settings.api.log_level if hasattr(settings.api, "log_level") else logging.INFO)
+    configure_logging(
+        level=settings.api.log_level
+        if hasattr(settings.api, "log_level")
+        else logging.INFO
+    )
 
     # --- middleware -------------------------------------------------------
     from surogates.api.middleware.api_prefix import StripApiPrefixMiddleware

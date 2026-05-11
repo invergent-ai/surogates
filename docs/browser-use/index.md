@@ -88,9 +88,11 @@ such as `@e3`, which `browser_click` and `browser_type` can use later. After
 navigation or large page changes, call `browser_get_state` again to refresh refs.
 
 `browser_screenshot` saves each PNG in the session workspace under
-`browser-screenshots/`. It also returns base64 PNG data when the screenshot is
-small enough for the event stream. Capture a smaller `region` if inline base64
-is required and the full viewport is too large.
+`browser-screenshots/` and returns both a tool-usable absolute `path`, such as
+`/workspace/browser-screenshots/...png`, and a workspace-relative
+`relative_path`. It never returns inline base64 image data; pass the returned
+path to `vision_analyze` or use workspace/file tools to inspect or move the
+image.
 
 ## Live View And User Control
 

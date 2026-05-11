@@ -34,8 +34,10 @@ def _get_injection_detector():
     global _injection_detector
     if _injection_detector is None:
         from agent_os.prompt_injection import PromptInjectionDetector
+
         _injection_detector = PromptInjectionDetector()
     return _injection_detector
+
 
 router = APIRouter()
 
@@ -78,7 +80,8 @@ class SendMessageRequest(BaseModel):
     @field_validator("images")
     @classmethod
     def _validate_images(
-        cls, v: list[ImageBlock] | None,
+        cls,
+        v: list[ImageBlock] | None,
     ) -> list[ImageBlock] | None:
         if not v:
             return v
@@ -366,14 +369,13 @@ async def send_message(
         "api_channel" if session.channel == API_CHANNEL else "web_channel"
     )
     injection_result = _get_injection_detector().detect(
-        body.content, source=injection_source,
+        body.content,
+        source=injection_source,
     )
     if injection_result.is_injection:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                f"Message blocked: {injection_result.explanation}"
-            ),
+            detail=(f"Message blocked: {injection_result.explanation}"),
         )
 
     # Emit the user message event.
@@ -385,8 +387,7 @@ async def send_message(
     event_data: dict = {"content": body.content}
     if body.images:
         event_data["images"] = [
-            {"data": img.data, "mime_type": img.mime_type}
-            for img in body.images
+            {"data": img.data, "mime_type": img.mime_type} for img in body.images
         ]
     event_id = await store.emit_event(
         session_id,
@@ -469,7 +470,8 @@ def _session_run_kind(channel: str, config: dict) -> str | None:
 
 
 @router.get(
-    "/sessions/{session_id}/tree", response_model=SessionTreeResponse,
+    "/sessions/{session_id}/tree",
+    response_model=SessionTreeResponse,
 )
 async def get_session_tree(
     session_id: UUID,
@@ -651,6 +653,7 @@ async def pause_session(
     # between status update and harness loop iteration).
     redis = request.app.state.redis
     import json as _json
+
     await redis.publish(
         f"{INTERRUPT_CHANNEL_PREFIX}:{session_id}",
         _json.dumps({"reason": "paused by user"}),
@@ -723,6 +726,42 @@ async def retry_session(
     return await store.get_session(session_id)
 
 
+async def _destroy_deleted_session_browser(request: Request, session_id: UUID) -> None:
+    session_id_str = str(session_id)
+    browser_pool = getattr(request.app.state, "browser_pool", None)
+    if browser_pool is not None:
+        try:
+            await browser_pool.destroy_for_session(session_id_str)
+        except Exception:
+            logger.warning(
+                "Failed to destroy browser sandbox for deleted session %s",
+                session_id,
+                exc_info=True,
+            )
+
+    browser_backend = getattr(request.app.state, "browser_backend", None)
+    if browser_backend is not None and hasattr(browser_backend, "destroy_for_session"):
+        try:
+            await browser_backend.destroy_for_session(session_id_str)
+        except Exception:
+            logger.warning(
+                "Failed to destroy backend browser resources for deleted session %s",
+                session_id,
+                exc_info=True,
+            )
+
+    browser_registry = getattr(request.app.state, "browser_registry", None)
+    if browser_registry is not None:
+        try:
+            await browser_registry.delete(session_id_str)
+        except Exception:
+            logger.warning(
+                "Failed to delete browser registry entry for deleted session %s",
+                session_id,
+                exc_info=True,
+            )
+
+
 @router.delete(
     "/api/sessions/{session_id}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -748,10 +787,14 @@ async def delete_session(
         agent_id=session.agent_id,
     )
 
+    for archived_session in archived_sessions:
+        await _destroy_deleted_session_browser(request, archived_session.id)
+
     # Interrupt workers so active parent/child harnesses stop processing and
-    # destroy any sandbox pods.
+    # destroy any sandbox/browser pods.
     redis = request.app.state.redis
     import json as _json
+
     for archived_session in archived_sessions:
         await redis.publish(
             f"{INTERRUPT_CHANNEL_PREFIX}:{archived_session.id}",

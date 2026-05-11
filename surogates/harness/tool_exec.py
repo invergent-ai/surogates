@@ -17,6 +17,7 @@ import re
 import time
 from typing import TYPE_CHECKING, Any, Callable
 
+from surogates.session.events import EventType
 from surogates.harness.message_utils import make_skipped_tool_result
 from surogates.harness.tool_guardrails import (
     ToolGuardrailDecision,
@@ -24,6 +25,7 @@ from surogates.harness.tool_guardrails import (
     append_toolguard_guidance,
     toolguard_synthetic_result,
 )
+from surogates.tools.coerce import coerce_tool_args
 
 # ---------------------------------------------------------------------------
 # Path sanitisation — replace workspace absolute paths with __WORKSPACE__
@@ -51,16 +53,11 @@ def _sanitize_paths(data: Any, workspace_path: str | None) -> Any:
         return [_sanitize_paths(v, workspace_path) for v in data]
     return data
 
-
 def _truncate_args(arguments: Any, limit: int = 500) -> str:
     raw = json.dumps(arguments, default=str, sort_keys=True)
     if len(raw) <= limit:
         return raw
     return raw[: max(0, limit - 3)] + "..."
-
-
-from surogates.session.events import EventType
-from surogates.tools.coerce import coerce_tool_args
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -454,6 +451,7 @@ async def execute_tool_calls(
     sandbox_pool: SandboxPool | None = None,
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
+    storage: Any | None = None,
     api_client: Any | None = None,
     session_factory: Any | None = None,
     llm_client: Any | None = None,
@@ -488,6 +486,7 @@ async def execute_tool_calls(
             sandbox_pool=sandbox_pool,
             browser_pool=browser_pool,
             browser_control=browser_control,
+            storage=storage,
             api_client=api_client,
             session_factory=session_factory,
             llm_client=llm_client,
@@ -509,6 +508,7 @@ async def execute_tool_calls(
         sandbox_pool=sandbox_pool,
         browser_pool=browser_pool,
         browser_control=browser_control,
+        storage=storage,
         api_client=api_client,
         session_factory=session_factory,
         llm_client=llm_client,
@@ -535,6 +535,7 @@ async def execute_tool_calls_sequential(
     sandbox_pool: SandboxPool | None = None,
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
+    storage: Any | None = None,
     api_client: Any | None = None,
     session_factory: Any | None = None,
     llm_client: Any | None = None,
@@ -583,6 +584,7 @@ async def execute_tool_calls_sequential(
             sandbox_pool=sandbox_pool,
             browser_pool=browser_pool,
             browser_control=browser_control,
+            storage=storage,
             api_client=api_client,
             session_factory=session_factory,
             llm_client=llm_client,
@@ -626,6 +628,7 @@ async def execute_tool_calls_concurrent(
     sandbox_pool: SandboxPool | None = None,
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
+    storage: Any | None = None,
     api_client: Any | None = None,
     session_factory: Any | None = None,
     llm_client: Any | None = None,
@@ -672,6 +675,7 @@ async def execute_tool_calls_concurrent(
                 sandbox_pool=sandbox_pool,
                 browser_pool=browser_pool,
                 browser_control=browser_control,
+                storage=storage,
                 api_client=api_client,
                 session_factory=session_factory,
                 llm_client=llm_client,
@@ -705,6 +709,7 @@ async def execute_single_tool(
     sandbox_pool: SandboxPool | None = None,
     browser_pool: BrowserPool | None = None,
     browser_control: BrowserControlStore | None = None,
+    storage: Any | None = None,
     api_client: Any | None = None,
     session_factory: Any | None = None,
     llm_client: Any | None = None,
@@ -720,7 +725,7 @@ async def execute_single_tool(
     successful ``tool.call`` is already an implicit allow; enable for
     compliance audits that require an explicit per-decision record.
     """
-    from surogates.trace import TraceContext, get_trace, new_span
+    from surogates.trace import get_trace, new_span
 
     # Each tool call gets its own child span for fine-grained tracing.
     # When called from concurrent execution, _parent_trace is the
@@ -761,7 +766,7 @@ async def execute_single_tool(
     if checkpoint_hash:
         tool_call_data["checkpoint_hash"] = checkpoint_hash
 
-    call_event_id = await store.emit_event(
+    _call_event_id = await store.emit_event(
         session.id,
         EventType.TOOL_CALL,
         tool_call_data,
@@ -1029,6 +1034,7 @@ async def execute_single_tool(
                 sandbox_pool=sandbox_pool,
                 browser_pool=browser_pool,
                 browser_control=browser_control,
+                storage=storage,
                 workspace_path=workspace_path,
                 api_client=api_client,
                 session_factory=session_factory,

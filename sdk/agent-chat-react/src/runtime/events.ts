@@ -5,6 +5,7 @@ export const WORKSPACE_MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "write_file",
   "patch",
   "execute_code",
+  "browser_screenshot",
 ]);
 
 export const AGENT_CHAT_LISTENED_EVENTS = [

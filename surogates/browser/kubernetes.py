@@ -209,6 +209,45 @@ class K8sBrowserBackend:
             entry.service_name,
         )
 
+    async def destroy_for_session(self, session_id: str) -> None:
+        """Delete browser resources with the session label, even if uncached."""
+        api = await self._get_api()
+        selector = f"app=surogates-browser,surogates.ai/session-id={session_id}"
+        pod_result = await api.list_namespaced_pod(
+            self._namespace,
+            label_selector=selector,
+        )
+        service_result = await api.list_namespaced_service(
+            self._namespace,
+            label_selector=selector,
+        )
+
+        services = list(getattr(service_result, "items", []) or [])
+        pods = list(getattr(pod_result, "items", []) or [])
+        for service in services:
+            name = getattr(service.metadata, "name", None)
+            if name:
+                await self._delete_service_safe(api, name)
+
+        for pod in pods:
+            name = getattr(pod.metadata, "name", None)
+            labels = getattr(pod.metadata, "labels", None) or {}
+            browser_id = labels.get("surogates.ai/browser-id")
+            if browser_id:
+                self._pods.pop(browser_id, None)
+                await self._delete_secret_safe(api, f"browser-s3-{browser_id[:12]}")
+            if name:
+                await self._delete_pod_safe(api, name)
+
+        if pods or services:
+            logger.info(
+                "Destroyed K8s browser resources for session %s "
+                "(pods=%d, services=%d)",
+                session_id,
+                len(pods),
+                len(services),
+            )
+
     async def find_by_session(
         self,
         session_id: str,

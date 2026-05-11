@@ -8,6 +8,7 @@ marker.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -553,6 +554,61 @@ class TestDestroy:
         await backend.destroy("bid")
 
         assert "bid" not in backend._pods
+
+    async def test_destroy_for_session_deletes_labeled_resources(
+        self,
+        backend: K8sBrowserBackend,
+        monkeypatch,
+    ) -> None:
+        pod = SimpleNamespace(
+            metadata=SimpleNamespace(
+                name="browser-abcdef123456",
+                labels={
+                    "app": "surogates-browser",
+                    "surogates.ai/browser-id": "abcdef1234567890",
+                    "surogates.ai/session-id": "sess-x",
+                },
+            ),
+        )
+        service = SimpleNamespace(
+            metadata=SimpleNamespace(name="browser-abcdef123456"),
+        )
+        api = MagicMock()
+        api.list_namespaced_pod = AsyncMock(return_value=MagicMock(items=[pod]))
+        api.list_namespaced_service = AsyncMock(return_value=MagicMock(items=[service]))
+        api.delete_namespaced_pod = AsyncMock()
+        api.delete_namespaced_service = AsyncMock()
+        api.delete_namespaced_secret = AsyncMock()
+
+        async def fake_get_api() -> MagicMock:
+            return api
+
+        monkeypatch.setattr(backend, "_get_api", fake_get_api)
+
+        await backend.destroy_for_session("sess-x")
+
+        selector = "app=surogates-browser,surogates.ai/session-id=sess-x"
+        api.list_namespaced_pod.assert_awaited_once_with(
+            "test-ns",
+            label_selector=selector,
+        )
+        api.list_namespaced_service.assert_awaited_once_with(
+            "test-ns",
+            label_selector=selector,
+        )
+        api.delete_namespaced_service.assert_awaited_once_with(
+            "browser-abcdef123456",
+            "test-ns",
+        )
+        api.delete_namespaced_pod.assert_awaited_once_with(
+            "browser-abcdef123456",
+            "test-ns",
+            grace_period_seconds=5,
+        )
+        api.delete_namespaced_secret.assert_awaited_once_with(
+            "browser-s3-abcdef123456",
+            "test-ns",
+        )
 
 
 class TestFindBySession:
