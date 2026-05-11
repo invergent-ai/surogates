@@ -142,6 +142,7 @@ class APISettings(BaseSettings):
     workers: int = 1
     cors_origins: list[str] = Field(default_factory=lambda: ["*"])
     web_url: str = "https://surogates.k8s.localhost"  # Public URL for the web UI (used in pairing links, emails, etc.)
+    rate_limit_rpm: int = 300
 
 
 class ToolOutputSettings(BaseSettings):

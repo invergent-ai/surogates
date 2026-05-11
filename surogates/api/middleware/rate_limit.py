@@ -53,7 +53,7 @@ def setup_rate_limit_middleware(app: FastAPI, settings: Settings) -> None:
     The middleware reads ``app.state.redis`` lazily so it can be attached
     before the lifespan creates the Redis client.
     """
-    requests_per_minute = getattr(settings.api, "rate_limit_rpm", 120)
+    requests_per_minute = getattr(settings.api, "rate_limit_rpm", 300)
 
     @app.middleware("http")
     async def _rate_limit_middleware(
