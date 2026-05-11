@@ -370,6 +370,65 @@ class TestGetStateFilters:
         assert len(state["tree"]) == 3
         assert all(node["ref"] != "@e4" for node in state["tree"])
 
+    async def test_consent_actions_are_promoted_and_survive_depth_limits(
+        self, client_with_transport
+    ) -> None:
+        client, handlers = client_with_transport
+        handlers.append(
+            (
+                "POST",
+                "/playwright/execute",
+                200,
+                {
+                    "success": True,
+                    "result": {
+                        "url": "https://example.test/",
+                        "title": "Example",
+                        "viewport": {"width": 1280, "height": 720},
+                        "nodes": [
+                            {
+                                "role": "link",
+                                "name": "Economy",
+                                "x": 100,
+                                "y": 20,
+                                "width": 80,
+                                "height": 30,
+                                "depth": 4,
+                            },
+                            {
+                                "role": "button",
+                                "name": "ACCEPT TOATE",
+                                "x": 1000,
+                                "y": 640,
+                                "width": 180,
+                                "height": 40,
+                                "depth": 14,
+                            },
+                            {
+                                "role": "button",
+                                "name": "VREAU SA MODIFIC SETARILE INDIVIDUAL",
+                                "x": 1000,
+                                "y": 690,
+                                "width": 180,
+                                "height": 40,
+                                "depth": 14,
+                            },
+                        ],
+                    },
+                },
+            )
+        )
+
+        state = await client.get_state(interactive_only=True, max_depth=5)
+
+        assert state["tree"][0]["ref"] == "@e2"
+        assert state["tree"][0]["name"] == "ACCEPT TOATE"
+        assert state["tree"][0]["intent"] == "accept_consent"
+        assert state["tree"][1]["ref"] == "@e1"
+        assert "VREAU SA MODIFIC SETARILE INDIVIDUAL" not in {
+            node["name"] for node in state["tree"]
+        }
+
 
 class TestClickType:
     async def test_click_at_coords(self, client_with_transport) -> None:

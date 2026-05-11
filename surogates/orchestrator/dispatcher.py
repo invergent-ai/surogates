@@ -45,6 +45,12 @@ _BASE_RETRY_DELAY: float = 1.0
 _ORPHAN_SWEEP_INTERVAL: float = 60.0
 _ORPHAN_STALE_SECONDS: int = 300
 
+# A queued wake can race with an already-running harness that still owns
+# the session lease, especially when the user interrupts and immediately
+# sends a replacement message. Back off briefly before requeueing so the
+# interrupted harness has time to release its lease.
+_LEASE_BUSY_REQUEUE_DELAY: float = 0.25
+
 
 class Orchestrator:
     """Pulls session IDs from a Redis sorted-set and dispatches them to the agent harness.
@@ -207,6 +213,10 @@ class Orchestrator:
         finally:
             self.semaphore.release()
 
+    async def _requeue_busy_session(self, session_id: UUID) -> None:
+        await asyncio.sleep(_LEASE_BUSY_REQUEUE_DELAY)
+        await enqueue_session(self.redis, self._agent_id, session_id)
+
     async def _process(self, session_id: UUID, attempt: int = 0) -> None:
         """Process a single session.  Retry with exponential backoff on failure."""
         from surogates.trace import new_span, new_trace
@@ -219,6 +229,14 @@ class Orchestrator:
             new_span()
 
         try:
+            if session_id in self._active_harnesses:
+                logger.info(
+                    "Session %s is already active on this worker; requeueing wake",
+                    session_id,
+                )
+                await self._requeue_busy_session(session_id)
+                return
+
             harness = self.harness_factory(session_id)
             # Support both sync and async factories.
             if hasattr(harness, "__await__"):
@@ -226,7 +244,13 @@ class Orchestrator:
             # Track the active harness so interrupt signals can reach it.
             self._active_harnesses[session_id] = harness
             try:
-                await harness.wake(session_id)
+                wake_result = await harness.wake(session_id)
+                if wake_result == "lease_held":
+                    logger.info(
+                        "Session %s lease is held; requeueing wake",
+                        session_id,
+                    )
+                    await self._requeue_busy_session(session_id)
             finally:
                 self._active_harnesses.pop(session_id, None)
         except Exception as exc:

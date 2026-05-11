@@ -566,7 +566,7 @@ class AgentHarness:
     # Entry point
     # ------------------------------------------------------------------
 
-    async def wake(self, session_id: UUID) -> None:
+    async def wake(self, session_id: UUID) -> str | None:
         """Entry point.  Acquire lease, replay events, run loop, release lease."""
         from surogates.trace import new_span
 
@@ -624,7 +624,7 @@ class AgentHarness:
                 "Session %s: lease held by another worker, skipping",
                 session_id,
             )
-            return
+            return "lease_held"
 
         # Start the background lease renewal task alongside the main loop.
         # Cancelled in the ``finally`` block below so the lease renews

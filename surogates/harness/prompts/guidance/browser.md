@@ -18,6 +18,11 @@ the clearest available safe action such as "Accept", "Accept all", "OK",
 "Agree", "Continue", or a close button. Then refresh page state and continue
 with the user's requested click.
 
+Consent actions may be marked with `intent: accept_consent` in
+`browser_get_state`; click those before other page controls when a banner is
+blocking the page. `@eN` refs are action targets, not CSS selectors; do not pass
+them as `selector` values.
+
 Do not open consent settings or customize preferences unless the user asks for
 that. Do not claim a user-requested click succeeded until the blocking banner is
 gone or you have verified that the intended page action happened.
