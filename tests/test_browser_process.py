@@ -15,13 +15,38 @@ class FakeDocker:
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
         self._containers: dict[str, dict[str, Any]] = {}
+        self.fail_next_run_with_port_conflict = False
 
     async def run(self, args: list[str]) -> tuple[int, bytes, bytes]:
         self.calls.append(args)
         if args[:2] == ["run", "-d"]:
+            if self.fail_next_run_with_port_conflict:
+                self.fail_next_run_with_port_conflict = False
+                return (
+                    125,
+                    b"",
+                    b"Bind for 0.0.0.0:32000 failed: port is already allocated",
+                )
             cid = f"cid-{len(self._containers) + 1}"
-            self._containers[cid] = {"running": True}
+            labels = {}
+            for idx, arg in enumerate(args):
+                if arg == "--label" and idx + 1 < len(args):
+                    key, value = args[idx + 1].split("=", 1)
+                    labels[key] = value
+            self._containers[cid] = {"running": True, "labels": labels}
             return 0, cid.encode() + b"\n", b""
+        if args[:2] == ["ps", "-aq"]:
+            label = ""
+            for idx, arg in enumerate(args):
+                if arg == "--filter" and idx + 1 < len(args):
+                    label = args[idx + 1].removeprefix("label=")
+            key, _, value = label.partition("=")
+            matches = [
+                cid
+                for cid, state in self._containers.items()
+                if state.get("labels", {}).get(key) == value
+            ]
+            return 0, ("\n".join(matches) + ("\n" if matches else "")).encode(), b""
         if args[0] == "inspect":
             cid = args[-1]
             running = self._containers.get(cid, {}).get("running", False)
@@ -72,7 +97,31 @@ class TestProvision:
         assert "30000:10001" in joined
         assert "31000:9222" in joined
         assert "32000:8080" in joined
+        assert "surogates.session_id=" in joined
         assert run_call[-1] == "kernel-test:1"
+
+    async def test_provision_retries_next_port_when_port_is_allocated(
+        self,
+        fake_spec_json_transport,
+    ) -> None:
+        docker = FakeDocker()
+        docker.fail_next_run_with_port_conflict = True
+        backend = ProcessBrowserBackend(
+            image="i",
+            rest_port_base=30000,
+            cdp_port_base=31000,
+            live_view_port_base=32000,
+            docker=docker,
+            httpx_transport=fake_spec_json_transport,
+        )
+
+        _bid, endpoint = await backend.provision(BrowserSpec())
+
+        run_calls = [call for call in docker.calls if call[:2] == ["run", "-d"]]
+        assert len(run_calls) == 2
+        assert "30000:10001" in " ".join(run_calls[0])
+        assert "30001:10001" in " ".join(run_calls[1])
+        assert endpoint.rest_url == "http://127.0.0.1:30001"
 
     async def test_provision_increments_port_for_second_browser(
         self, fake_spec_json_transport
@@ -143,7 +192,9 @@ class TestProvision:
 
     async def test_provision_cleans_up_container_when_readiness_times_out(self) -> None:
         class NeverReadyTransport(httpx.AsyncBaseTransport):
-            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            async def handle_async_request(
+                self, request: httpx.Request
+            ) -> httpx.Response:
                 return httpx.Response(503, json={"ready": False})
 
         docker = FakeDocker()
@@ -177,7 +228,9 @@ class TestStatus:
         bid, _ = await backend.provision(BrowserSpec())
         assert await backend.status(bid) == BrowserStatus.RUNNING
 
-    async def test_status_terminated_after_destroy(self, fake_spec_json_transport) -> None:
+    async def test_status_terminated_after_destroy(
+        self, fake_spec_json_transport
+    ) -> None:
         docker = FakeDocker()
         backend = ProcessBrowserBackend(
             image="i",
@@ -220,3 +273,24 @@ class TestDestroy:
             httpx_transport=fake_spec_json_transport,
         )
         await backend.destroy("never-provisioned")
+
+    async def test_destroy_for_session_stops_labeled_containers(
+        self,
+        fake_spec_json_transport,
+    ) -> None:
+        docker = FakeDocker()
+        backend = ProcessBrowserBackend(
+            image="i",
+            rest_port_base=30000,
+            cdp_port_base=31000,
+            live_view_port_base=32000,
+            docker=docker,
+            httpx_transport=fake_spec_json_transport,
+        )
+        bid, _ = await backend.provision(BrowserSpec(), session_id="sess-1")
+
+        await backend.destroy_for_session("sess-1")
+
+        assert bid not in docker._containers
+        assert ["stop", bid] in docker.calls
+        assert ["rm", bid] in docker.calls

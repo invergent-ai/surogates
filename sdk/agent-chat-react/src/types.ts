@@ -205,6 +205,11 @@ export interface AgentChatBrowserState {
   controlOwner: string | null;
 }
 
+export interface AgentChatBrowserPreviewSnapshot {
+  src: string;
+  capturedAt?: string;
+}
+
 export interface AgentChatBrowserStateResponse {
   status: "live" | "user-control";
   controlOwner: string | null;
@@ -433,6 +438,9 @@ export interface AgentChatAdapter {
     after: number;
   }): AgentChatEventStream;
   getBrowserState(sessionId: string): Promise<AgentChatBrowserStateResponse | null>;
+  getBrowserPreviewSnapshot?(
+    sessionId: string,
+  ): Promise<AgentChatBrowserPreviewSnapshot | null>;
   acquireBrowserControl(sessionId: string): Promise<AgentChatBrowserControlResponse>;
   releaseBrowserControl(sessionId: string): Promise<void>;
   browserLiveViewUrl(sessionId: string): string;

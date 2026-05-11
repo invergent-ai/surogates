@@ -33,6 +33,18 @@ def test_query_token_allowed_for_api_browser_live_view() -> None:
     )
 
 
+def test_query_token_allowed_for_workspace_download() -> None:
+    assert _allows_query_token(
+        "/v1/sessions/00000000-0000-0000-0000-000000000001/workspace/download",
+    )
+
+
+def test_query_token_allowed_for_api_workspace_download() -> None:
+    assert _allows_query_token(
+        "/v1/api/sessions/00000000-0000-0000-0000-000000000001/workspace/download",
+    )
+
+
 def test_query_token_rejected_for_browser_state() -> None:
     assert not _allows_query_token(
         "/v1/sessions/00000000-0000-0000-0000-000000000001/browser/state",

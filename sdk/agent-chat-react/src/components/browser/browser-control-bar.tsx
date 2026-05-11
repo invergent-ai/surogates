@@ -12,12 +12,16 @@ interface BrowserControlBarProps {
   sessionId: string;
   hasControl: boolean;
   adapter: BrowserControlAdapter;
+  onControlAcquired?: () => void;
+  onControlReleased?: () => void;
 }
 
 export function BrowserControlBar({
   sessionId,
   hasControl,
   adapter,
+  onControlAcquired,
+  onControlReleased,
 }: BrowserControlBarProps) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -29,8 +33,10 @@ export function BrowserControlBar({
     try {
       if (hasControl) {
         await adapter.releaseBrowserControl(sessionId);
+        onControlReleased?.();
       } else {
         await adapter.acquireBrowserControl(sessionId);
+        onControlAcquired?.();
       }
     } catch (nextError) {
       setError((nextError as Error).message);

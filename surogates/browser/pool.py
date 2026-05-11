@@ -8,7 +8,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
-from surogates.browser.base import BrowserBackend, BrowserEndpoint, BrowserSpec, BrowserStatus
+from surogates.browser.base import (
+    BrowserBackend,
+    BrowserEndpoint,
+    BrowserSpec,
+    BrowserStatus,
+)
 from surogates.browser.registry import BrowserEntry, BrowserRegistry
 from surogates.session.events import EventType
 
@@ -114,6 +119,12 @@ class BrowserPool:
         async with lock:
             slot = self._mapping.pop(session_id, None)
             if slot is None:
+                destroy_for_session = getattr(
+                    self._backend, "destroy_for_session", None
+                )
+                if callable(destroy_for_session):
+                    await destroy_for_session(session_id)
+                await self._registry.delete(session_id)
                 return
             await self._backend.destroy(slot.browser_id)
             await self._registry.delete(session_id)
@@ -146,6 +157,8 @@ class BrowserPool:
                 self._locks[session_id] = lock
             return lock
 
-    async def _emit_event(self, session_id: str, event_type: str, data: dict[str, Any]) -> None:
+    async def _emit_event(
+        self, session_id: str, event_type: str, data: dict[str, Any]
+    ) -> None:
         if self._emit is not None:
             await self._emit(session_id, event_type, data)

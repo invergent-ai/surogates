@@ -334,6 +334,7 @@ class AgentHarness:
         sandbox_pool: SandboxPool | None = None,
         browser_pool: BrowserPool | None = None,
         browser_control: BrowserControlStore | None = None,
+        storage: Any | None = None,
         checkpoints_enabled: bool = False,
         saga_enabled: bool = False,
         saga_settings: Any | None = None,
@@ -354,6 +355,7 @@ class AgentHarness:
         self._sandbox_pool: SandboxPool | None = sandbox_pool
         self._browser_pool: BrowserPool | None = browser_pool
         self._browser_control: BrowserControlStore | None = browser_control
+        self._storage = storage
         self._api_client = api_client
         self._session_factory = session_factory
 
@@ -1035,6 +1037,7 @@ class AgentHarness:
                     sandbox_pool=self._sandbox_pool,
                     browser_pool=self._browser_pool,
                     browser_control=self._browser_control,
+                    storage=self._storage,
                     api_client=self._api_client,
                     session_factory=self._session_factory,
                     llm_client=self._llm,
@@ -1592,6 +1595,7 @@ class AgentHarness:
                     sandbox_pool=self._sandbox_pool,
                     browser_pool=self._browser_pool,
                     browser_control=self._browser_control,
+                    storage=self._storage,
                     api_client=self._api_client,
                     session_factory=self._session_factory,
                     llm_client=self._llm,

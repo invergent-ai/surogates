@@ -95,7 +95,8 @@ async def _load_attached_kbs(
     try:
         from surogates.db.ops_engine import get_ops_session_factory
         from surogates.db.ops_models import (
-            OpsKnowledgeBase, agent_knowledge_bases,
+            OpsKnowledgeBase,
+            agent_knowledge_bases,
         )
         import sqlalchemy as sa
 
@@ -129,9 +130,12 @@ async def _load_attached_kbs(
             ]
     except Exception:
         import logging
+
         logging.getLogger(__name__).warning(
             "Failed to load attached KBs for agent %s; KB tools will be "
-            "disabled for this session", agent_id, exc_info=True,
+            "disabled for this session",
+            agent_id,
+            exc_info=True,
         )
         return []
 
@@ -151,24 +155,28 @@ async def _load_prompt_catalogs(
     try:
         async with session_factory() as _db:
             available_agents = await resource_loader.load_agents(
-                tenant, db_session=_db,
+                tenant,
+                db_session=_db,
             )
     except Exception:
         logger.debug(
             "Failed to load sub-agent catalog for tenant %s",
-            tenant.org_id, exc_info=True,
+            tenant.org_id,
+            exc_info=True,
         )
         available_agents = []
 
     try:
         async with session_factory() as _db:
             available_skills = await resource_loader.load_skills(
-                tenant, db_session=_db,
+                tenant,
+                db_session=_db,
             )
     except Exception:
         logger.debug(
             "Failed to load skill catalog for tenant %s",
-            tenant.org_id, exc_info=True,
+            tenant.org_id,
+            exc_info=True,
         )
         available_skills = []
 
@@ -221,9 +229,16 @@ async def run_worker(settings: Settings) -> None:
     # 3. Session store
     session_store = SessionStore(session_factory, redis=redis_client)
 
+    # 3b. Workspace storage shared by the API, sandbox mounts, and
+    # harness-local tools that need to materialize session files.
+    from surogates.storage.backend import create_backend
+
+    storage_backend = create_backend(settings)
+
     # 4a. Sandbox pool -- one sandbox per session, lazily provisioned.
     if settings.sandbox.backend == "kubernetes":
         from surogates.sandbox.kubernetes import K8sSandbox
+
         sandbox_backend = K8sSandbox(
             namespace=settings.sandbox.k8s_namespace,
             service_account=settings.sandbox.k8s_service_account,
@@ -254,7 +269,9 @@ async def run_worker(settings: Settings) -> None:
         from surogates.session.events import EventType
 
         try:
-            await session_store.emit_event(UUID(session_id), EventType(event_type), data)
+            await session_store.emit_event(
+                UUID(session_id), EventType(event_type), data
+            )
         except Exception:
             logger.exception("Failed to emit browser event %s", event_type)
 
@@ -273,6 +290,7 @@ async def run_worker(settings: Settings) -> None:
     # KB platform.
     if settings.ops_db.url:
         from surogates.db.ops_engine import init_ops_engine
+
         init_ops_engine(
             settings.ops_db.url,
             pool_size=settings.ops_db.pool_size,
@@ -285,6 +303,7 @@ async def run_worker(settings: Settings) -> None:
     # 4. Tool registry -- register all builtin tools + MCP tools.
     tool_registry = ToolRegistry()
     from surogates.tools.runtime import ToolRuntime
+
     tool_runtime = ToolRuntime(tool_registry)
     tool_runtime.register_builtins()
     logger.info(
@@ -297,6 +316,7 @@ async def run_worker(settings: Settings) -> None:
     #   - Direct: worker connects to MCP servers in-process (dev mode)
     #   - Proxied: worker delegates to the MCP proxy service (production)
     from surogates.tools.mcp.proxy import MCPToolProxy
+
     mcp_proxy = MCPToolProxy(tool_registry)
     mcp_proxy_client: Any = None  # HTTP client for proxied mode
 
@@ -304,6 +324,7 @@ async def run_worker(settings: Settings) -> None:
         # Production: MCP tools are called via the proxy service.
         # Tool discovery happens at session start (per-tenant), not here.
         from surogates.orchestrator.mcp_client import McpProxyClient
+
         mcp_proxy_client = McpProxyClient(
             base_url=settings.mcp_proxy_url,
             registry=tool_registry,
@@ -314,7 +335,9 @@ async def run_worker(settings: Settings) -> None:
         mcp_servers: dict[str, dict] = {}
         try:
             platform_loader = ResourceLoader(platform_mcp_dir=settings.platform_mcp_dir)
-            for server_def in platform_loader._load_mcp_from_dir(settings.platform_mcp_dir):
+            for server_def in platform_loader._load_mcp_from_dir(
+                settings.platform_mcp_dir
+            ):
                 mcp_servers[server_def.name] = {
                     "transport": server_def.transport,
                     "command": server_def.command,
@@ -398,13 +421,13 @@ async def run_worker(settings: Settings) -> None:
         from surogates.db.models import Org, User
 
         async with session_factory() as db:
-            org_row = (await db.execute(
-                sa_select(Org).where(Org.id == configured_org_id)
-            )).scalar_one_or_none()
+            org_row = (
+                await db.execute(sa_select(Org).where(Org.id == configured_org_id))
+            ).scalar_one_or_none()
             if session.user_id is not None:
-                user_row = (await db.execute(
-                    sa_select(User).where(User.id == session.user_id)
-                )).scalar_one_or_none()
+                user_row = (
+                    await db.execute(sa_select(User).where(User.id == session.user_id))
+                ).scalar_one_or_none()
             else:
                 user_row = None
 
@@ -451,12 +474,10 @@ async def run_worker(settings: Settings) -> None:
         # memory dir for service-account sessions (no per-user context
         # to carry forward).
         from pathlib import Path
+
         if session.user_id is not None:
             memory_dir = (
-                Path(tenant.asset_root)
-                / "users"
-                / str(session.user_id)
-                / "memory"
+                Path(tenant.asset_root) / "users" / str(session.user_id) / "memory"
             )
         else:
             memory_dir = Path(tenant.asset_root) / "shared" / "memory"
@@ -523,8 +544,11 @@ async def run_worker(settings: Settings) -> None:
                 token = create_access_token(
                     org_id=tenant.org_id,
                     user_id=tenant.user_id,
-                    permissions=set(tenant.permissions) or {
-                        "sessions:read", "sessions:write", "tools:read",
+                    permissions=set(tenant.permissions)
+                    or {
+                        "sessions:read",
+                        "sessions:write",
+                        "tools:read",
                     },
                 )
             elif session.service_account_id is not None:
@@ -578,6 +602,7 @@ async def run_worker(settings: Settings) -> None:
             sandbox_pool=sandbox_pool,
             browser_pool=browser_pool,
             browser_control=browser_control,
+            storage=storage_backend,
             api_client=harness_api_client,
             default_model=model_id,
             session_factory=session_factory,
@@ -588,6 +613,7 @@ async def run_worker(settings: Settings) -> None:
 
     # 8. Orchestrator — consumes from this agent's dedicated work queue.
     from surogates.config import agent_queue_key
+
     queue_key = agent_queue_key(configured_agent_id)
     orchestrator = Orchestrator(
         redis_client=redis_client,
@@ -597,6 +623,7 @@ async def run_worker(settings: Settings) -> None:
         agent_id=configured_agent_id,
         queue_key=queue_key,
         poll_timeout=settings.worker.poll_timeout,
+        browser_pool=browser_pool,
     )
 
     scheduled_runner = None
@@ -604,7 +631,6 @@ async def run_worker(settings: Settings) -> None:
     if settings.scheduled_sessions.enabled:
         from surogates.scheduled.runner import ScheduledSessionRunner
         from surogates.scheduled.store import ScheduledSessionStore
-        from surogates.storage.backend import create_backend
 
         scheduled_runner = ScheduledSessionRunner(
             settings=settings,
@@ -612,7 +638,7 @@ async def run_worker(settings: Settings) -> None:
             session_store=session_store,
             scheduled_store=ScheduledSessionStore(session_factory),
             redis=redis_client,
-            storage=create_backend(settings),
+            storage=storage_backend,
         )
         scheduled_task = asyncio.create_task(
             scheduled_runner.run_forever(),

@@ -15,6 +15,7 @@ from fastapi import WebSocketDisconnect
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from surogates.browser.client import KernelBrowserClient
 from surogates.browser.control import AcquireOutcome
 from surogates.browser.rfb import is_input_frame
 from surogates.session.events import EventType
@@ -46,6 +47,10 @@ def _route_prefix(request: Request) -> str:
 async def _proxy_live_view_request(method: str, url: str, **kwargs) -> httpx.Response:
     async with httpx.AsyncClient(timeout=30.0) as client:
         return await client.request(method, url, **kwargs)
+
+
+def _browser_preview_client(rest_url: str) -> KernelBrowserClient:
+    return KernelBrowserClient(rest_url)
 
 
 async def _connect_live_view_ws(url: str):
@@ -107,6 +112,25 @@ async def _should_forward_client_frame(
         return False
     holder = await control.held_by(session_id)
     return holder == str(tenant.user_id)
+
+
+async def _ensure_live_view_control(
+    *,
+    session_id: str,
+    tenant: TenantContext,
+    control,
+) -> None:
+    if tenant.user_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Browser live view requires browser control.",
+        )
+    holder = await control.held_by(session_id)
+    if holder != str(tenant.user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Browser live view requires browser control.",
+        )
 
 
 @router.get(
@@ -214,6 +238,37 @@ async def post_browser_control(
     return {"outcome": "released"}
 
 
+@router.get("/api/sessions/{session_id}/browser/preview.png")
+@router.get("/sessions/{session_id}/browser/preview.png")
+async def get_browser_preview(
+    session_id: UUID,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> Response:
+    resolver = request.app.state.browser_resolver
+    resolved = await resolver.resolve(
+        str(session_id),
+        expected_org_id=str(tenant.org_id),
+    )
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="No browser for session")
+
+    try:
+        async with _browser_preview_client(resolved.endpoint.rest_url) as client:
+            screenshot = await client.screenshot(viewport_only=True)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Browser preview is unreachable.",
+        ) from exc
+
+    return Response(
+        content=screenshot["png_bytes"],
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @router.api_route(
     "/api/sessions/{session_id}/browser/live/{path:path}",
     methods=["GET", "POST", "OPTIONS"],
@@ -229,16 +284,21 @@ async def proxy_live_view(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> Response:
     resolver = request.app.state.browser_resolver
+    control = request.app.state.browser_control
     resolved = await resolver.resolve(
         str(session_id),
         expected_org_id=str(tenant.org_id),
     )
     if resolved is None:
         raise HTTPException(status_code=404, detail="No browser for session")
+    await _ensure_live_view_control(
+        session_id=str(session_id),
+        tenant=tenant,
+        control=control,
+    )
 
     upstream_base = (
-        resolved.endpoint.live_view_url
-        .replace("ws://", "http://", 1)
+        resolved.endpoint.live_view_url.replace("ws://", "http://", 1)
         .replace("wss://", "https://", 1)
         .rstrip("/")
     )
@@ -268,8 +328,7 @@ async def proxy_live_view(
     response_headers = {
         key: value
         for key, value in upstream.headers.items()
-        if key.lower()
-        not in {"connection", "transfer-encoding", "content-encoding"}
+        if key.lower() not in {"connection", "transfer-encoding", "content-encoding"}
     }
     response = Response(
         content=upstream.content,
@@ -314,6 +373,11 @@ async def proxy_live_view_ws(
     )
     if resolved is None:
         await websocket.close(code=4404, reason="no browser")
+        return
+    if tenant.user_id is None or await control.held_by(str(session_id)) != str(
+        tenant.user_id
+    ):
+        await websocket.close(code=4403, reason="browser control required")
         return
 
     upstream_url = _live_view_upstream_ws_url(

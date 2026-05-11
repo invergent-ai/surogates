@@ -131,6 +131,7 @@ class StreamingToolExecutor:
         sandbox_pool: SandboxPool | None = None,
         browser_pool: BrowserPool | None = None,
         browser_control: BrowserControlStore | None = None,
+        storage: Any | None = None,
         api_client: Any | None = None,
         session_factory: Any | None = None,
         llm_client: Any | None = None,
@@ -153,6 +154,7 @@ class StreamingToolExecutor:
         self._sandbox_pool = sandbox_pool
         self._browser_pool = browser_pool
         self._browser_control = browser_control
+        self._storage = storage
         self._api_client = api_client
         self._session_factory = session_factory
         self._llm_client = llm_client
@@ -328,6 +330,7 @@ class StreamingToolExecutor:
                 sandbox_pool=self._sandbox_pool,
                 browser_pool=self._browser_pool,
                 browser_control=self._browser_control,
+                storage=self._storage,
                 api_client=self._api_client,
                 session_factory=self._session_factory,
                 llm_client=self._llm_client,

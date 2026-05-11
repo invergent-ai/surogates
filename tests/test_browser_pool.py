@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from surogates.browser.base import (
     BrowserEndpoint,
     BrowserSpec,
@@ -19,6 +21,7 @@ class FakeBackend:
         self.status_overrides: dict[str, BrowserStatus] = {}
         self.fail_provision: BrowserUnavailableError | None = None
         self.provision_labels: list[tuple[str, str, str]] = []
+        self.destroyed_sessions: list[str] = []
 
     async def provision(
         self,
@@ -44,6 +47,9 @@ class FakeBackend:
 
     async def destroy(self, browser_id: str) -> None:
         self.destroys.append(browser_id)
+
+    async def destroy_for_session(self, session_id: str) -> None:
+        self.destroyed_sessions.append(session_id)
 
 
 class FakeRegistry:
@@ -125,6 +131,27 @@ class TestDestroy:
     async def test_destroy_for_unknown_session_is_noop(self) -> None:
         pool = BrowserPool(backend=FakeBackend(), registry=FakeRegistry())  # type: ignore[arg-type]
         await pool.destroy_for_session("nope")
+
+    async def test_destroy_for_missing_mapping_uses_backend_session_cleanup(
+        self,
+    ) -> None:
+        backend = FakeBackend()
+        registry = FakeRegistry()
+        registry.entries["sess-1"] = BrowserEntry(
+            session_id="sess-1",
+            org_id="o",
+            user_id="u",
+            rest_url="http://x:30000",
+            cdp_url="ws://x:31000",
+            live_view_url="ws://x:32000",
+            provisioned_at=datetime.now(timezone.utc),
+        )
+        pool = BrowserPool(backend=backend, registry=registry)  # type: ignore[arg-type]
+
+        await pool.destroy_for_session("sess-1")
+
+        assert backend.destroyed_sessions == ["sess-1"]
+        assert "sess-1" not in registry.entries
 
     async def test_destroy_all(self) -> None:
         backend = FakeBackend()

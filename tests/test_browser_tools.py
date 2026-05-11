@@ -172,6 +172,28 @@ class FakeLargeScreenshotClient(FakeScreenshotClient):
         return {"png_bytes": b"\x89PNG\r\n\x1a\n" + (b"x" * 300_000)}
 
 
+class FakeSavePathScreenshotClient(FakeScreenshotClient):
+    async def screenshot(
+        self,
+        *,
+        region: dict[str, int] | None = None,
+        annotate: bool = False,
+        save_path: str | None = None,
+    ) -> dict[str, Any]:
+        self.captured.append(
+            {"region": region, "annotate": annotate, "save_path": save_path}
+        )
+        return {"png_bytes": b"\x89PNG\r\n\x1a\n" + (b"x" * 300_000)}
+
+
+class FakeStorage:
+    def __init__(self) -> None:
+        self.writes: list[tuple[str, str, bytes]] = []
+
+    async def write(self, bucket: str, key: str, data: bytes) -> None:
+        self.writes.append((bucket, key, data))
+
+
 @pytest.fixture()
 def tenant():
     return SimpleNamespace(
@@ -462,9 +484,13 @@ class TestScreenshotHandler:
             _client_factory=lambda endpoint: FakeScreenshotClient(),
         )
         body = json.loads(result)
-        assert body["path"].startswith("browser-screenshots/")
-        assert body["path"].endswith(".png")
-        assert (tmp_path / body["path"]).read_bytes() == b"\x89PNG\r\n\x1a\nimg"
+        assert body["saved"] is True
+        assert body["relative_path"].startswith("browser-screenshots/")
+        assert body["relative_path"].endswith(".png")
+        assert body["path"] == str(tmp_path / body["relative_path"])
+        assert "base64" not in body
+        assert "error" not in body
+        assert (tmp_path / body["relative_path"]).read_bytes() == b"\x89PNG\r\n\x1a\nimg"
 
     async def test_oversized_png_is_still_saved_to_workspace(
         self,
@@ -483,12 +509,51 @@ class TestScreenshotHandler:
             _client_factory=lambda endpoint: FakeLargeScreenshotClient(),
         )
         body = json.loads(result)
-        assert body["error"] == "screenshot_too_large_for_base64"
-        assert body["path"].startswith("browser-screenshots/")
-        assert (tmp_path / body["path"]).read_bytes().startswith(b"\x89PNG")
+        assert body["saved"] is True
+        assert body["relative_path"].startswith("browser-screenshots/")
+        assert body["path"] == str(tmp_path / body["relative_path"])
+        assert (tmp_path / body["relative_path"]).read_bytes().startswith(b"\x89PNG")
         assert "base64" not in body
+        assert "error" not in body
 
-    async def test_unwritable_workspace_does_not_fail_screenshot(
+    async def test_oversized_png_is_saved_to_workspace_storage(
+        self,
+        tenant,
+    ) -> None:
+        from surogates.tools.builtin.browser import _browser_screenshot_handler
+
+        session_id = uuid4()
+        storage = FakeStorage()
+        client = FakeSavePathScreenshotClient()
+
+        result = await _browser_screenshot_handler(
+            {},
+            tenant=tenant,
+            session_id=session_id,
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            workspace_path="/workspace",
+            session_config={"storage_bucket": "agent-bucket"},
+            storage=storage,
+            _client_factory=lambda endpoint: client,
+        )
+        body = json.loads(result)
+
+        assert body["saved"] is True
+        assert body["relative_path"].startswith("browser-screenshots/")
+        assert body["path"] == f"/workspace/{body['relative_path']}"
+        assert "base64" not in body
+        assert "error" not in body
+        assert client.captured[0]["save_path"] == body["path"]
+        assert storage.writes == [
+            (
+                "agent-bucket",
+                f"sessions/{session_id}/{body['relative_path']}",
+                b"\x89PNG\r\n\x1a\n" + (b"x" * 300_000),
+            )
+        ]
+
+    async def test_unwritable_workspace_without_storage_fails_without_base64(
         self,
         tenant,
         tmp_path,
@@ -507,10 +572,15 @@ class TestScreenshotHandler:
             _client_factory=lambda endpoint: FakeScreenshotClient(),
         )
         body = json.loads(result)
-        assert "base64" in body
+        assert body["error"] == "screenshot_save_failed"
+        assert "base64" not in body
         assert "path" not in body
 
-    async def test_annotate_returns_annotations(self, tenant) -> None:
+    async def test_annotate_saves_screenshot_and_returns_annotations(
+        self,
+        tenant,
+        tmp_path,
+    ) -> None:
         from surogates.tools.builtin.browser import _browser_screenshot_handler
 
         result = await _browser_screenshot_handler(
@@ -519,16 +589,18 @@ class TestScreenshotHandler:
             session_id=uuid4(),
             browser_pool=FakePool(),
             browser_control=FakeControlStore(),
+            workspace_path=str(tmp_path),
             _client_factory=lambda endpoint: FakeScreenshotClient(),
         )
         body = json.loads(result)
-        assert "base64" in body
+        assert body["saved"] is True
+        assert "base64" not in body
         assert body["mime_type"] == "image/png"
         assert body["annotations"] == [
             {"ref": "@e1", "label": 1, "role": "button", "name": "Go"},
         ]
 
-    async def test_returns_base64_png(self, tenant) -> None:
+    async def test_requires_workspace_destination(self, tenant) -> None:
         from surogates.tools.builtin.browser import _browser_screenshot_handler
 
         result = await _browser_screenshot_handler(
@@ -540,8 +612,8 @@ class TestScreenshotHandler:
             _client_factory=lambda endpoint: FakeScreenshotClient(),
         )
         body = json.loads(result)
-        assert "base64" in body
-        assert body["mime_type"] == "image/png"
+        assert body["error"] == "workspace_unavailable"
+        assert "base64" not in body
 
 
 BROWSER_TOOL_NAMES = [

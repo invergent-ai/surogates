@@ -26,6 +26,7 @@ from surogates.session.events import EventType
 if TYPE_CHECKING:
     from redis.asyncio import Redis
 
+    from surogates.browser.pool import BrowserPool
     from surogates.session.store import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,7 @@ class Orchestrator:
         queue_key: str,
         max_concurrent: int = 50,
         poll_timeout: int = 5,
+        browser_pool: BrowserPool | None = None,
     ) -> None:
         self.redis = redis_client
         self.session_store = session_store
@@ -71,6 +73,7 @@ class Orchestrator:
         self._agent_id = agent_id
         self._queue_key = queue_key
         self._poll_timeout = poll_timeout
+        self._browser_pool = browser_pool
         self._running = True
         self._tasks: set[asyncio.Task] = set()
         # Active harnesses by session ID — for delivering interrupt signals.
@@ -134,7 +137,8 @@ class Orchestrator:
             try:
                 # BZPOPMIN returns (key, member, score) or None on timeout.
                 result = await self.redis.bzpopmin(
-                    self._queue_key, timeout=self._poll_timeout,
+                    self._queue_key,
+                    timeout=self._poll_timeout,
                 )
             except asyncio.CancelledError:
                 logger.info("Orchestrator cancelled during poll")
@@ -150,7 +154,9 @@ class Orchestrator:
 
             # result is (key, member, score) for redis-py >= 5.
             _key, member, _score = result
-            session_id_str = member.decode() if isinstance(member, bytes) else str(member)
+            session_id_str = (
+                member.decode() if isinstance(member, bytes) else str(member)
+            )
 
             try:
                 session_id = UUID(session_id_str)
@@ -232,7 +238,7 @@ class Orchestrator:
             )
 
             if attempt + 1 < _MAX_RETRIES:
-                delay = _BASE_RETRY_DELAY * (2 ** attempt)
+                delay = _BASE_RETRY_DELAY * (2**attempt)
                 logger.info(
                     "Retrying session %s in %.1fs (attempt %d/%d)",
                     session_id,
@@ -265,7 +271,8 @@ class Orchestrator:
                         },
                     )
                     await self.session_store.update_session_status(
-                        session_id, "failed",
+                        session_id,
+                        "failed",
                     )
                 except Exception:
                     logger.exception(
@@ -318,13 +325,7 @@ class Orchestrator:
                     payload = _json.loads(data) if data else {}
                     reason = payload.get("reason", "interrupted")
 
-                    delivered = self.interrupt_session(session_id, reason)
-                    if not delivered:
-                        logger.warning(
-                            "Interrupt for session %s could not be delivered "
-                            "(no active harness on this worker)",
-                            session_id,
-                        )
+                    await self._handle_interrupt_signal(session_id, reason)
                 except Exception:
                     logger.warning(
                         "Failed to process interrupt message: %s",
@@ -336,6 +337,24 @@ class Orchestrator:
         finally:
             await pubsub.punsubscribe(f"{INTERRUPT_CHANNEL_PREFIX}:*")
             await pubsub.aclose()
+
+    async def _handle_interrupt_signal(self, session_id: UUID, reason: str) -> None:
+        delivered = self.interrupt_session(session_id, reason)
+        if reason == "session deleted" and self._browser_pool is not None:
+            try:
+                await self._browser_pool.destroy_for_session(str(session_id))
+            except Exception:
+                logger.warning(
+                    "Failed to destroy browser sandbox for deleted session %s",
+                    session_id,
+                    exc_info=True,
+                )
+        if not delivered:
+            logger.warning(
+                "Interrupt for session %s could not be delivered "
+                "(no active harness on this worker)",
+                session_id,
+            )
 
     async def _sweep_orphans_forever(self) -> None:
         """Periodically re-enqueue sessions abandoned by a dead worker.
@@ -377,7 +396,9 @@ class Orchestrator:
                         )
                         await self.session_store.release_stale_lease(session.id)
                         await enqueue_session(
-                            self.redis, session.agent_id, session.id,
+                            self.redis,
+                            session.agent_id,
+                            session.id,
                         )
                         logger.warning(
                             "Recovered orphaned session %s — re-enqueued",
