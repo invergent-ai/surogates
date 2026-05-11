@@ -400,3 +400,39 @@ async def test_sse_stream_emits_snapshot_and_nudge_for_new_item(
     assert "event: snapshot" in response.text
     assert "event: item" in response.text
     assert "task_complete" in response.text
+
+
+async def test_clarify_response_flips_inbox_to_responded(
+    client,
+    session_factory,
+    session_store,
+):
+    _, _, token, session = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+    event_id = await session_store.emit_event(
+        session.id,
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": "tc-clr-1",
+            "questions": [{"prompt": "Which color?"}],
+            "context": "",
+        },
+    )
+    item = await _get_inbox_item_for_event(session_store, event_id)
+    assert item.status == "pending"
+
+    response = await client.post(
+        f"/v1/sessions/{session.id}/clarify/tc-clr-1/respond",
+        json={"responses": [{"question": "Which color?", "answer": "blue"}]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 201, response.text
+    async with session_store._sf() as db:
+        updated = await db.get(InboxItem, item.id)
+
+    assert updated is not None
+    assert updated.status == "responded"
+    assert updated.responded_at is not None

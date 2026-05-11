@@ -17,7 +17,7 @@
 - [x] **Completed:** Task 12 - Add inbox item detail, read, and ack routes.
 - [x] **Completed:** Task 13 - Add governance decision response route.
 - [x] **Completed:** Task 14 - Add inbox SSE stream.
-- [ ] **In progress:** Task 15 - Mark clarify inbox items responded from clarify responses.
+- [x] **Completed:** Task 15 - Mark clarify inbox items responded from clarify responses.
 
 ## Phase 2 TODO
 
