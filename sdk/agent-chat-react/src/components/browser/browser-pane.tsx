@@ -37,6 +37,7 @@ interface BrowserPaneProps {
 
 export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
+  const [openFullscreenOnControl, setOpenFullscreenOnControl] = useState(false);
   const [previewSnapshot, setPreviewSnapshot] =
     useState<AgentChatBrowserPreviewSnapshot | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -85,10 +86,18 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
 
   useEffect(() => {
     setFullscreenOpen(false);
+    setOpenFullscreenOnControl(false);
     setPreviewSnapshot(null);
     setPreviewLoading(false);
     setPreviewError(null);
   }, [sessionId]);
+
+  useEffect(() => {
+    if (!openFullscreenOnControl) return;
+    if (!canUseLiveView) return;
+    setFullscreenOpen(true);
+    setOpenFullscreenOnControl(false);
+  }, [canUseLiveView, openFullscreenOnControl]);
 
   useEffect(() => {
     if (!hasLiveView || canUseLiveView) {
@@ -186,7 +195,7 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
             sessionId={sessionId}
             hasControl={state.status === "user-control"}
             adapter={adapter}
-            onControlAcquired={() => setFullscreenOpen(true)}
+            onControlAcquired={() => setOpenFullscreenOnControl(true)}
           />
         )}
       </div>

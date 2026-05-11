@@ -1,4 +1,4 @@
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { BrowserPane } from "../src/components/browser/browser-pane";
@@ -157,13 +157,40 @@ describe("BrowserPane", () => {
     expect(node.textContent).toContain("Take control");
   });
 
-  it("opens the full-page browser dialog after taking control", async () => {
+  it("waits for user-control state before opening the dialog after taking control", async () => {
+    let promoteToUserControl: (() => void) | null = null;
+    let resolveAcquire:
+      | ((value: { outcome: "granted"; ownerUserId: string }) => void)
+      | null = null;
+    const controlledAdapter = {
+      ...liveAdapter,
+      async acquireBrowserControl() {
+        return await new Promise<{ outcome: "granted"; ownerUserId: string }>(
+          (resolve) => {
+            resolveAcquire = resolve;
+          },
+        );
+      },
+    };
+
+    function Harness() {
+      const [hasControl, setHasControl] = useState(false);
+      promoteToUserControl = () => setHasControl(true);
+      return (
+        <BrowserPane
+          sessionId="s"
+          state={
+            hasControl
+              ? { status: "user-control", controlOwner: "u" }
+              : { status: "live", controlOwner: null }
+          }
+          adapter={controlledAdapter}
+        />
+      );
+    }
+
     const node = renderPane(
-      <BrowserPane
-        sessionId="s"
-        state={{ status: "live", controlOwner: null }}
-        adapter={liveAdapter}
-      />,
+      <Harness />,
     );
 
     const takeControlButton = Array.from(
@@ -175,9 +202,24 @@ describe("BrowserPane", () => {
       takeControlButton?.click();
     });
 
+    await act(async () => {
+      resolveAcquire?.({ outcome: "granted", ownerUserId: "u" });
+    });
+
+    expect(document.body.querySelector<HTMLElement>('[role="dialog"]')).toBeNull();
+
+    await act(async () => {
+      promoteToUserControl?.();
+    });
+
     const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]');
     expect(dialog).not.toBeNull();
     expect(dialog?.textContent).toContain("Browser");
+    expect(
+      document.body.querySelector<HTMLIFrameElement>(
+        '[data-testid="browser-fullscreen-iframe"]',
+      )?.getAttribute("src"),
+    ).toBe("about:blank#browser-live");
   });
 
   it("shows Return control button when user has control", () => {
