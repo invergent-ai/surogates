@@ -320,6 +320,69 @@ async def test_respond_governance_records_decision_and_wakes_session(
     assert "send_email" in rows[0].data["content"]
 
 
+async def test_respond_action_required_records_completion_and_wakes_session(
+    client,
+    session_factory,
+    session_store,
+    monkeypatch,
+):
+    _, _, token, session = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+    event_id = await session_store.emit_event(
+        session.id,
+        EventType.INBOX_ACTION_REQUIRED,
+        {
+            "title": "Sign in required",
+            "instructions": "Open the browser session and complete sign-in.",
+            "context": "The browser is showing the login page.",
+            "action_type": "browser",
+            "target": "browser",
+        },
+    )
+    item = await _get_inbox_item_for_event(session_store, event_id)
+    woken = []
+
+    async def fake_wake(request, session_id):
+        assert request
+        woken.append(session_id)
+
+    monkeypatch.setattr(
+        "surogates.api.routes.inbox._wake_session_from_request",
+        fake_wake,
+        raising=False,
+    )
+
+    response = await client.post(
+        f"/v1/inbox/{item.id}/respond",
+        json={"completed": True},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "responded"
+    assert response.json()["responded_at"] is not None
+    assert woken == [session.id]
+
+    async with session_store._sf() as db:
+        rows = (
+            await db.execute(
+                select(Event)
+                .where(
+                    Event.session_id == session.id,
+                    Event.type == EventType.USER_MESSAGE.value,
+                )
+                .order_by(Event.id)
+            )
+        ).scalars().all()
+
+    assert len(rows) == 1
+    assert rows[0].data["source"] == "inbox_action_completed"
+    assert rows[0].data["action_type"] == "browser"
+    assert "completed" in rows[0].data["content"].lower()
+
+
 async def test_respond_rejects_non_governance_kind(
     client,
     session_factory,

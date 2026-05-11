@@ -229,19 +229,21 @@ _EMPTY_RESPONSE_NUDGE: str = (
     "output (SVG, HTML, chart, table, markdown document), invoke "
     "create_artifact — do NOT paste the content as a code fence.]"
 )
-_CLARIFY_RESCUE_SYSTEM: str = (
+_USER_ACTION_RESCUE_SYSTEM: str = (
     "You are a strict routing judge for an agent harness. Decide whether "
-    "the assistant draft is ending the turn while it still needs input "
-    "from the user. Return only JSON with keys: needs_clarify boolean, "
-    "reason string, question string, context string. Use empty strings for "
-    "question and context when they do not apply. "
-    "Use needs_clarify=true when the draft asks the user to choose, "
-    "provide missing information, take over a browser, authenticate, "
-    "confirm an option that blocks progress, or otherwise answer before "
-    "useful work can continue. Use needs_clarify=false for final answers, "
-    "status reports that do not wait for a reply, and questions that are "
-    "rhetorical or already answered by the draft. If true, question must "
-    "be the exact concise question to ask with the clarify tool."
+    "the assistant draft is ending the turn while it still needs user input "
+    "or user action. Return only JSON with keys: action_kind string, reason "
+    "string, question string, title string, instructions string, context "
+    "string, action_type string, target string. Use action_kind='clarify' "
+    "only when the user can unblock the task by answering a text question. "
+    "Use action_kind='action_required' when the user must perform an action "
+    "in the session, browser, or another UI, such as login, MFA, OAuth, "
+    "CAPTCHA, consent, file picker, or browser approval. Use "
+    "action_kind='none' for final answers, status reports that do not wait "
+    "for a reply, and rhetorical questions. For clarify, question must be "
+    "the concise question to ask. For action_required, instructions must "
+    "tell the user what to do and target should usually be 'browser' or "
+    "'session'."
 )
 _DYNAMIC_LOOP_EXCLUDED_TOOLS: frozenset[str] = frozenset({
     "cron_create",
@@ -250,8 +252,13 @@ _DYNAMIC_LOOP_EXCLUDED_TOOLS: frozenset[str] = frozenset({
 })
 
 
-class _ClarifyRescueDecision(BaseModel):
+class _UserActionRescueDecision(BaseModel):
+    action_kind: str = Field(
+        default="none",
+        description="One of none, clarify, or action_required.",
+    )
     needs_clarify: bool = Field(
+        default=False,
         description="Whether the assistant draft is blocked on user input.",
     )
     reason: str = Field(
@@ -265,20 +272,33 @@ class _ClarifyRescueDecision(BaseModel):
         default="",
         description="Short context explaining why the user input is needed.",
     )
+    title: str = Field(default="", description="Short inbox item title.")
+    instructions: str = Field(
+        default="",
+        description="Instructions for a user action_required inbox item.",
+    )
+    action_type: str = Field(
+        default="manual",
+        description="Machine-readable action type such as browser or approval.",
+    )
+    target: str = Field(
+        default="session",
+        description="Where the user should perform the action.",
+    )
 
 
-async def _generate_clarify_rescue_structured(
+async def _generate_user_action_rescue_structured(
     *,
     llm_client: Any,
     model: str,
     messages: list[dict[str, str]],
 ) -> dict[str, Any] | None:
-    """Return a typed clarify-rescue judge decision when supported."""
+    """Return a typed user-action rescue judge decision when supported."""
     decision = await generate_structured(
         llm_client=llm_client,
         model=model,
         messages=messages,
-        output_model=_ClarifyRescueDecision,
+        output_model=_UserActionRescueDecision,
         max_tokens=300,
         temperature=0,
     )
@@ -1346,19 +1366,24 @@ class AgentHarness:
             if (
                 not tool_calls_raw
                 and finish_reason == "stop"
-                and await self._maybe_convert_final_response_to_clarify(
-                    session=session,
-                    messages=messages,
-                    assistant_message=assistant_message,
-                    model=model_id,
-                    tool_filter=tool_filter,
+                and (
+                    inbox_rescue_kind := await self._maybe_route_final_response_to_inbox(
+                        session=session,
+                        messages=messages,
+                        assistant_message=assistant_message,
+                        model=model_id,
+                        tool_filter=tool_filter,
+                    )
                 )
             ):
-                tool_calls_raw = assistant_message.get("tool_calls")
-                finish_reason = "tool_calls"
-                usage_data["finish_reason"] = finish_reason
-                response_data["finish_reason"] = finish_reason
-                response_data["clarify_rescue"] = True
+                if inbox_rescue_kind == "clarify":
+                    tool_calls_raw = assistant_message.get("tool_calls")
+                    finish_reason = "tool_calls"
+                    usage_data["finish_reason"] = finish_reason
+                    response_data["finish_reason"] = finish_reason
+                    response_data["clarify_rescue"] = True
+                elif inbox_rescue_kind == "action_required":
+                    response_data["action_required_rescue"] = True
 
             event_id = await self._store.emit_event(
                 session.id,
@@ -2067,7 +2092,7 @@ class AgentHarness:
         """Return list of (tool_call, error_message) for invalid calls."""
         return find_invalid_tool_calls(tool_calls, self._tools)
 
-    async def _maybe_convert_final_response_to_clarify(
+    async def _maybe_route_final_response_to_inbox(
         self,
         *,
         session: Session,
@@ -2075,41 +2100,74 @@ class AgentHarness:
         assistant_message: dict[str, Any],
         model: str,
         tool_filter: set[str] | None,
-    ) -> bool:
-        """Convert a final plain-text user-input ask into a clarify tool call.
+    ) -> str | None:
+        """Route final plain-text user blocks into the appropriate inbox path.
 
-        The LLM sometimes asks the user for blocking input in normal prose.
-        That bypasses the inbox because inbox input rows are generated by the
-        clarify tool.  A small LLM judge decides whether the draft is actually
-        waiting for user input; if so, this method rewrites the draft into a
-        real clarify tool call so the existing tool execution path owns the
-        inbox emission and wait semantics.
+        Text answers become clarify tool calls. User actions such as login or
+        approval become first-class action_required inbox items.
         """
         content = (assistant_message.get("content") or "").strip()
         if not content:
-            return False
+            return None
         if assistant_message.get("tool_calls"):
-            return False
+            return None
         if session.parent_id is not None or session.channel == "scheduled":
-            return False
+            return None
         if session.user_id is None:
-            return False
-        if "clarify" not in self._tools.tool_names:
-            return False
-        if tool_filter is not None and "clarify" not in tool_filter:
-            return False
+            return None
 
-        decision = await self._judge_final_response_needs_clarify(
+        decision = await self._judge_final_response_user_action(
             messages=messages,
             assistant_content=content,
             model=model,
         )
-        if not decision.get("needs_clarify"):
-            return False
+        action_kind = str(decision.get("action_kind") or "").strip()
+        if not action_kind:
+            action_kind = "clarify" if decision.get("needs_clarify") else "none"
+        if action_kind == "none":
+            return None
+
+        if action_kind == "action_required":
+            instructions = str(decision.get("instructions") or "").strip()
+            if not instructions:
+                instructions = str(decision.get("context") or content).strip()
+            if not instructions:
+                return None
+            await self._store.emit_event(
+                session.id,
+                EventType.INBOX_ACTION_REQUIRED,
+                {
+                    "title": str(
+                        decision.get("title") or "Action required"
+                    ).strip(),
+                    "instructions": instructions[:1000],
+                    "context": str(
+                        decision.get("context") or content
+                    ).strip()[:1000],
+                    "action_type": str(
+                        decision.get("action_type") or "manual"
+                    ).strip(),
+                    "target": str(decision.get("target") or "session").strip(),
+                    "reason": str(decision.get("reason") or "user_action"),
+                },
+            )
+            logger.info(
+                "Session %s: emitted action_required inbox item (reason=%s)",
+                session.id,
+                decision.get("reason") or "user_action",
+            )
+            return "action_required"
+
+        if action_kind != "clarify":
+            return None
+        if "clarify" not in self._tools.tool_names:
+            return None
+        if tool_filter is not None and "clarify" not in tool_filter:
+            return None
 
         question = str(decision.get("question") or "").strip()
         if not question:
-            return False
+            return None
         context = str(decision.get("context") or content).strip()
 
         tool_call_id = f"call_clarify_rescue_{uuid4().hex[:24]}"
@@ -2141,16 +2199,35 @@ class AgentHarness:
             session.id,
             decision.get("reason") or "user_input",
         )
-        return True
+        return "clarify"
 
-    async def _judge_final_response_needs_clarify(
+    async def _maybe_convert_final_response_to_clarify(
+        self,
+        *,
+        session: Session,
+        messages: list[dict],
+        assistant_message: dict[str, Any],
+        model: str,
+        tool_filter: set[str] | None,
+    ) -> bool:
+        """Compatibility wrapper for tests/callers that only need clarify."""
+        routed = await self._maybe_route_final_response_to_inbox(
+            session=session,
+            messages=messages,
+            assistant_message=assistant_message,
+            model=model,
+            tool_filter=tool_filter,
+        )
+        return routed == "clarify"
+
+    async def _judge_final_response_user_action(
         self,
         *,
         messages: list[dict],
         assistant_content: str,
         model: str,
     ) -> dict[str, Any]:
-        """Ask the configured LLM whether a draft final response needs clarify."""
+        """Ask the configured LLM whether a draft final response needs user input."""
         recent_messages = [
             {
                 "role": str(m.get("role", "")),
@@ -2164,24 +2241,19 @@ class AgentHarness:
             "assistant_draft": assistant_content[:3000],
         }
         judge_messages = [
-            {"role": "system", "content": _CLARIFY_RESCUE_SYSTEM},
+            {"role": "system", "content": _USER_ACTION_RESCUE_SYSTEM},
             {
                 "role": "user",
                 "content": json.dumps(judge_payload, ensure_ascii=False),
             },
         ]
-        structured = await _generate_clarify_rescue_structured(
+        structured = await _generate_user_action_rescue_structured(
             llm_client=self._llm,
             model=model,
             messages=judge_messages,
         )
         if structured is not None:
-            return {
-                "needs_clarify": bool(structured.get("needs_clarify")),
-                "reason": str(structured.get("reason") or "user_input"),
-                "question": structured.get("question"),
-                "context": structured.get("context"),
-            }
+            return self._normalize_user_action_decision(structured)
 
         for attempt in range(2):
             try:
@@ -2197,7 +2269,7 @@ class AgentHarness:
             except Exception as exc:
                 if attempt == 0:
                     logger.info(
-                        "Clarify rescue judge returned unparsable output; "
+                        "User-action rescue judge returned unparsable output; "
                         "retrying once: %s",
                         exc,
                     )
@@ -2209,37 +2281,104 @@ class AgentHarness:
                         ),
                     })
                     continue
-                fallback = self._fallback_final_response_needs_clarify(
+                fallback = self._fallback_final_response_user_action(
                     assistant_content,
                 )
-                if fallback.get("needs_clarify"):
+                if fallback.get("action_kind") in {"clarify", "action_required"}:
                     logger.warning(
-                        "Clarify rescue judge failed twice; using "
+                        "User-action rescue judge failed twice; using "
                         "local user-input fallback: %s",
                         exc,
                     )
                     return fallback
                 logger.warning(
-                    "Clarify rescue judge failed; leaving final response "
+                    "User-action rescue judge failed; leaving final response "
                     "unchanged: %s",
                     exc,
                 )
                 return {"needs_clarify": False, "reason": "judge_error"}
 
+        return self._normalize_user_action_decision(parsed)
+
+    async def _judge_final_response_needs_clarify(
+        self,
+        *,
+        messages: list[dict],
+        assistant_content: str,
+        model: str,
+    ) -> dict[str, Any]:
+        """Compatibility wrapper for callers that only inspect clarify fields."""
+        return await self._judge_final_response_user_action(
+            messages=messages,
+            assistant_content=assistant_content,
+            model=model,
+        )
+
+    @staticmethod
+    def _normalize_user_action_decision(parsed: dict[str, Any]) -> dict[str, Any]:
+        action_kind = str(parsed.get("action_kind") or "").strip()
+        decision_text = " ".join(
+            str(parsed.get(key) or "")
+            for key in (
+                "reason",
+                "question",
+                "title",
+                "instructions",
+                "context",
+                "action_type",
+                "target",
+            )
+        )
+        if action_kind not in {"", "none", "clarify", "action_required"}:
+            action_kind = ""
+        if action_kind in {"", "none"} and parsed.get("needs_clarify"):
+            action_kind = (
+                "action_required"
+                if AgentHarness._looks_like_user_action_requirement(decision_text)
+                else "clarify"
+            )
+        elif not action_kind:
+            action_kind = "none"
+        action_type = parsed.get("action_type")
+        target = parsed.get("target")
+        if action_kind == "action_required":
+            action_type = action_type or AgentHarness._infer_user_action_type(
+                decision_text,
+            )
+            target = target or ("browser" if action_type == "browser" else "session")
         return {
-            "needs_clarify": bool(parsed.get("needs_clarify")),
+            "action_kind": action_kind,
+            "needs_clarify": action_kind == "clarify",
             "reason": str(parsed.get("reason") or "user_input"),
             "question": parsed.get("question"),
+            "title": parsed.get("title"),
+            "instructions": parsed.get("instructions"),
             "context": parsed.get("context"),
+            "action_type": action_type,
+            "target": target,
         }
 
     @staticmethod
-    def _fallback_final_response_needs_clarify(
+    def _fallback_final_response_user_action(
         assistant_content: str,
     ) -> dict[str, Any]:
         """Last-resort detection used only when the LLM judge cannot answer."""
         text = assistant_content.strip()
         lowered = text.lower()
+        if AgentHarness._looks_like_user_action_requirement(lowered):
+            action_type = AgentHarness._infer_user_action_type(lowered)
+            target = "browser" if action_type == "browser" else "session"
+            return {
+                "action_kind": "action_required",
+                "needs_clarify": False,
+                "reason": "judge_fallback_action_required",
+                "title": "Action required",
+                "instructions": text[:1000],
+                "context": text[:1000],
+                "action_type": action_type,
+                "target": target,
+            }
+
         user_input_markers = (
             "?",
             "tell me",
@@ -2254,15 +2393,14 @@ class AgentHarness:
             "how should",
             "do you want",
             "would you like",
-            "need you to",
-            "take over",
-            "sign in",
-            "log in",
-            "enter your",
-            "complete any",
+            "which option",
         )
         if not any(marker in lowered for marker in user_input_markers):
-            return {"needs_clarify": False, "reason": "judge_error"}
+            return {
+                "action_kind": "none",
+                "needs_clarify": False,
+                "reason": "judge_error",
+            }
 
         question = None
         q_end = text.rfind("?")
@@ -2279,11 +2417,75 @@ class AgentHarness:
             question = "Please provide the input needed to continue."
 
         return {
+            "action_kind": "clarify",
             "needs_clarify": True,
             "reason": "judge_fallback",
             "question": question,
             "context": text[:1000],
         }
+
+    @staticmethod
+    def _looks_like_user_action_requirement(text: str) -> bool:
+        lowered = text.lower()
+        action_markers = (
+            "take over",
+            "open the browser",
+            "browser session",
+            "sign in",
+            "signin",
+            "log in",
+            "login",
+            "mfa",
+            "2fa",
+            "oauth",
+            "captcha",
+            "enter your password",
+            "enter your credentials",
+            "authorize",
+            "authorization",
+            "consent",
+            "approve in",
+            "approval prompt",
+            "permission prompt",
+            "file picker",
+            "complete the action",
+            "complete this action",
+            "manual action",
+        )
+        return any(marker in lowered for marker in action_markers)
+
+    @staticmethod
+    def _infer_user_action_type(text: str) -> str:
+        lowered = text.lower()
+        if any(
+            marker in lowered
+            for marker in (
+                "browser",
+                "sign in",
+                "signin",
+                "log in",
+                "login",
+                "mfa",
+                "oauth",
+                "captcha",
+                "password",
+                "2fa",
+            )
+        ):
+            return "browser"
+        if any(
+            marker in lowered
+            for marker in (
+                "approve",
+                "approval",
+                "authorize",
+                "authorization",
+                "consent",
+                "permission",
+            )
+        ):
+            return "approval"
+        return "manual"
 
     @staticmethod
     def _extract_chat_message_content(response: Any) -> str:
@@ -2310,7 +2512,7 @@ class AgentHarness:
             text = re.sub(r"^```(?:json)?\s*", "", text)
             text = re.sub(r"\s*```$", "", text)
         if not text:
-            raise ValueError("Clarify rescue judge returned empty content")
+            raise ValueError("User-action rescue judge returned empty content")
         if not text.startswith("{"):
             start = text.find("{")
             end = text.rfind("}")
@@ -2318,7 +2520,7 @@ class AgentHarness:
                 text = text[start:end + 1]
         parsed = json.loads(text)
         if not isinstance(parsed, dict):
-            raise ValueError("Clarify rescue judge returned non-object JSON")
+            raise ValueError("User-action rescue judge returned non-object JSON")
         return parsed
 
     @staticmethod

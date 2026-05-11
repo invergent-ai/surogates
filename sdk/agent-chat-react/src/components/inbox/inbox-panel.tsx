@@ -7,6 +7,7 @@ import {
   CheckIcon,
   CircleDotIcon,
   ClipboardCheckIcon,
+  ExternalLinkIcon,
   InboxIcon,
   MessageSquareIcon,
   ShieldAlertIcon,
@@ -45,6 +46,9 @@ type InboxAdapter = AgentChatAdapter & {
     itemId: number;
     decision: "approve" | "reject";
   }): Promise<AgentChatInboxItem>;
+  respondActionRequiredInboxItem?(input: {
+    itemId: number;
+  }): Promise<AgentChatInboxItem>;
   openInboxStream(): AgentChatInboxEventStream;
 };
 
@@ -64,6 +68,7 @@ function requireInboxAdapter(adapter: AgentChatAdapter): InboxAdapter {
 
 const KIND_LABEL: Record<string, string> = {
   input_required: "Input needed",
+  action_required: "Action needed",
   task_complete: "Task complete",
   governance_gate: "Approval",
   progress_checkin: "Progress",
@@ -89,6 +94,7 @@ function formatRelative(value: string): string {
 
 function kindIcon(kind: AgentChatInboxKind) {
   if (kind === "input_required") return MessageSquareIcon;
+  if (kind === "action_required") return ExternalLinkIcon;
   if (kind === "task_complete") return ClipboardCheckIcon;
   if (kind === "governance_gate") return ShieldAlertIcon;
   if (kind === "progress_checkin") return TimerIcon;
@@ -348,6 +354,71 @@ function GovernanceDetail({
   );
 }
 
+function ActionRequiredDetail({
+  item,
+  adapter,
+  onUpdated,
+  onSessionSelect,
+}: {
+  item: AgentChatInboxItem;
+  adapter: InboxAdapter;
+  onUpdated: (item: AgentChatInboxItem) => void;
+  onSessionSelect?: (sessionId: string) => void;
+}) {
+  const [submitting, setSubmitting] = useState(false);
+  const actionType =
+    typeof item.payload.action_type === "string"
+      ? item.payload.action_type
+      : "";
+  const context =
+    typeof item.payload.context === "string" ? item.payload.context : "";
+  const disabled =
+    item.status !== "pending" || submitting || !adapter.respondActionRequiredInboxItem;
+
+  async function complete() {
+    if (!adapter.respondActionRequiredInboxItem) return;
+    setSubmitting(true);
+    try {
+      onUpdated(await adapter.respondActionRequiredInboxItem({ itemId: item.id }));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      {item.body && <p className="whitespace-pre-wrap text-sm">{item.body}</p>}
+      {context && context !== item.body && (
+        <p className="whitespace-pre-wrap text-sm text-muted-foreground">
+          {context}
+        </p>
+      )}
+      {actionType && <Badge variant="secondary">{actionType}</Badge>}
+      <div className="flex flex-wrap gap-2">
+        <Button
+          type="button"
+          size="sm"
+          onClick={() => onSessionSelect?.(item.sessionId)}
+          aria-label="Open session for action"
+        >
+          <ExternalLinkIcon className="size-3.5" />
+          Open session
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          onClick={() => void complete()}
+          disabled={disabled}
+          aria-label="Mark action complete"
+        >
+          <CheckIcon className="size-3.5" />
+          {submitting ? "Marking" : "I completed this"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function ProgressDetail({
   item,
   adapter,
@@ -438,6 +509,13 @@ function InboxDetail({
 
       {item.kind === "input_required" ? (
         <InputRequiredDetail item={item} adapter={adapter} onUpdated={onUpdated} />
+      ) : item.kind === "action_required" ? (
+        <ActionRequiredDetail
+          item={item}
+          adapter={adapter}
+          onUpdated={onUpdated}
+          onSessionSelect={onSessionSelect}
+        />
       ) : item.kind === "governance_gate" ? (
         <GovernanceDetail item={item} adapter={adapter} onUpdated={onUpdated} />
       ) : item.kind === "progress_checkin" ? (

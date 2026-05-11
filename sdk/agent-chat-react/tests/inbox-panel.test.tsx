@@ -120,6 +120,13 @@ function createAdapter(items: AgentChatInboxItem[]): AgentChatAdapter {
       item.respondedAt = "2026-01-01T00:02:00Z";
       return item;
     },
+    async respondActionRequiredInboxItem(input) {
+      const item = items.find((candidate) => candidate.id === input.itemId);
+      if (!item) throw new Error("missing item");
+      item.status = "responded";
+      item.respondedAt = "2026-01-01T00:02:00Z";
+      return item;
+    },
     openInboxStream() {
       return {
         addEventListener() {},
@@ -250,6 +257,86 @@ describe("InboxPanel", () => {
     expect(submissions).toEqual([
       { question: "Which color?", answer: "blue", is_other: false },
     ]);
+    expect(container.textContent).toContain("Responded");
+  });
+
+  it("shows action-required instructions and lets the user mark completion", async () => {
+    const completed: number[] = [];
+    const selectedSessions: string[] = [];
+    const items = [
+      inboxItem({
+        id: 3,
+        kind: "action_required",
+        title: "Sign in required",
+        body: "Open the browser session and complete sign-in.",
+        payload: {
+          action_type: "browser",
+          instructions: "Open the browser session and complete sign-in.",
+          context: "The browser is showing a login page.",
+        },
+        actionRef: {
+          type: "open_session",
+          session_id: "session-1",
+          target: "browser",
+        },
+      }),
+    ];
+    const adapter: AgentChatAdapter = {
+      ...createAdapter(items),
+      async respondActionRequiredInboxItem(input) {
+        completed.push(input.itemId);
+        items[0] = { ...items[0], status: "responded", respondedAt: "now" };
+        return items[0];
+      },
+      async getInboxItem(input) {
+        const item = items.find((candidate) => candidate.id === input.itemId);
+        if (!item) throw new Error("missing item");
+        return item;
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <InboxPanel
+          adapter={adapter}
+          onSessionSelect={(sessionId) => selectedSessions.push(sessionId)}
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    const row = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open inbox item Sign in required"]',
+    );
+    await act(async () => {
+      row?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Action needed");
+    expect(container.textContent).toContain("Open the browser session");
+
+    const openSession = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Open session"),
+    );
+    await act(async () => {
+      openSession?.click();
+      await Promise.resolve();
+    });
+    expect(selectedSessions).toEqual(["session-1"]);
+
+    const complete = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Mark action complete"]',
+    );
+    await act(async () => {
+      complete?.click();
+      await Promise.resolve();
+    });
+
+    expect(completed).toEqual([3]);
     expect(container.textContent).toContain("Responded");
   });
 });
