@@ -67,8 +67,22 @@ export function AgentChat({
       }}
     >
       <TooltipProvider>
-        <section className="flex flex-1 min-h-0 overflow-hidden bg-background text-sm text-foreground">
-          <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <section
+          data-testid="agent-chat-layout"
+          className={
+            hasBrowserPanel
+              ? "grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_440px] overflow-hidden bg-background text-sm text-foreground"
+              : "flex min-h-0 flex-1 overflow-hidden bg-background text-sm text-foreground"
+          }
+        >
+          <div
+            data-testid="chat-panel"
+            className={
+              hasBrowserPanel
+                ? "col-start-1 min-w-0 overflow-hidden"
+                : "flex min-w-0 flex-1 flex-col overflow-hidden"
+            }
+          >
             <ChatThread
               sessionId={sessionId}
               messages={runtime.messages}
@@ -88,7 +102,7 @@ export function AgentChat({
             data-testid="right-stack"
             className={
               hasBrowserPanel
-                ? "order-last flex min-h-0 w-[440px] shrink-0 flex-col"
+                ? "col-start-2 flex min-h-0 w-full flex-col overflow-hidden"
                 : "flex min-h-0 shrink-0 flex-col"
             }
           >
