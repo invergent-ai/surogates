@@ -38,6 +38,7 @@ interface BrowserPaneProps {
 export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
   const [openFullscreenOnControl, setOpenFullscreenOnControl] = useState(false);
+  const [localControlActive, setLocalControlActive] = useState(false);
   const [previewSnapshot, setPreviewSnapshot] =
     useState<AgentChatBrowserPreviewSnapshot | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -54,8 +55,8 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
     return adapter.browserLiveViewUrl(sessionId);
   }, [adapter, hasLiveViewAdapter, sessionId]);
   const hasLiveView = state.status !== "provisioning" && state.status !== "closed";
-  const hasUserControl = state.status === "user-control";
-  const canUseLiveView = hasUserControl && Boolean(liveViewUrl);
+  const hasUserControl = localControlActive;
+  const canUseLiveView = hasLiveView && hasUserControl && Boolean(liveViewUrl);
   const canOpenPreview = hasLiveView && (hasPreviewAdapter || canUseLiveView);
   const canOpenFullscreen = canOpenPreview;
 
@@ -87,6 +88,7 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
   useEffect(() => {
     setFullscreenOpen(false);
     setOpenFullscreenOnControl(false);
+    setLocalControlActive(false);
     setPreviewSnapshot(null);
     setPreviewLoading(false);
     setPreviewError(null);
@@ -104,6 +106,7 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
       setFullscreenOpen(open);
       if (open || !hasUserControl || !hasControlAdapter) return;
 
+      setLocalControlActive(false);
       void adapter.releaseBrowserControl(sessionId).catch((error) => {
         console.error("Failed to release browser control", error);
       });
@@ -205,9 +208,13 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
         {hasLiveView && hasControlAdapter && (
           <BrowserControlBar
             sessionId={sessionId}
-            hasControl={state.status === "user-control"}
+            hasControl={localControlActive}
             adapter={adapter}
-            onControlAcquired={() => setOpenFullscreenOnControl(true)}
+            onControlAcquired={() => {
+              setLocalControlActive(true);
+              setOpenFullscreenOnControl(true);
+            }}
+            onControlReleased={() => setLocalControlActive(false)}
           />
         )}
       </div>

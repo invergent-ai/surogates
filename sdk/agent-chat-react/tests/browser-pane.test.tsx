@@ -1,4 +1,4 @@
-import { act, useState } from "react";
+import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { BrowserPane } from "../src/components/browser/browser-pane";
@@ -123,7 +123,7 @@ describe("BrowserPane", () => {
     expect(iframe).toBeNull();
   });
 
-  it("mounts the live-view iframe immediately while the user has browser control", () => {
+  it("does not mount live view from replayed user-control state after refresh", async () => {
     const node = renderPane(
       <BrowserPane
         sessionId="s"
@@ -132,16 +132,17 @@ describe("BrowserPane", () => {
       />,
     );
 
-    const iframe = node.querySelector<HTMLIFrameElement>(
-      '[data-testid="browser-iframe"]',
-    );
-    expect(iframe?.getAttribute("src")).toBe("about:blank#browser-live");
+    expect(node.textContent).toContain("user-A has control");
+    expect(node.textContent).toContain("Take control");
     expect(
-      node.querySelector('[data-testid="browser-preview-image"]'),
+      node.querySelector<HTMLIFrameElement>('[data-testid="browser-iframe"]'),
     ).toBeNull();
+    await flushPreview();
     expect(
-      node.querySelector('button[aria-label="Open browser preview"]'),
-    ).toBeNull();
+      node.querySelector<HTMLImageElement>(
+        '[data-testid="browser-preview-image"]',
+      ),
+    ).not.toBeNull();
   });
 
   it("shows Take control button in live state", async () => {
@@ -157,8 +158,7 @@ describe("BrowserPane", () => {
     expect(node.textContent).toContain("Take control");
   });
 
-  it("waits for user-control state before opening the dialog after taking control", async () => {
-    let promoteToUserControl: (() => void) | null = null;
+  it("opens the live-view dialog after this tab acquires control", async () => {
     let resolveAcquire:
       | ((value: { outcome: "granted"; ownerUserId: string }) => void)
       | null = null;
@@ -173,24 +173,12 @@ describe("BrowserPane", () => {
       },
     };
 
-    function Harness() {
-      const [hasControl, setHasControl] = useState(false);
-      promoteToUserControl = () => setHasControl(true);
-      return (
-        <BrowserPane
-          sessionId="s"
-          state={
-            hasControl
-              ? { status: "user-control", controlOwner: "u" }
-              : { status: "live", controlOwner: null }
-          }
-          adapter={controlledAdapter}
-        />
-      );
-    }
-
     const node = renderPane(
-      <Harness />,
+      <BrowserPane
+        sessionId="s"
+        state={{ status: "live", controlOwner: null }}
+        adapter={controlledAdapter}
+      />,
     );
 
     const takeControlButton = Array.from(
@@ -202,14 +190,10 @@ describe("BrowserPane", () => {
       takeControlButton?.click();
     });
 
-    await act(async () => {
-      resolveAcquire?.({ outcome: "granted", ownerUserId: "u" });
-    });
-
     expect(document.body.querySelector<HTMLElement>('[role="dialog"]')).toBeNull();
 
     await act(async () => {
-      promoteToUserControl?.();
+      resolveAcquire?.({ outcome: "granted", ownerUserId: "u" });
     });
 
     const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]');
@@ -223,7 +207,6 @@ describe("BrowserPane", () => {
   });
 
   it("releases browser control when the take-control dialog closes", async () => {
-    let promoteToUserControl: (() => void) | null = null;
     let releaseCount = 0;
     const controlledAdapter = {
       ...liveAdapter,
@@ -232,23 +215,13 @@ describe("BrowserPane", () => {
       },
     };
 
-    function Harness() {
-      const [hasControl, setHasControl] = useState(false);
-      promoteToUserControl = () => setHasControl(true);
-      return (
-        <BrowserPane
-          sessionId="s"
-          state={
-            hasControl
-              ? { status: "user-control", controlOwner: "u" }
-              : { status: "live", controlOwner: null }
-          }
-          adapter={controlledAdapter}
-        />
-      );
-    }
-
-    const node = renderPane(<Harness />);
+    const node = renderPane(
+      <BrowserPane
+        sessionId="s"
+        state={{ status: "live", controlOwner: null }}
+        adapter={controlledAdapter}
+      />,
+    );
 
     const takeControlButton = Array.from(
       node.querySelectorAll<HTMLButtonElement>("button"),
@@ -256,9 +229,6 @@ describe("BrowserPane", () => {
 
     await act(async () => {
       takeControlButton?.click();
-    });
-    await act(async () => {
-      promoteToUserControl?.();
     });
 
     expect(document.body.querySelector<HTMLElement>('[role="dialog"]')).not.toBeNull();
@@ -275,7 +245,7 @@ describe("BrowserPane", () => {
     expect(releaseCount).toBe(1);
   });
 
-  it("shows Return control button when user has control", () => {
+  it("does not show Return control for replayed user control", async () => {
     const node = renderPane(
       <BrowserPane
         sessionId="s"
@@ -284,7 +254,10 @@ describe("BrowserPane", () => {
       />,
     );
 
-    expect(node.textContent).toContain("Return control");
+    await flushPreview();
+
+    expect(node.textContent).toContain("Take control");
+    expect(node.textContent).not.toContain("Return control");
   });
 
   it("shows skeleton in provisioning state", () => {
