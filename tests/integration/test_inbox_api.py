@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from uuid import UUID
@@ -11,6 +12,7 @@ import pytest_asyncio
 from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
+from starlette.responses import StreamingResponse
 
 from surogates.db.models import Event, InboxItem
 from surogates.session.events import EventType
@@ -336,3 +338,65 @@ async def test_respond_rejects_non_governance_kind(
     )
 
     assert response.status_code == 409
+
+
+async def test_sse_stream_emits_snapshot_and_nudge_for_new_item(
+    client,
+    app,
+    session_factory,
+    monkeypatch,
+):
+    _, _, token, session = await _create_user_token_session(
+        session_factory,
+        app.state.session_store,
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    def finite_event_source(generator):
+        async def limited_stream():
+            async for event in generator:
+                if "event" not in event:
+                    continue
+                yield f"event: {event['event']}\n"
+                yield f"data: {event['data']}\n\n"
+                if event["event"] == "item":
+                    break
+
+        return StreamingResponse(
+            limited_stream(),
+            media_type="text/event-stream",
+        )
+
+    monkeypatch.setattr(
+        "surogates.api.routes.inbox.EventSourceResponse",
+        finite_event_source,
+        raising=False,
+    )
+
+    async def emit_item():
+        await asyncio.sleep(0.1)
+        await app.state.session_store.emit_event(
+            session.id,
+            EventType.INBOX_TASK_COMPLETE,
+            {
+                "outcome": "success",
+                "duration_seconds": 1,
+                "summary": "All done.",
+                "session_title": "Task complete",
+            },
+        )
+
+    emitter = asyncio.create_task(emit_item())
+    try:
+        async with asyncio.timeout(5):
+            response = await client.get(
+                "/v1/inbox/stream",
+                headers=headers,
+            )
+    finally:
+        await emitter
+
+    assert response.status_code == 200, response.text
+    assert "event: snapshot" in response.text
+    assert "event: item" in response.text
+    assert "task_complete" in response.text

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from datetime import datetime
@@ -10,6 +11,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
+from sse_starlette.sse import EventSourceResponse
 
 from surogates.config import enqueue_session
 from surogates.session.events import EventType
@@ -109,6 +111,70 @@ async def list_inbox(
         "items": [_serialize_item(item) for item in items],
         "next_cursor": next_cursor,
     }
+
+
+@router.get("/stream")
+async def stream_inbox(
+    request: Request,
+    tenant: Annotated[TenantContext, Depends(get_current_tenant)],
+):
+    tenant = _require_user_tenant(tenant)
+    redis = getattr(request.app.state, "redis", None)
+    if redis is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Redis is required for inbox streaming.",
+        )
+    channel = f"surogates:inbox:{tenant.user_id}"
+
+    async def event_gen():
+        store = request.app.state.session_store
+        pubsub = redis.pubsub()
+        try:
+            await pubsub.subscribe(channel)
+            snapshot = await asyncio.shield(
+                store.list_inbox(user_id=tenant.user_id, limit=200)
+            )
+            unread_ids = [
+                item.id
+                for item in snapshot
+                if item.read_at is None and item.status != "expired"
+            ]
+            yield {
+                "event": "snapshot",
+                "data": json.dumps({"unread_ids": unread_ids}, default=str),
+            }
+
+            while True:
+                if await request.is_disconnected():
+                    return
+                message = await pubsub.get_message(
+                    ignore_subscribe_messages=True,
+                    timeout=1.0,
+                )
+                if message is None:
+                    continue
+                raw = message.get("data")
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8")
+                if not raw:
+                    continue
+                try:
+                    item_id, kind = str(raw).split(":", 1)
+                    data = {"item_id": int(item_id), "kind": kind}
+                except (TypeError, ValueError):
+                    continue
+                yield {"event": "item", "data": json.dumps(data, default=str)}
+        except asyncio.CancelledError:
+            return
+        finally:
+            try:
+                await pubsub.unsubscribe(channel)
+                await pubsub.aclose()
+            except Exception:
+                pass
+
+    return EventSourceResponse(event_gen())
 
 
 @router.get("/{item_id}")
