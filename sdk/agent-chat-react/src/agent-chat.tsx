@@ -80,7 +80,7 @@ export function AgentChat({
             data-testid="chat-panel"
             className={
               hasBrowserPanel
-                ? "absolute inset-y-0 left-0 min-w-0 overflow-hidden"
+                ? "absolute inset-y-0 left-0 flex min-h-0 min-w-0 flex-col overflow-hidden"
                 : "flex min-w-0 flex-1 flex-col overflow-hidden"
             }
             style={hasBrowserPanel ? { right: 440 } : undefined}

@@ -302,6 +302,9 @@ describe("AgentChat", () => {
     expect((rightStack as HTMLElement | null)?.style.right).toBe("0px");
     expect((rightStack as HTMLElement | null)?.style.width).toBe("440px");
     expect(chatPanel?.className).toContain("absolute");
+    expect(chatPanel?.className).toContain("flex");
+    expect(chatPanel?.className).toContain("flex-col");
+    expect(chatPanel?.className).toContain("min-h-0");
     expect(rightStack?.className).toContain("absolute");
     expect(browserPanel?.className).toContain("w-full");
     expect(browserPanel?.className).toContain("h-1/2");
