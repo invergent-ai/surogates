@@ -136,6 +136,19 @@ class TestPromptBuilderBuild:
         assert "language" in prompt
         assert "dark" in prompt
 
+    def test_browser_guidance_includes_cookie_consent_handling(self, tmp_path: Path):
+        tenant = _make_tenant(tmp_path)
+        builder = PromptBuilder(
+            tenant,
+            available_tools={"browser_get_state", "browser_click"},
+        )
+
+        section = builder._tool_guidance_section()
+
+        assert "Cookie and consent banners" in section
+        assert "accept" in section.lower()
+        assert "before clicking" in section.lower()
+
 
 class TestPromptBuilderMemory:
     """Memory section loads from file."""

@@ -206,6 +206,8 @@ class PromptBuilder:
             parts.append(self._prompts.get("guidance/expert"))
         if "create_artifact" in self._available_tools:
             parts.append(self._prompts.get("guidance/artifact"))
+        if any(tool.startswith("browser_") for tool in self._available_tools):
+            parts.append(self._prompts.get("guidance/browser"))
         if (
             "loop_wait" in self._available_tools
             and self._session is not None
