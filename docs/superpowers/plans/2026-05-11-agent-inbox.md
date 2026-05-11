@@ -23,6 +23,11 @@
 - [x] **Completed:** Task 21 - Add web auth-backed API client and `/inbox` route using SDK components.
 - [x] **Completed:** Task 22 - Add Inbox sidebar item with live unread badge using SDK hook.
 
+## Phase 6 TODO
+
+- [x] **Completed:** Task 23 - Add clarify inbox end-to-end integration test.
+- [ ] **In progress:** Task 24 - Add governance and completion inbox end-to-end integration tests.
+
 ## Phase 3 TODO
 
 - [x] **Completed:** Task 10 - Add `SessionStore` helpers for the inbox API.
