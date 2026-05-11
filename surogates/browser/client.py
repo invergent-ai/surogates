@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
+import unicodedata
 from typing import Any
 
 import httpx
@@ -28,6 +30,23 @@ class KernelBrowserClient:
             "slider",
             "spinbutton",
         }
+    )
+    _CONSENT_ACTION_RE = re.compile(
+        r"^("
+        r"accept(?:\s+(?:all|toate|cookies|all\s+cookies))?|"
+        r"accepta(?:ti)?(?:\s+(?:toate|cookie-uri|cookies))?|"
+        r"agree|i\s+agree|allow\s+all(?:\s+cookies)?|"
+        r"ok|got\s+it|continue|continua|"
+        r"sunt\s+de\s+acord|de\s+acord"
+        r")[.!]?$",
+        re.IGNORECASE,
+    )
+    _CONSENT_SETTINGS_RE = re.compile(
+        r"\b("
+        r"settings|setari|setarile|preferences|preferinte|"
+        r"modify|modific|customize|parteneri|partners|vendors"
+        r")\b",
+        re.IGNORECASE,
     )
 
     _SNAPSHOT_SCRIPT = """
@@ -170,6 +189,7 @@ return {
                 max_depth=max_depth,
             )
         ]
+        tree = self._prioritize_state_entries(tree)
 
         self._snapshot_cache.clear()
         self._snapshot_cache.update(new_cache)
@@ -387,11 +407,22 @@ return {
                 "x": center_x,
                 "y": center_y,
             }
+            intent = self._state_entry_intent(role, name)
+            if intent is not None:
+                entry["intent"] = intent
             depth = node.get("depth")
             if depth is not None:
                 entry["depth"] = int(depth)
             tree.append(entry)
-            cache[ref] = {"x": center_x, "y": center_y, "role": role, "name": name}
+            cache_entry: dict[str, Any] = {
+                "x": center_x,
+                "y": center_y,
+                "role": role,
+                "name": name,
+            }
+            if intent is not None:
+                cache_entry["intent"] = intent
+            cache[ref] = cache_entry
 
         return tree, cache
 
@@ -408,9 +439,43 @@ return {
             return False
         if compact and not entry.get("name") and role not in self._INTERACTIVE_ROLES:
             return False
+        if entry.get("intent") == "accept_consent":
+            return True
         if max_depth is not None and int(entry.get("depth", 0)) > max_depth:
             return False
         return True
+
+    def _state_entry_intent(self, role: str, name: str) -> str | None:
+        if role not in {"button", "link"}:
+            return None
+        normalized = self._normalize_state_name(name)
+        if not normalized:
+            return None
+        if self._CONSENT_SETTINGS_RE.search(normalized):
+            return None
+        if self._CONSENT_ACTION_RE.search(normalized):
+            return "accept_consent"
+        return None
+
+    def _normalize_state_name(self, name: str) -> str:
+        collapsed = " ".join(name.split()).lower()
+        return (
+            unicodedata.normalize("NFKD", collapsed)
+            .encode("ascii", "ignore")
+            .decode("ascii")
+        )
+
+    def _prioritize_state_entries(
+        self,
+        entries: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return sorted(
+            entries,
+            key=lambda entry: (
+                0 if entry.get("intent") == "accept_consent" else 1,
+                int(str(entry.get("ref", "@e0"))[2:] or "0"),
+            ),
+        )
 
     def _snapshot_script(self, selector: str | None) -> str:
         return self._SNAPSHOT_SCRIPT.replace(
