@@ -16,11 +16,11 @@
 
 ## Phase 5 TODO
 
-- [ ] **In progress:** Task 17 - Add inbox types and adapter API in `sdk/agent-chat-react`, plus the web auth-backed API client.
-- [ ] **Left to do:** Task 18 - Add shared SDK inbox stream/unread hook.
-- [ ] **Left to do:** Task 19 - Add shared SDK inbox list view.
-- [ ] **Left to do:** Task 20 - Add shared SDK per-kind inbox detail views.
-- [ ] **Left to do:** Task 21 - Add web `/inbox` route using SDK components.
+- [x] **Completed:** Task 17 - Add inbox types and adapter API in `sdk/agent-chat-react`.
+- [x] **Completed:** Task 18 - Add shared SDK inbox stream/unread hook.
+- [x] **Completed:** Task 19 - Add shared SDK inbox list view.
+- [x] **Completed:** Task 20 - Add shared SDK per-kind inbox detail views.
+- [ ] **In progress:** Task 21 - Add web auth-backed API client and `/inbox` route using SDK components.
 - [ ] **Left to do:** Task 22 - Add Inbox sidebar item with live unread badge using SDK hook.
 
 ## Phase 3 TODO
