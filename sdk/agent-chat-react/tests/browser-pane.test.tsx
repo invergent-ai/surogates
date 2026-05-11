@@ -222,6 +222,59 @@ describe("BrowserPane", () => {
     ).toBe("about:blank#browser-live");
   });
 
+  it("releases browser control when the take-control dialog closes", async () => {
+    let promoteToUserControl: (() => void) | null = null;
+    let releaseCount = 0;
+    const controlledAdapter = {
+      ...liveAdapter,
+      async releaseBrowserControl() {
+        releaseCount += 1;
+      },
+    };
+
+    function Harness() {
+      const [hasControl, setHasControl] = useState(false);
+      promoteToUserControl = () => setHasControl(true);
+      return (
+        <BrowserPane
+          sessionId="s"
+          state={
+            hasControl
+              ? { status: "user-control", controlOwner: "u" }
+              : { status: "live", controlOwner: null }
+          }
+          adapter={controlledAdapter}
+        />
+      );
+    }
+
+    const node = renderPane(<Harness />);
+
+    const takeControlButton = Array.from(
+      node.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.includes("Take control"));
+
+    await act(async () => {
+      takeControlButton?.click();
+    });
+    await act(async () => {
+      promoteToUserControl?.();
+    });
+
+    expect(document.body.querySelector<HTMLElement>('[role="dialog"]')).not.toBeNull();
+
+    const closeButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.includes("Close"));
+    expect(closeButton).not.toBeNull();
+
+    await act(async () => {
+      closeButton?.click();
+    });
+
+    expect(releaseCount).toBe(1);
+  });
+
   it("shows Return control button when user has control", () => {
     const node = renderPane(
       <BrowserPane

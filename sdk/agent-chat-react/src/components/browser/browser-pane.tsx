@@ -99,6 +99,18 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
     setOpenFullscreenOnControl(false);
   }, [canUseLiveView, openFullscreenOnControl]);
 
+  const handleFullscreenOpenChange = useCallback(
+    (open: boolean) => {
+      setFullscreenOpen(open);
+      if (open || !hasUserControl || !hasControlAdapter) return;
+
+      void adapter.releaseBrowserControl(sessionId).catch((error) => {
+        console.error("Failed to release browser control", error);
+      });
+    },
+    [adapter, hasControlAdapter, hasUserControl, sessionId],
+  );
+
   useEffect(() => {
     if (!hasLiveView || canUseLiveView) {
       setPreviewLoading(false);
@@ -199,7 +211,7 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
           />
         )}
       </div>
-      <Dialog open={fullscreenOpen} onOpenChange={setFullscreenOpen}>
+      <Dialog open={fullscreenOpen} onOpenChange={handleFullscreenOpenChange}>
         <DialogContent
           aria-describedby={undefined}
           className="flex h-screen w-screen max-w-none flex-col gap-0 overflow-hidden rounded-none border-0 bg-background p-0 shadow-none ring-0 sm:max-w-none"
