@@ -344,6 +344,78 @@ class TestControlEndpoint:
         assert response.status_code == 400
 
 
+class TestPreviewEndpoint:
+    async def test_preview_returns_screenshot_png(
+        self,
+        app_factory,
+        monkeypatch,
+    ) -> None:
+        from surogates.api.routes import browser as browser_routes
+
+        build, resolver, _control = app_factory
+        sid = str(uuid4())
+        resolver.entries[sid] = _resolved(sid)
+        seen: list[str] = []
+
+        class FakePreviewClient:
+            def __init__(self, rest_url: str) -> None:
+                seen.append(rest_url)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args) -> None:
+                return None
+
+            async def screenshot(self) -> dict[str, bytes]:
+                return {"png_bytes": b"\x89PNG\r\n\x1a\npreview"}
+
+        monkeypatch.setattr(
+            browser_routes,
+            "_browser_preview_client",
+            FakePreviewClient,
+            raising=False,
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=build()),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(f"/v1/sessions/{sid}/browser/preview.png")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/png"
+        assert response.headers["cache-control"] == "no-store"
+        assert response.content == b"\x89PNG\r\n\x1a\npreview"
+        assert seen == ["http://browser-x.svc:10001"]
+
+    async def test_preview_unknown_session_returns_404(self, app_factory) -> None:
+        build, _resolver, _control = app_factory
+
+        async with AsyncClient(
+            transport=ASGITransport(app=build()),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                "/v1/sessions/00000000-0000-0000-0000-000000000001/browser/preview.png",
+            )
+
+        assert response.status_code == 404
+
+    async def test_preview_other_org_returns_404(self, app_factory) -> None:
+        build, resolver, _control = app_factory
+        sid = str(uuid4())
+        resolver.entries[sid] = _resolved(sid, org_id=ORG_1)
+
+        async with AsyncClient(
+            transport=ASGITransport(app=build(org_id=ORG_2)),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(f"/v1/sessions/{sid}/browser/preview.png")
+
+        assert response.status_code == 404
+
+
 class TestLiveViewHTTPProxy:
     async def test_vnc_html_is_proxied(self, app_factory, monkeypatch) -> None:
         from surogates.api.routes import browser as browser_routes

@@ -160,6 +160,17 @@ export async function getBrowserState(
   return (await response.json()) as BrowserStateResponse;
 }
 
+export async function getBrowserPreviewSnapshot(
+  sessionId: string,
+): Promise<Blob> {
+  const response = await authFetch(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/browser/preview.png`,
+  );
+  if (response.status === 404) throw new Error("Browser preview is unavailable");
+  if (!response.ok) throw new Error("Failed to fetch browser preview");
+  return await response.blob();
+}
+
 export async function acquireBrowserControl(
   sessionId: string,
 ): Promise<BrowserControlResponse> {
