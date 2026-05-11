@@ -12,7 +12,7 @@ from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
-from surogates.db.models import InboxItem
+from surogates.db.models import Event, InboxItem
 from surogates.session.events import EventType
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
@@ -249,6 +249,89 @@ async def test_ack_rejects_non_ackable_kind(
 
     response = await client.post(
         f"/v1/inbox/{item.id}/ack",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 409
+
+
+async def test_respond_governance_records_decision_and_wakes_session(
+    client,
+    session_factory,
+    session_store,
+    monkeypatch,
+):
+    _, _, token, session = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+    event_id = await session_store.emit_event(
+        session.id,
+        EventType.INBOX_GOVERNANCE_GATE,
+        {
+            "tool_name": "send_email",
+            "tool_call_id": "tc-gov-3",
+            "arguments_excerpt": "to=ceo@example.com",
+            "deny_reason": "External recipient",
+            "policy_id": "external-comms-v1",
+        },
+    )
+    item = await _get_inbox_item_for_event(session_store, event_id)
+    woken = []
+
+    async def fake_wake(request, session_id):
+        assert request
+        woken.append(session_id)
+
+    monkeypatch.setattr(
+        "surogates.api.routes.inbox._wake_session_from_request",
+        fake_wake,
+        raising=False,
+    )
+
+    response = await client.post(
+        f"/v1/inbox/{item.id}/respond",
+        json={"decision": "approve"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "responded"
+    assert response.json()["responded_at"] is not None
+    assert woken == [session.id]
+
+    async with session_store._sf() as db:
+        rows = (
+            await db.execute(
+                select(Event)
+                .where(
+                    Event.session_id == session.id,
+                    Event.type == EventType.USER_MESSAGE.value,
+                )
+                .order_by(Event.id)
+            )
+        ).scalars().all()
+
+    assert len(rows) == 1
+    assert rows[0].data["source"] == "inbox_governance_decision"
+    assert "APPROVE" in rows[0].data["content"]
+    assert "send_email" in rows[0].data["content"]
+
+
+async def test_respond_rejects_non_governance_kind(
+    client,
+    session_factory,
+    session_store,
+):
+    _, _, token, session = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+    item = await _emit_task_complete(session_store, session.id)
+
+    response = await client.post(
+        f"/v1/inbox/{item.id}/respond",
+        json={"decision": "approve"},
         headers={"Authorization": f"Bearer {token}"},
     )
 
