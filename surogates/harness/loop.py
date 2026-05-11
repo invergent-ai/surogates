@@ -70,6 +70,7 @@ from surogates.harness.sanitize import (
 from surogates.harness.slash_skill import expand_slash_skill
 from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
 from surogates.harness.streaming_executor import StreamingToolExecutor
+from surogates.harness.structured_output import generate_structured
 from surogates.harness.tool_exec import execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.harness.tool_schemas import filter_schemas_for_tenant
@@ -266,64 +267,22 @@ class _ClarifyRescueDecision(BaseModel):
     )
 
 
-async def _generate_clarify_rescue_with_outlines(
+async def _generate_clarify_rescue_structured(
     *,
     llm_client: Any,
     model: str,
     messages: list[dict[str, str]],
 ) -> dict[str, Any] | None:
-    """Return a structured clarify-rescue judge decision via Outlines."""
-    try:
-        import outlines
-        from outlines.inputs import Chat
-    except ImportError:
-        logger.info(
-            "Outlines is not installed; using raw JSON clarify rescue judge"
-        )
-        return None
-
-    try:
-        outlines_model = _make_outlines_model(
-            outlines_module=outlines,
-            llm_client=llm_client,
-            model=model,
-        )
-        result = await outlines_model.generate(
-            Chat(messages),
-            _ClarifyRescueDecision,
-            temperature=0,
-            max_tokens=300,
-        )
-        return _coerce_clarify_rescue_decision(result)
-    except Exception as exc:
-        logger.info(
-            "Outlines clarify rescue judge failed; using raw JSON fallback: %s",
-            exc,
-        )
-        return None
-
-
-def _make_outlines_model(
-    *,
-    outlines_module: Any,
-    llm_client: Any,
-    model: str,
-) -> Any:
-    """Choose the Outlines adapter for the configured OpenAI-compatible client."""
-    base_url = str(getattr(llm_client, "base_url", "") or "")
-    if base_url and "api.openai.com" not in base_url:
-        return outlines_module.from_vllm(llm_client, model)
-    return outlines_module.from_openai(llm_client, model)
-
-
-def _coerce_clarify_rescue_decision(value: Any) -> dict[str, Any]:
-    if isinstance(value, _ClarifyRescueDecision):
-        parsed = value
-    elif isinstance(value, dict):
-        parsed = _ClarifyRescueDecision.model_validate(value)
-    else:
-        parsed = _ClarifyRescueDecision.model_validate_json(str(value or ""))
-    return parsed.model_dump()
+    """Return a typed clarify-rescue judge decision when supported."""
+    decision = await generate_structured(
+        llm_client=llm_client,
+        model=model,
+        messages=messages,
+        output_model=_ClarifyRescueDecision,
+        max_tokens=300,
+        temperature=0,
+    )
+    return decision.model_dump() if decision is not None else None
 
 # Fenced-block kinds the post-response promoter is willing to turn into
 # an artifact when the model emits one in place of a ``create_artifact``
@@ -2211,7 +2170,7 @@ class AgentHarness:
                 "content": json.dumps(judge_payload, ensure_ascii=False),
             },
         ]
-        structured = await _generate_clarify_rescue_with_outlines(
+        structured = await _generate_clarify_rescue_structured(
             llm_client=self._llm,
             model=model,
             messages=judge_messages,

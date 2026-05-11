@@ -25,10 +25,7 @@ from surogates.harness.llm_call import (
     interruptible_sleep as _interruptible_sleep,
     is_transient_error as _is_transient_error,
 )
-from surogates.harness.loop import (
-    AgentHarness,
-    _generate_clarify_rescue_with_outlines,
-)
+from surogates.harness.loop import AgentHarness
 from surogates.harness.resilience import try_rotate_credential
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.models import Session
@@ -380,7 +377,7 @@ class TestDynamicLoopToolPolicy:
             }
 
         monkeypatch.setattr(
-            "surogates.harness.loop._generate_clarify_rescue_with_outlines",
+            "surogates.harness.loop._generate_clarify_rescue_structured",
             fake_generate_structured,
             raising=False,
         )
@@ -418,7 +415,7 @@ class TestDynamicLoopToolPolicy:
             return None
 
         monkeypatch.setattr(
-            "surogates.harness.loop._generate_clarify_rescue_with_outlines",
+            "surogates.harness.loop._generate_clarify_rescue_structured",
             fake_generate_structured,
             raising=False,
         )
@@ -448,90 +445,6 @@ class TestDynamicLoopToolPolicy:
 
         assert decision["needs_clarify"] is False
         llm_client.chat.completions.create.assert_awaited_once()
-
-    async def test_outlines_clarify_judge_uses_vllm_guided_json(self) -> None:
-        from openai import AsyncOpenAI
-
-        llm_client = AsyncOpenAI(
-            api_key="test-key",
-            base_url="http://localhost:8000/v1",
-        )
-        llm_client.chat.completions.create = AsyncMock(
-            return_value=SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(
-                            content=json.dumps({
-                                "needs_clarify": True,
-                                "reason": "user_input",
-                                "question": "Please choose an account.",
-                                "context": "The page needs an account choice.",
-                            }),
-                            refusal=None,
-                        )
-                    )
-                ]
-            )
-        )
-
-        decision = await _generate_clarify_rescue_with_outlines(
-            llm_client=llm_client,
-            model="surogate",
-            messages=[
-                {"role": "system", "content": "Judge."},
-                {"role": "user", "content": "{}"},
-            ],
-        )
-
-        assert decision is not None
-        assert decision["needs_clarify"] is True
-        call_kwargs = llm_client.chat.completions.create.await_args.kwargs
-        assert call_kwargs["model"] == "surogate"
-        assert "response_format" not in call_kwargs
-        assert call_kwargs["extra_body"]["guided_json"]["type"] == "object"
-        assert "needs_clarify" in call_kwargs["extra_body"]["guided_json"]["properties"]
-
-    async def test_outlines_clarify_judge_uses_openai_response_format(self) -> None:
-        from openai import AsyncOpenAI
-
-        llm_client = AsyncOpenAI(api_key="test-key")
-        llm_client.chat.completions.create = AsyncMock(
-            return_value=SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(
-                            content=json.dumps({
-                                "needs_clarify": False,
-                                "reason": "none",
-                                "question": "",
-                                "context": "",
-                            }),
-                            refusal=None,
-                        )
-                    )
-                ]
-            )
-        )
-
-        decision = await _generate_clarify_rescue_with_outlines(
-            llm_client=llm_client,
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Judge."},
-                {"role": "user", "content": "{}"},
-            ],
-        )
-
-        assert decision is not None
-        assert decision["needs_clarify"] is False
-        call_kwargs = llm_client.chat.completions.create.await_args.kwargs
-        assert call_kwargs["model"] == "gpt-4o-mini"
-        assert "extra_body" not in call_kwargs
-        assert call_kwargs["response_format"]["type"] == "json_schema"
-        assert (
-            call_kwargs["response_format"]["json_schema"]["schema"]["type"]
-            == "object"
-        )
 
     async def test_final_response_without_user_input_is_left_alone(self) -> None:
         response = SimpleNamespace(
