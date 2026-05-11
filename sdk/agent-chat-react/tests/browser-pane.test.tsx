@@ -80,6 +80,7 @@ describe("BrowserPane", () => {
     expect(preview?.getAttribute("src")).toBe(
       "data:image/png;base64,cHJldmlldw==",
     );
+    expect(preview?.className).toContain("object-cover");
     expect(iframe).toBeNull();
     expect(
       node.querySelector('button[aria-label="Open browser preview"]'),
@@ -118,6 +119,7 @@ describe("BrowserPane", () => {
     expect(preview?.getAttribute("src")).toBe(
       "data:image/png;base64,cHJldmlldw==",
     );
+    expect(preview?.className).toContain("object-contain");
     expect(iframe).toBeNull();
   });
 

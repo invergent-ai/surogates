@@ -164,6 +164,7 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
           ) : previewSnapshot ? (
             <BrowserPreviewImage
               src={previewSnapshot.src}
+              fit="cover"
               testId="browser-preview-image"
             />
           ) : previewLoading ? (
@@ -215,6 +216,7 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
             ) : previewSnapshot ? (
               <BrowserPreviewImage
                 src={previewSnapshot.src}
+                fit="contain"
                 testId="browser-fullscreen-preview-image"
               />
             ) : previewLoading ? (
@@ -239,9 +241,11 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
 
 function BrowserPreviewImage({
   src,
+  fit,
   testId,
 }: {
   src: string;
+  fit: "contain" | "cover";
   testId: string;
 }) {
   return (
@@ -249,7 +253,9 @@ function BrowserPreviewImage({
       data-testid={testId}
       src={src}
       alt="Browser preview"
-      className="h-full w-full bg-black object-contain"
+      className={`h-full w-full bg-black ${
+        fit === "cover" ? "object-cover object-top" : "object-contain"
+      }`}
       draggable={false}
     />
   );
