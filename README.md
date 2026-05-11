@@ -1,136 +1,294 @@
 # Surogates
 
-**Open platform for running managed agents at scale**, built around a clear separation between reasoning (“brain”) and execution (“hands”). It supports multi-tenancy and incorporates enterprise-grade security, making it well-suited for production deployments.
+Surogates is an open platform for running managed agents at scale. It is built
+around a durable session log, stateless agent workers, isolated execution
+sandboxes, and user-facing channels such as web chat, Slack, Telegram, website
+widgets, and programmatic API sessions.
 
+The core idea is simple: keep the agent's reasoning loop, execution
+environment, and user interface decoupled so each part can fail, scale, and be
+governed independently.
 
-The platform is **model-agnostic**, allowing you to use your preferred LLM provider without lock-in. It also includes **a robust tool system, seamless channel integrations**, and a **durable session architecture** designed for reliability and horizontal scalability.
-
-
-This makes Surogates more **resilient, scalable, and secure** than existing open agent frameworks, and a better fit **for enterprise use cases**. 
-
-Read the [docs](docs/index.md).
-
+Read the full [documentation](docs/index.md).
 
 ![Surogates Web Chat UI](assets/webui.webp)
 
+## What Surogates Provides
 
-Unlike developer-focused agent harnesses, Surogates is **purpose-built for multi-tenant, multi-user environments. It does not provide a TUI or CLI for direct agent interaction**. Instead, users engage with agents exclusively through external channels such as web chat or messaging platforms (e.g., Slack, Teams, Telegram).
+### Managed Agent Runtime
 
-Surogates takes a fundamentally different approach from personal agent frameworks like *OpenClaw*, *Hermes Agent*, *NemoClaw*, *LangSmith*, etc. which are typically designed for single-user workflows and often run the agent loop and tools within the same process.
+- Durable sessions backed by a PostgreSQL append-only event log.
+- Stateless workers that can replay session state and recover after crashes.
+- A Redis-backed orchestrator that wakes sessions and distributes work.
+- Per-session leases so only one worker runs a session at a time.
+- Server-Sent Events for real-time web updates and replay from the event log.
+- Background jobs for session cleanup, idle-session reset, scheduled work, and
+  expert training export.
 
+### Isolated Execution
+
+- A clear brain/hands split: workers run the LLM loop; sandboxes run untrusted
+  code and file operations.
+- Development sandboxes via local processes and production sandboxes via
+  Kubernetes pods.
+- Session-scoped workspaces mounted at `/workspace`.
+- S3-compatible storage for session files, tenant assets, skills, memory, and
+  MCP configuration.
+- Workspace browsing, file viewing, uploads, downloads, and artifact rendering
+  in the web UI.
+
+### Channels
+
+- Web chat SPA with streaming events, workspace browsing, browser live view,
+  session tree navigation, scheduled work, and agent inbox.
+- Slack and Telegram channel adapters for messaging workflows.
+- Website widget SDK for embedding public chat entry points.
+- API channel for non-interactive batch and pipeline use cases with
+  service-account tokens.
+- Shared delivery model through durable outbox rows and Redis nudges.
+
+### Human-in-the-Loop Inbox
+
+The agent inbox is a per-user queue of items that need attention:
+
+- `input_required` for text answers through the `clarify` flow.
+- `action_required` for browser login, MFA, OAuth approval, CAPTCHA, file
+  picker, consent, or other external user actions.
+- `task_complete` for completion summaries.
+- `governance_gate` for user-overridable policy decisions.
+- `progress_checkin` for long-running session updates.
+
+Each inbox item can open the related session and can be deleted. Depending on
+the kind, users can submit answers, acknowledge informational updates, approve
+or reject governance gates, or mark external actions complete so the session can
+resume.
+
+See [Agent Inbox](docs/agent-inbox/index.md).
+
+### Browser Use
+
+Agents can control a real session-scoped Chromium browser:
+
+- Navigate, click, type, scroll, inspect accessibility state, and capture
+  screenshots.
+- Share a workspace with sandbox tools.
+- Let the user take over for login, MFA, CAPTCHA, and other manual steps.
+- Continue from the same browser session after the user completes the action.
+
+See [Browser Use](docs/browser-use/index.md).
+
+### Tools and MCP
+
+Surogates includes built-in tools for:
+
+- Shell commands, file reads/writes, patching, code execution, and workspace
+  operations.
+- Web search, extraction, crawling, browser automation, and vision analysis.
+- Memory, skills, sub-agent delegation, session search, scheduled work, and
+  loop control.
+- MCP servers over stdio and HTTP, with OAuth 2.1 PKCE support.
+- MCP proxying with credential injection so sandboxes do not see tenant
+  secrets.
+
+Every tool call passes through governance before execution.
+
+See [Tools](docs/tools/index.md) and
+[MCP Integration](docs/mcp-integration/index.md).
+
+### Skills, Sub-Agents, and Experts
+
+- **Skills** are reusable prompt-based behaviors loaded from platform, org, and
+  user layers.
+- **Sub-agents** are declarative child-session presets with their own prompt,
+  tool envelope, model override, iteration cap, and optional governance policy
+  profile.
+- **Experts** are task-specialized models or scoped mini-loops that can be
+  selected for hard tasks and retrained from collected event data.
+
+See [Skills](docs/skills/index.md), [Sub-Agents](docs/sub-agents/index.md), and
+[Experts](docs/experts/index.md).
+
+### Memory
+
+Memory is stored as file-shaped assets:
+
+- `MEMORY.md` for durable project or org knowledge.
+- `USER.md` for user-specific preferences and stable facts.
+- Frozen snapshots are injected at session start.
+- Updates are security-scanned and deduplicated before storage.
+
+See [Memory](docs/memory/index.md).
+
+### Governance, Security, and Audit
+
+- Tenant-scoped auth, storage, credentials, skills, memory, MCP config, and
+  policies.
+- Policy engine for allow-lists, deny-lists, ABAC rules, and file path
+  containment.
+- Policy profiles that narrow child-session permissions.
+- MCP tool scanning for prompt injection, invisible unicode, schema abuse, and
+  rug-pull attacks.
+- Credential vault with tenant/user isolation.
+- Saga tracking for multi-step tool chains with compensation support.
+- Session event log and tenant audit log for compliance, debugging, and
+  training data.
+
+See [Governance and Security](docs/governance-and-security/index.md) and
+[Audit & Observability](docs/audit/index.md).
 
 ## Architecture
 
-**Surogates** decouples the session, harness, and sandbox so each can fail, scale, and be replaced independently:
-
-- the session is a durable append-only event log. 
-- the harness (brain) are stateless workers that drive the LLM loop. 
-- the sandbox (hands) is an isolated execution environment reached via tool calls. One sandbox per session, lazily provisioned, destroyed when the session ends.
-
-No component assumes anything about the others beyond a small set of interfaces. This means if the harness crashes, a new one can pick up where it left off by replaying the session log. If the sandbox dies, the harness can provision a new one and continue. The API server is the only component with access to tenant-level credentials (DB, S3) and issues scoped tokens to the workers, which in turn manage sandbox credentials.
+Surogates follows a three-component model:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                         User Channels                       │
-│                                                             │
-│     Web Chat UI  │  Slack  │  Teams  │  Telegram  │  ...    │
-└───────────────────────────────┬─────────────────────────────┘
-                                │
-┌───────────────────────────────┴─────────────────────────────┐
-│                   API Server Control Plane                  │
-│                                                             │
-│    FastAPI gateway, JWT auth, tenant routing, REST APIs     │
-│    Skills/Memory/Workspace APIs (reads/writes S3 storage)   │
-└──────────┬──────────────────────────────────────┬───────────┘
-           │                                      │
-  ┌────────┴────────┐                    ┌────────┴────────┐
-  │  Orchestrator   │                    │   S3 Storage    │
-  │  (Redis queue)  │                    │                 │
-  └────────┬────────┘                    │  tenant-{org}   │
-           │                             │  session-{id}   │
-           │                             └────────┬──┬─────┘
-  ┌────────┼────────────┐                         │  │
-  │        │            │                         │  │
-┌─┴──────┐┌┴───────┐┌───┴─────┐                   │  │
-│Worker 1││Worker 2││Worker N │  stateless        │  │
-│        ││        ││         │  any can serve    │  │
-│ LLM    ││ LLM    ││ LLM     │  any session      │  │
-│ loop   ││ loop   ││ loop    │                   │  │
-│ Tools  ││ Tools  ││ Tools   │  skills/memory    │  │
-│ Memory ││ Memory ││ Memory  │  via API ─────────┘  │
-│ Skills ││ Skills ││ Skills  │  server              │
-│ Context││ Context││ Context │                      │
-└──┬─────┘└──┬─────┘└──┬──────┘                      │
-   │         │         │                             │
-   │      K8s exec     │                             │
-   │         │         │                             │
-┌──▼─────┐┌──▼─────┐┌──▼─────┐                       │
-│Sandbox ││Sandbox ││Sandbox │  per-session          │
-│  pod   ││  pod   ││  pod   │  ephemeral            │
-│terminal││terminal││terminal│  untrusted            │
-│file I/O││file I/O││file I/O│  S3 session bucket ───┘
-│  code  ││  code  ││  code  │
-└──┬─────┘└──┬─────┘└──┬─────┘
-   │         │         │       
-   └─────────┼─────────┘       
-             │          
-┌────────────┴────────────────────────────────────────────┐
-│                    Session Store                        │
-│            PostgreSQL append-only event log             │
-│         sessions, events, leases, delivery              │
-└─────────────────────────────────────────────────────────┘
+Channels / API clients
+        |
+        v
+API server
+  - auth, tenant routing, REST APIs, web SPA
+  - tenant storage and credential access
+        |
+        v
+Redis orchestrator
+        |
+        v
+Workers
+  - stateless harness loop
+  - tool routing, governance, memory, skills, MCP proxy calls
+        |
+        v
+Sandboxes
+  - isolated terminal, file, patch, and code execution
+  - session-scoped workspace only
+        |
+        v
+PostgreSQL session store
+  - sessions, events, leases, inbox items, delivery outbox
 ```
 
-## Security & Governance
+The API server is the trusted control plane. Workers are stateless and can serve
+any session. Sandboxes are isolated and receive only session-scoped workspace
+access. If a worker or sandbox fails, the next run resumes from the durable
+event log.
 
-**Every tool call passes through a policy engine before execution**. Policies are allow-list by default, frozen per session, and support ABAC rules and OPA/Rego — the agent cannot modify its own permissions at runtime.
+See [Architecture](docs/architecture/index.md).
 
-- **3-tier trust boundary** — API server holds tenant credentials, workers get scoped tokens, sandboxes get only their own session bucket. Credentials never enter the sandbox.
-- **MCP tool scanning** — tool definitions are scanned on load for prompt injection, invisible unicode, schema abuse, and rug-pull attacks (SHA-256 fingerprinting).
-- **Execution rings** — tools are assigned to privilege tiers (system → trusted → sandboxed → restricted) gated on per-user trust scores.
-- **Network isolation** — sandbox pods can only access their allocated S3 session bucket through session-scoped access tokens, and the MCP proxy. No database/API server access, no data exfiltration, no contamination.
+## Repository Layout
 
+| Path | Purpose |
+|---|---|
+| `surogates/` | Python backend: API server, worker harness, tools, storage, governance, jobs. |
+| `web/` | React web application for the hosted chat UI. |
+| `sdk/agent-chat-react/` | Shared React chat and inbox components used by the web app and downstream apps. |
+| `sdk/website-widget/` | Embeddable website widget SDK. |
+| `docs/` | User, operator, and architecture documentation. |
+| `scripts/` | Development and release helper scripts. |
+| `tests/` | Backend unit and integration tests. |
 
 ## Quick Start
 
+For the complete local setup, follow [Getting Started](docs/getting-started/index.md).
+
+At a high level, a development environment needs:
+
+- Python 3.12+
+- Node 20.19+ or 22.12+
+- PostgreSQL
+- Redis
+- S3-compatible object storage for tenant assets and session workspaces
+- An LLM provider reachable through an OpenAI-compatible API
+
+Install and configure the Python package:
+
 ```bash
-# 1. Create k3d cluster with PostgreSQL, Redis, Garage, Traefik
-./k8s/setup-cluster.sh
-
-# 2. Complete Garage post-install (layout + access key)
-GARAGE_POD=$(kubectl get pods -l app.kubernetes.io/name=garage -o jsonpath='{.items[0].metadata.name}')
-kubectl exec -ti $GARAGE_POD -- /garage layout assign -z dc1 -c 1T \
-  $(kubectl exec $GARAGE_POD -- /garage node id -q | cut -d@ -f1)
-kubectl exec -ti $GARAGE_POD -- /garage layout apply --version 1
-kubectl exec -ti $GARAGE_POD -- /garage key create surogates-key
-
-# 3. Paste Garage key into config.dev.yaml, then:
-SUROGATES_CONFIG=config.dev.yaml uv run python scripts/bootstrap_dev.py
-
-# 4. Run API server + worker
-SUROGATES_CONFIG=config.dev.yaml surogates api     # terminal 1
-SUROGATES_CONFIG=config.dev.yaml surogates worker   # terminal 2
-
-# 5. Start the web chat UI (optional, can use API to send messages too
-cd web
-npm run dev
-
-# 5. Open http://localhost:5173 (or the address printed in the terminal) and start chatting with your agent!
+uv sync
+export SUROGATES_CONFIG=/path/to/config.yaml
 ```
+
+Run the API server and a worker:
+
+```bash
+SUROGATES_CONFIG=$SUROGATES_CONFIG uv run surogates api
+SUROGATES_CONFIG=$SUROGATES_CONFIG uv run surogates worker
+```
+
+Run the web UI in development:
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+The detailed configuration reference is in
+[Appendix A: Configuration](docs/appendices/configuration.md).
+
+## Development Checks
+
+Common backend checks:
+
+```bash
+uv run pytest
+python -m compileall -q surogates
+```
+
+Shared React SDK checks:
+
+```bash
+cd sdk/agent-chat-react
+npm run typecheck
+npm test
+```
+
+Web app checks:
+
+```bash
+cd web
+npm run typecheck
+npm run build
+```
+
+Some integration tests require PostgreSQL, Redis, Docker, browser images, or
+Kubernetes depending on the test marker.
+
+## Documentation Map
+
+- [Getting Started](docs/getting-started/index.md)
+- [Architecture](docs/architecture/index.md)
+- [Channels](docs/channels/index.md)
+- [Browser Use](docs/browser-use/index.md)
+- [Agent Inbox](docs/agent-inbox/index.md)
+- [Tools](docs/tools/index.md)
+- [MCP Integration](docs/mcp-integration/index.md)
+- [Skills](docs/skills/index.md)
+- [Sub-Agents](docs/sub-agents/index.md)
+- [Experts](docs/experts/index.md)
+- [Memory](docs/memory/index.md)
+- [Governance and Security](docs/governance-and-security/index.md)
+- [Audit & Observability](docs/audit/index.md)
+- [Storage](docs/storage/index.md)
+- [Background Jobs](docs/background-jobs/index.md)
+- [Operations](docs/operations/index.md)
+- [REST API Reference](docs/appendices/api-reference.md)
+- [Configuration Reference](docs/appendices/configuration.md)
+- [Glossary](docs/appendices/glossary.md)
 
 ## Contributing
 
-Our platform borrowed the best ideas and sometimes pieces of code from many notable open source projects:
+Surogates builds on ideas from managed-agent architecture, sandboxed execution,
+MCP, governance policy systems, and existing open agent projects. Notable
+influences and dependencies include:
 
-- [Hermes Agent](https://github.com/NousResearch/hermes-agent) — tool implementations, agent loop, skills, memory, MCP integration
-- [Anthropic Managed Agents](https://www.anthropic.com/engineering/building-effective-agents) — session/harness/sandbox architecture, crash recovery
-- [Anthropic Sandbox Runtime](https://github.com/anthropic-experimental/sandbox-runtime) — OS-level process isolation via bubblewrap
-- [Microsoft Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit) — policy enforcement, MCP tool poisoning defense
-- [OpenClaw](https://github.com/openclaw/openclaw) — inspiration for breadth of integrations
-- [Nvidia OpenShell](https://github.com/NVIDIA/OpenShell) — enterprise security patterns
+- [Anthropic Managed Agents](https://www.anthropic.com/engineering/building-effective-agents)
+- [Anthropic Sandbox Runtime](https://github.com/anthropic-experimental/sandbox-runtime)
+- [Microsoft Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit)
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent)
+- [OpenClaw](https://github.com/openclaw/openclaw)
+- [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell)
 
-If we missed any projects, do let us know! We are grateful to those communities for their contributions to the open agent ecosystem.
+Contributions that improve reliability, security, documentation, and
+interoperability are welcome.
 
 ## License
 
-AGPL-3.0 — see [LICENSE](LICENSE).
+AGPL-3.0-only. See [LICENSE.AGPL-3.0](LICENSE.AGPL-3.0).
