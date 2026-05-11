@@ -396,6 +396,113 @@ class TestDynamicLoopToolPolicy:
         assert converted is False
         assert assistant_message["tool_calls"] is None
 
+    async def test_final_response_clarify_judge_retries_after_empty_response(
+        self,
+    ) -> None:
+        empty_response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=""))]
+        )
+        json_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps({
+                            "needs_clarify": True,
+                            "reason": "missing_information",
+                            "question": "What account should I use?",
+                            "context": "The task cannot continue without an account.",
+                        })
+                    )
+                )
+            ]
+        )
+        llm_client = AsyncMock()
+        llm_client.chat.completions.create.side_effect = [
+            empty_response,
+            json_response,
+        ]
+        from surogates.tools.registry import ToolRegistry, ToolSchema
+
+        reg = ToolRegistry()
+        reg.register(
+            "clarify",
+            ToolSchema(name="clarify", description="test", parameters={}),
+            lambda _: "{}",
+        )
+        harness = _make_harness(llm_client=llm_client, tool_registry=reg)
+        session = _session_with_config({})
+        assistant_message = {
+            "role": "assistant",
+            "content": "What account should I use?",
+            "tool_calls": None,
+        }
+
+        converted = await harness._maybe_convert_final_response_to_clarify(
+            session=session,
+            messages=[{"role": "user", "content": "Post this update"}],
+            assistant_message=assistant_message,
+            model="surogate",
+            tool_filter={"clarify"},
+        )
+
+        assert converted is True
+        assert llm_client.chat.completions.create.await_count == 2
+        tool_calls = assistant_message["tool_calls"]
+        assert tool_calls is not None
+        arguments = json.loads(tool_calls[0]["function"]["arguments"])
+        assert arguments["questions"][0]["prompt"] == "What account should I use?"
+
+    async def test_final_response_clarify_judge_reads_reasoning_content(
+        self,
+    ) -> None:
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="",
+                        reasoning_content=json.dumps({
+                            "needs_clarify": True,
+                            "reason": "user_decision",
+                            "question": "Should I continue?",
+                            "context": "The assistant needs a decision.",
+                        }),
+                    )
+                )
+            ]
+        )
+        llm_client = AsyncMock()
+        llm_client.chat.completions.create.return_value = response
+        from surogates.tools.registry import ToolRegistry, ToolSchema
+
+        reg = ToolRegistry()
+        reg.register(
+            "clarify",
+            ToolSchema(name="clarify", description="test", parameters={}),
+            lambda _: "{}",
+        )
+        harness = _make_harness(llm_client=llm_client, tool_registry=reg)
+        session = _session_with_config({})
+        assistant_message = {
+            "role": "assistant",
+            "content": "Should I continue?",
+            "tool_calls": None,
+        }
+
+        converted = await harness._maybe_convert_final_response_to_clarify(
+            session=session,
+            messages=[{"role": "user", "content": "Run the task"}],
+            assistant_message=assistant_message,
+            model="surogate",
+            tool_filter={"clarify"},
+        )
+
+        assert converted is True
+        assert llm_client.chat.completions.create.await_count == 1
+        tool_calls = assistant_message["tool_calls"]
+        assert tool_calls is not None
+        arguments = json.loads(tool_calls[0]["function"]["arguments"])
+        assert arguments["questions"][0]["prompt"] == "Should I continue?"
+
     def test_successful_loop_wait_is_terminal_for_dynamic_loop_run(self) -> None:
         harness = _make_harness()
         session = _session_with_config({

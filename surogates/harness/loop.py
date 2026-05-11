@@ -2124,27 +2124,44 @@ class AgentHarness:
             "recent_messages": recent_messages,
             "assistant_draft": assistant_content[:3000],
         }
-        try:
-            response = await self._llm.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": _CLARIFY_RESCUE_SYSTEM},
-                    {
+        judge_messages = [
+            {"role": "system", "content": _CLARIFY_RESCUE_SYSTEM},
+            {
+                "role": "user",
+                "content": json.dumps(judge_payload, ensure_ascii=False),
+            },
+        ]
+        for attempt in range(2):
+            try:
+                response = await self._llm.chat.completions.create(
+                    model=model,
+                    messages=judge_messages,
+                    temperature=0,
+                    max_tokens=300,
+                )
+                content = self._extract_chat_message_content(response)
+                parsed = self._parse_json_object(content)
+                break
+            except Exception:
+                if attempt == 0:
+                    logger.info(
+                        "Clarify rescue judge returned unparsable output; "
+                        "retrying once",
+                        exc_info=True,
+                    )
+                    judge_messages.append({
                         "role": "user",
-                        "content": json.dumps(judge_payload, ensure_ascii=False),
-                    },
-                ],
-                temperature=0,
-                max_tokens=300,
-            )
-            content = self._extract_chat_message_content(response)
-            parsed = self._parse_json_object(content)
-        except Exception:
-            logger.warning(
-                "Clarify rescue judge failed; leaving final response unchanged",
-                exc_info=True,
-            )
-            return {"needs_clarify": False, "reason": "judge_error"}
+                        "content": (
+                            "Your previous judge response was empty or not "
+                            "valid JSON. Return only the required JSON object."
+                        ),
+                    })
+                    continue
+                logger.warning(
+                    "Clarify rescue judge failed; leaving final response unchanged",
+                    exc_info=True,
+                )
+                return {"needs_clarify": False, "reason": "judge_error"}
 
         return {
             "needs_clarify": bool(parsed.get("needs_clarify")),
@@ -2158,8 +2175,18 @@ class AgentHarness:
         choice = response.choices[0]
         message = choice.message
         if isinstance(message, dict):
-            return str(message.get("content") or "")
-        return str(getattr(message, "content", "") or "")
+            return str(
+                message.get("content")
+                or message.get("reasoning_content")
+                or message.get("reasoning")
+                or ""
+            )
+        return str(
+            getattr(message, "content", None)
+            or getattr(message, "reasoning_content", None)
+            or getattr(message, "reasoning", None)
+            or ""
+        )
 
     @staticmethod
     def _parse_json_object(content: str) -> dict[str, Any]:
@@ -2167,6 +2194,13 @@ class AgentHarness:
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?\s*", "", text)
             text = re.sub(r"\s*```$", "", text)
+        if not text:
+            raise ValueError("Clarify rescue judge returned empty content")
+        if not text.startswith("{"):
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                text = text[start:end + 1]
         parsed = json.loads(text)
         if not isinstance(parsed, dict):
             raise ValueError("Clarify rescue judge returned non-object JSON")
