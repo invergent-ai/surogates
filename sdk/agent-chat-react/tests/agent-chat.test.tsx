@@ -133,6 +133,18 @@ function session(
   return { id, status: "active", ...overrides };
 }
 
+function setTextareaValue(
+  textarea: HTMLTextAreaElement,
+  value: string,
+): void {
+  const valueSetter = Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    "value",
+  )?.set;
+  valueSetter?.call(textarea, value);
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
@@ -215,6 +227,50 @@ describe("AgentChat", () => {
     expect(document.body.textContent).toContain("Schedule recurring prompt");
     expect(document.body.textContent).toContain("/review");
     expect(document.body.textContent).toContain("Review the current work");
+  });
+
+  it("stops the active response before sending a submitted message while streaming", async () => {
+    const stream = new FakeEventStream();
+    const calls: string[] = [];
+    const adapter: AgentChatAdapter = {
+      ...createAdapter(stream),
+      async pauseSession(input) {
+        calls.push(`stop:${input.sessionId}`);
+      },
+      async sendMessage(input) {
+        calls.push(`send:${input.sessionId}:${input.content}`);
+        return { eventId: 5, status: "accepted" };
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    act(() => {
+      stream.emit("llm.request", 1, {});
+    });
+
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea");
+    const form = container.querySelector<HTMLFormElement>("form");
+    expect(textarea).not.toBeNull();
+    expect(form).not.toBeNull();
+
+    await act(async () => {
+      setTextareaValue(textarea!, "interrupt with this");
+      form!.requestSubmit();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(calls).toEqual([
+      "stop:s-1",
+      "send:s-1:interrupt with this",
+    ]);
   });
 
   it("packages the workspace panel and file viewer with the chat component", async () => {
