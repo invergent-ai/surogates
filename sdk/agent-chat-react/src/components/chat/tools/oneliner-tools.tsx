@@ -4,8 +4,9 @@
 // Compact one-liner renderers for lightweight tools:
 // - Session search
 // - Web fetch / search / crawl
+// - Vision analyze
 
-import { SearchIcon, GlobeIcon } from "lucide-react";
+import { SearchIcon, GlobeIcon, EyeIcon } from "lucide-react";
 import type { ToolCallInfo } from "../../../types";
 
 // ── Session search ──────────────────────────────────────────────────
@@ -59,6 +60,29 @@ export function WebToolBlock({ tc }: { tc: ToolCallInfo }) {
       {displayText && (
         <span className="text-muted-foreground/70 truncate text-xs">
           {displayText}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// ── Vision analyze ──────────────────────────────────────────────────
+
+export function VisionAnalyzeBlock({ tc }: { tc: ToolCallInfo }) {
+  let image = "";
+  try {
+    const args = JSON.parse(tc.args);
+    const ref = String(args.image ?? args.image_url ?? args.image_path ?? "");
+    image = ref.split("/").pop() ?? ref;
+  } catch { /* ignore */ }
+
+  return (
+    <div className="flex items-center gap-2 text-sm py-0.5">
+      <EyeIcon className="size-3.5 text-muted-foreground/60 shrink-0" />
+      <span className="font-medium text-foreground">Vision Analyze</span>
+      {image && (
+        <span className="text-muted-foreground/70 truncate text-xs">
+          {image}
         </span>
       )}
     </div>

@@ -54,31 +54,19 @@ function renderGroup(nextCalls: ToolCallInfo[]) {
 }
 
 describe("BrowserActivityGroup", () => {
-  it("renders collapsed by default", () => {
+  it("renders all actions inline, joined by commas", () => {
     const node = renderGroup(calls);
 
-    expect(node.textContent).toContain("3 actions");
-    expect(node.textContent).not.toContain("navigate https://app.com");
-  });
-
-  it("expands to show per-action list", () => {
-    const node = renderGroup(calls);
-
-    act(() => {
-      node.querySelector("button")?.click();
-    });
-
-    expect(node.textContent).toContain("navigate https://app.com");
+    expect(node.textContent).toContain("Browser:");
+    expect(node.textContent).toContain("navigate to https://app.com");
     expect(node.textContent).toContain("click @e3");
+    expect(node.textContent).toContain("type \"x\" into @e4");
+    expect(node.textContent).toMatch(
+      /navigate to https:\/\/app\.com, click @e3, type "x" into @e4/,
+    );
   });
 
-  it("shows the latest action in the collapsed header", () => {
-    const node = renderGroup(calls);
-
-    expect(node.textContent).toContain("latest: type");
-  });
-
-  it("flags errors with a marker", () => {
+  it("flags erroring actions with a marker", () => {
     const node = renderGroup([
       ...calls,
       {
@@ -89,10 +77,6 @@ describe("BrowserActivityGroup", () => {
         status: "error",
       },
     ]);
-
-    act(() => {
-      node.querySelector("button")?.click();
-    });
 
     expect(node.querySelector('[data-testid="activity-error-4"]')).not.toBeNull();
   });
