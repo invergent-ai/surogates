@@ -15,8 +15,8 @@
 - [x] **Completed:** Task 5 - Emit `INBOX_INPUT_REQUIRED` from the clarify tool.
 - [x] **Completed:** Task 6 - Emit `INBOX_TASK_COMPLETE` from `_complete_session`.
 - [x] **Completed:** Task 7 - Add `overridable` metadata to `PolicyDecision`.
-- [ ] **In progress:** Task 8 - Emit `INBOX_GOVERNANCE_GATE` on overridable policy denial.
-- [ ] **Left to do:** Task 9 - Emit `INBOX_PROGRESS_CHECKIN` at harness iteration checkpoints.
+- [x] **Completed:** Task 8 - Emit `INBOX_GOVERNANCE_GATE` on overridable policy denial.
+- [ ] **In progress:** Task 9 - Emit `INBOX_PROGRESS_CHECKIN` at harness iteration checkpoints.
 
 ## Phase 1 TODO
 
