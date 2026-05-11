@@ -10,6 +10,14 @@
 
 **Reference spec:** `docs/superpowers/specs/2026-05-11-agent-inbox-design.md`
 
+## Phase 2 TODO
+
+- [x] **Completed:** Task 5 - Emit `INBOX_INPUT_REQUIRED` from the clarify tool.
+- [ ] **In progress:** Task 6 - Emit `INBOX_TASK_COMPLETE` from `_complete_session`.
+- [ ] **Left to do:** Task 7 - Add `overridable` metadata to `PolicyDecision`.
+- [ ] **Left to do:** Task 8 - Emit `INBOX_GOVERNANCE_GATE` on overridable policy denial.
+- [ ] **Left to do:** Task 9 - Emit `INBOX_PROGRESS_CHECKIN` at harness iteration checkpoints.
+
 ## Phase 1 TODO
 
 - [x] **Completed:** Task 1 - Add four new `EventType` values.
