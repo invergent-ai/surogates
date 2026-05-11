@@ -190,6 +190,38 @@ describe("useAgentChatRuntime", () => {
     expect(runtime.api.messages[0]?.content).toBe("loaded message");
   });
 
+  it("refreshes the workspace when browser_screenshot completes", () => {
+    const calls: AdapterCalls = {
+      opened: [],
+      sent: [],
+      paused: [],
+      retried: [],
+      created: [],
+    };
+    const adapter = createFakeAdapter(calls);
+    const runtime = renderRuntime({ adapter, sessionId: "s-1" });
+
+    expect(runtime.api.workspaceRefreshKey).toBe(0);
+
+    act(() => {
+      calls.opened[0]?.stream.emit("tool.call", 1, {
+        tool_call_id: "shot-1",
+        name: "browser_screenshot",
+        arguments: {},
+      });
+      calls.opened[0]?.stream.emit("tool.result", 2, {
+        tool_call_id: "shot-1",
+        content: JSON.stringify({
+          saved: true,
+          path: "/workspace/browser-screenshots/shot.png",
+          relative_path: "browser-screenshots/shot.png",
+        }),
+      });
+    });
+
+    expect(runtime.api.workspaceRefreshKey).toBe(1);
+  });
+
   it("closes the old stream when session id changes", () => {
     const calls: AdapterCalls = {
       opened: [],
