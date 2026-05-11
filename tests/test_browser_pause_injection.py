@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from surogates.harness.loop import maybe_inject_browser_pause
+from surogates.harness.loop import _initial_system_message, maybe_inject_browser_pause
 
 
 class TestBrowserPauseInjection:
@@ -65,3 +65,13 @@ class TestBrowserPauseInjection:
         )
 
         assert msg is None
+
+    def test_pause_notice_is_folded_into_first_system_message(self) -> None:
+        msg = _initial_system_message(
+            "Base system prompt.",
+            "The user has taken control of the browser.",
+        )
+
+        assert msg["role"] == "system"
+        assert msg["content"].startswith("Base system prompt.")
+        assert "The user has taken control of the browser." in msg["content"]

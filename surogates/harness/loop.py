@@ -124,6 +124,17 @@ async def maybe_inject_browser_pause(
     return None
 
 
+def _initial_system_message(system_prompt: str, browser_pause_notice: str | None) -> dict[str, str]:
+    """Build the first API message, folding transient system notices into it."""
+
+    if not browser_pause_notice:
+        return {"role": "system", "content": system_prompt}
+    return {
+        "role": "system",
+        "content": f"{system_prompt}\n\n{browser_pause_notice}",
+    }
+
+
 def _format_loop_list(rows: list[Any]) -> str:
     if not rows:
         return "No active loops."
@@ -936,12 +947,8 @@ class AgentHarness:
                 browser_control=self._browser_control,
             )
             api_messages: list[dict] = [
-                {"role": "system", "content": system_prompt},
+                _initial_system_message(system_prompt, browser_pause_notice),
             ]
-            if browser_pause_notice:
-                api_messages.append(
-                    {"role": "system", "content": browser_pause_notice},
-                )
             # Prefilled context (few-shot examples, planning context)
             if prefill_messages:
                 api_messages.extend(prefill_messages)

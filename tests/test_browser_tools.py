@@ -647,6 +647,21 @@ class TestToolWiring:
         for tool in BROWSER_TOOL_NAMES:
             assert registry.has(tool), tool
 
+    def test_browser_scroll_schema_explains_direction(self) -> None:
+        from surogates.tools.registry import ToolRegistry
+        from surogates.tools.runtime import ToolRuntime
+
+        registry = ToolRegistry()
+        ToolRuntime(registry).register_builtins()
+
+        [schema] = registry.get_schemas(names={"browser_scroll"})
+        function = schema["function"]
+        delta_y = function["parameters"]["properties"]["delta_y"]
+        assert "positive" in function["description"].lower()
+        assert "scroll down" in function["description"].lower()
+        assert "positive" in delta_y["description"].lower()
+        assert "scroll down" in delta_y["description"].lower()
+
     def test_governance_url_arg_includes_browser_navigate(self) -> None:
         from surogates.governance.policy import _URL_ARGUMENT_MAP
 

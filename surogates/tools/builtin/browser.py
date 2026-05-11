@@ -373,10 +373,24 @@ async def _browser_press_key_handler(
 SCROLL_SCHEMA = {
     "type": "object",
     "properties": {
-        "x": {"type": "integer"},
-        "y": {"type": "integer"},
-        "delta_x": {"type": "integer", "default": 0},
-        "delta_y": {"type": "integer", "default": 0},
+        "x": {
+            "type": "integer",
+            "description": "Viewport x coordinate where the scroll wheel event should occur.",
+        },
+        "y": {
+            "type": "integer",
+            "description": "Viewport y coordinate where the scroll wheel event should occur.",
+        },
+        "delta_x": {
+            "type": "integer",
+            "default": 0,
+            "description": "Horizontal wheel delta. Positive values scroll right; negative values scroll left.",
+        },
+        "delta_y": {
+            "type": "integer",
+            "default": 0,
+            "description": "Vertical wheel delta. Positive values scroll down; negative values scroll up.",
+        },
     },
     "required": ["x", "y"],
     "additionalProperties": False,
@@ -772,7 +786,10 @@ def register(registry: ToolRegistry) -> None:
         name="browser_scroll",
         schema=ToolSchema(
             name="browser_scroll",
-            description="Scroll at viewport coordinates.",
+            description=(
+                "Scroll at viewport coordinates. Use positive delta_y to scroll down "
+                "and negative delta_y to scroll up."
+            ),
             parameters=SCROLL_SCHEMA,
         ),
         handler=_browser_scroll_handler,
