@@ -135,6 +135,39 @@ async def test_vision_analyze_reads_workspace_image_from_storage() -> None:
 
 
 @pytest.mark.asyncio
+async def test_vision_analyze_reads_absolute_workspace_image_from_storage() -> None:
+    from surogates.tools.builtin.vision import _vision_analyze_handler
+
+    session_id = UUID("00000000-0000-0000-0000-000000000124")
+    relative_path = "browser-screenshots/screenshot.png"
+    bucket = "agent-bucket"
+    storage = FakeStorage(
+        {
+            (
+                bucket,
+                session_workspace_key(session_id, relative_path),
+            ): _png_bytes()
+        }
+    )
+    create = AsyncMock(return_value=_fake_response("absolute workspace image"))
+    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+    result = await _vision_analyze_handler(
+        {"image": f"/workspace/{relative_path}", "question": "What is in this image?"},
+        workspace_path="/workspace",
+        storage=storage,
+        session_id=session_id,
+        session_config={"storage_bucket": bucket},
+        llm_client=llm_client,
+        model="surogate",
+    )
+
+    payload = json.loads(result)
+    assert payload["analysis"] == "absolute workspace image"
+    assert payload["source"] == "workspace_file"
+
+
+@pytest.mark.asyncio
 async def test_vision_analyze_blocks_workspace_escape(tmp_path: Path) -> None:
     from surogates.tools.builtin.vision import _vision_analyze_handler
 

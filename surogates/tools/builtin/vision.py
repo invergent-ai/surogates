@@ -171,7 +171,10 @@ async def _image_ref_to_data_url(
     if storage is not None and session_id is not None:
         storage_bucket = (session_config or {}).get("storage_bucket")
         if storage_bucket:
-            relative_path = _validate_workspace_storage_path(image_ref)
+            relative_path = _validate_workspace_storage_path(
+                image_ref,
+                workspace_path=workspace_path,
+            )
             key = session_workspace_key(session_id, relative_path)
             try:
                 data = await storage.read(storage_bucket, key)
@@ -204,7 +207,19 @@ async def _image_ref_to_data_url(
     return _to_data_url(data, mime_type), "workspace_file"
 
 
-def _validate_workspace_storage_path(image_ref: str) -> str:
+def _validate_workspace_storage_path(
+    image_ref: str,
+    *,
+    workspace_path: str | None,
+) -> str:
+    if workspace_path:
+        workspace_root = PurePosixPath(workspace_path)
+        ref_path = PurePosixPath(image_ref)
+        try:
+            image_ref = ref_path.relative_to(workspace_root).as_posix()
+        except ValueError:
+            pass
+
     path = PurePosixPath(image_ref)
     if path.is_absolute() or not path.parts or any(part == ".." for part in path.parts):
         raise WorkspaceSandboxError(f"Path traversal blocked: {image_ref}")

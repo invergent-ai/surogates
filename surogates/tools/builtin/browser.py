@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 from datetime import datetime, timezone
@@ -528,7 +527,6 @@ SCREENSHOT_SCHEMA = {
     "additionalProperties": False,
 }
 
-_MAX_BASE64_BYTES = 256 * 1024
 _SCREENSHOT_DIR = "browser-screenshots"
 
 
@@ -536,6 +534,18 @@ def _new_screenshot_path() -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     filename = f"browser-screenshot-{timestamp}-{uuid4().hex[:8]}.png"
     return f"{_SCREENSHOT_DIR}/{filename}"
+
+
+def _workspace_result_path(
+    *,
+    workspace_path: str | None,
+    storage_bucket: str | None,
+    relative_path: str,
+) -> str:
+    root = workspace_path or ("/workspace" if storage_bucket else "")
+    if not root:
+        return relative_path
+    return f"{root.rstrip('/')}/{relative_path}"
 
 
 def _save_screenshot_to_workspace(
@@ -619,19 +629,32 @@ async def _browser_screenshot_handler(
     _browser_id, endpoint, snapshot_cache = preflight
     storage_bucket = (session_config or {}).get("storage_bucket")
     should_save = bool(workspace_path or (storage is not None and storage_bucket))
-    relative_path = _new_screenshot_path() if should_save else None
-    save_path = f"/workspace/{relative_path}" if workspace_path and relative_path else None
-    saved_in_browser = save_path is not None
+    if not should_save:
+        return json.dumps(
+            {
+                "error": "workspace_unavailable",
+                "detail": "browser_screenshot requires a session workspace destination",
+            }
+        )
+
+    relative_path = _new_screenshot_path()
+    browser_save_path = f"/workspace/{relative_path}" if workspace_path else None
+    result_path = _workspace_result_path(
+        workspace_path=workspace_path,
+        storage_bucket=storage_bucket,
+        relative_path=relative_path,
+    )
+    saved_in_browser = browser_save_path is not None
     client = _make_client(_client_factory, endpoint, snapshot_cache)
     async with client:
         try:
             result = await client.screenshot(
                 region=arguments.get("region"),
                 annotate=bool(arguments.get("annotate", False)),
-                save_path=save_path,
+                save_path=browser_save_path,
             )
         except RuntimeError:
-            if save_path is None:
+            if browser_save_path is None:
                 raise
             saved_in_browser = False
             result = await client.screenshot(
@@ -640,45 +663,39 @@ async def _browser_screenshot_handler(
             )
 
     png_bytes = result["png_bytes"]
-    path = None
-    if relative_path is not None:
-        path = await _save_screenshot_to_storage(
-            png_bytes,
-            storage=storage,
-            session_id=session_id,
-            session_config=session_config,
-            relative_path=relative_path,
-        )
-    if relative_path is not None and path is None and not saved_in_browser:
-        path = _save_screenshot_to_workspace(
+    saved = await _save_screenshot_to_storage(
+        png_bytes,
+        storage=storage,
+        session_id=session_id,
+        session_config=session_config,
+        relative_path=relative_path,
+    )
+    if saved is None and not saved_in_browser:
+        saved = _save_screenshot_to_workspace(
             png_bytes,
             workspace_path=workspace_path,
             relative_path=relative_path,
         )
-    if relative_path is not None and path is None and saved_in_browser:
-        path = relative_path
+    if saved is None and saved_in_browser:
+        saved = relative_path
 
-    if len(png_bytes) > _MAX_BASE64_BYTES:
-        body: dict[str, Any] = {
-            "error": "screenshot_too_large_for_base64",
-            "bytes": len(png_bytes),
-            "mime_type": "image/png",
-            "guidance": (
-                "Screenshot was saved to the session workspace. Capture a "
-                "smaller region if inline base64 is required."
-            ),
-        }
-        if path is not None:
-            body["path"] = path
-        return json.dumps(body)
+    if saved is None:
+        return json.dumps(
+            {
+                "error": "screenshot_save_failed",
+                "bytes": len(png_bytes),
+                "mime_type": "image/png",
+                "detail": "Screenshot was captured but could not be saved to the session workspace.",
+            }
+        )
 
     body: dict[str, Any] = {
-        "base64": base64.b64encode(png_bytes).decode(),
+        "saved": True,
+        "path": result_path,
+        "relative_path": relative_path,
         "mime_type": "image/png",
         "bytes": len(png_bytes),
     }
-    if path is not None:
-        body["path"] = path
     if "annotations" in result:
         body["annotations"] = result["annotations"]
     return json.dumps(body)
@@ -786,8 +803,8 @@ def register(registry: ToolRegistry) -> None:
         schema=ToolSchema(
             name="browser_screenshot",
             description=(
-                "Capture a bounded base64 PNG screenshot. Use annotate=true "
-                "to overlay numbered labels for cached refs."
+                "Capture a PNG screenshot and save it to the session workspace. "
+                "Use annotate=true to overlay numbered labels for cached refs."
             ),
             parameters=SCREENSHOT_SCHEMA,
         ),
