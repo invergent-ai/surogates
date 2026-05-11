@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { MouseEvent, ReactNode } from "react";
 import {
   AlertCircleIcon,
-  ChevronRightIcon,
   DownloadIcon,
   FolderOpenIcon,
   Loader2Icon,
@@ -50,8 +49,6 @@ interface WorkspacePanelProps {
   sessionId: string | null;
   selectedPath: string | null;
   onSelectedPathChange: (path: string | null) => void;
-  collapsed?: boolean;
-  onCollapsedChange?: (collapsed: boolean) => void;
   refreshSignal?: number;
   disabled?: boolean;
   fillParent?: boolean;
@@ -160,8 +157,6 @@ export function WorkspacePanel({
   sessionId,
   selectedPath,
   onSelectedPathChange,
-  collapsed = false,
-  onCollapsedChange,
   refreshSignal = 0,
   disabled = false,
   fillParent = false,
@@ -381,27 +376,6 @@ export function WorkspacePanel({
     };
   }, []);
 
-  if (collapsed) {
-    return (
-      <aside
-        data-testid="workspace-panel"
-        role="button"
-        tabIndex={0}
-        className="relative z-10 flex h-full min-h-0 w-10 shrink-0 cursor-pointer items-center justify-center border-l border-muted-foreground/20 bg-card text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
-        aria-label="Expand workspace"
-        onClick={() => onCollapsedChange?.(false)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            onCollapsedChange?.(false);
-          }
-        }}
-      >
-        <FolderOpenIcon className="size-4 text-amber-500" />
-      </aside>
-    );
-  }
-
   return (
     <aside
       data-testid="workspace-panel"
@@ -442,19 +416,6 @@ export function WorkspacePanel({
             {disabled ? "Workspace - Read-only" : "Workspace"}
           </div>
         </div>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={() => onCollapsedChange?.(true)}
-              aria-label="Collapse workspace"
-            >
-              <ChevronRightIcon className="size-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">Collapse</TooltipContent>
-        </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
