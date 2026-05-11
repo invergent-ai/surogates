@@ -257,6 +257,62 @@ async def test_ack_rejects_non_ackable_kind(
     assert response.status_code == 409
 
 
+async def test_delete_inbox_item_expires_and_hides_item(
+    client,
+    session_factory,
+    session_store,
+):
+    _, _, token, session = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+    item = await _emit_task_complete(session_store, session.id)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = await client.delete(f"/v1/inbox/{item.id}", headers=headers)
+
+    assert response.status_code == 204, response.text
+
+    default_list = await client.get("/v1/inbox", headers=headers)
+    assert default_list.status_code == 200, default_list.text
+    assert default_list.json()["items"] == []
+
+    expired_list = await client.get("/v1/inbox?status=expired", headers=headers)
+    assert expired_list.status_code == 200, expired_list.text
+    assert [row["id"] for row in expired_list.json()["items"]] == [item.id]
+    assert expired_list.json()["items"][0]["status"] == "expired"
+
+    async with session_store._sf() as db:
+        row = await db.get(InboxItem, item.id)
+    assert row is not None
+    assert row.status == "expired"
+    assert row.responded_at is not None
+
+
+async def test_delete_other_users_item_returns_404(
+    client,
+    session_factory,
+    session_store,
+):
+    _, _, owner_token, session = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+    assert owner_token
+    _, _, other_token, _ = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+    item = await _emit_task_complete(session_store, session.id)
+
+    response = await client.delete(
+        f"/v1/inbox/{item.id}",
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+
+    assert response.status_code == 404
+
+
 async def test_respond_governance_records_decision_and_wakes_session(
     client,
     session_factory,

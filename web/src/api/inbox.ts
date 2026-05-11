@@ -107,6 +107,15 @@ export async function acknowledgeInboxItem(
   return toInboxItem((await response.json()) as InboxItemResponse);
 }
 
+export async function deleteInboxItem(itemId: number): Promise<void> {
+  const response = await authFetch(`/api/v1/inbox/${itemId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    return parseError(response, "Failed to delete inbox item");
+  }
+}
+
 export async function respondGovernanceInboxItem(
   itemId: number,
   decision: "approve" | "reject",

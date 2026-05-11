@@ -820,6 +820,37 @@ class SessionStore:
             await db.refresh(row)
             return row
 
+    async def delete_inbox_item(
+        self,
+        *,
+        item_id: int,
+        user_id: UUID,
+    ) -> InboxItem | None:
+        """Hide a user-owned inbox item from default inbox views.
+
+        Inbox rows reference immutable session events, so deletion is a
+        soft-delete represented by the existing terminal ``expired`` status.
+        """
+        async with self._sf() as db:
+            row = (
+                await db.execute(
+                    select(InboxItem).where(
+                        InboxItem.id == item_id,
+                        InboxItem.user_id == user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            if row.status != "expired":
+                now = datetime.now(timezone.utc)
+                row.status = "expired"
+                row.responded_at = row.responded_at or now
+                row.updated_at = now
+                await db.commit()
+                await db.refresh(row)
+            return row
+
     # ------------------------------------------------------------------
     # Lease management (raw SQL — atomic upsert required)
     # ------------------------------------------------------------------

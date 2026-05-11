@@ -454,6 +454,7 @@ export interface AgentChatAdapter {
   getInboxItem?(input: { itemId: number }): Promise<AgentChatInboxItem>;
   markInboxItemRead?(input: { itemId: number }): Promise<AgentChatInboxItem>;
   acknowledgeInboxItem?(input: { itemId: number }): Promise<AgentChatInboxItem>;
+  deleteInboxItem?(input: { itemId: number }): Promise<void>;
   respondGovernanceInboxItem?(input: {
     itemId: number;
     decision: "approve" | "reject";

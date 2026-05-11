@@ -112,6 +112,11 @@ function createAdapter(items: AgentChatInboxItem[]): AgentChatAdapter {
       item.respondedAt = "2026-01-01T00:02:00Z";
       return item;
     },
+    async deleteInboxItem(input) {
+      const index = items.findIndex((candidate) => candidate.id === input.itemId);
+      if (index === -1) throw new Error("missing item");
+      items.splice(index, 1);
+    },
     async respondGovernanceInboxItem(input) {
       const item = items.find((candidate) => candidate.id === input.itemId);
       if (!item) throw new Error("missing item");
@@ -331,6 +336,11 @@ describe("InboxPanel", () => {
     const complete = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Mark action complete"]',
     );
+    const deleteButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Delete inbox item"]',
+    );
+    expect(complete?.parentElement?.contains(deleteButton)).toBe(true);
+
     await act(async () => {
       complete?.click();
       await Promise.resolve();
@@ -338,5 +348,52 @@ describe("InboxPanel", () => {
 
     expect(completed).toEqual([3]);
     expect(container.textContent).toContain("Responded");
+  });
+
+  it("deletes the selected inbox item and clears the detail pane", async () => {
+    const deleted: number[] = [];
+    const items = [
+      inboxItem({ id: 4, title: "Old notification", body: "Clean me up." }),
+    ];
+    const adapter: AgentChatAdapter = {
+      ...createAdapter(items),
+      async deleteInboxItem(input) {
+        deleted.push(input.itemId);
+        const index = items.findIndex((candidate) => candidate.id === input.itemId);
+        if (index === -1) throw new Error("missing item");
+        items.splice(index, 1);
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<InboxPanel adapter={adapter} />);
+      await Promise.resolve();
+    });
+
+    const row = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open inbox item Old notification"]',
+    );
+    await act(async () => {
+      row?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Clean me up.");
+
+    const deleteButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Delete inbox item"]',
+    );
+    await act(async () => {
+      deleteButton?.click();
+      await Promise.resolve();
+    });
+
+    expect(deleted).toEqual([4]);
+    expect(container.textContent).not.toContain("Old notification");
+    expect(container.textContent).toContain("No inbox items");
+    expect(container.textContent).toContain("Select an item");
   });
 });

@@ -9,7 +9,15 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -244,6 +252,23 @@ async def acknowledge_inbox_item(
             detail=str(exc),
         ) from exc
     return _serialize_item(item)
+
+
+@router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_inbox_item(
+    item_id: int,
+    request: Request,
+    tenant: Annotated[TenantContext, Depends(get_current_tenant)],
+):
+    tenant = _require_user_tenant(tenant)
+    store = request.app.state.session_store
+    item = await store.delete_inbox_item(item_id=item_id, user_id=tenant.user_id)
+    if item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Inbox item not found.",
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/{item_id}/respond")

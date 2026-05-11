@@ -131,6 +131,10 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     return await inboxApi.acknowledgeInboxItem(input.itemId);
   },
 
+  async deleteInboxItem(input) {
+    await inboxApi.deleteInboxItem(input.itemId);
+  },
+
   async respondGovernanceInboxItem(input) {
     return await inboxApi.respondGovernanceInboxItem(
       input.itemId,

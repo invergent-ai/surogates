@@ -12,6 +12,7 @@ import {
   MessageSquareIcon,
   ShieldAlertIcon,
   TimerIcon,
+  Trash2Icon,
 } from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -42,6 +43,7 @@ type InboxAdapter = AgentChatAdapter & {
   getInboxItem(input: { itemId: number }): Promise<AgentChatInboxItem>;
   markInboxItemRead(input: { itemId: number }): Promise<AgentChatInboxItem>;
   acknowledgeInboxItem(input: { itemId: number }): Promise<AgentChatInboxItem>;
+  deleteInboxItem?(input: { itemId: number }): Promise<void>;
   respondGovernanceInboxItem(input: {
     itemId: number;
     decision: "approve" | "reject";
@@ -358,14 +360,17 @@ function ActionRequiredDetail({
   item,
   adapter,
   onUpdated,
+  onDeleted,
   onSessionSelect,
 }: {
   item: AgentChatInboxItem;
   adapter: InboxAdapter;
   onUpdated: (item: AgentChatInboxItem) => void;
+  onDeleted: (itemId: number) => Promise<void>;
   onSessionSelect?: (sessionId: string) => void;
 }) {
   const [submitting, setSubmitting] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const actionType =
     typeof item.payload.action_type === "string"
       ? item.payload.action_type
@@ -374,6 +379,7 @@ function ActionRequiredDetail({
     typeof item.payload.context === "string" ? item.payload.context : "";
   const disabled =
     item.status !== "pending" || submitting || !adapter.respondActionRequiredInboxItem;
+  const deleteDisabled = deleting || !adapter.deleteInboxItem;
 
   async function complete() {
     if (!adapter.respondActionRequiredInboxItem) return;
@@ -382,6 +388,16 @@ function ActionRequiredDetail({
       onUpdated(await adapter.respondActionRequiredInboxItem({ itemId: item.id }));
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function deleteItem() {
+    if (!adapter.deleteInboxItem) return;
+    setDeleting(true);
+    try {
+      await onDeleted(item.id);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -414,6 +430,20 @@ function ActionRequiredDetail({
           <CheckIcon className="size-3.5" />
           {submitting ? "Marking" : "I completed this"}
         </Button>
+        {adapter.deleteInboxItem && (
+          <Button
+            type="button"
+            size="sm"
+            variant="destructive"
+            onClick={() => void deleteItem()}
+            disabled={deleteDisabled}
+            aria-label="Delete inbox item"
+            title="Delete inbox item"
+          >
+            <Trash2Icon className="size-3.5" />
+            {deleting ? "Deleting" : "Delete"}
+          </Button>
+        )}
       </div>
     </div>
   );
@@ -473,14 +503,28 @@ function InboxDetail({
   item,
   adapter,
   onUpdated,
+  onDeleted,
   onSessionSelect,
 }: {
   item: AgentChatInboxItem;
   adapter: InboxAdapter;
   onUpdated: (item: AgentChatInboxItem) => void;
+  onDeleted: (itemId: number) => Promise<void>;
   onSessionSelect?: (sessionId: string) => void;
 }) {
   const Icon = kindIcon(item.kind);
+  const [deleting, setDeleting] = useState(false);
+
+  async function deleteItem() {
+    if (!adapter.deleteInboxItem) return;
+    setDeleting(true);
+    try {
+      await onDeleted(item.id);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
     <section className="min-w-0 flex-1 overflow-y-auto p-6">
       <div className="mb-5 flex min-w-0 items-start gap-3">
@@ -505,6 +549,19 @@ function InboxDetail({
             Open session
           </button>
         </div>
+        {adapter.deleteInboxItem && item.kind !== "action_required" && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            disabled={deleting}
+            onClick={() => void deleteItem()}
+            aria-label="Delete inbox item"
+            title="Delete inbox item"
+          >
+            <Trash2Icon className="size-4" />
+          </Button>
+        )}
       </div>
 
       {item.kind === "input_required" ? (
@@ -514,6 +571,7 @@ function InboxDetail({
           item={item}
           adapter={adapter}
           onUpdated={onUpdated}
+          onDeleted={onDeleted}
           onSessionSelect={onSessionSelect}
         />
       ) : item.kind === "governance_gate" ? (
@@ -614,6 +672,19 @@ export function InboxPanel({
     applyItem(item);
   }
 
+  const deleteItem = useCallback(
+    async (itemId: number) => {
+      if (!inboxAdapter.deleteInboxItem) return;
+      await inboxAdapter.deleteInboxItem({ itemId });
+      setItems((current) => current.filter((item) => item.id !== itemId));
+      if (selectedItemId === itemId) {
+        if (selectedId === undefined) setInternalSelectedId(null);
+        onSelectedIdChange?.(null);
+      }
+    },
+    [inboxAdapter, onSelectedIdChange, selectedId, selectedItemId],
+  );
+
   return (
     <div className="flex h-full min-h-0 min-w-0 bg-background text-foreground">
       <aside className="flex w-80 min-w-72 max-w-sm shrink-0 flex-col border-r border-line">
@@ -684,6 +755,7 @@ export function InboxPanel({
           item={selectedItem}
           adapter={inboxAdapter}
           onUpdated={updateSelectedItem}
+          onDeleted={deleteItem}
           onSessionSelect={onSessionSelect}
         />
       ) : (
