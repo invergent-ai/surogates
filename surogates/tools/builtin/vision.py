@@ -7,7 +7,7 @@ import binascii
 import json
 import logging
 import mimetypes
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -15,6 +15,7 @@ import httpx
 
 from surogates.harness.image_shrink import shrink_image_parts_in_messages
 from surogates.harness.message_utils import message_to_dict
+from surogates.storage.tenant import session_workspace_key
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.url_safety import is_safe_url
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError, validate_path
@@ -93,6 +94,9 @@ async def _vision_analyze_handler(arguments: dict[str, Any], **kwargs: Any) -> s
         data_url, source_kind = await _image_ref_to_data_url(
             image_ref,
             workspace_path=kwargs.get("workspace_path"),
+            storage=kwargs.get("storage"),
+            session_id=kwargs.get("session_id"),
+            session_config=kwargs.get("session_config"),
         )
     except ValueError as exc:
         return _json_error(str(exc))
@@ -149,6 +153,9 @@ async def _image_ref_to_data_url(
     image_ref: str,
     *,
     workspace_path: str | None,
+    storage: Any | None = None,
+    session_id: Any | None = None,
+    session_config: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     if image_ref.startswith("data:image/"):
         return _validate_data_url(image_ref), "data_url"
@@ -160,6 +167,27 @@ async def _image_ref_to_data_url(
         if mime_type not in _SUPPORTED_MIME_TYPES:
             raise ValueError(f"Unsupported image MIME type: {mime_type or 'unknown'}")
         return _to_data_url(data, mime_type), "url"
+
+    if storage is not None and session_id is not None:
+        storage_bucket = (session_config or {}).get("storage_bucket")
+        if storage_bucket:
+            relative_path = _validate_workspace_storage_path(image_ref)
+            key = session_workspace_key(session_id, relative_path)
+            try:
+                data = await storage.read(storage_bucket, key)
+            except KeyError:
+                raise ValueError(f"Image file not found: {image_ref}") from None
+            if len(data) > _MAX_IMAGE_BYTES:
+                raise ValueError(
+                    f"Image file is too large: {len(data)} bytes exceeds {_MAX_IMAGE_BYTES}"
+                )
+            mime_type = _detect_mime_type(
+                data,
+                fallback=mimetypes.guess_type(relative_path)[0] or "",
+            )
+            if mime_type not in _SUPPORTED_MIME_TYPES:
+                raise ValueError(f"Unsupported image MIME type: {mime_type or 'unknown'}")
+            return _to_data_url(data, mime_type), "workspace_file"
 
     path = Path(validate_path(workspace_path, image_ref))
     if not path.is_file():
@@ -174,6 +202,13 @@ async def _image_ref_to_data_url(
     if mime_type not in _SUPPORTED_MIME_TYPES:
         raise ValueError(f"Unsupported image MIME type: {mime_type or 'unknown'}")
     return _to_data_url(data, mime_type), "workspace_file"
+
+
+def _validate_workspace_storage_path(image_ref: str) -> str:
+    path = PurePosixPath(image_ref)
+    if path.is_absolute() or not path.parts or any(part == ".." for part in path.parts):
+        raise WorkspaceSandboxError(f"Path traversal blocked: {image_ref}")
+    return path.as_posix()
 
 
 def _validate_data_url(data_url: str) -> str:

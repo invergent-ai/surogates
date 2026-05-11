@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,11 +14,18 @@ import pytest
 from PIL import Image
 
 from surogates.session.models import Session, SessionLease
+from surogates.storage.tenant import session_workspace_key
 from surogates.tools.registry import ToolRegistry
 
 
 def _png(path: Path) -> None:
     Image.new("RGB", (2, 2), (200, 40, 10)).save(path, format="PNG")
+
+
+def _png_bytes() -> bytes:
+    buf = BytesIO()
+    Image.new("RGB", (2, 2), (200, 40, 10)).save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _fake_response(content: str = "a small red-orange square") -> SimpleNamespace:
@@ -40,6 +48,17 @@ def _fake_response(content: str = "a small red-orange square") -> SimpleNamespac
             total_tokens=12,
         ),
     )
+
+
+class FakeStorage:
+    def __init__(self, objects: dict[tuple[str, str], bytes]) -> None:
+        self.objects = objects
+
+    async def read(self, bucket: str, key: str) -> bytes:
+        try:
+            return self.objects[(bucket, key)]
+        except KeyError as exc:
+            raise KeyError(f"{bucket}/{key}") from exc
 
 
 def test_tool_runtime_registers_vision_analyze() -> None:
@@ -77,6 +96,41 @@ async def test_vision_analyze_sends_workspace_image_as_data_url(tmp_path: Path) 
     content = call_kwargs["messages"][0]["content"]
     assert content[0]["type"] == "text"
     assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+@pytest.mark.asyncio
+async def test_vision_analyze_reads_workspace_image_from_storage() -> None:
+    from surogates.tools.builtin.vision import _vision_analyze_handler
+
+    session_id = UUID("00000000-0000-0000-0000-000000000123")
+    image_path = "browser-screenshots/screenshot.png"
+    bucket = "agent-bucket"
+    storage = FakeStorage(
+        {
+            (
+                bucket,
+                session_workspace_key(session_id, image_path),
+            ): _png_bytes()
+        }
+    )
+    create = AsyncMock(return_value=_fake_response("storage image"))
+    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+    result = await _vision_analyze_handler(
+        {"image": image_path, "question": "What is in this image?"},
+        workspace_path="/workspace",
+        storage=storage,
+        session_id=session_id,
+        session_config={"storage_bucket": bucket},
+        llm_client=llm_client,
+        model="surogate",
+    )
+
+    payload = json.loads(result)
+    assert payload["analysis"] == "storage image"
+    assert payload["source"] == "workspace_file"
+    content = create.await_args.kwargs["messages"][0]["content"]
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
