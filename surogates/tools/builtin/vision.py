@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
 _MAX_REDIRECTS = 5
 _DEFAULT_PROMPT = "Describe the image. Include any visible text and important details."
+# Long-edge caps before sending to the vision model. Anthropic resizes anything
+# beyond ~1568 px server-side; OpenAI's ``low`` detail uses a single 512x512
+# tile and ~85 tokens. Pre-resizing locally trims upload bytes and latency.
+_VISION_MAX_DIMENSION_DEFAULT = 1568
+_VISION_MAX_DIMENSION_LOW = 512
+_VISION_MAX_BYTES = 1_000_000
 _SUPPORTED_MIME_TYPES = frozenset({
     "image/png",
     "image/jpeg",
@@ -118,7 +124,14 @@ async def _vision_analyze_handler(arguments: dict[str, Any], **kwargs: Any) -> s
             ],
         }
     ]
-    shrink_image_parts_in_messages(messages)
+    max_dimension = (
+        _VISION_MAX_DIMENSION_LOW if detail == "low" else _VISION_MAX_DIMENSION_DEFAULT
+    )
+    shrink_image_parts_in_messages(
+        messages,
+        max_bytes=_VISION_MAX_BYTES,
+        max_dimension=max_dimension,
+    )
 
     model = str(kwargs.get("model") or kwargs.get("session_model") or "surogate")
     response = await llm_client.chat.completions.create(
