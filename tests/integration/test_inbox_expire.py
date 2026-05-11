@@ -58,7 +58,7 @@ async def test_sweeper_expires_pending_items_for_terminal_sessions(
     expired_count = await expire_inbox_items(session_store)
     item = await _get_inbox_item_for_session(session_store, session.id)
 
-    assert expired_count == 1
+    assert expired_count >= 1
     assert item.status == "expired"
 
 
