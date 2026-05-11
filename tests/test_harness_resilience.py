@@ -234,11 +234,54 @@ def _session_with_config(config: dict[str, Any]) -> Session:
 class TestDynamicLoopToolPolicy:
     """Dynamic loop sessions expose loop_wait but not scheduler creation tools."""
 
+    def test_explicit_allowed_tools_still_include_clarify(self) -> None:
+        from surogates.tools.registry import ToolRegistry, ToolSchema
+
+        reg = ToolRegistry()
+        for name in ("clarify", "web_search"):
+            reg.register(
+                name,
+                ToolSchema(name=name, description="test", parameters={}),
+                lambda _: "{}",
+            )
+        harness = _make_harness(tool_registry=reg)
+        session = _session_with_config({"allowed_tools": ["web_search"]})
+
+        tool_names = harness._tool_filter_for_session(session)
+
+        assert tool_names == {"clarify", "web_search"}
+
+    def test_excluded_tools_cannot_remove_clarify(self) -> None:
+        from surogates.tools.registry import ToolRegistry, ToolSchema
+
+        reg = ToolRegistry()
+        for name in ("clarify", "web_search"):
+            reg.register(
+                name,
+                ToolSchema(name=name, description="test", parameters={}),
+                lambda _: "{}",
+            )
+        harness = _make_harness(tool_registry=reg)
+        session = _session_with_config({"excluded_tools": ["clarify"]})
+
+        tool_names = harness._tool_filter_for_session(session)
+
+        assert tool_names is not None
+        assert "clarify" in tool_names
+        assert "web_search" in tool_names
+
     def test_dynamic_loop_sessions_cannot_create_nested_cron_schedules(self) -> None:
         from surogates.tools.registry import ToolRegistry, ToolSchema
 
         reg = ToolRegistry()
-        for name in ("cron_create", "cron_delete", "cron_list", "loop_wait", "web_search"):
+        for name in (
+            "clarify",
+            "cron_create",
+            "cron_delete",
+            "cron_list",
+            "loop_wait",
+            "web_search",
+        ):
             reg.register(
                 name,
                 ToolSchema(name=name, description="test", parameters={}),
@@ -253,11 +296,105 @@ class TestDynamicLoopToolPolicy:
         tool_names = harness._tool_filter_for_session(session)
 
         assert tool_names is not None
+        assert "clarify" in tool_names
         assert "loop_wait" in tool_names
         assert "web_search" in tool_names
         assert "cron_create" not in tool_names
         assert "cron_delete" not in tool_names
         assert "cron_list" not in tool_names
+
+    async def test_final_response_needing_user_input_becomes_clarify_call(self) -> None:
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps({
+                            "needs_clarify": True,
+                            "reason": "user_decision",
+                            "question": "Which account should I use?",
+                            "context": "I need the user to choose an account.",
+                        })
+                    )
+                )
+            ]
+        )
+        llm_client = AsyncMock()
+        llm_client.chat.completions.create.return_value = response
+        from surogates.tools.registry import ToolRegistry, ToolSchema
+
+        reg = ToolRegistry()
+        reg.register(
+            "clarify",
+            ToolSchema(name="clarify", description="test", parameters={}),
+            lambda _: "{}",
+        )
+        harness = _make_harness(llm_client=llm_client, tool_registry=reg)
+        session = _session_with_config({})
+        assistant_message = {
+            "role": "assistant",
+            "content": "Which account should I use?",
+            "tool_calls": None,
+        }
+
+        converted = await harness._maybe_convert_final_response_to_clarify(
+            session=session,
+            messages=[{"role": "user", "content": "Post a status update"}],
+            assistant_message=assistant_message,
+            model="surogate",
+            tool_filter={"clarify", "browser_navigate"},
+        )
+
+        assert converted is True
+        tool_calls = assistant_message["tool_calls"]
+        assert tool_calls is not None
+        assert tool_calls[0]["function"]["name"] == "clarify"
+        arguments = json.loads(tool_calls[0]["function"]["arguments"])
+        assert arguments["questions"][0]["prompt"] == "Which account should I use?"
+        assert arguments["context"] == "I need the user to choose an account."
+
+    async def test_final_response_without_user_input_is_left_alone(self) -> None:
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps({
+                            "needs_clarify": False,
+                            "reason": "none",
+                            "question": None,
+                            "context": None,
+                        })
+                    )
+                )
+            ]
+        )
+        llm_client = AsyncMock()
+        llm_client.chat.completions.create.return_value = response
+        from surogates.tools.registry import ToolRegistry, ToolSchema
+
+        reg = ToolRegistry()
+        reg.register(
+            "clarify",
+            ToolSchema(name="clarify", description="test", parameters={}),
+            lambda _: "{}",
+        )
+        harness = _make_harness(llm_client=llm_client, tool_registry=reg)
+        session = _session_with_config({})
+        assistant_message = {
+            "role": "assistant",
+            "content": "Done. I posted the update.",
+            "tool_calls": None,
+        }
+
+        converted = await harness._maybe_convert_final_response_to_clarify(
+            session=session,
+            messages=[{"role": "user", "content": "Post a status update"}],
+            assistant_message=assistant_message,
+            model="surogate",
+            tool_filter={"clarify", "browser_navigate"},
+        )
+
+        assert converted is False
+        assert assistant_message["tool_calls"] is None
 
     def test_successful_loop_wait_is_terminal_for_dynamic_loop_run(self) -> None:
         harness = _make_harness()
