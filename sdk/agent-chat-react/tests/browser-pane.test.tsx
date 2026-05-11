@@ -50,8 +50,15 @@ function renderPane(element: React.ReactElement) {
   return container;
 }
 
+async function flushPreview() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
 describe("BrowserPane", () => {
-  it("opens a passive screenshot preview without mounting the live-view iframe", async () => {
+  it("renders a passive screenshot preview without mounting the live-view iframe", async () => {
     const node = renderPane(
       <BrowserPane
         sessionId="s"
@@ -62,14 +69,7 @@ describe("BrowserPane", () => {
 
     expect(node.querySelector('[data-testid="browser-iframe"]')).toBeNull();
 
-    const openButton = node.querySelector<HTMLButtonElement>(
-      'button[aria-label="Open browser preview"]',
-    );
-    expect(openButton).not.toBeNull();
-
-    await act(async () => {
-      openButton?.click();
-    });
+    await flushPreview();
 
     const preview = node.querySelector<HTMLImageElement>(
       '[data-testid="browser-preview-image"]',
@@ -81,6 +81,9 @@ describe("BrowserPane", () => {
       "data:image/png;base64,cHJldmlldw==",
     );
     expect(iframe).toBeNull();
+    expect(
+      node.querySelector('button[aria-label="Open browser preview"]'),
+    ).toBeNull();
   });
 
   it("opens passive preview in a full-page dialog without mounting live view", async () => {
@@ -91,6 +94,7 @@ describe("BrowserPane", () => {
         adapter={liveAdapter}
       />,
     );
+    await flushPreview();
 
     const maximizeButton = node.querySelector<HTMLButtonElement>(
       'button[aria-label="Maximize browser"]',
@@ -117,7 +121,7 @@ describe("BrowserPane", () => {
     expect(iframe).toBeNull();
   });
 
-  it("mounts the live-view iframe only while the user has browser control", async () => {
+  it("mounts the live-view iframe immediately while the user has browser control", () => {
     const node = renderPane(
       <BrowserPane
         sessionId="s"
@@ -126,15 +130,6 @@ describe("BrowserPane", () => {
       />,
     );
 
-    const openButton = node.querySelector<HTMLButtonElement>(
-      'button[aria-label="Open browser preview"]',
-    );
-    expect(openButton).not.toBeNull();
-
-    await act(async () => {
-      openButton?.click();
-    });
-
     const iframe = node.querySelector<HTMLIFrameElement>(
       '[data-testid="browser-iframe"]',
     );
@@ -142,9 +137,25 @@ describe("BrowserPane", () => {
     expect(
       node.querySelector('[data-testid="browser-preview-image"]'),
     ).toBeNull();
+    expect(
+      node.querySelector('button[aria-label="Open browser preview"]'),
+    ).toBeNull();
   });
 
-  it("shows Take control button in live state", () => {
+  it("shows Take control button in live state", async () => {
+    const node = renderPane(
+      <BrowserPane
+        sessionId="s"
+        state={{ status: "live", controlOwner: null }}
+        adapter={liveAdapter}
+      />,
+    );
+    await flushPreview();
+
+    expect(node.textContent).toContain("Take control");
+  });
+
+  it("opens the full-page browser dialog after taking control", async () => {
     const node = renderPane(
       <BrowserPane
         sessionId="s"
@@ -153,7 +164,18 @@ describe("BrowserPane", () => {
       />,
     );
 
-    expect(node.textContent).toContain("Take control");
+    const takeControlButton = Array.from(
+      node.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.includes("Take control"));
+    expect(takeControlButton).not.toBeNull();
+
+    await act(async () => {
+      takeControlButton?.click();
+    });
+
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.textContent).toContain("Browser");
   });
 
   it("shows Return control button when user has control", () => {
@@ -189,7 +211,7 @@ describe("BrowserPane", () => {
       />,
     );
 
-    expect(node.textContent).toMatch(/browser live view is unavailable/i);
+    expect(node.textContent).toMatch(/browser preview is unavailable/i);
     expect(node.querySelector('[data-testid="browser-iframe"]')).toBeNull();
     expect(
       node.querySelector('button[aria-label="Open browser preview"]'),

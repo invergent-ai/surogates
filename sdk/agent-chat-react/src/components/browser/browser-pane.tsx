@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Maximize2Icon, PlayIcon, ZapIcon } from "lucide-react";
+import { Maximize2Icon, ZapIcon } from "lucide-react";
 import { BrowserControlBar } from "./browser-control-bar";
 import { BrowserLiveView } from "./browser-live-view";
 import { BrowserStatusDot } from "./browser-status-dot";
@@ -37,7 +37,6 @@ interface BrowserPaneProps {
 
 export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
-  const [inlinePreviewOpen, setInlinePreviewOpen] = useState(false);
   const [previewSnapshot, setPreviewSnapshot] =
     useState<AgentChatBrowserPreviewSnapshot | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -86,7 +85,6 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
 
   useEffect(() => {
     setFullscreenOpen(false);
-    setInlinePreviewOpen(false);
     setPreviewSnapshot(null);
     setPreviewLoading(false);
     setPreviewError(null);
@@ -98,7 +96,7 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
       setPreviewError(null);
       return;
     }
-    if (!inlinePreviewOpen && !fullscreenOpen) return;
+    if (!hasPreviewAdapter) return;
 
     const abort = new AbortController();
     void refreshPreview(abort.signal);
@@ -113,7 +111,7 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
     canUseLiveView,
     fullscreenOpen,
     hasLiveView,
-    inlinePreviewOpen,
+    hasPreviewAdapter,
     refreshPreview,
   ]);
 
@@ -161,36 +159,24 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
             <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">
               Browser closed.
             </div>
-          ) : canUseLiveView && inlinePreviewOpen ? (
+          ) : canUseLiveView ? (
             <BrowserLiveView src={liveViewUrl} />
-          ) : inlinePreviewOpen && previewSnapshot ? (
+          ) : previewSnapshot ? (
             <BrowserPreviewImage
               src={previewSnapshot.src}
               testId="browser-preview-image"
             />
-          ) : inlinePreviewOpen && previewLoading ? (
+          ) : previewLoading ? (
             <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">
               Loading browser preview...
             </div>
-          ) : inlinePreviewOpen && previewError ? (
+          ) : previewError ? (
             <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">
               {previewError}
             </div>
-          ) : canOpenPreview ? (
-            <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">
-              <button
-                type="button"
-                aria-label="Open browser preview"
-                className="inline-flex items-center gap-2 border border-line bg-card px-3 py-2 text-xs font-medium text-foreground transition-colors hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                onClick={() => setInlinePreviewOpen(true)}
-              >
-                <PlayIcon className="size-3.5" aria-hidden="true" />
-                <span>Open preview</span>
-              </button>
-            </div>
           ) : (
             <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">
-              Browser live view is unavailable.
+              Browser preview is unavailable.
             </div>
           )}
         </div>
@@ -199,6 +185,7 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
             sessionId={sessionId}
             hasControl={state.status === "user-control"}
             adapter={adapter}
+            onControlAcquired={() => setFullscreenOpen(true)}
           />
         )}
       </div>
