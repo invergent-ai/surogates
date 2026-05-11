@@ -192,13 +192,29 @@ return {
     ) -> None:
         """Click at viewport coordinates."""
 
-        body: dict[str, Any] = {"x": x, "y": y, "click_type": click_type}
-        if button != "left":
-            body["button"] = button
+        options: dict[str, Any] = {"button": button}
         if num_clicks != 1:
-            body["num_clicks"] = num_clicks
-        response = await self._http.post("/computer/click_mouse", json=body)
-        response.raise_for_status()
+            options["clickCount"] = num_clicks
+        if click_type == "click":
+            code = (
+                f"await page.mouse.click({int(x)}, {int(y)}, "
+                f"{json.dumps(options)});\nreturn true;"
+            )
+        elif click_type == "down":
+            code = (
+                f"await page.mouse.move({int(x)}, {int(y)});\n"
+                f"await page.mouse.down({json.dumps({'button': button})});\n"
+                "return true;"
+            )
+        elif click_type == "up":
+            code = (
+                f"await page.mouse.move({int(x)}, {int(y)});\n"
+                f"await page.mouse.up({json.dumps({'button': button})});\n"
+                "return true;"
+            )
+        else:
+            raise ValueError(f"unsupported click_type: {click_type}")
+        await self._playwright_execute(code)
         self._invalidate_snapshot_cache()
 
     async def click_ref(self, ref: str, **kwargs: Any) -> None:

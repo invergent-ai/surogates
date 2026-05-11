@@ -375,11 +375,15 @@ class TestClickType:
     async def test_click_at_coords(self, client_with_transport) -> None:
         client, handlers = client_with_transport
         client._snapshot_cache["@e1"] = {"x": 1, "y": 1, "role": "button", "name": "Go"}
-        handlers.append(("POST", "/computer/click_mouse", 200, {"ok": True}))
+        handlers.append(
+            ("POST", "/playwright/execute", 200, {"success": True, "result": True})
+        )
         await client.click_at(120, 240)
         assert client._snapshot_cache == {}
 
-    async def test_click_ref_resolves_from_cache(self, client_with_transport) -> None:
+    async def test_click_ref_uses_playwright_viewport_coordinates(
+        self, client_with_transport
+    ) -> None:
         client, _handlers = client_with_transport
         client._snapshot_cache["@e3"] = {
             "x": 50,
@@ -393,14 +397,21 @@ class TestClickType:
             async def handle_async_request(
                 self, request: httpx.Request
             ) -> httpx.Response:
-                captured.append(json.loads(request.content))
-                return httpx.Response(200, json={"ok": True})
+                captured.append({
+                    "path": request.url.path,
+                    "body": json.loads(request.content),
+                })
+                return httpx.Response(200, json={"success": True, "result": True})
 
         client._http = httpx.AsyncClient(
             base_url=client.rest_url, transport=CapturingTransport()
         )
         await client.click_ref("@e3")
-        assert captured[0] == {"x": 50, "y": 60, "click_type": "click"}
+        assert captured[0]["path"] == "/playwright/execute"
+        code = captured[0]["body"]["code"]
+        assert "page.mouse.click" in code
+        assert "50" in code
+        assert "60" in code
 
     async def test_click_ref_unknown_raises(self, client_with_transport) -> None:
         client, _ = client_with_transport
@@ -427,7 +438,9 @@ class TestClickType:
             "role": "textbox",
             "name": "Email",
         }
-        handlers.append(("POST", "/computer/click_mouse", 200, {"ok": True}))
+        handlers.append(
+            ("POST", "/playwright/execute", 200, {"success": True, "result": True})
+        )
         handlers.append(("POST", "/computer/type", 200, {"ok": True}))
         await client.type_into_ref("@e2", "test@example.com")
         assert client._snapshot_cache == {}
