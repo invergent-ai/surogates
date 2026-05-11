@@ -1,7 +1,14 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { formatDistanceToNow } from "date-fns";
 import {
   CheckIcon,
@@ -153,6 +160,61 @@ function QuestionInput({
   );
 }
 
+function InboxDetailActions({
+  item,
+  adapter,
+  onDeleted,
+  onSessionSelect,
+  children,
+}: {
+  item: AgentChatInboxItem;
+  adapter: InboxAdapter;
+  onDeleted: (itemId: number) => Promise<void>;
+  onSessionSelect?: (sessionId: string) => void;
+  children?: ReactNode;
+}) {
+  const [deleting, setDeleting] = useState(false);
+
+  async function deleteItem() {
+    if (!adapter.deleteInboxItem) return;
+    setDeleting(true);
+    try {
+      await onDeleted(item.id);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap gap-2">
+      <Button
+        type="button"
+        size="sm"
+        onClick={() => onSessionSelect?.(item.sessionId)}
+        aria-label="Open session"
+      >
+        <ExternalLinkIcon className="size-3.5" />
+        Open session
+      </Button>
+      {children}
+      {adapter.deleteInboxItem && (
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          onClick={() => void deleteItem()}
+          disabled={deleting}
+          aria-label="Delete inbox item"
+          title="Delete inbox item"
+        >
+          <Trash2Icon className="size-3.5" />
+          {deleting ? "Deleting" : "Delete"}
+        </Button>
+      )}
+    </div>
+  );
+}
+
 function InputRequiredDetail({
   item,
   adapter,
@@ -189,7 +251,6 @@ function InputRequiredDetail({
     : [];
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const disabled = item.status !== "pending" || submitting;
   const canSubmit = questions.every((question) => answers[question.prompt]?.trim());
 
@@ -214,16 +275,6 @@ function InputRequiredDetail({
       onUpdated(await adapter.getInboxItem({ itemId: item.id }));
     } finally {
       setSubmitting(false);
-    }
-  }
-
-  async function deleteItem() {
-    if (!adapter.deleteInboxItem) return;
-    setDeleting(true);
-    try {
-      await onDeleted(item.id);
-    } finally {
-      setDeleting(false);
     }
   }
 
@@ -253,16 +304,12 @@ function InputRequiredDetail({
           />
         </label>
       ))}
-      <div className="flex flex-wrap gap-2">
-        <Button
-          type="button"
-          size="sm"
-          onClick={() => onSessionSelect?.(item.sessionId)}
-          aria-label="Open session for input"
-        >
-          <ExternalLinkIcon className="size-3.5" />
-          Open session
-        </Button>
+      <InboxDetailActions
+        item={item}
+        adapter={adapter}
+        onDeleted={onDeleted}
+        onSessionSelect={onSessionSelect}
+      >
         <Button
           type="button"
           size="sm"
@@ -272,21 +319,7 @@ function InputRequiredDetail({
         >
           {submitting ? "Submitting" : "Submit"}
         </Button>
-        {adapter.deleteInboxItem && (
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            onClick={() => void deleteItem()}
-            disabled={deleting}
-            aria-label="Delete inbox item"
-            title="Delete inbox item"
-          >
-            <Trash2Icon className="size-3.5" />
-            {deleting ? "Deleting" : "Delete"}
-          </Button>
-        )}
-      </div>
+      </InboxDetailActions>
     </div>
   );
 }
@@ -295,10 +328,14 @@ function AckDetail({
   item,
   adapter,
   onUpdated,
+  onDeleted,
+  onSessionSelect,
 }: {
   item: AgentChatInboxItem;
   adapter: InboxAdapter;
   onUpdated: (item: AgentChatInboxItem) => void;
+  onDeleted: (itemId: number) => Promise<void>;
+  onSessionSelect?: (sessionId: string) => void;
 }) {
   async function acknowledge() {
     onUpdated(await adapter.acknowledgeInboxItem({ itemId: item.id }));
@@ -322,17 +359,24 @@ function AckDetail({
           Duration: {Math.round(duration / 60)} min ({duration} s)
         </p>
       )}
-      {item.status === "pending" && (
-        <Button
-          type="button"
-          size="sm"
-          onClick={() => void acknowledge()}
-          aria-label="Acknowledge inbox item"
-        >
-          <CheckIcon className="size-3.5" />
-          Acknowledge
-        </Button>
-      )}
+      <InboxDetailActions
+        item={item}
+        adapter={adapter}
+        onDeleted={onDeleted}
+        onSessionSelect={onSessionSelect}
+      >
+        {item.status === "pending" && (
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => void acknowledge()}
+            aria-label="Acknowledge inbox item"
+          >
+            <CheckIcon className="size-3.5" />
+            Acknowledge
+          </Button>
+        )}
+      </InboxDetailActions>
     </div>
   );
 }
@@ -341,10 +385,14 @@ function GovernanceDetail({
   item,
   adapter,
   onUpdated,
+  onDeleted,
+  onSessionSelect,
 }: {
   item: AgentChatInboxItem;
   adapter: InboxAdapter;
   onUpdated: (item: AgentChatInboxItem) => void;
+  onDeleted: (itemId: number) => Promise<void>;
+  onSessionSelect?: (sessionId: string) => void;
 }) {
   async function decide(decision: "approve" | "reject") {
     onUpdated(
@@ -373,7 +421,12 @@ function GovernanceDetail({
           {args}
         </pre>
       )}
-      <div className="flex gap-2">
+      <InboxDetailActions
+        item={item}
+        adapter={adapter}
+        onDeleted={onDeleted}
+        onSessionSelect={onSessionSelect}
+      >
         <Button
           type="button"
           size="sm"
@@ -391,7 +444,7 @@ function GovernanceDetail({
         >
           Reject
         </Button>
-      </div>
+      </InboxDetailActions>
     </div>
   );
 }
@@ -410,7 +463,6 @@ function ActionRequiredDetail({
   onSessionSelect?: (sessionId: string) => void;
 }) {
   const [submitting, setSubmitting] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const actionType =
     typeof item.payload.action_type === "string"
       ? item.payload.action_type
@@ -419,7 +471,6 @@ function ActionRequiredDetail({
     typeof item.payload.context === "string" ? item.payload.context : "";
   const disabled =
     item.status !== "pending" || submitting || !adapter.respondActionRequiredInboxItem;
-  const deleteDisabled = deleting || !adapter.deleteInboxItem;
 
   async function complete() {
     if (!adapter.respondActionRequiredInboxItem) return;
@@ -428,16 +479,6 @@ function ActionRequiredDetail({
       onUpdated(await adapter.respondActionRequiredInboxItem({ itemId: item.id }));
     } finally {
       setSubmitting(false);
-    }
-  }
-
-  async function deleteItem() {
-    if (!adapter.deleteInboxItem) return;
-    setDeleting(true);
-    try {
-      await onDeleted(item.id);
-    } finally {
-      setDeleting(false);
     }
   }
 
@@ -450,16 +491,12 @@ function ActionRequiredDetail({
         </p>
       )}
       {actionType && <Badge variant="secondary">{actionType}</Badge>}
-      <div className="flex flex-wrap gap-2">
-        <Button
-          type="button"
-          size="sm"
-          onClick={() => onSessionSelect?.(item.sessionId)}
-          aria-label="Open session for action"
-        >
-          <ExternalLinkIcon className="size-3.5" />
-          Open session
-        </Button>
+      <InboxDetailActions
+        item={item}
+        adapter={adapter}
+        onDeleted={onDeleted}
+        onSessionSelect={onSessionSelect}
+      >
         <Button
           type="button"
           size="sm"
@@ -470,21 +507,7 @@ function ActionRequiredDetail({
           <CheckIcon className="size-3.5" />
           {submitting ? "Marking" : "I completed this"}
         </Button>
-        {adapter.deleteInboxItem && (
-          <Button
-            type="button"
-            size="sm"
-            variant="destructive"
-            onClick={() => void deleteItem()}
-            disabled={deleteDisabled}
-            aria-label="Delete inbox item"
-            title="Delete inbox item"
-          >
-            <Trash2Icon className="size-3.5" />
-            {deleting ? "Deleting" : "Delete"}
-          </Button>
-        )}
-      </div>
+      </InboxDetailActions>
     </div>
   );
 }
@@ -493,10 +516,14 @@ function ProgressDetail({
   item,
   adapter,
   onUpdated,
+  onDeleted,
+  onSessionSelect,
 }: {
   item: AgentChatInboxItem;
   adapter: InboxAdapter;
   onUpdated: (item: AgentChatInboxItem) => void;
+  onDeleted: (itemId: number) => Promise<void>;
+  onSessionSelect?: (sessionId: string) => void;
 }) {
   async function acknowledge() {
     onUpdated(await adapter.acknowledgeInboxItem({ itemId: item.id }));
@@ -524,17 +551,24 @@ function ProgressDetail({
           ))}
         </dl>
       )}
-      {item.status === "pending" && (
-        <Button
-          type="button"
-          size="sm"
-          onClick={() => void acknowledge()}
-          aria-label="Acknowledge inbox item"
-        >
-          <CheckIcon className="size-3.5" />
-          Acknowledge
-        </Button>
-      )}
+      <InboxDetailActions
+        item={item}
+        adapter={adapter}
+        onDeleted={onDeleted}
+        onSessionSelect={onSessionSelect}
+      >
+        {item.status === "pending" && (
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => void acknowledge()}
+            aria-label="Acknowledge inbox item"
+          >
+            <CheckIcon className="size-3.5" />
+            Acknowledge
+          </Button>
+        )}
+      </InboxDetailActions>
     </div>
   );
 }
@@ -553,17 +587,6 @@ function InboxDetail({
   onSessionSelect?: (sessionId: string) => void;
 }) {
   const Icon = kindIcon(item.kind);
-  const [deleting, setDeleting] = useState(false);
-
-  async function deleteItem() {
-    if (!adapter.deleteInboxItem) return;
-    setDeleting(true);
-    try {
-      await onDeleted(item.id);
-    } finally {
-      setDeleting(false);
-    }
-  }
 
   return (
     <section className="min-w-0 flex-1 overflow-y-auto p-6">
@@ -581,29 +604,7 @@ function InboxDetail({
           <h2 className="mt-2 text-lg font-semibold leading-snug text-foreground">
             {item.title}
           </h2>
-          <button
-            type="button"
-            className="mt-1 text-xs text-muted-foreground hover:text-foreground"
-            onClick={() => onSessionSelect?.(item.sessionId)}
-          >
-            Open session
-          </button>
         </div>
-        {adapter.deleteInboxItem &&
-          item.kind !== "action_required" &&
-          item.kind !== "input_required" && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              disabled={deleting}
-              onClick={() => void deleteItem()}
-              aria-label="Delete inbox item"
-              title="Delete inbox item"
-            >
-              <Trash2Icon className="size-4" />
-            </Button>
-          )}
       </div>
 
       {item.kind === "input_required" ? (
@@ -623,11 +624,29 @@ function InboxDetail({
           onSessionSelect={onSessionSelect}
         />
       ) : item.kind === "governance_gate" ? (
-        <GovernanceDetail item={item} adapter={adapter} onUpdated={onUpdated} />
+        <GovernanceDetail
+          item={item}
+          adapter={adapter}
+          onUpdated={onUpdated}
+          onDeleted={onDeleted}
+          onSessionSelect={onSessionSelect}
+        />
       ) : item.kind === "progress_checkin" ? (
-        <ProgressDetail item={item} adapter={adapter} onUpdated={onUpdated} />
+        <ProgressDetail
+          item={item}
+          adapter={adapter}
+          onUpdated={onUpdated}
+          onDeleted={onDeleted}
+          onSessionSelect={onSessionSelect}
+        />
       ) : (
-        <AckDetail item={item} adapter={adapter} onUpdated={onUpdated} />
+        <AckDetail
+          item={item}
+          adapter={adapter}
+          onUpdated={onUpdated}
+          onDeleted={onDeleted}
+          onSessionSelect={onSessionSelect}
+        />
       )}
     </section>
   );

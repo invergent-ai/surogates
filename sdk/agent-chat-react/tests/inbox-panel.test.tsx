@@ -156,6 +156,7 @@ afterEach(() => {
 
 describe("InboxPanel", () => {
   it("renders inbox items and acknowledges task completion", async () => {
+    const selectedSessions: string[] = [];
     const items = [
       inboxItem({ id: 1, title: "Deploy finished", body: "Deployment passed." }),
     ];
@@ -165,7 +166,12 @@ describe("InboxPanel", () => {
     root = createRoot(container);
 
     await act(async () => {
-      root?.render(<InboxPanel adapter={adapter} />);
+      root?.render(
+        <InboxPanel
+          adapter={adapter}
+          onSessionSelect={(sessionId) => selectedSessions.push(sessionId)}
+        />,
+      );
       await Promise.resolve();
     });
 
@@ -184,6 +190,22 @@ describe("InboxPanel", () => {
     const ack = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Acknowledge inbox item"]',
     );
+    const openSession = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open session"]',
+    );
+    const deleteButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Delete inbox item"]',
+    );
+
+    expect(ack?.parentElement?.contains(openSession)).toBe(true);
+    expect(ack?.parentElement?.contains(deleteButton)).toBe(true);
+
+    await act(async () => {
+      openSession?.click();
+      await Promise.resolve();
+    });
+    expect(selectedSessions).toEqual(["session-1"]);
+
     await act(async () => {
       ack?.click();
       await Promise.resolve();
@@ -261,7 +283,7 @@ describe("InboxPanel", () => {
       'button[aria-label="Submit inbox response"]',
     );
     const openSession = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Open session for input"]',
+      'button[aria-label="Open session"]',
     );
     const deleteButton = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Delete inbox item"]',
@@ -285,6 +307,118 @@ describe("InboxPanel", () => {
       { question: "Which color?", answer: "blue", is_other: false },
     ]);
     expect(container.textContent).toContain("Responded");
+  });
+
+  it("shows open session and delete actions for progress check-ins", async () => {
+    const selectedSessions: string[] = [];
+    const items = [
+      inboxItem({
+        id: 6,
+        kind: "progress_checkin",
+        title: "Still working",
+        body: "The agent is still running.",
+        payload: { iterations: 4, last_tool: "browser_navigate" },
+      }),
+    ];
+    const adapter = createAdapter(items);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <InboxPanel
+          adapter={adapter}
+          onSessionSelect={(sessionId) => selectedSessions.push(sessionId)}
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    const row = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open inbox item Still working"]',
+    );
+    await act(async () => {
+      row?.click();
+      await Promise.resolve();
+    });
+
+    const acknowledge = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Acknowledge inbox item"]',
+    );
+    const openSession = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open session"]',
+    );
+    const deleteButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Delete inbox item"]',
+    );
+
+    expect(acknowledge?.parentElement?.contains(openSession)).toBe(true);
+    expect(acknowledge?.parentElement?.contains(deleteButton)).toBe(true);
+
+    await act(async () => {
+      openSession?.click();
+      await Promise.resolve();
+    });
+    expect(selectedSessions).toEqual(["session-1"]);
+  });
+
+  it("shows open session and delete actions for governance approvals", async () => {
+    const selectedSessions: string[] = [];
+    const items = [
+      inboxItem({
+        id: 7,
+        kind: "governance_gate",
+        title: "Approval required",
+        body: null,
+        payload: {
+          tool_name: "send_email",
+          arguments_excerpt: "to=ceo@example.com",
+          deny_reason: "External recipient",
+        },
+      }),
+    ];
+    const adapter = createAdapter(items);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <InboxPanel
+          adapter={adapter}
+          onSessionSelect={(sessionId) => selectedSessions.push(sessionId)}
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    const row = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open inbox item Approval required"]',
+    );
+    await act(async () => {
+      row?.click();
+      await Promise.resolve();
+    });
+
+    const approve = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Approve"),
+    );
+    const openSession = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open session"]',
+    );
+    const deleteButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Delete inbox item"]',
+    );
+
+    expect(approve?.parentElement?.contains(openSession)).toBe(true);
+    expect(approve?.parentElement?.contains(deleteButton)).toBe(true);
+
+    await act(async () => {
+      openSession?.click();
+      await Promise.resolve();
+    });
+    expect(selectedSessions).toEqual(["session-1"]);
   });
 
   it("deletes an input-required inbox item from the input action row", async () => {
@@ -405,8 +539,8 @@ describe("InboxPanel", () => {
     expect(container.textContent).toContain("Action needed");
     expect(container.textContent).toContain("Open the browser session");
 
-    const openSession = Array.from(container.querySelectorAll("button")).find(
-      (button) => button.textContent?.includes("Open session"),
+    const openSession = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open session"]',
     );
     await act(async () => {
       openSession?.click();
