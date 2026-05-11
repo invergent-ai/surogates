@@ -384,7 +384,6 @@ class K8sBrowserBackend:
                 ),
             ])
             env_vars = [
-                client.V1EnvVar(name="HOME", value="/workspace"),
                 client.V1EnvVar(name="WORKSPACE_DIR", value="/workspace"),
                 *[env for env in env_vars if env.name not in {"HOME", "WORKSPACE_DIR"}],
             ]
@@ -403,8 +402,9 @@ class K8sBrowserBackend:
                 "-c",
                 (
                     "mkdir -p "
-                    "/browser-runtime/supervisord/chromedriver "
+                    "/browser-runtime/supervisord "
                     "/browser-runtime/envoy-certs && "
+                    "touch /browser-runtime/supervisord/chromedriver && "
                     "chown -R 1000:1000 /browser-runtime && "
                     "chmod -R 0770 /browser-runtime"
                 ),

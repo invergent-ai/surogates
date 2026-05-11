@@ -212,7 +212,6 @@ class TestBuildPodManifest:
             for mount in browser_container.volume_mounts[2:]
         ] == [("workspace", "/workspace", "HostToContainer")]
         assert {e.name: e.value for e in browser_container.env} == {
-            "HOME": "/workspace",
             "WORKSPACE_DIR": "/workspace",
         }
 
