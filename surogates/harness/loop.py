@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import traceback
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID
 
@@ -136,6 +137,44 @@ def _format_loop_list(rows: list[Any]) -> str:
             f"(next: {row.next_run_at}){suffix}"
         )
     return "\n".join(lines)
+
+
+def _last_assistant_message_excerpt(
+    messages: list[dict[str, Any]],
+    limit: int = 500,
+) -> str:
+    """Return the latest assistant text as a compact summary."""
+
+    for message in reversed(messages):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content") or ""
+        if isinstance(content, list):
+            content = " ".join(
+                str(part.get("text", ""))
+                for part in content
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") in {"text", "output_text"}
+                )
+            )
+        text = str(content).strip()
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 3)].rstrip() + "..."
+    return ""
+
+
+def _seconds_since(value: Any) -> int:
+    if not isinstance(value, datetime):
+        return 0
+    created_at = value
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return max(
+        0,
+        int((datetime.now(timezone.utc) - created_at).total_seconds()),
+    )
 
 
 def _should_notify_parent_on_completion(session: Any) -> bool:
@@ -3081,6 +3120,21 @@ class AgentHarness:
             EventType.SESSION_COMPLETE,
             complete_data,
         )
+        inbox_event_id = await self._store.emit_event(
+            session.id,
+            EventType.INBOX_TASK_COMPLETE,
+            {
+                "outcome": (
+                    "success"
+                    if reason in {"stop", "done", "complete", "completed"}
+                    else reason
+                ),
+                "summary": _last_assistant_message_excerpt(messages),
+                "duration_seconds": _seconds_since(session.created_at),
+                "session_title": session.title or "Task complete",
+                "error": None,
+            },
+        )
         try:
             await self._store.update_session_status(session.id, "completed")
         except Exception:
@@ -3113,7 +3167,9 @@ class AgentHarness:
         await self._finalize_dynamic_loop_if_needed(session)
 
         # Advance cursor to the latest event.
-        cursor_target = through_event_id if through_event_id is not None else event_id
+        cursor_target = (
+            through_event_id if through_event_id is not None else inbox_event_id
+        )
         try:
             await self._store.advance_harness_cursor(
                 session.id, cursor_target, lease.lease_token,
