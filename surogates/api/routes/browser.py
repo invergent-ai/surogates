@@ -255,7 +255,7 @@ async def get_browser_preview(
 
     try:
         async with _browser_preview_client(resolved.endpoint.rest_url) as client:
-            screenshot = await client.screenshot()
+            screenshot = await client.screenshot(viewport_only=True)
     except Exception as exc:
         raise HTTPException(
             status_code=502,

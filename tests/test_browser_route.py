@@ -356,6 +356,7 @@ class TestPreviewEndpoint:
         sid = str(uuid4())
         resolver.entries[sid] = _resolved(sid)
         seen: list[str] = []
+        screenshot_kwargs: list[dict[str, object]] = []
 
         class FakePreviewClient:
             def __init__(self, rest_url: str) -> None:
@@ -367,7 +368,8 @@ class TestPreviewEndpoint:
             async def __aexit__(self, *_args) -> None:
                 return None
 
-            async def screenshot(self) -> dict[str, bytes]:
+            async def screenshot(self, **kwargs) -> dict[str, bytes]:
+                screenshot_kwargs.append(kwargs)
                 return {"png_bytes": b"\x89PNG\r\n\x1a\npreview"}
 
         monkeypatch.setattr(
@@ -388,6 +390,7 @@ class TestPreviewEndpoint:
         assert response.headers["cache-control"] == "no-store"
         assert response.content == b"\x89PNG\r\n\x1a\npreview"
         assert seen == ["http://browser-x.svc:10001"]
+        assert screenshot_kwargs == [{"viewport_only": True}]
 
     async def test_preview_unknown_session_returns_404(self, app_factory) -> None:
         build, _resolver, _control = app_factory
