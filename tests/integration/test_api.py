@@ -393,6 +393,40 @@ async def test_api_session_workspace_file_with_service_account(
     assert file_resp.json()["content"] == "print('hello')\n"
 
 
+async def test_session_workspace_download_accepts_query_token(
+    client: AsyncClient, app, session_factory
+):
+    """Workspace download supports browser anchor links carrying ?token=."""
+    _, _, token, _ = await _create_test_tenant(session_factory)
+    create_resp = await client.post(
+        "/v1/sessions",
+        json={"model": "gpt-4o"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    session_id = create_resp.json()["id"]
+
+    store = SessionStore(session_factory)
+    session = await store.get_session(UUID(session_id))
+    bucket = session.config["storage_bucket"]
+    await app.state.storage.write(
+        bucket,
+        session_workspace_key(session_id, "browser-screenshots/shot.png"),
+        b"png bytes",
+    )
+
+    download_resp = await client.get(
+        f"/v1/sessions/{session_id}/workspace/download",
+        params={"path": "browser-screenshots/shot.png", "token": token},
+    )
+
+    assert download_resp.status_code == 200, download_resp.text
+    assert download_resp.content == b"png bytes"
+    assert download_resp.headers["content-disposition"] == (
+        'attachment; filename="shot.png"'
+    )
+
+
 async def test_get_session(client: AsyncClient, session_factory):
     """GET /v1/sessions/{id} returns session details."""
     _, _, token, _ = await _create_test_tenant(session_factory)
