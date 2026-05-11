@@ -281,13 +281,17 @@ describe("AgentChat", () => {
       await Promise.resolve();
     });
 
-    act(() => {
+    await act(async () => {
       stream.emit("browser.provisioned", 10, { session_id: "s-1" });
+      await Promise.resolve();
     });
 
     const browserPane = container.querySelector('[data-testid="browser-pane"]');
     const workspacePanel = container.querySelector('[data-testid="workspace-panel"]');
+    const browserPanel = container.querySelector('[data-testid="browser-panel"]');
     expect(browserPane).not.toBeNull();
+    expect(browserPanel?.className).toContain("w-[400px]");
+    expect(browserPanel?.className).toContain("overflow-hidden");
     expect(workspacePanel).not.toBeNull();
     expect(
       browserPane!.compareDocumentPosition(workspacePanel!) &

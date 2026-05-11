@@ -85,7 +85,10 @@ export function AgentChat({
           </div>
           <div data-testid="right-stack" className="flex min-h-0 shrink-0 flex-col">
             {browserState !== null && sessionId && (
-              <div className="min-h-0 flex-1 border-b border-line">
+              <div
+                data-testid="browser-panel"
+                className="min-h-0 w-[400px] min-w-[300px] max-w-[900px] flex-1 overflow-hidden border-b border-line"
+              >
                 <BrowserPane
                   sessionId={sessionId}
                   state={browserState}
