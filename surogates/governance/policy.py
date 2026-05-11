@@ -69,6 +69,8 @@ class PolicyDecision:
     allowed: bool
     reason: str
     tool_name: str
+    overridable: bool = False
+    policy_id: str | None = None
 
 
 class GovernanceGate:
