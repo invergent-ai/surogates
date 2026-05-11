@@ -13,8 +13,8 @@
 ## Phase 3 TODO
 
 - [x] **Completed:** Task 10 - Add `SessionStore` helpers for the inbox API.
-- [ ] **In progress:** Task 11 - Add `GET /v1/inbox`.
-- [ ] **Left to do:** Task 12 - Add inbox item detail, read, and ack routes.
+- [x] **Completed:** Task 11 - Add `GET /v1/inbox`.
+- [ ] **In progress:** Task 12 - Add inbox item detail, read, and ack routes.
 - [ ] **Left to do:** Task 13 - Add governance decision response route.
 - [ ] **Left to do:** Task 14 - Add inbox SSE stream.
 - [ ] **Left to do:** Task 15 - Mark clarify inbox items responded from clarify responses.
@@ -45,6 +45,7 @@
 - The web API layer uses `authFetch` from `web/src/api/auth.ts` and `/api/v1/...` URLs. There is no `web/src/api/client.ts`.
 - TanStack routes use `createRoute` plus explicit registration in `web/src/app/router.tsx`; this repo is not using file-route generation.
 - Clarify responses post `{ responses: ClarifyAnswer[] }` to `submitClarifyResponse`; they do not post `{ answers: ... }`.
+- Inbox UI components must live in `sdk/agent-chat-react`; do not add them under `web/src` when implementing the UI phases.
 
 ## Phase 0 — Pre-flight
 
