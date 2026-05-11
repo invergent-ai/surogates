@@ -237,6 +237,36 @@ class TestDestroyUnknown:
         # Should not raise, just log a warning.
 
 
+class TestDestroy:
+    """Destroying a sandbox deletes its Kubernetes resources."""
+
+    async def test_destroy_force_deletes_pod_and_secret(self, sandbox: K8sSandbox):
+        api = MagicMock()
+        api.delete_namespaced_pod = AsyncMock()
+        api.delete_namespaced_secret = AsyncMock()
+        sandbox._api = api
+        sandbox._pods["abc"] = _PodEntry(
+            sandbox_id="abc",
+            pod_name="sandbox-abc",
+            secret_name="secret-abc",
+            namespace="test-ns",
+            spec=SandboxSpec(),
+        )
+
+        await sandbox.destroy("abc")
+
+        api.delete_namespaced_pod.assert_awaited_once_with(
+            "sandbox-abc",
+            "test-ns",
+            grace_period_seconds=0,
+        )
+        api.delete_namespaced_secret.assert_awaited_once_with(
+            "secret-abc",
+            "test-ns",
+        )
+        assert "abc" not in sandbox._pods
+
+
 class TestStatusUnknown:
     """Status of unknown sandbox returns TERMINATED."""
 

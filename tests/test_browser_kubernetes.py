@@ -626,7 +626,7 @@ class TestDestroy:
         api.delete_namespaced_pod.assert_awaited_once_with(
             "browser-abcdef123456",
             "test-ns",
-            grace_period_seconds=5,
+            grace_period_seconds=0,
         )
         api.delete_namespaced_secret.assert_awaited_once_with(
             "browser-s3-abcdef123456",

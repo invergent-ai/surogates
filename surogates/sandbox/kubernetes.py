@@ -570,7 +570,7 @@ class K8sSandbox:
         try:
             await api.delete_namespaced_pod(
                 entry.pod_name, entry.namespace,
-                grace_period_seconds=5,
+                grace_period_seconds=0,
             )
         except ApiException as exc:
             if exc.status != 404:

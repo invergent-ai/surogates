@@ -553,7 +553,7 @@ class K8sBrowserBackend:
             await api.delete_namespaced_pod(
                 pod_name,
                 self._namespace,
-                grace_period_seconds=5,
+                grace_period_seconds=0,
             )
         except ApiException as exc:
             if exc.status != 404:
