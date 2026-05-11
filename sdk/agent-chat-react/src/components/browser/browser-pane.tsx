@@ -173,7 +173,7 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
           ) : previewSnapshot ? (
             <BrowserPreviewImage
               src={previewSnapshot.src}
-              fit="cover"
+              fit="contain"
               testId="browser-preview-image"
             />
           ) : previewLoading ? (
