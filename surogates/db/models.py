@@ -318,6 +318,71 @@ class Event(Base):
 
 
 # ---------------------------------------------------------------------------
+# Inbox Items
+# ---------------------------------------------------------------------------
+
+
+class InboxItem(Base):
+    """A raised-hand moment for the user, mirrored from a session event."""
+
+    __tablename__ = "inbox_items"
+    __table_args__ = (
+        Index(
+            "idx_inbox_user_status_created",
+            "user_id",
+            "status",
+            "created_at",
+            postgresql_using="btree",
+        ),
+        Index("idx_inbox_org_created", "org_id", "created_at"),
+        Index("idx_inbox_session", "session_id"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=False
+    )
+    source_event_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("events.id"), nullable=False, unique=True
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="pending", server_default="pending"
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    action_ref: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    read_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    responded_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+# ---------------------------------------------------------------------------
 # Session Leases
 # ---------------------------------------------------------------------------
 
