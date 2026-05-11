@@ -27,6 +27,8 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID, uuid4
 
+from pydantic import BaseModel, Field
+
 from surogates.harness.agent_resolver import (
     apply_agent_def_to_session,
     resolve_agent_def,
@@ -68,6 +70,7 @@ from surogates.harness.sanitize import (
 from surogates.harness.slash_skill import expand_slash_skill
 from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
 from surogates.harness.streaming_executor import StreamingToolExecutor
+from surogates.harness.structured_output import generate_structured
 from surogates.harness.tool_exec import execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.harness.tool_schemas import filter_schemas_for_tenant
@@ -230,7 +233,8 @@ _CLARIFY_RESCUE_SYSTEM: str = (
     "You are a strict routing judge for an agent harness. Decide whether "
     "the assistant draft is ending the turn while it still needs input "
     "from the user. Return only JSON with keys: needs_clarify boolean, "
-    "reason string, question string or null, context string or null. "
+    "reason string, question string, context string. Use empty strings for "
+    "question and context when they do not apply. "
     "Use needs_clarify=true when the draft asks the user to choose, "
     "provide missing information, take over a browser, authenticate, "
     "confirm an option that blocks progress, or otherwise answer before "
@@ -244,6 +248,41 @@ _DYNAMIC_LOOP_EXCLUDED_TOOLS: frozenset[str] = frozenset({
     "cron_delete",
     "cron_list",
 })
+
+
+class _ClarifyRescueDecision(BaseModel):
+    needs_clarify: bool = Field(
+        description="Whether the assistant draft is blocked on user input.",
+    )
+    reason: str = Field(
+        description="Short machine-readable reason for the routing decision.",
+    )
+    question: str = Field(
+        default="",
+        description="Concise question to ask via clarify when blocked.",
+    )
+    context: str = Field(
+        default="",
+        description="Short context explaining why the user input is needed.",
+    )
+
+
+async def _generate_clarify_rescue_structured(
+    *,
+    llm_client: Any,
+    model: str,
+    messages: list[dict[str, str]],
+) -> dict[str, Any] | None:
+    """Return a typed clarify-rescue judge decision when supported."""
+    decision = await generate_structured(
+        llm_client=llm_client,
+        model=model,
+        messages=messages,
+        output_model=_ClarifyRescueDecision,
+        max_tokens=300,
+        temperature=0,
+    )
+    return decision.model_dump() if decision is not None else None
 
 # Fenced-block kinds the post-response promoter is willing to turn into
 # an artifact when the model emits one in place of a ``create_artifact``
@@ -2131,6 +2170,19 @@ class AgentHarness:
                 "content": json.dumps(judge_payload, ensure_ascii=False),
             },
         ]
+        structured = await _generate_clarify_rescue_structured(
+            llm_client=self._llm,
+            model=model,
+            messages=judge_messages,
+        )
+        if structured is not None:
+            return {
+                "needs_clarify": bool(structured.get("needs_clarify")),
+                "reason": str(structured.get("reason") or "user_input"),
+                "question": structured.get("question"),
+                "context": structured.get("context"),
+            }
+
         for attempt in range(2):
             try:
                 response = await self._llm.chat.completions.create(
@@ -2142,12 +2194,12 @@ class AgentHarness:
                 content = self._extract_chat_message_content(response)
                 parsed = self._parse_json_object(content)
                 break
-            except Exception:
+            except Exception as exc:
                 if attempt == 0:
                     logger.info(
                         "Clarify rescue judge returned unparsable output; "
-                        "retrying once",
-                        exc_info=True,
+                        "retrying once: %s",
+                        exc,
                     )
                     judge_messages.append({
                         "role": "user",
@@ -2157,9 +2209,20 @@ class AgentHarness:
                         ),
                     })
                     continue
+                fallback = self._fallback_final_response_needs_clarify(
+                    assistant_content,
+                )
+                if fallback.get("needs_clarify"):
+                    logger.warning(
+                        "Clarify rescue judge failed twice; using "
+                        "local user-input fallback: %s",
+                        exc,
+                    )
+                    return fallback
                 logger.warning(
-                    "Clarify rescue judge failed; leaving final response unchanged",
-                    exc_info=True,
+                    "Clarify rescue judge failed; leaving final response "
+                    "unchanged: %s",
+                    exc,
                 )
                 return {"needs_clarify": False, "reason": "judge_error"}
 
@@ -2168,6 +2231,58 @@ class AgentHarness:
             "reason": str(parsed.get("reason") or "user_input"),
             "question": parsed.get("question"),
             "context": parsed.get("context"),
+        }
+
+    @staticmethod
+    def _fallback_final_response_needs_clarify(
+        assistant_content: str,
+    ) -> dict[str, Any]:
+        """Last-resort detection used only when the LLM judge cannot answer."""
+        text = assistant_content.strip()
+        lowered = text.lower()
+        user_input_markers = (
+            "?",
+            "tell me",
+            "let me know",
+            "provide",
+            "choose",
+            "which ",
+            "what ",
+            "when ",
+            "where ",
+            "who ",
+            "how should",
+            "do you want",
+            "would you like",
+            "need you to",
+            "take over",
+            "sign in",
+            "log in",
+            "enter your",
+            "complete any",
+        )
+        if not any(marker in lowered for marker in user_input_markers):
+            return {"needs_clarify": False, "reason": "judge_error"}
+
+        question = None
+        q_end = text.rfind("?")
+        if q_end >= 0:
+            prefix = text[:q_end]
+            q_start = max(
+                prefix.rfind("."),
+                prefix.rfind("!"),
+                prefix.rfind("?"),
+                prefix.rfind("\n"),
+            )
+            question = text[q_start + 1:q_end + 1].strip()
+        if not question:
+            question = "Please provide the input needed to continue."
+
+        return {
+            "needs_clarify": True,
+            "reason": "judge_fallback",
+            "question": question,
+            "context": text[:1000],
         }
 
     @staticmethod

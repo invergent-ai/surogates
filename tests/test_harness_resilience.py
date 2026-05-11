@@ -352,6 +352,100 @@ class TestDynamicLoopToolPolicy:
         assert arguments["questions"][0]["prompt"] == "Which account should I use?"
         assert arguments["context"] == "I need the user to choose an account."
 
+    async def test_clarify_judge_prefers_outlines_structured_output(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[dict[str, Any]] = []
+
+        async def fake_generate_structured(
+            *,
+            llm_client: Any,
+            model: str,
+            messages: list[dict[str, str]],
+        ) -> dict[str, Any]:
+            calls.append({
+                "llm_client": llm_client,
+                "model": model,
+                "messages": messages,
+            })
+            return {
+                "needs_clarify": True,
+                "reason": "login_required",
+                "question": "Please sign in and tell me when to continue.",
+                "context": "The browser is asking the user to sign in.",
+            }
+
+        monkeypatch.setattr(
+            "surogates.harness.loop._generate_clarify_rescue_structured",
+            fake_generate_structured,
+            raising=False,
+        )
+        llm_client = AsyncMock()
+        llm_client.chat.completions.create.side_effect = AssertionError(
+            "raw JSON fallback should not run when Outlines succeeds"
+        )
+        harness = _make_harness(llm_client=llm_client)
+
+        decision = await harness._judge_final_response_needs_clarify(
+            messages=[{"role": "user", "content": "Pay the invoice"}],
+            assistant_content="The page is asking you to sign in before I can continue.",
+            model="surogate",
+        )
+
+        assert decision == {
+            "needs_clarify": True,
+            "reason": "login_required",
+            "question": "Please sign in and tell me when to continue.",
+            "context": "The browser is asking the user to sign in.",
+        }
+        assert calls
+        assert calls[0]["model"] == "surogate"
+
+    async def test_clarify_judge_falls_back_when_outlines_unavailable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def fake_generate_structured(
+            *,
+            llm_client: Any,
+            model: str,
+            messages: list[dict[str, str]],
+        ) -> None:
+            return None
+
+        monkeypatch.setattr(
+            "surogates.harness.loop._generate_clarify_rescue_structured",
+            fake_generate_structured,
+            raising=False,
+        )
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps({
+                            "needs_clarify": False,
+                            "reason": "none",
+                            "question": None,
+                            "context": None,
+                        })
+                    )
+                )
+            ]
+        )
+        llm_client = AsyncMock()
+        llm_client.chat.completions.create.return_value = response
+        harness = _make_harness(llm_client=llm_client)
+
+        decision = await harness._judge_final_response_needs_clarify(
+            messages=[{"role": "user", "content": "Pay the invoice"}],
+            assistant_content="Done. I paid the invoice.",
+            model="surogate",
+        )
+
+        assert decision["needs_clarify"] is False
+        llm_client.chat.completions.create.assert_awaited_once()
+
     async def test_final_response_without_user_input_is_left_alone(self) -> None:
         response = SimpleNamespace(
             choices=[
@@ -502,6 +596,89 @@ class TestDynamicLoopToolPolicy:
         assert tool_calls is not None
         arguments = json.loads(tool_calls[0]["function"]["arguments"])
         assert arguments["questions"][0]["prompt"] == "Should I continue?"
+
+    async def test_final_response_uses_fallback_when_judge_never_returns_json(
+        self,
+    ) -> None:
+        empty_response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=""))]
+        )
+        llm_client = AsyncMock()
+        llm_client.chat.completions.create.side_effect = [
+            empty_response,
+            empty_response,
+        ]
+        from surogates.tools.registry import ToolRegistry, ToolSchema
+
+        reg = ToolRegistry()
+        reg.register(
+            "clarify",
+            ToolSchema(name="clarify", description="test", parameters={}),
+            lambda _: "{}",
+        )
+        harness = _make_harness(llm_client=llm_client, tool_registry=reg)
+        session = _session_with_config({})
+        assistant_message = {
+            "role": "assistant",
+            "content": (
+                "I need you to choose the account before I can continue. "
+                "Which account should I use?"
+            ),
+            "tool_calls": None,
+        }
+
+        converted = await harness._maybe_convert_final_response_to_clarify(
+            session=session,
+            messages=[{"role": "user", "content": "Post this update"}],
+            assistant_message=assistant_message,
+            model="surogate",
+            tool_filter={"clarify"},
+        )
+
+        assert converted is True
+        assert llm_client.chat.completions.create.await_count == 2
+        tool_calls = assistant_message["tool_calls"]
+        assert tool_calls is not None
+        arguments = json.loads(tool_calls[0]["function"]["arguments"])
+        assert arguments["questions"][0]["prompt"] == "Which account should I use?"
+
+    async def test_final_response_fallback_does_not_convert_plain_final_answer(
+        self,
+    ) -> None:
+        empty_response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=""))]
+        )
+        llm_client = AsyncMock()
+        llm_client.chat.completions.create.side_effect = [
+            empty_response,
+            empty_response,
+        ]
+        from surogates.tools.registry import ToolRegistry, ToolSchema
+
+        reg = ToolRegistry()
+        reg.register(
+            "clarify",
+            ToolSchema(name="clarify", description="test", parameters={}),
+            lambda _: "{}",
+        )
+        harness = _make_harness(llm_client=llm_client, tool_registry=reg)
+        session = _session_with_config({})
+        assistant_message = {
+            "role": "assistant",
+            "content": "Done. I posted the update.",
+            "tool_calls": None,
+        }
+
+        converted = await harness._maybe_convert_final_response_to_clarify(
+            session=session,
+            messages=[{"role": "user", "content": "Post this update"}],
+            assistant_message=assistant_message,
+            model="surogate",
+            tool_filter={"clarify"},
+        )
+
+        assert converted is False
+        assert assistant_message["tool_calls"] is None
 
     def test_successful_loop_wait_is_terminal_for_dynamic_loop_run(self) -> None:
         harness = _make_harness()

@@ -46,6 +46,7 @@ dependencies = [
     "python-telegram-bot>=21.0,<22.0",
     "pillow>=10,<13",
     "croniter>=3.0,<7.0",
+    "outlines>=1.2,<2.0",
 ]
 scripts = { "surogates" = "surogates.cli.main:cli_main" }
 
