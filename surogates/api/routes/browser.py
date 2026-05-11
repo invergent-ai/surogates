@@ -114,6 +114,25 @@ async def _should_forward_client_frame(
     return holder == str(tenant.user_id)
 
 
+async def _ensure_live_view_control(
+    *,
+    session_id: str,
+    tenant: TenantContext,
+    control,
+) -> None:
+    if tenant.user_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Browser live view requires browser control.",
+        )
+    holder = await control.held_by(session_id)
+    if holder != str(tenant.user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Browser live view requires browser control.",
+        )
+
+
 @router.get(
     "/api/sessions/{session_id}/browser/state",
     response_model=BrowserStateResponse,
@@ -265,12 +284,18 @@ async def proxy_live_view(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> Response:
     resolver = request.app.state.browser_resolver
+    control = request.app.state.browser_control
     resolved = await resolver.resolve(
         str(session_id),
         expected_org_id=str(tenant.org_id),
     )
     if resolved is None:
         raise HTTPException(status_code=404, detail="No browser for session")
+    await _ensure_live_view_control(
+        session_id=str(session_id),
+        tenant=tenant,
+        control=control,
+    )
 
     upstream_base = (
         resolved.endpoint.live_view_url.replace("ws://", "http://", 1)
@@ -348,6 +373,11 @@ async def proxy_live_view_ws(
     )
     if resolved is None:
         await websocket.close(code=4404, reason="no browser")
+        return
+    if tenant.user_id is None or await control.held_by(str(session_id)) != str(
+        tenant.user_id
+    ):
+        await websocket.close(code=4403, reason="browser control required")
         return
 
     upstream_url = _live_view_upstream_ws_url(

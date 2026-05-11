@@ -420,9 +420,10 @@ class TestLiveViewHTTPProxy:
     async def test_vnc_html_is_proxied(self, app_factory, monkeypatch) -> None:
         from surogates.api.routes import browser as browser_routes
 
-        build, resolver, _control = app_factory
+        build, resolver, control = app_factory
         sid = str(uuid4())
         resolver.entries[sid] = _resolved(sid)
+        control.flag[sid] = str(USER_1)
         seen: list[str] = []
 
         async def fake_request(method, url, **kwargs):
@@ -450,6 +451,39 @@ class TestLiveViewHTTPProxy:
         assert response.text == "<html>neko</html>"
         assert seen == ["http://browser-x.svc:443/"]
 
+    async def test_live_view_requires_browser_control(
+        self,
+        app_factory,
+        monkeypatch,
+    ) -> None:
+        from surogates.api.routes import browser as browser_routes
+
+        build, resolver, _control = app_factory
+        sid = str(uuid4())
+        resolver.entries[sid] = _resolved(sid)
+        proxied = False
+
+        async def fake_request(method, url, **kwargs):
+            nonlocal proxied
+            proxied = True
+            return httpx.Response(status_code=200, text="<html>neko</html>")
+
+        monkeypatch.setattr(
+            browser_routes,
+            "_proxy_live_view_request",
+            fake_request,
+            raising=False,
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=build()),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(f"/v1/sessions/{sid}/browser/live/")
+
+        assert response.status_code == 403
+        assert proxied is False
+
     async def test_unknown_session_returns_404(self, app_factory) -> None:
         build, _resolver, _control = app_factory
 
@@ -470,9 +504,10 @@ class TestLiveViewHTTPProxy:
     ) -> None:
         from surogates.api.routes import browser as browser_routes
 
-        build, resolver, _control = app_factory
+        build, resolver, control = app_factory
         sid = str(uuid4())
         resolver.entries[sid] = _resolved(sid)
+        control.flag[sid] = str(USER_1)
         params_seen: list[dict[str, str]] = []
 
         async def fake_request(method, url, **kwargs):
@@ -510,9 +545,10 @@ class TestLiveViewHTTPProxy:
         from surogates.api.routes import browser as browser_routes
         from surogates.tenant.auth.middleware import LIVE_VIEW_TOKEN_COOKIE
 
-        build, resolver, _control = app_factory
+        build, resolver, control = app_factory
         sid = str(uuid4())
         resolver.entries[sid] = _resolved(sid)
+        control.flag[sid] = str(USER_1)
 
         async def fake_request(method, url, **kwargs):
             return httpx.Response(
