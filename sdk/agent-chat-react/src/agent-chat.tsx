@@ -84,11 +84,18 @@ export function AgentChat({
               retryIndicator={runtime.retryIndicator}
             />
           </div>
-          <div data-testid="right-stack" className="flex min-h-0 shrink-0 flex-col">
+          <div
+            data-testid="right-stack"
+            className={
+              hasBrowserPanel
+                ? "order-last flex min-h-0 w-[440px] shrink-0 flex-col"
+                : "flex min-h-0 shrink-0 flex-col"
+            }
+          >
             {hasBrowserPanel && (
               <div
                 data-testid="browser-panel"
-                className="h-1/2 min-h-0 w-[400px] min-w-[300px] max-w-[900px] overflow-hidden border-b border-line"
+                className="h-1/2 min-h-0 w-full overflow-hidden border-b border-line"
               >
                 <BrowserPane
                   sessionId={sessionId}
@@ -101,7 +108,7 @@ export function AgentChat({
               data-testid="workspace-panel-frame"
               className={
                 hasBrowserPanel
-                  ? "h-1/2 min-h-0 w-[400px] min-w-[300px] max-w-[900px] overflow-hidden"
+                  ? "h-1/2 min-h-0 w-full overflow-hidden"
                   : "min-h-0"
               }
             >
@@ -114,6 +121,7 @@ export function AgentChat({
                 onCollapsedChange={setWorkspaceCollapsed}
                 refreshSignal={runtime.workspaceRefreshKey}
                 disabled={effectiveDisabled}
+                fillParent={Boolean(hasBrowserPanel)}
               />
             </div>
           </div>

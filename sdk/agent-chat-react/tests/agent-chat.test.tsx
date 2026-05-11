@@ -289,14 +289,19 @@ describe("AgentChat", () => {
     const browserPane = container.querySelector('[data-testid="browser-pane"]');
     const workspacePanel = container.querySelector('[data-testid="workspace-panel"]');
     const browserPanel = container.querySelector('[data-testid="browser-panel"]');
+    const rightStack = container.querySelector('[data-testid="right-stack"]');
     const workspacePanelFrame = container.querySelector(
       '[data-testid="workspace-panel-frame"]',
     );
     expect(browserPane).not.toBeNull();
-    expect(browserPanel?.className).toContain("w-[400px]");
+    expect(rightStack?.className).toContain("w-[440px]");
+    expect(rightStack?.className).toContain("order-last");
+    expect(browserPanel?.className).toContain("w-full");
     expect(browserPanel?.className).toContain("h-1/2");
     expect(browserPanel?.className).toContain("overflow-hidden");
+    expect(workspacePanel?.className).toContain("w-full");
     expect(workspacePanelFrame?.className).toContain("h-1/2");
+    expect(workspacePanelFrame?.className).toContain("w-full");
     expect(workspacePanelFrame?.className).toContain("overflow-hidden");
     expect(workspacePanel).not.toBeNull();
     expect(
