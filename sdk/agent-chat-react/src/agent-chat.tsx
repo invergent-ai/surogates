@@ -44,6 +44,7 @@ export function AgentChat({
     ? "Scheduled run is read-only"
     : undefined;
   const browserState = runtime.state.browser;
+  const hasBrowserPanel = browserState !== null && sessionId;
 
   useEffect(() => {
     onMessagesChange?.(runtime.messages);
@@ -84,10 +85,10 @@ export function AgentChat({
             />
           </div>
           <div data-testid="right-stack" className="flex min-h-0 shrink-0 flex-col">
-            {browserState !== null && sessionId && (
+            {hasBrowserPanel && (
               <div
                 data-testid="browser-panel"
-                className="min-h-0 w-[400px] min-w-[300px] max-w-[900px] flex-1 overflow-hidden border-b border-line"
+                className="h-1/2 min-h-0 w-[400px] min-w-[300px] max-w-[900px] overflow-hidden border-b border-line"
               >
                 <BrowserPane
                   sessionId={sessionId}
@@ -96,16 +97,25 @@ export function AgentChat({
                 />
               </div>
             )}
-            <WorkspacePanel
-              adapter={adapter}
-              sessionId={sessionId}
-              selectedPath={workspacePath}
-              onSelectedPathChange={setWorkspacePath}
-              collapsed={workspaceCollapsed}
-              onCollapsedChange={setWorkspaceCollapsed}
-              refreshSignal={runtime.workspaceRefreshKey}
-              disabled={effectiveDisabled}
-            />
+            <div
+              data-testid="workspace-panel-frame"
+              className={
+                hasBrowserPanel
+                  ? "h-1/2 min-h-0 w-[400px] min-w-[300px] max-w-[900px] overflow-hidden"
+                  : "min-h-0"
+              }
+            >
+              <WorkspacePanel
+                adapter={adapter}
+                sessionId={sessionId}
+                selectedPath={workspacePath}
+                onSelectedPathChange={setWorkspacePath}
+                collapsed={workspaceCollapsed}
+                onCollapsedChange={setWorkspaceCollapsed}
+                refreshSignal={runtime.workspaceRefreshKey}
+                disabled={effectiveDisabled}
+              />
+            </div>
           </div>
         </section>
       </TooltipProvider>
