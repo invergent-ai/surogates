@@ -194,6 +194,7 @@ describe("InboxPanel", () => {
 
   it("submits input-required answers through the adapter", async () => {
     const submissions: Array<{ question: string; answer: string }> = [];
+    const selectedSessions: string[] = [];
     const items = [
       inboxItem({
         id: 2,
@@ -224,7 +225,12 @@ describe("InboxPanel", () => {
     root = createRoot(container);
 
     await act(async () => {
-      root?.render(<InboxPanel adapter={adapter} />);
+      root?.render(
+        <InboxPanel
+          adapter={adapter}
+          onSessionSelect={(sessionId) => selectedSessions.push(sessionId)}
+        />,
+      );
       await Promise.resolve();
     });
 
@@ -254,6 +260,22 @@ describe("InboxPanel", () => {
     const submit = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Submit inbox response"]',
     );
+    const openSession = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open session for input"]',
+    );
+    const deleteButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Delete inbox item"]',
+    );
+
+    expect(submit?.parentElement?.contains(openSession)).toBe(true);
+    expect(submit?.parentElement?.contains(deleteButton)).toBe(true);
+
+    await act(async () => {
+      openSession?.click();
+      await Promise.resolve();
+    });
+    expect(selectedSessions).toEqual(["session-1"]);
+
     await act(async () => {
       submit?.click();
       await Promise.resolve();
@@ -263,6 +285,65 @@ describe("InboxPanel", () => {
       { question: "Which color?", answer: "blue", is_other: false },
     ]);
     expect(container.textContent).toContain("Responded");
+  });
+
+  it("deletes an input-required inbox item from the input action row", async () => {
+    const deleted: number[] = [];
+    const items = [
+      inboxItem({
+        id: 5,
+        kind: "input_required",
+        title: "Need account",
+        body: "Need an account.",
+        payload: {
+          tool_call_id: "tc-5",
+          questions: [{ prompt: "Which account?" }],
+        },
+      }),
+    ];
+    const adapter: AgentChatAdapter = {
+      ...createAdapter(items),
+      async deleteInboxItem(input) {
+        deleted.push(input.itemId);
+        const index = items.findIndex((candidate) => candidate.id === input.itemId);
+        if (index === -1) throw new Error("missing item");
+        items.splice(index, 1);
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<InboxPanel adapter={adapter} />);
+      await Promise.resolve();
+    });
+
+    const row = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open inbox item Need account"]',
+    );
+    await act(async () => {
+      row?.click();
+      await Promise.resolve();
+    });
+
+    const submit = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Submit inbox response"]',
+    );
+    const deleteButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Delete inbox item"]',
+    );
+    expect(submit?.parentElement?.contains(deleteButton)).toBe(true);
+
+    await act(async () => {
+      deleteButton?.click();
+      await Promise.resolve();
+    });
+
+    expect(deleted).toEqual([5]);
+    expect(container.textContent).not.toContain("Need account");
+    expect(container.textContent).toContain("No inbox items");
+    expect(container.textContent).toContain("Select an item");
   });
 
   it("shows action-required instructions and lets the user mark completion", async () => {

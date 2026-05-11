@@ -157,10 +157,14 @@ function InputRequiredDetail({
   item,
   adapter,
   onUpdated,
+  onDeleted,
+  onSessionSelect,
 }: {
   item: AgentChatInboxItem;
   adapter: InboxAdapter;
   onUpdated: (item: AgentChatInboxItem) => void;
+  onDeleted: (itemId: number) => Promise<void>;
+  onSessionSelect?: (sessionId: string) => void;
 }) {
   const questions = Array.isArray(item.payload.questions)
     ? (item.payload.questions as Array<{
@@ -185,6 +189,7 @@ function InputRequiredDetail({
     : [];
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const disabled = item.status !== "pending" || submitting;
   const canSubmit = questions.every((question) => answers[question.prompt]?.trim());
 
@@ -209,6 +214,16 @@ function InputRequiredDetail({
       onUpdated(await adapter.getInboxItem({ itemId: item.id }));
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function deleteItem() {
+    if (!adapter.deleteInboxItem) return;
+    setDeleting(true);
+    try {
+      await onDeleted(item.id);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -238,15 +253,40 @@ function InputRequiredDetail({
           />
         </label>
       ))}
-      <Button
-        type="button"
-        size="sm"
-        onClick={() => void submit()}
-        disabled={disabled || !canSubmit}
-        aria-label="Submit inbox response"
-      >
-        {submitting ? "Submitting" : "Submit"}
-      </Button>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          type="button"
+          size="sm"
+          onClick={() => onSessionSelect?.(item.sessionId)}
+          aria-label="Open session for input"
+        >
+          <ExternalLinkIcon className="size-3.5" />
+          Open session
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          onClick={() => void submit()}
+          disabled={disabled || !canSubmit}
+          aria-label="Submit inbox response"
+        >
+          {submitting ? "Submitting" : "Submit"}
+        </Button>
+        {adapter.deleteInboxItem && (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={() => void deleteItem()}
+            disabled={deleting}
+            aria-label="Delete inbox item"
+            title="Delete inbox item"
+          >
+            <Trash2Icon className="size-3.5" />
+            {deleting ? "Deleting" : "Delete"}
+          </Button>
+        )}
+      </div>
     </div>
   );
 }
@@ -549,23 +589,31 @@ function InboxDetail({
             Open session
           </button>
         </div>
-        {adapter.deleteInboxItem && item.kind !== "action_required" && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            disabled={deleting}
-            onClick={() => void deleteItem()}
-            aria-label="Delete inbox item"
-            title="Delete inbox item"
-          >
-            <Trash2Icon className="size-4" />
-          </Button>
-        )}
+        {adapter.deleteInboxItem &&
+          item.kind !== "action_required" &&
+          item.kind !== "input_required" && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              disabled={deleting}
+              onClick={() => void deleteItem()}
+              aria-label="Delete inbox item"
+              title="Delete inbox item"
+            >
+              <Trash2Icon className="size-4" />
+            </Button>
+          )}
       </div>
 
       {item.kind === "input_required" ? (
-        <InputRequiredDetail item={item} adapter={adapter} onUpdated={onUpdated} />
+        <InputRequiredDetail
+          item={item}
+          adapter={adapter}
+          onUpdated={onUpdated}
+          onDeleted={onDeleted}
+          onSessionSelect={onSessionSelect}
+        />
       ) : item.kind === "action_required" ? (
         <ActionRequiredDetail
           item={item}
