@@ -112,10 +112,22 @@ function createAdapter(items: AgentChatInboxItem[]): AgentChatAdapter {
       item.respondedAt = "2026-01-01T00:02:00Z";
       return item;
     },
+    async deleteInboxItem(input) {
+      const index = items.findIndex((candidate) => candidate.id === input.itemId);
+      if (index === -1) throw new Error("missing item");
+      items.splice(index, 1);
+    },
     async respondGovernanceInboxItem(input) {
       const item = items.find((candidate) => candidate.id === input.itemId);
       if (!item) throw new Error("missing item");
       item.payload = { ...item.payload, decision: input.decision };
+      item.status = "responded";
+      item.respondedAt = "2026-01-01T00:02:00Z";
+      return item;
+    },
+    async respondActionRequiredInboxItem(input) {
+      const item = items.find((candidate) => candidate.id === input.itemId);
+      if (!item) throw new Error("missing item");
       item.status = "responded";
       item.respondedAt = "2026-01-01T00:02:00Z";
       return item;
@@ -251,5 +263,137 @@ describe("InboxPanel", () => {
       { question: "Which color?", answer: "blue", is_other: false },
     ]);
     expect(container.textContent).toContain("Responded");
+  });
+
+  it("shows action-required instructions and lets the user mark completion", async () => {
+    const completed: number[] = [];
+    const selectedSessions: string[] = [];
+    const items = [
+      inboxItem({
+        id: 3,
+        kind: "action_required",
+        title: "Sign in required",
+        body: "Open the browser session and complete sign-in.",
+        payload: {
+          action_type: "browser",
+          instructions: "Open the browser session and complete sign-in.",
+          context: "The browser is showing a login page.",
+        },
+        actionRef: {
+          type: "open_session",
+          session_id: "session-1",
+          target: "browser",
+        },
+      }),
+    ];
+    const adapter: AgentChatAdapter = {
+      ...createAdapter(items),
+      async respondActionRequiredInboxItem(input) {
+        completed.push(input.itemId);
+        items[0] = { ...items[0], status: "responded", respondedAt: "now" };
+        return items[0];
+      },
+      async getInboxItem(input) {
+        const item = items.find((candidate) => candidate.id === input.itemId);
+        if (!item) throw new Error("missing item");
+        return item;
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <InboxPanel
+          adapter={adapter}
+          onSessionSelect={(sessionId) => selectedSessions.push(sessionId)}
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    const row = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open inbox item Sign in required"]',
+    );
+    await act(async () => {
+      row?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Action needed");
+    expect(container.textContent).toContain("Open the browser session");
+
+    const openSession = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Open session"),
+    );
+    await act(async () => {
+      openSession?.click();
+      await Promise.resolve();
+    });
+    expect(selectedSessions).toEqual(["session-1"]);
+
+    const complete = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Mark action complete"]',
+    );
+    const deleteButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Delete inbox item"]',
+    );
+    expect(complete?.parentElement?.contains(deleteButton)).toBe(true);
+
+    await act(async () => {
+      complete?.click();
+      await Promise.resolve();
+    });
+
+    expect(completed).toEqual([3]);
+    expect(container.textContent).toContain("Responded");
+  });
+
+  it("deletes the selected inbox item and clears the detail pane", async () => {
+    const deleted: number[] = [];
+    const items = [
+      inboxItem({ id: 4, title: "Old notification", body: "Clean me up." }),
+    ];
+    const adapter: AgentChatAdapter = {
+      ...createAdapter(items),
+      async deleteInboxItem(input) {
+        deleted.push(input.itemId);
+        const index = items.findIndex((candidate) => candidate.id === input.itemId);
+        if (index === -1) throw new Error("missing item");
+        items.splice(index, 1);
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<InboxPanel adapter={adapter} />);
+      await Promise.resolve();
+    });
+
+    const row = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open inbox item Old notification"]',
+    );
+    await act(async () => {
+      row?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Clean me up.");
+
+    const deleteButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Delete inbox item"]',
+    );
+    await act(async () => {
+      deleteButton?.click();
+      await Promise.resolve();
+    });
+
+    expect(deleted).toEqual([4]);
+    expect(container.textContent).not.toContain("Old notification");
+    expect(container.textContent).toContain("No inbox items");
+    expect(container.textContent).toContain("Select an item");
   });
 });

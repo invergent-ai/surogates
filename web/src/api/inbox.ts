@@ -107,6 +107,15 @@ export async function acknowledgeInboxItem(
   return toInboxItem((await response.json()) as InboxItemResponse);
 }
 
+export async function deleteInboxItem(itemId: number): Promise<void> {
+  const response = await authFetch(`/api/v1/inbox/${itemId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    return parseError(response, "Failed to delete inbox item");
+  }
+}
+
 export async function respondGovernanceInboxItem(
   itemId: number,
   decision: "approve" | "reject",
@@ -115,6 +124,20 @@ export async function respondGovernanceInboxItem(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ decision }),
+  });
+  if (!response.ok) {
+    return parseError(response, "Failed to respond to inbox item");
+  }
+  return toInboxItem((await response.json()) as InboxItemResponse);
+}
+
+export async function respondActionRequiredInboxItem(
+  itemId: number,
+): Promise<AgentChatInboxItem> {
+  const response = await authFetch(`/api/v1/inbox/${itemId}/respond`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ completed: true }),
   });
   if (!response.ok) {
     return parseError(response, "Failed to respond to inbox item");

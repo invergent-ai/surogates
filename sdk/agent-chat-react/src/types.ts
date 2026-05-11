@@ -165,6 +165,7 @@ export interface AgentChatScheduledWorkList {
 
 export type AgentChatInboxKind =
   | "input_required"
+  | "action_required"
   | "task_complete"
   | "governance_gate"
   | "progress_checkin"
@@ -453,9 +454,13 @@ export interface AgentChatAdapter {
   getInboxItem?(input: { itemId: number }): Promise<AgentChatInboxItem>;
   markInboxItemRead?(input: { itemId: number }): Promise<AgentChatInboxItem>;
   acknowledgeInboxItem?(input: { itemId: number }): Promise<AgentChatInboxItem>;
+  deleteInboxItem?(input: { itemId: number }): Promise<void>;
   respondGovernanceInboxItem?(input: {
     itemId: number;
     decision: "approve" | "reject";
+  }): Promise<AgentChatInboxItem>;
+  respondActionRequiredInboxItem?(input: {
+    itemId: number;
   }): Promise<AgentChatInboxItem>;
   openInboxStream?(): AgentChatInboxEventStream;
   getArtifact(input: {

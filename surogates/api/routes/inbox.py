@@ -9,7 +9,15 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -23,8 +31,9 @@ router = APIRouter(prefix="/inbox")
 _ACKABLE_KINDS = frozenset({"task_complete", "progress_checkin"})
 
 
-class GovernanceDecision(BaseModel):
-    decision: str = Field(pattern="^(approve|reject)$")
+class InboxResponse(BaseModel):
+    decision: str | None = Field(default=None, pattern="^(approve|reject)$")
+    completed: bool | None = None
 
 
 def _require_user_tenant(tenant: TenantContext) -> TenantContext:
@@ -245,10 +254,27 @@ async def acknowledge_inbox_item(
     return _serialize_item(item)
 
 
-@router.post("/{item_id}/respond")
-async def respond_to_governance_item(
+@router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_inbox_item(
     item_id: int,
-    payload: GovernanceDecision,
+    request: Request,
+    tenant: Annotated[TenantContext, Depends(get_current_tenant)],
+):
+    tenant = _require_user_tenant(tenant)
+    store = request.app.state.session_store
+    item = await store.delete_inbox_item(item_id=item_id, user_id=tenant.user_id)
+    if item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Inbox item not found.",
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{item_id}/respond")
+async def respond_to_inbox_item(
+    item_id: int,
+    payload: InboxResponse,
     request: Request,
     tenant: Annotated[TenantContext, Depends(get_current_tenant)],
 ):
@@ -260,31 +286,54 @@ async def respond_to_governance_item(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Inbox item not found.",
         )
-    if item.kind != "governance_gate":
+    if item.kind not in {"governance_gate", "action_required"}:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Items of kind '{item.kind}' are not respondable here.",
         )
 
-    decision = payload.decision
-    tool_name = item.payload.get("tool_name", "unknown")
-    tool_call_id = item.payload.get("tool_call_id", "")
-    user_message = (
-        f"[governance decision] {decision.upper()} for {tool_name}"
-        f" (call {tool_call_id})."
-    )
-    await store.emit_event(
-        item.session_id,
-        EventType.USER_MESSAGE,
-        {
+    if item.kind == "governance_gate":
+        if payload.decision not in {"approve", "reject"}:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Governance response requires approve or reject.",
+            )
+        decision = payload.decision
+        tool_name = item.payload.get("tool_name", "unknown")
+        tool_call_id = item.payload.get("tool_call_id", "")
+        user_message = (
+            f"[governance decision] {decision.upper()} for {tool_name}"
+            f" (call {tool_call_id})."
+        )
+        event_data = {
             "content": user_message,
             "source": "inbox_governance_decision",
             "decision": decision,
             "tool_name": tool_name,
             "tool_call_id": tool_call_id,
             "inbox_item_id": item.id,
-        },
-    )
+        }
+    else:
+        if payload.completed is not True:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Action-required response must set completed=true.",
+            )
+        action_type = item.payload.get("action_type", "manual")
+        instructions = item.payload.get("instructions", "")
+        user_message = (
+            f"[user action completed] {action_type}. The user completed the "
+            "requested action and the agent may continue."
+        )
+        event_data = {
+            "content": user_message,
+            "source": "inbox_action_completed",
+            "action_type": action_type,
+            "instructions": instructions,
+            "inbox_item_id": item.id,
+        }
+
+    await store.emit_event(item.session_id, EventType.USER_MESSAGE, event_data)
     try:
         item = await store.set_inbox_status(
             item_id=item_id,

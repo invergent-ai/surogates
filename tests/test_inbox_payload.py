@@ -29,6 +29,32 @@ def test_input_required_row_includes_tool_call_id_and_questions():
     assert row.action_ref["endpoint"].endswith("/respond")
 
 
+def test_action_required_row_points_user_to_session():
+    row = build_inbox_row(
+        event_type=EventType.INBOX_ACTION_REQUIRED,
+        event_data={
+            "title": "Sign in required",
+            "instructions": "Open the browser session and complete sign-in.",
+            "context": "The browser is showing the login page.",
+            "action_type": "browser",
+            "target": "browser",
+        },
+        session_id="00000000-0000-0000-0000-000000000001",
+    )
+
+    assert isinstance(row, InboxRow)
+    assert row.kind == "action_required"
+    assert row.title == "Sign in required"
+    assert row.body == "Open the browser session and complete sign-in."
+    assert row.payload["action_type"] == "browser"
+    assert row.payload["instructions"] == "Open the browser session and complete sign-in."
+    assert row.payload["context"] == "The browser is showing the login page."
+    assert row.action_ref is not None
+    assert row.action_ref["type"] == "open_session"
+    assert row.action_ref["session_id"] == "00000000-0000-0000-0000-000000000001"
+    assert row.action_ref["target"] == "browser"
+
+
 def test_task_complete_row_carries_outcome():
     row = build_inbox_row(
         event_type=EventType.INBOX_TASK_COMPLETE,

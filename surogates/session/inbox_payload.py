@@ -38,6 +38,8 @@ def build_inbox_row(
 
     if event_type == EventType.INBOX_INPUT_REQUIRED:
         return _input_required(event_data, session_id)
+    if event_type == EventType.INBOX_ACTION_REQUIRED:
+        return _action_required(event_data, session_id)
     if event_type == EventType.INBOX_TASK_COMPLETE:
         return _task_complete(event_data)
     if event_type == EventType.INBOX_GOVERNANCE_GATE:
@@ -75,6 +77,42 @@ def _first_question_prompt(questions: list[Any]) -> str | None:
         return None
     prompt = questions[0].get("prompt")
     return prompt if isinstance(prompt, str) else None
+
+
+def _action_required(data: dict[str, Any], session_id: str) -> InboxRow:
+    action_type = _truncate(data.get("action_type") or "manual", limit=80)
+    target = _truncate(data.get("target") or "session", limit=80)
+    instructions = _truncate(data.get("instructions"), limit=_BODY_TRUNCATE)
+    context = _truncate(data.get("context"), limit=_BODY_TRUNCATE)
+    body = instructions or context or None
+    title = data.get("title") or _default_action_title(action_type)
+
+    return InboxRow(
+        kind="action_required",
+        title=_truncate(title, limit=_TITLE_TRUNCATE),
+        body=body,
+        payload={
+            "action_type": action_type,
+            "target": target,
+            "instructions": instructions,
+            "context": context,
+            "reason": data.get("reason", ""),
+        },
+        action_ref={
+            "type": "open_session",
+            "session_id": session_id,
+            "target": target,
+            "completion_endpoint": "/v1/inbox/{item_id}/respond",
+        },
+    )
+
+
+def _default_action_title(action_type: str) -> str:
+    if action_type == "browser":
+        return "Browser action required"
+    if action_type == "approval":
+        return "Approval required"
+    return "Action required"
 
 
 def _task_complete(data: dict[str, Any]) -> InboxRow:
