@@ -10,6 +10,15 @@
 
 **Reference spec:** `docs/superpowers/specs/2026-05-11-agent-inbox-design.md`
 
+## Phase 3 TODO
+
+- [x] **Completed:** Task 10 - Add `SessionStore` helpers for the inbox API.
+- [ ] **In progress:** Task 11 - Add `GET /v1/inbox`.
+- [ ] **Left to do:** Task 12 - Add inbox item detail, read, and ack routes.
+- [ ] **Left to do:** Task 13 - Add governance decision response route.
+- [ ] **Left to do:** Task 14 - Add inbox SSE stream.
+- [ ] **Left to do:** Task 15 - Mark clarify inbox items responded from clarify responses.
+
 ## Phase 2 TODO
 
 - [x] **Completed:** Task 5 - Emit `INBOX_INPUT_REQUIRED` from the clarify tool.

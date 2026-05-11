@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, not_, select, text, update, delete, func, or_
+from sqlalchemy import and_, not_, select, text, update, delete, func, or_, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import (
@@ -74,6 +74,11 @@ class SessionStore:
         # Session channel cache: session_id → (channel, config).
         # Populated lazily when a deliverable event is emitted.
         self._channel_cache: dict[UUID, tuple[str, dict]] = {}
+
+    _INBOX_TERMINAL = frozenset({"acknowledged", "responded", "expired"})
+    _INBOX_ALLOWED_TRANSITIONS = {
+        "pending": frozenset({"acknowledged", "responded", "expired"}),
+    }
 
     # ------------------------------------------------------------------
     # Session CRUD
@@ -709,6 +714,110 @@ class SessionStore:
             )
             row = result.first()
         return row[0] if row is not None else None
+
+    async def list_inbox(
+        self,
+        *,
+        user_id: UUID,
+        status: str | None = None,
+        kind: str | None = None,
+        session_id: UUID | None = None,
+        cursor: tuple[datetime, int] | None = None,
+        limit: int = 50,
+    ) -> list[InboxItem]:
+        stmt = select(InboxItem).where(InboxItem.user_id == user_id)
+        if status:
+            stmt = stmt.where(InboxItem.status == status)
+        else:
+            stmt = stmt.where(InboxItem.status != "expired")
+        if kind:
+            stmt = stmt.where(InboxItem.kind == kind)
+        if session_id:
+            stmt = stmt.where(InboxItem.session_id == session_id)
+        if cursor:
+            cursor_created_at, cursor_id = cursor
+            stmt = stmt.where(
+                tuple_(InboxItem.created_at, InboxItem.id)
+                < tuple_(cursor_created_at, cursor_id)
+            )
+        stmt = stmt.order_by(
+            InboxItem.created_at.desc(),
+            InboxItem.id.desc(),
+        ).limit(limit)
+        async with self._sf() as db:
+            result = await db.execute(stmt)
+            return list(result.scalars().all())
+
+    async def get_inbox_item(
+        self,
+        *,
+        item_id: int,
+        user_id: UUID,
+    ) -> InboxItem | None:
+        async with self._sf() as db:
+            result = await db.execute(
+                select(InboxItem).where(
+                    InboxItem.id == item_id,
+                    InboxItem.user_id == user_id,
+                )
+            )
+            return result.scalar_one_or_none()
+
+    async def mark_inbox_read(
+        self,
+        *,
+        item_id: int,
+        user_id: UUID,
+    ) -> InboxItem:
+        async with self._sf() as db:
+            row = (
+                await db.execute(
+                    select(InboxItem).where(
+                        InboxItem.id == item_id,
+                        InboxItem.user_id == user_id,
+                    )
+                )
+            ).scalar_one()
+            if row.read_at is None:
+                row.read_at = datetime.now(timezone.utc)
+                await db.commit()
+                await db.refresh(row)
+            return row
+
+    async def set_inbox_status(
+        self,
+        *,
+        item_id: int,
+        user_id: UUID,
+        new_status: str,
+    ) -> InboxItem:
+        if new_status not in self._INBOX_TERMINAL:
+            raise ValueError(f"Invalid target status: {new_status}")
+
+        async with self._sf() as db:
+            row = (
+                await db.execute(
+                    select(InboxItem).where(
+                        InboxItem.id == item_id,
+                        InboxItem.user_id == user_id,
+                    )
+                )
+            ).scalar_one()
+            if row.status in self._INBOX_TERMINAL:
+                raise ValueError(
+                    f"Cannot transition from terminal status {row.status}"
+                )
+            allowed = self._INBOX_ALLOWED_TRANSITIONS.get(
+                row.status,
+                frozenset(),
+            )
+            if new_status not in allowed:
+                raise ValueError(f"Invalid transition {row.status} -> {new_status}")
+            row.status = new_status
+            row.responded_at = datetime.now(timezone.utc)
+            await db.commit()
+            await db.refresh(row)
+            return row
 
     # ------------------------------------------------------------------
     # Lease management (raw SQL — atomic upsert required)
