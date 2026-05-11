@@ -2379,28 +2379,24 @@ class AgentHarness:
                 "target": target,
             }
 
-        user_input_markers = (
-            "?",
-            "tell me",
+        explicit_input_markers = (
+            "tell me which",
+            "tell me what",
             "let me know",
-            "provide",
-            "choose",
-            "which ",
-            "what ",
-            "when ",
-            "where ",
-            "who ",
-            "how should",
+            "please provide",
+            "provide the",
+            "provide a",
+            "choose ",
+            "select ",
             "do you want",
             "would you like",
             "which option",
+            "which account",
+            "what account",
+            "before i can continue",
+            "need you to",
+            "i need your",
         )
-        if not any(marker in lowered for marker in user_input_markers):
-            return {
-                "action_kind": "none",
-                "needs_clarify": False,
-                "reason": "judge_error",
-            }
 
         question = None
         q_end = text.rfind("?")
@@ -2413,6 +2409,37 @@ class AgentHarness:
                 prefix.rfind("\n"),
             )
             question = text[q_start + 1:q_end + 1].strip()
+
+        direct_question_markers = (
+            "should i",
+            "should we",
+            "do you want",
+            "would you like",
+            "can you",
+            "could you",
+            "which account",
+            "what account",
+            "which option",
+            "what should i",
+            "how should i",
+            "when should i",
+            "where should i",
+            "who should i",
+        )
+        question_lower = question.lower() if question else ""
+        has_direct_question = bool(question) and any(
+            marker in question_lower for marker in direct_question_markers
+        )
+        has_explicit_input_request = any(
+            marker in lowered for marker in explicit_input_markers
+        )
+        if not has_direct_question and not has_explicit_input_request:
+            return {
+                "action_kind": "none",
+                "needs_clarify": False,
+                "reason": "judge_error",
+            }
+
         if not question:
             question = "Please provide the input needed to continue."
 
@@ -3744,7 +3771,7 @@ class AgentHarness:
         if cost_tracker is not None:
             complete_data["cost_summary"] = cost_tracker.summary()
 
-        event_id = await self._store.emit_event(
+        await self._store.emit_event(
             session.id,
             EventType.SESSION_COMPLETE,
             complete_data,

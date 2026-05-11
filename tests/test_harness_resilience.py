@@ -7,12 +7,11 @@ and the retry/fallback integration.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -785,6 +784,54 @@ class TestDynamicLoopToolPolicy:
         converted = await harness._maybe_convert_final_response_to_clarify(
             session=session,
             messages=[{"role": "user", "content": "Post this update"}],
+            assistant_message=assistant_message,
+            model="surogate",
+            tool_filter={"clarify"},
+        )
+
+        assert converted is False
+        assert assistant_message["tool_calls"] is None
+
+    async def test_final_response_fallback_does_not_convert_answer_with_headline_question_words(
+        self,
+    ) -> None:
+        empty_response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=""))]
+        )
+        llm_client = AsyncMock()
+        llm_client.chat.completions.create.side_effect = [
+            empty_response,
+            empty_response,
+        ]
+        from surogates.tools.registry import ToolRegistry, ToolSchema
+
+        reg = ToolRegistry()
+        reg.register(
+            "clarify",
+            ToolSchema(name="clarify", description="test", parameters={}),
+            lambda _: "{}",
+        )
+        harness = _make_harness(llm_client=llm_client, tool_registry=reg)
+        session = _session_with_config({})
+        assistant_message = {
+            "role": "assistant",
+            "content": (
+                "The main news headline on HotNews.ro is: "
+                "\"Ilie Bolojan, mesaj transant despre varianta unui guvern "
+                "condus de premierul Grindeanu. Ce va face PNL\". "
+                "It is about what the PNL will do next."
+            ),
+            "tool_calls": None,
+        }
+
+        converted = await harness._maybe_convert_final_response_to_clarify(
+            session=session,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Open hotnews.ro and tell me the main headline",
+                }
+            ],
             assistant_message=assistant_message,
             model="surogate",
             tool_filter={"clarify"},
