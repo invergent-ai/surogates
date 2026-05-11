@@ -71,8 +71,13 @@ export function AgentChat({
           data-testid="agent-chat-layout"
           className={
             hasBrowserPanel
-              ? "grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_440px] overflow-hidden bg-background text-sm text-foreground"
+              ? "grid min-h-0 flex-1 overflow-hidden bg-background text-sm text-foreground"
               : "flex min-h-0 flex-1 overflow-hidden bg-background text-sm text-foreground"
+          }
+          style={
+            hasBrowserPanel
+              ? { gridTemplateColumns: "minmax(0, 1fr) 440px" }
+              : undefined
           }
         >
           <div
@@ -105,6 +110,7 @@ export function AgentChat({
                 ? "col-start-2 flex min-h-0 w-full flex-col overflow-hidden"
                 : "flex min-h-0 shrink-0 flex-col"
             }
+            style={hasBrowserPanel ? { width: 440 } : undefined}
           >
             {hasBrowserPanel && (
               <div

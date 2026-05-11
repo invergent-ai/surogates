@@ -297,9 +297,12 @@ describe("AgentChat", () => {
     );
     expect(browserPane).not.toBeNull();
     expect(layout?.className).toContain("grid");
-    expect(layout?.className).toContain("grid-cols-[minmax(0,1fr)_440px]");
+    expect((layout as HTMLElement | null)?.style.gridTemplateColumns).toBe(
+      "minmax(0, 1fr) 440px",
+    );
     expect(chatPanel?.className).toContain("col-start-1");
     expect(rightStack?.className).toContain("col-start-2");
+    expect((rightStack as HTMLElement | null)?.style.width).toBe("440px");
     expect(rightStack?.className).toContain("w-full");
     expect(browserPanel?.className).toContain("w-full");
     expect(browserPanel?.className).toContain("h-1/2");
