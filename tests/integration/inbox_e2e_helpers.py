@@ -8,15 +8,11 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-import pytest_asyncio
 from cryptography.fernet import Fernet
-from httpx import ASGITransport, AsyncClient
 
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
 from surogates.tenant.credentials import CredentialVault
-
-from .conftest import create_org, create_user
 
 
 @dataclass(frozen=True)
@@ -37,8 +33,7 @@ class StubTenant:
     user_id: UUID
 
 
-@pytest_asyncio.fixture(loop_scope="session")
-async def app(session_factory, redis_client, pg_url, redis_url):
+def build_inbox_test_app(session_factory, redis_client, pg_url, redis_url):
     os.environ["SUROGATES_DB_URL"] = pg_url
     os.environ["SUROGATES_REDIS_URL"] = redis_url
 
@@ -62,15 +57,6 @@ async def app(session_factory, redis_client, pg_url, redis_url):
     return application
 
 
-@pytest_asyncio.fixture(loop_scope="session")
-async def client(app):
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as c:
-        yield c
-
-
 async def create_user_token_session(
     session_factory,
     session_store,
@@ -78,6 +64,8 @@ async def create_user_token_session(
     agent_id: str = "test-agent",
     config: dict[str, Any] | None = None,
 ) -> UserSession:
+    from .conftest import create_org, create_user
+
     org_id = await create_org(session_factory)
     user_id = uuid.uuid4()
     await create_user(session_factory, org_id, user_id=user_id)

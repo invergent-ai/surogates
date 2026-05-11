@@ -9,15 +9,13 @@ from surogates.harness.loop import AgentHarness
 from surogates.tools.registry import ToolRegistry
 
 from .inbox_e2e_helpers import StubTenant
-from .inbox_e2e_helpers import app as app
-from .inbox_e2e_helpers import client as client
 from .inbox_e2e_helpers import create_user_token_session
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
 async def test_completion_inbox_and_ack(
-    client,
+    inbox_client,
     session_factory,
     session_store,
 ):
@@ -55,7 +53,7 @@ async def test_completion_inbox_and_ack(
         reason="completed",
     )
 
-    list_response = await client.get(
+    list_response = await inbox_client.get(
         f"/v1/inbox?kind=task_complete&session_id={session.id}",
         headers=user_session.auth_headers,
     )
@@ -69,7 +67,7 @@ async def test_completion_inbox_and_ack(
     assert item["body"] == "All done."
     assert item["payload"]["outcome"] == "success"
 
-    response = await client.post(
+    response = await inbox_client.post(
         f"/v1/inbox/{item['id']}/ack",
         headers=user_session.auth_headers,
     )

@@ -15,15 +15,13 @@ from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry
 
 from .inbox_e2e_helpers import StubTenant
-from .inbox_e2e_helpers import app as app
-from .inbox_e2e_helpers import client as client
 from .inbox_e2e_helpers import create_user_token_session
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
 async def test_governance_approval_wakes_session(
-    client,
+    inbox_client,
     session_factory,
     session_store,
     monkeypatch,
@@ -87,7 +85,7 @@ async def test_governance_approval_wakes_session(
     result_content = json.loads(result["content"])
     assert result_content["error"] == "policy_blocked_overridable"
 
-    list_response = await client.get(
+    list_response = await inbox_client.get(
         (
             "/v1/inbox?kind=governance_gate"
             f"&session_id={user_session.session.id}"
@@ -102,7 +100,7 @@ async def test_governance_approval_wakes_session(
     assert item["payload"]["tool_name"] == "write_file"
     assert item["payload"]["tool_call_id"] == "tc-e2e-gov"
 
-    response = await client.post(
+    response = await inbox_client.post(
         f"/v1/inbox/{item['id']}/respond",
         json={"decision": "approve"},
         headers=user_session.auth_headers,

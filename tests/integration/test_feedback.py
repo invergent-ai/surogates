@@ -47,6 +47,7 @@ async def app(session_factory, redis_client, pg_url, redis_url):
     application.state.redis = redis_client
     application.state.session_store = SessionStore(session_factory)
     application.state.settings = Settings()
+    application.state.settings.storage.bucket = f"test-agent-{uuid.uuid4()}"
     application.state.storage = create_backend(application.state.settings)
     application.state.credential_vault = CredentialVault(
         session_factory, Fernet.generate_key()

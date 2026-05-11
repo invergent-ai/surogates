@@ -12,6 +12,7 @@ from uuid import UUID
 
 import pytest
 import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -27,6 +28,8 @@ from surogates.db.engine import apply_observability_ddl
 from surogates.db.models import Base
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.service_account import _reset_caches as _reset_sa_caches
+
+from .inbox_e2e_helpers import build_inbox_test_app
 
 # Ensure JWT secret is set for all integration tests.
 os.environ.setdefault("SUROGATES_JWT_SECRET", "integration-test-secret-key-1234")
@@ -162,6 +165,22 @@ async def redis_client(redis_url):
     client = Redis.from_url(redis_url, decode_responses=False)
     yield client
     await client.aclose()
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def inbox_app(session_factory, redis_client, pg_url, redis_url):
+    """FastAPI app configured for inbox end-to-end route tests."""
+    return build_inbox_test_app(session_factory, redis_client, pg_url, redis_url)
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def inbox_client(inbox_app):
+    """HTTP client for inbox end-to-end route tests."""
+    async with AsyncClient(
+        transport=ASGITransport(app=inbox_app),
+        base_url="http://test",
+    ) as client:
+        yield client
 
 
 # ---------------------------------------------------------------------------

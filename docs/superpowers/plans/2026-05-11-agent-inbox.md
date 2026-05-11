@@ -28,6 +28,14 @@
 - [x] **Completed:** Task 23 - Add clarify inbox end-to-end integration test.
 - [x] **Completed:** Task 24 - Add governance and completion inbox end-to-end integration tests.
 
+## Phase 7 TODO
+
+- [x] **Completed:** Task 25 Step 1 - Run the whole backend test suite.
+- [x] **Completed:** Task 25 Step 2 - Run Python lint and type checks where configured. `ruff check .` reports existing unrelated failures; touched files pass targeted ruff.
+- [x] **Completed:** Task 25 Step 3 - Run frontend lint, typecheck, and build gates. Web and SDK typecheck/build/test pass; `npm run lint` reports existing unrelated failures; touched inbox/nav files pass targeted ESLint.
+- [x] **Completed:** Task 25 Step 4 - Perform or document the manual smoke check. Built `/inbox` route serves from Vite preview; authenticated browser clarify smoke was not run in this shell-only pass.
+- [x] **Completed:** Task 25 Step 5 - Commit any verification cleanup.
+
 ## Phase 3 TODO
 
 - [x] **Completed:** Task 10 - Add `SessionStore` helpers for the inbox API.

@@ -24,7 +24,7 @@ import { useAppStore } from "@/stores/app-store";
 import { logout } from "@/api/auth";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { surogatesWebChatAdapter } from "@/features/chat/surogates-web-chat-adapter";
+import { surogatesWebChatAdapter } from "@/features/chat";
 
 export function SessionSidebar() {
   const navigate = useNavigate();

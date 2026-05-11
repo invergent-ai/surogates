@@ -8,15 +8,13 @@ from sqlalchemy import select
 from surogates.db.models import Event
 from surogates.session.events import EventType
 
-from .inbox_e2e_helpers import app as app
-from .inbox_e2e_helpers import client as client
 from .inbox_e2e_helpers import create_user_token_session
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
 async def test_clarify_through_inbox(
-    client,
+    inbox_client,
     session_factory,
     session_store,
 ):
@@ -32,7 +30,7 @@ async def test_clarify_through_inbox(
         },
     )
 
-    list_response = await client.get(
+    list_response = await inbox_client.get(
         (
             "/v1/inbox?kind=input_required"
             f"&session_id={user_session.session.id}"
@@ -48,7 +46,7 @@ async def test_clarify_through_inbox(
     assert item["status"] == "pending"
     assert item["action_ref"]["tool_call_id"] == "tc-e2e-clarify"
 
-    response = await client.post(
+    response = await inbox_client.post(
         (
             f"/v1/sessions/{user_session.session.id}"
             "/clarify/tc-e2e-clarify/respond"
@@ -59,7 +57,7 @@ async def test_clarify_through_inbox(
 
     assert response.status_code == 201, response.text
 
-    detail_response = await client.get(
+    detail_response = await inbox_client.get(
         f"/v1/inbox/{item['id']}",
         headers=user_session.auth_headers,
     )

@@ -6,7 +6,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { InboxPanel } from "@invergent/agent-chat-react";
 import { SessionSidebar } from "@/components/navbar";
 import { useAppStore } from "@/stores/app-store";
-import { surogatesWebChatAdapter } from "@/features/chat/surogates-web-chat-adapter";
+import { surogatesWebChatAdapter } from "@/features/chat";
 
 export function InboxPage() {
   const navigate = useNavigate();
