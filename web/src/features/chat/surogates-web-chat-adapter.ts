@@ -159,6 +159,14 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     };
   },
 
+  async getBrowserPreviewSnapshot(sessionId) {
+    const blob = await sessionsApi.getBrowserPreviewSnapshot(sessionId);
+    return {
+      src: await blobToDataUrl(blob),
+      capturedAt: new Date().toISOString(),
+    };
+  },
+
   async acquireBrowserControl(sessionId) {
     const response = await sessionsApi.acquireBrowserControl(sessionId);
     return {
@@ -254,6 +262,15 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     return url.pathname + url.search;
   },
 };
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error("Failed to read blob"));
+    reader.onload = () => resolve(String(reader.result));
+    reader.readAsDataURL(blob);
+  });
+}
 
 function skillToSlashCommand(skill: SkillSummary): AgentChatSlashCommand {
   const trigger = skill.trigger

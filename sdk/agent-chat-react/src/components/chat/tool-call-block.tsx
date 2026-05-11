@@ -9,7 +9,7 @@ import type { ToolCallInfo } from "../../types";
 import { TerminalToolBlock } from "./tools/terminal-tool";
 import { TodoToolBlock } from "./tools/todo-tool";
 import { ExecuteCodeToolBlock } from "./tools/execute-code-tool";
-import { SessionSearchBlock, WebToolBlock } from "./tools/oneliner-tools";
+import { SessionSearchBlock, WebToolBlock, VisionAnalyzeBlock } from "./tools/oneliner-tools";
 import { ReadFileBlock, WriteFileBlock, PatchBlock, SearchFilesBlock, ListFilesBlock } from "./tools/file-tools";
 import { ProcessToolBlock } from "./tools/process-tool";
 import { ExpertToolBlock } from "./tools/expert-tool";
@@ -48,6 +48,9 @@ export function ToolCallBlock({
     case "web_search":
     case "web_crawl":
       return <WebToolBlock tc={tc} />;
+
+    case "vision_analyze":
+      return <VisionAnalyzeBlock tc={tc} />;
 
     case "read_file":
       return <ReadFileBlock tc={tc} onFileSelect={onFileSelect} />;

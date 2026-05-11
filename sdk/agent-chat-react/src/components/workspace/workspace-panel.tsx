@@ -54,6 +54,7 @@ interface WorkspacePanelProps {
   onCollapsedChange?: (collapsed: boolean) => void;
   refreshSignal?: number;
   disabled?: boolean;
+  fillParent?: boolean;
 }
 
 function collectExpandedPaths(
@@ -163,6 +164,7 @@ export function WorkspacePanel({
   onCollapsedChange,
   refreshSignal = 0,
   disabled = false,
+  fillParent = false,
 }: WorkspacePanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [entries, setEntries] = useState<AgentChatWorkspaceEntry[]>([]);
@@ -385,7 +387,7 @@ export function WorkspacePanel({
         data-testid="workspace-panel"
         role="button"
         tabIndex={0}
-        className="relative z-10 flex min-h-0 w-10 shrink-0 cursor-pointer items-center justify-center border-l border-muted-foreground/20 bg-card text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+        className="relative z-10 flex h-full min-h-0 w-10 shrink-0 cursor-pointer items-center justify-center border-l border-muted-foreground/20 bg-card text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
         aria-label="Expand workspace"
         onClick={() => onCollapsedChange?.(false)}
         onKeyDown={(event) => {
@@ -403,13 +405,22 @@ export function WorkspacePanel({
   return (
     <aside
       data-testid="workspace-panel"
-      className="relative z-10 flex min-h-0 flex-col overflow-hidden border-l border-muted-foreground/20 bg-card"
-      style={{ width, minWidth: MIN_WIDTH, maxWidth: MAX_WIDTH }}
+      className={cn(
+        "relative z-10 flex h-full min-h-0 flex-col overflow-hidden border-l border-muted-foreground/20 bg-card",
+        fillParent && "w-full",
+      )}
+      style={
+        fillParent
+          ? undefined
+          : { width, minWidth: MIN_WIDTH, maxWidth: MAX_WIDTH }
+      }
     >
-      <div
-        className="absolute inset-y-0 left-0 z-20 w-1.5 cursor-col-resize transition-colors hover:bg-primary/20 active:bg-primary/30"
-        onMouseDown={onResizeStart}
-      />
+      {!fillParent && (
+        <div
+          className="absolute inset-y-0 left-0 z-20 w-1.5 cursor-col-resize transition-colors hover:bg-primary/20 active:bg-primary/30"
+          onMouseDown={onResizeStart}
+        />
+      )}
       <input
         ref={fileInputRef}
         type="file"

@@ -1,6 +1,7 @@
 ---
 name: heavyskill
 description: Use for complex reasoning tasks where a single chain-of-thought may be insufficient — math/STEM problems, logical deduction, algorithmic challenges, and uncertain approaches. Spawns K parallel reasoning sub-agents, then synthesizes their trajectories through critical analysis to produce a superior answer. Do not use for simple factual questions, casual conversation, or straightforward edits.
+applies_when: always
 ---
 
 # HeavySkill: Heavy Thinking
@@ -82,9 +83,9 @@ Your task:
 - Provide the definitive final answer
 ```
 
-## Implementation in Claude Code Harness
+## Implementation in the agent harness
 
-When activated in Claude Code, execute as follows:
+When activated, execute as follows:
 
 1. **Identify the problem** — Extract the core reasoning task from the user's request
 2. **Spawn parallel sub-agents** — Use the delegate_task tool to launch K=3 independent reasoning sub-agents in a single message (parallel execution)

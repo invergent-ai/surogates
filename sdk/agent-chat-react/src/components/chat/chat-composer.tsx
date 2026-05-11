@@ -53,8 +53,11 @@ type SlashCommand = AgentChatSlashCommand;
 // ── Props ────────────────────────────────────────────────────────────
 
 interface ChatComposerProps {
-  onSend: (text: string, images?: AgentChatImageAttachment[]) => void;
-  onStop: () => void;
+  onSend: (
+    text: string,
+    images?: AgentChatImageAttachment[],
+  ) => void | Promise<void>;
+  onStop: () => void | Promise<void>;
   isRunning: boolean;
   disabled?: boolean;
   disabledReason?: string;
@@ -229,9 +232,9 @@ function ChatComposerInner({
   // ── Submit ───────────────────────────────────────────────────────
 
   const handleSubmit = useCallback(
-    (message: PromptInputMessage) => {
+    async (message: PromptInputMessage) => {
       const text = message.text.trim();
-      if (!text || isRunning || disabled) return;
+      if (!text || disabled) return;
 
       // Convert file attachments to image blocks.
       const images: AgentChatImageAttachment[] = [];
@@ -240,9 +243,12 @@ function ChatComposerInner({
           images.push({ data: file.url, mimeType: file.mediaType });
         }
       }
-      onSend(text, images.length > 0 ? images : undefined);
+      if (isRunning) {
+        await onStop();
+      }
+      await onSend(text, images.length > 0 ? images : undefined);
     },
-    [onSend, isRunning, disabled],
+    [onSend, onStop, isRunning, disabled],
   );
 
   // ── Render ───────────────────────────────────────────────────────

@@ -28,7 +28,9 @@ def mock_transport():
                     if isinstance(body, bytes):
                         return httpx.Response(status, content=body)
                     return httpx.Response(status, json=body)
-            return httpx.Response(404, json={"error": "not found", "path": request.url.path})
+            return httpx.Response(
+                404, json={"error": "not found", "path": request.url.path}
+            )
 
     return handlers, MockTransport()
 
@@ -88,7 +90,9 @@ class TestNavigate:
         assert result["url"] == "https://example.com/"
         assert result["title"] == "Example"
 
-    async def test_navigate_propagates_kernel_error(self, client_with_transport) -> None:
+    async def test_navigate_propagates_kernel_error(
+        self, client_with_transport
+    ) -> None:
         client, handlers = client_with_transport
         handlers.append(
             (
@@ -101,15 +105,25 @@ class TestNavigate:
         with pytest.raises(RuntimeError, match="ERR_NAME_NOT_RESOLVED"):
             await client.navigate("https://nope.invalid")
 
-    async def test_navigate_invalidates_snapshot_cache(self, client_with_transport) -> None:
+    async def test_navigate_invalidates_snapshot_cache(
+        self, client_with_transport
+    ) -> None:
         client, handlers = client_with_transport
-        client._snapshot_cache["@e1"] = {"x": 10, "y": 10, "role": "button", "name": "x"}
+        client._snapshot_cache["@e1"] = {
+            "x": 10,
+            "y": 10,
+            "role": "button",
+            "name": "x",
+        }
         handlers.append(
             (
                 "POST",
                 "/playwright/execute",
                 200,
-                {"success": True, "result": {"url": "https://example.com/", "title": "Example"}},
+                {
+                    "success": True,
+                    "result": {"url": "https://example.com/", "title": "Example"},
+                },
             )
         )
         await client.navigate("https://example.com")
@@ -121,7 +135,9 @@ class TestGetState:
         captured: list[dict[str, Any]] = []
 
         class CapturingTransport(httpx.AsyncBaseTransport):
-            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            async def handle_async_request(
+                self, request: httpx.Request
+            ) -> httpx.Response:
                 captured.append(json.loads(request.content))
                 return httpx.Response(
                     200,
@@ -149,7 +165,9 @@ class TestGetState:
         assert code.index("await page.evaluate") < code.index("document.querySelector")
         assert code.index("await page.evaluate") < code.index("root.querySelectorAll")
 
-    async def test_get_state_returns_tree_with_refs(self, client_with_transport) -> None:
+    async def test_get_state_returns_tree_with_refs(
+        self, client_with_transport
+    ) -> None:
         client, handlers = client_with_transport
         handlers.append(
             (
@@ -192,7 +210,9 @@ class TestGetState:
         assert state["tree"][0]["name"] == "Settings"
         assert state["tree"][1]["ref"] == "@e2"
 
-    async def test_get_state_populates_snapshot_cache(self, client_with_transport) -> None:
+    async def test_get_state_populates_snapshot_cache(
+        self, client_with_transport
+    ) -> None:
         client, handlers = client_with_transport
         handlers.append(
             (
@@ -228,7 +248,12 @@ class TestGetState:
 
     async def test_get_state_overwrites_old_cache(self, client_with_transport) -> None:
         client, handlers = client_with_transport
-        client._snapshot_cache["@e9"] = {"x": 0, "y": 0, "role": "stale", "name": "stale"}
+        client._snapshot_cache["@e9"] = {
+            "x": 0,
+            "y": 0,
+            "role": "stale",
+            "name": "stale",
+        }
         handlers.append(
             (
                 "POST",
@@ -269,10 +294,38 @@ class TestGetStateFilters:
                 "title": "t",
                 "viewport": {"width": 1, "height": 1},
                 "nodes": [
-                    {"role": "generic", "name": "", "x": 0, "y": 0, "width": 0, "height": 0},
-                    {"role": "button", "name": "Go", "x": 10, "y": 10, "width": 1, "height": 1},
-                    {"role": "paragraph", "name": "", "x": 0, "y": 20, "width": 0, "height": 0},
-                    {"role": "link", "name": "Home", "x": 30, "y": 30, "width": 1, "height": 1},
+                    {
+                        "role": "generic",
+                        "name": "",
+                        "x": 0,
+                        "y": 0,
+                        "width": 0,
+                        "height": 0,
+                    },
+                    {
+                        "role": "button",
+                        "name": "Go",
+                        "x": 10,
+                        "y": 10,
+                        "width": 1,
+                        "height": 1,
+                    },
+                    {
+                        "role": "paragraph",
+                        "name": "",
+                        "x": 0,
+                        "y": 20,
+                        "width": 0,
+                        "height": 0,
+                    },
+                    {
+                        "role": "link",
+                        "name": "Home",
+                        "x": 30,
+                        "y": 30,
+                        "width": 1,
+                        "height": 1,
+                    },
                 ],
             },
         }
@@ -288,13 +341,17 @@ class TestGetStateFilters:
         assert state["tree"][0]["ref"] == "@e2"
         assert state["tree"][1]["ref"] == "@e4"
 
-    async def test_filters_dont_corrupt_cache(self, client_with_transport, deep_response) -> None:
+    async def test_filters_dont_corrupt_cache(
+        self, client_with_transport, deep_response
+    ) -> None:
         client, handlers = client_with_transport
         handlers.append(("POST", "/playwright/execute", 200, deep_response))
         await client.get_state(interactive_only=True)
         assert set(client._snapshot_cache.keys()) == {"@e1", "@e2", "@e3", "@e4"}
 
-    async def test_max_depth_truncates(self, client_with_transport, deep_response) -> None:
+    async def test_max_depth_truncates(
+        self, client_with_transport, deep_response
+    ) -> None:
         client, handlers = client_with_transport
         deep_response = {
             "success": True,
@@ -302,7 +359,9 @@ class TestGetStateFilters:
                 **deep_response["result"],
                 "nodes": [
                     {**node, "depth": depth}
-                    for node, depth in zip(deep_response["result"]["nodes"], [0, 1, 1, 3])
+                    for node, depth in zip(
+                        deep_response["result"]["nodes"], [0, 1, 1, 3]
+                    )
                 ],
             },
         }
@@ -316,23 +375,43 @@ class TestClickType:
     async def test_click_at_coords(self, client_with_transport) -> None:
         client, handlers = client_with_transport
         client._snapshot_cache["@e1"] = {"x": 1, "y": 1, "role": "button", "name": "Go"}
-        handlers.append(("POST", "/computer/click_mouse", 200, {"ok": True}))
+        handlers.append(
+            ("POST", "/playwright/execute", 200, {"success": True, "result": True})
+        )
         await client.click_at(120, 240)
         assert client._snapshot_cache == {}
 
-    async def test_click_ref_resolves_from_cache(self, client_with_transport) -> None:
+    async def test_click_ref_uses_playwright_viewport_coordinates(
+        self, client_with_transport
+    ) -> None:
         client, _handlers = client_with_transport
-        client._snapshot_cache["@e3"] = {"x": 50, "y": 60, "role": "button", "name": "Go"}
+        client._snapshot_cache["@e3"] = {
+            "x": 50,
+            "y": 60,
+            "role": "button",
+            "name": "Go",
+        }
         captured: list[dict[str, Any]] = []
 
         class CapturingTransport(httpx.AsyncBaseTransport):
-            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-                captured.append(json.loads(request.content))
-                return httpx.Response(200, json={"ok": True})
+            async def handle_async_request(
+                self, request: httpx.Request
+            ) -> httpx.Response:
+                captured.append({
+                    "path": request.url.path,
+                    "body": json.loads(request.content),
+                })
+                return httpx.Response(200, json={"success": True, "result": True})
 
-        client._http = httpx.AsyncClient(base_url=client.rest_url, transport=CapturingTransport())
+        client._http = httpx.AsyncClient(
+            base_url=client.rest_url, transport=CapturingTransport()
+        )
         await client.click_ref("@e3")
-        assert captured[0] == {"x": 50, "y": 60, "click_type": "click"}
+        assert captured[0]["path"] == "/playwright/execute"
+        code = captured[0]["body"]["code"]
+        assert "page.mouse.click" in code
+        assert "50" in code
+        assert "60" in code
 
     async def test_click_ref_unknown_raises(self, client_with_transport) -> None:
         client, _ = client_with_transport
@@ -341,15 +420,27 @@ class TestClickType:
 
     async def test_type_text_invalidates_cache(self, client_with_transport) -> None:
         client, handlers = client_with_transport
-        client._snapshot_cache["@e1"] = {"x": 1, "y": 1, "role": "textbox", "name": "Email"}
+        client._snapshot_cache["@e1"] = {
+            "x": 1,
+            "y": 1,
+            "role": "textbox",
+            "name": "Email",
+        }
         handlers.append(("POST", "/computer/type", 200, {"ok": True}))
         await client.type_text("hello")
         assert client._snapshot_cache == {}
 
     async def test_type_into_ref_clicks_first(self, client_with_transport) -> None:
         client, handlers = client_with_transport
-        client._snapshot_cache["@e2"] = {"x": 30, "y": 40, "role": "textbox", "name": "Email"}
-        handlers.append(("POST", "/computer/click_mouse", 200, {"ok": True}))
+        client._snapshot_cache["@e2"] = {
+            "x": 30,
+            "y": 40,
+            "role": "textbox",
+            "name": "Email",
+        }
+        handlers.append(
+            ("POST", "/playwright/execute", 200, {"success": True, "result": True})
+        )
         handlers.append(("POST", "/computer/type", 200, {"ok": True}))
         await client.type_into_ref("@e2", "test@example.com")
         assert client._snapshot_cache == {}
@@ -368,11 +459,15 @@ class TestSmallActions:
         captured: list[dict[str, Any]] = []
 
         class CapturingTransport(httpx.AsyncBaseTransport):
-            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            async def handle_async_request(
+                self, request: httpx.Request
+            ) -> httpx.Response:
                 captured.append(json.loads(request.content))
                 return httpx.Response(200, json={"ok": True})
 
-        client._http = httpx.AsyncClient(base_url=client.rest_url, transport=CapturingTransport())
+        client._http = httpx.AsyncClient(
+            base_url=client.rest_url, transport=CapturingTransport()
+        )
         await client.press_key("Ctrl+l")
         assert captured[0]["keys"] == ["Ctrl+l"]
 
@@ -402,10 +497,43 @@ class TestSmallActions:
 class TestScreenshot:
     async def test_screenshot_returns_png_bytes(self, client_with_transport) -> None:
         client, handlers = client_with_transport
-        handlers.append(("POST", "/computer/screenshot", 200, PNG_MAGIC + b"fakepngbody"))
+        handlers.append(
+            ("POST", "/computer/screenshot", 200, PNG_MAGIC + b"fakepngbody")
+        )
         result = await client.screenshot()
         assert result["png_bytes"].startswith(PNG_MAGIC)
         assert "annotations" not in result
+
+    async def test_screenshot_can_capture_page_viewport_without_desktop(
+        self,
+        client_with_transport,
+    ) -> None:
+        client, _handlers = client_with_transport
+        seen_paths: list[str] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen_paths.append(request.url.path)
+            assert request.url.path == "/playwright/execute"
+            payload = json.loads(request.content.decode())
+            assert "page.screenshot(options)" in payload["code"]
+            assert '"path"' not in payload["code"]
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "result": base64.b64encode(PNG_MAGIC + b"viewport").decode(),
+                },
+            )
+
+        client._http = httpx.AsyncClient(
+            base_url=client.rest_url,
+            transport=httpx.MockTransport(handler),
+        )
+
+        result = await client.screenshot(viewport_only=True)
+
+        assert result["png_bytes"] == PNG_MAGIC + b"viewport"
+        assert seen_paths == ["/playwright/execute"]
 
     async def test_screenshot_can_save_inside_browser_workspace(
         self,
@@ -441,12 +569,24 @@ class TestScreenshot:
         self, client_with_transport
     ) -> None:
         client, _ = client_with_transport
-        client._snapshot_cache["@e1"] = {"x": 100, "y": 50, "role": "button", "name": "Go"}
-        client._snapshot_cache["@e2"] = {"x": 200, "y": 50, "role": "link", "name": "Help"}
+        client._snapshot_cache["@e1"] = {
+            "x": 100,
+            "y": 50,
+            "role": "button",
+            "name": "Go",
+        }
+        client._snapshot_cache["@e2"] = {
+            "x": 200,
+            "y": 50,
+            "role": "link",
+            "name": "Help",
+        }
         seen_paths: list[str] = []
 
         class TracingTransport(httpx.AsyncBaseTransport):
-            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            async def handle_async_request(
+                self, request: httpx.Request
+            ) -> httpx.Response:
                 seen_paths.append(request.url.path)
                 if request.url.path == "/computer/screenshot":
                     return httpx.Response(200, content=PNG_MAGIC + b"img")
@@ -454,7 +594,9 @@ class TestScreenshot:
                     return httpx.Response(200, json={"success": True, "result": True})
                 return httpx.Response(404)
 
-        client._http = httpx.AsyncClient(base_url=client.rest_url, transport=TracingTransport())
+        client._http = httpx.AsyncClient(
+            base_url=client.rest_url, transport=TracingTransport()
+        )
         result = await client.screenshot(annotate=True)
 
         assert seen_paths.count("/playwright/execute") == 2

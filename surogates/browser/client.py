@@ -192,13 +192,29 @@ return {
     ) -> None:
         """Click at viewport coordinates."""
 
-        body: dict[str, Any] = {"x": x, "y": y, "click_type": click_type}
-        if button != "left":
-            body["button"] = button
+        options: dict[str, Any] = {"button": button}
         if num_clicks != 1:
-            body["num_clicks"] = num_clicks
-        response = await self._http.post("/computer/click_mouse", json=body)
-        response.raise_for_status()
+            options["clickCount"] = num_clicks
+        if click_type == "click":
+            code = (
+                f"await page.mouse.click({int(x)}, {int(y)}, "
+                f"{json.dumps(options)});\nreturn true;"
+            )
+        elif click_type == "down":
+            code = (
+                f"await page.mouse.move({int(x)}, {int(y)});\n"
+                f"await page.mouse.down({json.dumps({'button': button})});\n"
+                "return true;"
+            )
+        elif click_type == "up":
+            code = (
+                f"await page.mouse.move({int(x)}, {int(y)});\n"
+                f"await page.mouse.up({json.dumps({'button': button})});\n"
+                "return true;"
+            )
+        else:
+            raise ValueError(f"unsupported click_type: {click_type}")
+        await self._playwright_execute(code)
         self._invalidate_snapshot_cache()
 
     async def click_ref(self, ref: str, **kwargs: Any) -> None:
@@ -234,7 +250,9 @@ return {
         response.raise_for_status()
         self._invalidate_snapshot_cache()
 
-    async def scroll_at(self, x: int, y: int, *, delta_x: int = 0, delta_y: int = 0) -> None:
+    async def scroll_at(
+        self, x: int, y: int, *, delta_x: int = 0, delta_y: int = 0
+    ) -> None:
         """Scroll at viewport coordinates."""
 
         response = await self._http.post(
@@ -249,7 +267,10 @@ return {
 
         if len(path) < 2:
             raise ValueError("drag path must contain at least two points")
-        body: dict[str, Any] = {"path": [list(point) for point in path], "smooth": False}
+        body: dict[str, Any] = {
+            "path": [list(point) for point in path],
+            "smooth": False,
+        }
         if button != "left":
             body["button"] = button
         response = await self._http.post("/computer/drag_mouse", json=body)
@@ -267,6 +288,7 @@ return {
         region: dict[str, int] | None = None,
         annotate: bool = False,
         save_path: str | None = None,
+        viewport_only: bool = False,
     ) -> dict[str, Any]:
         """Capture a PNG screenshot, optionally with numbered ref overlays."""
 
@@ -278,8 +300,10 @@ return {
             await self._inject_overlay(annotations)
 
         try:
-            if save_path is not None:
-                options: dict[str, Any] = {"path": save_path}
+            if save_path is not None or viewport_only:
+                options: dict[str, Any] = {}
+                if save_path is not None:
+                    options["path"] = save_path
                 if region is not None:
                     options["clip"] = {
                         "x": region["x"],
@@ -333,7 +357,9 @@ return {
     def _resolve_ref(self, ref: str) -> dict[str, Any]:
         entry = self._snapshot_cache.get(ref)
         if entry is None:
-            raise KeyError(f"Unknown ref {ref!r}; call browser_get_state to refresh refs")
+            raise KeyError(
+                f"Unknown ref {ref!r}; call browser_get_state to refresh refs"
+            )
         return entry
 
     def _build_tree_and_cache(

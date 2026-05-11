@@ -54,8 +54,11 @@ interface ChatThreadProps {
   messages: ChatMessageType[];
   isRunning: boolean;
   isLoadingHistory?: boolean;
-  onSend: (text: string, images?: AgentChatImageAttachment[]) => void;
-  onStop: () => void;
+  onSend: (
+    text: string,
+    images?: AgentChatImageAttachment[],
+  ) => void | Promise<void>;
+  onStop: () => void | Promise<void>;
   onFileSelect?: (path: string) => void;
   disabled?: boolean;
   disabledReason?: string;

@@ -1,10 +1,4 @@
-import { useState } from "react";
-import {
-  AlertCircleIcon,
-  ChevronDownIcon,
-  ChevronRightIcon,
-  ZapIcon,
-} from "lucide-react";
+import { ZapIcon } from "lucide-react";
 import type { ToolCallInfo } from "../../types";
 
 interface BrowserActivityGroupProps {
@@ -12,69 +6,92 @@ interface BrowserActivityGroupProps {
 }
 
 export function BrowserActivityGroup({ calls }: BrowserActivityGroupProps) {
-  const [open, setOpen] = useState(false);
-  const latest = calls[calls.length - 1];
-
   return (
-    <div className="rounded-none border border-line bg-card text-xs">
-      <button
-        type="button"
-        onClick={() => setOpen((current) => !current)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-muted/40"
-      >
-        {open ? (
-          <ChevronDownIcon className="size-3 shrink-0" aria-hidden="true" />
-        ) : (
-          <ChevronRightIcon className="size-3 shrink-0" aria-hidden="true" />
-        )}
-        <ZapIcon className="size-3 shrink-0 text-amber-500" aria-hidden="true" />
-        <span className="font-semibold text-foreground">browser</span>
-        <span className="min-w-0 truncate text-muted-foreground">
-          ({calls.length} {calls.length === 1 ? "action" : "actions"} - latest:{" "}
-          {latest ? summarise(latest) : "none"})
-        </span>
-      </button>
-      {open && (
-        <ul className="border-t border-line py-1">
-          {calls.map((call) => {
-            const error = stringValue(parseJson(call.result).error);
-            return (
-              <li
-                key={call.id}
-                className="flex items-center gap-2 px-6 py-1 font-mono text-[11px]"
+    <div className="flex items-center gap-2 border border-line bg-card px-3 py-2 text-xs">
+      <ZapIcon className="size-3 shrink-0 text-amber-500" aria-hidden="true" />
+      <span className="shrink-0 font-semibold text-foreground">Browser:</span>
+      <span className="min-w-0 truncate text-muted-foreground">
+        {calls.map((call, index) => {
+          const error = stringValue(parseJson(call.result).error);
+          return (
+            <span key={call.id}>
+              {index > 0 && ", "}
+              <span
+                className={error ? "text-destructive" : undefined}
+                data-testid={error ? `activity-error-${call.id}` : undefined}
+                title={error || undefined}
               >
-                {error && (
-                  <AlertCircleIcon
-                    data-testid={`activity-error-${call.id}`}
-                    className="size-3 shrink-0 text-destructive"
-                    aria-hidden="true"
-                  />
-                )}
-                <span className="min-w-0 truncate">{summarise(call)}</span>
-                {error && (
-                  <span className="ml-auto max-w-40 truncate text-destructive">
-                    {error}
-                  </span>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
+                {summarize(call)}
+              </span>
+            </span>
+          );
+        })}
+      </span>
     </div>
   );
 }
 
-function summarise(call: ToolCallInfo): string {
-  const verb = call.toolName.replace(/^browser_/, "");
+function summarize(call: ToolCallInfo): string {
   const args = parseJson(call.args);
-  const ref = stringValue(args.ref);
-  const url = stringValue(args.url);
-  const text = stringValue(args.text);
-  if (url) return `${verb} ${url}`;
-  if (ref) return `${verb} ${ref}`;
-  if (text) return `${verb} "${text.slice(0, 24)}"`;
-  return verb;
+  const handler = ACTION_SUMMARIES[call.toolName];
+  return handler ? handler(args) : call.toolName.replace(/^browser_/, "");
+}
+
+const ACTION_SUMMARIES: Record<string, (args: Record<string, unknown>) => string> = {
+  browser_navigate: (args) => `navigate to ${stringValue(args.url) || "?"}`,
+  browser_get_state: () => "get state",
+  browser_close: () => "close",
+  browser_click: (args) => {
+    const ref = stringValue(args.ref);
+    if (ref) return `click ${ref}`;
+    const x = asNumber(args.x);
+    const y = asNumber(args.y);
+    if (x !== null && y !== null) return `click (${x}, ${y})`;
+    return "click";
+  },
+  browser_type: (args) => {
+    const text = stringValue(args.text);
+    const ref = stringValue(args.ref);
+    const quoted = text ? `"${truncateText(text)}"` : "";
+    if (!quoted) return ref ? `type into ${ref}` : "type";
+    return ref ? `type ${quoted} into ${ref}` : `type ${quoted}`;
+  },
+  browser_press_key: (args) => {
+    const keys = Array.isArray(args.keys) ? args.keys.map(String) : [];
+    return keys.length ? `press ${keys.join("+")}` : "press key";
+  },
+  browser_scroll: (args) => {
+    const x = asNumber(args.x);
+    const y = asNumber(args.y);
+    const dx = asNumber(args.delta_x) ?? 0;
+    const dy = asNumber(args.delta_y) ?? 0;
+    const delta = dx || dy ? `Δ(${dx}, ${dy})` : "";
+    const origin = x !== null && y !== null ? `at (${x}, ${y})` : "";
+    return ["scroll", delta, origin].filter(Boolean).join(" ");
+  },
+  browser_drag: (args) => {
+    const path = Array.isArray(args.path) ? args.path : [];
+    if (path.length < 2) return "drag";
+    const first = path[0] as unknown[];
+    const last = path[path.length - 1] as unknown[];
+    const point = (p: unknown[]) =>
+      `(${asNumber(p[0]) ?? "?"}, ${asNumber(p[1]) ?? "?"})`;
+    return `drag ${point(first)} → ${point(last)}`;
+  },
+  browser_wait: (args) => {
+    const ms = asNumber(args.ms);
+    return ms === null ? "wait" : `wait ${ms}ms`;
+  },
+  browser_screenshot: (args) =>
+    args.annotate === true ? "screenshot (annotated)" : "screenshot",
+};
+
+function truncateText(text: string, max = 32): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function parseJson(raw?: string): Record<string, unknown> {

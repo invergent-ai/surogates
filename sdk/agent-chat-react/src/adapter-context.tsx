@@ -13,11 +13,15 @@ const AgentChatAdapterContext =
 export const NO_BROWSER_ADAPTER: Pick<
   AgentChatAdapter,
   | "getBrowserState"
+  | "getBrowserPreviewSnapshot"
   | "acquireBrowserControl"
   | "releaseBrowserControl"
   | "browserLiveViewUrl"
 > = {
   async getBrowserState() {
+    return null;
+  },
+  async getBrowserPreviewSnapshot() {
     return null;
   },
   async acquireBrowserControl() {

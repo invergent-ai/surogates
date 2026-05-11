@@ -84,6 +84,26 @@ class _Redis:
         self.published.append((channel, message))
 
 
+class _BrowserPool:
+    def __init__(self) -> None:
+        self.destroyed_sessions: list[str] = []
+
+    async def destroy_for_session(self, session_id: str) -> None:
+        self.destroyed_sessions.append(session_id)
+
+
+class _BrowserBackend(_BrowserPool):
+    pass
+
+
+class _BrowserRegistry:
+    def __init__(self) -> None:
+        self.deleted_sessions: list[str] = []
+
+    async def delete(self, session_id: str) -> None:
+        self.deleted_sessions.append(session_id)
+
+
 class _Store:
     def __init__(self, org_id: UUID, agent_id: str = "support-bot") -> None:
         self.org_id = org_id
@@ -156,6 +176,9 @@ def _request(
     store: _Store,
     storage: _RecordingStorage,
     redis: _Redis,
+    browser_pool: _BrowserPool | None = None,
+    browser_backend: _BrowserBackend | None = None,
+    browser_registry: _BrowserRegistry | None = None,
     path: str = "/v1/sessions",
 ):
     settings = Settings(agent_id=store.agent_id)
@@ -169,6 +192,9 @@ def _request(
                 session_store=store,
                 storage=storage,
                 redis=redis,
+                browser_pool=browser_pool,
+                browser_backend=browser_backend,
+                browser_registry=browser_registry,
             ),
         ),
     )
@@ -249,6 +275,38 @@ async def test_delete_session_deletes_session_prefix_not_agent_bucket():
     ]
 
 
+async def test_delete_session_destroys_browser_sandbox():
+    org_id = uuid4()
+    session_id = uuid4()
+    store = _Store(org_id)
+    store.session = SimpleNamespace(
+        id=session_id,
+        org_id=org_id,
+        agent_id="support-bot",
+        status="active",
+        channel="web",
+        config={"storage_bucket": "ops-agent-bucket"},
+    )
+    storage = _RecordingStorage()
+    browser_pool = _BrowserPool()
+    browser_backend = _BrowserBackend()
+    browser_registry = _BrowserRegistry()
+    request = _request(
+        store,
+        storage,
+        _Redis(),
+        browser_pool=browser_pool,
+        browser_backend=browser_backend,
+        browser_registry=browser_registry,
+    )
+
+    await sessions_route.delete_session(session_id, request, _tenant(org_id, uuid4()))
+
+    assert browser_pool.destroyed_sessions == [str(session_id)]
+    assert browser_backend.destroyed_sessions == [str(session_id)]
+    assert browser_registry.deleted_sessions == [str(session_id)]
+
+
 async def test_workspace_upload_read_tree_and_delete_use_session_prefix():
     org_id = uuid4()
     session_id = uuid4()
@@ -274,9 +332,10 @@ async def test_workspace_upload_read_tree_and_delete_use_session_prefix():
     )
 
     assert uploaded.path == "src/app.py"
-    assert storage.objects[
-        ("ops-agent-bucket", f"sessions/{session_id}/src/app.py")
-    ] == b"print('hi')"
+    assert (
+        storage.objects[("ops-agent-bucket", f"sessions/{session_id}/src/app.py")]
+        == b"print('hi')"
+    )
 
     tree = await workspace_route.get_workspace_tree(session_id, request, tenant)
     assert tree.root == "ops-agent-bucket"
@@ -284,15 +343,22 @@ async def test_workspace_upload_read_tree_and_delete_use_session_prefix():
     assert tree.entries[0].children[0].path == "src/app.py"
 
     content = await workspace_route.get_workspace_file(
-        session_id, request, path="src/app.py", tenant=tenant,
+        session_id,
+        request,
+        path="src/app.py",
+        tenant=tenant,
     )
     assert content.content == "print('hi')"
 
     await workspace_route.delete_file(
-        session_id, request, path="src/app.py", tenant=tenant,
+        session_id,
+        request,
+        path="src/app.py",
+        tenant=tenant,
     )
     assert storage.deleted_keys[-1] == (
-        "ops-agent-bucket", f"sessions/{session_id}/src/app.py",
+        "ops-agent-bucket",
+        f"sessions/{session_id}/src/app.py",
     )
 
 
@@ -308,14 +374,17 @@ async def test_workspace_pdf_files_are_read_as_base64_previews():
         config={"storage_bucket": "ops-agent-bucket"},
     )
     storage = _RecordingStorage()
-    storage.objects[
-        ("ops-agent-bucket", f"sessions/{session_id}/docs/report.pdf")
-    ] = b"%PDF-1.4\n"
+    storage.objects[("ops-agent-bucket", f"sessions/{session_id}/docs/report.pdf")] = (
+        b"%PDF-1.4\n"
+    )
     request = _request(store, storage, _Redis())
     tenant = _tenant(org_id, uuid4())
 
     content = await workspace_route.get_workspace_file(
-        session_id, request, path="docs/report.pdf", tenant=tenant,
+        session_id,
+        request,
+        path="docs/report.pdf",
+        tenant=tenant,
     )
 
     assert content.path == "docs/report.pdf"

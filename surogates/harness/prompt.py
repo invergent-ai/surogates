@@ -150,17 +150,19 @@ class PromptBuilder:
 
         Layers:
         1. Agent identity (sub-agent body if active, otherwise org config or default)
-        2. Tool-aware behavioral guidance (memory, session_search, skills)
-        3. Tool-use enforcement (model-specific)
-        4. Memory (frozen snapshot)
-        5. Skills index
-        6. Available sub-agents (coordinator sessions only)
-        7. Context files (AGENTS.md, .cursorrules)
-        8. Timestamp, model info, platform hint
-        9. Model-specific execution guidance (OpenAI, Google)
+        2. Working principles + heavy-thinking pattern (always loaded)
+        3. Tool-aware behavioral guidance (memory, session_search, skills)
+        4. Tool-use enforcement (model-specific)
+        5. Memory (frozen snapshot)
+        6. Skills index
+        7. Available sub-agents (coordinator sessions only)
+        8. Context files (AGENTS.md, .cursorrules)
+        9. Timestamp, model info, platform hint
+        10. Model-specific execution guidance (OpenAI, Google)
         """
         sections: list[str] = []
         sections.append(self._identity_section())
+        sections.append(self._working_principles_section())
 
         # Tool-aware guidance — only injected when the tool is actually loaded.
         sections.append(self._tool_guidance_section())
@@ -206,6 +208,8 @@ class PromptBuilder:
             parts.append(self._prompts.get("guidance/expert"))
         if "create_artifact" in self._available_tools:
             parts.append(self._prompts.get("guidance/artifact"))
+        if any(tool.startswith("browser_") for tool in self._available_tools):
+            parts.append(self._prompts.get("guidance/browser"))
         if (
             "loop_wait" in self._available_tools
             and self._session is not None
@@ -238,6 +242,26 @@ class PromptBuilder:
         if not parts:
             return ""
         return "\n\n".join(parts)
+
+    def _working_principles_section(self) -> str:
+        """Always-loaded working principles plus the heavy-thinking pattern.
+
+        Two fragments rendered back-to-back: ``guidance/working_principles``
+        (the 12-rule project charter — caution on non-trivial work, surface
+        uncertainty over hiding it, conform to the codebase) and
+        ``guidance/heavyskill`` (parallel-reason-then-synthesize pattern for
+        hard reasoning problems, dispatched via ``delegate_task``).
+
+        Both fragments are loaded unconditionally.  ``delegate_task`` is a
+        built-in harness tool that is always registered, so gating
+        heavyskill on tool availability adds noise without buying anything.
+        Sub-agents inherit the same principles -- they are general behavior,
+        not coordinator-specific.
+        """
+        return "\n\n".join((
+            self._prompts.get("guidance/working_principles"),
+            self._prompts.get("guidance/heavyskill"),
+        ))
 
     def _identity_section(self) -> str:
         """Agent identity.

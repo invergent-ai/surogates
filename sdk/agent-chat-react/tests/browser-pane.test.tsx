@@ -20,6 +20,9 @@ const liveAdapter = {
     return { outcome: "granted" as const, ownerUserId: "u" };
   },
   async releaseBrowserControl() {},
+  async getBrowserPreviewSnapshot() {
+    return { src: "data:image/png;base64,cHJldmlldw==" };
+  },
   browserLiveViewUrl() {
     return "about:blank#browser-live";
   },
@@ -47,8 +50,15 @@ function renderPane(element: React.ReactElement) {
   return container;
 }
 
+async function flushPreview() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
 describe("BrowserPane", () => {
-  it("mounts the inline live-view iframe only after the preview is opened", async () => {
+  it("renders a passive screenshot preview without mounting the live-view iframe", async () => {
     const node = renderPane(
       <BrowserPane
         sessionId="s"
@@ -59,22 +69,25 @@ describe("BrowserPane", () => {
 
     expect(node.querySelector('[data-testid="browser-iframe"]')).toBeNull();
 
-    const openButton = node.querySelector<HTMLButtonElement>(
-      'button[aria-label="Open browser live preview"]',
+    await flushPreview();
+
+    const preview = node.querySelector<HTMLImageElement>(
+      '[data-testid="browser-preview-image"]',
     );
-    expect(openButton).not.toBeNull();
-
-    await act(async () => {
-      openButton?.click();
-    });
-
     const iframe = node.querySelector<HTMLIFrameElement>(
       '[data-testid="browser-iframe"]',
     );
-    expect(iframe?.getAttribute("src")).toBe("about:blank#browser-live");
+    expect(preview?.getAttribute("src")).toBe(
+      "data:image/png;base64,cHJldmlldw==",
+    );
+    expect(preview?.className).toContain("object-contain");
+    expect(iframe).toBeNull();
+    expect(
+      node.querySelector('button[aria-label="Open browser preview"]'),
+    ).toBeNull();
   });
 
-  it("opens the browser live view in a full-page dialog", async () => {
+  it("opens passive preview in a full-page dialog without mounting live view", async () => {
     const node = renderPane(
       <BrowserPane
         sessionId="s"
@@ -82,6 +95,7 @@ describe("BrowserPane", () => {
         adapter={liveAdapter}
       />,
     );
+    await flushPreview();
 
     const maximizeButton = node.querySelector<HTMLButtonElement>(
       'button[aria-label="Maximize browser"]',
@@ -93,28 +107,23 @@ describe("BrowserPane", () => {
     });
 
     const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]');
+    const preview = document.body.querySelector<HTMLImageElement>(
+      '[data-testid="browser-fullscreen-preview-image"]',
+    );
     const iframe = document.body.querySelector<HTMLIFrameElement>(
       '[data-testid="browser-fullscreen-iframe"]',
     );
 
     expect(dialog).not.toBeNull();
     expect(dialog?.textContent).toContain("Browser");
-    expect(iframe?.getAttribute("src")).toBe("about:blank#browser-live");
-  });
-
-  it("shows Take control button in live state", () => {
-    const node = renderPane(
-      <BrowserPane
-        sessionId="s"
-        state={{ status: "live", controlOwner: null }}
-        adapter={liveAdapter}
-      />,
+    expect(preview?.getAttribute("src")).toBe(
+      "data:image/png;base64,cHJldmlldw==",
     );
-
-    expect(node.textContent).toContain("Take control");
+    expect(preview?.className).toContain("object-contain");
+    expect(iframe).toBeNull();
   });
 
-  it("shows Return control button when user has control", () => {
+  it("does not mount live view from replayed user-control state after refresh", async () => {
     const node = renderPane(
       <BrowserPane
         sessionId="s"
@@ -123,7 +132,132 @@ describe("BrowserPane", () => {
       />,
     );
 
-    expect(node.textContent).toContain("Return control");
+    expect(node.textContent).toContain("user-A has control");
+    expect(node.textContent).toContain("Take control");
+    expect(
+      node.querySelector<HTMLIFrameElement>('[data-testid="browser-iframe"]'),
+    ).toBeNull();
+    await flushPreview();
+    expect(
+      node.querySelector<HTMLImageElement>(
+        '[data-testid="browser-preview-image"]',
+      ),
+    ).not.toBeNull();
+  });
+
+  it("shows Take control button in live state", async () => {
+    const node = renderPane(
+      <BrowserPane
+        sessionId="s"
+        state={{ status: "live", controlOwner: null }}
+        adapter={liveAdapter}
+      />,
+    );
+    await flushPreview();
+
+    expect(node.textContent).toContain("Take control");
+  });
+
+  it("opens the live-view dialog after this tab acquires control", async () => {
+    let resolveAcquire:
+      | ((value: { outcome: "granted"; ownerUserId: string }) => void)
+      | null = null;
+    const controlledAdapter = {
+      ...liveAdapter,
+      async acquireBrowserControl() {
+        return await new Promise<{ outcome: "granted"; ownerUserId: string }>(
+          (resolve) => {
+            resolveAcquire = resolve;
+          },
+        );
+      },
+    };
+
+    const node = renderPane(
+      <BrowserPane
+        sessionId="s"
+        state={{ status: "live", controlOwner: null }}
+        adapter={controlledAdapter}
+      />,
+    );
+
+    const takeControlButton = Array.from(
+      node.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.includes("Take control"));
+    expect(takeControlButton).not.toBeNull();
+
+    await act(async () => {
+      takeControlButton?.click();
+    });
+
+    expect(document.body.querySelector<HTMLElement>('[role="dialog"]')).toBeNull();
+
+    await act(async () => {
+      resolveAcquire?.({ outcome: "granted", ownerUserId: "u" });
+    });
+
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.textContent).toContain("Browser");
+    expect(
+      document.body.querySelector<HTMLIFrameElement>(
+        '[data-testid="browser-fullscreen-iframe"]',
+      )?.getAttribute("src"),
+    ).toBe("about:blank#browser-live");
+  });
+
+  it("releases browser control when the take-control dialog closes", async () => {
+    let releaseCount = 0;
+    const controlledAdapter = {
+      ...liveAdapter,
+      async releaseBrowserControl() {
+        releaseCount += 1;
+      },
+    };
+
+    const node = renderPane(
+      <BrowserPane
+        sessionId="s"
+        state={{ status: "live", controlOwner: null }}
+        adapter={controlledAdapter}
+      />,
+    );
+
+    const takeControlButton = Array.from(
+      node.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.includes("Take control"));
+
+    await act(async () => {
+      takeControlButton?.click();
+    });
+
+    expect(document.body.querySelector<HTMLElement>('[role="dialog"]')).not.toBeNull();
+
+    const closeButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.includes("Close"));
+    expect(closeButton).not.toBeNull();
+
+    await act(async () => {
+      closeButton?.click();
+    });
+
+    expect(releaseCount).toBe(1);
+  });
+
+  it("does not show Return control for replayed user control", async () => {
+    const node = renderPane(
+      <BrowserPane
+        sessionId="s"
+        state={{ status: "user-control", controlOwner: "user-A" }}
+        adapter={liveAdapter}
+      />,
+    );
+
+    await flushPreview();
+
+    expect(node.textContent).toContain("Take control");
+    expect(node.textContent).not.toContain("Return control");
   });
 
   it("shows skeleton in provisioning state", () => {
@@ -147,10 +281,10 @@ describe("BrowserPane", () => {
       />,
     );
 
-    expect(node.textContent).toMatch(/browser live view is unavailable/i);
+    expect(node.textContent).toMatch(/browser preview is unavailable/i);
     expect(node.querySelector('[data-testid="browser-iframe"]')).toBeNull();
     expect(
-      node.querySelector('button[aria-label="Open browser live preview"]'),
+      node.querySelector('button[aria-label="Open browser preview"]'),
     ).toBeNull();
     expect(node.querySelector('button[aria-label="Maximize browser"]')).toBeNull();
     expect(node.textContent).not.toContain("Take control");
