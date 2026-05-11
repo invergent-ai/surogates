@@ -229,6 +229,12 @@ async def run_worker(settings: Settings) -> None:
     # 3. Session store
     session_store = SessionStore(session_factory, redis=redis_client)
 
+    # 3b. Workspace storage shared by the API, sandbox mounts, and
+    # harness-local tools that need to materialize session files.
+    from surogates.storage.backend import create_backend
+
+    storage_backend = create_backend(settings)
+
     # 4a. Sandbox pool -- one sandbox per session, lazily provisioned.
     if settings.sandbox.backend == "kubernetes":
         from surogates.sandbox.kubernetes import K8sSandbox
@@ -596,6 +602,7 @@ async def run_worker(settings: Settings) -> None:
             sandbox_pool=sandbox_pool,
             browser_pool=browser_pool,
             browser_control=browser_control,
+            storage=storage_backend,
             api_client=harness_api_client,
             default_model=model_id,
             session_factory=session_factory,
@@ -624,7 +631,6 @@ async def run_worker(settings: Settings) -> None:
     if settings.scheduled_sessions.enabled:
         from surogates.scheduled.runner import ScheduledSessionRunner
         from surogates.scheduled.store import ScheduledSessionStore
-        from surogates.storage.backend import create_backend
 
         scheduled_runner = ScheduledSessionRunner(
             settings=settings,
@@ -632,7 +638,7 @@ async def run_worker(settings: Settings) -> None:
             session_store=session_store,
             scheduled_store=ScheduledSessionStore(session_factory),
             redis=redis_client,
-            storage=create_backend(settings),
+            storage=storage_backend,
         )
         scheduled_task = asyncio.create_task(
             scheduled_runner.run_forever(),

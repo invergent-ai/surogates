@@ -19,6 +19,7 @@ from surogates.browser.base import (
 from surogates.browser.client import KernelBrowserClient
 from surogates.browser.control import BrowserControlStore
 from surogates.browser.pool import BrowserPool
+from surogates.storage.tenant import session_workspace_key
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -562,6 +563,35 @@ def _save_screenshot_to_workspace(
     return relative_path
 
 
+async def _save_screenshot_to_storage(
+    png_bytes: bytes,
+    *,
+    storage: Any | None,
+    session_id: UUID | str | None,
+    session_config: dict[str, Any] | None,
+    relative_path: str,
+) -> str | None:
+    if storage is None or session_id is None:
+        return None
+
+    storage_bucket = (session_config or {}).get("storage_bucket")
+    if not storage_bucket:
+        return None
+
+    key = session_workspace_key(session_id, relative_path)
+    try:
+        await storage.write(storage_bucket, key, png_bytes)
+    except Exception as exc:
+        logger.warning(
+            "Could not save browser screenshot to workspace storage %s/%s: %s",
+            storage_bucket,
+            key,
+            exc,
+        )
+        return None
+    return relative_path
+
+
 async def _browser_screenshot_handler(
     arguments: dict[str, Any],
     *,
@@ -572,6 +602,7 @@ async def _browser_screenshot_handler(
     _client_factory: Callable[..., Any] = _default_client_factory,
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
+    storage: Any | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -586,8 +617,10 @@ async def _browser_screenshot_handler(
         return preflight
 
     _browser_id, endpoint, snapshot_cache = preflight
-    relative_path = _new_screenshot_path() if workspace_path else None
-    save_path = f"/workspace/{relative_path}" if relative_path else None
+    storage_bucket = (session_config or {}).get("storage_bucket")
+    should_save = bool(workspace_path or (storage is not None and storage_bucket))
+    relative_path = _new_screenshot_path() if should_save else None
+    save_path = f"/workspace/{relative_path}" if workspace_path and relative_path else None
     saved_in_browser = save_path is not None
     client = _make_client(_client_factory, endpoint, snapshot_cache)
     async with client:
@@ -607,13 +640,24 @@ async def _browser_screenshot_handler(
             )
 
     png_bytes = result["png_bytes"]
-    path = relative_path
-    if relative_path is not None and not saved_in_browser:
+    path = None
+    if relative_path is not None:
+        path = await _save_screenshot_to_storage(
+            png_bytes,
+            storage=storage,
+            session_id=session_id,
+            session_config=session_config,
+            relative_path=relative_path,
+        )
+    if relative_path is not None and path is None and not saved_in_browser:
         path = _save_screenshot_to_workspace(
             png_bytes,
             workspace_path=workspace_path,
             relative_path=relative_path,
         )
+    if relative_path is not None and path is None and saved_in_browser:
+        path = relative_path
+
     if len(png_bytes) > _MAX_BASE64_BYTES:
         body: dict[str, Any] = {
             "error": "screenshot_too_large_for_base64",

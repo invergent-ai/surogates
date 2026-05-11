@@ -172,6 +172,28 @@ class FakeLargeScreenshotClient(FakeScreenshotClient):
         return {"png_bytes": b"\x89PNG\r\n\x1a\n" + (b"x" * 300_000)}
 
 
+class FakeSavePathScreenshotClient(FakeScreenshotClient):
+    async def screenshot(
+        self,
+        *,
+        region: dict[str, int] | None = None,
+        annotate: bool = False,
+        save_path: str | None = None,
+    ) -> dict[str, Any]:
+        self.captured.append(
+            {"region": region, "annotate": annotate, "save_path": save_path}
+        )
+        return {"png_bytes": b"\x89PNG\r\n\x1a\n" + (b"x" * 300_000)}
+
+
+class FakeStorage:
+    def __init__(self) -> None:
+        self.writes: list[tuple[str, str, bytes]] = []
+
+    async def write(self, bucket: str, key: str, data: bytes) -> None:
+        self.writes.append((bucket, key, data))
+
+
 @pytest.fixture()
 def tenant():
     return SimpleNamespace(
@@ -487,6 +509,40 @@ class TestScreenshotHandler:
         assert body["path"].startswith("browser-screenshots/")
         assert (tmp_path / body["path"]).read_bytes().startswith(b"\x89PNG")
         assert "base64" not in body
+
+    async def test_oversized_png_is_saved_to_workspace_storage(
+        self,
+        tenant,
+    ) -> None:
+        from surogates.tools.builtin.browser import _browser_screenshot_handler
+
+        session_id = uuid4()
+        storage = FakeStorage()
+        client = FakeSavePathScreenshotClient()
+
+        result = await _browser_screenshot_handler(
+            {},
+            tenant=tenant,
+            session_id=session_id,
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            workspace_path="/workspace",
+            session_config={"storage_bucket": "agent-bucket"},
+            storage=storage,
+            _client_factory=lambda endpoint: client,
+        )
+        body = json.loads(result)
+
+        assert body["error"] == "screenshot_too_large_for_base64"
+        assert body["path"].startswith("browser-screenshots/")
+        assert client.captured[0]["save_path"] == f"/workspace/{body['path']}"
+        assert storage.writes == [
+            (
+                "agent-bucket",
+                f"sessions/{session_id}/{body['path']}",
+                b"\x89PNG\r\n\x1a\n" + (b"x" * 300_000),
+            )
+        ]
 
     async def test_unwritable_workspace_does_not_fail_screenshot(
         self,
