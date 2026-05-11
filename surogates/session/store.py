@@ -690,6 +690,26 @@ class SessionStore:
             rows = result.scalars().all()
         return [Event.model_validate(r) for r in rows]
 
+    async def last_event_at(
+        self,
+        session_id: UUID,
+        event_type: EventType,
+    ) -> datetime | None:
+        """Return the timestamp of the latest event of a type in a session."""
+
+        async with self._sf() as db:
+            result = await db.execute(
+                select(EventRow.created_at)
+                .where(
+                    EventRow.session_id == session_id,
+                    EventRow.type == event_type.value,
+                )
+                .order_by(EventRow.id.desc())
+                .limit(1)
+            )
+            row = result.first()
+        return row[0] if row is not None else None
+
     # ------------------------------------------------------------------
     # Lease management (raw SQL — atomic upsert required)
     # ------------------------------------------------------------------

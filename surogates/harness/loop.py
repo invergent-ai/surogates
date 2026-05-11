@@ -177,6 +177,12 @@ def _seconds_since(value: Any) -> int:
     )
 
 
+def _as_aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _should_notify_parent_on_completion(session: Any) -> bool:
     return session.parent_id is not None and session.channel != "scheduled"
 
@@ -1660,6 +1666,17 @@ class AgentHarness:
 
             # 8. Append tool results to messages.
             messages.extend(tool_results)
+            last_tool_name = ""
+            for tc in reversed(tool_calls_raw):
+                last_tool_name = tc.get("function", {}).get("name", "")
+                if last_tool_name:
+                    break
+            await self._maybe_emit_progress_checkin(
+                session,
+                messages,
+                iteration_count=iteration,
+                last_tool=last_tool_name,
+            )
 
             # 8a. Memory manager: sync turn to external providers.
             if self._memory_manager is not None:
@@ -3082,6 +3099,50 @@ class AgentHarness:
                 logger.debug("Auto-generated title for session %s: %s", session.id, title)
         except Exception:
             logger.debug("Auto-title generation skipped for %s", session.id, exc_info=True)
+
+    async def _maybe_emit_progress_checkin(
+        self,
+        session: Session,
+        messages: list[dict],
+        *,
+        iteration_count: int,
+        last_tool: str | None = None,
+    ) -> None:
+        """Emit an inbox progress check-in when the configured interval elapses."""
+
+        interval = (session.config or {}).get("inbox_checkin_interval_seconds")
+        if not interval:
+            return
+        try:
+            interval_seconds = int(interval)
+        except (TypeError, ValueError):
+            return
+        if interval_seconds <= 0:
+            return
+
+        latest = await self._store.last_event_at(
+            session.id,
+            EventType.INBOX_PROGRESS_CHECKIN,
+        )
+        created_at = session.created_at
+        reference = latest or created_at
+        if not isinstance(reference, datetime):
+            return
+
+        now = datetime.now(timezone.utc)
+        if (now - _as_aware_utc(reference)).total_seconds() < interval_seconds:
+            return
+
+        await self._store.emit_event(
+            session.id,
+            EventType.INBOX_PROGRESS_CHECKIN,
+            {
+                "progress_summary": _last_assistant_message_excerpt(messages),
+                "iterations": iteration_count,
+                "last_tool": last_tool or "",
+                "elapsed_seconds": _seconds_since(created_at),
+            },
+        )
 
     async def _complete_session(
         self,
