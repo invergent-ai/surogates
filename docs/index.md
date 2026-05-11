@@ -65,19 +65,26 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - User control handoff for login, MFA, and CAPTCHA flows
 - Browser deployment, configuration, and security model
 
-### [8. Commands](commands/index.md)
+### [8. Agent Inbox](agent-inbox/index.md)
+- Inbox item lifecycle and statuses
+- User-facing item kinds: input required, action required, task complete, governance gate, progress check-in
+- Web UI actions: Open session, Submit, Acknowledge, I completed this, Approve / Reject, Delete
+- REST API and SSE stream reference
+- Shared `agent-chat-react` inbox adapter contract
+
+### [9. Commands](commands/index.md)
 - Builtin slash commands: `/clear`, `/compress`, `/loop`
 - Dynamic skill commands: `/<skill-name> [args...]`
 - Command resolution order and channel notes
 
-### [9. Skills](skills/index.md)
+### [10. Skills](skills/index.md)
 - What is a skill? (prompt-based reusable behaviors)
 - `SKILL.md` format and frontmatter
 - 3-layer loading (platform > org > user)
 - Skill CRUD via API
 - Skill validation rules
 
-### [10. Sub-Agents](sub-agents/index.md)
+### [11. Sub-Agents](sub-agents/index.md)
 - What is a sub-agent? (declarative agent type as a child session)
 - Sub-agents vs. skills vs. experts (when to use which)
 - `AGENT.md` format and frontmatter
@@ -87,7 +94,7 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - "Running" panel + session tree endpoints
 - Web UI library page and REST API reference
 
-### [11. Experts](experts/index.md)
+### [12. Experts](experts/index.md)
 - What is an expert? (task-specialized model as a skill)
 - Define an expert (`SKILL.md` with type: expert)
 - Collect training data from the event log
@@ -97,7 +104,7 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - Feedback tracking and auto-disable
 - API reference
 
-### [12. Memory](memory/index.md)
+### [13. Memory](memory/index.md)
 - Memory system overview
 - `MEMORY.md` / `USER.md` format (section-delimited entries)
 - MemoryStore (frozen snapshots, security scanning, dedup)
@@ -105,7 +112,7 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - MemoryManager (builtin + external providers, prefetch fencing)
 - API-mediated access (worker -> API server -> tenant bucket)
 
-### [13. MCP Integration](mcp-integration/index.md)
+### [14. MCP Integration](mcp-integration/index.md)
 - MCP client (stdio + HTTP transport)
 - Auto-reconnect and sampling
 - OAuth 2.1 PKCE for MCP servers
@@ -113,7 +120,7 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - MCP server configuration (platform + org + user layers)
 - MCP security scanning (poisoning, rug-pull, invisible unicode)
 
-### [14. Governance and Security](governance-and-security/index.md)
+### [15. Governance and Security](governance-and-security/index.md)
 - Policy engine (AGT PolicyEngine, allow-list, ABAC)
 - MCP security scanner (tool poisoning, SHA-256 fingerprinting)
 - Policy immutability (freeze per session)
@@ -123,25 +130,25 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - Saga (multi-step tool chains with automatic rollback)
 - Rate limiting (per-org, per-user, sliding window)
 
-### [14a. Audit &amp; Observability](audit/index.md)
+### [15a. Audit &amp; Observability](audit/index.md)
 - [Session event log](audit/events.md) -- every turn, tool call, policy decision, saga step inside a session
 - [Tenant audit log](audit/audit_log.md) -- auth, MCP scan, credential access (events with no session)
 - [SQL views](audit/views.md) -- typed projections for dashboards, audit queries, training data
 - Denormalization trigger, trace correlation, non-blocking emission, stability policy
 
-### [15. Storage](storage/index.md)
+### [16. Storage](storage/index.md)
 - StorageBackend protocol (`LocalBackend` / `S3Backend`)
 - Tenant asset roots (bucket layout, directory conventions)
 - Session prefixes (lifecycle, s3fs-fuse mount)
 - Bucket security model (session-scoped vs. tenant-wide)
 
-### [16. Background Jobs](background-jobs/index.md)
+### [17. Background Jobs](background-jobs/index.md)
 - `cleanup_sessions` -- orphaned session prefix sweep
 - Scheduled sessions -- `/loop` recurring prompts and per-agent DB-backed ticking
 - `reset_idle_sessions` -- idle session reset with memory flush
 - `training_collector` -- expert training data export
 
-### [17. Operations](operations/index.md)
+### [18. Operations](operations/index.md)
 - Health checks and metrics
 - HPA configuration and scaling strategy
 - Monitoring active sessions
