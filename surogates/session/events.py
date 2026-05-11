@@ -111,3 +111,9 @@ class EventType(str, Enum):
     BROWSER_DESTROYED = "browser.destroyed"
     BROWSER_CONTROL_GRANTED = "browser.control_granted"
     BROWSER_CONTROL_RETURNED = "browser.control_returned"
+
+    # Agent inbox
+    INBOX_INPUT_REQUIRED = "inbox.input_required"
+    INBOX_TASK_COMPLETE = "inbox.task_complete"
+    INBOX_GOVERNANCE_GATE = "inbox.governance_gate"
+    INBOX_PROGRESS_CHECKIN = "inbox.progress_checkin"
