@@ -691,6 +691,46 @@ class TestSagaReadOnlyParallel:
         assert _all_concurrency_safe(tool_calls) is False
 
 
+class TestDelegationParallel:
+    def test_delegate_task_batch_parallelizes(self) -> None:
+        """A heavyskill-style batch of delegate_task calls fans out concurrently."""
+        from surogates.harness.tool_exec import should_parallelize
+
+        tool_calls = [
+            {"function": {"name": "delegate_task", "arguments": "{}"}, "id": "1"},
+            {"function": {"name": "delegate_task", "arguments": "{}"}, "id": "2"},
+            {"function": {"name": "delegate_task", "arguments": "{}"}, "id": "3"},
+        ]
+        assert should_parallelize(tool_calls) is True
+
+    def test_spawn_worker_batch_parallelizes(self) -> None:
+        from surogates.harness.tool_exec import should_parallelize
+
+        tool_calls = [
+            {"function": {"name": "spawn_worker", "arguments": "{}"}, "id": "1"},
+            {"function": {"name": "spawn_worker", "arguments": "{}"}, "id": "2"},
+        ]
+        assert should_parallelize(tool_calls) is True
+
+    def test_delegation_excluded_from_streaming_eager_dispatch(self) -> None:
+        """Delegation tools must not be eager-dispatched during streaming —
+        a discarded stream would orphan child sessions in the DB."""
+        from surogates.harness.tool_exec import is_parallelizable
+
+        assert is_parallelizable("delegate_task") is False
+        assert is_parallelizable("spawn_worker") is False
+
+    def test_mixed_delegate_and_clarify_serial(self) -> None:
+        """clarify still forces serial — it blocks on user input."""
+        from surogates.harness.tool_exec import should_parallelize
+
+        tool_calls = [
+            {"function": {"name": "delegate_task", "arguments": "{}"}, "id": "1"},
+            {"function": {"name": "clarify", "arguments": "{}"}, "id": "2"},
+        ]
+        assert should_parallelize(tool_calls) is False
+
+
 # ---------------------------------------------------------------------------
 # Coordinator prompt
 # ---------------------------------------------------------------------------

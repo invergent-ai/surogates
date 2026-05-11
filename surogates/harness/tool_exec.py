@@ -79,7 +79,7 @@ logger = logging.getLogger(__name__)
 # Tool parallelisation policy constants
 # ---------------------------------------------------------------------------
 
-NEVER_PARALLEL_TOOLS: frozenset[str] = frozenset({"clarify", "delegate_task"})
+NEVER_PARALLEL_TOOLS: frozenset[str] = frozenset({"clarify"})
 
 # Read-only tools that are safe to execute concurrently with each other
 # and with ongoing LLM streaming.  These tools have no side effects —
@@ -126,15 +126,39 @@ SANDBOX_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "terminal",
 })
 
-# All tools that can run concurrently — read-only tools plus sandbox tools
-# that are independent operations.  Used by both `should_parallelize` and
-# the streaming executor.
+# Tools that can run concurrently with the LLM stream — read-only tools
+# plus parallel-safe sandbox tools.  Used by the streaming executor to
+# decide whether to dispatch a tool eagerly while the model is still
+# generating.  Eager dispatch must be safe to cancel mid-flight, so
+# side-effecting tools that allocate durable state (delegation tools
+# create child sessions in the DB) are excluded even though they're
+# safe to batch-dispatch concurrently after the stream completes —
+# see :data:`BATCH_PARALLEL_TOOLS`.
 PARALLEL_TOOLS: frozenset[str] = CONCURRENCY_SAFE_TOOLS | SANDBOX_PARALLEL_TOOLS
 
 
 def is_parallelizable(tool_name: str) -> bool:
     """Return ``True`` if *tool_name* can run concurrently with other parallelizable tools."""
     return tool_name in PARALLEL_TOOLS
+
+
+# Delegation tools that spawn child sessions.  Each call creates an
+# independent session with its own lease, event log, and budget, so a
+# batch can safely fan out concurrently after the LLM stream completes.
+# Heavyskill (parallel-reason-then-synthesize) relies on this for
+# ``delegate_task``; ``spawn_worker`` already documents parallel
+# fan-out in its schema.  Excluded from :data:`PARALLEL_TOOLS` so the
+# streaming executor doesn't dispatch them eagerly — a discarded
+# stream would orphan child sessions created speculatively.
+DELEGATION_TOOLS: frozenset[str] = frozenset({
+    "delegate_task",
+    "spawn_worker",
+})
+
+# All tools that ``should_parallelize`` may dispatch concurrently after
+# the stream completes.  Superset of :data:`PARALLEL_TOOLS` plus
+# delegation tools.  Used only for batched (post-stream) dispatch.
+BATCH_PARALLEL_TOOLS: frozenset[str] = PARALLEL_TOOLS | DELEGATION_TOOLS
 
 MAX_TOOL_WORKERS: int = 8
 
@@ -368,9 +392,9 @@ def should_parallelize(tool_calls: list[dict[str, Any]]) -> bool:
     Rules:
     - Single tool call -> sequential (no benefit from parallelism).
     - Any tool in ``NEVER_PARALLEL_TOOLS`` -> sequential.
-    - All tools in ``CONCURRENCY_SAFE_TOOLS`` -> parallel.
+    - All tools in ``BATCH_PARALLEL_TOOLS`` (read-only + sandbox +
+      delegation) -> parallel.
     - Tools in ``PATH_SCOPED_TOOLS`` -> parallel only if paths don't overlap.
-    - All tools are sandbox-executable (terminal, file ops) -> parallel.
     - Otherwise -> sequential.
     """
     if len(tool_calls) <= 1:
@@ -385,12 +409,12 @@ def should_parallelize(tool_calls: list[dict[str, Any]]) -> bool:
     if any(n in NEVER_PARALLEL_TOOLS for n in names):
         return False
 
-    # All tools are parallelizable (read-only + sandbox)?
-    if all(n in PARALLEL_TOOLS for n in names):
+    # All tools are parallelizable (read-only + sandbox + delegation)?
+    if all(n in BATCH_PARALLEL_TOOLS for n in names):
         return True
 
     # Path-scoped tools can run in parallel if paths don't overlap.
-    all_parallel_or_path = PARALLEL_TOOLS | PATH_SCOPED_TOOLS
+    all_parallel_or_path = BATCH_PARALLEL_TOOLS | PATH_SCOPED_TOOLS
     if all(n in all_parallel_or_path for n in names):
         return paths_do_not_overlap(
             [tc for tc in tool_calls
