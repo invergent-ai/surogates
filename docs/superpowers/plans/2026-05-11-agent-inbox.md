@@ -10,6 +10,10 @@
 
 **Reference spec:** `docs/superpowers/specs/2026-05-11-agent-inbox-design.md`
 
+## Phase 4 TODO
+
+- [x] **Completed:** Task 16 - Add inbox sweeper for pending items on terminal sessions.
+
 ## Phase 3 TODO
 
 - [x] **Completed:** Task 10 - Add `SessionStore` helpers for the inbox API.
