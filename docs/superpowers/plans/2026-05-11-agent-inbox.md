@@ -14,8 +14,8 @@
 
 - [x] **Completed:** Task 10 - Add `SessionStore` helpers for the inbox API.
 - [x] **Completed:** Task 11 - Add `GET /v1/inbox`.
-- [ ] **In progress:** Task 12 - Add inbox item detail, read, and ack routes.
-- [ ] **Left to do:** Task 13 - Add governance decision response route.
+- [x] **Completed:** Task 12 - Add inbox item detail, read, and ack routes.
+- [ ] **In progress:** Task 13 - Add governance decision response route.
 - [ ] **Left to do:** Task 14 - Add inbox SSE stream.
 - [ ] **Left to do:** Task 15 - Mark clarify inbox items responded from clarify responses.
 

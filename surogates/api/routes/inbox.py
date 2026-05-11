@@ -15,6 +15,8 @@ from surogates.tenant.context import TenantContext
 
 router = APIRouter(prefix="/inbox")
 
+_ACKABLE_KINDS = frozenset({"task_complete", "progress_checkin"})
+
 
 def _require_user_tenant(tenant: TenantContext) -> TenantContext:
     if tenant.user_id is None:
@@ -95,3 +97,71 @@ async def list_inbox(
         "items": [_serialize_item(item) for item in items],
         "next_cursor": next_cursor,
     }
+
+
+@router.get("/{item_id}")
+async def get_inbox_item(
+    item_id: int,
+    request: Request,
+    tenant: Annotated[TenantContext, Depends(get_current_tenant)],
+):
+    tenant = _require_user_tenant(tenant)
+    store = request.app.state.session_store
+    item = await store.get_inbox_item(item_id=item_id, user_id=tenant.user_id)
+    if item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Inbox item not found.",
+        )
+    return _serialize_item(item)
+
+
+@router.post("/{item_id}/read")
+async def mark_inbox_item_read(
+    item_id: int,
+    request: Request,
+    tenant: Annotated[TenantContext, Depends(get_current_tenant)],
+):
+    tenant = _require_user_tenant(tenant)
+    store = request.app.state.session_store
+    item = await store.get_inbox_item(item_id=item_id, user_id=tenant.user_id)
+    if item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Inbox item not found.",
+        )
+    item = await store.mark_inbox_read(item_id=item_id, user_id=tenant.user_id)
+    return _serialize_item(item)
+
+
+@router.post("/{item_id}/ack")
+async def acknowledge_inbox_item(
+    item_id: int,
+    request: Request,
+    tenant: Annotated[TenantContext, Depends(get_current_tenant)],
+):
+    tenant = _require_user_tenant(tenant)
+    store = request.app.state.session_store
+    item = await store.get_inbox_item(item_id=item_id, user_id=tenant.user_id)
+    if item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Inbox item not found.",
+        )
+    if item.kind not in _ACKABLE_KINDS:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Inbox item kind is not acknowledgeable.",
+        )
+    try:
+        item = await store.set_inbox_status(
+            item_id=item_id,
+            user_id=tenant.user_id,
+            new_status="acknowledged",
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    return _serialize_item(item)

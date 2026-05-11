@@ -10,7 +10,9 @@ import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
+from surogates.db.models import InboxItem
 from surogates.session.events import EventType
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
@@ -78,6 +80,29 @@ async def _create_service_account_token(session_factory) -> tuple[UUID, str]:
     return org_id, issued.token
 
 
+async def _get_inbox_item_for_event(session_store, event_id: int) -> InboxItem:
+    async with session_store._sf() as db:
+        return (
+            await db.execute(
+                select(InboxItem).where(InboxItem.source_event_id == event_id)
+            )
+        ).scalar_one()
+
+
+async def _emit_task_complete(session_store, session_id) -> InboxItem:
+    event_id = await session_store.emit_event(
+        session_id,
+        EventType.INBOX_TASK_COMPLETE,
+        {
+            "outcome": "success",
+            "duration_seconds": 1,
+            "summary": "All done.",
+            "session_title": "Task complete",
+        },
+    )
+    return await _get_inbox_item_for_event(session_store, event_id)
+
+
 async def test_list_inbox_returns_only_callers_items(
     client,
     session_factory,
@@ -122,3 +147,109 @@ async def test_list_inbox_rejects_service_account(
     )
 
     assert response.status_code == 403
+
+
+async def test_get_inbox_item(client, session_factory, session_store):
+    _, _, token, session = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+    item = await _emit_task_complete(session_store, session.id)
+
+    response = await client.get(
+        f"/v1/inbox/{item.id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["id"] == item.id
+
+
+async def test_get_other_users_item_returns_404(
+    client,
+    session_factory,
+    session_store,
+):
+    _, _, owner_token, session = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+    assert owner_token
+    _, _, other_token, _ = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+    item = await _emit_task_complete(session_store, session.id)
+
+    response = await client.get(
+        f"/v1/inbox/{item.id}",
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+
+    assert response.status_code == 404
+
+
+async def test_mark_read_is_idempotent(client, session_factory, session_store):
+    _, _, token, session = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+    item = await _emit_task_complete(session_store, session.id)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    first = await client.post(f"/v1/inbox/{item.id}/read", headers=headers)
+    second = await client.post(f"/v1/inbox/{item.id}/read", headers=headers)
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["read_at"] is not None
+    assert first.json()["read_at"] == second.json()["read_at"]
+
+
+async def test_ack_flips_status_to_acknowledged(
+    client,
+    session_factory,
+    session_store,
+):
+    _, _, token, session = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+    item = await _emit_task_complete(session_store, session.id)
+
+    response = await client.post(
+        f"/v1/inbox/{item.id}/ack",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "acknowledged"
+    assert response.json()["responded_at"] is not None
+
+
+async def test_ack_rejects_non_ackable_kind(
+    client,
+    session_factory,
+    session_store,
+):
+    _, _, token, session = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+    event_id = await session_store.emit_event(
+        session.id,
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": "tc-ack-reject",
+            "questions": [{"prompt": "Which color?"}],
+            "context": "",
+        },
+    )
+    item = await _get_inbox_item_for_event(session_store, event_id)
+
+    response = await client.post(
+        f"/v1/inbox/{item.id}/ack",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 409
