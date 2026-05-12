@@ -6,6 +6,10 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from surogates.config import load_settings
+from surogates.harness.auxiliary_client import build_summary_auxiliary_llm
+from surogates.session.models import Session
+
 logger = logging.getLogger(__name__)
 
 _TITLE_PROMPT = (
@@ -127,15 +131,13 @@ async def maybe_generate_session_title(
     *,
     store: Any,
     llm_client: Any,
-    session: Any,
+    session: Session,
     messages: list[dict[str, Any]],
     assistant_message: dict[str, Any],
     model: str,
+    tenant: Any | None = None,
 ) -> str | None:
     """Generate and persist a title when this is an early untitled exchange."""
-    if getattr(session, "title", None):
-        return None
-
     assistant_content = _content_as_text(assistant_message.get("content", ""))
     if not assistant_content.strip():
         return None
@@ -148,9 +150,21 @@ async def maybe_generate_session_title(
     if not user_messages or len(user_messages) > 2:
         return None
 
+    title_client = llm_client
+    title_model = model
+    try:
+        summary_auxiliary = build_summary_auxiliary_llm(load_settings(), tenant)
+    except Exception as exc:
+        logger.warning("Summary model title client setup failed: %s", exc)
+        logger.debug("Summary model title client setup traceback", exc_info=True)
+        summary_auxiliary = None
+    if summary_auxiliary is not None:
+        title_client = summary_auxiliary.client
+        title_model = summary_auxiliary.model
+
     title = await generate_session_title(
-        llm_client=llm_client,
-        model=model,
+        llm_client=title_client,
+        model=title_model,
         user_message=user_messages[-1],
         assistant_response=assistant_content,
     )

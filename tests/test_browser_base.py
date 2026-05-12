@@ -60,6 +60,17 @@ def test_settings_includes_browser(monkeypatch) -> None:
     assert s.browser.backend == "process"
 
 
+def test_llm_settings_do_not_expose_generation_defaults(monkeypatch) -> None:
+    monkeypatch.setenv("SUROGATES_LLM_TEMPERATURE", "0.2")
+    monkeypatch.setenv("SUROGATES_LLM_MAX_TOKENS", "123")
+
+    from surogates.config import LLMSettings
+
+    s = LLMSettings()
+    assert not hasattr(s, "temperature")
+    assert not hasattr(s, "max_tokens")
+
+
 def test_browser_status_values() -> None:
     from surogates.browser.base import BrowserStatus
 

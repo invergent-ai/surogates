@@ -6,7 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from surogates.harness.auxiliary_client import build_summary_auxiliary_llm
+from surogates.harness.auxiliary_client import (
+    build_summary_auxiliary_llm,
+    build_vision_auxiliary_llm,
+)
 from surogates.harness.context import ContextCompressor, SUMMARY_PREFIX
 
 
@@ -50,6 +53,82 @@ def test_build_summary_auxiliary_llm_returns_none_without_model() -> None:
     )
 
     assert build_summary_auxiliary_llm(settings) is None
+
+
+def test_build_vision_auxiliary_llm_uses_dedicated_endpoint() -> None:
+    settings = SimpleNamespace(
+        llm=SimpleNamespace(
+            vision_model="vision-pro",
+            vision_base_url="https://vision.example/v1",
+            vision_api_key="vision-key",
+            base_url="https://main.example/v1",
+            api_key="main-key",
+        )
+    )
+
+    aux = build_vision_auxiliary_llm(settings)
+
+    assert aux is not None
+    assert aux.model == "vision-pro"
+    assert str(aux.client.base_url).rstrip("/") == "https://vision.example/v1"
+
+
+def test_build_vision_auxiliary_llm_falls_back_to_main_endpoint() -> None:
+    settings = SimpleNamespace(
+        llm=SimpleNamespace(
+            vision_model="vision-pro",
+            vision_base_url="",
+            vision_api_key="",
+            base_url="https://main.example/v1",
+            api_key="main-key",
+        )
+    )
+
+    aux = build_vision_auxiliary_llm(settings)
+
+    assert aux is not None
+    assert str(aux.client.base_url).rstrip("/") == "https://main.example/v1"
+
+
+def test_build_vision_auxiliary_llm_returns_none_without_model() -> None:
+    settings = SimpleNamespace(
+        llm=SimpleNamespace(
+            vision_model="",
+            vision_base_url="",
+            vision_api_key="",
+            base_url="https://main.example/v1",
+            api_key="main-key",
+        )
+    )
+
+    assert build_vision_auxiliary_llm(settings) is None
+
+
+def test_build_vision_auxiliary_llm_user_pref_picks_model_only() -> None:
+    settings = SimpleNamespace(
+        llm=SimpleNamespace(
+            vision_model="global-vision",
+            vision_base_url="https://global.example/v1",
+            vision_api_key="global-key",
+            base_url="https://main.example/v1",
+            api_key="main-key",
+        )
+    )
+    tenant = SimpleNamespace(
+        org_config={
+            "llm": {
+                "vision_base_url": "https://org.example/v1",
+                "vision_api_key": "org-key",
+            }
+        },
+        user_preferences={"llm": {"vision_model": "user-vision"}},
+    )
+
+    aux = build_vision_auxiliary_llm(settings, tenant)
+
+    assert aux is not None
+    assert aux.model == "user-vision"
+    assert str(aux.client.base_url).rstrip("/") == "https://org.example/v1"
 
 
 @pytest.mark.asyncio

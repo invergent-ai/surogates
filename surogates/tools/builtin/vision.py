@@ -133,7 +133,10 @@ async def _vision_analyze_handler(arguments: dict[str, Any], **kwargs: Any) -> s
         max_dimension=max_dimension,
     )
 
-    model = str(kwargs.get("model") or kwargs.get("session_model") or "surogate")
+    model = (
+        _configured_vision_model()
+        or str(kwargs.get("model") or kwargs.get("session_model") or "surogate")
+    )
     response = await llm_client.chat.completions.create(
         model=model,
         messages=messages,
@@ -160,6 +163,12 @@ def _get_image_ref(arguments: dict[str, Any]) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def _configured_vision_model() -> str:
+    from surogates.config import load_settings
+
+    return str(getattr(load_settings().llm, "vision_model", "") or "").strip()
 
 
 async def _image_ref_to_data_url(

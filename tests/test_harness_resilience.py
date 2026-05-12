@@ -27,7 +27,7 @@ from surogates.harness.llm_call import (
 from surogates.harness.loop import AgentHarness
 from surogates.harness.resilience import try_rotate_credential
 from surogates.sandbox.pool import SandboxPool
-from surogates.session.models import Session
+from surogates.session.models import Session, SessionLease
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +199,8 @@ def _make_harness(**overrides: Any) -> AgentHarness:
         context_compressor=MagicMock(spec=ContextCompressor),
         prompt_builder=MagicMock(spec=PromptBuilder),
         sandbox_pool=MagicMock(spec=SandboxPool),
+        vision_client=None,
+        vision_model="",
     )
     defaults.update(overrides)
 
@@ -212,6 +214,8 @@ def _make_harness(**overrides: Any) -> AgentHarness:
         context_compressor=defaults["context_compressor"],
         prompt_builder=defaults["prompt_builder"],
         sandbox_pool=defaults["sandbox_pool"],
+        vision_client=defaults["vision_client"],
+        vision_model=defaults["vision_model"],
     )
 
 
@@ -227,6 +231,28 @@ def _session_with_config(config: dict[str, Any]) -> Session:
         config=config,
         created_at=now,
         updated_at=now,
+    )
+
+
+def _chat_response(content: str, *, model: str = "test-model") -> SimpleNamespace:
+    return SimpleNamespace(
+        model=model,
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(
+                    model_dump=lambda **_kwargs: {
+                        "role": "assistant",
+                        "content": content,
+                    }
+                ),
+            )
+        ],
+        usage=SimpleNamespace(
+            prompt_tokens=1,
+            completion_tokens=1,
+            total_tokens=2,
+        ),
     )
 
 
@@ -271,6 +297,154 @@ class TestDynamicLoopToolPolicy:
 
 
 class TestSessionLifecycle:
+    async def test_final_summary_describes_images_before_non_vision_model(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        monkeypatch.setenv("SUROGATES_CONFIG", str(tmp_path / "missing-config.yaml"))
+        monkeypatch.setenv("SUROGATES_LLM_VISION_MODEL", "gpt-4o-mini")
+
+        create = AsyncMock(
+            side_effect=[
+                _chat_response("A red square with the label OK.", model="gpt-4o-mini"),
+                _chat_response("Final summary.", model="deepseek-chat"),
+            ]
+        )
+        llm_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        )
+        store = AsyncMock()
+        store.emit_event = AsyncMock(side_effect=[101, 102, 103])
+        harness = _make_harness(
+            session_store=store,
+            llm_client=llm_client,
+            sandbox_pool=None,
+        )
+        harness._streaming_enabled = False
+        session = _session_with_config({})
+        session.model = "deepseek-chat"
+        now = datetime.now(timezone.utc)
+        lease = SessionLease(
+            session_id=session.id,
+            owner_id="worker",
+            lease_token=uuid4(),
+            expires_at=now,
+        )
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,AAA=",
+                            "detail": "auto",
+                        },
+                    },
+                ],
+            }
+        ]
+
+        await harness._request_final_summary(
+            session=session,
+            messages=messages,
+            system_prompt="System prompt",
+            lease=lease,
+        )
+
+        assert create.await_count == 2
+        vision_call = create.await_args_list[0].kwargs
+        assert vision_call["model"] == "gpt-4o-mini"
+        assert any(
+            part.get("type") == "image_url"
+            for part in vision_call["messages"][0]["content"]
+        )
+        base_call = create.await_args_list[1].kwargs
+        assert base_call["model"] == "deepseek-chat"
+        assert "A red square with the label OK." in str(base_call["messages"])
+        assert "image_url" not in str(base_call["messages"])
+        assert isinstance(base_call["messages"][1]["content"], str)
+
+    async def test_final_summary_routes_image_description_to_vision_client(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        monkeypatch.setenv("SUROGATES_CONFIG", str(tmp_path / "missing-config.yaml"))
+        # Intentionally leave SUROGATES_LLM_VISION_MODEL unset -- the
+        # injected vision client + model_override should take precedence
+        # over the load_settings() fallback.
+
+        main_create = AsyncMock(
+            side_effect=[_chat_response("Final summary.", model="deepseek-chat")]
+        )
+        vision_create = AsyncMock(
+            side_effect=[_chat_response("A red square.", model="surogate")]
+        )
+        main_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=main_create))
+        )
+        vision_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=vision_create))
+        )
+
+        store = AsyncMock()
+        store.emit_event = AsyncMock(side_effect=[101, 102, 103])
+        harness = _make_harness(
+            session_store=store,
+            llm_client=main_client,
+            sandbox_pool=None,
+            vision_client=vision_client,
+            vision_model="surogate",
+        )
+        harness._streaming_enabled = False
+        session = _session_with_config({})
+        session.model = "deepseek-chat"
+        now = datetime.now(timezone.utc)
+        lease = SessionLease(
+            session_id=session.id,
+            owner_id="worker",
+            lease_token=uuid4(),
+            expires_at=now,
+        )
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,AAA=",
+                            "detail": "auto",
+                        },
+                    },
+                ],
+            }
+        ]
+
+        await harness._request_final_summary(
+            session=session,
+            messages=messages,
+            system_prompt="System prompt",
+            lease=lease,
+        )
+
+        # Image description must go through the dedicated vision client
+        # (different endpoint), not the main LLM client.
+        assert vision_create.await_count == 1
+        vision_call = vision_create.await_args_list[0].kwargs
+        assert vision_call["model"] == "surogate"
+
+        # Main client receives only the text-substituted summary call.
+        assert main_create.await_count == 1
+        base_call = main_create.await_args_list[0].kwargs
+        assert base_call["model"] == "deepseek-chat"
+        assert "A red square." in str(base_call["messages"])
+        assert "image_url" not in str(base_call["messages"])
+
     async def test_final_response_completes_primary_session(
         self,
         monkeypatch: pytest.MonkeyPatch,

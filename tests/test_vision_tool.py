@@ -100,6 +100,32 @@ async def test_vision_analyze_sends_workspace_image_as_data_url(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_vision_analyze_uses_configured_vision_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from surogates.tools.builtin.vision import _vision_analyze_handler
+
+    monkeypatch.setenv("SUROGATES_CONFIG", str(tmp_path / "missing-config.yaml"))
+    monkeypatch.setenv("SUROGATES_LLM_VISION_MODEL", "configured-vision-model")
+    image_path = tmp_path / "sample.png"
+    _png(image_path)
+    create = AsyncMock(return_value=_fake_response())
+    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+    result = await _vision_analyze_handler(
+        {"image": "sample.png", "question": "What is in this image?"},
+        workspace_path=str(tmp_path),
+        llm_client=llm_client,
+        model="active-chat-model",
+    )
+
+    payload = json.loads(result)
+    assert payload["analysis"] == "a small red-orange square"
+    assert create.await_args.kwargs["model"] == "configured-vision-model"
+
+
+@pytest.mark.asyncio
 async def test_vision_analyze_reads_workspace_image_from_storage() -> None:
     from surogates.tools.builtin.vision import _vision_analyze_handler
 

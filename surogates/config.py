@@ -215,12 +215,7 @@ class LLMSettings(BaseSettings):
     provider: str = ""  # "openai", "anthropic", "openrouter", etc.
     base_url: str = ""  # custom endpoint (e.g. vLLM, Ollama)
     api_key: str = ""  # provider API key
-    max_tokens: int | None = None
-    temperature: float = 0.7
-    summary_model: str = ""  # cheap model for context compression summaries
-    summary_base_url: str = ""  # optional auxiliary endpoint for summaries
-    summary_api_key: str = ""  # optional auxiliary API key for summaries
-
+    
     # Fallback chain — list of dicts with provider/model/api_key/base_url
     # Configured via config.yaml only (too complex for env vars)
     fallback_providers: list[dict[str, Any]] = Field(default_factory=list)
@@ -241,6 +236,14 @@ class LLMSettings(BaseSettings):
     #         context_window: 204800
     #         max_output_tokens: 4096
     models: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    
+    summary_model: str = ""  # cheap model for context compression summaries
+    summary_base_url: str = ""  # optional auxiliary endpoint for summaries
+    summary_api_key: str = ""  # optional auxiliary API key for summaries
+    
+    vision_model: str = ""  # model with vision capabilities for image inputs
+    vision_base_url: str = ""  # optional auxiliary endpoint for vision model
+    vision_api_key: str = ""  # optional auxiliary API key for vision model
 
 
 class SandboxSettings(BaseSettings):

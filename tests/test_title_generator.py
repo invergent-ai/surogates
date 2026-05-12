@@ -218,6 +218,47 @@ async def test_maybe_generate_session_title_sets_title_for_first_exchange(monkey
 
 
 @pytest.mark.asyncio
+async def test_maybe_generate_session_title_uses_summary_model_from_config(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("SUROGATES_CONFIG", str(tmp_path / "missing-config.yaml"))
+    monkeypatch.setenv("SUROGATES_LLM_SUMMARY_MODEL", "summary-title-model")
+    aux_create = AsyncMock(return_value=_response("Summary Model Title"))
+    aux_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=aux_create)
+        )
+    )
+    main_create = AsyncMock(return_value=_response("Main Model Title"))
+    main_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=main_create)
+        )
+    )
+    monkeypatch.setattr(
+        "surogates.harness.auxiliary_client.AsyncOpenAI",
+        lambda **_kwargs: aux_client,
+    )
+    store = SimpleNamespace(update_session_title_if_empty=AsyncMock(return_value=True))
+    session = SimpleNamespace(id=uuid4(), title=None, model="gpt-4o")
+
+    title = await maybe_generate_session_title(
+        store=store,
+        llm_client=main_client,
+        session=session,
+        messages=[{"role": "user", "content": "summarize the report"}],
+        assistant_message={"role": "assistant", "content": "Report summarized."},
+        model="gpt-4o",
+    )
+
+    assert title == "Summary Model Title"
+    aux_create.assert_awaited_once()
+    main_create.assert_not_called()
+    assert aux_create.await_args.kwargs["model"] == "summary-title-model"
+
+
+@pytest.mark.asyncio
 async def test_maybe_generate_session_title_skips_later_exchanges(monkeypatch) -> None:
     store = SimpleNamespace(update_session_title_if_empty=AsyncMock())
     llm_client = SimpleNamespace()
@@ -253,6 +294,7 @@ async def test_harness_title_hook_delegates_best_effort(monkeypatch) -> None:
     harness = AgentHarness.__new__(AgentHarness)
     harness._store = SimpleNamespace()
     harness._llm = SimpleNamespace()
+    harness._tenant = SimpleNamespace()
 
     maybe_generate = AsyncMock(return_value="Build Sales Chart")
     monkeypatch.setattr(
@@ -277,6 +319,7 @@ async def test_harness_title_hook_delegates_best_effort(monkeypatch) -> None:
         messages=messages,
         assistant_message=assistant_message,
         model="gpt-4o",
+        tenant=harness._tenant,
     )
 
 
@@ -288,6 +331,7 @@ async def test_loop_command_response_generates_title(monkeypatch) -> None:
         advance_harness_cursor=AsyncMock(),
     )
     harness._llm = SimpleNamespace()
+    harness._tenant = SimpleNamespace()
     harness._current_model = None
     harness._default_model = "gpt-4o"
     maybe_generate = AsyncMock(return_value="Track Bitcoin Volatility")
@@ -315,4 +359,5 @@ async def test_loop_command_response_generates_title(monkeypatch) -> None:
         ],
         assistant_message={"role": "assistant", "content": "Loop scheduled."},
         model="gpt-4o",
+        tenant=harness._tenant,
     )

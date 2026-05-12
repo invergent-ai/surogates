@@ -18,9 +18,13 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from surogates.harness.budget import IterationBudget
-from surogates.harness.auxiliary_client import build_summary_auxiliary_llm
+from surogates.harness.auxiliary_client import (
+    build_summary_auxiliary_llm,
+    build_vision_auxiliary_llm,
+)
 from surogates.harness.context import ContextCompressor
 from surogates.harness.loop import AgentHarness
+from surogates.harness.model_metadata import get_model_info
 from surogates.harness.prompt import PromptBuilder
 from surogates.harness.prompt_library import default_library as default_prompt_library
 from surogates.health import infrastructure_readiness, start_health_server
@@ -42,6 +46,19 @@ if TYPE_CHECKING:
     from surogates.config import BrowserSettings, Settings
 
 logger = logging.getLogger(__name__)
+
+
+def _warn_if_base_model_missing_from_metadata(model_id: str) -> None:
+    """Warn when the configured base model has no static metadata entry."""
+    normalized = str(model_id or "").strip()
+    if not normalized or get_model_info(normalized) is not None:
+        return
+    logger.warning(
+        "Base LLM model %r is not present in surogates.harness.model_metadata "
+        "MODEL_CATALOG or aliases; add model metadata so context sizing, "
+        "capability checks, and cost estimates remain accurate.",
+        normalized,
+    )
 
 
 def _build_browser_backend(
@@ -375,6 +392,7 @@ async def run_worker(settings: Settings) -> None:
         settings.llm.base_url or "(default)",
         f"{settings.llm.api_key[:12]}..." if settings.llm.api_key else "(not set)",
     )
+    _warn_if_base_model_missing_from_metadata(settings.llm.model)
 
     # Worker identity -- from K8s downward API or a generated fallback.
     worker_id = settings.worker_id or f"worker-{id(asyncio.get_event_loop()):x}"
@@ -457,6 +475,7 @@ async def run_worker(settings: Settings) -> None:
         model_id = settings.llm.model
         budget = IterationBudget(max_total=90)
         summary_auxiliary = build_summary_auxiliary_llm(settings, tenant)
+        vision_auxiliary = build_vision_auxiliary_llm(settings, tenant)
         compressor = ContextCompressor(
             model_id,
             base_url=settings.llm.base_url,
@@ -609,6 +628,12 @@ async def run_worker(settings: Settings) -> None:
             saga_enabled=settings.saga.enabled,
             saga_settings=settings.saga if settings.saga.enabled else None,
             log_policy_allowed=settings.governance.log_allowed,
+            vision_client=(
+                vision_auxiliary.client if vision_auxiliary is not None else None
+            ),
+            vision_model=(
+                vision_auxiliary.model if vision_auxiliary is not None else ""
+            ),
         )
 
     # 8. Orchestrator — consumes from this agent's dedicated work queue.
