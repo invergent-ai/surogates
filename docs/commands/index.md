@@ -88,6 +88,9 @@ against the outcome and its rubric. If the evaluator says more revision is
 needed, Surogates appends a synthetic continuation message and wakes the same
 session again.
 
+For a task-oriented walkthrough, see the
+[Goals Quick Start](../goals/index.md).
+
 Examples:
 
 ```text
