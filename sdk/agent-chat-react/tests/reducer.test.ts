@@ -172,6 +172,53 @@ describe("applyAgentChatEvent", () => {
     ]);
   });
 
+  it("merges a replayed llm.response into the existing matching tool-call turn", () => {
+    const afterThinking = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "llm.thinking",
+      eventId: 1,
+      data: { reasoning: "Need user input." },
+    });
+    const afterToolCall = applyAgentChatEvent(afterThinking, {
+      type: "tool.call",
+      eventId: 2,
+      data: {
+        tool_call_id: "tc-clarify",
+        name: "clarify",
+        arguments: { questions: [{ prompt: "Pick one" }] },
+      },
+    });
+
+    const next = applyAgentChatEvent(afterToolCall, {
+      type: "llm.response",
+      eventId: 3,
+      data: {
+        message: {
+          role: "assistant",
+          content: "I need one decision before continuing.",
+          tool_calls: [
+            {
+              id: "tc-clarify",
+              type: "function",
+              function: {
+                name: "clarify",
+                arguments: "{\"questions\":[{\"prompt\":\"Pick one\"}]}",
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    expect(next.messages).toHaveLength(1);
+    expect(next.messages[0]?.toolCalls?.map((tc) => tc.id)).toEqual([
+      "tc-clarify",
+    ]);
+    expect(next.messages[0]?.reasoning).toContain("Need user input.");
+    expect(next.messages[0]?.reasoning).toContain(
+      "I need one decision before continuing.",
+    );
+  });
+
   it("folds browser lifecycle events into browser state and timeline markers", () => {
     const provisioned = applyAgentChatEvent(createInitialAgentChatState(), {
       type: "browser.provisioned",

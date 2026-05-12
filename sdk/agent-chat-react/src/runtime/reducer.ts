@@ -366,10 +366,20 @@ function applyLlmResponse(
     ? message?.tool_calls
     : [];
   const hasToolCalls = toolCalls.length > 0;
+  const responseToolCallIds = toolCallIdsFromResponse(toolCalls);
   const idx = findLastAssistantIndex(messages);
   const prevAssistant = idx >= 0 ? messages[idx] : undefined;
   const prevHasTools = Boolean(prevAssistant?.toolCalls?.length);
   const hasUserAfter = idx >= 0 && hasUserAfterIndex(messages, idx);
+  const matchesExistingToolTurn = Boolean(
+    hasToolCalls &&
+      prevAssistant?.toolCalls?.length &&
+      responseToolCallIds.length > 0 &&
+      !hasUserAfter &&
+      responseToolCallIds.every((id) =>
+        prevAssistant.toolCalls?.some((tc) => tc.id === id)
+      ),
+  );
 
   if (state.hadDeltas && idx >= 0 && !hasUserAfter) {
     const current = messages[idx]!;
@@ -383,6 +393,15 @@ function applyLlmResponse(
     } else {
       messages[idx] = { ...current, status: "complete" };
     }
+  } else if (matchesExistingToolTurn && idx >= 0) {
+    const current = messages[idx]!;
+    messages[idx] = {
+      ...current,
+      reasoning: responseContent
+        ? appendText(current.reasoning, responseContent)
+        : current.reasoning,
+      status: "streaming",
+    };
   } else if (prevHasTools || !prevAssistant || hasUserAfter) {
     messages.push({
       id: `evt-${event.eventId}`,
@@ -426,6 +445,18 @@ function applyLlmResponse(
       model: stringValue(event.data.model),
     },
   };
+}
+
+function toolCallIdsFromResponse(toolCalls: unknown[]): string[] {
+  return toolCalls
+    .map((toolCall) => stringValue(objectValue(toolCall)?.id))
+    .filter((id) => id.length > 0);
+}
+
+function appendText(existing: string | undefined, addition: string): string {
+  if (!existing) return addition;
+  if (existing.includes(addition)) return existing;
+  return `${existing}\n${addition}`;
 }
 
 function applyLlmThinking(
