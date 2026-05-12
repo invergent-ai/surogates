@@ -24,6 +24,7 @@ import os
 import re
 import traceback
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID, uuid4
 
@@ -48,6 +49,12 @@ from surogates.harness.message_utils import (
     coerce_message_content,
     make_skipped_tool_result,
     message_to_dict,
+)
+from surogates.harness.outcomes import (
+    DEFAULT_MAX_ITERATIONS,
+    OutcomeState,
+    parse_goal_command,
+    start_outcome,
 )
 from surogates.harness.prompt_cache import SystemPromptCache
 from surogates.harness.rate_limit_guard import ProviderRateLimitGuard
@@ -1074,6 +1081,10 @@ class AgentHarness:
 
             if last_user_content == "/clear":
                 await self._handle_clear_command(session, lease)
+                return
+
+            if last_user_content == "/goal" or last_user_content.startswith("/goal "):
+                await self._handle_goal_command(session, last_user_content, lease)
                 return
 
             if last_user_content.startswith("/loop"):
@@ -3522,6 +3533,182 @@ class AgentHarness:
             },
         )
         # Lease released by the outer wake() finally block.
+
+    def _outcome_settings(self) -> Any:
+        try:
+            from surogates.config import load_settings
+
+            return load_settings().outcomes
+        except Exception:
+            logger.debug("Failed to load outcome settings", exc_info=True)
+            return SimpleNamespace(
+                max_iterations=DEFAULT_MAX_ITERATIONS,
+                max_parse_failures=3,
+            )
+
+    async def _handle_goal_command(
+        self,
+        session: Session,
+        content: str,
+        lease: SessionLease,
+    ) -> None:
+        args = content[len("/goal") :].strip()
+        command = parse_goal_command(args)
+        current = OutcomeState.from_config((session.config or {}).get("outcome"))
+
+        if command.action == "status":
+            message = self._format_outcome_status(current)
+        elif command.action == "set":
+            message = await self._define_goal_outcome(session, command)
+        elif command.action == "pause":
+            message = await self._pause_goal_outcome(session, current)
+        elif command.action == "resume":
+            message = await self._resume_goal_outcome(session, current)
+        elif command.action == "clear":
+            message = await self._clear_goal_outcome(session, current)
+        else:
+            message = "Usage: /goal <outcome>, /goal status, /goal pause, /goal resume, /goal clear."
+
+        response_event_id = await self._store.emit_event(
+            session.id,
+            EventType.LLM_RESPONSE,
+            {"message": {"role": "assistant", "content": message}},
+        )
+        await self._store.advance_harness_cursor(
+            session.id,
+            through_event_id=response_event_id,
+            lease_token=lease.lease_token,
+        )
+
+        if command.action == "set":
+            outcome = OutcomeState.from_config((session.config or {}).get("outcome"))
+            if outcome is None:
+                return
+            outcome_id = outcome.id if outcome else None
+            kickoff_id = await self._store.emit_synthetic_user_message(
+                session.id,
+                content=outcome.description,
+                synthetic="outcome_kickoff",
+                metadata={"outcome_id": outcome_id},
+            )
+            logger.debug(
+                "Session %s: emitted outcome kickoff user message %s",
+                session.id,
+                kickoff_id,
+            )
+            if self._redis is not None:
+                try:
+                    from surogates.config import enqueue_session
+
+                    await enqueue_session(self._redis, session.agent_id, session.id)
+                except Exception:
+                    logger.debug("Failed to enqueue outcome kickoff", exc_info=True)
+
+    async def _define_goal_outcome(self, session: Session, command: Any) -> str:
+        settings = self._outcome_settings()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            state = start_outcome(
+                command.text,
+                rubric=command.rubric,
+                max_iterations=getattr(
+                    settings,
+                    "max_iterations",
+                    DEFAULT_MAX_ITERATIONS,
+                ),
+                now_iso=now_iso,
+            )
+        except ValueError:
+            return "Usage: /goal <outcome>. Example: /goal Fix all failing tests."
+
+        await self._store.update_session_config_key(
+            session.id,
+            "outcome",
+            state.to_config(),
+        )
+        session.config = {**(session.config or {}), "outcome": state.to_config()}
+        await self._store.emit_event(
+            session.id,
+            EventType.OUTCOME_DEFINED,
+            {
+                "outcome_id": state.id,
+                "description": state.description,
+                "rubric": state.rubric,
+                "max_iterations": state.max_iterations,
+            },
+        )
+        return f"Outcome defined ({state.max_iterations} iterations): {state.description}"
+
+    async def _pause_goal_outcome(
+        self,
+        session: Session,
+        current: OutcomeState | None,
+    ) -> str:
+        if current is None or current.status not in {"active", "paused"}:
+            return "No active outcome. Set one with /goal <text>."
+        current.status = "paused"
+        current.paused_reason = "user-paused"
+        current.updated_at = datetime.now(timezone.utc).isoformat()
+        await self._store.update_session_config_key(
+            session.id,
+            "outcome",
+            current.to_config(),
+        )
+        session.config = {**(session.config or {}), "outcome": current.to_config()}
+        await self._store.emit_event(
+            session.id,
+            EventType.OUTCOME_PAUSED,
+            {"outcome_id": current.id, "reason": current.paused_reason},
+        )
+        return f"Outcome paused: {current.description}"
+
+    async def _resume_goal_outcome(
+        self,
+        session: Session,
+        current: OutcomeState | None,
+    ) -> str:
+        if current is None or current.status not in {"paused", "max_iterations_reached"}:
+            return "No paused outcome to resume."
+        current.status = "active"
+        current.paused_reason = None
+        current.updated_at = datetime.now(timezone.utc).isoformat()
+        await self._store.update_session_config_key(
+            session.id,
+            "outcome",
+            current.to_config(),
+        )
+        session.config = {**(session.config or {}), "outcome": current.to_config()}
+        return f"Outcome resumed: {current.description}"
+
+    async def _clear_goal_outcome(
+        self,
+        session: Session,
+        current: OutcomeState | None,
+    ) -> str:
+        await self._store.clear_session_config_key(session.id, "outcome")
+        session.config = {**(session.config or {})}
+        session.config.pop("outcome", None)
+        await self._store.emit_event(
+            session.id,
+            EventType.OUTCOME_CLEARED,
+            {"outcome_id": current.id if current else None},
+        )
+        return "Outcome cleared." if current else "No active outcome."
+
+    def _format_outcome_status(self, state: OutcomeState | None) -> str:
+        if state is None:
+            return "No active outcome. Set one with /goal <text>."
+        lines = [
+            (
+                f"Outcome ({state.status}, {state.iteration}/"
+                f"{state.max_iterations} iterations): {state.description}"
+            ),
+        ]
+        if state.last_explanation:
+            lines.append(f"Last evaluation: {state.last_explanation}")
+        if state.paused_reason:
+            lines.append(f"Paused reason: {state.paused_reason}")
+        return "\n".join(lines)
 
     async def _handle_loop_command(
         self,
