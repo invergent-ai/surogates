@@ -13,6 +13,7 @@ from surogates.harness.outcomes import (
     parse_outcome_evaluation,
     start_outcome,
 )
+from surogates.config import Settings
 from surogates.session.events import EventType
 
 
@@ -245,3 +246,11 @@ def test_outcome_event_type_values_are_stable() -> None:
     )
     assert EventType.OUTCOME_EVALUATION_END.value == "span.outcome_evaluation_end"
     assert EventType.OUTCOME_CONTINUATION.value == "outcome.continuation"
+
+
+def test_outcome_settings_defaults() -> None:
+    settings = Settings()
+
+    assert settings.outcomes.max_iterations == 3
+    assert settings.outcomes.max_parse_failures == 3
+    assert settings.outcomes.evaluator_model == ""

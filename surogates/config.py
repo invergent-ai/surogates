@@ -486,6 +486,18 @@ class SagaSettings(BaseSettings):
     retry_delay: float = 1.0
 
 
+class OutcomeSettings(BaseSettings):
+    """Outcome-oriented /goal loop configuration."""
+
+    model_config = {"env_prefix": "SUROGATES_OUTCOMES_"}
+
+    max_iterations: int = 3
+    max_parse_failures: int = 3
+    evaluator_model: str = ""
+    evaluator_base_url: str = ""
+    evaluator_api_key: str = ""
+
+
 class ScheduledSessionSettings(BaseSettings):
     """Per-agent scheduled session ticker configuration."""
 
@@ -512,6 +524,7 @@ class Settings(BaseSettings):
     browser: BrowserSettings = Field(default_factory=BrowserSettings)
     governance: GovernanceSettings = Field(default_factory=GovernanceSettings)
     saga: SagaSettings = Field(default_factory=SagaSettings)
+    outcomes: OutcomeSettings = Field(default_factory=OutcomeSettings)
     session_reset: SessionResetSettings = Field(default_factory=SessionResetSettings)
     scheduled_sessions: ScheduledSessionSettings = Field(
         default_factory=ScheduledSessionSettings,

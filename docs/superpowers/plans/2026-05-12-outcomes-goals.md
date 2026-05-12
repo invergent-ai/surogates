@@ -17,8 +17,8 @@
 - [x] **Task 3: Add Outcome Event Types** — completed
 - [x] **Task 4: Add SessionStore Outcome Persistence** — completed
 - [x] **Task 5: Reserve `/goal` From Dynamic Skills** — completed
-- [ ] **Task 6: Add Outcome Settings** — in_progress
-- [ ] **Task 7: Add `user.define_outcome` API Event** — pending
+- [x] **Task 6: Add Outcome Settings** — completed
+- [ ] **Task 7: Add `user.define_outcome` API Event** — in_progress
 - [ ] **Task 8: Add `/goal` Command Handler** — pending
 - [ ] **Task 9: Add Post-Turn Outcome Evaluation** — pending
 - [ ] **Task 10: Prevent Completed Status During Active Continuation** — pending
