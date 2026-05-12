@@ -55,7 +55,6 @@ export function WebToolBlock({ tc }: { tc: ToolCallInfo }) {
 
   return (
     <div className="flex items-center gap-2 text-sm py-0.5">
-      <GlobeIcon className="size-3.5 text-muted-foreground/60 shrink-0" />
       <span className="font-medium text-foreground">{toolLabel}</span>
       {displayText && (
         <span className="text-muted-foreground/70 truncate text-xs">

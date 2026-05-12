@@ -10,8 +10,11 @@ Backend is selected automatically based on available API keys, or
 can be forced via ``WEB_BACKEND`` environment variable.
 
 Backend compatibility:
-- Tavily: search, extract  (simple API-key auth in JSON body)
+- Tavily: search, extract, crawl  (simple API-key auth in JSON body)
 - Exa: search, extract  (simple API-key auth via httpx)
+
+``web_crawl`` (Tavily-only) is defined here but not registered by
+default -- see :func:`register` for the rationale and opt-in path.
 """
 
 from __future__ import annotations
@@ -792,7 +795,15 @@ WEB_CRAWL_SCHEMA_PARAMS = {
 
 
 def register(registry: ToolRegistry) -> None:
-    """Register web_search, web_extract, and web_crawl tools."""
+    """Register web_search and web_extract tools.
+
+    ``web_crawl`` is intentionally NOT registered by default: it is
+    Tavily-only, can fan out to 20 page fetches per call, and the
+    ``web_search`` + ``web_extract`` combination covers nearly every
+    real use case.  The handler and schema remain available
+    (``_web_crawl_handler``, ``WEB_CRAWL_SCHEMA_PARAMS``) for callers
+    that want to opt in explicitly.
+    """
     registry.register(
         name="web_search",
         schema=ToolSchema(
@@ -824,23 +835,6 @@ def register(registry: ToolRegistry) -> None:
             parameters=WEB_EXTRACT_SCHEMA_PARAMS,
         ),
         handler=_web_extract_handler,
-        toolset="web",
-        max_result_size=100_000,
-    )
-
-    registry.register(
-        name="web_crawl",
-        schema=ToolSchema(
-            name="web_crawl",
-            description=(
-                "Crawl a website with specific instructions. Returns content "
-                "from multiple pages in markdown format. Useful for exploring "
-                "documentation sites, finding specific information across a "
-                "site, or extracting structured data. Uses Tavily backend."
-            ),
-            parameters=WEB_CRAWL_SCHEMA_PARAMS,
-        ),
-        handler=_web_crawl_handler,
         toolset="web",
         max_result_size=100_000,
     )
