@@ -20,8 +20,8 @@
 - [x] **Task 6: Add Outcome Settings** — completed
 - [x] **Task 7: Add `user.define_outcome` API Event** — completed
 - [x] **Task 8: Add `/goal` Command Handler** — completed
-- [ ] **Task 9: Add Post-Turn Outcome Evaluation** — in_progress
-- [ ] **Task 10: Prevent Completed Status During Active Continuation** — pending
+- [x] **Task 9: Add Post-Turn Outcome Evaluation** — completed
+- [ ] **Task 10: Prevent Completed Status During Active Continuation** — in_progress
 - [ ] **Task 11: Document Outcome API and `/goal` Behavior** — pending
 - [ ] **Task 12: Run Focused Verification** — pending
 

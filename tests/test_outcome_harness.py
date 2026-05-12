@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
@@ -10,6 +11,7 @@ import pytest
 from surogates.harness.budget import IterationBudget
 from surogates.harness.context import ContextCompressor
 from surogates.harness.loop import AgentHarness
+from surogates.harness.outcomes import parse_outcome_evaluation, start_outcome
 from surogates.harness.prompt import PromptBuilder
 from surogates.session.events import EventType
 from surogates.session.models import Session, SessionLease
@@ -98,6 +100,14 @@ class FakeStore:
         })
 
 
+class FakeRedis:
+    def __init__(self) -> None:
+        self.zadds: list[tuple[str, dict[str, float]]] = []
+
+    async def zadd(self, key: str, mapping: dict[str, float]) -> None:
+        self.zadds.append((key, mapping))
+
+
 def _make_harness(store: FakeStore, **overrides: Any) -> AgentHarness:
     tenant = TenantContext(
         org_id=UUID("00000000-0000-0000-0000-000000000001"),
@@ -120,6 +130,16 @@ def _make_harness(store: FakeStore, **overrides: Any) -> AgentHarness:
     }
     defaults.update(overrides)
     return AgentHarness(**defaults)
+
+
+def _active_outcome_config() -> dict[str, Any]:
+    state = start_outcome(
+        "Fix tests",
+        rubric="pytest passes",
+        max_iterations=3,
+        now_iso="2026-05-12T10:00:00+00:00",
+    )
+    return state.to_config()
 
 
 @pytest.mark.asyncio
@@ -208,3 +228,116 @@ async def test_handle_goal_clear_marks_config_cleared() -> None:
 
     assert store.config_clears == [(session.id, "outcome")]
     assert any(event[1] == EventType.OUTCOME_CLEARED for event in store.events)
+
+
+@pytest.mark.asyncio
+async def test_post_turn_outcome_evaluation_enqueues_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FakeStore()
+    redis = FakeRedis()
+    harness = _make_harness(store, redis_client=redis)
+    session = _session(config={"outcome": _active_outcome_config()})
+    lease = _lease(session.id)
+
+    async def fake_evaluate(
+        *,
+        state: Any,
+        latest_response: str,
+        model: str,
+    ) -> Any:
+        return parse_outcome_evaluation(
+            '{"result":"needs_revision","explanation":"Tests still fail",'
+            '"feedback":"Run pytest"}',
+        )
+
+    monkeypatch.setattr(harness, "_evaluate_outcome", fake_evaluate)
+
+    handled = await harness._maybe_continue_outcome(
+        session,
+        lease,
+        latest_response="I fixed one test",
+        response_event_id=10,
+        model="gpt-4o",
+    )
+
+    assert handled is True
+    assert store.config_updates[-1][2]["status"] == "active"
+    assert any(event[1] == EventType.OUTCOME_EVALUATION_START for event in store.events)
+    assert any(event[1] == EventType.OUTCOME_EVALUATION_ONGOING for event in store.events)
+    assert any(event[1] == EventType.OUTCOME_EVALUATION_END for event in store.events)
+    assert any(event[1] == EventType.OUTCOME_CONTINUATION for event in store.events)
+    synthetic = store.synthetic_messages[-1]
+    assert synthetic[2] == "outcome_continuation"
+    assert "Run pytest" in synthetic[1]
+    assert redis.zadds
+    assert store.cursor_advances[-1]["through_event_id"] == store.next_event_id - 2
+
+
+@pytest.mark.asyncio
+async def test_post_turn_outcome_evaluation_completes_when_satisfied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FakeStore()
+    harness = _make_harness(store)
+    session = _session(config={"outcome": _active_outcome_config()})
+    lease = _lease(session.id)
+
+    async def fake_evaluate(
+        *,
+        state: Any,
+        latest_response: str,
+        model: str,
+    ) -> Any:
+        return parse_outcome_evaluation(
+            '{"result":"satisfied","explanation":"pytest passes","feedback":""}',
+        )
+
+    monkeypatch.setattr(harness, "_evaluate_outcome", fake_evaluate)
+
+    handled = await harness._maybe_continue_outcome(
+        session,
+        lease,
+        latest_response="All tests pass",
+        response_event_id=10,
+        model="gpt-4o",
+    )
+
+    assert handled is False
+    assert store.config_updates[-1][2]["status"] == "satisfied"
+    assert store.synthetic_messages == []
+
+
+@pytest.mark.asyncio
+async def test_evaluate_outcome_uses_base_llm_model_by_default() -> None:
+    store = FakeStore()
+    llm = MagicMock()
+    llm.chat.completions.create = AsyncMock(return_value=SimpleNamespace(
+        choices=[
+            SimpleNamespace(message=SimpleNamespace(
+                content=(
+                    '{"result":"satisfied","explanation":"done",'
+                    '"feedback":"done"}'
+                ),
+            )),
+        ],
+    ))
+    harness = _make_harness(store, llm_client=llm)
+    harness._outcome_settings = lambda: SimpleNamespace(evaluator_model="")
+    state = start_outcome(
+        "Fix tests",
+        rubric="pytest passes",
+        max_iterations=3,
+        now_iso="2026-05-12T10:00:00+00:00",
+    )
+
+    evaluation = await harness._evaluate_outcome(
+        state=state,
+        latest_response="All tests pass",
+        model="base-model",
+    )
+
+    assert evaluation.result == "satisfied"
+    call = llm.chat.completions.create.await_args.kwargs
+    assert call["model"] == "base-model"
+    assert call["temperature"] == 0

@@ -53,7 +53,10 @@ from surogates.harness.message_utils import (
 from surogates.harness.outcomes import (
     DEFAULT_MAX_ITERATIONS,
     OutcomeState,
+    apply_evaluation,
+    build_evaluator_messages,
     parse_goal_command,
+    parse_outcome_evaluation,
     start_outcome,
 )
 from surogates.harness.prompt_cache import SystemPromptCache
@@ -1884,6 +1887,15 @@ class AgentHarness:
                     messages,
                 )
 
+                if await self._maybe_continue_outcome(
+                    session,
+                    lease,
+                    latest_response=assistant_message.get("content") or "",
+                    response_event_id=event_id,
+                    model=model_id,
+                ):
+                    return
+
                 # A response without tool calls completes the current
                 # objective.  Follow-up messages revive the session into a
                 # new objective rather than keeping completed work "active".
@@ -3709,6 +3721,142 @@ class AgentHarness:
         if state.paused_reason:
             lines.append(f"Paused reason: {state.paused_reason}")
         return "\n".join(lines)
+
+    async def _evaluate_outcome(
+        self,
+        *,
+        state: OutcomeState,
+        latest_response: str,
+        model: str,
+    ) -> Any:
+        settings = self._outcome_settings()
+        eval_model = getattr(settings, "evaluator_model", "") or model
+        messages = build_evaluator_messages(state, latest_response)
+        try:
+            response = await self._llm.chat.completions.create(
+                model=eval_model,
+                messages=messages,
+                temperature=0,
+                max_tokens=500,
+            )
+            raw = self._extract_chat_message_content(response)
+        except Exception as exc:
+            logger.warning(
+                "Outcome evaluator failed for %s: %s",
+                state.id,
+                exc,
+            )
+            raw = json.dumps({
+                "result": "needs_revision",
+                "explanation": f"evaluator error: {type(exc).__name__}",
+                "feedback": "Continue working toward the outcome.",
+            })
+        return parse_outcome_evaluation(raw)
+
+    async def _maybe_continue_outcome(
+        self,
+        session: Session,
+        lease: SessionLease,
+        *,
+        latest_response: str,
+        response_event_id: int,
+        model: str,
+    ) -> bool:
+        state = OutcomeState.from_config((session.config or {}).get("outcome"))
+        if state is None or state.status != "active":
+            return False
+
+        start_event_id = await self._store.emit_event(
+            session.id,
+            EventType.OUTCOME_EVALUATION_START,
+            {
+                "outcome_id": state.id,
+                "iteration": state.iteration,
+                "response_event_id": response_event_id,
+            },
+        )
+        await self._store.emit_event(
+            session.id,
+            EventType.OUTCOME_EVALUATION_ONGOING,
+            {"outcome_id": state.id, "iteration": state.iteration},
+        )
+        evaluation = await self._evaluate_outcome(
+            state=state,
+            latest_response=latest_response,
+            model=model,
+        )
+        settings = self._outcome_settings()
+        decision = apply_evaluation(
+            state,
+            evaluation,
+            now_iso=datetime.now(timezone.utc).isoformat(),
+            max_parse_failures=getattr(settings, "max_parse_failures", 3),
+        )
+        await self._store.update_session_config_key(
+            session.id,
+            "outcome",
+            state.to_config(),
+        )
+        session.config = {**(session.config or {}), "outcome": state.to_config()}
+
+        await self._store.emit_event(
+            session.id,
+            EventType.OUTCOME_EVALUATION_END,
+            {
+                "outcome_id": state.id,
+                "outcome_evaluation_start_id": start_event_id,
+                "iteration": state.iteration,
+                "result": decision.result,
+                "explanation": evaluation.explanation,
+                "feedback": evaluation.feedback,
+                "parse_failed": evaluation.parse_failed,
+            },
+        )
+
+        status_event_id: int | None = None
+        if decision.message:
+            status_event_id = await self._store.emit_event(
+                session.id,
+                EventType.LLM_RESPONSE,
+                {"message": {"role": "assistant", "content": decision.message}},
+            )
+
+        if not decision.should_continue or not decision.continuation_prompt:
+            return False
+
+        marker_event_id = await self._store.emit_event(
+            session.id,
+            EventType.OUTCOME_CONTINUATION,
+            {
+                "outcome_id": state.id,
+                "iteration": state.iteration,
+                "status_event_id": status_event_id,
+            },
+        )
+        continuation_event_id = await self._store.emit_synthetic_user_message(
+            session.id,
+            content=decision.continuation_prompt,
+            synthetic="outcome_continuation",
+            metadata={"outcome_id": state.id},
+        )
+        await self._store.advance_harness_cursor(
+            session.id,
+            through_event_id=marker_event_id,
+            lease_token=lease.lease_token,
+        )
+        logger.debug(
+            "Session %s: outcome continuation user message %s queued",
+            session.id,
+            continuation_event_id,
+        )
+        if self._redis is not None:
+            try:
+                from surogates.config import enqueue_session
+
+                await enqueue_session(self._redis, session.agent_id, session.id)
+            except Exception:
+                logger.debug("Failed to enqueue outcome continuation", exc_info=True)
+        return True
 
     async def _handle_loop_command(
         self,
