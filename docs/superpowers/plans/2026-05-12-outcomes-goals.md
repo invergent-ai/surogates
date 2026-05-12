@@ -23,7 +23,7 @@
 - [x] **Task 9: Add Post-Turn Outcome Evaluation** — completed
 - [x] **Task 10: Prevent Completed Status During Active Continuation** — completed
 - [x] **Task 11: Document Outcome API and `/goal` Behavior** — completed
-- [ ] **Task 12: Run Focused Verification** — in_progress
+- [x] **Task 12: Run Focused Verification** — completed
 
 ---
 
@@ -2057,3 +2057,8 @@ Expected: all tests pass. If unrelated existing failures appear, record exact fa
 - Surogates fit: state in `sessions.config`, events in the append-only log, continuation via synthetic `user.message`, Redis wake through existing `enqueue_session`.
 - The plan adds `POST /sessions/{id}/events` only for `user.define_outcome`; it does not create a broad arbitrary event ingestion API.
 - The first version evaluates the assistant's final response, not workspace files directly. Rubrics can still require the assistant to verify files/tests. A future task can add evaluator access to artifact metadata or workspace summaries.
+- Focused verification passed. A full `uv run pytest tests -q` run failed in four deterministic, non-outcome model metadata tests expecting `gpt-4o` to remain in the static model catalog:
+  `tests/test_auxiliary_client.py::test_context_compressor_uses_summary_client_for_summaries`,
+  `tests/test_model_discovery.py::TestResolveModelInfo::test_static_catalog_wins_for_known_id`,
+  `tests/test_model_discovery.py::TestResolveModelInfo::test_override_beats_static`, and
+  `tests/test_session_provisioning.py::test_create_agent_session_populates_storage_and_model_metadata`.
