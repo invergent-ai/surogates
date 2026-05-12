@@ -219,7 +219,7 @@ function TreeNodeRow({
   const title = entry.title ?? fallbackSessionTitle(entry);
   const subtitle = [
     formatRunKind(entry.runKind),
-    entry.agentType,
+    entry.model ?? entry.agentType,
     formatSessionTime(entry.updatedAt),
   ].filter(Boolean).join(" · ");
 
