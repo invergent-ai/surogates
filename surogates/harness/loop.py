@@ -242,19 +242,30 @@ _EMPTY_RESPONSE_NUDGE: str = (
 )
 _USER_ACTION_RESCUE_SYSTEM: str = (
     "You are a strict routing judge for an agent harness. Decide whether "
-    "the assistant draft is ending the turn while it still needs user input "
-    "or user action. Return only JSON with keys: action_kind string, reason "
-    "string, question string, title string, instructions string, context "
-    "string, action_type string, target string. Use action_kind='clarify' "
-    "only when the user can unblock the task by answering a text question. "
-    "Use action_kind='action_required' when the user must perform an action "
-    "in the session, browser, or another UI, such as login, MFA, OAuth, "
-    "CAPTCHA, consent, file picker, or browser approval. Use "
-    "action_kind='none' for final answers, status reports that do not wait "
-    "for a reply, and rhetorical questions. For clarify, question must be "
-    "the concise question to ask. For action_required, instructions must "
-    "tell the user what to do and target should usually be 'browser' or "
-    "'session'."
+    "the assistant's draft response is ending the turn while it is "
+    "genuinely blocked on user input or user action. Default to "
+    "action_kind='none' unless the assistant has clearly stopped a "
+    "concrete in-progress task that cannot proceed without specific input "
+    "from the user. When in doubt, choose 'none'. "
+    "Use action_kind='clarify' ONLY when the assistant has paused a "
+    "specific in-progress task and is asking a specific question whose "
+    "answer is required to continue. Set 'question' to that concise "
+    "question. "
+    "Use action_kind='action_required' when the assistant has paused for "
+    "the user to perform a UI action it cannot do itself: login, MFA, "
+    "OAuth, CAPTCHA, consent screen, file picker, or browser approval. "
+    "Set 'instructions' to what the user must do and 'target' to 'browser' "
+    "or 'session'. "
+    "Use action_kind='none' for: completed work with polite closings ('let "
+    "me know if you need anything else', 'feel free to ask'), status "
+    "reports, summaries, recaps of what was done, suggestions, optional "
+    "follow-ups ('I can also do X if you want'), rhetorical questions, "
+    "offers to continue, and any case where the assistant could simply "
+    "stop and wait without losing progress. A polite invitation to "
+    "continue is NOT a blocker. Asking 'anything else?' is NOT a blocker. "
+    "Return only JSON with keys: action_kind string, reason string, "
+    "question string, title string, instructions string, context string, "
+    "action_type string, target string."
 )
 _DYNAMIC_LOOP_EXCLUDED_TOOLS: frozenset[str] = frozenset({
     "cron_create",
@@ -801,6 +812,77 @@ class AgentHarness:
         from surogates.tools.utils.interrupt import set_interrupt
         set_interrupt(False)
 
+    async def _should_abort_before_llm_response(
+        self,
+        session: Session,
+        llm_request_event_id: int,
+    ) -> bool:
+        """Return True if this iteration must drop its buffered response.
+
+        Detects two races that can otherwise leak a buffered response into
+        the wrong turn:
+
+        - An explicit interrupt was raised (lease loss, channel pause,
+          new-message-while-busy nudge from the API).
+        - A new ``user.message`` was appended after this iteration's own
+          ``llm.request`` event — meaning the user moved on to a new turn
+          while the stream or end-of-turn judge was still in flight.
+
+        When a stale user message is detected the interrupt flag is also
+        set so the cleanup path runs identically for both causes.
+        """
+        if self._check_interrupt():
+            return True
+        newer = await self._store.get_events(
+            session.id,
+            after=llm_request_event_id,
+            types=[EventType.USER_MESSAGE],
+            limit=1,
+        )
+        if newer:
+            logger.info(
+                "Session %s: dropping stale buffered response — user "
+                "message %s arrived after llm.request %s",
+                session.id,
+                newer[0].id,
+                llm_request_event_id,
+            )
+            self.interrupt("stale response — newer user message in log")
+            return True
+        return False
+
+    async def _abort_iteration_with_pause(
+        self,
+        session: Session,
+        saga: Any,
+    ) -> None:
+        """Tear down sandbox + sagas and emit SESSION_PAUSE, then clear.
+
+        Shared by the iteration-top interrupt check and the pre-emission
+        staleness guard so both paths perform the same cleanup before
+        returning from the loop.
+        """
+        reason_msg = self._interrupt_message or "interrupted"
+        if saga is not None and saga.active_sagas:
+            await self._compensate_sagas(saga, session, "interrupt")
+        if self._sandbox_pool is not None:
+            try:
+                await self._sandbox_pool.destroy_for_session(str(session.id))
+            except Exception:
+                logger.debug(
+                    "Sandbox cleanup on interrupt failed", exc_info=True,
+                )
+        await self._store.emit_event(
+            session.id,
+            EventType.SESSION_PAUSE,
+            {
+                "reason": "interrupted",
+                "message": reason_msg,
+                "worker_id": self._worker_id,
+            },
+        )
+        self._clear_interrupt()
+
     # ------------------------------------------------------------------
     # Lease renewal (background task)
     # ------------------------------------------------------------------
@@ -1218,27 +1300,7 @@ class AgentHarness:
 
             # --- Interrupt check at the top of each iteration ---
             if self._check_interrupt():
-                reason_msg = self._interrupt_message or "interrupted"
-                # Compensate active sagas before destroying the sandbox
-                # (compensation may need sandbox access).
-                if saga is not None and saga.active_sagas:
-                    await self._compensate_sagas(saga, session, "interrupt")
-                # Destroy the sandbox pod on interrupt.
-                if self._sandbox_pool is not None:
-                    try:
-                        await self._sandbox_pool.destroy_for_session(str(session.id))
-                    except Exception:
-                        logger.debug("Sandbox cleanup on interrupt failed", exc_info=True)
-                await self._store.emit_event(
-                    session.id,
-                    EventType.SESSION_PAUSE,
-                    {
-                        "reason": "interrupted",
-                        "message": reason_msg,
-                        "worker_id": self._worker_id,
-                    },
-                )
-                self._clear_interrupt()
+                await self._abort_iteration_with_pause(session, saga)
                 return
 
             # --- Checkpoint: reset per-turn dedup in sandbox ---
@@ -1274,7 +1336,7 @@ class AgentHarness:
 
             # 1. Emit LLM_REQUEST event.
             model_id = self._current_model or session.model or self._default_model
-            await self._store.emit_event(
+            llm_request_event_id = await self._store.emit_event(
                 session.id,
                 EventType.LLM_REQUEST,
                 {"model": model_id, "iteration": iteration},
@@ -1605,6 +1667,18 @@ class AgentHarness:
                     response_data["clarify_rescue"] = True
                 elif inbox_rescue_kind == "action_required":
                     response_data["action_required_rescue"] = True
+
+            # 4a. Interrupt / staleness guard.  The stream and any judge
+            # LLM call above can take several seconds.  If a new
+            # user.message has been appended (or the interrupt flag was
+            # set) while we were busy, the buffered response belongs to a
+            # turn the user has already abandoned — drop it instead of
+            # attributing it to the next user message.
+            if await self._should_abort_before_llm_response(
+                session, llm_request_event_id,
+            ):
+                await self._abort_iteration_with_pause(session, saga)
+                return
 
             event_id = await self._store.emit_event(
                 session.id,
@@ -2488,16 +2562,6 @@ class AgentHarness:
                         ),
                     })
                     continue
-                fallback = self._fallback_final_response_user_action(
-                    assistant_content,
-                )
-                if fallback.get("action_kind") in {"clarify", "action_required"}:
-                    logger.warning(
-                        "User-action rescue judge failed twice; using "
-                        "local user-input fallback: %s",
-                        exc,
-                    )
-                    return fallback
                 logger.warning(
                     "User-action rescue judge failed; leaving final response "
                     "unchanged: %s",
@@ -2563,99 +2627,6 @@ class AgentHarness:
             "context": parsed.get("context"),
             "action_type": action_type,
             "target": target,
-        }
-
-    @staticmethod
-    def _fallback_final_response_user_action(
-        assistant_content: str,
-    ) -> dict[str, Any]:
-        """Last-resort detection used only when the LLM judge cannot answer."""
-        text = assistant_content.strip()
-        lowered = text.lower()
-        if AgentHarness._looks_like_user_action_requirement(lowered):
-            action_type = AgentHarness._infer_user_action_type(lowered)
-            target = "browser" if action_type == "browser" else "session"
-            return {
-                "action_kind": "action_required",
-                "needs_clarify": False,
-                "reason": "judge_fallback_action_required",
-                "title": "Action required",
-                "instructions": text[:1000],
-                "context": text[:1000],
-                "action_type": action_type,
-                "target": target,
-            }
-
-        explicit_input_markers = (
-            "tell me which",
-            "tell me what",
-            "let me know",
-            "please provide",
-            "provide the",
-            "provide a",
-            "choose ",
-            "select ",
-            "do you want",
-            "would you like",
-            "which option",
-            "which account",
-            "what account",
-            "before i can continue",
-            "need you to",
-            "i need your",
-        )
-
-        question = None
-        q_end = text.rfind("?")
-        if q_end >= 0:
-            prefix = text[:q_end]
-            q_start = max(
-                prefix.rfind("."),
-                prefix.rfind("!"),
-                prefix.rfind("?"),
-                prefix.rfind("\n"),
-            )
-            question = text[q_start + 1:q_end + 1].strip()
-
-        direct_question_markers = (
-            "should i",
-            "should we",
-            "do you want",
-            "would you like",
-            "can you",
-            "could you",
-            "which account",
-            "what account",
-            "which option",
-            "what should i",
-            "how should i",
-            "when should i",
-            "where should i",
-            "who should i",
-        )
-        question_lower = question.lower() if question else ""
-        has_direct_question = bool(question) and any(
-            marker in question_lower for marker in direct_question_markers
-        )
-        has_explicit_input_request = any(
-            marker in lowered for marker in explicit_input_markers
-        )
-        if not has_direct_question and not has_explicit_input_request:
-            return {
-                "action_kind": "none",
-                "needs_clarify": False,
-                "reason": "judge_error",
-            }
-
-        if not question:
-            question = "Please provide the input needed to continue."
-
-        return {
-            "action_kind": "clarify",
-            "needs_clarify": True,
-            "reason": "judge_fallback",
-            "question": question,
-            "context": text[:1000],
         }
 
     @staticmethod

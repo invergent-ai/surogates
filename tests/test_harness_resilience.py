@@ -452,6 +452,7 @@ class TestSessionLifecycle:
         """A final no-tool response completes the current objective."""
         store = AsyncMock()
         store.emit_event = AsyncMock(side_effect=[101, 102])
+        store.get_events = AsyncMock(return_value=[])
 
         harness = _make_harness(
             session_store=store,
@@ -657,58 +658,6 @@ class TestSessionLifecycle:
         assert event_args[0] == session.id
         assert event_args[1].value == "inbox.action_required"
         assert event_args[2]["title"] == "Sign in required"
-        assert event_args[2]["action_type"] == "browser"
-
-    async def test_final_response_browser_action_fallback_emits_action_required(
-        self,
-    ) -> None:
-        empty_response = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=""))]
-        )
-        llm_client = AsyncMock()
-        llm_client.chat.completions.create.side_effect = [
-            empty_response,
-            empty_response,
-        ]
-        from surogates.tools.registry import ToolRegistry, ToolSchema
-
-        reg = ToolRegistry()
-        reg.register(
-            "clarify",
-            ToolSchema(name="clarify", description="test", parameters={}),
-            lambda _: "{}",
-        )
-        store = AsyncMock()
-        harness = _make_harness(
-            llm_client=llm_client,
-            tool_registry=reg,
-            session_store=store,
-        )
-        session = _session_with_config({})
-        assistant_message = {
-            "role": "assistant",
-            "content": (
-                "Please open the browser session and complete the approval "
-                "prompt before I can continue."
-            ),
-            "tool_calls": None,
-        }
-
-        routed = await harness._maybe_route_final_response_to_inbox(
-            session=session,
-            messages=[{"role": "user", "content": "Connect this account"}],
-            assistant_message=assistant_message,
-            model="surogate",
-            tool_filter={"clarify", "browser_navigate"},
-        )
-
-        assert routed == "action_required"
-        assert llm_client.chat.completions.create.await_count == 2
-        assert assistant_message["tool_calls"] is None
-        store.emit_event.assert_awaited_once()
-        event_args = store.emit_event.await_args.args
-        assert event_args[1].value == "inbox.action_required"
-        assert event_args[2]["instructions"].startswith("Please open the browser")
         assert event_args[2]["action_type"] == "browser"
 
     async def test_user_action_judge_prefers_outlines_structured_output(
@@ -956,51 +905,6 @@ class TestSessionLifecycle:
         assert tool_calls is not None
         arguments = json.loads(tool_calls[0]["function"]["arguments"])
         assert arguments["questions"][0]["prompt"] == "Should I continue?"
-
-    async def test_final_response_uses_fallback_when_judge_never_returns_json(
-        self,
-    ) -> None:
-        empty_response = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=""))]
-        )
-        llm_client = AsyncMock()
-        llm_client.chat.completions.create.side_effect = [
-            empty_response,
-            empty_response,
-        ]
-        from surogates.tools.registry import ToolRegistry, ToolSchema
-
-        reg = ToolRegistry()
-        reg.register(
-            "clarify",
-            ToolSchema(name="clarify", description="test", parameters={}),
-            lambda _: "{}",
-        )
-        harness = _make_harness(llm_client=llm_client, tool_registry=reg)
-        session = _session_with_config({})
-        assistant_message = {
-            "role": "assistant",
-            "content": (
-                "I need you to choose the account before I can continue. "
-                "Which account should I use?"
-            ),
-            "tool_calls": None,
-        }
-
-        converted = await harness._maybe_convert_final_response_to_clarify(
-            session=session,
-            messages=[{"role": "user", "content": "Post this update"}],
-            assistant_message=assistant_message,
-            model="surogate",
-            tool_filter={"clarify"},
-        )
-
-        assert converted is True
-        assert llm_client.chat.completions.create.await_count == 2
-        tool_calls = assistant_message["tool_calls"]
-        assert tool_calls is not None
-        arguments = json.loads(tool_calls[0]["function"]["arguments"])
-        assert arguments["questions"][0]["prompt"] == "Which account should I use?"
 
     async def test_final_response_fallback_does_not_convert_plain_final_answer(
         self,
