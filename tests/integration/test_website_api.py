@@ -12,6 +12,7 @@ database row — every test sets the relevant fields on
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from uuid import UUID
@@ -26,6 +27,7 @@ from surogates.channels.website_session import (
     COOKIE_NAME,
     CSRF_HEADER_NAME,
 )
+from surogates.session.events import EventType
 from surogates.session.store import SessionStore
 from surogates.tenant.credentials import CredentialVault
 
@@ -561,3 +563,132 @@ async def test_publishable_key_rejected_outside_website_prefix(
         headers={"Authorization": f"Bearer {key}"},
     )
     assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# SSE stream — terminal-status race guard
+# ---------------------------------------------------------------------------
+
+
+async def _read_sse_events(response, *, until_types: set[str], deadline_s: float):
+    """Consume an SSE response and return ``(event, data)`` pairs.
+
+    Returns once **any** event in ``until_types`` has been observed, or
+    when ``deadline_s`` elapses (so a hung handler surfaces as a test
+    failure rather than blocking forever).
+    """
+    received: list[tuple[str, str]] = []
+    event_type = ""
+    data_lines: list[str] = []
+
+    async def _consume():
+        nonlocal event_type, data_lines
+        async for line in response.aiter_lines():
+            if line == "":
+                if event_type:
+                    received.append((event_type, "\n".join(data_lines)))
+                    if event_type in until_types:
+                        return
+                event_type = ""
+                data_lines = []
+                continue
+            if line.startswith(":"):
+                continue
+            if line.startswith("event:"):
+                event_type = line.split(":", 1)[1].strip()
+            elif line.startswith("data:"):
+                data_lines.append(line.split(":", 1)[1].lstrip())
+
+    try:
+        await asyncio.wait_for(_consume(), timeout=deadline_s)
+    except asyncio.TimeoutError:
+        pass
+    return received
+
+
+async def test_stream_terminal_close_emits_session_done(
+    app, client: AsyncClient, session_factory, session_store,
+):
+    """A truly terminal website session closes with ``session.done``.
+
+    Without a pending POST, the handler's grace window times out and
+    the stream sends a single ``session.done`` event and closes. The
+    cookie set by bootstrap carries the website-session JWT.
+    """
+    csrf, sid, origin = await _bootstrap(app, client, session_factory)
+    await app.state.session_store.update_session_status(sid, "completed")
+
+    async with client.stream(
+        "GET",
+        f"/v1/website/sessions/{sid}/events?after=0",
+        headers={"Origin": origin},
+    ) as response:
+        assert response.status_code == 200
+        events = await _read_sse_events(
+            response,
+            until_types={"session.done"},
+            deadline_s=2.0,
+        )
+
+    types = [event_type for event_type, _ in events]
+    assert "session.done" in types, (
+        f"expected session.done on a terminal session, got: {types}"
+    )
+
+
+async def test_stream_race_recovery_streams_resumed_events(
+    app, client: AsyncClient, session_factory,
+):
+    """Race guard delivers events that land during the grace window.
+
+    Mirrors the production race: SSE opens on a ``completed`` session,
+    then a SESSION_RESUME publish lands during the grace window. The
+    handler must wake on the publish, re-check status, find ``active``,
+    and stream through SESSION_RESUME + USER_MESSAGE without ever
+    emitting ``session.done``.
+
+    Uses ``app.state.session_store`` (redis-aware) so ``emit_event``
+    actually publishes on ``surogates:session:{id}``.
+    """
+    csrf, sid, origin = await _bootstrap(app, client, session_factory)
+    redis_store: SessionStore = app.state.session_store
+    await redis_store.update_session_status(sid, "completed")
+
+    async def _flip_to_active_after_subscribe():
+        # Give the SSE handler time to enter event_generator and subscribe
+        # to ``surogates:session:{id}``. The subscribe must precede the
+        # publish — that's the whole point of the race guard.
+        await asyncio.sleep(0.25)
+        await redis_store.update_session_status(sid, "active")
+        await redis_store.emit_event(sid, EventType.SESSION_RESUME, {})
+        await redis_store.emit_event(
+            sid, EventType.USER_MESSAGE, {"content": "are you there?"},
+        )
+
+    flipper = asyncio.create_task(_flip_to_active_after_subscribe())
+    try:
+        async with client.stream(
+            "GET",
+            f"/v1/website/sessions/{sid}/events?after=0",
+            headers={"Origin": origin},
+        ) as response:
+            assert response.status_code == 200
+            events = await _read_sse_events(
+                response,
+                until_types={"user.message"},
+                deadline_s=5.0,
+            )
+    finally:
+        await flipper
+
+    types = [event_type for event_type, _ in events]
+    assert "session.resume" in types, (
+        f"expected session.resume to reach the client; got: {types}"
+    )
+    assert "user.message" in types, (
+        f"expected user.message to reach the client; got: {types}"
+    )
+    assert "session.done" not in types, (
+        f"session.done must not be emitted when the race is recovered; "
+        f"got: {types}"
+    )
