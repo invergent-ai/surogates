@@ -529,6 +529,39 @@ describe("useAgentChatRuntime", () => {
     expect(calls.retried).toEqual(["s-1"]);
     expect(runtime.api.isRunning).toBe(true);
   });
+
+  it("reopens a completed session stream before sending a follow-up", async () => {
+    const calls: AdapterCalls = {
+      opened: [],
+      sent: [],
+      paused: [],
+      retried: [],
+      created: [],
+    };
+    const adapter = createFakeAdapter(calls);
+    const runtime = renderRuntime({ adapter, sessionId: "s-1" });
+
+    act(() => {
+      calls.opened[0]?.stream.emit("user.message", 1, { content: "first" });
+      calls.opened[0]?.stream.emit("llm.response", 2, {
+        message: { role: "assistant", content: "done" },
+      });
+      calls.opened[0]?.stream.emit("session.complete", 3, {});
+      calls.opened[0]?.stream.emit("session.done", 0, { status: "completed" });
+      calls.opened[0]!.stream.onerror?.();
+    });
+
+    expect(runtime.api.isRunning).toBe(false);
+    expect(calls.opened).toHaveLength(1);
+
+    await act(async () => {
+      await runtime.api.send("again");
+    });
+
+    expect(calls.sent).toEqual([{ sessionId: "s-1", content: "again" }]);
+    expect(calls.opened).toHaveLength(2);
+    expect(calls.opened[1]).toMatchObject({ sessionId: "s-1", after: 3 });
+  });
 });
 
 function HarnessWrapper(props: {

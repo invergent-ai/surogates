@@ -34,10 +34,15 @@ export function useAgentChatRuntime({
   const streamRef = useRef<AgentChatEventStream | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previousSessionIdRef = useRef<string | null>(sessionId);
+  const sessionIdRef = useRef<string | null>(sessionId);
 
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
 
   const clearReconnectTimer = useCallback(() => {
     if (reconnectTimerRef.current) {
@@ -52,24 +57,10 @@ export function useAgentChatRuntime({
     stream?.close();
   }, []);
 
-  useEffect(() => {
-    const previousSessionId = previousSessionIdRef.current;
-    previousSessionIdRef.current = sessionId;
-    clearReconnectTimer();
-    closeStream();
-
-    if (!sessionId) {
-      setSession(null);
-      setState(createInitialAgentChatState());
-      return;
-    }
-
-    let cancelled = false;
-
-    const connect = (after?: number) => {
-      if (cancelled) return;
+  const openStream = useCallback(
+    (targetSessionId: string, after?: number) => {
       const stream = adapter.openEventStream({
-        sessionId,
+        sessionId: targetSessionId,
         after: after ?? stateRef.current.lastEventId,
       });
       streamRef.current = stream;
@@ -96,11 +87,48 @@ export function useAgentChatRuntime({
         if (streamRef.current === stream) {
           streamRef.current = null;
         }
-        if (!stateRef.current.sessionDone && !cancelled) {
-          reconnectTimerRef.current = setTimeout(() => connect(), 3000);
+        if (
+          !stateRef.current.sessionDone &&
+          sessionIdRef.current === targetSessionId
+        ) {
+          reconnectTimerRef.current = setTimeout(
+            () => openStream(targetSessionId),
+            3000,
+          );
         }
       };
-    };
+    },
+    [adapter],
+  );
+
+  const ensureStreamForNewTurn = useCallback(
+    (targetSessionId: string) => {
+      if (streamRef.current && !stateRef.current.sessionDone) return;
+
+      const after = stateRef.current.lastEventId;
+      clearReconnectTimer();
+      closeStream();
+      stateRef.current = {
+        ...stateRef.current,
+        sessionDone: false,
+        terminal: false,
+      };
+      openStream(targetSessionId, after);
+    },
+    [clearReconnectTimer, closeStream, openStream],
+  );
+
+  useEffect(() => {
+    const previousSessionId = previousSessionIdRef.current;
+    previousSessionIdRef.current = sessionId;
+    clearReconnectTimer();
+    closeStream();
+
+    if (!sessionId) {
+      setSession(null);
+      setState(createInitialAgentChatState());
+      return;
+    }
 
     const currentState = stateRef.current;
     const preservePendingFirstMessage =
@@ -122,12 +150,12 @@ export function useAgentChatRuntime({
     stateRef.current = initialState;
     setSession(null);
     setState(initialState);
-    connect(0);
+    openStream(sessionId, 0);
 
     adapter
       .getSession({ sessionId })
       .then((loadedSession) => {
-        if (cancelled) return;
+        if (sessionIdRef.current !== sessionId) return;
         setSession(loadedSession);
         if (loadedSession.messageCount === 0) {
           setState((prev) => ({
@@ -146,17 +174,17 @@ export function useAgentChatRuntime({
       .catch(() => undefined);
 
     return () => {
-      cancelled = true;
       clearReconnectTimer();
       closeStream();
     };
-  }, [adapter, clearReconnectTimer, closeStream, sessionId]);
+  }, [adapter, clearReconnectTimer, closeStream, openStream, sessionId]);
 
   const markSending = useCallback(
     (content: string, images?: AgentChatImageAttachment[]) => {
       setState((prev) => ({
         ...prev,
         terminal: false,
+        sessionDone: false,
         isRunning: true,
         messages: [
           ...prev.messages,
@@ -242,13 +270,22 @@ export function useAgentChatRuntime({
       }
 
       try {
+        ensureStreamForNewTurn(sessionId);
         await adapter.sendMessage({ sessionId, content, images });
       } catch (error) {
         markSendError(error instanceof Error ? error.message : "send failed");
         throw error;
       }
     },
-    [adapter, agentId, markSendError, markSending, onSessionChange, sessionId],
+    [
+      adapter,
+      agentId,
+      ensureStreamForNewTurn,
+      markSendError,
+      markSending,
+      onSessionChange,
+      sessionId,
+    ],
   );
 
   const stop = useCallback(async () => {
