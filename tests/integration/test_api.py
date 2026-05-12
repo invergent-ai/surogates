@@ -242,6 +242,38 @@ async def test_send_message(client: AsyncClient, session_factory):
     assert data["status"] == "processing"
 
 
+async def test_send_message_revives_completed_session(
+    client: AsyncClient,
+    session_factory,
+):
+    """A completed objective can receive a follow-up objective."""
+    _, _, token, _ = await _create_test_tenant(session_factory)
+
+    create_resp = await client.post(
+        "/v1/sessions",
+        json={"model": "gpt-4o"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    session_id = UUID(create_resp.json()["id"])
+
+    store = SessionStore(session_factory)
+    await store.update_session_status(session_id, "completed")
+
+    resp = await client.post(
+        f"/v1/sessions/{session_id}/messages",
+        json={"content": "New objective"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert resp.status_code == 202, resp.text
+    data = resp.json()
+    assert data["event_id"] > 0
+    assert data["status"] == "processing"
+
+    events = await store.get_events(session_id)
+    assert any(e.type == "session.resume" for e in events)
+
+
 async def test_create_api_session_with_service_account(
     client: AsyncClient, session_factory
 ):

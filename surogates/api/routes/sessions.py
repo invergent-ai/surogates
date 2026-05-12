@@ -345,22 +345,22 @@ async def send_message(
     session = await _get_session_for_tenant(request, session_id, tenant)
     require_user_writable_session(session)
 
-    if session.status not in ("active", "idle", "failed", "paused"):
+    if session.status not in ("active", "idle", "failed", "paused", "completed"):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Session is in '{session.status}' state and cannot accept messages.",
         )
 
-    # Reset failed/paused sessions back to active on new message.
+    # Reset terminal/interrupted sessions back to active on new message.
     # A ``SESSION_RESUME`` event must land too -- the web client's
     # ``terminalRef`` latch stays set after *any* terminal event
     # (session.pause / session.fail / session.complete / session.done)
     # and suppresses the running indicators for every subsequent
     # ``llm.delta`` / ``llm.thinking``.  Without the resume event the
     # UI reports "stopped" while deltas for the new turn stream in,
-    # regardless of whether the previous terminal state was pause or
-    # fail.
-    if session.status in ("failed", "paused"):
+    # regardless of whether the previous terminal state was pause, fail,
+    # or completed.
+    if session.status in ("failed", "paused", "completed"):
         await store.update_session_status(session_id, "active")
         await store.emit_event(session_id, EventType.SESSION_RESUME, {})
 

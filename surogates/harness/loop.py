@@ -1584,22 +1584,14 @@ class AgentHarness:
                     messages,
                 )
 
-                # A response without tool calls is the end of this turn.
-                # For sub-agent (delegated) and scheduled sessions, this is
-                # also the end of the session: no user is expected to continue
-                # the same session interactively.
-                # For primary user sessions, the session stays 'active' so
-                # the user can send a follow-up message.
-                if session.parent_id is not None or session.channel == "scheduled":
-                    await self._complete_session(
-                        session, messages, lease, reason="completed",
-                        through_event_id=event_id,
-                        cost_tracker=cost_tracker,
-                    )
-                else:
-                    await self._end_turn(
-                        session, lease, through_event_id=event_id,
-                    )
+                # A response without tool calls completes the current
+                # objective.  Follow-up messages revive the session into a
+                # new objective rather than keeping completed work "active".
+                await self._complete_session(
+                    session, messages, lease, reason="completed",
+                    through_event_id=event_id,
+                    cost_tracker=cost_tracker,
+                )
                 return
 
             # Response had tool calls, so it was not empty — reset the

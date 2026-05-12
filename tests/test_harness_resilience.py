@@ -269,6 +269,80 @@ class TestDynamicLoopToolPolicy:
         assert "clarify" in tool_names
         assert "web_search" in tool_names
 
+
+class TestSessionLifecycle:
+    async def test_final_response_completes_primary_session(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A final no-tool response completes the current objective."""
+        store = AsyncMock()
+        store.emit_event = AsyncMock(side_effect=[101, 102])
+
+        harness = _make_harness(
+            session_store=store,
+            budget=IterationBudget(max_total=3),
+            context_compressor=SimpleNamespace(context_length=1000),
+            prompt_builder=SimpleNamespace(has_agents=False),
+            sandbox_pool=None,
+        )
+        harness._streaming_enabled = False
+        harness._prefetch_memory = AsyncMock(return_value="")
+        harness._maybe_consult_required_expert = AsyncMock(return_value=None)
+        harness._maybe_route_final_response_to_inbox = AsyncMock(return_value=None)
+        harness._maybe_generate_title = AsyncMock(return_value=None)
+        harness._promote_fenced_artifacts = AsyncMock(return_value=None)
+        harness._complete_session = AsyncMock(return_value=None)
+        harness._end_turn = AsyncMock(return_value=None)
+
+        async def fake_call_llm_with_retry(**_: Any) -> tuple[dict, dict]:
+            return (
+                {
+                    "role": "assistant",
+                    "content": "Objective complete.",
+                    "tool_calls": None,
+                },
+                {
+                    "model": "test-model",
+                    "finish_reason": "stop",
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                },
+            )
+
+        monkeypatch.setattr(
+            "surogates.harness.loop.call_llm_with_retry",
+            fake_call_llm_with_retry,
+        )
+
+        now = datetime.now(timezone.utc)
+        session = Session(
+            id=uuid4(),
+            user_id=uuid4(),
+            org_id=uuid4(),
+            agent_id="agent-1",
+            channel="web",
+            status="active",
+            config={},
+            created_at=now,
+            updated_at=now,
+        )
+        lease = SimpleNamespace(lease_token=uuid4())
+
+        await harness._run_loop(
+            session,
+            [{"role": "user", "content": "Do the task"}],
+            "system",
+            lease,
+            all_events=[],
+        )
+
+        harness._complete_session.assert_awaited_once()
+        _, kwargs = harness._complete_session.await_args
+        assert kwargs["reason"] == "completed"
+        assert kwargs["through_event_id"] == 102
+        harness._end_turn.assert_not_awaited()
+
     def test_dynamic_loop_sessions_cannot_create_nested_cron_schedules(self) -> None:
         from surogates.tools.registry import ToolRegistry, ToolSchema
 

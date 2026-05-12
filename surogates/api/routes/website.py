@@ -502,7 +502,7 @@ async def send_website_message(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
-    if session.status not in ("active", "idle", "failed", "paused"):
+    if session.status not in ("active", "idle", "failed", "paused", "completed"):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Session is in '{session.status}' state and cannot accept messages.",
@@ -520,7 +520,7 @@ async def send_website_message(
             ),
         )
 
-    if session.status in ("failed", "paused"):
+    if session.status in ("failed", "paused", "completed"):
         await store.update_session_status(session_id, "active")
         await store.emit_event(session_id, EventType.SESSION_RESUME, {})
 
