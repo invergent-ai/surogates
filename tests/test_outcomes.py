@@ -13,6 +13,7 @@ from surogates.harness.outcomes import (
     parse_outcome_evaluation,
     start_outcome,
 )
+from surogates.session.events import EventType
 
 
 def test_parse_goal_status_defaults_for_empty_args() -> None:
@@ -229,3 +230,18 @@ def test_apply_evaluation_stops_at_iteration_budget() -> None:
     assert state.status == "max_iterations_reached"
     assert decision.result == "max_iterations_reached"
     assert decision.should_continue is False
+
+
+def test_outcome_event_type_values_are_stable() -> None:
+    assert EventType.USER_DEFINE_OUTCOME.value == "user.define_outcome"
+    assert EventType.OUTCOME_DEFINED.value == "outcome.defined"
+    assert (
+        EventType.OUTCOME_EVALUATION_START.value
+        == "span.outcome_evaluation_start"
+    )
+    assert (
+        EventType.OUTCOME_EVALUATION_ONGOING.value
+        == "span.outcome_evaluation_ongoing"
+    )
+    assert EventType.OUTCOME_EVALUATION_END.value == "span.outcome_evaluation_end"
+    assert EventType.OUTCOME_CONTINUATION.value == "outcome.continuation"
