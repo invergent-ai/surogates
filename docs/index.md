@@ -73,9 +73,15 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - Shared `agent-chat-react` inbox adapter contract
 
 ### [9. Commands](commands/index.md)
-- Builtin slash commands: `/clear`, `/compress`, `/loop`
+- Builtin slash commands: `/clear`, `/compress`, `/goal`, `/loop`
 - Dynamic skill commands: `/<skill-name> [args...]`
 - Command resolution order and channel notes
+
+### [9a. Goals Quick Start](goals/index.md)
+- Start a goal from chat with `/goal <description>`
+- Add rubrics for concrete acceptance criteria
+- Use `user.define_outcome` for programmatic goal creation
+- Understand evaluator events, synthetic continuations, and iteration budgets
 
 ### [10. Skills](skills/index.md)
 - What is a skill? (prompt-based reusable behaviors)

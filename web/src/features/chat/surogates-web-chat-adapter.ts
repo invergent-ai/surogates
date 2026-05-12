@@ -22,6 +22,12 @@ import * as workspaceApi from "@/api/workspace";
 import { getAuthToken } from "@/features/auth";
 import type { ScheduledWorkItem, Session } from "@/types/session";
 
+const DEFAULT_OUTCOME_RUBRIC =
+  "The outcome is satisfied only when the assistant's latest response " +
+  "explicitly confirms the requested work is complete, clearly presents " +
+  "the final deliverable, or clearly explains that the work is blocked or " +
+  "unachievable and what remains outside the agent's control.";
+
 export const surogatesWebChatAdapter: AgentChatAdapter = {
   async listSessions(input) {
     const response = await sessionsApi.listSessions({
@@ -57,6 +63,20 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
       images,
     );
     return { eventId: response.event_id, status: response.status };
+  },
+
+  async defineOutcome(input) {
+    const response = await sessionsApi.defineOutcome(input.sessionId, {
+      description: input.description,
+      rubric: input.rubric?.trim() || DEFAULT_OUTCOME_RUBRIC,
+      maxIterations: input.maxIterations,
+    });
+    const event = response.events[0];
+    return {
+      eventId: event?.event_id,
+      outcomeId: event?.outcome_id,
+      processedAt: event?.processed_at,
+    };
   },
 
   async pauseSession(input) {

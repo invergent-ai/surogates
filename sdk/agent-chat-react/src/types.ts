@@ -435,6 +435,12 @@ export interface AgentChatAdapter {
     content: string;
     images?: AgentChatImageAttachment[];
   }): Promise<{ eventId?: number; status?: string }>;
+  defineOutcome?(input: {
+    sessionId: string;
+    description: string;
+    rubric?: string;
+    maxIterations?: number;
+  }): Promise<{ eventId?: number; outcomeId?: string; processedAt?: string }>;
   pauseSession(input: { sessionId: string }): Promise<void>;
   retrySession(input: { sessionId: string }): Promise<AgentChatSession>;
   deleteSession?(input: { sessionId: string }): Promise<void>;

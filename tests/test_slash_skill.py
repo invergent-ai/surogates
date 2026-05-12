@@ -57,6 +57,9 @@ class TestParseSlashCommand:
     def test_returns_none_for_compress(self) -> None:
         assert parse_slash_command("/compress") is None
 
+    def test_returns_none_for_goal(self) -> None:
+        assert parse_slash_command("/goal fix tests") is None
+
     def test_returns_none_when_no_leading_slash(self) -> None:
         assert parse_slash_command("arxiv cuda") is None
 

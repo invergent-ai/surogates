@@ -11,6 +11,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from surogates.api.session_guards import require_user_writable_session
+from surogates.config import enqueue_session, load_settings
+from surogates.harness.outcomes import build_defined_outcome_from_event
 from surogates.session.events import EventType
 from surogates.session.models import Event
 from surogates.session.store import SessionNotFoundError, SessionStore
@@ -43,6 +46,34 @@ _POLL_INTERVAL = 0.5  # Fallback poll; Redis pub/sub is the primary notification
 class PollEventsResponse(BaseModel):
     events: list[Event]
     has_more: bool
+
+
+class DefineOutcomeRubric(BaseModel):
+    type: str
+    content: str | None = None
+    file_id: str | None = None
+
+
+class SessionEventIn(BaseModel):
+    type: str
+    description: str | None = None
+    rubric: DefineOutcomeRubric | None = None
+    max_iterations: int | None = None
+
+
+class SendEventsRequest(BaseModel):
+    events: list[SessionEventIn]
+
+
+class SentSessionEvent(BaseModel):
+    type: str
+    event_id: int
+    outcome_id: str | None = None
+    processed_at: str
+
+
+class SendEventsResponse(BaseModel):
+    events: list[SentSessionEvent]
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +127,117 @@ async def _verify_session_access(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
+
+
+def _rubric_text_or_422(rubric: DefineOutcomeRubric | None) -> str:
+    if (
+        rubric is None
+        or rubric.type != "text"
+        or not (rubric.content or "").strip()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="user.define_outcome requires rubric {type: 'text', content: ...}.",
+        )
+    return rubric.content.strip()
+
+
+# ---------------------------------------------------------------------------
+# Event ingestion endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/api/sessions/{session_id}/events",
+    response_model=SendEventsResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+@router.post(
+    "/sessions/{session_id}/events",
+    response_model=SendEventsResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def send_session_events(
+    session_id: UUID,
+    body: SendEventsRequest,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> SendEventsResponse:
+    """Send control-plane events to a session.
+
+    This is intentionally narrow. The first accepted event is
+    ``user.define_outcome``; arbitrary client event ingestion can be added
+    later with separate validation and authorization.
+    """
+    _require_service_account_api_route(request, tenant)
+    store = _get_session_store(request)
+    await _verify_session_access(store, session_id, tenant)
+    session = await store.get_session(session_id)
+    require_user_writable_session(session)
+
+    sent: list[SentSessionEvent] = []
+    for event in body.events:
+        if event.type != EventType.USER_DEFINE_OUTCOME.value:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unsupported event type: {event.type}",
+            )
+
+        rubric_text = _rubric_text_or_422(event.rubric)
+        try:
+            state, processed_at = build_defined_outcome_from_event(
+                description=event.description or "",
+                rubric=rubric_text,
+                max_iterations=event.max_iterations,
+                settings=load_settings().outcomes,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+        event_id = await store.emit_event(
+            session_id,
+            EventType.USER_DEFINE_OUTCOME,
+            {
+                "description": state.description,
+                "rubric": {"type": "text", "content": state.rubric},
+                "max_iterations": state.max_iterations,
+                "outcome_id": state.id,
+                "processed_at": processed_at,
+            },
+        )
+        await store.update_session_config_key(
+            session_id,
+            "outcome",
+            state.to_config(),
+        )
+        await store.emit_synthetic_user_message(
+            session_id,
+            content=state.description,
+            synthetic="outcome_kickoff",
+            metadata={"outcome_id": state.id},
+        )
+
+        if session.status in {"failed", "paused", "completed"}:
+            await store.update_session_status(session_id, "active")
+            await store.emit_event(session_id, EventType.SESSION_RESUME, {})
+
+        redis = getattr(request.app.state, "redis", None)
+        if redis is not None:
+            await enqueue_session(redis, session.agent_id, session_id)
+
+        sent.append(
+            SentSessionEvent(
+                type=EventType.USER_DEFINE_OUTCOME.value,
+                event_id=event_id,
+                outcome_id=state.id,
+                processed_at=processed_at,
+            )
+        )
+
+    return SendEventsResponse(events=sent)
 
 
 # ---------------------------------------------------------------------------

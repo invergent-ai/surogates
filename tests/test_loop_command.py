@@ -6,6 +6,10 @@ def test_loop_is_not_treated_as_skill() -> None:
     assert parse_slash_command("/loop 5m check deploy") is None
 
 
+def test_goal_is_not_treated_as_skill() -> None:
+    assert parse_slash_command("/goal fix tests") is None
+
+
 def test_loop_command_parser_supports_slash_prompt() -> None:
     parsed = parse_loop_command("5m /babysit-prs")
     assert parsed.interval == "5m"
