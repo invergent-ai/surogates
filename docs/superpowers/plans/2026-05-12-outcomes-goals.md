@@ -12,8 +12,8 @@
 
 ## Implementation Todo
 
-- [ ] **Task 1: Add Outcome Core Module** — in_progress
-- [ ] **Task 2: Add Evaluator Decision Logic** — pending
+- [x] **Task 1: Add Outcome Core Module** — completed
+- [ ] **Task 2: Add Evaluator Decision Logic** — in_progress
 - [ ] **Task 3: Add Outcome Event Types** — pending
 - [ ] **Task 4: Add SessionStore Outcome Persistence** — pending
 - [ ] **Task 5: Reserve `/goal` From Dynamic Skills** — pending
