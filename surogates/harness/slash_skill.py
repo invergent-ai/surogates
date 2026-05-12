@@ -40,6 +40,7 @@ _SLASH_COMMAND_RE: Final = re.compile(
 _BUILTIN_SLASH_COMMANDS: Final[frozenset[str]] = frozenset({
     "clear",
     "compress",
+    "goal",
     "loop",
 })
 
