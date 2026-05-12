@@ -3,10 +3,10 @@
 //
 // Compact one-liner renderers for lightweight tools:
 // - Session search
-// - Web fetch / search / crawl
+// - Web search / crawl
 // - Vision analyze
 
-import { SearchIcon, GlobeIcon, EyeIcon } from "lucide-react";
+import { SearchIcon, EyeIcon } from "lucide-react";
 import type { ToolCallInfo } from "../../../types";
 
 // ── Session search ──────────────────────────────────────────────────
@@ -37,10 +37,7 @@ export function WebToolBlock({ tc }: { tc: ToolCallInfo }) {
   let displayText = "";
   try {
     const args = JSON.parse(tc.args);
-    if (tc.toolName === "web_extract") {
-      const urls: string[] = args.urls ?? [];
-      displayText = urls[0] ?? "";
-    } else if (tc.toolName === "web_search") {
+    if (tc.toolName === "web_search") {
       displayText = args.query ?? "";
     } else if (tc.toolName === "web_crawl") {
       displayText = args.url ?? "";
@@ -48,7 +45,6 @@ export function WebToolBlock({ tc }: { tc: ToolCallInfo }) {
   } catch { /* ignore */ }
 
   const toolLabel = {
-    web_extract: "Web Fetch",
     web_search: "Web Search",
     web_crawl: "Web Crawl",
   }[tc.toolName] ?? tc.toolName;

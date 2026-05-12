@@ -10,6 +10,7 @@ import { TerminalToolBlock } from "./tools/terminal-tool";
 import { TodoToolBlock } from "./tools/todo-tool";
 import { ExecuteCodeToolBlock } from "./tools/execute-code-tool";
 import { SessionSearchBlock, WebToolBlock, VisionAnalyzeBlock } from "./tools/oneliner-tools";
+import { WebExtractToolBlock } from "./tools/web-extract-tool";
 import { ReadFileBlock, WriteFileBlock, PatchBlock, SearchFilesBlock, ListFilesBlock } from "./tools/file-tools";
 import { ProcessToolBlock } from "./tools/process-tool";
 import { ExpertToolBlock } from "./tools/expert-tool";
@@ -45,6 +46,8 @@ export function ToolCallBlock({
       return <SessionSearchBlock tc={tc} />;
 
     case "web_extract":
+      return <WebExtractToolBlock tc={tc} />;
+
     case "web_search":
     case "web_crawl":
       return <WebToolBlock tc={tc} />;
