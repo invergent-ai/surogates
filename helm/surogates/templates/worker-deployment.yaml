@@ -77,11 +77,15 @@ spec:
               value: {{ .Values.browser.resources.limits.memory | quote }}
             - name: SUROGATES_BROWSER_POD_READY_TIMEOUT
               value: {{ .Values.browser.podReadyTimeout | quote }}
+            - name: SUROGATES_BROWSER_ENDPOINT_PROBE_TIMEOUT
+              value: {{ .Values.browser.endpointProbeTimeout | quote }}
             - name: SUROGATES_BROWSER_ACTIVE_DEADLINE_SECONDS
               value: {{ .Values.browser.activeDeadlineSeconds | quote }}
             {{- if eq .Values.browser.backend "kubernetes" }}
             - name: SUROGATES_BROWSER_K8S_NAMESPACE
               value: {{ default .Release.Namespace .Values.browser.k8sNamespace | quote }}
+            - name: SUROGATES_BROWSER_K8S_CLUSTER_DOMAIN
+              value: {{ .Values.browser.clusterDomain | quote }}
             - name: SUROGATES_BROWSER_K8S_SERVICE_ACCOUNT
               value: {{ printf "%s-%s" $fullname .Values.browser.serviceAccountSuffix | quote }}
             {{- else }}

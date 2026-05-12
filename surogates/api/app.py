@@ -57,7 +57,9 @@ def _install_browser_api_dependencies(app: Any, settings: Any) -> None:
         backend = K8sBrowserBackend(
             namespace=settings.browser.k8s_namespace,
             service_account=settings.browser.k8s_service_account,
+            cluster_domain=settings.browser.k8s_cluster_domain,
             pod_ready_timeout=settings.browser.pod_ready_timeout,
+            endpoint_probe_timeout=settings.browser.endpoint_probe_timeout,
             image=settings.browser.image,
             storage_settings=getattr(settings, "storage", None),
             s3fs_image=settings.browser.k8s_s3fs_image,

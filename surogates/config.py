@@ -300,9 +300,11 @@ class BrowserSettings(BaseSettings):
     live_view_mode: Literal["novnc", "webrtc"] = "novnc"
     k8s_namespace: str = "surogates"
     k8s_service_account: str = "surogates-browser"
+    k8s_cluster_domain: str = "cluster.local"
     k8s_s3fs_image: str = "ghcr.io/invergent-ai/surogates-s3fs:latest"
     k8s_s3_endpoint: str = ""
     pod_ready_timeout: int = 60
+    endpoint_probe_timeout: int = 30
     active_deadline_seconds: int = 3600
     cpu: str = "1"
     memory: str = "2Gi"

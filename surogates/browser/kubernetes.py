@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
+import httpx
 from kubernetes_asyncio import client, config, watch
 from kubernetes_asyncio.client import ApiException
 
@@ -59,7 +60,9 @@ class K8sBrowserBackend:
         *,
         namespace: str = "surogates",
         service_account: str = "surogates-browser",
+        cluster_domain: str = "cluster.local",
         pod_ready_timeout: int = 60,
+        endpoint_probe_timeout: int = 30,
         image: str = "ghcr.io/invergent-ai/surogates-agent-browser:latest",
         storage_settings: Any = None,
         s3fs_image: str = "ghcr.io/invergent-ai/surogates-s3fs:latest",
@@ -67,7 +70,9 @@ class K8sBrowserBackend:
     ) -> None:
         self._namespace = namespace
         self._service_account = service_account
+        self._cluster_domain = cluster_domain.strip(".") or "cluster.local"
         self._pod_ready_timeout = pod_ready_timeout
+        self._endpoint_probe_timeout = endpoint_probe_timeout
         self._image = image
         self._storage = storage_settings
         self._s3fs_image = s3fs_image
@@ -90,12 +95,11 @@ class K8sBrowserBackend:
         pod_name = f"browser-{suffix}"
         service_name = f"browser-{suffix}"
         secret_name = f"browser-s3-{suffix}" if spec.workspace_source_ref else None
+        fqdn = f"{service_name}.{self._namespace}.svc.{self._cluster_domain}."
         endpoint = BrowserEndpoint(
-            rest_url=f"http://{service_name}.{self._namespace}.svc:{SERVICE_PORT_REST}",
-            cdp_url=f"ws://{service_name}.{self._namespace}.svc:{SERVICE_PORT_CDP}",
-            live_view_url=(
-                f"ws://{service_name}.{self._namespace}.svc:{SERVICE_PORT_LIVE_VIEW}"
-            ),
+            rest_url=f"http://{fqdn}:{SERVICE_PORT_REST}",
+            cdp_url=f"ws://{fqdn}:{SERVICE_PORT_CDP}",
+            live_view_url=f"ws://{fqdn}:{SERVICE_PORT_LIVE_VIEW}",
         )
 
         if secret_name is not None:
@@ -146,6 +150,18 @@ class K8sBrowserBackend:
             raise BrowserUnavailableError(
                 f"Browser pod {pod_name} did not become ready: {exc}",
                 classification="readiness",
+            ) from exc
+
+        try:
+            await self._wait_for_endpoint(endpoint.rest_url)
+        except Exception as exc:
+            await self._delete_service_safe(api, service_name)
+            await self._delete_pod_safe(api, pod_name)
+            if secret_name is not None:
+                await self._delete_secret_safe(api, secret_name)
+            raise BrowserUnavailableError(
+                f"Browser endpoint {endpoint.rest_url} not reachable: {exc}",
+                classification="endpoint-propagation",
             ) from exc
 
         self._pods[browser_id] = _PodEntry(
@@ -547,6 +563,35 @@ class K8sBrowserBackend:
             )
         finally:
             pod_watch.stop()
+
+    async def _wait_for_endpoint(self, rest_url: str) -> None:
+        # Pod-Ready means the kubelet's local readiness probe passed; it does
+        # not guarantee Service EndpointSlice / kube-proxy / NetworkPolicy
+        # rules have propagated to the *caller's* node. Probe from here until
+        # /spec.json answers, so tool code never burns a 30s ConnectTimeout
+        # on the cold path.
+        deadline = asyncio.get_event_loop().time() + self._endpoint_probe_timeout
+        last_error: Exception | None = None
+        probe_timeout = httpx.Timeout(connect=2.0, read=5.0, write=5.0, pool=2.0)
+        async with httpx.AsyncClient(
+            base_url=rest_url, timeout=probe_timeout
+        ) as probe:
+            while True:
+                try:
+                    response = await probe.get("/spec.json")
+                    if response.status_code == 200:
+                        return
+                    last_error = RuntimeError(
+                        f"HTTP {response.status_code} from /spec.json",
+                    )
+                except httpx.HTTPError as exc:
+                    last_error = exc
+                if asyncio.get_event_loop().time() >= deadline:
+                    raise RuntimeError(
+                        f"endpoint {rest_url} unreachable within "
+                        f"{self._endpoint_probe_timeout}s: {last_error}",
+                    )
+                await asyncio.sleep(1.0)
 
     async def _delete_pod_safe(self, api: client.CoreV1Api, pod_name: str) -> None:
         try:

@@ -125,18 +125,23 @@ return {
 };
 """
 
+    _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=10.0, pool=5.0)
+
     def __init__(
         self,
         rest_url: str,
         *,
-        timeout: float = 30.0,
+        timeout: float | httpx.Timeout | None = None,
         snapshot_cache: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.rest_url = rest_url.rstrip("/")
-        self._timeout = timeout
+        if timeout is None:
+            self._timeout: float | httpx.Timeout = self._DEFAULT_TIMEOUT
+        else:
+            self._timeout = timeout
         self._http: httpx.AsyncClient = httpx.AsyncClient(
             base_url=self.rest_url,
-            timeout=timeout,
+            timeout=self._timeout,
         )
         self._closed = False
         self._snapshot_cache = snapshot_cache if snapshot_cache is not None else {}

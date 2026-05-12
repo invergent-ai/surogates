@@ -73,7 +73,9 @@ def _build_browser_backend(
         return K8sBrowserBackend(
             namespace=settings.k8s_namespace,
             service_account=settings.k8s_service_account,
+            cluster_domain=settings.k8s_cluster_domain,
             pod_ready_timeout=settings.pod_ready_timeout,
+            endpoint_probe_timeout=settings.endpoint_probe_timeout,
             image=settings.image,
             storage_settings=storage_settings,
             s3fs_image=settings.k8s_s3fs_image,

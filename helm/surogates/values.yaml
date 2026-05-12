@@ -116,9 +116,17 @@ browser:
       cpu: "2"
       memory: 4Gi
   podReadyTimeout: 60
+  # How long the worker probes a freshly-provisioned browser pod's
+  # /spec.json before giving up. Covers Service EndpointSlice +
+  # kube-proxy + NetworkPolicy propagation delays.
+  endpointProbeTimeout: 30
   activeDeadlineSeconds: 3600
   serviceAccountSuffix: "browser"
   k8sNamespace: ""
+  # Cluster DNS domain used in browser-pod Service FQDNs. Default
+  # ``cluster.local`` matches stock kubeadm/k3d. Override for clusters
+  # with a custom domain (e.g. ``surogate.local``).
+  clusterDomain: "cluster.local"
   blockedCidrs: []
   processPorts:
     restBase: 30000

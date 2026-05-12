@@ -11,6 +11,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from kubernetes_asyncio.client import ApiException
 
@@ -298,8 +299,12 @@ class TestProvision:
         async def fake_wait_ready(api_inner, pod_name: str) -> None:
             return None
 
+        async def fake_wait_endpoint(rest_url: str) -> None:
+            return None
+
         monkeypatch.setattr(backend, "_get_api", fake_get_api)
         monkeypatch.setattr(backend, "_wait_for_ready", fake_wait_ready)
+        monkeypatch.setattr(backend, "_wait_for_endpoint", fake_wait_endpoint)
 
         spec = BrowserSpec(
             image="kernel-headful:test",
@@ -313,7 +318,7 @@ class TestProvision:
         )
 
         assert len(bid) == 32
-        prefix = f"browser-{bid[:12]}.test-ns.svc"
+        prefix = f"browser-{bid[:12]}.test-ns.svc.cluster.local."
         assert endpoint.rest_url == f"http://{prefix}:10001"
         assert endpoint.cdp_url == f"ws://{prefix}:9222"
         assert endpoint.live_view_url == f"ws://{prefix}:443"
@@ -393,6 +398,138 @@ class TestProvision:
         assert api.delete_namespaced_secret.call_count == 1
         assert backend._pods == {}
 
+    async def test_provision_uses_custom_cluster_domain(self, monkeypatch) -> None:
+        backend = K8sBrowserBackend(
+            namespace="ns-1",
+            cluster_domain="surogate.local",
+        )
+
+        api = MagicMock()
+        api.create_namespaced_pod = AsyncMock()
+        api.create_namespaced_service = AsyncMock()
+
+        async def fake_get_api() -> MagicMock:
+            return api
+
+        async def fake_wait_ready(api_inner, pod_name: str) -> None:
+            return None
+
+        async def fake_wait_endpoint(rest_url: str) -> None:
+            return None
+
+        monkeypatch.setattr(backend, "_get_api", fake_get_api)
+        monkeypatch.setattr(backend, "_wait_for_ready", fake_wait_ready)
+        monkeypatch.setattr(backend, "_wait_for_endpoint", fake_wait_endpoint)
+
+        _, endpoint = await backend.provision(
+            BrowserSpec(),
+            session_id="s",
+            org_id="o",
+            user_id="u",
+        )
+
+        assert ".ns-1.svc.surogate.local.:10001" in endpoint.rest_url
+        assert endpoint.rest_url.endswith(":10001")
+
+    async def test_provision_rolls_back_when_endpoint_unreachable(
+        self,
+        backend: K8sBrowserBackend,
+        monkeypatch,
+    ) -> None:
+        api = MagicMock()
+        api.create_namespaced_secret = AsyncMock()
+        api.create_namespaced_pod = AsyncMock()
+        api.create_namespaced_service = AsyncMock()
+        api.delete_namespaced_pod = AsyncMock()
+        api.delete_namespaced_service = AsyncMock()
+        api.delete_namespaced_secret = AsyncMock()
+
+        async def fake_get_api() -> MagicMock:
+            return api
+
+        async def fake_wait_ready(api_inner, pod_name: str) -> None:
+            return None
+
+        async def fake_wait_endpoint(rest_url: str) -> None:
+            raise RuntimeError("connection timeout")
+
+        monkeypatch.setattr(backend, "_get_api", fake_get_api)
+        monkeypatch.setattr(backend, "_wait_for_ready", fake_wait_ready)
+        monkeypatch.setattr(backend, "_wait_for_endpoint", fake_wait_endpoint)
+
+        with pytest.raises(BrowserUnavailableError) as exc_info:
+            await backend.provision(
+                BrowserSpec(workspace_source_ref="s3://agent-bucket/sessions/s"),
+                session_id="s",
+                org_id="o",
+                user_id="u",
+            )
+
+        assert exc_info.value.classification == "endpoint-propagation"
+        assert api.delete_namespaced_service.call_count == 1
+        assert api.delete_namespaced_pod.call_count == 1
+        assert api.delete_namespaced_secret.call_count == 1
+        assert backend._pods == {}
+
+
+class TestWaitForEndpoint:
+    async def test_returns_when_spec_json_responds(self) -> None:
+        backend = K8sBrowserBackend(endpoint_probe_timeout=5)
+
+        calls: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            if len(calls) < 3:
+                raise httpx.ConnectTimeout("propagation pending")
+            return httpx.Response(200, json={"openapi": "3.0"})
+
+        transport = httpx.MockTransport(handler)
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            kwargs["transport"] = transport
+            return original_init(self, *args, **kwargs)
+
+        original_sleep = __import__("asyncio").sleep
+
+        async def fast_sleep(_: float) -> None:
+            await original_sleep(0)
+
+        import asyncio as _asyncio
+
+        _asyncio.sleep = fast_sleep  # type: ignore[assignment]
+        httpx.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+        try:
+            await backend._wait_for_endpoint("http://browser-x.ns.svc.cluster.local.:10001")
+        finally:
+            httpx.AsyncClient.__init__ = original_init  # type: ignore[assignment]
+            _asyncio.sleep = original_sleep  # type: ignore[assignment]
+
+        assert len(calls) >= 3
+
+    async def test_raises_when_endpoint_never_reachable(self) -> None:
+        backend = K8sBrowserBackend(endpoint_probe_timeout=0)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectTimeout("never")
+
+        transport = httpx.MockTransport(handler)
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            kwargs["transport"] = transport
+            return original_init(self, *args, **kwargs)
+
+        httpx.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+        try:
+            with pytest.raises(RuntimeError, match="unreachable within"):
+                await backend._wait_for_endpoint(
+                    "http://browser-x.ns.svc.cluster.local.:10001",
+                )
+        finally:
+            httpx.AsyncClient.__init__ = original_init  # type: ignore[assignment]
+
 
 class TestProtocolAlignment:
     async def test_pool_forwards_session_to_k8s_provision(
@@ -413,8 +550,12 @@ class TestProtocolAlignment:
         async def fake_wait_ready(api_inner, pod_name: str) -> None:
             return None
 
+        async def fake_wait_endpoint(rest_url: str) -> None:
+            return None
+
         monkeypatch.setattr(backend, "_get_api", fake_get_api)
         monkeypatch.setattr(backend, "_wait_for_ready", fake_wait_ready)
+        monkeypatch.setattr(backend, "_wait_for_endpoint", fake_wait_endpoint)
 
         class FakeRegistry:
             def __init__(self) -> None:
