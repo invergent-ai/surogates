@@ -68,7 +68,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Global npm packages ─────────────────────────────────────────────
-RUN npm install -g docx puppeteer react-icons react react-dom sharp pptxgenjs @anthropic-ai/claude-code opencode-ai@latest pnpm \
+RUN npm install -g docx puppeteer react-icons react react-dom sharp pptxgenjs @anthropic-ai/claude-code opencode-ai@latest pnpm hyperframes \
     && npm cache clean --force
 
 # ── Python virtualenv ────────────────────────────────────────────────

@@ -33,6 +33,7 @@ import { Shimmer } from "../ai-elements/shimmer";
 import { BrowserActivityGroup } from "../browser/browser-activity-group";
 import { ToolCallBlock } from "./tool-call-block";
 import { WebSearchGroupBlock } from "./tools/web-search-tool";
+import { parseTerminalResult } from "./tools/terminal-tool";
 import { statusColorClass, effectiveStatus, toolErrorSummary, parseArgs } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
 import { ChatComposer } from "./chat-composer";
@@ -174,6 +175,10 @@ function messageToEntries(
           resolvedArtifactName: resolvedName,
         });
         continue;
+      }
+      if (tc.toolName === "terminal" && tc.status !== "running") {
+        const parsed = parseTerminalResult(tc.result, tc.args);
+        if (parsed && (parsed.exit_code !== 0 || parsed.error)) continue;
       }
       entries.push({ kind: "tool", key: tc.id, tc });
     }

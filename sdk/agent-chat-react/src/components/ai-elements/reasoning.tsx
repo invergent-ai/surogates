@@ -21,7 +21,6 @@ import {
   useEffect,
   useMemo,
   useRef,
-  useState,
 } from "react";
 import { Streamdown } from "streamdown";
 
@@ -52,8 +51,7 @@ export type ReasoningProps = ComponentProps<typeof Collapsible> & {
   duration?: number;
 };
 
-const AUTO_CLOSE_DELAY = 1000;
-const AUTO_OPEN_DELAY = 100;
+const MIN_DURATION_MS = 100;
 const MS_IN_S = 1000;
 
 export const Reasoning = memo(
@@ -67,16 +65,11 @@ export const Reasoning = memo(
     children,
     ...props
   }: ReasoningProps) => {
-    // Always start closed.  During session replay, past messages briefly
-    // flicker through ``isStreaming=true`` (as llm.delta events are replayed
-    // one by one before llm.response lands) -- auto-opening on that flicker
-    // would force every historical Reasoning's Streamdown to render at once
-    // and then close again, which is the dominant cost of replaying long
-    // conversations.  The debounced useEffect below handles genuine live
-    // streaming.
+    // Reasoning blocks always start closed and never auto-open -- the user
+    // explicitly clicks the trigger to expand.  This keeps the chat quiet
+    // during streaming and avoids forcing every historical Reasoning's
+    // Streamdown to render on session replay.
     const resolvedDefaultOpen = defaultOpen ?? false;
-    // Track if defaultOpen was explicitly set to false (to prevent auto-open)
-    const isExplicitlyClosed = defaultOpen === false;
 
     const [isOpen, setIsOpen] = useControllableState<boolean>({
       defaultProp: resolvedDefaultOpen,
@@ -88,8 +81,6 @@ export const Reasoning = memo(
       prop: durationProp,
     });
 
-    const hasEverStreamedRef = useRef(false);
-    const [hasAutoClosed, setHasAutoClosed] = useState(false);
     const startTimeRef = useRef<number | null>(null);
 
     // Track when streaming starts and compute duration.  Sub-100ms flickers
@@ -103,41 +94,11 @@ export const Reasoning = memo(
       } else if (startTimeRef.current !== null) {
         const elapsed = Date.now() - startTimeRef.current;
         startTimeRef.current = null;
-        if (elapsed >= AUTO_OPEN_DELAY) {
-          hasEverStreamedRef.current = true;
+        if (elapsed >= MIN_DURATION_MS) {
           setDuration(Math.ceil(elapsed / MS_IN_S));
         }
       }
     }, [isStreaming, setDuration]);
-
-    // Auto-open when streaming starts (unless explicitly closed).  Debounced
-    // so replay flickers (isStreaming true → false within the same render
-    // burst) don't force the block open.
-    useEffect(() => {
-      if (!isStreaming || isOpen || isExplicitlyClosed) return;
-      const timer = setTimeout(() => {
-        hasEverStreamedRef.current = true;
-        setIsOpen(true);
-      }, AUTO_OPEN_DELAY);
-      return () => clearTimeout(timer);
-    }, [isStreaming, isOpen, setIsOpen, isExplicitlyClosed]);
-
-    // Auto-close when streaming ends (once only, and only if it ever streamed)
-    useEffect(() => {
-      if (
-        hasEverStreamedRef.current &&
-        !isStreaming &&
-        isOpen &&
-        !hasAutoClosed
-      ) {
-        const timer = setTimeout(() => {
-          setIsOpen(false);
-          setHasAutoClosed(true);
-        }, AUTO_CLOSE_DELAY);
-
-        return () => clearTimeout(timer);
-      }
-    }, [isStreaming, isOpen, setIsOpen, hasAutoClosed]);
 
     const handleOpenChange = useCallback(
       (newOpen: boolean) => {

@@ -118,7 +118,7 @@ function TerminalCollapsible({ command, output, isRunning, hasError }: TerminalB
           ) : hasError ? (
             <span className="font-semibold text-destructive">Command failed</span>
           ) : (
-            <span className="font-semibold text-foreground">Command result</span>
+            <span className="font-semibold text-foreground">Command</span>
           )}
         </span>
         <ChevronDownIcon
@@ -171,13 +171,15 @@ export function TerminalToolBlock({ tc }: { tc: ToolCallInfo }) {
   const result = parseTerminalResult(tc.result, tc.args);
 
   if (result) {
-    const output = result.output || result.error || "";
+    const hasError = result.exit_code !== 0 || Boolean(result.error);
+    if (hasError) return null;
+    const output = result.output || "";
     return (
       <TerminalCollapsible
         command={result.command}
         output={output}
         isRunning={isRunning}
-        hasError={result.exit_code !== 0 || Boolean(result.error)}
+        hasError={false}
       />
     );
   }
