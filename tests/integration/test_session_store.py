@@ -108,6 +108,81 @@ async def test_update_session_title_if_empty_sets_once(session_store, session_fa
     assert unchanged.title == "Debug Redis Failures"
 
 
+async def test_update_session_config_key_persists_nested_value(
+    session_store,
+    session_factory,
+):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id,
+        org_id=org_id,
+        agent_id="test-agent",
+        config={"existing": "kept"},
+    )
+    outcome = {
+        "id": "outc_test",
+        "description": "Fix tests",
+        "status": "active",
+    }
+
+    await session_store.update_session_config_key(session.id, "outcome", outcome)
+
+    updated = await session_store.get_session(session.id)
+    assert updated.config["existing"] == "kept"
+    assert updated.config["outcome"] == outcome
+
+
+async def test_clear_session_config_key_removes_value(
+    session_store,
+    session_factory,
+):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id,
+        org_id=org_id,
+        agent_id="test-agent",
+    )
+    await session_store.update_session_config_key(
+        session.id,
+        "outcome",
+        {"id": "outc_test", "description": "Fix tests"},
+    )
+
+    await session_store.clear_session_config_key(session.id, "outcome")
+
+    updated = await session_store.get_session(session.id)
+    assert "outcome" not in updated.config
+
+
+async def test_emit_synthetic_outcome_user_message_marks_event(
+    session_store,
+    session_factory,
+):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id,
+        org_id=org_id,
+        agent_id="test-agent",
+    )
+
+    event_id = await session_store.emit_synthetic_user_message(
+        session.id,
+        content="[Continuing toward your defined outcome]\nOutcome: Fix tests",
+        synthetic="outcome_continuation",
+        metadata={"outcome_id": "outc_test"},
+    )
+
+    events = await session_store.get_events(session.id)
+    event = next(e for e in events if e.id == event_id)
+    assert event.type == EventType.USER_MESSAGE.value
+    assert event.data["content"].startswith("[Continuing")
+    assert event.data["synthetic"] == "outcome_continuation"
+    assert event.data["outcome_id"] == "outc_test"
+
+
 async def test_list_sessions(session_store, session_factory):
     """Listing sessions for a user returns the correct count with pagination."""
     org_id = await create_org(session_factory)

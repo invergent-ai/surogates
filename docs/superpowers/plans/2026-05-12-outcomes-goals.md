@@ -15,8 +15,8 @@
 - [x] **Task 1: Add Outcome Core Module** — completed
 - [x] **Task 2: Add Evaluator Decision Logic** — completed
 - [x] **Task 3: Add Outcome Event Types** — completed
-- [ ] **Task 4: Add SessionStore Outcome Persistence** — in_progress
-- [ ] **Task 5: Reserve `/goal` From Dynamic Skills** — pending
+- [x] **Task 4: Add SessionStore Outcome Persistence** — completed
+- [ ] **Task 5: Reserve `/goal` From Dynamic Skills** — in_progress
 - [ ] **Task 6: Add Outcome Settings** — pending
 - [ ] **Task 7: Add `user.define_outcome` API Event** — pending
 - [ ] **Task 8: Add `/goal` Command Handler** — pending
