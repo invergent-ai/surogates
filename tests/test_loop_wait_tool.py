@@ -53,6 +53,7 @@ async def test_loop_wait_clamps_and_persists_next_delay():
 
     assert result["success"] is True
     assert result["delay_seconds"] == 60
+    assert result["completed"] is False
     assert store.finished == [{
         "schedule_id": schedule_id,
         "org_id": org_id,
@@ -61,7 +62,33 @@ async def test_loop_wait_clamps_and_persists_next_delay():
         "session_id": session_id,
         "delay_seconds": 60,
         "reason": "fast retry",
+        "completed": False,
     }]
+
+
+@pytest.mark.asyncio
+async def test_loop_wait_passes_completed_flag_to_store():
+    org_id = uuid4()
+    user_id = uuid4()
+    schedule_id = uuid4()
+    session_id = uuid4()
+    store = FakeStore()
+
+    result = json.loads(await _loop_wait_handler(
+        {"delay_seconds": 3600, "reason": "task done", "completed": True},
+        tenant=SimpleNamespace(org_id=org_id, user_id=user_id),
+        agent_id="agent-a",
+        session_id=str(session_id),
+        session_config={
+            "scheduled_session_id": str(schedule_id),
+            "scheduled_dynamic_loop": True,
+        },
+        scheduled_store=store,
+    ))
+
+    assert result["success"] is True
+    assert result["completed"] is True
+    assert store.finished[0]["completed"] is True
 
 
 @pytest.mark.asyncio

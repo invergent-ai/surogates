@@ -292,36 +292,27 @@ async def _spawn_worker_handler(
         if "allowed_tools" not in worker_config:
             worker_config["excluded_tools"] = list(existing)
 
-    # Inherit workspace path so the worker can access the same files.
-    workspace_path = parent_session.config.get("workspace_path")
-    if workspace_path:
-        worker_config["workspace_path"] = workspace_path
-
     # Model: explicit argument wins over agent def's preset.
     if model_override is None and agent_def is not None and agent_def.model:
         model_override = agent_def.model
 
     try:
-        # 1. Create the child session.
-        child_session = await session_store.create_session(
-            user_id=tenant.user_id,
-            org_id=tenant.org_id,
-            agent_id=agent_id,
+        from surogates.session.provisioning import create_child_session
+
+        child_session = await create_child_session(
+            store=session_store,
+            parent=parent_session,
             channel="worker",
             model=model_override,
             config=worker_config,
-            parent_id=parent_session_id,
         )
         child_id = child_session.id
 
-        # 2. Emit a USER_MESSAGE event in the child session.
         await session_store.emit_event(
             child_id,
             EventType.USER_MESSAGE,
             {"content": user_content},
         )
-
-        # 3. Emit WORKER_SPAWNED event in the parent session.
         await session_store.emit_event(
             parent_session_id,
             EventType.WORKER_SPAWNED,
@@ -330,8 +321,6 @@ async def _spawn_worker_handler(
                 "goal": goal[:500],
             },
         )
-
-        # 4. Enqueue the child session to its agent's work queue.
         if redis is not None:
             await enqueue_session(redis, agent_id, child_id)
 

@@ -16,9 +16,9 @@ from surogates.tools.registry import ToolRegistry, ToolSchema
 _LOOP_WAIT_SCHEMA = ToolSchema(
     name="loop_wait",
     description=(
-        "Set when the current dynamic /loop should run again. Use only in "
-        "dynamic loop sessions after deciding the next wait based on what "
-        "you observed."
+        "Set when the current dynamic /loop should run again, or declare "
+        "the loop finished. Use only in dynamic loop sessions after deciding "
+        "the next wait based on what you observed."
     ),
     parameters={
         "type": "object",
@@ -27,14 +27,28 @@ _LOOP_WAIT_SCHEMA = ToolSchema(
                 "type": "integer",
                 "description": (
                     "Seconds to wait before the next loop iteration. Values "
-                    "are clamped to 60 through 3600 seconds."
+                    "are clamped to 60 through 3600 seconds. Ignored when "
+                    "``completed`` is true."
                 ),
                 "minimum": DYNAMIC_LOOP_MIN_DELAY_SECONDS,
                 "maximum": DYNAMIC_LOOP_MAX_DELAY_SECONDS,
             },
             "reason": {
                 "type": "string",
-                "description": "Brief reason for the selected delay.",
+                "description": (
+                    "Brief reason for the selected delay, or for finishing "
+                    "the loop when ``completed`` is true."
+                ),
+            },
+            "completed": {
+                "type": "boolean",
+                "description": (
+                    "Set to true to mark the dynamic loop finished. The "
+                    "schedule status flips to ``completed`` and no further "
+                    "runs are scheduled. Use this when the loop's task is "
+                    "done and there is no future work to wait for."
+                ),
+                "default": False,
             },
         },
         "required": ["delay_seconds", "reason"],
@@ -81,6 +95,7 @@ async def _loop_wait_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     reason = str(arguments.get("reason") or "").strip()
     if not reason:
         return _json({"success": False, "error": "reason is required"})
+    completed = bool(arguments.get("completed") or False)
 
     store = kwargs.get("scheduled_store")
     if store is None:
@@ -94,6 +109,7 @@ async def _loop_wait_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         session_id=session_id,
         delay_seconds=delay,
         reason=reason,
+        completed=completed,
     )
     if not updated:
         return _json({
@@ -104,6 +120,7 @@ async def _loop_wait_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         "success": True,
         "delay_seconds": delay,
         "reason": reason,
+        "completed": completed,
     })
 
 

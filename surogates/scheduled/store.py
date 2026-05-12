@@ -384,6 +384,7 @@ class ScheduledSessionStore:
         session_id: UUID,
         delay_seconds: int,
         reason: str,
+        completed: bool = False,
     ) -> bool:
         delay = clamp_dynamic_loop_delay(delay_seconds)
         now = _utcnow()
@@ -400,7 +401,9 @@ class ScheduledSessionStore:
             ):
                 return False
 
-            completed = row.expires_at is not None and row.expires_at <= now
+            # The caller (loop_wait) can declare the loop done; otherwise the
+            # only way a dynamic loop terminates is by reaching ``expires_at``.
+            done = completed or (row.expires_at is not None and row.expires_at <= now)
             schedule_data = {
                 **row.schedule,
                 "last_delay_seconds": delay,
@@ -408,8 +411,8 @@ class ScheduledSessionStore:
                 "last_delay_set_at": now.isoformat(),
             }
             row.schedule = schedule_data
-            row.next_run_at = None if completed else now + timedelta(seconds=delay)
-            row.status = "completed" if completed else "active"
+            row.next_run_at = None if done else now + timedelta(seconds=delay)
+            row.status = "completed" if done else "active"
             row.locked_by = None
             row.locked_until = None
             row.updated_at = now

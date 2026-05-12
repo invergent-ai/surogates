@@ -20,13 +20,27 @@ from surogates.session.events import EventType
 # ---------------------------------------------------------------------------
 
 
+def _default_workspace_config() -> dict:
+    return {
+        "storage_bucket": "tenant-bucket",
+        "workspace_path": "/workspace/tenant-bucket/parent",
+        "supports_vision": False,
+    }
+
+
 def _make_session(**overrides: Any) -> MagicMock:
+    """Build a workspace-ready mock session.
+
+    ``create_child_session`` requires the parent to carry storage_bucket,
+    workspace_path, and supports_vision in its config.  Default to a
+    valid set so individual tests don't need to repeat the boilerplate.
+    """
     session = MagicMock()
     session.id = overrides.get("id", uuid4())
     session.parent_id = overrides.get("parent_id")
     session.agent_id = overrides.get("agent_id", "agent-test")
     session.model = overrides.get("model", "gpt-4o")
-    session.config = overrides.get("config", {})
+    session.config = overrides.get("config", _default_workspace_config())
     return session
 
 

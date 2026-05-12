@@ -7,7 +7,7 @@ from io import BytesIO
 from uuid import UUID, uuid4
 
 import pytest
-from fastapi import UploadFile
+from fastapi import BackgroundTasks, UploadFile
 
 from surogates.api.routes import workspace as workspace_route
 from surogates.jobs.cleanup_sessions import cleanup_orphaned_session_prefixes
@@ -43,6 +43,17 @@ class _RecordingStorage:
     async def delete(self, bucket: str, key: str) -> None:
         self.deleted_keys.append((bucket, key))
         self.objects.pop((bucket, key), None)
+
+    async def delete_prefix(self, bucket: str, prefix: str) -> int:
+        listed = set(self.keys.get(bucket, []))
+        listed.update(k for b, k in self.objects if b == bucket)
+        matched = sorted(k for k in listed if k.startswith(prefix))
+        for key in matched:
+            self.deleted_keys.append((bucket, key))
+            self.objects.pop((bucket, key), None)
+        if bucket in self.keys:
+            self.keys[bucket] = [k for k in self.keys[bucket] if not k.startswith(prefix)]
+        return len(matched)
 
     async def write(self, bucket: str, key: str, data: bytes) -> None:
         self.objects[(bucket, key)] = data
@@ -265,8 +276,14 @@ async def test_delete_session_deletes_session_prefix_not_agent_bucket():
         "sessions/other-session/file.txt",
     ]
     request = _request(store, storage, _Redis())
+    background_tasks = BackgroundTasks()
 
-    await sessions_route.delete_session(session_id, request, _tenant(org_id, uuid4()))
+    await sessions_route.delete_session(
+        session_id, request, background_tasks, _tenant(org_id, uuid4())
+    )
+    # Workspace cleanup runs after the response is sent; in tests we drive
+    # the queued task manually so we can assert on its side effects.
+    await background_tasks()
 
     assert storage.deleted_buckets == []
     assert storage.deleted_keys == [
@@ -300,7 +317,10 @@ async def test_delete_session_destroys_browser_sandbox():
         browser_registry=browser_registry,
     )
 
-    await sessions_route.delete_session(session_id, request, _tenant(org_id, uuid4()))
+    background_tasks = BackgroundTasks()
+    await sessions_route.delete_session(
+        session_id, request, background_tasks, _tenant(org_id, uuid4())
+    )
 
     assert browser_pool.destroyed_sessions == [str(session_id)]
     assert browser_backend.destroyed_sessions == [str(session_id)]

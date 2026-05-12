@@ -28,6 +28,24 @@ from surogates.storage.tenant import session_workspace_key, session_workspace_pr
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 
+
+def _workspace_root_id(session: Session) -> str:
+    """Return the storage-prefix id for *session*'s workspace.
+
+    New children (post shared-workspace deploy) carry an explicit
+    ``sandbox_root_session_id`` stamped by ``create_child_session``.
+    Use it so the viewer surfaces the parent's files.
+
+    Older children — including legacy scheduled-runner runs that owned
+    their own per-session prefix — do NOT have that cached root.  Fall
+    back to ``session.id`` so the viewer keeps showing whatever was
+    actually written under their own prefix.  This deliberately
+    differs from :func:`sandbox_session_key`, which falls back to
+    ``parent_id`` for the in-process sandbox pool.
+    """
+    root = (session.config or {}).get("sandbox_root_session_id")
+    return str(root) if root else str(session.id)
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -189,10 +207,17 @@ def _require_service_account_api_route(
         )
 
 
-async def _get_workspace_session_and_bucket(
+async def _get_workspace_session_bucket_and_root(
     store: SessionStore, session_id: UUID, tenant: TenantContext,
-) -> tuple[Session, str]:
-    """Resolve and validate the session and agent bucket for workspace access."""
+) -> tuple[Session, str, str]:
+    """Resolve session, bucket, and workspace-root id for storage access.
+
+    For shared-workspace children (delegations, loop iterations created
+    after the shared-workspace deploy), the root id comes from the
+    session's cached ``sandbox_root_session_id``.  See
+    :func:`_workspace_root_id` for the resolution rule and its
+    deliberate divergence from :func:`sandbox_session_key`.
+    """
     try:
         session = await store.get_session(session_id)
     except SessionNotFoundError:
@@ -213,19 +238,21 @@ async def _get_workspace_session_and_bucket(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Session {session_id} has no agent bucket.",
         )
-    return session, bucket
+    return session, bucket, _workspace_root_id(session)
 
 
-async def _get_storage_bucket(
+async def _get_bucket_and_root(
     store: SessionStore, session_id: UUID, tenant: TenantContext,
-) -> str:
-    """Resolve and validate the agent bucket for workspace reads."""
-    _, bucket = await _get_workspace_session_and_bucket(store, session_id, tenant)
-    return bucket
+) -> tuple[str, str]:
+    """Resolve the bucket and workspace-root id for read-only routes."""
+    _, bucket, root_id = await _get_workspace_session_bucket_and_root(
+        store, session_id, tenant,
+    )
+    return bucket, root_id
 
 
-def _strip_session_prefix(session_id: UUID, key: str) -> str:
-    prefix = session_workspace_prefix(session_id)
+def _strip_session_prefix(root_id: str, key: str) -> str:
+    prefix = session_workspace_prefix(root_id)
     if not key.startswith(prefix):
         return key
     return key[len(prefix):]
@@ -355,11 +382,11 @@ async def get_workspace_tree(
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     storage = _get_storage(request)
-    bucket = await _get_storage_bucket(store, session_id, tenant)
+    bucket, root_id = await _get_bucket_and_root(store, session_id, tenant)
 
-    prefix = session_workspace_prefix(session_id)
+    prefix = session_workspace_prefix(root_id)
     keys = await storage.list_keys(bucket, prefix=prefix)
-    relative_keys = [_strip_session_prefix(session_id, k) for k in keys]
+    relative_keys = [_strip_session_prefix(root_id, k) for k in keys]
     # Drop keys living under reserved prefixes (artifact storage) so
     # internal server-side files don't leak into the workspace browser.
     visible_keys = [k for k in relative_keys if k and not _is_reserved(k)]
@@ -392,7 +419,7 @@ async def get_workspace_file(
     _validate_path(path)
     store = _get_session_store(request)
     storage = _get_storage(request)
-    bucket = await _get_storage_bucket(store, session_id, tenant)
+    bucket, root_id = await _get_bucket_and_root(store, session_id, tenant)
 
     is_text = _is_text_key(path)
     is_image = _is_image_key(path)
@@ -405,7 +432,7 @@ async def get_workspace_file(
         )
 
     try:
-        data = await storage.read(bucket, session_workspace_key(session_id, path))
+        data = await storage.read(bucket, session_workspace_key(root_id, path))
     except KeyError:
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
@@ -468,7 +495,7 @@ async def upload_file(
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     storage = _get_storage(request)
-    session, bucket = await _get_workspace_session_and_bucket(
+    session, bucket, root_id = await _get_workspace_session_bucket_and_root(
         store, session_id, tenant
     )
     require_user_writable_session(session)
@@ -490,7 +517,7 @@ async def upload_file(
             detail=f"File exceeds maximum upload size ({_MAX_UPLOAD_BYTES // 1_000_000} MB).",
         )
 
-    await storage.write(bucket, session_workspace_key(session_id, key), contents)
+    await storage.write(bucket, session_workspace_key(root_id, key), contents)
 
     return UploadResponse(path=key, size=len(contents))
 
@@ -508,9 +535,9 @@ async def download_file(
     _validate_path(path)
     store = _get_session_store(request)
     storage = _get_storage(request)
-    bucket = await _get_storage_bucket(store, session_id, tenant)
+    bucket, root_id = await _get_bucket_and_root(store, session_id, tenant)
 
-    storage_key = session_workspace_key(session_id, path)
+    storage_key = session_workspace_key(root_id, path)
     if not await storage.exists(bucket, storage_key):
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
@@ -555,12 +582,12 @@ async def delete_file(
     _validate_path(path)
     store = _get_session_store(request)
     storage = _get_storage(request)
-    session, bucket = await _get_workspace_session_and_bucket(
+    session, bucket, root_id = await _get_workspace_session_bucket_and_root(
         store, session_id, tenant
     )
     require_user_writable_session(session)
 
-    storage_key = session_workspace_key(session_id, path)
+    storage_key = session_workspace_key(root_id, path)
     if not await storage.exists(bucket, storage_key):
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
 

@@ -143,6 +143,43 @@ async def test_dynamic_loop_lifecycle_waits_for_loop_wait(session_factory):
     assert updated.schedule["last_delay_reason"] == "CI is still running"
 
 
+async def test_dynamic_loop_marked_completed_when_caller_declares_done(session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+
+    created = await store.create_dynamic_loop(
+        org_id=org_id,
+        user_id=user_id,
+        agent_id="agent-a",
+        prompt="collect 5 BTC prices",
+        schedule=parse_dynamic_loop_schedule(),
+        created_from_session_id=None,
+    )
+    claimed = (await store.claim_due(agent_id="agent-a", worker_id="w1", limit=1))[0]
+    await store.mark_run_created(claimed, session_id=created.id)
+
+    ok = await store.mark_dynamic_run_finished(
+        schedule_id=created.id,
+        org_id=org_id,
+        user_id=user_id,
+        agent_id="agent-a",
+        session_id=created.id,
+        delay_seconds=3600,
+        reason="Task complete — 5 BTC prices collected",
+        completed=True,
+    )
+
+    assert ok is True
+    updated = await store.get(created.id)
+    assert updated.status == "completed"
+    assert updated.next_run_at is None
+    # Reason is still persisted so the user can see why the loop ended.
+    assert updated.schedule["last_delay_reason"] == (
+        "Task complete — 5 BTC prices collected"
+    )
+
+
 async def test_terminal_dynamic_loop_without_wait_gets_fallback(
     session_factory,
     session_store,

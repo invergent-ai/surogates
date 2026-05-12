@@ -111,6 +111,31 @@ class TestLocalBackendObjects:
         assert not (tmp_path / "bucket" / "a" / "b").exists()
         assert not (tmp_path / "bucket" / "a").exists()
 
+    async def test_delete_prefix_removes_subtree_and_returns_count(
+        self, backend: LocalBackend, tmp_path: Path,
+    ):
+        await backend.write_text("bucket", "sessions/abc/file.txt", "1")
+        await backend.write_text("bucket", "sessions/abc/sub/nested.txt", "2")
+        await backend.write_text("bucket", "sessions/other/keep.txt", "3")
+
+        deleted = await backend.delete_prefix("bucket", "sessions/abc/")
+
+        assert deleted == 2
+        assert not (tmp_path / "bucket" / "sessions" / "abc").exists()
+        # Sibling prefix is untouched, and the shared parent is preserved.
+        assert (tmp_path / "bucket" / "sessions" / "other" / "keep.txt").exists()
+
+    async def test_delete_prefix_missing_is_noop(self, backend: LocalBackend):
+        assert await backend.delete_prefix("bucket", "sessions/missing/") == 0
+
+    async def test_delete_prefix_rejects_traversal(self, backend: LocalBackend):
+        with pytest.raises(ValueError):
+            await backend.delete_prefix("bucket", "../escape")
+
+    async def test_delete_prefix_rejects_empty(self, backend: LocalBackend):
+        with pytest.raises(ValueError):
+            await backend.delete_prefix("bucket", "")
+
     async def test_list_keys(self, backend: LocalBackend):
         await backend.write_text("bucket", "a.txt", "1")
         await backend.write_text("bucket", "b/c.txt", "2")

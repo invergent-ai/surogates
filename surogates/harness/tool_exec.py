@@ -35,6 +35,73 @@ from surogates.tools.coerce import coerce_tool_args
 _WORKSPACE_TOKEN = "__WORKSPACE__"
 
 
+_WORKSPACE_MOUNT_PATH = "/workspace"
+
+
+def _build_session_sandbox_spec(
+    session: Any,
+    tenant: Any,
+    sandbox_owner: str,
+) -> Any:
+    """Build the SandboxSpec used to provision *session*'s sandbox.
+
+    Delegation children and loop iterations share the root's sandbox
+    (see :func:`surogates.sandbox.pool.sandbox_session_key`) so the
+    sub-agent or next tick can see the files already produced.  The
+    workspace mount must be derived from *sandbox_owner* (the root)
+    rather than ``session.id`` — otherwise a reprovision under a child
+    would mount an empty per-child prefix.
+
+    The tenant's baseline spec is copied before mutation so that
+    appending the workspace mount or env passthrough never bleeds
+    across sessions sharing the same tenant context.
+    """
+    from surogates.sandbox.base import Resource, SandboxSpec
+    from surogates.storage.tenant import session_workspace_prefix
+    from surogates.tools.utils.env_passthrough import get_sandbox_env
+
+    baseline = getattr(tenant, "sandbox_spec", None)
+    if baseline is None:
+        sandbox_spec = SandboxSpec()
+    else:
+        # Copy fields explicitly so the caller's baseline spec stays
+        # immutable across sessions sharing the same tenant context.
+        # ``Resource`` is a frozen dataclass; reusing the list elements
+        # is safe.
+        sandbox_spec = SandboxSpec(
+            image=baseline.image,
+            resources=list(baseline.resources),
+            cpu=baseline.cpu,
+            memory=baseline.memory,
+            cpu_limit=baseline.cpu_limit,
+            memory_limit=baseline.memory_limit,
+            timeout=baseline.timeout,
+            env=dict(baseline.env),
+        )
+
+    storage_bucket = session.config.get("storage_bucket", "")
+    has_workspace_mount = any(
+        r.mount_path == _WORKSPACE_MOUNT_PATH for r in sandbox_spec.resources
+    )
+    if storage_bucket and not has_workspace_mount:
+        sandbox_spec.resources.append(
+            Resource(
+                source_ref=(
+                    f"s3://{storage_bucket}/"
+                    f"{session_workspace_prefix(sandbox_owner)}"
+                ),
+                mount_path=_WORKSPACE_MOUNT_PATH,
+            ),
+        )
+    # Pass through skill-declared env vars to the sandbox pod.  Only
+    # matters at provisioning time — env is baked into the pod spec.
+    if not sandbox_spec.env.get("_passthrough_done"):
+        for k, v in get_sandbox_env().items():
+            sandbox_spec.env.setdefault(k, v)
+        sandbox_spec.env["_passthrough_done"] = "1"
+    return sandbox_spec
+
+
 def _sanitize_paths(data: Any, workspace_path: str | None) -> Any:
     """Replace occurrences of the workspace absolute path with __WORKSPACE__.
 
@@ -1008,35 +1075,9 @@ async def execute_single_tool(
         location = TOOL_LOCATIONS.get(tool_name, ToolLocation.SANDBOX)
 
         if location == ToolLocation.SANDBOX and sandbox_pool is not None:
-            # Lazily provision or reuse the session's sandbox.  Delegation
-            # children share the parent's sandbox (see
-            # :func:`sandbox_session_key`) so the sub-agent can see the
-            # files the parent already produced.
-            from surogates.sandbox.base import SandboxSpec, Resource
             from surogates.sandbox.pool import sandbox_session_key
-            from surogates.storage.tenant import session_workspace_prefix
-            sandbox_spec = getattr(tenant, "sandbox_spec", None) or SandboxSpec()
-            storage_bucket = session.config.get("storage_bucket", "")
-            if storage_bucket and not any(
-                r.source_ref.startswith("s3://") for r in sandbox_spec.resources
-            ):
-                sandbox_spec.resources.append(
-                    Resource(
-                        source_ref=(
-                            f"s3://{storage_bucket}/"
-                            f"{session_workspace_prefix(session.id)}"
-                        ),
-                        mount_path="/workspace",
-                    ),
-                )
-            # Pass through skill-declared env vars to the sandbox pod.
-            # Only matters at provisioning time — env is baked into the pod spec.
-            if not sandbox_spec.env.get("_passthrough_done"):
-                from surogates.tools.utils.env_passthrough import get_sandbox_env
-                for k, v in get_sandbox_env().items():
-                    sandbox_spec.env.setdefault(k, v)
-                sandbox_spec.env["_passthrough_done"] = "1"
             sandbox_owner = sandbox_session_key(session)
+            sandbox_spec = _build_session_sandbox_spec(session, tenant, sandbox_owner)
             await sandbox_pool.ensure(sandbox_owner, sandbox_spec)
             # Dispatch to the sandbox pod — runs the real Python tool handler
             # inside the sandbox via tool-executor.
