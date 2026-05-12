@@ -13,7 +13,7 @@ user-invoked shortcuts that shape the next harness turn.
 When the latest user message starts with `/`, Surogates resolves it in this
 order:
 
-1. Builtin command handlers: `/clear`, `/compress`, `/loop`.
+1. Builtin command handlers: `/clear`, `/compress`, `/goal`, `/loop`.
 2. Dynamic skill command: `/<skill-name> [args...]`.
 3. Plain user message if no builtin or skill matches.
 
@@ -50,6 +50,79 @@ What it does:
 - Does not call the main chat model for a normal response.
 
 Use this when a long session should be compacted before continuing.
+
+### `user.define_outcome`
+
+Defines an outcome through the API event stream. This is the canonical
+programmatic shape; `/goal` is a chat convenience wrapper.
+
+```http
+POST /v1/sessions/{session_id}/events
+```
+
+```json
+{
+  "events": [
+    {
+      "type": "user.define_outcome",
+      "description": "Fix every failing test in tests/",
+      "rubric": {
+        "type": "text",
+        "content": "- The final response includes the passing pytest command\n- No failing tests remain"
+      },
+      "max_iterations": 5
+    }
+  ]
+}
+```
+
+Do not also send a user message to kick it off. Surogates records the
+definition, persists the active outcome, appends a synthetic kickoff message,
+and wakes the session.
+
+### `/goal <description>`
+
+Defines an outcome for the current session. Surogates starts work immediately
+from the normal conversation flow, then evaluates each final assistant response
+against the outcome and its rubric. If the evaluator says more revision is
+needed, Surogates appends a synthetic continuation message and wakes the same
+session again.
+
+Examples:
+
+```text
+/goal Fix every failing test in tests/ and report the command that passes
+
+/goal Build a DCF model for Costco
+
+Rubric:
+- Produces an .xlsx file
+- Uses five years of historical revenue
+- Includes WACC and terminal value assumptions
+- Includes a sensitivity analysis
+```
+
+Controls:
+
+| Command | Behavior |
+|---|---|
+| `/goal` or `/goal status` | Show current outcome state and last evaluator result |
+| `/goal pause` | Pause automatic continuation without clearing state |
+| `/goal resume` | Resume a paused outcome |
+| `/goal clear` | Clear the current outcome |
+
+Outcome behavior:
+
+- One outcome is active per session.
+- Default iteration budget is `outcomes.max_iterations` (`3`, max `20`).
+- Evaluator lifecycle events are emitted as `span.outcome_evaluation_start`,
+  `span.outcome_evaluation_ongoing`, and `span.outcome_evaluation_end`.
+- Continuations are normal `user.message` events marked with
+  `synthetic: outcome_continuation`.
+- User messages can steer the work while the outcome is active; evaluation
+  resumes after the user-directed turn.
+- Evaluator failures fail open as `needs_revision`; repeated unparseable
+  evaluator output pauses the outcome.
 
 ### `/loop [interval] <prompt>`
 

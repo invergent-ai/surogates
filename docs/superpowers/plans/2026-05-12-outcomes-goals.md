@@ -22,8 +22,8 @@
 - [x] **Task 8: Add `/goal` Command Handler** — completed
 - [x] **Task 9: Add Post-Turn Outcome Evaluation** — completed
 - [x] **Task 10: Prevent Completed Status During Active Continuation** — completed
-- [ ] **Task 11: Document Outcome API and `/goal` Behavior** — in_progress
-- [ ] **Task 12: Run Focused Verification** — pending
+- [x] **Task 11: Document Outcome API and `/goal` Behavior** — completed
+- [ ] **Task 12: Run Focused Verification** — in_progress
 
 ---
 
