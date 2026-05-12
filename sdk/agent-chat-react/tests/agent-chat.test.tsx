@@ -654,7 +654,7 @@ describe("AgentChat", () => {
     expect(container.textContent).not.toContain('"question"');
   });
 
-  it("shows a visible explanation for failed tool result dots", async () => {
+  it("shows a visible explanation for failed non-terminal tool dots and hides failed terminal calls", async () => {
     const stream = new FakeEventStream();
     const adapter = createAdapter(stream);
     container = document.createElement("div");
@@ -700,10 +700,12 @@ describe("AgentChat", () => {
     expect(container.textContent).toContain(
       "Tavily API error: 401: Unauthorized",
     );
-    expect(container.textContent).toContain("Command failed");
-    expect(container.textContent).toContain(
+    // Failed terminal calls are intentionally hidden from the timeline.
+    expect(container.textContent).not.toContain("Command failed");
+    expect(container.textContent).not.toContain(
       "Sandbox is unavailable. Workspace commands cannot run right now.",
     );
+    expect(container.textContent).not.toContain("pip install python-pptx");
     expect(container.textContent).not.toContain("sandbox-0df712402538");
   });
 
