@@ -7,6 +7,7 @@ helpers.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -22,6 +23,18 @@ DEFAULT_OUTCOME_RUBRIC = (
 )
 
 _RUBRIC_RE = re.compile(r"\n\s*(?:rubric|criteria)\s*:\s*\n", re.IGNORECASE)
+_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+EVALUATOR_SYSTEM_PROMPT = (
+    "You are a strict outcome evaluator for an agent harness. Evaluate the "
+    "assistant's latest response against the user's outcome and rubric. Use "
+    "a separate, critical perspective. Return only JSON with keys: result, "
+    "explanation, feedback. result must be one of satisfied, needs_revision, "
+    "or failed. Use failed only when the outcome and rubric contradict each "
+    "other or cannot be evaluated. Treat a clearly blocked or unachievable "
+    "outcome as satisfied if the response explains the block and next user "
+    "action clearly."
+)
 
 
 @dataclass(frozen=True)
@@ -75,6 +88,22 @@ class OutcomeState:
                 0,
             ),
         )
+
+
+@dataclass(frozen=True)
+class OutcomeEvaluation:
+    result: str
+    explanation: str
+    feedback: str
+    parse_failed: bool = False
+
+
+@dataclass(frozen=True)
+class OutcomeDecision:
+    result: str
+    should_continue: bool
+    message: str
+    continuation_prompt: str | None = None
 
 
 def _coerce_int(value: Any, default: int) -> int:
@@ -147,4 +176,140 @@ def build_continuation_prompt(state: OutcomeState) -> str:
         "Revise the work to satisfy the outcome. Take the next concrete step. "
         "If the outcome is now satisfied, state that explicitly and stop. "
         "If you are blocked and need user input, say so clearly and stop."
+    )
+
+
+def build_evaluator_messages(
+    state: OutcomeState,
+    latest_response: str,
+) -> list[dict[str, str]]:
+    payload = (
+        f"Outcome:\n{state.description}\n\n"
+        f"Rubric:\n{state.rubric}\n\n"
+        f"Assistant latest response:\n{(latest_response or '')[:4000]}\n\n"
+        "Return JSON exactly like:\n"
+        '{"result":"satisfied|needs_revision|failed",'
+        '"explanation":"one sentence","feedback":"revision guidance"}'
+    )
+    return [
+        {"role": "system", "content": EVALUATOR_SYSTEM_PROMPT},
+        {"role": "user", "content": payload},
+    ]
+
+
+def parse_outcome_evaluation(raw: str) -> OutcomeEvaluation:
+    if not (raw or "").strip():
+        return OutcomeEvaluation(
+            result="needs_revision",
+            explanation="evaluator returned empty response",
+            feedback="Continue working toward the outcome.",
+            parse_failed=True,
+        )
+
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        newline = text.find("\n")
+        if newline >= 0:
+            text = text[newline + 1 :]
+
+    data: Any = None
+    try:
+        data = json.loads(text)
+    except Exception:
+        match = _JSON_OBJECT_RE.search(text)
+        if match is not None:
+            try:
+                data = json.loads(match.group(0))
+            except Exception:
+                data = None
+
+    if not isinstance(data, dict):
+        return OutcomeEvaluation(
+            result="needs_revision",
+            explanation=f"evaluator response was not JSON: {raw[:200]!r}",
+            feedback="Continue working toward the outcome.",
+            parse_failed=True,
+        )
+
+    result = str(data.get("result") or "needs_revision").strip()
+    if result not in {"satisfied", "needs_revision", "failed"}:
+        result = "needs_revision"
+    explanation = str(data.get("explanation") or "no explanation provided").strip()
+    feedback = str(data.get("feedback") or explanation).strip()
+    return OutcomeEvaluation(
+        result=result,
+        explanation=explanation,
+        feedback=feedback,
+    )
+
+
+def apply_evaluation(
+    state: OutcomeState,
+    evaluation: OutcomeEvaluation,
+    *,
+    now_iso: str,
+    max_parse_failures: int,
+) -> OutcomeDecision:
+    state.iteration += 1
+    state.updated_at = now_iso
+    state.last_result = evaluation.result
+    state.last_explanation = evaluation.explanation
+    state.last_feedback = evaluation.feedback
+
+    if evaluation.parse_failed:
+        state.consecutive_parse_failures += 1
+    else:
+        state.consecutive_parse_failures = 0
+
+    if evaluation.result == "satisfied":
+        state.status = "satisfied"
+        return OutcomeDecision(
+            result="satisfied",
+            should_continue=False,
+            message=f"Outcome satisfied: {evaluation.explanation}",
+        )
+
+    if evaluation.result == "failed":
+        state.status = "failed"
+        return OutcomeDecision(
+            result="failed",
+            should_continue=False,
+            message=f"Outcome evaluation failed: {evaluation.explanation}",
+        )
+
+    if state.consecutive_parse_failures >= max(1, int(max_parse_failures or 1)):
+        state.status = "paused"
+        state.paused_reason = "evaluator parse failures"
+        return OutcomeDecision(
+            result="paused",
+            should_continue=False,
+            message=(
+                "Outcome paused: evaluator returned unparseable output "
+                "repeatedly. Use /goal resume after adjusting the evaluator "
+                "model or rubric."
+            ),
+        )
+
+    if state.iteration >= state.max_iterations:
+        state.status = "max_iterations_reached"
+        return OutcomeDecision(
+            result="max_iterations_reached",
+            should_continue=False,
+            message=(
+                f"Outcome paused: {state.iteration}/{state.max_iterations} "
+                "iterations used. Use /goal resume to continue, or /goal "
+                "clear to stop."
+            ),
+        )
+
+    state.status = "active"
+    return OutcomeDecision(
+        result="needs_revision",
+        should_continue=True,
+        message=(
+            f"Continuing outcome ({state.iteration}/{state.max_iterations}): "
+            f"{evaluation.explanation}"
+        ),
+        continuation_prompt=build_continuation_prompt(state),
     )

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
+
 from surogates.harness.outcomes import (
     DEFAULT_OUTCOME_RUBRIC,
     OutcomeCommand,
     OutcomeState,
+    apply_evaluation,
     build_continuation_prompt,
+    build_evaluator_messages,
     parse_goal_command,
+    parse_outcome_evaluation,
     start_outcome,
 )
 
@@ -88,3 +93,139 @@ def test_build_continuation_prompt_includes_feedback_and_rubric() -> None:
     assert "Fix tests" in prompt
     assert "Must pass pytest" in prompt
     assert "pytest still fails" in prompt
+
+
+def test_parse_outcome_evaluation_accepts_json() -> None:
+    evaluation = parse_outcome_evaluation(
+        json.dumps({
+            "result": "needs_revision",
+            "explanation": "One criterion missing",
+            "feedback": "Add the sensitivity table",
+        })
+    )
+
+    assert evaluation.result == "needs_revision"
+    assert evaluation.explanation == "One criterion missing"
+    assert evaluation.feedback == "Add the sensitivity table"
+    assert evaluation.parse_failed is False
+
+
+def test_parse_outcome_evaluation_extracts_fenced_json() -> None:
+    evaluation = parse_outcome_evaluation(
+        '```json\n{"result":"satisfied","explanation":"All criteria met","feedback":""}\n```'
+    )
+
+    assert evaluation.result == "satisfied"
+    assert evaluation.parse_failed is False
+
+
+def test_parse_outcome_evaluation_marks_bad_output_as_parse_failure() -> None:
+    evaluation = parse_outcome_evaluation("I think it is done")
+
+    assert evaluation.result == "needs_revision"
+    assert evaluation.parse_failed is True
+
+
+def test_build_evaluator_messages_contains_outcome_rubric_and_response() -> None:
+    state = start_outcome(
+        "Fix tests",
+        rubric="pytest passes",
+        max_iterations=3,
+        now_iso="2026-05-12T10:00:00Z",
+    )
+
+    messages = build_evaluator_messages(state, "I fixed one file")
+    joined = "\n".join(m["content"] for m in messages)
+
+    assert "Fix tests" in joined
+    assert "pytest passes" in joined
+    assert "I fixed one file" in joined
+    assert '"result"' in joined
+
+
+def test_apply_evaluation_satisfied_marks_state_satisfied() -> None:
+    state = start_outcome(
+        "Fix tests",
+        rubric="",
+        max_iterations=3,
+        now_iso="2026-05-12T10:00:00Z",
+    )
+
+    decision = apply_evaluation(
+        state,
+        parse_outcome_evaluation(
+            '{"result":"satisfied","explanation":"All good","feedback":""}'
+        ),
+        now_iso="2026-05-12T10:01:00Z",
+        max_parse_failures=3,
+    )
+
+    assert state.status == "satisfied"
+    assert decision.should_continue is False
+    assert decision.result == "satisfied"
+
+
+def test_apply_evaluation_needs_revision_continues_before_budget() -> None:
+    state = start_outcome(
+        "Fix tests",
+        rubric="",
+        max_iterations=3,
+        now_iso="2026-05-12T10:00:00Z",
+    )
+
+    decision = apply_evaluation(
+        state,
+        parse_outcome_evaluation(
+            '{"result":"needs_revision","explanation":"Missing test","feedback":"Run pytest"}'
+        ),
+        now_iso="2026-05-12T10:01:00Z",
+        max_parse_failures=3,
+    )
+
+    assert state.status == "active"
+    assert state.iteration == 1
+    assert state.last_feedback == "Run pytest"
+    assert decision.should_continue is True
+
+
+def test_apply_evaluation_pauses_after_parse_failures() -> None:
+    state = start_outcome(
+        "Fix tests",
+        rubric="",
+        max_iterations=3,
+        now_iso="2026-05-12T10:00:00Z",
+    )
+    state.consecutive_parse_failures = 2
+
+    decision = apply_evaluation(
+        state,
+        parse_outcome_evaluation("not json"),
+        now_iso="2026-05-12T10:01:00Z",
+        max_parse_failures=3,
+    )
+
+    assert state.status == "paused"
+    assert "parse" in (state.paused_reason or "")
+    assert decision.should_continue is False
+
+
+def test_apply_evaluation_stops_at_iteration_budget() -> None:
+    state = start_outcome(
+        "Fix tests",
+        rubric="",
+        max_iterations=1,
+        now_iso="2026-05-12T10:00:00Z",
+    )
+
+    decision = apply_evaluation(
+        state,
+        parse_outcome_evaluation(
+            '{"result":"needs_revision","explanation":"Missing","feedback":"Keep going"}'
+        ),
+        now_iso="2026-05-12T10:01:00Z",
+        max_parse_failures=3,
+    )
+
+    assert state.status == "max_iterations_reached"
+    assert decision.result == "max_iterations_reached"
+    assert decision.should_continue is False
