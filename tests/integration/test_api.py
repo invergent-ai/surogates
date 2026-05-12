@@ -242,6 +242,75 @@ async def test_send_message(client: AsyncClient, session_factory):
     assert data["status"] == "processing"
 
 
+async def test_define_outcome_event_requires_rubric(
+    client: AsyncClient,
+    session_factory,
+):
+    _, _, token, _ = await _create_test_tenant(session_factory)
+    create_resp = await client.post(
+        "/v1/sessions",
+        json={"model": "gpt-4o"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    session_id = create_resp.json()["id"]
+
+    response = await client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={
+            "events": [
+                {
+                    "type": "user.define_outcome",
+                    "description": "Fix all tests",
+                    "max_iterations": 3,
+                }
+            ]
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 422
+    assert "rubric" in response.text
+
+
+async def test_define_outcome_event_persists_state_and_enqueues(
+    client: AsyncClient,
+    session_factory,
+    app,
+):
+    _, _, token, _ = await _create_test_tenant(session_factory)
+    create_resp = await client.post(
+        "/v1/sessions",
+        json={"model": "gpt-4o"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    session_id = UUID(create_resp.json()["id"])
+
+    response = await client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={
+            "events": [
+                {
+                    "type": "user.define_outcome",
+                    "description": "Fix all tests",
+                    "rubric": {"type": "text", "content": "- pytest passes"},
+                    "max_iterations": 5,
+                }
+            ]
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["events"][0]["type"] == "user.define_outcome"
+    assert body["events"][0]["outcome_id"].startswith("outc_")
+
+    session = await app.state.session_store.get_session(session_id)
+    assert session.config["outcome"]["description"] == "Fix all tests"
+    assert session.config["outcome"]["rubric"] == "- pytest passes"
+    assert session.config["outcome"]["max_iterations"] == 5
+
+
 async def test_send_message_revives_completed_session(
     client: AsyncClient,
     session_factory,

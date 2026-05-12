@@ -238,6 +238,56 @@ data: {"id": 5, "type": "tool.result", "data": {"name": "terminal", "result": "f
 
 The SSE connection stays open. New events are pushed as they are emitted. If the connection drops, reconnect with `?after=<last-event-id>` to resume without data loss.
 
+### `POST /v1/sessions/{id}/events`
+
+Send control-plane session events. The first supported event is
+`user.define_outcome`, which starts an outcome-oriented work loop without a
+separate user message.
+
+**Request:**
+```json
+{
+  "events": [
+    {
+      "type": "user.define_outcome",
+      "description": "Fix every failing test in tests/",
+      "rubric": {
+        "type": "text",
+        "content": "- The final response includes the passing pytest command\n- No failing tests remain"
+      },
+      "max_iterations": 5
+    }
+  ]
+}
+```
+
+- `type` must be `user.define_outcome`.
+- `description` is the work request that the agent should satisfy.
+- `rubric.type` must be `text`; `rubric.content` is required.
+- `max_iterations` is optional. Defaults to `outcomes.max_iterations` and is
+  capped at `20`.
+
+**Response (202):**
+```json
+{
+  "events": [
+    {
+      "type": "user.define_outcome",
+      "event_id": 123,
+      "outcome_id": "outc_...",
+      "processed_at": "2026-05-12T10:00:00Z"
+    }
+  ]
+}
+```
+
+Surogates persists the outcome in session config, emits `outcome.defined`,
+appends a synthetic `user.message` with `synthetic: outcome_kickoff`, and wakes
+the session. Post-turn grading emits `span.outcome_evaluation_start`,
+`span.outcome_evaluation_ongoing`, and `span.outcome_evaluation_end`; automatic
+revisions are represented by synthetic `user.message` events with
+`synthetic: outcome_continuation`.
+
 ## Skills
 
 ### `GET /v1/skills`

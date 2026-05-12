@@ -41,6 +41,16 @@ class EventType(str, Enum):
     SESSION_FAIL = "session.fail"
     SESSION_RESET = "session.reset"
 
+    # Outcome-oriented goal loop
+    USER_DEFINE_OUTCOME = "user.define_outcome"
+    OUTCOME_DEFINED = "outcome.defined"
+    OUTCOME_PAUSED = "outcome.paused"
+    OUTCOME_CLEARED = "outcome.cleared"
+    OUTCOME_EVALUATION_START = "span.outcome_evaluation_start"
+    OUTCOME_EVALUATION_ONGOING = "span.outcome_evaluation_ongoing"
+    OUTCOME_EVALUATION_END = "span.outcome_evaluation_end"
+    OUTCOME_CONTINUATION = "outcome.continuation"
+
     # Context management
     CONTEXT_COMPACT = "context.compact"
     MEMORY_UPDATE = "memory.update"

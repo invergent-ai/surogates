@@ -288,6 +288,70 @@ class SessionStore:
                 raise SessionNotFoundError(f"session {session_id} not found")
             return False
 
+    async def update_session_config_key(
+        self,
+        session_id: UUID,
+        key: str,
+        value: Any,
+    ) -> None:
+        """Set one top-level key in ``sessions.config``.
+
+        The row is locked while the current JSON config is copied and updated
+        so concurrent config mutations do not accidentally drop each other.
+        """
+        if not key:
+            raise ValueError("config key must be non-empty")
+        async with self._sf() as db:
+            result = await db.execute(
+                select(SessionRow)
+                .where(SessionRow.id == session_id)
+                .with_for_update()
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            config = dict(row.config or {})
+            config[key] = value
+            row.config = config
+            row.updated_at = func.now()
+            await db.commit()
+
+    async def clear_session_config_key(self, session_id: UUID, key: str) -> None:
+        """Remove one top-level key from ``sessions.config``."""
+        if not key:
+            raise ValueError("config key must be non-empty")
+        async with self._sf() as db:
+            result = await db.execute(
+                select(SessionRow)
+                .where(SessionRow.id == session_id)
+                .with_for_update()
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            config = dict(row.config or {})
+            config.pop(key, None)
+            row.config = config
+            row.updated_at = func.now()
+            await db.commit()
+
+    async def emit_synthetic_user_message(
+        self,
+        session_id: UUID,
+        *,
+        content: str,
+        synthetic: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        """Append a server-generated user message to the event log."""
+        data: dict[str, Any] = {
+            "content": content,
+            "synthetic": synthetic,
+        }
+        if metadata:
+            data.update(metadata)
+        return await self.emit_event(session_id, EventType.USER_MESSAGE, data)
+
     async def list_sessions(
         self,
         org_id: UUID,

@@ -44,6 +44,14 @@ llm:
   #     label: "secondary"
   #     priority: 1
 
+# ── Outcome Goals ───────────────────────────────────────────────────
+outcomes:
+  max_iterations: 3        # Default revision loops for outcomes; hard-clamped to 20
+  max_parse_failures: 3    # Pause if the evaluator repeatedly returns non-JSON
+  # evaluator_model: ""    # Optional strict evaluator model; defaults to active session model
+  # evaluator_base_url: "" # Optional evaluator endpoint
+  # evaluator_api_key: ""  # Optional evaluator API key
+
 # ── Worker ────────────────────────────────────────────────────────────
 worker:
   concurrency: 50

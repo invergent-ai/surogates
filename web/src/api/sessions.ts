@@ -83,6 +83,57 @@ export async function sendMessage(
   return (await response.json()) as { event_id: number; status: string };
 }
 
+export async function defineOutcome(
+  sessionId: string,
+  input: {
+    description: string;
+    rubric: string;
+    maxIterations?: number;
+  },
+): Promise<{
+  events: Array<{
+    type: "user.define_outcome";
+    event_id: number;
+    outcome_id: string;
+    processed_at: string;
+  }>;
+}> {
+  const response = await authFetch(
+    `/api/v1/sessions/${sessionId}/events`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        events: [
+          {
+            type: "user.define_outcome",
+            description: input.description,
+            rubric: {
+              type: "text",
+              content: input.rubric,
+            },
+            max_iterations: input.maxIterations,
+          },
+        ],
+      }),
+    },
+  );
+  if (!response.ok) {
+    const err = (await response.json().catch(() => null)) as {
+      detail?: string;
+    } | null;
+    throw new Error(err?.detail ?? "Failed to define outcome");
+  }
+  return (await response.json()) as {
+    events: Array<{
+      type: "user.define_outcome";
+      event_id: number;
+      outcome_id: string;
+      processed_at: string;
+    }>;
+  };
+}
+
 export async function confirmDisclosure(sessionId: string): Promise<void> {
   const response = await authFetch(
     `/api/v1/sessions/${sessionId}/confirm-disclosure`,

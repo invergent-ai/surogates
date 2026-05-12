@@ -256,12 +256,13 @@ export function useAgentChatRuntime({
   const send = useCallback(
     async (content: string, images?: AgentChatImageAttachment[]) => {
       markSending(content, images);
+      const goal = images?.length ? null : parseGoalDefinition(content);
 
       if (!sessionId) {
         try {
           const session = await adapter.createSession({ agentId });
           onSessionChange?.(session.id);
-          await adapter.sendMessage({ sessionId: session.id, content, images });
+          await sendTurn(adapter, session.id, content, images, goal);
         } catch (error) {
           markSendError(error instanceof Error ? error.message : "send failed");
           throw error;
@@ -271,7 +272,7 @@ export function useAgentChatRuntime({
 
       try {
         ensureStreamForNewTurn(sessionId);
-        await adapter.sendMessage({ sessionId, content, images });
+        await sendTurn(adapter, sessionId, content, images, goal);
       } catch (error) {
         markSendError(error instanceof Error ? error.message : "send failed");
         throw error;
@@ -351,4 +352,45 @@ function findLastAssistantIndex(messages: AgentChatState["messages"]): number {
     if (messages[i]?.role === "assistant") return i;
   }
   return -1;
+}
+
+type ParsedGoalDefinition = {
+  description: string;
+  rubric?: string;
+};
+
+const GOAL_RUBRIC_RE = /\n\s*(?:rubric|criteria)\s*:\s*\n/i;
+const GOAL_CONTROL_COMMANDS = new Set(["", "status", "pause", "resume", "clear"]);
+
+async function sendTurn(
+  adapter: AgentChatAdapter,
+  sessionId: string,
+  content: string,
+  images: AgentChatImageAttachment[] | undefined,
+  goal: ParsedGoalDefinition | null,
+): Promise<void> {
+  if (goal && adapter.defineOutcome) {
+    await adapter.defineOutcome({
+      sessionId,
+      description: goal.description,
+      rubric: goal.rubric,
+    });
+    return;
+  }
+  await adapter.sendMessage({ sessionId, content, images });
+}
+
+function parseGoalDefinition(content: string): ParsedGoalDefinition | null {
+  const text = content.trim();
+  if (text !== "/goal" && !text.startsWith("/goal ")) return null;
+
+  const args = text.slice("/goal".length).trim();
+  if (GOAL_CONTROL_COMMANDS.has(args.toLowerCase())) return null;
+
+  const match = GOAL_RUBRIC_RE.exec(args);
+  const description = (match ? args.slice(0, match.index) : args).trim();
+  if (!description) return null;
+
+  const rubric = match ? args.slice(match.index + match[0].length).trim() : "";
+  return rubric ? { description, rubric } : { description };
 }

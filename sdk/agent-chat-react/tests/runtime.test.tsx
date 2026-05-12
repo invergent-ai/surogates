@@ -50,6 +50,7 @@ class FakeEventStream implements AgentChatEventStream {
 type AdapterCalls = {
   opened: Array<{ sessionId: string; after: number; stream: FakeEventStream }>;
   sent: Array<{ sessionId: string; content: string }>;
+  outcomes?: Array<{ sessionId: string; description: string; rubric?: string }>;
   paused: string[];
   retried: string[];
   created: Array<{ agentId?: string; system?: string }>;
@@ -75,6 +76,10 @@ function createFakeAdapter(calls: AdapterCalls) {
     async sendMessage(input) {
       calls.sent.push(input);
       return { eventId: 1, status: "accepted" };
+    },
+    async defineOutcome(input) {
+      (calls.outcomes ??= []).push(input);
+      return { eventId: 2, outcomeId: "outc_test" };
     },
     async pauseSession(input) {
       calls.paused.push(input.sessionId);
@@ -307,6 +312,79 @@ describe("useAgentChatRuntime", () => {
     expect(calls.sent).toEqual([{ sessionId: "s-1", content: "hello" }]);
   });
 
+  it("defines a goal through the outcome event endpoint for /goal text", async () => {
+    const calls: AdapterCalls = {
+      opened: [],
+      sent: [],
+      outcomes: [],
+      paused: [],
+      retried: [],
+      created: [],
+    };
+    const adapter = createFakeAdapter(calls);
+    const runtime = renderRuntime({ adapter, sessionId: "s-1" });
+
+    await act(async () => {
+      await runtime.api.send("/goal Fix all tests");
+    });
+
+    expect(calls.outcomes).toEqual([
+      { sessionId: "s-1", description: "Fix all tests" },
+    ]);
+    expect(calls.sent).toEqual([]);
+    expect(runtime.api.messages[0]).toMatchObject({
+      role: "user",
+      content: "/goal Fix all tests",
+      status: "complete",
+    });
+  });
+
+  it("extracts a rubric when defining a goal", async () => {
+    const calls: AdapterCalls = {
+      opened: [],
+      sent: [],
+      outcomes: [],
+      paused: [],
+      retried: [],
+      created: [],
+    };
+    const adapter = createFakeAdapter(calls);
+    const runtime = renderRuntime({ adapter, sessionId: "s-1" });
+
+    await act(async () => {
+      await runtime.api.send("/goal Fix all tests\n\nRubric:\n- pytest passes");
+    });
+
+    expect(calls.outcomes).toEqual([
+      {
+        sessionId: "s-1",
+        description: "Fix all tests",
+        rubric: "- pytest passes",
+      },
+    ]);
+    expect(calls.sent).toEqual([]);
+  });
+
+  it("sends goal controls as normal slash commands", async () => {
+    const calls: AdapterCalls = {
+      opened: [],
+      sent: [],
+      outcomes: [],
+      paused: [],
+      retried: [],
+      created: [],
+    };
+    const adapter = createFakeAdapter(calls);
+    const runtime = renderRuntime({ adapter, sessionId: "s-1" });
+
+    await act(async () => {
+      await runtime.api.send("/goal status");
+    });
+
+    expect(calls.sent).toEqual([{ sessionId: "s-1", content: "/goal status" }]);
+    expect(calls.outcomes).toEqual([]);
+  });
+
   it("creates a session before sending when sessionId is null", async () => {
     const calls: AdapterCalls = {
       opened: [],
@@ -332,6 +410,36 @@ describe("useAgentChatRuntime", () => {
     expect(calls.sent).toEqual([
       { sessionId: "created-session", content: "first" },
     ]);
+    expect(changed).toEqual(["created-session"]);
+  });
+
+  it("creates a session before defining a first-turn goal", async () => {
+    const calls: AdapterCalls = {
+      opened: [],
+      sent: [],
+      outcomes: [],
+      paused: [],
+      retried: [],
+      created: [],
+    };
+    const changed: string[] = [];
+    const adapter = createFakeAdapter(calls);
+    const runtime = renderRuntime({
+      adapter,
+      agentId: "agent-1",
+      sessionId: null,
+      onSessionChange: (sessionId) => changed.push(sessionId),
+    });
+
+    await act(async () => {
+      await runtime.api.send("/goal Fix all tests");
+    });
+
+    expect(calls.created).toEqual([{ agentId: "agent-1" }]);
+    expect(calls.outcomes).toEqual([
+      { sessionId: "created-session", description: "Fix all tests" },
+    ]);
+    expect(calls.sent).toEqual([]);
     expect(changed).toEqual(["created-session"]);
   });
 

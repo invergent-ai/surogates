@@ -24,6 +24,7 @@ import os
 import re
 import traceback
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID, uuid4
 
@@ -48,6 +49,15 @@ from surogates.harness.message_utils import (
     coerce_message_content,
     make_skipped_tool_result,
     message_to_dict,
+)
+from surogates.harness.outcomes import (
+    DEFAULT_MAX_ITERATIONS,
+    OutcomeState,
+    apply_evaluation,
+    build_evaluator_messages,
+    parse_goal_command,
+    parse_outcome_evaluation,
+    start_outcome,
 )
 from surogates.harness.prompt_cache import SystemPromptCache
 from surogates.harness.rate_limit_guard import ProviderRateLimitGuard
@@ -1076,6 +1086,10 @@ class AgentHarness:
                 await self._handle_clear_command(session, lease)
                 return
 
+            if last_user_content == "/goal" or last_user_content.startswith("/goal "):
+                await self._handle_goal_command(session, last_user_content, lease)
+                return
+
             if last_user_content.startswith("/loop"):
                 await self._handle_loop_command(session, last_user_content, lease)
                 return
@@ -1872,6 +1886,15 @@ class AgentHarness:
                     (assistant_message.get("content") or ""),
                     messages,
                 )
+
+                if await self._maybe_continue_outcome(
+                    session,
+                    lease,
+                    latest_response=assistant_message.get("content") or "",
+                    response_event_id=event_id,
+                    model=model_id,
+                ):
+                    return
 
                 # A response without tool calls completes the current
                 # objective.  Follow-up messages revive the session into a
@@ -3522,6 +3545,318 @@ class AgentHarness:
             },
         )
         # Lease released by the outer wake() finally block.
+
+    def _outcome_settings(self) -> Any:
+        try:
+            from surogates.config import load_settings
+
+            return load_settings().outcomes
+        except Exception:
+            logger.debug("Failed to load outcome settings", exc_info=True)
+            return SimpleNamespace(
+                max_iterations=DEFAULT_MAX_ITERATIONS,
+                max_parse_failures=3,
+            )
+
+    async def _handle_goal_command(
+        self,
+        session: Session,
+        content: str,
+        lease: SessionLease,
+    ) -> None:
+        args = content[len("/goal") :].strip()
+        command = parse_goal_command(args)
+        current = OutcomeState.from_config((session.config or {}).get("outcome"))
+
+        if command.action == "status":
+            message = self._format_outcome_status(current)
+        elif command.action == "set":
+            message = await self._define_goal_outcome(session, command)
+        elif command.action == "pause":
+            message = await self._pause_goal_outcome(session, current)
+        elif command.action == "resume":
+            message = await self._resume_goal_outcome(session, current)
+        elif command.action == "clear":
+            message = await self._clear_goal_outcome(session, current)
+        else:
+            message = "Usage: /goal <outcome>, /goal status, /goal pause, /goal resume, /goal clear."
+
+        response_event_id = await self._store.emit_event(
+            session.id,
+            EventType.LLM_RESPONSE,
+            {"message": {"role": "assistant", "content": message}},
+        )
+        await self._store.advance_harness_cursor(
+            session.id,
+            through_event_id=response_event_id,
+            lease_token=lease.lease_token,
+        )
+
+        if command.action == "set":
+            outcome = OutcomeState.from_config((session.config or {}).get("outcome"))
+            if outcome is None:
+                return
+            outcome_id = outcome.id if outcome else None
+            kickoff_id = await self._store.emit_synthetic_user_message(
+                session.id,
+                content=outcome.description,
+                synthetic="outcome_kickoff",
+                metadata={"outcome_id": outcome_id},
+            )
+            logger.debug(
+                "Session %s: emitted outcome kickoff user message %s",
+                session.id,
+                kickoff_id,
+            )
+            if self._redis is not None:
+                try:
+                    from surogates.config import enqueue_session
+
+                    await enqueue_session(self._redis, session.agent_id, session.id)
+                except Exception:
+                    logger.debug("Failed to enqueue outcome kickoff", exc_info=True)
+
+    async def _define_goal_outcome(self, session: Session, command: Any) -> str:
+        settings = self._outcome_settings()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            state = start_outcome(
+                command.text,
+                rubric=command.rubric,
+                max_iterations=getattr(
+                    settings,
+                    "max_iterations",
+                    DEFAULT_MAX_ITERATIONS,
+                ),
+                now_iso=now_iso,
+            )
+        except ValueError:
+            return "Usage: /goal <outcome>. Example: /goal Fix all failing tests."
+
+        await self._store.update_session_config_key(
+            session.id,
+            "outcome",
+            state.to_config(),
+        )
+        session.config = {**(session.config or {}), "outcome": state.to_config()}
+        await self._store.emit_event(
+            session.id,
+            EventType.OUTCOME_DEFINED,
+            {
+                "outcome_id": state.id,
+                "description": state.description,
+                "rubric": state.rubric,
+                "max_iterations": state.max_iterations,
+            },
+        )
+        return f"Outcome defined ({state.max_iterations} iterations): {state.description}"
+
+    async def _pause_goal_outcome(
+        self,
+        session: Session,
+        current: OutcomeState | None,
+    ) -> str:
+        if current is None or current.status not in {"active", "paused"}:
+            return "No active outcome. Set one with /goal <text>."
+        current.status = "paused"
+        current.paused_reason = "user-paused"
+        current.updated_at = datetime.now(timezone.utc).isoformat()
+        await self._store.update_session_config_key(
+            session.id,
+            "outcome",
+            current.to_config(),
+        )
+        session.config = {**(session.config or {}), "outcome": current.to_config()}
+        await self._store.emit_event(
+            session.id,
+            EventType.OUTCOME_PAUSED,
+            {"outcome_id": current.id, "reason": current.paused_reason},
+        )
+        return f"Outcome paused: {current.description}"
+
+    async def _resume_goal_outcome(
+        self,
+        session: Session,
+        current: OutcomeState | None,
+    ) -> str:
+        if current is None or current.status not in {"paused", "max_iterations_reached"}:
+            return "No paused outcome to resume."
+        current.status = "active"
+        current.paused_reason = None
+        current.updated_at = datetime.now(timezone.utc).isoformat()
+        await self._store.update_session_config_key(
+            session.id,
+            "outcome",
+            current.to_config(),
+        )
+        session.config = {**(session.config or {}), "outcome": current.to_config()}
+        return f"Outcome resumed: {current.description}"
+
+    async def _clear_goal_outcome(
+        self,
+        session: Session,
+        current: OutcomeState | None,
+    ) -> str:
+        await self._store.clear_session_config_key(session.id, "outcome")
+        session.config = {**(session.config or {})}
+        session.config.pop("outcome", None)
+        await self._store.emit_event(
+            session.id,
+            EventType.OUTCOME_CLEARED,
+            {"outcome_id": current.id if current else None},
+        )
+        return "Outcome cleared." if current else "No active outcome."
+
+    def _format_outcome_status(self, state: OutcomeState | None) -> str:
+        if state is None:
+            return "No active outcome. Set one with /goal <text>."
+        lines = [
+            (
+                f"Outcome ({state.status}, {state.iteration}/"
+                f"{state.max_iterations} iterations): {state.description}"
+            ),
+        ]
+        if state.last_explanation:
+            lines.append(f"Last evaluation: {state.last_explanation}")
+        if state.paused_reason:
+            lines.append(f"Paused reason: {state.paused_reason}")
+        return "\n".join(lines)
+
+    async def _evaluate_outcome(
+        self,
+        *,
+        state: OutcomeState,
+        latest_response: str,
+        model: str,
+    ) -> Any:
+        settings = self._outcome_settings()
+        eval_model = getattr(settings, "evaluator_model", "") or model
+        messages = build_evaluator_messages(state, latest_response)
+        try:
+            response = await self._llm.chat.completions.create(
+                model=eval_model,
+                messages=messages,
+                temperature=0,
+                max_tokens=500,
+            )
+            raw = self._extract_chat_message_content(response)
+        except Exception as exc:
+            logger.warning(
+                "Outcome evaluator failed for %s: %s",
+                state.id,
+                exc,
+            )
+            raw = json.dumps({
+                "result": "needs_revision",
+                "explanation": f"evaluator error: {type(exc).__name__}",
+                "feedback": "Continue working toward the outcome.",
+            })
+        return parse_outcome_evaluation(raw)
+
+    async def _maybe_continue_outcome(
+        self,
+        session: Session,
+        lease: SessionLease,
+        *,
+        latest_response: str,
+        response_event_id: int,
+        model: str,
+    ) -> bool:
+        state = OutcomeState.from_config((session.config or {}).get("outcome"))
+        if state is None or state.status != "active":
+            return False
+
+        start_event_id = await self._store.emit_event(
+            session.id,
+            EventType.OUTCOME_EVALUATION_START,
+            {
+                "outcome_id": state.id,
+                "iteration": state.iteration,
+                "response_event_id": response_event_id,
+            },
+        )
+        await self._store.emit_event(
+            session.id,
+            EventType.OUTCOME_EVALUATION_ONGOING,
+            {"outcome_id": state.id, "iteration": state.iteration},
+        )
+        evaluation = await self._evaluate_outcome(
+            state=state,
+            latest_response=latest_response,
+            model=model,
+        )
+        settings = self._outcome_settings()
+        decision = apply_evaluation(
+            state,
+            evaluation,
+            now_iso=datetime.now(timezone.utc).isoformat(),
+            max_parse_failures=getattr(settings, "max_parse_failures", 3),
+        )
+        await self._store.update_session_config_key(
+            session.id,
+            "outcome",
+            state.to_config(),
+        )
+        session.config = {**(session.config or {}), "outcome": state.to_config()}
+
+        await self._store.emit_event(
+            session.id,
+            EventType.OUTCOME_EVALUATION_END,
+            {
+                "outcome_id": state.id,
+                "outcome_evaluation_start_id": start_event_id,
+                "iteration": state.iteration,
+                "result": decision.result,
+                "explanation": evaluation.explanation,
+                "feedback": evaluation.feedback,
+                "parse_failed": evaluation.parse_failed,
+            },
+        )
+
+        status_event_id: int | None = None
+        if decision.message:
+            status_event_id = await self._store.emit_event(
+                session.id,
+                EventType.LLM_RESPONSE,
+                {"message": {"role": "assistant", "content": decision.message}},
+            )
+
+        if not decision.should_continue or not decision.continuation_prompt:
+            return False
+
+        marker_event_id = await self._store.emit_event(
+            session.id,
+            EventType.OUTCOME_CONTINUATION,
+            {
+                "outcome_id": state.id,
+                "iteration": state.iteration,
+                "status_event_id": status_event_id,
+            },
+        )
+        continuation_event_id = await self._store.emit_synthetic_user_message(
+            session.id,
+            content=decision.continuation_prompt,
+            synthetic="outcome_continuation",
+            metadata={"outcome_id": state.id},
+        )
+        await self._store.advance_harness_cursor(
+            session.id,
+            through_event_id=marker_event_id,
+            lease_token=lease.lease_token,
+        )
+        logger.debug(
+            "Session %s: outcome continuation user message %s queued",
+            session.id,
+            continuation_event_id,
+        )
+        if self._redis is not None:
+            try:
+                from surogates.config import enqueue_session
+
+                await enqueue_session(self._redis, session.agent_id, session.id)
+            except Exception:
+                logger.debug("Failed to enqueue outcome continuation", exc_info=True)
+        return True
 
     async def _handle_loop_command(
         self,

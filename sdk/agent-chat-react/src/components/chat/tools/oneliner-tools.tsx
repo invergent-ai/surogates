@@ -6,7 +6,7 @@
 // - Web fetch / search / crawl
 // - Vision analyze
 
-import { SearchIcon, GlobeIcon, EyeIcon } from "lucide-react";
+import { SearchIcon, EyeIcon } from "lucide-react";
 import type { ToolCallInfo } from "../../../types";
 
 // ── Session search ──────────────────────────────────────────────────
