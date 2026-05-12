@@ -341,3 +341,39 @@ async def test_evaluate_outcome_uses_base_llm_model_by_default() -> None:
     call = llm.chat.completions.create.await_args.kwargs
     assert call["model"] == "base-model"
     assert call["temperature"] == 0
+
+
+@pytest.mark.asyncio
+async def test_outcome_continuation_does_not_complete_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FakeStore()
+    redis = FakeRedis()
+    harness = _make_harness(store, redis_client=redis)
+    harness._complete_session = AsyncMock()
+    session = _session(config={"outcome": _active_outcome_config()})
+    lease = _lease(session.id)
+
+    async def fake_evaluate(
+        *,
+        state: Any,
+        latest_response: str,
+        model: str,
+    ) -> Any:
+        return parse_outcome_evaluation(
+            '{"result":"needs_revision","explanation":"Missing",'
+            '"feedback":"Continue"}',
+        )
+
+    monkeypatch.setattr(harness, "_evaluate_outcome", fake_evaluate)
+
+    continued = await harness._maybe_continue_outcome(
+        session,
+        lease,
+        latest_response="partial",
+        response_event_id=10,
+        model="gpt-4o",
+    )
+
+    assert continued is True
+    harness._complete_session.assert_not_called()
