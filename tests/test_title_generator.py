@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -14,6 +16,7 @@ from surogates.harness.title_generator import (
     maybe_generate_session_title,
 )
 from surogates.harness.loop import AgentHarness
+from surogates.session.models import Event, Session, SessionLease
 
 
 def _response(content: str):
@@ -55,7 +58,6 @@ async def test_generate_session_title_uses_auxiliary_chat_client() -> None:
         llm_client=llm_client,
         model="gpt-4o-mini",
         user_message="Redis is timing out in production",
-        assistant_response="Let's inspect connection pool metrics.",
     )
 
     assert title == "Debug Redis Failures"
@@ -81,7 +83,6 @@ async def test_generate_session_title_disables_thinking_for_surogate_model() -> 
         llm_client=llm_client,
         model="surogate",
         user_message="watch the bitcoin price",
-        assistant_response="Loop scheduled.",
     )
 
     assert title == "Bitcoin Price Loop"
@@ -109,7 +110,6 @@ async def test_generate_session_title_retries_without_optional_params() -> None:
         llm_client=llm_client,
         model="gpt-5",
         user_message="Redis is timing out in production",
-        assistant_response="Let's inspect connection pool metrics.",
     )
 
     assert title == "Debug Redis Failures"
@@ -138,7 +138,6 @@ async def test_generate_session_title_retry_removes_thinking_extra_body() -> Non
         llm_client=llm_client,
         model="surogate",
         user_message="watch the bitcoin price",
-        assistant_response="Loop scheduled.",
     )
 
     assert title == "Bitcoin Price Loop"
@@ -162,24 +161,22 @@ async def test_generate_session_title_returns_none_on_llm_failure() -> None:
         llm_client=llm_client,
         model="gpt-4o-mini",
         user_message="hello",
-        assistant_response="hi",
     )
 
     assert title is None
 
 
 @pytest.mark.asyncio
-async def test_maybe_generate_session_title_skips_existing_title() -> None:
+async def test_maybe_generate_session_title_returns_none_when_no_user_message() -> None:
     store = SimpleNamespace(update_session_title_if_empty=AsyncMock())
     llm_client = SimpleNamespace()
-    session = SimpleNamespace(id=uuid4(), title="Existing", model="gpt-4o")
+    session = SimpleNamespace(id=uuid4(), title=None, model="gpt-4o")
 
     title = await maybe_generate_session_title(
         store=store,
         llm_client=llm_client,
         session=session,
-        messages=[{"role": "user", "content": "build a chart"}],
-        assistant_message={"role": "assistant", "content": "Done."},
+        messages=[{"role": "assistant", "content": "Hi"}],
         model="gpt-4o",
     )
 
@@ -188,7 +185,7 @@ async def test_maybe_generate_session_title_skips_existing_title() -> None:
 
 
 @pytest.mark.asyncio
-async def test_maybe_generate_session_title_sets_title_for_first_exchange(monkeypatch) -> None:
+async def test_maybe_generate_session_title_sets_title_for_first_message(monkeypatch) -> None:
     store = SimpleNamespace(update_session_title_if_empty=AsyncMock(return_value=True))
     llm_client = SimpleNamespace()
     session = SimpleNamespace(id=uuid4(), title=None, model="gpt-4o")
@@ -206,7 +203,6 @@ async def test_maybe_generate_session_title_sets_title_for_first_exchange(monkey
         llm_client=llm_client,
         session=session,
         messages=[{"role": "user", "content": "build a chart"}],
-        assistant_message={"role": "assistant", "content": "Done."},
         model="gpt-4o",
     )
 
@@ -248,7 +244,6 @@ async def test_maybe_generate_session_title_uses_summary_model_from_config(
         llm_client=main_client,
         session=session,
         messages=[{"role": "user", "content": "summarize the report"}],
-        assistant_message={"role": "assistant", "content": "Report summarized."},
         model="gpt-4o",
     )
 
@@ -280,7 +275,6 @@ async def test_maybe_generate_session_title_skips_later_exchanges(monkeypatch) -
             {"role": "assistant", "content": "answer"},
             {"role": "user", "content": "third"},
         ],
-        assistant_message={"role": "assistant", "content": "Done."},
         model="gpt-4o",
     )
 
@@ -290,11 +284,12 @@ async def test_maybe_generate_session_title_skips_later_exchanges(monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_harness_title_hook_delegates_best_effort(monkeypatch) -> None:
+async def test_harness_title_hook_runs_in_background(monkeypatch) -> None:
     harness = AgentHarness.__new__(AgentHarness)
     harness._store = SimpleNamespace()
     harness._llm = SimpleNamespace()
     harness._tenant = SimpleNamespace()
+    harness._background_tasks = set()
 
     maybe_generate = AsyncMock(return_value="Build Sales Chart")
     monkeypatch.setattr(
@@ -302,62 +297,152 @@ async def test_harness_title_hook_delegates_best_effort(monkeypatch) -> None:
         maybe_generate,
     )
     session = SimpleNamespace(id=uuid4(), title=None)
-    assistant_message = {"role": "assistant", "content": "Done."}
-    messages = [{"role": "user", "content": "build a chart"}, assistant_message]
+    messages = [{"role": "user", "content": "build a chart"}]
 
-    await harness._maybe_generate_title(
+    harness._maybe_generate_title(
         session=session,
         messages=messages,
-        assistant_message=assistant_message,
         model="gpt-4o",
     )
+
+    # The call should not have happened synchronously -- it was scheduled.
+    maybe_generate.assert_not_called()
+    assert len(harness._background_tasks) == 1
+
+    # Drain the background task and verify the underlying generator ran.
+    await asyncio.gather(*list(harness._background_tasks))
 
     maybe_generate.assert_awaited_once_with(
         store=harness._store,
         llm_client=harness._llm,
         session=session,
         messages=messages,
-        assistant_message=assistant_message,
         model="gpt-4o",
         tenant=harness._tenant,
     )
+    assert harness._background_tasks == set()
 
 
 @pytest.mark.asyncio
-async def test_loop_command_response_generates_title(monkeypatch) -> None:
+async def test_harness_title_hook_skips_when_title_already_set(monkeypatch) -> None:
     harness = AgentHarness.__new__(AgentHarness)
-    harness._store = SimpleNamespace(
-        emit_event=AsyncMock(return_value=42),
-        advance_harness_cursor=AsyncMock(),
-    )
+    harness._store = SimpleNamespace()
     harness._llm = SimpleNamespace()
     harness._tenant = SimpleNamespace()
-    harness._current_model = None
+    harness._background_tasks = set()
+
+    maybe_generate = AsyncMock(return_value="Whatever")
+    monkeypatch.setattr(
+        "surogates.harness.loop.maybe_generate_session_title",
+        maybe_generate,
+    )
+    session = SimpleNamespace(id=uuid4(), title="Existing")
+    messages = [{"role": "user", "content": "build a chart"}]
+
+    harness._maybe_generate_title(
+        session=session,
+        messages=messages,
+        model="gpt-4o",
+    )
+
+    assert harness._background_tasks == set()
+    maybe_generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wake_kicks_off_title_for_loop_command(monkeypatch) -> None:
+    """``wake()`` schedules title generation for /loop commands.
+
+    Regression cover for what ``test_loop_command_response_generates_title``
+    used to assert on the now-removed inline hook in ``_emit_loop_response``.
+    Title generation is owned by the wake-time trigger; /loop sessions must
+    still get titled even though the command short-circuits before the LLM
+    loop runs.
+    """
+    session_id = uuid4()
+    now = datetime.now(timezone.utc)
+    session = Session(
+        id=session_id,
+        user_id=uuid4(),
+        org_id=uuid4(),
+        agent_id="agent-1",
+        channel="web",
+        status="active",
+        config={},
+        title=None,
+        model="gpt-4o",
+        created_at=now,
+        updated_at=now,
+    )
+    lease = SessionLease(
+        session_id=session_id,
+        owner_id="test-worker",
+        lease_token=uuid4(),
+        expires_at=now + timedelta(seconds=30),
+    )
+    user_event = Event(
+        id=1,
+        session_id=session_id,
+        type="user.message",
+        data={"content": "/loop check bitcoin volatility"},
+        created_at=now,
+    )
+
+    rebuilt_messages = [
+        {"role": "user", "content": "/loop check bitcoin volatility"},
+    ]
+
+    harness = AgentHarness.__new__(AgentHarness)
+    harness._llm = AsyncMock()
+    harness._worker_id = "test-worker"
     harness._default_model = "gpt-4o"
+    harness._streaming_enabled = True
+    harness._memory_manager = None
+    harness._tenant = SimpleNamespace(org_id=session.org_id, user_id=session.user_id)
+    harness._session_factory = None
+    harness._prompt = MagicMock()
+    harness._background_tasks = set()
+
+    store = AsyncMock()
+    store.get_session = AsyncMock(return_value=session)
+    store.try_acquire_lease = AsyncMock(return_value=lease)
+    store.get_harness_cursor = AsyncMock(return_value=0)
+    store.get_events = AsyncMock(return_value=[user_event])
+    store.emit_event = AsyncMock(return_value=2)
+    store.release_lease = AsyncMock()
+    store.renew_lease = AsyncMock()
+    harness._store = store
+
+    harness._renew_lease_forever = AsyncMock()
+    harness._rebuild_messages = MagicMock(return_value=rebuilt_messages)
+    harness._engineer_context = AsyncMock(side_effect=lambda _s, _e, m: m)
+    harness._build_system_prompt = AsyncMock(return_value="")
+    harness._handle_loop_command = AsyncMock()
+
+    monkeypatch.setattr("surogates.trace.new_span", lambda: None)
+    monkeypatch.setattr(
+        "surogates.harness.loop.cleanup_dead_connections",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "surogates.harness.loop.resolve_agent_def",
+        AsyncMock(return_value=None),
+    )
+
     maybe_generate = AsyncMock(return_value="Track Bitcoin Volatility")
     monkeypatch.setattr(
         "surogates.harness.loop.maybe_generate_session_title",
         maybe_generate,
     )
-    session = SimpleNamespace(id=uuid4(), title=None, model="gpt-4o")
-    lease = SimpleNamespace(lease_token=uuid4())
 
-    await harness._emit_loop_response(
-        session,
-        lease,
-        "Loop scheduled.",
-        user_content="/loop check bitcoin volatility",
-    )
+    await harness.wake(session_id)
 
-    maybe_generate.assert_awaited_once_with(
-        store=harness._store,
-        llm_client=harness._llm,
-        session=session,
-        messages=[
-            {"role": "user", "content": "/loop check bitcoin volatility"},
-            {"role": "assistant", "content": "Loop scheduled."},
-        ],
-        assistant_message={"role": "assistant", "content": "Loop scheduled."},
-        model="gpt-4o",
-        tenant=harness._tenant,
-    )
+    # The /loop command short-circuit fired, not the LLM loop.
+    harness._handle_loop_command.assert_awaited_once()
+
+    # Title hook ran with the /loop user message and was drained on shutdown.
+    maybe_generate.assert_awaited_once()
+    call_kwargs = maybe_generate.await_args.kwargs
+    assert call_kwargs["messages"] == rebuilt_messages
+    assert call_kwargs["model"] == "gpt-4o"
+    assert harness._background_tasks == set()

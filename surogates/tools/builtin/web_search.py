@@ -235,7 +235,7 @@ def clean_base64_images(text: str) -> str:
 async def _tavily_request(endpoint: str, payload: dict) -> dict:
     """Send an async POST request to the Tavily API.
 
-    Auth is provided via ``api_key`` in the JSON body (no header-based auth).
+    Auth is provided via the documented ``Authorization: Bearer`` header.
     Raises ``ValueError`` if ``TAVILY_API_KEY`` is not set.
     """
     api_key = os.getenv("TAVILY_API_KEY")
@@ -244,11 +244,15 @@ async def _tavily_request(endpoint: str, payload: dict) -> dict:
             "TAVILY_API_KEY environment variable not set. "
             "Get your API key at https://app.tavily.com/home"
         )
-    payload["api_key"] = api_key
     url = f"{_TAVILY_BASE_URL}/{endpoint.lstrip('/')}"
     logger.info("Tavily %s request to %s", endpoint, url)
     async with httpx.AsyncClient() as client:
-        response = await client.post(url, json=payload, timeout=60)
+        response = await client.post(
+            url,
+            json=payload,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=60,
+        )
         response.raise_for_status()
         return response.json()
 

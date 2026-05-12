@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 _TITLE_PROMPT = (
     "Generate a short, descriptive title (3-7 words) for a conversation "
-    "that starts with the following exchange. Capture the main topic or "
+    "that opens with the following user message. Capture the main topic or "
     "intent. Return ONLY the title text, no quotes, no prefix, and no "
     "punctuation at the end."
 )
@@ -43,24 +43,16 @@ async def generate_session_title(
     llm_client: Any,
     model: str,
     user_message: str,
-    assistant_response: str,
     timeout: float = 30.0,
 ) -> str | None:
-    """Generate a short title from the first user/assistant exchange."""
+    """Generate a short title from the first user message."""
     user_snippet = (user_message or "")[:500]
-    assistant_snippet = (assistant_response or "")[:500]
-    if not user_snippet or not assistant_snippet:
+    if not user_snippet:
         return None
 
     messages = [
         {"role": "system", "content": _TITLE_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"User: {user_snippet}\n\n"
-                f"Assistant: {assistant_snippet}"
-            ),
-        },
+        {"role": "user", "content": user_snippet},
     ]
     kwargs = {
         "model": model,
@@ -133,21 +125,23 @@ async def maybe_generate_session_title(
     llm_client: Any,
     session: Session,
     messages: list[dict[str, Any]],
-    assistant_message: dict[str, Any],
     model: str,
     tenant: Any | None = None,
 ) -> str | None:
-    """Generate and persist a title when this is an early untitled exchange."""
-    assistant_content = _content_as_text(assistant_message.get("content", ""))
-    if not assistant_content.strip():
-        return None
-
+    """Generate and persist a title from the first user message."""
     user_messages = [
         _content_as_text(message.get("content", ""))
         for message in messages
         if message.get("role") == "user"
     ]
     if not user_messages or len(user_messages) > 2:
+        return None
+
+    first_user_message = next(
+        (text for text in user_messages if text.strip()),
+        "",
+    )
+    if not first_user_message.strip():
         return None
 
     title_client = llm_client
@@ -165,8 +159,7 @@ async def maybe_generate_session_title(
     title = await generate_session_title(
         llm_client=title_client,
         model=title_model,
-        user_message=user_messages[-1],
-        assistant_response=assistant_content,
+        user_message=first_user_message,
     )
     if not title:
         return None

@@ -159,6 +159,13 @@ def _get_skill_stager(request: Request) -> SkillStager:
     )
 
 
+def _resource_loader(request: Request):
+    """Build a resource loader from the active API settings."""
+    from surogates.tools.loader import ResourceLoader
+
+    return ResourceLoader.from_settings(request.app.state.settings)
+
+
 def _staging_preamble(skill_name: str, staged_at: str) -> str:
     """Return a directive preamble that tells the LLM how to address staged files.
 
@@ -230,9 +237,7 @@ async def _stage_skill_for_session(
     stager = _get_skill_stager(request)
 
     if skill_def.source == SKILL_SOURCE_PLATFORM:
-        from surogates.tools.loader import ResourceLoader
-
-        loader = ResourceLoader()
+        loader = _resource_loader(request)
         source_dir = loader.resolve_platform_skill_dir(skill_def.name)
         if source_dir is None:
             logger.warning(
@@ -344,9 +349,7 @@ async def list_skills(
         Optional filter: ``"skill"`` for regular skills, ``"expert"``
         for expert skills, or ``None`` (default) for all.
     """
-    from surogates.tools.loader import ResourceLoader
-
-    loader = ResourceLoader()
+    loader = _resource_loader(request)
     session_factory = request.app.state.session_factory
     async with session_factory() as db_session:
         all_skills = await loader.load_skills(tenant, db_session=db_session)
@@ -386,13 +389,9 @@ async def view_skill(
     preamble is prepended to ``content`` so the LLM can resolve relative
     paths (``scripts/foo.py``) against the staged directory.
     """
-    from surogates.tools.loader import (
-        ResourceLoader,
-        SKILL_SOURCE_PLATFORM,
-        SKILL_SOURCE_USER,
-    )
+    from surogates.tools.loader import SKILL_SOURCE_PLATFORM, SKILL_SOURCE_USER
 
-    loader = ResourceLoader()
+    loader = _resource_loader(request)
     session_factory = request.app.state.session_factory
     async with session_factory() as db_session:
         all_skills = await loader.load_skills(tenant, db_session=db_session)
@@ -469,15 +468,15 @@ async def read_skill_file(
     """
     raise_validation(validate_file_path(path))
 
-    from surogates.tools.loader import ResourceLoader, SKILL_SOURCE_PLATFORM
+    from surogates.tools.loader import SKILL_SOURCE_PLATFORM
 
     # Authorize the session up-front: any redirect-to-staged path writes
-        # into the session workspace, so ownership must be verified even though
+    # into the session workspace, so ownership must be verified even though
     # the caller may only be reading a text file in the end.
     if session_id is not None:
         await _authorize_session_for_staging(request, tenant, session_id)
 
-    loader = ResourceLoader()
+    loader = _resource_loader(request)
     session_factory = request.app.state.session_factory
     async with session_factory() as db_session:
         all_skills = await loader.load_skills(tenant, db_session=db_session)

@@ -464,7 +464,7 @@ class TestSessionLifecycle:
         harness._prefetch_memory = AsyncMock(return_value="")
         harness._maybe_consult_required_expert = AsyncMock(return_value=None)
         harness._maybe_route_final_response_to_inbox = AsyncMock(return_value=None)
-        harness._maybe_generate_title = AsyncMock(return_value=None)
+        harness._maybe_generate_title = MagicMock(return_value=None)
         harness._promote_fenced_artifacts = AsyncMock(return_value=None)
         harness._complete_session = AsyncMock(return_value=None)
         harness._end_turn = AsyncMock(return_value=None)

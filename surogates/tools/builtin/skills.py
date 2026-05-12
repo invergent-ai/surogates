@@ -135,11 +135,24 @@ def register(registry: ToolRegistry) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _settings_from_kwargs(kwargs: dict[str, Any]) -> Any | None:
+    settings = kwargs.get("settings")
+    if settings is not None:
+        return settings
+    try:
+        from surogates.config import load_settings
+
+        return load_settings()
+    except Exception:
+        logger.debug("Failed to load settings for skill directory lookup", exc_info=True)
+        return None
+
+
 async def _load_all_skills(tenant: Any, **kwargs: Any) -> list:
     """Load skills from all layers, using DB when a session factory is available."""
     from surogates.tools.loader import ResourceLoader
 
-    loader = ResourceLoader()
+    loader = ResourceLoader.from_settings(_settings_from_kwargs(kwargs))
     session_factory = kwargs.get("session_factory")
     if session_factory is not None:
         async with session_factory() as db_session:
@@ -241,8 +254,6 @@ async def _skill_view_handler(
             ensure_ascii=False,
         )
 
-    from surogates.tools.loader import PLATFORM_SKILLS_DIR
-
     skills = await _load_all_skills(**kwargs)
 
     # Find the requested skill by name
@@ -265,7 +276,11 @@ async def _skill_view_handler(
         )
 
     # Resolve the skill directory on disk
-    skill_dir = _resolve_skill_dir(name, tenant)
+    skill_dir = _resolve_skill_dir(
+        name,
+        tenant,
+        settings=_settings_from_kwargs(kwargs),
+    )
     if skill_dir is None:
         return json.dumps(
             {
@@ -485,7 +500,12 @@ async def _skill_view_handler(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_skill_dir(name: str, tenant: Any) -> Path | None:
+def _resolve_skill_dir(
+    name: str,
+    tenant: Any,
+    *,
+    settings: Any | None = None,
+) -> Path | None:
     """Find the on-disk directory for a skill by name.
 
     Searches user, org-shared, and platform layers in precedence order.
@@ -495,11 +515,14 @@ def _resolve_skill_dir(name: str, tenant: Any) -> Path | None:
     asset_root = Path(tenant.asset_root)
     org_id = str(tenant.org_id)
     user_id = str(tenant.user_id)
+    platform_skills_dir = getattr(settings, "platform_skills_dir", None)
+    if not platform_skills_dir:
+        platform_skills_dir = PLATFORM_SKILLS_DIR
 
     search_dirs = [
         asset_root / org_id / "users" / user_id / "skills",
         asset_root / org_id / "shared" / "skills",
-        Path(PLATFORM_SKILLS_DIR),
+        Path(platform_skills_dir),
     ]
 
     for skills_dir in search_dirs:

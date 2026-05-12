@@ -10,8 +10,7 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "env": {
-                "SUROGATES_CONFIG": "${workspaceFolder}/config.dev.yaml",
-                "SUROGATES_PLATFORM_SKILLS_DIR": "${workspaceFolder}/.dev/skills"
+                "SUROGATES_CONFIG": "${workspaceFolder}/config.dev.yaml"
             }
         },
         {

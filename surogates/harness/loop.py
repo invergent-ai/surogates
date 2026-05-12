@@ -218,6 +218,13 @@ _LEASE_TTL_SECONDS: int = 60
 # ``_LEASE_TTL_SECONDS`` so a single missed tick still leaves the lease alive.
 _LEASE_RENEWAL_INTERVAL_SECONDS: float = 20.0
 
+# Upper bound on how long ``wake()`` will wait for fire-and-forget background
+# tasks (e.g. title generation) before releasing the session lease.  The drain
+# is best-effort: anything still pending after this is cancelled so the worker
+# can release the lease promptly.  Slightly longer than the title generator's
+# own 30 s timeout to give it room to finish cleanly.
+_BACKGROUND_DRAIN_TIMEOUT_SECONDS: float = 35.0
+
 # Retry / resilience constants
 _MAX_LENGTH_CONTINUATIONS: int = 3
 _MAX_CONSECUTIVE_INVALID_TOOL_CALLS: int = 3
@@ -758,6 +765,11 @@ class AgentHarness:
         self._current_model: str | None = None
         self._default_model: str = default_model
 
+        # Fire-and-forget background tasks (title generation, etc.).
+        # Tasks are tracked here to prevent garbage collection while pending
+        # and are discarded automatically on completion.
+        self._background_tasks: set[asyncio.Task] = set()
+
     # ------------------------------------------------------------------
     # Interrupt API (thread-safe)
     # ------------------------------------------------------------------
@@ -938,6 +950,16 @@ class AgentHarness:
             # 6. Rebuild the message list from the full event history.
             messages = self._rebuild_messages(all_events)
 
+            # 6a. Kick off title generation in the background as soon as we
+            # see the user's first message.  Runs in parallel with context
+            # engineering and the main LLM call, so the chat turn isn't
+            # delayed waiting for the title.
+            self._maybe_generate_title(
+                session=session,
+                messages=messages,
+                model=session.model or self._default_model,
+            )
+
             # 7. Compress context if needed.
             messages = await self._engineer_context(
                 session, all_events, messages,
@@ -1062,6 +1084,13 @@ class AgentHarness:
                 await renewal_task
             except (asyncio.CancelledError, Exception):
                 pass
+
+            # Best-effort drain of fire-and-forget background tasks (title
+            # generation, etc.) so they don't get cancelled mid-LLM-call when
+            # the worker turns over.  Bounded by
+            # ``_BACKGROUND_DRAIN_TIMEOUT_SECONDS``; anything still pending is
+            # cancelled so lease release isn't delayed by a hung task.
+            await self._drain_background_tasks(session_id)
 
             # 10. Always release the lease.
             try:
@@ -1758,12 +1787,6 @@ class AgentHarness:
                     messages.pop()
 
                 messages.append(assistant_message)
-                await self._maybe_generate_title(
-                    session=session,
-                    messages=messages,
-                    assistant_message=assistant_message,
-                    model=model_id,
-                )
 
                 # If the model emitted an SVG / HTML as a fenced code
                 # block instead of calling ``create_artifact``, promote
@@ -3651,16 +3674,6 @@ class AgentHarness:
             EventType.LLM_RESPONSE,
             {"message": assistant_message},
         )
-        if user_content:
-            await self._maybe_generate_title(
-                session=session,
-                messages=[
-                    {"role": "user", "content": user_content},
-                    assistant_message,
-                ],
-                assistant_message=assistant_message,
-                model=self._current_model or session.model or self._default_model,
-            )
         await self._store.advance_harness_cursor(
             session.id,
             through_event_id=event_id,
@@ -3845,22 +3858,88 @@ class AgentHarness:
                 session.id,
             )
 
-    async def _maybe_generate_title(
+    async def _drain_background_tasks(self, session_id: UUID) -> None:
+        """Wait for fire-and-forget background tasks to finish before lease release.
+
+        Bounded by ``_BACKGROUND_DRAIN_TIMEOUT_SECONDS`` so a hung task can't
+        delay lease release indefinitely.  Anything still pending after the
+        timeout is cancelled; exceptions are swallowed because these tasks are
+        best-effort by design.
+
+        Tasks are dropped from ``self._background_tasks`` here instead of
+        relying on the per-task ``done_callback`` to run later — the callback
+        is scheduled separately on the loop and may not have fired by the time
+        the caller inspects the set.
+        """
+        if not self._background_tasks:
+            return
+        pending = list(self._background_tasks)
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*pending, return_exceptions=True),
+                timeout=_BACKGROUND_DRAIN_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            still_pending = [task for task in pending if not task.done()]
+            logger.warning(
+                "Background drain timed out for session %s; cancelling %d task(s)",
+                session_id,
+                len(still_pending),
+            )
+            for task in still_pending:
+                task.cancel()
+            await asyncio.gather(*still_pending, return_exceptions=True)
+        finally:
+            for task in pending:
+                self._background_tasks.discard(task)
+
+    def _maybe_generate_title(
         self,
         *,
         session: Session,
         messages: list[dict],
-        assistant_message: dict,
         model: str,
     ) -> None:
-        """Best-effort auto-title generation for early user exchanges."""
+        """Schedule auto-title generation as a fire-and-forget background task.
+
+        Title generation issues its own LLM call which can take several seconds.
+        Running it inline would block the chat turn (delaying the
+        SESSION_COMPLETE event the UI uses to clear the busy indicator).
+        It is triggered as soon as the harness sees the user's first message,
+        so the title can land in parallel with the main LLM response.
+
+        The task writes the title atomically via
+        ``update_session_title_if_empty``; the frontend picks it up on the next
+        session refresh.  Messages are snapshotted so the chat thread can keep
+        mutating the live list without racing the background reader.
+        """
+        if (session.title or "").strip():
+            return
+        task = asyncio.create_task(
+            self._run_title_generation(
+                session=session,
+                messages=list(messages),
+                model=model,
+            ),
+            name=f"title-gen-{session.id}",
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _run_title_generation(
+        self,
+        *,
+        session: Session,
+        messages: list[dict],
+        model: str,
+    ) -> None:
+        """Body of the background title-generation task."""
         try:
             title = await maybe_generate_session_title(
                 store=self._store,
                 llm_client=self._llm,
                 session=session,
                 messages=messages,
-                assistant_message=assistant_message,
                 model=model,
                 tenant=self._tenant,
             )

@@ -217,6 +217,22 @@ class ResourceLoader:
             else PLATFORM_AGENTS_DIR
         )
 
+    @classmethod
+    def from_settings(cls, settings: Any | None) -> "ResourceLoader":
+        """Build a loader from a settings object that may carry platform-dir overrides.
+
+        Reads ``platform_skills_dir``, ``platform_mcp_dir``, and
+        ``platform_agents_dir`` attributes when present; missing or None
+        attributes fall through to the module-level defaults.  ``None``
+        settings yields a loader configured with all defaults — convenient
+        for paths where settings could not be loaded.
+        """
+        return cls(
+            platform_skills_dir=getattr(settings, "platform_skills_dir", None),
+            platform_mcp_dir=getattr(settings, "platform_mcp_dir", None),
+            platform_agents_dir=getattr(settings, "platform_agents_dir", None),
+        )
+
     # ------------------------------------------------------------------
     # Platform skill directory resolution
     # ------------------------------------------------------------------
