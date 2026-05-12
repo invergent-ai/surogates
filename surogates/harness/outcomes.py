@@ -162,6 +162,29 @@ def start_outcome(
     )
 
 
+def build_defined_outcome_from_event(
+    *,
+    description: str,
+    rubric: str,
+    max_iterations: int | None,
+    settings: Any,
+) -> tuple[OutcomeState, str]:
+    """Build an outcome from a canonical ``user.define_outcome`` event."""
+    from datetime import datetime, timezone
+
+    if not (rubric or "").strip():
+        raise ValueError("rubric is required")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    state = start_outcome(
+        description,
+        rubric=rubric,
+        max_iterations=max_iterations
+        or getattr(settings, "max_iterations", DEFAULT_MAX_ITERATIONS),
+        now_iso=now_iso,
+    )
+    return state, now_iso
+
+
 def build_continuation_prompt(state: OutcomeState) -> str:
     feedback = (
         state.last_feedback
