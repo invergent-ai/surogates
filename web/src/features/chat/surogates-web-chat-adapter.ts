@@ -20,6 +20,7 @@ import { listSkills, type SkillSummary } from "@/api/skills";
 import * as sessionsApi from "@/api/sessions";
 import * as workspaceApi from "@/api/workspace";
 import { getAuthToken } from "@/features/auth";
+import { useAppStore } from "@/stores/app-store";
 import type { ScheduledWorkItem, Session } from "@/types/session";
 
 const DEFAULT_OUTCOME_RUBRIC =
@@ -276,7 +277,7 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     );
     url.searchParams.set("after", String(input.after));
     if (token) url.searchParams.set("token", token);
-    return wrapEventSource(new EventSource(url.toString()));
+    return wrapEventSource(new EventSource(url.toString()), input.sessionId);
   },
 
   browserLiveViewUrl(sessionId) {
@@ -370,8 +371,27 @@ function deriveRunKind(
   return null;
 }
 
-function wrapEventSource(source: EventSource): AgentChatEventStream {
+function wrapEventSource(
+  source: EventSource,
+  sessionId: string,
+): AgentChatEventStream {
   let errorHandler: (() => void) | null = null;
+
+  // Side-channel listener for ``session.title_updated``.  Sidebar/title state
+  // lives in the zustand store, not in the AgentChat library, so we patch it
+  // from here instead of plumbing a new event type through the chat protocol.
+  source.addEventListener("session.title_updated", (event) => {
+    const message = event as MessageEvent<string>;
+    try {
+      const payload = JSON.parse(message.data) as { title?: unknown };
+      if (typeof payload.title === "string" && payload.title.length > 0) {
+        useAppStore.getState().updateSessionTitle(sessionId, payload.title);
+      }
+    } catch {
+      // Malformed payload — ignore.
+    }
+  });
+
   return {
     addEventListener(
       type: AgentChatEventType,

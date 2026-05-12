@@ -4215,8 +4215,10 @@ class AgentHarness:
         so the title can land in parallel with the main LLM response.
 
         The task writes the title atomically via
-        ``update_session_title_if_empty``; the frontend picks it up on the next
-        session refresh.  Messages are snapshotted so the chat thread can keep
+        ``update_session_title_if_empty`` and emits
+        :data:`EventType.SESSION_TITLE_UPDATED` on success so the per-session
+        SSE stream surfaces the new title without waiting for a manual session
+        list refresh.  Messages are snapshotted so the chat thread can keep
         mutating the live list without racing the background reader.
         """
         if (session.title or "").strip():
@@ -4239,7 +4241,12 @@ class AgentHarness:
         messages: list[dict],
         model: str,
     ) -> None:
-        """Body of the background title-generation task."""
+        """Body of the background title-generation task.
+
+        ``maybe_generate_session_title`` returns the title only when the DB
+        write actually replaced an empty value, so emitting the event from this
+        branch avoids double-emission when two workers race the same session.
+        """
         try:
             title = await maybe_generate_session_title(
                 store=self._store,
@@ -4250,9 +4257,18 @@ class AgentHarness:
                 tenant=self._tenant,
             )
             if title:
+                await self._store.emit_event(
+                    session.id,
+                    EventType.SESSION_TITLE_UPDATED,
+                    {"title": title},
+                )
                 logger.debug("Auto-generated title for session %s: %s", session.id, title)
         except Exception:
-            logger.debug("Auto-title generation skipped for %s", session.id, exc_info=True)
+            logger.warning(
+                "Auto-title generation failed for session %s",
+                session.id,
+                exc_info=True,
+            )
 
     async def _maybe_emit_progress_checkin(
         self,

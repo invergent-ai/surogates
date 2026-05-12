@@ -4,15 +4,11 @@ description: "Infographics: 21 layouts x 21 styles (信息图, 可视化)."
 version: 1.56.1
 author: 宝玉 (JimLiu)
 license: MIT
-metadata:
-  hermes:
-    tags: [infographic, visual-summary, creative, image-generation]
-    homepage: https://github.com/JimLiu/baoyu-skills#baoyu-infographic
 ---
 
 # Infographic Generator
 
-Adapted from [baoyu-infographic](https://github.com/JimLiu/baoyu-skills) for Hermes Agent's tool ecosystem.
+Adapted from [baoyu-infographic](https://github.com/JimLiu/baoyu-skills) for Surogate Agent's tool ecosystem.
 
 Two dimensions: **layout** (information structure) × **style** (visual aesthetics). Freely combine any layout with any style.
 

@@ -29,7 +29,7 @@ import urllib.request
 # Constants
 # ---------------------------------------------------------------------------
 
-USER_AGENT = "HermesAgent/1.0 (contact: hermes@agent.ai)"
+USER_AGENT = "SurogateAgent/1.0 (contact: maintainers@invergent.ai)"
 DATA_SOURCE = "OpenStreetMap/Nominatim"
 
 NOMINATIM_SEARCH  = "https://nominatim.openstreetmap.org/search"

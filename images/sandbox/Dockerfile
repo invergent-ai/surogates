@@ -40,7 +40,8 @@ RUN uv venv /opt/venv \
         python-pptx \
         markitdown[pptx] \
         Pillow \
-        pyfiglet
+        pyfiglet \
+        nano-pdf
 
 # ── Stage 2: Final image ─────────────────────────────────────────────
 FROM python:3.12-slim
@@ -59,6 +60,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tini \
         ca-certificates \
         gnupg \
+        ffmpeg \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
     && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
@@ -66,7 +68,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Global npm packages ─────────────────────────────────────────────
-RUN npm install -g docx puppeteer react-icons react react-dom sharp pptxgenjs @anthropic-ai/claude-code pnpm \
+RUN npm install -g docx puppeteer react-icons react react-dom sharp pptxgenjs @anthropic-ai/claude-code opencode-ai@latest pnpm \
     && npm cache clean --force
 
 # ── Python virtualenv ────────────────────────────────────────────────

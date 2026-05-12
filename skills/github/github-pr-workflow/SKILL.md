@@ -2,12 +2,8 @@
 name: github-pr-workflow
 description: "GitHub PR lifecycle: branch, commit, open, CI, merge."
 version: 1.1.0
-author: Hermes Agent
+author: Surogate Agent
 license: MIT
-metadata:
-  hermes:
-    tags: [GitHub, Pull-Requests, CI/CD, Git, Automation, Merge]
-    related_skills: [github-auth, github-code-review]
 ---
 
 # GitHub Pull Request Workflow
@@ -29,8 +25,8 @@ else
   AUTH="git"
   # Ensure we have a token for API calls
   if [ -z "$GITHUB_TOKEN" ]; then
-    if [ -f ~/.hermes/.env ] && grep -q "^GITHUB_TOKEN=" ~/.hermes/.env; then
-      GITHUB_TOKEN=$(grep "^GITHUB_TOKEN=" ~/.hermes/.env | head -1 | cut -d= -f2 | tr -d '\n\r')
+    if [ -f ~/.surogate/.env ] && grep -q "^GITHUB_TOKEN=" ~/.surogate/.env; then
+      GITHUB_TOKEN=$(grep "^GITHUB_TOKEN=" ~/.surogate/.env | head -1 | cut -d= -f2 | tr -d '\n\r')
     elif grep -q "github.com" ~/.git-credentials 2>/dev/null; then
       GITHUB_TOKEN=$(grep "github.com" ~/.git-credentials 2>/dev/null | head -1 | sed 's|https://[^:]*:\([^@]*\)@.*|\1|')
     fi

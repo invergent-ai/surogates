@@ -21,6 +21,7 @@ export type SessionsSlice = {
   removeSession: (sessionId: string) => void;
   setActiveSession: (sessionId: string | null) => void;
   upsertSession: (session: Session) => void;
+  updateSessionTitle: (sessionId: string, title: string) => void;
 };
 
 export const createSessionsSlice: StateCreator<
@@ -103,4 +104,15 @@ export const createSessionsSlice: StateCreator<
         ),
       };
     }),
+
+  // Patches just ``title`` on a row already in the list so the
+  // ``session.title_updated`` SSE event doesn't reorder the sidebar or steal
+  // the active session.  Rows we haven't fetched yet are ignored — the next
+  // ``fetchSessions`` will pull the persisted title anyway.
+  updateSessionTitle: (sessionId, title) =>
+    set((state) => ({
+      sessions: state.sessions.map((candidate) =>
+        candidate.id === sessionId ? { ...candidate, title } : candidate,
+      ),
+    })),
 });

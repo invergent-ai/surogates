@@ -286,7 +286,7 @@ async def test_maybe_generate_session_title_skips_later_exchanges(monkeypatch) -
 @pytest.mark.asyncio
 async def test_harness_title_hook_runs_in_background(monkeypatch) -> None:
     harness = AgentHarness.__new__(AgentHarness)
-    harness._store = SimpleNamespace()
+    harness._store = SimpleNamespace(emit_event=AsyncMock(return_value=42))
     harness._llm = SimpleNamespace()
     harness._tenant = SimpleNamespace()
     harness._background_tasks = set()
@@ -320,7 +320,44 @@ async def test_harness_title_hook_runs_in_background(monkeypatch) -> None:
         model="gpt-4o",
         tenant=harness._tenant,
     )
+    # A successful title write must emit SESSION_TITLE_UPDATED so the SSE
+    # stream can patch the sidebar without an explicit refetch.
+    from surogates.session.events import EventType
+
+    harness._store.emit_event.assert_awaited_once_with(
+        session.id,
+        EventType.SESSION_TITLE_UPDATED,
+        {"title": "Build Sales Chart"},
+    )
     assert harness._background_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_harness_title_hook_skips_event_when_no_title(monkeypatch) -> None:
+    """No title generated → no SESSION_TITLE_UPDATED event."""
+    harness = AgentHarness.__new__(AgentHarness)
+    harness._store = SimpleNamespace(emit_event=AsyncMock())
+    harness._llm = SimpleNamespace()
+    harness._tenant = SimpleNamespace()
+    harness._background_tasks = set()
+
+    maybe_generate = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        "surogates.harness.loop.maybe_generate_session_title",
+        maybe_generate,
+    )
+    session = SimpleNamespace(id=uuid4(), title=None)
+    messages = [{"role": "user", "content": "build a chart"}]
+
+    harness._maybe_generate_title(
+        session=session,
+        messages=messages,
+        model="gpt-4o",
+    )
+    await asyncio.gather(*list(harness._background_tasks))
+
+    maybe_generate.assert_awaited_once()
+    harness._store.emit_event.assert_not_called()
 
 
 @pytest.mark.asyncio

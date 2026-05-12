@@ -5,11 +5,6 @@ description: "Generate project ideas via creative constraints."
 version: 1.0.0
 author: SHL0MS
 license: MIT
-metadata:
-  hermes:
-    tags: [Creative, Ideation, Projects, Brainstorming, Inspiration]
-    category: creative
-    requires_toolsets: []
 ---
 
 # Creative Ideation

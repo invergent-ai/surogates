@@ -2,12 +2,8 @@
 name: github-code-review
 description: "Review PRs: diffs, inline comments via gh or REST."
 version: 1.1.0
-author: Hermes Agent
+author: Surogate Agent
 license: MIT
-metadata:
-  hermes:
-    tags: [GitHub, Code-Review, Pull-Requests, Git, Quality]
-    related_skills: [github-auth, github-pr-workflow]
 ---
 
 # GitHub Code Review
@@ -27,8 +23,8 @@ if command -v gh &>/dev/null && gh auth status &>/dev/null; then
 else
   AUTH="git"
   if [ -z "$GITHUB_TOKEN" ]; then
-    if [ -f ~/.hermes/.env ] && grep -q "^GITHUB_TOKEN=" ~/.hermes/.env; then
-      GITHUB_TOKEN=$(grep "^GITHUB_TOKEN=" ~/.hermes/.env | head -1 | cut -d= -f2 | tr -d '\n\r')
+    if [ -f ~/.surogate/.env ] && grep -q "^GITHUB_TOKEN=" ~/.surogate/.env; then
+      GITHUB_TOKEN=$(grep "^GITHUB_TOKEN=" ~/.surogate/.env | head -1 | cut -d= -f2 | tr -d '\n\r')
     elif grep -q "github.com" ~/.git-credentials 2>/dev/null; then
       GITHUB_TOKEN=$(grep "github.com" ~/.git-credentials 2>/dev/null | head -1 | sed 's|https://[^:]*:\([^@]*\)@.*|\1|')
     fi
@@ -261,7 +257,7 @@ curl -s -X POST \
   -d "{
     \"commit_id\": \"$HEAD_SHA\",
     \"event\": \"COMMENT\",
-    \"body\": \"Code review from Hermes Agent\",
+    \"body\": \"Code review from Surogate Agent\",
     \"comments\": [
       {\"path\": \"src/auth.py\", \"line\": 45, \"body\": \"Use parameterized queries to prevent SQL injection.\"},
       {\"path\": \"src/models/user.py\", \"line\": 23, \"body\": \"Hash passwords with bcrypt before storing.\"},
@@ -334,7 +330,7 @@ When the user asks you to "review PR #N", "look at this PR", or gives you a PR U
 ### Step 1: Set up environment
 
 ```bash
-source "${HERMES_HOME:-$HOME/.hermes}/skills/github/github-auth/scripts/gh-env.sh"
+source "${HOME}/.surogate/skills/github/github-auth/scripts/gh-env.sh"
 # Or run the inline setup block from the top of this skill
 ```
 
@@ -408,7 +404,7 @@ Collect your findings and submit them as a formal review with inline comments.
 **With gh:**
 ```bash
 # If no issues — approve
-gh pr review $PR_NUMBER --approve --body "Reviewed by Hermes Agent. Code looks clean — good test coverage, no security concerns."
+gh pr review $PR_NUMBER --approve --body "Reviewed by Surogate Agent. Code looks clean — good test coverage, no security concerns."
 
 # If issues found — request changes with inline comments
 gh pr review $PR_NUMBER --request-changes --body "Found a few issues — see inline comments."
@@ -427,7 +423,7 @@ curl -s -X POST \
   -d "{
     \"commit_id\": \"$HEAD_SHA\",
     \"event\": \"REQUEST_CHANGES\",
-    \"body\": \"## Hermes Agent Review\n\nFound 2 issues, 1 suggestion. See inline comments.\",
+    \"body\": \"## Surogate Agent Review\n\nFound 2 issues, 1 suggestion. See inline comments.\",
     \"comments\": [
       {\"path\": \"src/auth.py\", \"line\": 45, \"body\": \"🔴 **Critical:** User input passed directly to SQL query — use parameterized queries.\"},
       {\"path\": \"src/models.py\", \"line\": 23, \"body\": \"⚠️ **Warning:** Password stored without hashing.\"},
@@ -461,7 +457,7 @@ gh pr comment $PR_NUMBER --body "$(cat <<'EOF'
 - Good error handling in the middleware layer
 
 ---
-*Reviewed by Hermes Agent*
+*Reviewed by Surogate Agent*
 EOF
 )"
 ```

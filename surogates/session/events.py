@@ -40,6 +40,10 @@ class EventType(str, Enum):
     SESSION_COMPLETE = "session.complete"
     SESSION_FAIL = "session.fail"
     SESSION_RESET = "session.reset"
+    # Auto-title lands on ``sessions.title`` outside the chat-turn event flow.
+    # Emitting this lets SSE subscribers patch the title in place instead of
+    # waiting for an unrelated refresh.
+    SESSION_TITLE_UPDATED = "session.title_updated"
 
     # Outcome-oriented goal loop
     USER_DEFINE_OUTCOME = "user.define_outcome"
