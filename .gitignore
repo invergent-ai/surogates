@@ -33,3 +33,4 @@ dist/**
 config.dev.yaml
 .venv/
 node_modules/**
+.vscode/launch.json
