@@ -32,6 +32,7 @@ import {
 import { Shimmer } from "../ai-elements/shimmer";
 import { BrowserActivityGroup } from "../browser/browser-activity-group";
 import { ToolCallBlock } from "./tool-call-block";
+import { WebSearchGroupBlock } from "./tools/web-search-tool";
 import { statusColorClass, effectiveStatus, toolErrorSummary, parseArgs } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
 import { ChatComposer } from "./chat-composer";
@@ -77,6 +78,7 @@ type TimelineEntry =
   | { kind: "reasoning"; key: string; reasoning: string; isStreaming: boolean }
   | { kind: "tool"; key: string; tc: ToolCallInfo; resolvedArtifactName?: string }
   | { kind: "browser_activity"; key: string; calls: ToolCallInfo[] }
+  | { kind: "web_search_group"; key: string; calls: ToolCallInfo[] }
   | { kind: "text"; key: string; content: string }
   | { kind: "thinking"; key: string }
   | { kind: "skill_invoked"; key: string; skill: string; stagedAt: string | null }
@@ -228,6 +230,37 @@ function groupBrowserActivityEntries(entries: TimelineEntry[]): TimelineEntry[] 
 
 function isBrowserToolCall(call: ToolCallInfo): boolean {
   return call.toolName.startsWith("browser_");
+}
+
+function groupWebSearchEntries(entries: TimelineEntry[]): TimelineEntry[] {
+  const grouped: TimelineEntry[] = [];
+  let buffer: ToolCallInfo[] = [];
+
+  const flush = () => {
+    if (buffer.length === 0) return;
+    if (buffer.length === 1) {
+      grouped.push({ kind: "tool", key: buffer[0].id, tc: buffer[0] });
+    } else {
+      grouped.push({
+        kind: "web_search_group",
+        key: `web-search-${buffer[0].id}-${buffer[buffer.length - 1].id}`,
+        calls: buffer,
+      });
+    }
+    buffer = [];
+  };
+
+  for (const entry of entries) {
+    if (entry.kind === "tool" && entry.tc.toolName === "web_search") {
+      buffer.push(entry.tc);
+      continue;
+    }
+    flush();
+    grouped.push(entry);
+  }
+
+  flush();
+  return grouped;
 }
 
 /** A run of consecutive messages grouped by role.
@@ -484,6 +517,27 @@ function TimelineEntryItem({
     );
   }
 
+  if (entry.kind === "web_search_group") {
+    const allComplete = entry.calls.every((tc) => tc.status === "complete");
+    const anyRunning = entry.calls.some((tc) => tc.status === "running");
+    const indicatorClass = anyRunning
+      ? "bg-emerald-500 animate-pulse"
+      : allComplete
+        ? "bg-emerald-500"
+        : "bg-red-500";
+    return (
+      <TimelineItem step={step}>
+        <TimelineHeader>
+          <TimelineSeparator style={{ backgroundColor: "var(--color-border)" }} />
+          <TimelineIndicator className={cn("size-2 border-none", indicatorClass)} />
+        </TimelineHeader>
+        <TimelineContent>
+          <WebSearchGroupBlock tcs={entry.calls} />
+        </TimelineContent>
+      </TimelineItem>
+    );
+  }
+
   if (entry.kind === "text") {
     return (
       <TimelineItem step={step}>
@@ -586,6 +640,7 @@ function AssistantGroup({
     entries.push(...messageToEntries(messages[i], isLast, artifactFallbacks));
   }
   entries = groupBrowserActivityEntries(entries);
+  entries = groupWebSearchEntries(entries);
 
   // Whenever this is the tail assistant group and the session is still
   // running, append a "Working on it..." row unless something visible is
