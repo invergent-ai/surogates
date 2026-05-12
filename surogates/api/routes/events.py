@@ -273,19 +273,13 @@ async def stream_events(
     if not tenant.owns_session(session_check.org_id, session_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
 
-    if session_check and session_check.status in _TERMINAL_STATUSES:
-        remaining = await asyncio.shield(
-            store.get_events(session_id, after=after, limit=1)
-        )
-        if not remaining:
-            # Nothing left to deliver — close permanently.
-            async def _terminal_generator():  # noqa: ANN202
-                yield {
-                    "event": "session.done",
-                    "data": json.dumps({"reason": session_check.status, "status": session_check.status}),
-                    "retry": 0,  # tell EventSource not to reconnect
-                }
-            return EventSourceResponse(_terminal_generator())
+    # Pre-loop fast-close for terminal sessions used to live here, but it
+    # raced with concurrent POST /messages: a message landing between the
+    # ``after`` check and the close meant the SESSION_RESUME pubsub publish
+    # had no subscriber, and the new turn never reached the client.
+    # ``event_generator`` now subscribes to pubsub first and applies a brief
+    # grace window before declaring a terminal session done, so the single
+    # path is correct for both fresh and historical opens.
 
     # Try to get Redis for pub/sub notifications (faster than polling).
     redis = getattr(request.app.state, "redis", None)
@@ -371,14 +365,64 @@ async def stream_events(
                         return
 
                     if session.status in _TERMINAL_STATUSES:
-                        yield {
-                            "event": "session.done",
-                            "data": json.dumps(
-                                {"reason": session.status, "status": session.status}
-                            ),
-                            "retry": 0,  # tell EventSource not to reconnect
-                        }
-                        return
+                        # Race guard: a POST /messages currently in flight
+                        # commits SESSION_RESUME and publishes on
+                        # ``surogates:session:{id}``. We subscribed above so
+                        # any publish issued after that point is queued. Wait
+                        # briefly before declaring the session done, then
+                        # re-check status — the POST may have flipped it
+                        # back to active.
+                        #
+                        # Loop on get_message until a real publish or the
+                        # deadline: redis-py queues the subscribe-confirm
+                        # message and ``get_message(ignore_subscribe_messages=
+                        # True)`` consumes it returning None, which without a
+                        # loop would collapse our grace window to zero on the
+                        # very first call after subscribe.
+                        if pubsub is not None:
+                            loop = asyncio.get_event_loop()
+                            deadline = loop.time() + _POLL_INTERVAL
+                            while loop.time() < deadline:
+                                remaining = max(0.0, deadline - loop.time())
+                                try:
+                                    msg = await asyncio.wait_for(
+                                        pubsub.get_message(
+                                            ignore_subscribe_messages=True,
+                                            timeout=remaining,
+                                        ),
+                                        timeout=remaining + 0.2,
+                                    )
+                                except (asyncio.TimeoutError, Exception):
+                                    break
+                                if msg is not None:
+                                    break
+                            try:
+                                session = await asyncio.shield(
+                                    store.get_session(session_id)
+                                )
+                            except SessionNotFoundError:
+                                yield {
+                                    "event": "session.done",
+                                    "data": json.dumps(
+                                        {"reason": "session_not_found"},
+                                    ),
+                                    "retry": 0,
+                                }
+                                return
+
+                        if session.status in _TERMINAL_STATUSES:
+                            yield {
+                                "event": "session.done",
+                                "data": json.dumps(
+                                    {"reason": session.status, "status": session.status}
+                                ),
+                                "retry": 0,  # tell EventSource not to reconnect
+                            }
+                            return
+                        # Status flipped to active during grace window -- loop
+                        # back so the next iteration fetches the new events.
+                        elapsed += _POLL_INTERVAL
+                        continue
 
                     # Wait for a Redis notification or fall back to polling.
                     if pubsub is not None:
