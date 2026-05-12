@@ -75,6 +75,16 @@ class StorageBackend(Protocol):
         """Delete an object.  No-op if it doesn't exist."""
         ...
 
+    async def delete_prefix(self, bucket: str, prefix: str) -> int:
+        """Delete every object whose key starts with *prefix*.
+
+        Bulk equivalent of ``list_keys`` + per-key ``delete``.  On S3 this
+        uses ``delete_objects`` (up to 1000 keys per call); on local FS
+        it rmtree's the prefix directory.  Returns the number of objects
+        deleted.
+        """
+        ...
+
     async def list_keys(self, bucket: str, prefix: str = "") -> list[str]:
         """List object keys under *prefix*.  Returns relative keys."""
         ...
@@ -184,6 +194,24 @@ class LocalBackend:
             while parent != bucket_root and parent.exists() and not any(parent.iterdir()):
                 parent.rmdir()
                 parent = parent.parent
+
+    async def delete_prefix(self, bucket: str, prefix: str) -> int:
+        if not prefix:
+            raise ValueError("delete_prefix requires a non-empty prefix")
+        bucket_root = self._bucket_path(bucket)
+        target = (bucket_root / prefix).resolve()
+        if not target.is_relative_to(bucket_root):
+            raise ValueError(f"Path traversal denied: {prefix}")
+        if not target.is_dir():
+            return 0
+        deleted = sum(1 for p in target.rglob("*") if p.is_file())
+        shutil.rmtree(target)
+        # Match ``delete``: walk up empty parents to the bucket root.
+        parent = target.parent
+        while parent != bucket_root and parent.exists() and not any(parent.iterdir()):
+            parent.rmdir()
+            parent = parent.parent
+        return deleted
 
     async def list_keys(self, bucket: str, prefix: str = "") -> list[str]:
         bucket_root = self._bucket_path(bucket)
@@ -340,6 +368,31 @@ class S3Backend:
                 await s3.delete_object(Bucket=bucket, Key=key)
             except Exception:
                 pass  # Idempotent — no error if key doesn't exist.
+
+    async def delete_prefix(self, bucket: str, prefix: str) -> int:
+        if not prefix:
+            raise ValueError("delete_prefix requires a non-empty prefix")
+        deleted = 0
+        async with self._client() as s3:
+            paginator = s3.get_paginator("list_objects_v2")
+            batch: list[dict[str, str]] = []
+            async for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    batch.append({"Key": obj["Key"]})
+                    if len(batch) >= 1000:
+                        await s3.delete_objects(
+                            Bucket=bucket,
+                            Delete={"Objects": batch, "Quiet": True},
+                        )
+                        deleted += len(batch)
+                        batch = []
+            if batch:
+                await s3.delete_objects(
+                    Bucket=bucket,
+                    Delete={"Objects": batch, "Quiet": True},
+                )
+                deleted += len(batch)
+        return deleted
 
     async def list_keys(self, bucket: str, prefix: str = "") -> list[str]:
         import aioboto3

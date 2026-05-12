@@ -17,13 +17,27 @@ from surogates.harness.budget import IterationBudget
 from surogates.tools.loader import AgentDef
 
 
+def _default_workspace_config() -> dict:
+    return {
+        "storage_bucket": "tenant-bucket",
+        "workspace_path": "/workspace/tenant-bucket/parent",
+        "supports_vision": False,
+    }
+
+
 def _make_session(**overrides: Any) -> MagicMock:
+    """Build a workspace-ready mock session.
+
+    ``create_child_session`` requires the parent to have storage_bucket,
+    workspace_path, and supports_vision in its config.  Default to a
+    valid set so individual tests don't need to repeat the boilerplate.
+    """
     session = MagicMock()
     session.id = overrides.get("id", uuid4())
     session.parent_id = overrides.get("parent_id")
     session.agent_id = overrides.get("agent_id", "agent-test")
     session.model = overrides.get("model", "gpt-4o")
-    session.config = overrides.get("config", {})
+    session.config = overrides.get("config", _default_workspace_config())
     return session
 
 
@@ -415,3 +429,119 @@ class TestDelegateTaskAgentType:
         assert "agent_type" not in cfg
         assert "allowed_tools" not in cfg
         assert "policy_profile" not in cfg
+
+
+# =========================================================================
+# Shared-workspace inheritance — delegate and spawn_worker must propagate
+# the parent's workspace fields onto child sessions.
+# =========================================================================
+
+
+def _parent_with_workspace(
+    *,
+    sandbox_root_session_id: str | None = None,
+) -> MagicMock:
+    parent_id = uuid4()
+    cfg: dict[str, Any] = {
+        "storage_bucket": "agent-a-bucket",
+        "workspace_path": f"/workspace/agent-a-bucket/sessions/{parent_id}",
+        "supports_vision": True,
+    }
+    if sandbox_root_session_id is not None:
+        cfg["sandbox_root_session_id"] = sandbox_root_session_id
+    parent = _make_session(id=parent_id, agent_id="agent-a", config=cfg)
+    parent.org_id = uuid4()
+    parent.user_id = uuid4()
+    parent.service_account_id = None
+    return parent
+
+
+class TestSharedWorkspace:
+
+    @pytest.mark.asyncio
+    async def test_delegate_child_inherits_parent_workspace(self) -> None:
+        from surogates.tools.builtin import delegate
+
+        parent = _parent_with_workspace()
+        store = _make_store()
+        store.get_session = AsyncMock(return_value=parent)
+
+        with patch.object(
+            delegate, "_poll_child_completion",
+            AsyncMock(return_value="done"),
+        ):
+            await delegate._delegate_handler(
+                {"goal": "x"},
+                session_store=store,
+                redis=_make_redis(),
+                tenant=MagicMock(user_id=uuid4(), org_id=uuid4()),
+                session_id=str(parent.id),
+                budget=IterationBudget(max_total=50),
+                session_factory=MagicMock(),
+            )
+
+        call = store.create_session.call_args[1]
+        cfg = call["config"]
+        assert cfg["storage_bucket"] == parent.config["storage_bucket"]
+        assert cfg["workspace_path"] == parent.config["workspace_path"]
+        assert cfg["supports_vision"] is True
+        # Parent is itself a root → root id is parent's own id.
+        assert cfg["sandbox_root_session_id"] == str(parent.id)
+        # Child identity inherits from parent, NOT from the caller tenant.
+        assert call["org_id"] == parent.org_id
+        assert call["user_id"] == parent.user_id
+        assert call["agent_id"] == parent.agent_id
+
+    @pytest.mark.asyncio
+    async def test_delegate_grandchild_preserves_root(self) -> None:
+        from surogates.tools.builtin import delegate
+
+        root_id = uuid4()
+        # Parent is already a delegation child — its config carries the root.
+        parent = _parent_with_workspace(
+            sandbox_root_session_id=str(root_id),
+        )
+        store = _make_store()
+        store.get_session = AsyncMock(return_value=parent)
+
+        with patch.object(
+            delegate, "_poll_child_completion",
+            AsyncMock(return_value="done"),
+        ):
+            await delegate._delegate_handler(
+                {"goal": "x"},
+                session_store=store,
+                redis=_make_redis(),
+                tenant=MagicMock(user_id=uuid4(), org_id=uuid4()),
+                session_id=str(parent.id),
+                budget=IterationBudget(max_total=50),
+                session_factory=MagicMock(),
+            )
+
+        cfg = store.create_session.call_args[1]["config"]
+        assert cfg["sandbox_root_session_id"] == str(root_id)
+
+    @pytest.mark.asyncio
+    async def test_spawn_worker_child_inherits_parent_workspace(self) -> None:
+        from surogates.tools.builtin import coordinator
+
+        parent = _parent_with_workspace()
+        store = _make_store()
+        store.get_session = AsyncMock(return_value=parent)
+
+        await coordinator._spawn_worker_handler(
+            {"goal": "do it"},
+            session_store=store,
+            redis=_make_redis(),
+            tenant=MagicMock(user_id=uuid4(), org_id=uuid4()),
+            session_id=str(parent.id),
+            budget=IterationBudget(max_total=50),
+            session_factory=MagicMock(),
+        )
+
+        call = store.create_session.call_args[1]
+        cfg = call["config"]
+        assert cfg["storage_bucket"] == parent.config["storage_bucket"]
+        assert cfg["workspace_path"] == parent.config["workspace_path"]
+        assert cfg["sandbox_root_session_id"] == str(parent.id)
+        assert call["agent_id"] == parent.agent_id

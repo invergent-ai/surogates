@@ -68,10 +68,15 @@ function formatKind(value: string | null | undefined): string {
     .join(" ");
 }
 
-function formatRelative(value: string | null | undefined, label: string): string | null {
+function formatRelative(
+  value: string | null | undefined,
+  label: string,
+  future = false,
+): string | null {
   if (!value) return null;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
+  if (future && date.getTime() <= Date.now()) return `${label} due now`;
   return `${label} ${formatDistanceToNow(date, { addSuffix: true })}`;
 }
 
@@ -134,10 +139,10 @@ function ScheduledWorkRow({
   const lastSessionId = item.lastSessionId ?? null;
   const meta = [
     scheduleDisplay(item),
-    formatRelative(item.nextRunAt, "Next"),
+    formatRelative(item.nextRunAt, "Next", true),
     formatRelative(item.lastRunAt, "Last"),
     formatRuns(item.runCount),
-    item.expiresAt ? formatRelative(item.expiresAt, "Expires") : null,
+    item.expiresAt ? formatRelative(item.expiresAt, "Expires", true) : null,
   ].filter(Boolean);
   const openLastRun = () => {
     if (lastSessionId) onOpenLastRun(lastSessionId);

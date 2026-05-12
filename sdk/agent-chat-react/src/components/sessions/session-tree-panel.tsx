@@ -11,6 +11,7 @@ import { formatDistanceToNow } from "date-fns";
 import {
   ChevronDownIcon,
   ChevronRightIcon,
+  Loader2Icon,
   SquareIcon,
   Trash2Icon,
   UsersIcon,
@@ -219,7 +220,6 @@ function TreeNodeRow({
   const subtitle = [
     formatRunKind(entry.runKind),
     entry.agentType,
-    entry.model ?? "default",
     formatSessionTime(entry.updatedAt),
   ].filter(Boolean).join(" · ");
 
@@ -285,7 +285,12 @@ function TreeNodeRow({
         {canDelete && (
           <button
             type="button"
-            className="p-1 rounded opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-destructive/10 hover:text-destructive disabled:pointer-events-none disabled:opacity-50 transition-all"
+            className={cn(
+              "p-1 rounded hover:bg-destructive/10 hover:text-destructive disabled:pointer-events-none transition-all",
+              deletingSessionId === entry.id
+                ? "opacity-100"
+                : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
+            )}
             onClick={(e) => {
               e.stopPropagation();
               onDelete(entry.id);
@@ -294,7 +299,11 @@ function TreeNodeRow({
             title="Delete session"
             disabled={deletingSessionId === entry.id}
           >
-            <Trash2Icon className="w-3 h-3" />
+            {deletingSessionId === entry.id ? (
+              <Loader2Icon className="w-3 h-3 animate-spin" />
+            ) : (
+              <Trash2Icon className="w-3 h-3" />
+            )}
           </button>
         )}
       </div>

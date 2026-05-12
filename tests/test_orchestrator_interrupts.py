@@ -88,9 +88,15 @@ async def test_lease_held_wake_is_requeued(
     )
 
 
-async def test_locally_active_wake_is_requeued_without_replacing_harness(
+async def test_locally_active_wake_defers_rewake_without_zadd(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A duplicate _process while the wake is in flight must NOT spin on Redis.
+
+    Regression for the busy-requeue loop where every WORKER_COMPLETE on a
+    long coordinator wake produced ~4 enqueue/log cycles per second for
+    the wake's full duration.
+    """
     session_id = uuid4()
     redis = AsyncMock()
     redis.zadd = AsyncMock()
@@ -99,11 +105,6 @@ async def test_locally_active_wake_is_requeued_without_replacing_harness(
     def fail_if_called(_session_id):
         raise AssertionError("duplicate local wake should not create a harness")
 
-    monkeypatch.setattr(
-        "surogates.orchestrator.dispatcher._LEASE_BUSY_REQUEUE_DELAY",
-        0,
-        raising=False,
-    )
     orchestrator = Orchestrator(
         redis_client=redis,
         session_store=object(),
@@ -117,7 +118,64 @@ async def test_locally_active_wake_is_requeued_without_replacing_harness(
     await orchestrator._process(session_id)
 
     assert orchestrator._active_harnesses[session_id] is active_harness
+    assert session_id in orchestrator._rewake_pending
+    redis.zadd.assert_not_called()
+
+
+async def test_deferred_rewake_enqueues_once_after_wake_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pending rewake flag must produce exactly one enqueue when wake exits."""
+    session_id = uuid4()
+    redis = AsyncMock()
+    redis.zadd = AsyncMock()
+
+    class _Harness:
+        async def wake(self, _session_id):
+            return None
+
+    orchestrator = Orchestrator(
+        redis_client=redis,
+        session_store=object(),
+        harness_factory=lambda _sid: _Harness(),
+        agent_id="support-bot",
+        queue_key="surogates:work_queue:support-bot",
+        max_concurrent=1,
+    )
+    # Simulate a parallel _process invocation that flagged a deferred rewake
+    # while this wake was already running.
+    orchestrator._rewake_pending.add(session_id)
+
+    await orchestrator._process(session_id)
+
+    assert session_id not in orchestrator._rewake_pending
     redis.zadd.assert_called_once_with(
         "surogates:work_queue:support-bot",
         {str(session_id): 0},
     )
+
+
+async def test_successful_wake_without_pending_flag_does_not_enqueue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The happy path must not generate spurious enqueues."""
+    session_id = uuid4()
+    redis = AsyncMock()
+    redis.zadd = AsyncMock()
+
+    class _Harness:
+        async def wake(self, _session_id):
+            return None
+
+    orchestrator = Orchestrator(
+        redis_client=redis,
+        session_store=object(),
+        harness_factory=lambda _sid: _Harness(),
+        agent_id="support-bot",
+        queue_key="surogates:work_queue:support-bot",
+        max_concurrent=1,
+    )
+
+    await orchestrator._process(session_id)
+
+    redis.zadd.assert_not_called()

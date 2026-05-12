@@ -216,6 +216,20 @@ class PromptBuilder:
             and self._session.config.get("scheduled_dynamic_loop")
         ):
             parts.append(self._prompts.get("guidance/loop_wait"))
+        elif (
+            "loop_complete" in self._available_tools
+            and self._session is not None
+            and self._session.config.get("scheduled_session_id")
+        ):
+            # Non-dynamic scheduled children (fixed-cron ``/loop`` runs or
+            # cron_create-spawned sessions) need to know they are already on
+            # a schedule so they don't try to spawn another one.  The
+            # guidance references ``loop_complete``, so we only inject it
+            # when that tool is actually registered — otherwise a stale
+            # worker process that has the new prompt fragment but not the
+            # new tool registration would tell the LLM to call a tool
+            # that doesn't exist.
+            parts.append(self._prompts.get("guidance/cron_loop"))
 
         # Coordinator guidance — injected when the session is in coordinator mode.
         if (

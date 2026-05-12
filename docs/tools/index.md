@@ -177,15 +177,16 @@ patterns, and destructive command patterns.
 
 ### `loop_wait` -- Dynamic Loop Control
 
-Sets the next delay for a dynamic `/loop` run. This tool is exposed only inside
-scheduled sessions that were created by `/loop <prompt>` without a fixed
-interval. It is not a general scheduling API; normal sessions should use
-`cron_create` or the `/loop` command.
+Sets the next delay for a dynamic `/loop` run, or declares the loop finished.
+This tool is exposed only inside scheduled sessions that were created by
+`/loop <prompt>` without a fixed interval. It is not a general scheduling API;
+normal sessions should use `cron_create` or the `/loop` command.
 
 | Parameter | Type | Description |
 |---|---|---|
-| `delay_seconds` | integer | Seconds to wait before the next run. Values are clamped to 60 through 3600 |
-| `reason` | string | Brief explanation for the selected delay |
+| `delay_seconds` | integer | Seconds to wait before the next run. Values are clamped to 60 through 3600. Ignored when `completed` is true |
+| `reason` | string | Brief explanation for the selected delay, or for finishing the loop when `completed` is true |
+| `completed` | boolean | Optional. When `true`, the schedule's status flips to `completed` and no further runs are scheduled. Use this when the loop's task is done and there is no future work to wait for |
 
 After a dynamic loop run completes, the schedule remains active and the next
 `channel="scheduled"` session fires at `now + delay_seconds`. If the agent does
@@ -198,6 +199,31 @@ to call more tools. Dynamic loop child sessions do not expose `cron_create`,
 `cron_list`, or `cron_delete`, which prevents a loop iteration from creating
 nested schedules. Users can manage dynamic loops from normal sessions with
 `/loop list`, `/loop cancel <id>`, `cron_list`, and `cron_delete`.
+
+### `loop_complete` -- Fixed-Cron Loop Termination
+
+Marks the current `/loop` schedule finished from inside a fixed-cron run.
+This tool is exposed only inside scheduled sessions that were created by
+`/loop <interval> <prompt>` with a cron-style interval. Dynamic loops use
+`loop_wait` with `completed: true` instead.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `reason` | string | Brief reason for completing the loop -- typically the stop condition that was reached |
+
+A fixed-cron `/loop` keeps firing on its cron expression until `expires_at`
+(default 3 days) or until something explicitly cancels it. Phrasings in the
+prompt like `stop after 5 entries` describe a stop condition the agent must
+check on every wake -- they are not enforced by the runtime. When the
+condition is met, calling `loop_complete` flips the schedule to
+`status=completed` and clears `next_run_at`, so the schedule never wakes
+again. The reason is stored on the schedule row (`schedule.last_completed_reason`)
+for audit.
+
+Fixed-cron loop child sessions do not expose `cron_create`, `cron_list`, or
+`cron_delete`, so `loop_complete` is the only in-session way to stop the
+schedule. As a fallback, the user can always run `/loop cancel <id>` from a
+normal session.
 
 ### `delegate_task` / `spawn_worker` -- Sub-Agent Delegation
 

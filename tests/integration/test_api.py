@@ -494,6 +494,176 @@ async def test_api_session_workspace_file_with_service_account(
     assert file_resp.json()["content"] == "print('hello')\n"
 
 
+async def test_workspace_routes_resolve_root_for_child_session(
+    client: AsyncClient, app, session_factory
+):
+    """A child session's workspace viewer must list the parent's files.
+
+    Regression: workspace.py used to key storage on the URL session_id,
+    so a delegation child or loop iteration would see an empty workspace
+    even though the harness was writing to the parent's prefix.  Files
+    written under ``sessions/{parent_id}/`` must surface when the child's
+    ``/workspace/tree`` is queried, and reads/uploads/downloads/deletes
+    must go through the parent's prefix too.
+    """
+    org_id, user_id, token, _ = await _create_test_tenant(session_factory)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Parent session goes through the normal creation path so it gets
+    # workspace fields seeded.
+    parent_resp = await client.post(
+        "/v1/sessions",
+        json={"model": "gpt-4o"},
+        headers=headers,
+    )
+    assert parent_resp.status_code == 201, parent_resp.text
+    parent_id = UUID(parent_resp.json()["id"])
+
+    store = SessionStore(session_factory)
+    parent = await store.get_session(parent_id)
+    bucket = parent.config["storage_bucket"]
+
+    # Files actually live under the parent's prefix.
+    await app.state.storage.write(
+        bucket,
+        session_workspace_key(parent_id, "notes/plan.md"),
+        b"# plan\n",
+    )
+
+    # Create a delegation-style child sharing the parent's workspace,
+    # mirroring how create_child_session stamps the config.
+    from surogates.session.provisioning import create_child_session
+    child = await create_child_session(
+        store=store,
+        parent=parent,
+        channel="delegation",
+    )
+
+    # Child's tree must show the parent's file.
+    tree_resp = await client.get(
+        f"/v1/sessions/{child.id}/workspace/tree",
+        headers=headers,
+    )
+    assert tree_resp.status_code == 200, tree_resp.text
+    tree = tree_resp.json()
+    notes_dir = next(e for e in tree["entries"] if e["name"] == "notes")
+    file_names = [c["name"] for c in notes_dir["children"]]
+    assert "plan.md" in file_names
+
+    # Read via the child route surfaces the parent's content.
+    file_resp = await client.get(
+        f"/v1/sessions/{child.id}/workspace/file",
+        params={"path": "notes/plan.md"},
+        headers=headers,
+    )
+    assert file_resp.status_code == 200, file_resp.text
+    assert file_resp.json()["content"] == "# plan\n"
+
+    # Upload via the child route writes into the parent's prefix.
+    upload_resp = await client.post(
+        f"/v1/sessions/{child.id}/workspace/upload",
+        files={"file": ("from_child.txt", b"hello from child")},
+        params={"path": "shared"},
+        headers=headers,
+    )
+    assert upload_resp.status_code == 201, upload_resp.text
+    assert await app.state.storage.exists(
+        bucket,
+        session_workspace_key(parent_id, "shared/from_child.txt"),
+    )
+    # And the same file does NOT exist under the child's own prefix.
+    assert not await app.state.storage.exists(
+        bucket,
+        session_workspace_key(child.id, "shared/from_child.txt"),
+    )
+
+    # Download routes resolve through the parent too.
+    dl_resp = await client.get(
+        f"/v1/sessions/{child.id}/workspace/download",
+        params={"path": "shared/from_child.txt", "token": token},
+    )
+    assert dl_resp.status_code == 200
+    assert dl_resp.content == b"hello from child"
+
+    # Delete via the child route removes the file from the parent's prefix.
+    del_resp = await client.request(
+        "DELETE",
+        f"/v1/sessions/{child.id}/workspace/file",
+        params={"path": "shared/from_child.txt"},
+        headers=headers,
+    )
+    assert del_resp.status_code == 200, del_resp.text
+    assert not await app.state.storage.exists(
+        bucket,
+        session_workspace_key(parent_id, "shared/from_child.txt"),
+    )
+
+
+async def test_workspace_legacy_child_without_root_uses_own_prefix(
+    client: AsyncClient, app, session_factory
+):
+    """Pre-deploy children without sandbox_root_session_id keep their own prefix.
+
+    Legacy scheduled-runner runs were created with ``create_agent_session``
+    and own a per-session storage prefix.  The viewer must continue to
+    surface their own files; falling through to ``parent_id`` would
+    silently switch them to an unrelated prefix.
+    """
+    org_id, user_id, token, _ = await _create_test_tenant(session_factory)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    parent_resp = await client.post(
+        "/v1/sessions",
+        json={"model": "gpt-4o"},
+        headers=headers,
+    )
+    parent_id = UUID(parent_resp.json()["id"])
+
+    store = SessionStore(session_factory)
+    parent = await store.get_session(parent_id)
+    bucket = parent.config["storage_bucket"]
+
+    # Simulate a legacy child: has parent_id but no sandbox_root_session_id.
+    # Files live under sessions/{child_id}/, as the old scheduled runner
+    # would have allocated via create_agent_session.
+    legacy_child_id = uuid.uuid4()
+    await store.create_session(
+        session_id=legacy_child_id,
+        user_id=user_id,
+        org_id=org_id,
+        agent_id=parent.agent_id,
+        channel="scheduled",
+        model=parent.model,
+        config={
+            "storage_bucket": bucket,
+            "workspace_path": f"/workspace/{bucket}/sessions/{legacy_child_id}",
+            "supports_vision": False,
+        },
+        parent_id=parent_id,
+    )
+    await app.state.storage.write(
+        bucket,
+        session_workspace_key(legacy_child_id, "legacy.txt"),
+        b"legacy content",
+    )
+
+    tree_resp = await client.get(
+        f"/v1/sessions/{legacy_child_id}/workspace/tree",
+        headers=headers,
+    )
+    assert tree_resp.status_code == 200, tree_resp.text
+    entries = tree_resp.json()["entries"]
+    assert any(e["name"] == "legacy.txt" for e in entries), entries
+
+    file_resp = await client.get(
+        f"/v1/sessions/{legacy_child_id}/workspace/file",
+        params={"path": "legacy.txt"},
+        headers=headers,
+    )
+    assert file_resp.status_code == 200, file_resp.text
+    assert file_resp.json()["content"] == "legacy content"
+
+
 async def test_session_workspace_download_accepts_query_token(
     client: AsyncClient, app, session_factory
 ):

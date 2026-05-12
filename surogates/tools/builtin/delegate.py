@@ -140,7 +140,6 @@ async def _delegate_handler(
                 ),
             })
 
-    # Child inherits the parent's agent_id — delegation stays within the agent.
     parent_session = await session_store.get_session(parent_session_id)
     agent_id = parent_session.agent_id
 
@@ -164,28 +163,13 @@ async def _delegate_handler(
     if model_override is None and agent_def is not None and agent_def.model:
         model_override = agent_def.model
 
-    # Build the child's config — agent def supplies tool filter and
-    # policy profile presets; explicit fields (none at the delegate
-    # schema today) would win if present.  The child inherits the
-    # parent's ``storage_bucket`` so the sub-agent's sandbox mounts
-    # the same S3 workspace the parent has been writing to — without
-    # this, K8sSandbox gives the child a fresh empty bucket and the
-    # sub-agent can't see any of the files it was asked to work on.
-    # (ProcessSandbox shares via sandbox_session_key instead.)
+    # Caller-controlled child config.  Workspace-sharing fields
+    # (storage_bucket, workspace_path, sandbox_root_session_id) are
+    # populated by create_child_session from the parent.
     child_config: dict[str, Any] = {
         "max_iterations": child_iterations,
         "streaming": False,
     }
-    parent_storage_bucket = parent_session.config.get("storage_bucket")
-    if parent_storage_bucket:
-        child_config["storage_bucket"] = parent_storage_bucket
-    # Propagate the ultimate root of the delegation chain so
-    # grandchildren keep landing on the same sandbox as their
-    # grandparent.  Without this, every hop would re-root on its
-    # immediate parent and deep chains would fragment into separate
-    # sandboxes.  See :func:`sandbox_session_key` for the lookup side.
-    parent_root = parent_session.config.get("sandbox_root_session_id")
-    child_config["sandbox_root_session_id"] = str(parent_root or parent_session.id)
     if agent_type:
         child_config["agent_type"] = agent_type
     if agent_def is not None:
@@ -197,39 +181,33 @@ async def _delegate_handler(
             child_config["policy_profile"] = agent_def.policy_profile
 
     try:
-        # 1. Create the child session.
-        child_session = await session_store.create_session(
-            user_id=tenant.user_id,
-            org_id=tenant.org_id,
-            agent_id=agent_id,
+        from surogates.session.provisioning import create_child_session
+
+        child_session = await create_child_session(
+            store=session_store,
+            parent=parent_session,
             channel="delegation",
             model=model_override,
             config=child_config,
-            parent_id=parent_session_id,
         )
         child_id = child_session.id
 
-        # 2. Emit a USER_MESSAGE event in the child session.
         await session_store.emit_event(
             child_id,
             EventType.USER_MESSAGE,
             {"content": user_content},
         )
-
-        # 3. Enqueue the child session on its agent's work queue (if available).
         if redis is not None:
             await enqueue_session(redis, agent_id, child_id)
 
-        # 4. Poll the child session's events until completion or timeout.
         result_text = await _poll_child_completion(
             session_store, child_id,
         )
 
-        # 5. Notify memory manager of delegation outcome.
         memory_manager = kwargs.get("memory_manager")
         if memory_manager is not None:
             try:
-                await memory_manager.on_delegation(
+                memory_manager.on_delegation(
                     task=goal,
                     result=result_text[:2000],
                     child_session_id=str(child_id),

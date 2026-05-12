@@ -125,7 +125,7 @@ export function AgentChat({
               className={
                 hasBrowserPanel
                   ? "h-1/2 min-h-0 w-full overflow-hidden"
-                  : "min-h-0"
+                  : "min-h-0 h-full"
               }
             >
               <WorkspacePanel

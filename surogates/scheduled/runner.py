@@ -8,7 +8,8 @@ from sqlalchemy.exc import IntegrityError
 from surogates.config import enqueue_session
 from surogates.scheduled.schedule import DYNAMIC_LOOP_STALE_RUN_SECONDS
 from surogates.session.events import EventType
-from surogates.session.provisioning import create_agent_session
+from surogates.session.provisioning import create_agent_session, create_child_session
+from surogates.session.store import SessionNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -104,27 +105,58 @@ class ScheduledSessionRunner:
         fire_key = schedule.next_run_at.isoformat() if schedule.next_run_at else "now"
         idempotency_key = f"scheduled:{schedule.id}:{fire_key}"
         is_dynamic_loop = schedule.schedule.get("kind") == "dynamic_loop"
+        scheduled_config = {
+            "scheduled_session_id": str(schedule.id),
+            "scheduled_source": schedule.source,
+            "scheduled_dynamic_loop": is_dynamic_loop,
+        }
+
+        # When the schedule has a known creator session, every run shares
+        # its workspace (so cumulative state across loop iterations
+        # persists).  Detached schedules — creator deleted or never set —
+        # fall back to a fresh per-run workspace and drop parent_id (the
+        # sessions.parent_id FK would otherwise reject the insert).
+        parent = None
+        if schedule.created_from_session_id is not None:
+            try:
+                parent = await self._session_store.get_session(
+                    schedule.created_from_session_id,
+                )
+            except SessionNotFoundError:
+                parent = None
+
         try:
-            session = await create_agent_session(
-                store=self._session_store,
-                storage=self._storage,
-                settings=self._settings,
-                org_id=schedule.org_id,
-                user_id=schedule.user_id,
-                agent_id=schedule.agent_id,
-                channel="scheduled",
-                model=self._settings.llm.model,
-                config={
-                    "scheduled_session_id": str(schedule.id),
-                    "scheduled_source": schedule.source,
-                    "scheduled_dynamic_loop": is_dynamic_loop,
-                },
-                parent_id=schedule.created_from_session_id,
-                idempotency_key=idempotency_key,
-            )
+            if parent is not None:
+                session = await create_child_session(
+                    store=self._session_store,
+                    parent=parent,
+                    channel="scheduled",
+                    model=self._settings.llm.model,
+                    config=scheduled_config,
+                    idempotency_key=idempotency_key,
+                )
+            else:
+                session = await create_agent_session(
+                    store=self._session_store,
+                    storage=self._storage,
+                    settings=self._settings,
+                    org_id=schedule.org_id,
+                    user_id=schedule.user_id,
+                    agent_id=schedule.agent_id,
+                    channel="scheduled",
+                    model=self._settings.llm.model,
+                    config=scheduled_config,
+                    parent_id=None,
+                    idempotency_key=idempotency_key,
+                )
         except IntegrityError:
+            # Children inherit org_id from the parent; look up under
+            # whichever org actually owns the row.  In normal operation
+            # parent.org_id == schedule.org_id, but we don't enforce
+            # that, so use the right scope explicitly.
+            lookup_org = parent.org_id if parent is not None else schedule.org_id
             existing = await self._session_store.get_session_by_idempotency_key(
-                schedule.org_id,
+                lookup_org,
                 idempotency_key,
             )
             if existing is None:

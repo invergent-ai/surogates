@@ -62,8 +62,7 @@ async def cleanup_orphaned_session_prefixes(
             logger.info("[DRY RUN] Would delete workspace prefix: %s", prefix)
         else:
             logger.info("Deleting orphaned workspace prefix: %s", prefix)
-            for key in await storage.list_keys(bucket, prefix=prefix):
-                await storage.delete(bucket, key)
+            await storage.delete_prefix(bucket, prefix)
         deleted += 1
 
     return deleted

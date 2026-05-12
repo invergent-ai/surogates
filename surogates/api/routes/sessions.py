@@ -8,7 +8,7 @@ from uuid import UUID
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text as _sql_text
 
@@ -726,6 +726,42 @@ async def retry_session(
     return await store.get_session(session_id)
 
 
+async def _cleanup_archived_workspaces(
+    storage,
+    archived_sessions: list[Session],
+) -> None:
+    """Bulk-delete each archived session's workspace objects.
+
+    Runs out-of-band via ``BackgroundTasks`` so the HTTP response returns
+    as soon as the DB archive completes. Failures are logged, not raised
+    — the periodic cleanup job sweeps anything left behind.
+    """
+    for archived_session in archived_sessions:
+        storage_bucket = (archived_session.config or {}).get("storage_bucket")
+        if not storage_bucket:
+            logger.warning(
+                "Archived session %s has no agent bucket; skipping "
+                "workspace cleanup",
+                archived_session.id,
+            )
+            continue
+        prefix = session_workspace_prefix(archived_session.id)
+        try:
+            deleted = await storage.delete_prefix(storage_bucket, prefix)
+            logger.info(
+                "Cleaned workspace for archived session %s (%d objects)",
+                archived_session.id,
+                deleted,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to delete workspace prefix %s in bucket %s",
+                prefix,
+                storage_bucket,
+                exc_info=True,
+            )
+
+
 async def _destroy_deleted_session_browser(request: Request, session_id: UUID) -> None:
     session_id_str = str(session_id)
     browser_pool = getattr(request.app.state, "browser_pool", None)
@@ -773,6 +809,7 @@ async def _destroy_deleted_session_browser(request: Request, session_id: UUID) -
 async def delete_session(
     session_id: UUID,
     request: Request,
+    background_tasks: BackgroundTasks,
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> None:
     """Archive (soft-delete) a session and delete its workspace storage."""
@@ -801,31 +838,22 @@ async def delete_session(
             _json.dumps({"reason": "session deleted"}),
         )
 
-    # Delete each session's workspace objects without deleting the agent bucket.
-    storage = request.app.state.storage
-    for archived_session in archived_sessions:
-        storage_bucket = (archived_session.config or {}).get("storage_bucket")
-        if not storage_bucket:
-            if archived_session.id == session_id:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Session {session_id} has no agent bucket.",
-                )
-            logger.warning(
-                "Archived child session %s has no agent bucket; skipping "
-                "workspace cleanup",
-                archived_session.id,
-            )
-            continue
-        prefix = session_workspace_prefix(archived_session.id)
-        try:
-            keys = await storage.list_keys(storage_bucket, prefix=prefix)
-            for key in keys:
-                await storage.delete(storage_bucket, key)
-        except Exception:
-            logger.warning(
-                "Failed to delete workspace prefix %s in bucket %s",
-                prefix,
-                storage_bucket,
-                exc_info=True,
-            )
+    # The primary session must have a bucket so we can validate the route up
+    # front; child workspaces with missing buckets are tolerated and skipped
+    # in the background cleanup.
+    primary_bucket = (session.config or {}).get("storage_bucket")
+    if not primary_bucket:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Session {session_id} has no agent bucket.",
+        )
+
+    # Workspace cleanup runs after the response is sent. The session is
+    # already archived in the DB, so it disappears from the UI immediately;
+    # the cleanup CronJob (jobs/cleanup_sessions.py) sweeps anything left
+    # behind if this task fails or the process crashes.
+    background_tasks.add_task(
+        _cleanup_archived_workspaces,
+        request.app.state.storage,
+        archived_sessions,
+    )

@@ -686,6 +686,44 @@ async def test_find_orphaned_sessions_ignores_clean_api_turns(
     assert session.id not in {s.id for s in found}
 
 
+async def test_find_orphaned_sessions_ignores_trailing_title_event(
+    session_store, session_factory,
+):
+    """A clean turn followed by an async title write is idle, not orphaned.
+
+    Title generation is fire-and-forget and emits ``session.title_updated``
+    after the harness has already released its lease.  The orphan sweeper
+    must skip that trailing event when judging whether work ended cleanly,
+    otherwise every finished ``/loop`` session would be re-enqueued.
+    """
+    org_id = await create_org(session_factory)
+    issued = await issue_service_account_token(session_factory, org_id)
+
+    session = await session_store.create_session(
+        user_id=None,
+        service_account_id=issued.id,
+        org_id=org_id,
+        agent_id="agent-a",
+        channel="api",
+    )
+    await session_store.emit_event(
+        session.id,
+        EventType.LLM_RESPONSE,
+        {"message": {"role": "assistant", "content": "Done."}},
+    )
+    await session_store.emit_event(
+        session.id,
+        EventType.SESSION_TITLE_UPDATED,
+        {"title": "My session"},
+    )
+    await _backdate(session_factory, session.id, seconds=120)
+
+    found = await session_store.find_orphaned_sessions(
+        stale_seconds=60, agent_id="agent-a",
+    )
+    assert session.id not in {s.id for s in found}
+
+
 async def test_find_orphaned_sessions_recovers_api_turn_waiting_on_tools(
     session_store, session_factory,
 ):

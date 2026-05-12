@@ -384,6 +384,7 @@ class ScheduledSessionStore:
         session_id: UUID,
         delay_seconds: int,
         reason: str,
+        completed: bool = False,
     ) -> bool:
         delay = clamp_dynamic_loop_delay(delay_seconds)
         now = _utcnow()
@@ -400,7 +401,9 @@ class ScheduledSessionStore:
             ):
                 return False
 
-            completed = row.expires_at is not None and row.expires_at <= now
+            # The caller (loop_wait) can declare the loop done; otherwise the
+            # only way a dynamic loop terminates is by reaching ``expires_at``.
+            done = completed or (row.expires_at is not None and row.expires_at <= now)
             schedule_data = {
                 **row.schedule,
                 "last_delay_seconds": delay,
@@ -408,8 +411,55 @@ class ScheduledSessionStore:
                 "last_delay_set_at": now.isoformat(),
             }
             row.schedule = schedule_data
-            row.next_run_at = None if completed else now + timedelta(seconds=delay)
-            row.status = "completed" if completed else "active"
+            row.next_run_at = None if done else now + timedelta(seconds=delay)
+            row.status = "completed" if done else "active"
+            row.locked_by = None
+            row.locked_until = None
+            row.updated_at = now
+            await db.commit()
+            return True
+
+    async def mark_loop_completed(
+        self,
+        *,
+        schedule_id: UUID,
+        org_id: UUID,
+        user_id: UUID,
+        agent_id: str,
+        session_id: UUID,
+        reason: str,
+    ) -> bool:
+        """Mark a scheduled loop completed at the request of its running session.
+
+        Used by the ``loop_complete`` tool so a fixed-cron ``/loop`` child
+        can self-terminate when its prompt's stop condition is met.  The
+        tenant/agent/session tuple is enforced — only the currently-running
+        session can complete its own schedule, mirroring the guard in
+        ``mark_dynamic_run_finished``.
+
+        Returns ``True`` on success, ``False`` when the row doesn't exist
+        or the tuple doesn't match.
+        """
+        now = _utcnow()
+        async with self._sf() as db:
+            row = await db.get(ScheduledSessionRow, schedule_id, with_for_update=True)
+            if row is None:
+                return False
+            if (
+                row.org_id != org_id
+                or row.user_id != user_id
+                or row.agent_id != agent_id
+                or row.last_session_id != session_id
+            ):
+                return False
+            schedule_data = {
+                **row.schedule,
+                "last_completed_reason": reason.strip()[:500] or "No reason provided.",
+                "last_completed_at": now.isoformat(),
+            }
+            row.schedule = schedule_data
+            row.next_run_at = None
+            row.status = "completed"
             row.locked_by = None
             row.locked_until = None
             row.updated_at = now

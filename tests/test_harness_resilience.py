@@ -551,6 +551,105 @@ class TestSessionLifecycle:
         assert "cron_delete" not in tool_names
         assert "cron_list" not in tool_names
 
+    def test_fixed_cron_loop_sessions_cannot_create_nested_cron_schedules(self) -> None:
+        """Fixed-cron ``/loop`` children must also be barred from spawning schedules.
+
+        Regression for the case where a ``/loop 1m`` child invoked
+        ``cron_create`` from inside its wake and built a parallel cron
+        job for the same task.
+        """
+        from surogates.tools.registry import ToolRegistry, ToolSchema
+
+        reg = ToolRegistry()
+        for name in (
+            "clarify",
+            "cron_create",
+            "cron_delete",
+            "cron_list",
+            "loop_complete",
+            "loop_wait",
+            "web_search",
+        ):
+            reg.register(
+                name,
+                ToolSchema(name=name, description="test", parameters={}),
+                lambda _: "{}",
+            )
+        harness = _make_harness(tool_registry=reg)
+        session = _session_with_config({
+            "scheduled_dynamic_loop": False,
+            "scheduled_session_id": str(uuid4()),
+            "scheduled_source": "loop",
+        })
+
+        tool_names = harness._tool_filter_for_session(session)
+
+        assert tool_names is not None
+        assert "clarify" in tool_names
+        assert "web_search" in tool_names
+        assert "cron_create" not in tool_names
+        assert "cron_delete" not in tool_names
+        assert "cron_list" not in tool_names
+        # No loop_wait for fixed-cron loops — the schedule controls cadence.
+        assert "loop_wait" not in tool_names
+        # Fixed-cron children get loop_complete so they can self-terminate.
+        assert "loop_complete" in tool_names
+
+    def test_dynamic_loop_sessions_do_not_get_loop_complete(self) -> None:
+        """Dynamic loops self-terminate via loop_wait(completed=true)."""
+        from surogates.tools.registry import ToolRegistry, ToolSchema
+
+        reg = ToolRegistry()
+        for name in ("clarify", "loop_complete", "loop_wait"):
+            reg.register(
+                name,
+                ToolSchema(name=name, description="test", parameters={}),
+                lambda _: "{}",
+            )
+        harness = _make_harness(tool_registry=reg)
+        session = _session_with_config({
+            "scheduled_dynamic_loop": True,
+            "scheduled_session_id": str(uuid4()),
+        })
+
+        tool_names = harness._tool_filter_for_session(session)
+
+        assert tool_names is not None
+        assert "loop_wait" in tool_names
+        assert "loop_complete" not in tool_names
+
+    def test_non_scheduled_sessions_keep_cron_tools(self) -> None:
+        """A regular (non-scheduled) session must still be able to use cron tools."""
+        from surogates.tools.registry import ToolRegistry, ToolSchema
+
+        reg = ToolRegistry()
+        for name in (
+            "clarify",
+            "cron_create",
+            "cron_delete",
+            "cron_list",
+            "loop_complete",
+            "loop_wait",
+        ):
+            reg.register(
+                name,
+                ToolSchema(name=name, description="test", parameters={}),
+                lambda _: "{}",
+            )
+        harness = _make_harness(tool_registry=reg)
+        session = _session_with_config({})
+
+        tool_names = harness._tool_filter_for_session(session)
+
+        assert tool_names is not None
+        assert "cron_create" in tool_names
+        assert "cron_delete" in tool_names
+        assert "cron_list" in tool_names
+        # ``loop_wait`` and ``loop_complete`` belong to scheduled-child
+        # sessions only; a regular session must not see them.
+        assert "loop_wait" not in tool_names
+        assert "loop_complete" not in tool_names
+
     async def test_final_response_needing_user_input_becomes_clarify_call(self) -> None:
         response = SimpleNamespace(
             choices=[

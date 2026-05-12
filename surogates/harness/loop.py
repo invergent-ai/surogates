@@ -381,6 +381,43 @@ def _actionable_pending_events(events: list[Any], cursor: int) -> list[Any]:
     return pending
 
 
+def _slash_loop_already_processed(events: list[Any]) -> bool:
+    """Return True if the latest ``/loop`` user message has already been answered.
+
+    ``_handle_loop_command`` emits exactly one ``LLM_RESPONSE`` via
+    ``_emit_loop_response`` per run, so an ``LLM_RESPONSE`` whose id sits
+    after the latest ``USER_MESSAGE`` proves the command has already been
+    processed.  Used to skip duplicate schedule creation when the harness
+    wakes a second time on the same ``/loop`` message — e.g. when the
+    orphan sweeper re-enqueues a finished session.
+    """
+    latest_user_msg_id: int | None = None
+    for event in events:
+        event_type = (
+            event.type.value
+            if isinstance(event.type, EventType)
+            else str(event.type)
+        )
+        if event_type == EventType.USER_MESSAGE.value and event.id is not None:
+            if latest_user_msg_id is None or event.id > latest_user_msg_id:
+                latest_user_msg_id = event.id
+    if latest_user_msg_id is None:
+        return False
+    for event in events:
+        event_type = (
+            event.type.value
+            if isinstance(event.type, EventType)
+            else str(event.type)
+        )
+        if (
+            event_type == EventType.LLM_RESPONSE.value
+            and event.id is not None
+            and event.id > latest_user_msg_id
+        ):
+            return True
+    return False
+
+
 def _derive_artifact_name(kind: str, messages: list[dict]) -> str:
     """Pick a human-readable name for an auto-promoted artifact.
 
@@ -1091,7 +1128,15 @@ class AgentHarness:
                 return
 
             if last_user_content.startswith("/loop"):
-                await self._handle_loop_command(session, last_user_content, lease)
+                # Idempotency guard: ``_handle_loop_command`` creates a fresh
+                # scheduled-loop row each time it runs against a ``/loop ...``
+                # user message.  If the harness wakes a second time on the
+                # same message — e.g. after an orphan-sweeper recovery — we
+                # must not create a duplicate schedule.
+                if not _slash_loop_already_processed(all_events):
+                    await self._handle_loop_command(
+                        session, last_user_content, lease,
+                    )
                 return
 
             # 10b. Eager /<skill> expansion -- see slash_skill.expand_slash_skill.
@@ -2293,9 +2338,12 @@ class AgentHarness:
                 # (it may have been destroyed on a prior crash).
                 if self._sandbox_pool is not None:
                     try:
-                        from surogates.sandbox.base import SandboxSpec
-                        sandbox_spec = getattr(self._tenant, "sandbox_spec", None) or SandboxSpec()
-                        await self._sandbox_pool.ensure(sandbox_session_key(session), sandbox_spec)
+                        from surogates.harness.tool_exec import _build_session_sandbox_spec
+                        sandbox_owner = sandbox_session_key(session)
+                        sandbox_spec = _build_session_sandbox_spec(
+                            session, self._tenant, sandbox_owner,
+                        )
+                        await self._sandbox_pool.ensure(sandbox_owner, sandbox_spec)
                     except Exception:
                         logger.warning(
                             "Cannot provision sandbox for saga compensation "
@@ -2803,19 +2851,37 @@ class AgentHarness:
             excluded.update(WORKER_EXCLUDED_TOOLS)
             tool_filter = set(self._tools.tool_names) - excluded
 
-        if config.get("scheduled_dynamic_loop"):
+        # Any session running as one iteration of a schedule (``/loop`` or
+        # cron_create-spawned) must not be able to create new schedules.
+        # Otherwise the LLM can spawn nested cron jobs from inside a wake —
+        # observed in the wild on a ``/loop 1m`` run that called
+        # ``cron_create`` to build a parallel cron for the same task.
+        is_scheduled_child = bool(config.get("scheduled_session_id"))
+        if is_scheduled_child:
             if tool_filter is None:
                 tool_filter = set(self._tools.tool_names)
             else:
                 tool_filter = set(tool_filter)
             tool_filter.difference_update(_DYNAMIC_LOOP_EXCLUDED_TOOLS)
-            if "loop_wait" in self._tools.tool_names:
-                tool_filter.add("loop_wait")
+            if config.get("scheduled_dynamic_loop"):
+                if "loop_wait" in self._tools.tool_names:
+                    tool_filter.add("loop_wait")
+                # Dynamic loops self-terminate via ``loop_wait(completed=true)``.
+                tool_filter.discard("loop_complete")
+            else:
+                # Fixed-cron children have no use for ``loop_wait`` — the
+                # cron expression controls cadence — but they need a way
+                # to self-terminate when their prompt's stop condition is
+                # met; ``loop_complete`` is the canonical control surface.
+                tool_filter.discard("loop_wait")
+                if "loop_complete" in self._tools.tool_names:
+                    tool_filter.add("loop_complete")
             return self._ensure_always_available_tools(tool_filter)
 
         if tool_filter is not None and not explicit_allowed:
             tool_filter = set(tool_filter)
             tool_filter.discard("loop_wait")
+            tool_filter.discard("loop_complete")
         return self._ensure_always_available_tools(tool_filter)
 
     @staticmethod

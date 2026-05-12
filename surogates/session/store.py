@@ -1221,12 +1221,26 @@ class SessionStore:
         narrows the candidate set without a LATERAL scan; the
         latest-event-type check then runs only on that small set.
         """
+        # Fire-and-forget events that land after the harness has already
+        # released its lease (e.g. background title generation).  These
+        # legitimately follow a clean turn and must not be read as evidence
+        # of in-flight work — otherwise finished sessions get repeatedly
+        # flagged as orphaned and re-enqueued, which for slash commands
+        # like ``/loop`` produces duplicated side effects.
+        trailing_async_event_types = (
+            "session.title_updated",
+        )
         # Correlated scalar subqueries: latest event for the session
-        # under test.  Used to distinguish idle-between-turns sessions
-        # from genuinely abandoned mid-turn sessions.
+        # under test, skipping trailing-async events so the predicate
+        # sees the most recent harness-driven event.  Used to distinguish
+        # idle-between-turns sessions from genuinely abandoned mid-turn
+        # sessions.
         latest_event_type = (
             select(EventRow.type)
-            .where(EventRow.session_id == SessionRow.id)
+            .where(
+                EventRow.session_id == SessionRow.id,
+                EventRow.type.notin_(trailing_async_event_types),
+            )
             .order_by(EventRow.id.desc())
             .limit(1)
             .correlate(SessionRow)
@@ -1234,7 +1248,10 @@ class SessionStore:
         )
         latest_event_data = (
             select(EventRow.data)
-            .where(EventRow.session_id == SessionRow.id)
+            .where(
+                EventRow.session_id == SessionRow.id,
+                EventRow.type.notin_(trailing_async_event_types),
+            )
             .order_by(EventRow.id.desc())
             .limit(1)
             .correlate(SessionRow)

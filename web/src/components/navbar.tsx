@@ -71,7 +71,7 @@ export function SessionSidebar() {
     <aside
       className={cn(
         "bg-card border-r border-line flex flex-col overflow-hidden z-10 transition-all duration-200",
-        collapsed ? "w-14 min-w-14" : "w-60 min-w-60",
+        collapsed ? "w-14 min-w-14" : "w-80 min-w-80",
       )}
     >
       {/* Header */}

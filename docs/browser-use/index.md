@@ -190,7 +190,11 @@ Browser pods are intentionally not the execution sandbox:
 
 - They do not receive database, Redis, API, or LLM credentials.
 - The browser container gets `/workspace`; in Kubernetes, an s3fs sidecar holds
-  session-scoped storage credentials for that mount.
+  session-scoped storage credentials for that mount. Under the `process` backend
+  the host cannot mount the S3 bucket, so when storage is `s3` the browser is
+  started without a `/workspace` bind mount — navigation/screenshot still work,
+  but file sharing between the agent workspace and the browser is unavailable
+  (use `process` + `local` storage, or `kubernetes` + `s3`, for full sharing).
 - Their ServiceAccount has no Kubernetes permissions.
 - The API server authenticates and authorizes all live-view and control traffic.
 - Browser tool calls pass through governance, including URL checks for

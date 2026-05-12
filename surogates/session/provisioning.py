@@ -4,9 +4,20 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from surogates.harness.model_metadata import get_model_info
+from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.models import Session
 from surogates.session.store import SessionStore
 from surogates.storage.tenant import agent_session_bucket
+
+
+# Fields that pin a child session to its root's workspace.  Callers must
+# not be able to override these via ``config`` -- doing so would silently
+# break workspace sharing.
+_WORKSPACE_SHARING_FIELDS = (
+    "storage_bucket",
+    "workspace_path",
+    "supports_vision",
+)
 
 
 async def create_agent_session(
@@ -50,5 +61,67 @@ async def create_agent_session(
         config=merged_config,
         parent_id=parent_id,
         service_account_id=service_account_id,
+        idempotency_key=idempotency_key,
+    )
+
+
+async def create_child_session(
+    *,
+    store: SessionStore,
+    parent: Session,
+    channel: str,
+    model: str | None = None,
+    config: dict | None = None,
+    service_account_id: UUID | None = None,
+    idempotency_key: str | None = None,
+    session_id: UUID | None = None,
+) -> Session:
+    """Create a session that shares its parent's workspace.
+
+    The child reuses the parent's ``storage_bucket`` and
+    ``workspace_path`` and stamps ``sandbox_root_session_id`` to the
+    ultimate ancestor (via :func:`sandbox_session_key`).  No new
+    ``sessions/{child_id}/`` prefix is allocated on storage; tools
+    write into the root's workspace prefix.
+
+    Identity is inherited from *parent*: ``agent_id``, ``org_id``,
+    ``user_id``, and ``service_account_id`` (unless explicitly
+    overridden via *service_account_id*).  ``model`` falls back to
+    ``parent.model`` when not supplied.
+    """
+    merged_config = dict(config or {})
+
+    parent_config = parent.config or {}
+    missing = [f for f in _WORKSPACE_SHARING_FIELDS if f not in parent_config]
+    if missing:
+        raise ValueError(
+            f"Parent session {parent.id} cannot seed a shared workspace: "
+            f"missing required config fields {missing}. The parent must "
+            f"have been created via create_agent_session() (or another "
+            f"path that populates the workspace)."
+        )
+    for field in _WORKSPACE_SHARING_FIELDS:
+        merged_config[field] = parent_config[field]
+
+    merged_config["sandbox_root_session_id"] = sandbox_session_key(parent)
+
+    effective_service_account_id = (
+        service_account_id
+        if service_account_id is not None
+        else parent.service_account_id
+    )
+    if effective_service_account_id is not None:
+        merged_config["service_account_id"] = str(effective_service_account_id)
+
+    return await store.create_session(
+        session_id=session_id,
+        user_id=parent.user_id,
+        org_id=parent.org_id,
+        agent_id=parent.agent_id,
+        channel=channel,
+        model=model if model is not None else parent.model,
+        config=merged_config,
+        parent_id=parent.id,
+        service_account_id=effective_service_account_id,
         idempotency_key=idempotency_key,
     )
