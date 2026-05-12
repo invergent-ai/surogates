@@ -136,6 +136,8 @@ class StreamingToolExecutor:
         session_factory: Any | None = None,
         llm_client: Any | None = None,
         model: str | None = None,
+        vision_llm_client: Any | None = None,
+        vision_model: str = "",
         saga: SagaOrchestrator | None = None,
         log_policy_allowed: bool = False,
         tool_guardrails: Any | None = None,
@@ -159,6 +161,8 @@ class StreamingToolExecutor:
         self._session_factory = session_factory
         self._llm_client = llm_client
         self._model = model
+        self._vision_llm_client = vision_llm_client
+        self._vision_model = vision_model
         self._saga = saga
         self._tool_guardrails = tool_guardrails
 
@@ -335,6 +339,8 @@ class StreamingToolExecutor:
                 session_factory=self._session_factory,
                 llm_client=self._llm_client,
                 model=self._model,
+                vision_llm_client=self._vision_llm_client,
+                vision_model=self._vision_model,
                 saga=self._saga,
                 log_policy_allowed=self._log_policy_allowed,
             )

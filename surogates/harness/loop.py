@@ -1463,6 +1463,8 @@ class AgentHarness:
                     session_factory=self._session_factory,
                     llm_client=self._llm,
                     model=model_id,
+                    vision_llm_client=self._vision_client,
+                    vision_model=self._vision_model,
                     saga=saga,
                     log_policy_allowed=self._log_policy_allowed,
                     tool_guardrails=tool_guardrails,
@@ -2050,6 +2052,8 @@ class AgentHarness:
                     session_factory=self._session_factory,
                     llm_client=self._llm,
                     model=model_id,
+                    vision_llm_client=self._vision_client,
+                    vision_model=self._vision_model,
                     saga=saga,
                     log_policy_allowed=self._log_policy_allowed,
                 )

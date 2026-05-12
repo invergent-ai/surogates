@@ -83,9 +83,12 @@ def register(registry: ToolRegistry) -> None:
 
 
 async def _vision_analyze_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
-    llm_client = kwargs.get("llm_client")
-    if llm_client is None:
-        return _json_error("vision_analyze requires a harness llm_client")
+    client, model = _select_vision_client_and_model(kwargs)
+    if client is None:
+        return _json_error(
+            "vision_analyze is not available: no vision LLM is configured "
+            "and the active session model is unknown"
+        )
 
     image_ref = _get_image_ref(arguments)
     if not image_ref:
@@ -133,11 +136,7 @@ async def _vision_analyze_handler(arguments: dict[str, Any], **kwargs: Any) -> s
         max_dimension=max_dimension,
     )
 
-    model = (
-        _configured_vision_model()
-        or str(kwargs.get("model") or kwargs.get("session_model") or "surogate")
-    )
-    response = await llm_client.chat.completions.create(
+    response = await client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=0,
@@ -157,18 +156,40 @@ async def _vision_analyze_handler(arguments: dict[str, Any], **kwargs: Any) -> s
     )
 
 
+def _select_vision_client_and_model(
+    kwargs: dict[str, Any],
+) -> tuple[Any | None, str]:
+    """Pick the (client, model) pair to run vision_analyze through.
+
+    A dedicated vision LLM (``vision_llm_client``/``vision_model`` kwargs,
+    populated from ``settings.llm.vision_*``) wins when configured — its
+    model name only exists on that endpoint, so it must be paired with its
+    own client.  Otherwise fall back to the session's primary client and
+    model, which is valid when the active model itself supports vision.
+    No literal-string default: an unconfigured vision tool returns an
+    explanatory error instead of sending a guessed model name upstream.
+    """
+    vision_client = kwargs.get("vision_llm_client")
+    vision_model = str(kwargs.get("vision_model") or "").strip()
+    if vision_client is not None and vision_model:
+        return vision_client, vision_model
+
+    primary_client = kwargs.get("llm_client")
+    session_model = str(
+        kwargs.get("model") or kwargs.get("session_model") or ""
+    ).strip()
+    if primary_client is not None and session_model:
+        return primary_client, session_model
+
+    return None, ""
+
+
 def _get_image_ref(arguments: dict[str, Any]) -> str:
     for key in ("image", "path", "image_path", "image_url", "url"):
         value = arguments.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
-
-
-def _configured_vision_model() -> str:
-    from surogates.config import load_settings
-
-    return str(getattr(load_settings().llm, "vision_model", "") or "").strip()
 
 
 async def _image_ref_to_data_url(

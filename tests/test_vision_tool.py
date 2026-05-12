@@ -100,14 +100,43 @@ async def test_vision_analyze_sends_workspace_image_as_data_url(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_vision_analyze_uses_configured_vision_model(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_vision_analyze_prefers_vision_client_over_primary(
     tmp_path: Path,
 ) -> None:
     from surogates.tools.builtin.vision import _vision_analyze_handler
 
-    monkeypatch.setenv("SUROGATES_CONFIG", str(tmp_path / "missing-config.yaml"))
-    monkeypatch.setenv("SUROGATES_LLM_VISION_MODEL", "configured-vision-model")
+    image_path = tmp_path / "sample.png"
+    _png(image_path)
+    primary_create = AsyncMock(return_value=_fake_response("primary"))
+    primary_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=primary_create)),
+    )
+    vision_create = AsyncMock(return_value=_fake_response("vision-aux"))
+    vision_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=vision_create)),
+    )
+
+    result = await _vision_analyze_handler(
+        {"image": "sample.png", "question": "What is in this image?"},
+        workspace_path=str(tmp_path),
+        llm_client=primary_client,
+        model="active-chat-model",
+        vision_llm_client=vision_client,
+        vision_model="configured-vision-model",
+    )
+
+    payload = json.loads(result)
+    assert payload["analysis"] == "vision-aux"
+    assert vision_create.await_args.kwargs["model"] == "configured-vision-model"
+    primary_create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_vision_analyze_falls_back_to_primary_when_no_vision_client(
+    tmp_path: Path,
+) -> None:
+    from surogates.tools.builtin.vision import _vision_analyze_handler
+
     image_path = tmp_path / "sample.png"
     _png(image_path)
     create = AsyncMock(return_value=_fake_response())
@@ -122,7 +151,26 @@ async def test_vision_analyze_uses_configured_vision_model(
 
     payload = json.loads(result)
     assert payload["analysis"] == "a small red-orange square"
-    assert create.await_args.kwargs["model"] == "configured-vision-model"
+    assert create.await_args.kwargs["model"] == "active-chat-model"
+
+
+@pytest.mark.asyncio
+async def test_vision_analyze_errors_when_nothing_configured(
+    tmp_path: Path,
+) -> None:
+    from surogates.tools.builtin.vision import _vision_analyze_handler
+
+    image_path = tmp_path / "sample.png"
+    _png(image_path)
+
+    result = await _vision_analyze_handler(
+        {"image": "sample.png", "question": "What is in this image?"},
+        workspace_path=str(tmp_path),
+    )
+
+    payload = json.loads(result)
+    assert "error" in payload
+    assert "not available" in payload["error"]
 
 
 @pytest.mark.asyncio
