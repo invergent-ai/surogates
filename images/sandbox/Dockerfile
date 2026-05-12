@@ -39,7 +39,8 @@ RUN uv venv /opt/venv \
         python-docx \
         python-pptx \
         markitdown[pptx] \
-        Pillow
+        Pillow \
+        pyfiglet
 
 # ── Stage 2: Final image ─────────────────────────────────────────────
 FROM python:3.12-slim
