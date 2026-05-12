@@ -171,7 +171,13 @@ class ProcessBrowserBackend:
         return container_id, endpoint
 
     def _mountable_workspace(self, workspace_path: str | None) -> Path | None:
-        if not workspace_path:
+        # S3Backend.resolve_workspace_path returns the sentinel "/workspace"
+        # — the path inside a sandbox pod where s3fs-fuse mounts the bucket.
+        # When ProcessBrowserBackend is paired with S3Backend we cannot
+        # bind-mount it from the host: skip silently rather than warning.
+        # K8sBrowserBackend + S3Backend handles this via an s3fs sidecar;
+        # ProcessBrowserBackend + LocalBackend gets a real host path.
+        if not workspace_path or workspace_path == "/workspace":
             return None
         workspace = Path(workspace_path).resolve()
         try:

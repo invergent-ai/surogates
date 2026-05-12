@@ -84,6 +84,12 @@ class Orchestrator:
         self._tasks: set[asyncio.Task] = set()
         # Active harnesses by session ID — for delivering interrupt signals.
         self._active_harnesses: dict[UUID, Any] = {}
+        # Sessions that received an extra enqueue while their wake was
+        # already in flight on this worker.  The active wake honours the
+        # flag by enqueueing exactly once when it returns, instead of
+        # spin-requeueing through the work queue at ~4 Hz for the entire
+        # duration of the wake.
+        self._rewake_pending: set[UUID] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -230,11 +236,17 @@ class Orchestrator:
 
         try:
             if session_id in self._active_harnesses:
-                logger.info(
-                    "Session %s is already active on this worker; requeueing wake",
+                # A wake is already running for this session on this worker
+                # (e.g. a child worker just emitted ``WORKER_COMPLETE`` and
+                # enqueued the parent while the parent's coordinator wake is
+                # mid-stream).  Defer to the active wake: it will enqueue
+                # once when it returns.  Avoids a 4 Hz spin loop on Redis
+                # for the entire lifetime of a long wake.
+                self._rewake_pending.add(session_id)
+                logger.debug(
+                    "Session %s already active on this worker; deferring rewake",
                     session_id,
                 )
-                await self._requeue_busy_session(session_id)
                 return
 
             harness = self.harness_factory(session_id)
@@ -243,16 +255,26 @@ class Orchestrator:
                 harness = await harness
             # Track the active harness so interrupt signals can reach it.
             self._active_harnesses[session_id] = harness
+            wake_result: str | None = None
             try:
                 wake_result = await harness.wake(session_id)
-                if wake_result == "lease_held":
-                    logger.info(
-                        "Session %s lease is held; requeueing wake",
-                        session_id,
-                    )
-                    await self._requeue_busy_session(session_id)
             finally:
                 self._active_harnesses.pop(session_id, None)
+
+            # Slot is free; settle any follow-up enqueue.  ``lease_held``
+            # (another worker owns the lease) backs off briefly first; a
+            # deferred rewake fires immediately because the relevant wake
+            # just finished.  Redis ZADD dedupes if both apply.
+            rewake_pending = session_id in self._rewake_pending
+            self._rewake_pending.discard(session_id)
+            if wake_result == "lease_held":
+                logger.info(
+                    "Session %s lease is held; requeueing wake",
+                    session_id,
+                )
+                await self._requeue_busy_session(session_id)
+            elif rewake_pending:
+                await enqueue_session(self.redis, self._agent_id, session_id)
         except Exception as exc:
             logger.exception(
                 "Harness failed for session %s (attempt %d/%d)",

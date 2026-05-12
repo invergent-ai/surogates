@@ -207,7 +207,7 @@ async def _delegate_handler(
         memory_manager = kwargs.get("memory_manager")
         if memory_manager is not None:
             try:
-                await memory_manager.on_delegation(
+                memory_manager.on_delegation(
                     task=goal,
                     result=result_text[:2000],
                     child_session_id=str(child_id),

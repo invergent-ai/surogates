@@ -170,10 +170,12 @@ Loop behavior:
 - Stores schedules in PostgreSQL scoped by `org_id`, `user_id`, and `agent_id`.
 - Runs from the owning agent worker, which claims due rows with
   `FOR UPDATE SKIP LOCKED`.
-- Fixed-interval loops auto-expire after 3 days.
+- Fixed-interval loops auto-expire after 3 days. A run can end the schedule
+  early by calling `loop_complete` when the prompt's stop condition is met.
 - Dynamic loops auto-expire after 7 days. Each run must call `loop_wait` with a
   next delay between 1 minute and 1 hour; if it does not, Surogates applies a
-  10-minute fallback delay.
+  10-minute fallback delay. Setting `completed: true` on `loop_wait` ends the
+  schedule early.
 - Accepts slash commands as prompts, so `/loop 5m /some-skill args` works.
 - Scans prompts before persistence for prompt-injection markers, invisible
   Unicode, secret-exfiltration patterns, and destructive command patterns.

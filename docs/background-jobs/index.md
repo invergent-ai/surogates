@@ -154,11 +154,14 @@ session, emits the stored prompt as `user.message`, and enqueues that
 session on the agent's Redis work queue.
 
 Users can create short-lived loops with `/loop [interval] <prompt>`.
-Fixed-interval loops expire after 3 days. When the interval is omitted,
-Surogates creates a dynamic loop: each run chooses its next delay with
-`loop_wait`, clamped to 1 minute through 1 hour, and the loop expires after
-7 days. Use `/loop list` and `/loop cancel <id>` to manage them. See
-[Commands](../commands/index.md) for the full slash-command reference.
+Fixed-interval loops expire after 3 days; a run can end the schedule early
+by calling `loop_complete` when the prompt's stop condition is met. When
+the interval is omitted, Surogates creates a dynamic loop: each run chooses
+its next delay with `loop_wait`, clamped to 1 minute through 1 hour, and
+the loop expires after 7 days; passing `completed: true` to `loop_wait`
+ends the schedule early. Use `/loop list` and `/loop cancel <id>` to
+manage them. See [Commands](../commands/index.md) for the full slash-command
+reference.
 
 ## `training_collector` -- Expert Training Data Export
 

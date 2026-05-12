@@ -56,11 +56,43 @@ _LOOP_WAIT_SCHEMA = ToolSchema(
 )
 
 
+_LOOP_COMPLETE_SCHEMA = ToolSchema(
+    name="loop_complete",
+    description=(
+        "Mark the current ``/loop`` schedule finished. Call this from "
+        "inside a fixed-cron ``/loop`` run when the prompt's stop "
+        "condition is met (e.g. 'stop after 5 entries' and 5 entries "
+        "now exist). The schedule's status flips to ``completed`` and "
+        "no further runs are scheduled. For dynamic loops, use "
+        "``loop_wait`` with ``completed: true`` instead."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "reason": {
+                "type": "string",
+                "description": (
+                    "Brief reason for completing the loop — typically the "
+                    "stop condition that was reached."
+                ),
+            },
+        },
+        "required": ["reason"],
+    },
+)
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(
         name="loop_wait",
         schema=_LOOP_WAIT_SCHEMA,
         handler=_loop_wait_handler,
+        toolset="scheduling",
+    )
+    registry.register(
+        name="loop_complete",
+        schema=_LOOP_COMPLETE_SCHEMA,
+        handler=_loop_complete_handler,
         toolset="scheduling",
     )
 
@@ -121,6 +153,70 @@ async def _loop_wait_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         "delay_seconds": delay,
         "reason": reason,
         "completed": completed,
+    })
+
+
+async def _loop_complete_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+    tenant = kwargs.get("tenant")
+    if tenant is None or getattr(tenant, "user_id", None) is None:
+        return _json({
+            "success": False,
+            "error": "/loop schedules are user-owned only",
+        })
+
+    agent_id = str(kwargs.get("agent_id") or "")
+    if not agent_id:
+        return _json({"success": False, "error": "agent_id is required"})
+
+    session_config = kwargs.get("session_config") or {}
+    if not session_config.get("scheduled_session_id"):
+        return _json({
+            "success": False,
+            "error": "loop_complete is available only inside a /loop run",
+        })
+    if session_config.get("scheduled_dynamic_loop"):
+        return _json({
+            "success": False,
+            "error": (
+                "Dynamic loops complete via loop_wait(completed=true); "
+                "loop_complete is for fixed-cron /loop runs only"
+            ),
+        })
+
+    try:
+        schedule_id = UUID(str(session_config.get("scheduled_session_id") or ""))
+    except ValueError:
+        return _json({"success": False, "error": "Invalid schedule id"})
+
+    try:
+        session_id = UUID(str(kwargs.get("session_id") or ""))
+    except ValueError:
+        return _json({"success": False, "error": "Invalid session id"})
+
+    reason = str(arguments.get("reason") or "").strip()
+    if not reason:
+        return _json({"success": False, "error": "reason is required"})
+
+    store = kwargs.get("scheduled_store")
+    if store is None:
+        store = ScheduledSessionStore(kwargs["session_factory"])
+
+    updated = await store.mark_loop_completed(
+        schedule_id=schedule_id,
+        org_id=tenant.org_id,
+        user_id=tenant.user_id,
+        agent_id=agent_id,
+        session_id=session_id,
+        reason=reason,
+    )
+    if not updated:
+        return _json({
+            "success": False,
+            "error": "Schedule was not found or this session cannot update it",
+        })
+    return _json({
+        "success": True,
+        "reason": reason,
     })
 
 

@@ -143,6 +143,80 @@ async def test_dynamic_loop_lifecycle_waits_for_loop_wait(session_factory):
     assert updated.schedule["last_delay_reason"] == "CI is still running"
 
 
+async def _create_due_loop(store, *, org_id, user_id, agent_id="agent-a"):
+    """Build a fixed-cron ``/loop`` row with ``next_run_at`` in the past.
+
+    Backdating ``next_run_at`` keeps the row claimable so we can drive it
+    through ``mark_run_created`` to associate a run session — required
+    before ``mark_loop_completed`` will accept the request.
+    """
+    due = datetime.now(timezone.utc) - timedelta(minutes=1)
+    return await store.create(
+        org_id=org_id,
+        user_id=user_id,
+        agent_id=agent_id,
+        name="Loop: fetch btc",
+        prompt="fetch btc price; stop after 2 prices",
+        schedule=parse_schedule("1m", timezone_name="UTC"),
+        source="loop",
+        created_from_session_id=None,
+        next_run_at=due,
+    )
+
+
+async def test_mark_loop_completed_terminates_fixed_cron_schedule(session_factory):
+    """``loop_complete`` flips a fixed-cron schedule to ``completed``."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+
+    created = await _create_due_loop(store, org_id=org_id, user_id=user_id)
+    claimed = (await store.claim_due(agent_id="agent-a", worker_id="w1", limit=1))[0]
+    await store.mark_run_created(claimed, session_id=created.id)
+
+    ok = await store.mark_loop_completed(
+        schedule_id=created.id,
+        org_id=org_id,
+        user_id=user_id,
+        agent_id="agent-a",
+        session_id=created.id,
+        reason="Stop condition reached: 2 prices collected.",
+    )
+
+    assert ok is True
+    updated = await store.get(created.id)
+    assert updated.status == "completed"
+    assert updated.next_run_at is None
+    assert updated.schedule["last_completed_reason"] == (
+        "Stop condition reached: 2 prices collected."
+    )
+
+
+async def test_mark_loop_completed_rejects_wrong_tenant(session_factory):
+    """The session asking to complete must match the schedule's last run."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    other_user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+
+    created = await _create_due_loop(store, org_id=org_id, user_id=user_id)
+    claimed = (await store.claim_due(agent_id="agent-a", worker_id="w1", limit=1))[0]
+    await store.mark_run_created(claimed, session_id=created.id)
+
+    ok = await store.mark_loop_completed(
+        schedule_id=created.id,
+        org_id=org_id,
+        user_id=other_user_id,  # wrong owner
+        agent_id="agent-a",
+        session_id=created.id,
+        reason="not the owner",
+    )
+
+    assert ok is False
+    untouched = await store.get(created.id)
+    assert untouched.status == "active"
+
+
 async def test_dynamic_loop_marked_completed_when_caller_declares_done(session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)

@@ -213,7 +213,15 @@ class StreamingToolExecutor:
         Starts any queued tools that can execute now, then waits for all
         tasks to finish.  Tools that were never executed (due to sibling
         abort, discard, or interrupt) get synthetic "skipped" results.
+
+        Called only after the stream is committed (callers use
+        :meth:`discard` instead when the stream aborts), so tools that
+        were excluded from eager mid-stream dispatch -- delegation tools,
+        which would orphan child sessions on a discarded stream -- can
+        now safely fan out in parallel.  See
+        :meth:`_promote_batch_parallel_tools`.
         """
+        self._promote_batch_parallel_tools()
         self._process_queue()
 
         # Wait for all tasks, including ones created dynamically by
@@ -442,6 +450,55 @@ class StreamingToolExecutor:
             self._start_execution(tool)
             if not tool.is_parallelizable:
                 break  # Non-concurrent tool runs alone
+
+    def _promote_batch_parallel_tools(self) -> None:
+        """Promote delegation-style tools to parallel-eligible post-stream.
+
+        Delegation tools (``delegate_task``, ``spawn_worker``) are kept out
+        of :data:`~surogates.harness.tool_exec.PARALLEL_TOOLS` so the
+        streaming executor doesn't speculatively spawn child sessions
+        mid-stream -- if the stream were later discarded, those sessions
+        would orphan.  Once the stream is committed (the contract of
+        :meth:`get_all_results`) that risk is gone, so delegation tools
+        can safely fan out in parallel.
+
+        Flips :attr:`TrackedTool.is_parallelizable` to ``True`` for every
+        tracked tool whose name is in
+        :data:`~surogates.harness.tool_exec.BATCH_PARALLEL_TOOLS` and is
+        not already completed.  Promoting an already-executing tool is
+        safe -- the flag is only consulted by :meth:`_can_execute` to
+        decide whether queued siblings may join -- and it is necessary
+        because a delegation tool that started alone during streaming
+        would otherwise prevent its queued siblings from running
+        concurrently.
+
+        Identical ``(tool_name, args)`` signatures within the candidate
+        batch are a model loop pattern that the non-streaming dispatcher
+        forces sequential so guardrails can break the loop (see
+        :func:`~surogates.harness.tool_exec._batch_has_duplicate_signatures`).
+        Match that here: when duplicates are present, skip promotion so
+        the queue drains one at a time.
+        """
+        from surogates.harness.tool_exec import (
+            BATCH_PARALLEL_TOOLS,
+            _batch_has_duplicate_signatures,
+        )
+
+        candidates: list[TrackedTool] = []
+        for tool in self._tracked:
+            if tool.is_parallelizable or tool.status == ToolStatus.COMPLETED:
+                continue
+            name = tool.tool_call.get("function", {}).get("name", "")
+            if name in BATCH_PARALLEL_TOOLS:
+                candidates.append(tool)
+
+        if not candidates:
+            return
+        if _batch_has_duplicate_signatures([t.tool_call for t in candidates]):
+            return
+
+        for tool in candidates:
+            tool.is_parallelizable = True
 
 
 # ---------------------------------------------------------------------------

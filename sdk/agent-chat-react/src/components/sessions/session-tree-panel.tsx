@@ -220,7 +220,6 @@ function TreeNodeRow({
   const subtitle = [
     formatRunKind(entry.runKind),
     entry.agentType,
-    entry.model ?? "default",
     formatSessionTime(entry.updatedAt),
   ].filter(Boolean).join(" · ");
 

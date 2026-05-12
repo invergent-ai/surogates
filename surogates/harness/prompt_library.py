@@ -51,6 +51,7 @@ REQUIRED_KEYS: tuple[str, ...] = (
     "guidance/artifact",
     "guidance/browser",
     "guidance/loop_wait",
+    "guidance/cron_loop",
     "guidance/coordinator",
     "guidance/execution_discipline",
     "guidance/tool_use_enforcement",

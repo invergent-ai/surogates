@@ -190,6 +190,33 @@ class TestProvision:
         assert "WORKSPACE_DIR=/workspace" not in run_call
         assert "HOME=/workspace" not in run_call
 
+    async def test_provision_skips_s3_workspace_sentinel(
+        self,
+        fake_spec_json_transport,
+        caplog,
+    ) -> None:
+        docker = FakeDocker()
+        backend = ProcessBrowserBackend(
+            image="i",
+            rest_port_base=30000,
+            cdp_port_base=31000,
+            live_view_port_base=32000,
+            docker=docker,
+            httpx_transport=fake_spec_json_transport,
+        )
+
+        with caplog.at_level("WARNING", logger="surogates.browser.process"):
+            await backend.provision(BrowserSpec(workspace_path="/workspace"))
+
+        run_call = docker.calls[0]
+        assert "-v" not in run_call
+        assert "WORKSPACE_DIR=/workspace" not in run_call
+        assert "HOME=/workspace" not in run_call
+        assert not any(
+            "Skipping browser workspace bind mount" in rec.message
+            for rec in caplog.records
+        )
+
     async def test_provision_cleans_up_container_when_readiness_times_out(self) -> None:
         class NeverReadyTransport(httpx.AsyncBaseTransport):
             async def handle_async_request(

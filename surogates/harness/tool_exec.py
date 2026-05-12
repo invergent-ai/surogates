@@ -23,6 +23,7 @@ from surogates.harness.tool_guardrails import (
     ToolGuardrailDecision,
     ToolGuardrails,
     append_toolguard_guidance,
+    canonical_tool_args,
     toolguard_synthetic_result,
 )
 from surogates.tools.coerce import coerce_tool_args
@@ -453,6 +454,33 @@ def _all_concurrency_safe(tool_calls: list[dict[str, Any]]) -> bool:
     )
 
 
+def _batch_has_duplicate_signatures(tool_calls: list[dict[str, Any]]) -> bool:
+    """Return ``True`` if any two calls in *tool_calls* share name + args.
+
+    Repeated identical calls in a single batch are a model loop pattern that
+    :class:`ToolGuardrails` is designed to detect via successive
+    ``after_call``/``before_call`` state updates.  Parallel dispatch would
+    fire all duplicates before any after_call ran, defeating that.  When
+    duplicates are present, fall back to sequential so the guardrail can
+    observe each result and block the loop.
+    """
+    seen: set[tuple[str, str]] = set()
+    for tc in tool_calls:
+        fn = tc.get("function", {})
+        name = fn.get("name", "")
+        args_raw = fn.get("arguments", "")
+        try:
+            parsed = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+            canon = canonical_tool_args(parsed if isinstance(parsed, dict) else {})
+        except (json.JSONDecodeError, TypeError, ValueError):
+            canon = str(args_raw)
+        key = (name, canon)
+        if key in seen:
+            return True
+        seen.add(key)
+    return False
+
+
 def should_parallelize(tool_calls: list[dict[str, Any]]) -> bool:
     """Decide whether a batch of tool calls can be executed concurrently.
 
@@ -555,14 +583,27 @@ async def execute_tool_calls(
 ) -> list[dict]:
     """Execute tool calls, choosing parallel vs sequential.
 
-    When *saga* is active, parallel execution is restricted to
-    concurrency-safe (read-only) tools only — side-effecting tools
-    must run sequentially so saga compensation has deterministic step
-    ordering.  Read-only tools have no side effects to compensate,
-    so they can still benefit from parallelism.
+    The parallel branch is taken when:
+
+    - :func:`should_parallelize` accepts the batch (>1 call, all in
+      :data:`BATCH_PARALLEL_TOOLS`, path-scoped tools don't overlap), AND
+    - either no guardrails are active, or the batch has no duplicate
+      ``(tool_name, args)`` signatures.  Duplicate signatures within one
+      batch are a model loop pattern that :class:`ToolGuardrails` is
+      designed to break via successive ``after_call``/``before_call``
+      state updates — parallel dispatch would fire all duplicates before
+      any after_call ran, defeating that, so duplicates force sequential
+      so the guardrail can block them, AND
+    - when *saga* is active, parallel execution is restricted to
+      concurrency-safe (read-only) tools only — side-effecting tools
+      must run sequentially so saga compensation has deterministic step
+      ordering.  Read-only tools have no side effects to compensate,
+      so they can still benefit from parallelism.
     """
-    if tool_guardrails is None and should_parallelize(tool_calls) and (
-        saga is None or _all_concurrency_safe(tool_calls)
+    if (
+        should_parallelize(tool_calls)
+        and (tool_guardrails is None or not _batch_has_duplicate_signatures(tool_calls))
+        and (saga is None or _all_concurrency_safe(tool_calls))
     ):
         return await execute_tool_calls_concurrent(
             tool_calls,
@@ -586,6 +627,7 @@ async def execute_tool_calls(
             model=model,
             vision_llm_client=vision_llm_client,
             vision_model=vision_model,
+            tool_guardrails=tool_guardrails,
             log_policy_allowed=log_policy_allowed,
         )
     return await execute_tool_calls_sequential(
@@ -736,6 +778,7 @@ async def execute_tool_calls_concurrent(
     model: str | None = None,
     vision_llm_client: Any | None = None,
     vision_model: str = "",
+    tool_guardrails: ToolGuardrails | None = None,
     log_policy_allowed: bool = False,
 ) -> list[dict]:
     """Execute tool calls concurrently using asyncio.gather.
@@ -746,6 +789,13 @@ async def execute_tool_calls_concurrent(
     Each concurrent tool runs inside a copied :mod:`contextvars` context
     so that ``new_span()`` inside ``execute_single_tool`` does not clobber
     sibling tasks' trace state.
+
+    Guardrail integration mirrors :func:`execute_tool_calls_sequential`:
+    ``before_call`` runs sequentially over the batch before dispatch (so a
+    blocking decision skips the affected call, and ``should_halt`` truncates
+    the batch); allowed calls fan out in parallel; ``after_call`` runs
+    sequentially over the results in batch order to keep failure-counter
+    updates deterministic.
     """
     import contextvars as _cv
 
@@ -789,14 +839,75 @@ async def execute_tool_calls_concurrent(
                 log_policy_allowed=log_policy_allowed,
             )
 
-    # Spawn each task in its own context copy so new_span() calls
-    # inside execute_single_tool are isolated from siblings.
-    loop = asyncio.get_running_loop()
-    tasks = [
-        loop.create_task(_guarded(tc), context=_cv.copy_context())
-        for tc in tool_calls
-    ]
-    return list(await asyncio.gather(*tasks))
+    # Pre-pass: apply ``before_call`` sequentially so guardrail blocking
+    # decisions are observed before any parallel work starts.  Build
+    # ``results`` in original order; allowed calls get a None placeholder
+    # that's filled in after the parallel gather completes.
+    results: list[dict | None] = []
+    parallel_slots: list[tuple[int, dict[str, Any]]] = []
+    halt_in_pre_pass = False
+
+    for tc in tool_calls:
+        if interrupt_check():
+            results.append(make_skipped_tool_result(tc))
+            continue
+        if tool_guardrails is not None:
+            guardrail_args = _parse_tool_args_for_guardrail(tc)
+            tool_name = tc.get("function", {}).get("name", "")
+            before = tool_guardrails.before_call(tool_name, guardrail_args)
+            if not before.allows_execution:
+                results.append(
+                    await _emit_guardrail_tool_result(
+                        tc,
+                        decision=before,
+                        session=session,
+                        lease=lease,
+                        store=store,
+                    )
+                )
+                if before.should_halt:
+                    halt_in_pre_pass = True
+                    break
+                continue
+        parallel_slots.append((len(results), tc))
+        results.append(None)
+
+    # Parallel dispatch of allowed calls.
+    if parallel_slots:
+        asyncio_loop = asyncio.get_running_loop()
+        tasks = [
+            asyncio_loop.create_task(_guarded(tc), context=_cv.copy_context())
+            for _, tc in parallel_slots
+        ]
+        parallel_results = await asyncio.gather(*tasks)
+        for (idx, _), result in zip(parallel_slots, parallel_results):
+            results[idx] = result
+
+    # Post-pass: apply ``after_call`` and any guidance suffix in batch
+    # order so per-tool failure counters update deterministically.  Stops
+    # appending guidance once a halt decision fires (matches the
+    # sequential path's ``break``), but does not discard already-executed
+    # results — the outer loop will see ``halt_decision`` and stop.
+    if tool_guardrails is not None and not halt_in_pre_pass:
+        for idx, tc in parallel_slots:
+            result = results[idx]
+            if result is None:
+                continue
+            tool_name = tc.get("function", {}).get("name", "")
+            guardrail_args = _parse_tool_args_for_guardrail(tc)
+            after = tool_guardrails.after_call(
+                tool_name,
+                guardrail_args,
+                result.get("content", ""),
+            )
+            results[idx] = {
+                **result,
+                "content": append_toolguard_guidance(result.get("content", ""), after),
+            }
+            if tool_guardrails.halt_decision is not None:
+                break
+
+    return [r for r in results if r is not None]
 
 
 async def execute_single_tool(

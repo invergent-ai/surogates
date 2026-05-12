@@ -2851,19 +2851,37 @@ class AgentHarness:
             excluded.update(WORKER_EXCLUDED_TOOLS)
             tool_filter = set(self._tools.tool_names) - excluded
 
-        if config.get("scheduled_dynamic_loop"):
+        # Any session running as one iteration of a schedule (``/loop`` or
+        # cron_create-spawned) must not be able to create new schedules.
+        # Otherwise the LLM can spawn nested cron jobs from inside a wake —
+        # observed in the wild on a ``/loop 1m`` run that called
+        # ``cron_create`` to build a parallel cron for the same task.
+        is_scheduled_child = bool(config.get("scheduled_session_id"))
+        if is_scheduled_child:
             if tool_filter is None:
                 tool_filter = set(self._tools.tool_names)
             else:
                 tool_filter = set(tool_filter)
             tool_filter.difference_update(_DYNAMIC_LOOP_EXCLUDED_TOOLS)
-            if "loop_wait" in self._tools.tool_names:
-                tool_filter.add("loop_wait")
+            if config.get("scheduled_dynamic_loop"):
+                if "loop_wait" in self._tools.tool_names:
+                    tool_filter.add("loop_wait")
+                # Dynamic loops self-terminate via ``loop_wait(completed=true)``.
+                tool_filter.discard("loop_complete")
+            else:
+                # Fixed-cron children have no use for ``loop_wait`` — the
+                # cron expression controls cadence — but they need a way
+                # to self-terminate when their prompt's stop condition is
+                # met; ``loop_complete`` is the canonical control surface.
+                tool_filter.discard("loop_wait")
+                if "loop_complete" in self._tools.tool_names:
+                    tool_filter.add("loop_complete")
             return self._ensure_always_available_tools(tool_filter)
 
         if tool_filter is not None and not explicit_allowed:
             tool_filter = set(tool_filter)
             tool_filter.discard("loop_wait")
+            tool_filter.discard("loop_complete")
         return self._ensure_always_available_tools(tool_filter)
 
     @staticmethod
