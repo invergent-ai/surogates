@@ -134,6 +134,11 @@ def _load_platform_configs(platform_mcp_dir: str) -> dict[str, dict[str, Any]]:
             "url": server_def.url,
             "env": dict(server_def.env),
             "timeout": server_def.timeout,
+            # Credentials must be carried through so ``_resolve_credentials``
+            # can pop them off and inject the resolved value as a header.
+            # Without this the proxy advertises platform MCP servers but
+            # can never authenticate to them.
+            "credential_refs": list(server_def.credential_refs or []),
         }
 
     return configs

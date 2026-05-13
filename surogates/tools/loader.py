@@ -183,6 +183,15 @@ class MCPServerDef:
     # Surogates instance can still talk to authenticated HTTP MCP
     # endpoints.
     headers: dict[str, str] = field(default_factory=dict)
+    # Names of vault credentials whose decrypted values get injected as
+    # env vars (stdio) or HTTP Authorization headers (http) at connect
+    # time. Each entry is either a plain string (legacy "credential
+    # name") or a dict with ``name`` plus optional placement directives
+    # — see ``mcp_proxy.loader._resolve_credentials``. Carried through
+    # the platform-config path so the proxy's loader can pop them off
+    # and resolve via the encrypted vault instead of trusting whatever
+    # the JSON file says verbatim.
+    credential_refs: list[Any] = field(default_factory=list)
 
 
 # ------------------------------------------------------------------
@@ -1375,6 +1384,7 @@ def _parse_mcp_server(name: str, cfg: dict[str, Any]) -> MCPServerDef:
         env=cfg.get("env", {}),
         timeout=cfg.get("timeout", 120),
         headers=dict(cfg.get("headers") or {}),
+        credential_refs=list(cfg.get("credential_refs") or []),
     )
 
 
