@@ -283,7 +283,7 @@ function ChatComposerInner({
               <PromptInputActionMenu>
                 <PromptInputActionMenuTrigger />
                 <PromptInputActionMenuContent>
-                  <PromptInputActionAddAttachments />
+                  <PromptInputActionAddAttachments label="Add images" />
                 </PromptInputActionMenuContent>
               </PromptInputActionMenu>
               <Button
