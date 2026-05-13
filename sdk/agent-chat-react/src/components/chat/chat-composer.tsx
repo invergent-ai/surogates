@@ -470,11 +470,24 @@ function ChatComposerInner({
   // ── Render ───────────────────────────────────────────────────────
 
   return (
-    <Popover open={menuOpen} onOpenChange={(open) => {
-      if (!open) {
-        setButtonMenuOpen(false);
-      }
-    }}>
+    <Popover
+      open={menuOpen}
+      onOpenChange={(open) => {
+        if (!open) {
+          // Radix fires onOpenChange(false) for both Escape and
+          // click-outside.  Without latching ``menuDismissed`` here
+          // the next render would recompute ``showSlashMenu`` from
+          // the textarea (which still starts with ``/``) and the
+          // popup would immediately reopen, undoing the user's
+          // dismissal.  ``menuDismissed`` resets in the useEffect
+          // at the top of this component as soon as the textarea
+          // stops starting with ``/`` (or the button menu fires),
+          // so the next genuine ``/`` press reopens the popup.
+          setButtonMenuOpen(false);
+          setMenuDismissed(true);
+        }
+      }}
+    >
       <AttachmentPreviewStrip />
       <PopoverAnchor asChild>
         <PromptInput
