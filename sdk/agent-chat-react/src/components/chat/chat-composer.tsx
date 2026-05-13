@@ -1,7 +1,14 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   File as FileIcon,
@@ -344,16 +351,28 @@ function ChatComposerInner({
   // own keyboard handler navigates.  We drive ``value`` externally
   // (the user types in the chat textarea, not a CommandInput), so
   // arrow-key navigation moves the highlight without scrolling.  This
-  // effect plugs the gap: every time ``selectedIndex`` changes, look
-  // up the currently-highlighted item by its data attribute and
-  // request a ``block: "nearest"`` scroll so the chip stays visible.
-  useEffect(() => {
+  // effect plugs the gap.
+  //
+  // Subtlety: ``[data-selected="true"]`` is a poor selector here.
+  // cmdk syncs that attribute in its own ``useEffect``, which fires
+  // AFTER ours when the parent re-renders — so we'd read the
+  // previous selection and scroll one item behind, manifesting as
+  // an off-by-one where the user can step past the visible window
+  // before the list catches up.  Querying by position into the
+  // rendered ``[data-slot="command-item"]`` list is independent of
+  // cmdk's internal sync and lines up with ``filteredCommands``
+  // since both share the same render order.
+  //
+  // ``useLayoutEffect`` ensures the scroll completes before paint so
+  // the next visible frame already shows the highlight in view.
+  useLayoutEffect(() => {
     const root = commandListRef.current;
     if (!root) return;
-    const selected = root.querySelector<HTMLElement>(
-      "[data-slot='command-item'][data-selected='true']",
+    const items = root.querySelectorAll<HTMLElement>(
+      "[data-slot='command-item']",
     );
-    selected?.scrollIntoView({ block: "nearest" });
+    const target = items[selectedIndex];
+    target?.scrollIntoView({ block: "nearest" });
   }, [selectedIndex, filteredCommands]);
 
   const menuOpen = showSlashMenu && filteredCommands.length > 0;
