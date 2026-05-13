@@ -98,11 +98,12 @@ RUN chmod +x /usr/local/bin/uv /opt/venv/bin/pip \
 # don't survive a sandbox-pod crash within a session (they're scoped to
 # the pod's lifetime) — sessions are short-lived enough that a re-install
 # on a fresh pod is cheap.
-ENV PATH="/home/sandbox/.local/bin:/opt/venv/bin:$PATH" \
+ENV PATH="/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/opt/venv/bin:$PATH" \
     PYTHONUSERBASE="/home/sandbox/.local" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_USER=1
+    PIP_USER=1 \
+    NPM_CONFIG_PREFIX="/home/sandbox/.npm-global"
 
 # ── Tool executor ───────────────────────────────────────────────────
 COPY images/sandbox/tool-executor /usr/local/bin/tool-executor
@@ -111,8 +112,8 @@ RUN chmod +x /usr/local/bin/tool-executor
 # ── Non-root user ───────────────────────────────────────────────────
 RUN groupadd --gid 1000 sandbox \
     && useradd --uid 1000 --gid sandbox --create-home sandbox \
-    && mkdir -p /workspace /home/sandbox/.local \
-    && chown sandbox:sandbox /workspace /home/sandbox/.local
+    && mkdir -p /workspace /home/sandbox/.local /home/sandbox/.npm-global \
+    && chown sandbox:sandbox /workspace /home/sandbox/.local /home/sandbox/.npm-global
 
 USER sandbox
 WORKDIR /workspace
