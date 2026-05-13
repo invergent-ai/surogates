@@ -47,6 +47,7 @@ dependencies = [
     "pillow>=10,<13",
     "croniter>=3.0,<7.0",
     "outlines>=1.2,<2.0",
+    "mcp>=1.2,<2.0",
 ]
 scripts = { "surogates" = "surogates.cli.main:cli_main" }
 
