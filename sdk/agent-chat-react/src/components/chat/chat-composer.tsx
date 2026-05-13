@@ -1,7 +1,7 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   File as FileIcon,
   FileArchive,
@@ -327,11 +327,32 @@ function ChatComposerInner({
 
   const menuOpen = showSlashMenu;
 
+  // Selecting a command closes the popup; cmdk + Radix Popover then
+  // tear down the CommandInput, which is the currently-focused
+  // element.  Without an explicit hand-off, focus falls onto the body
+  // and the user has to click back into the chat input before they
+  // can keep typing.  We stash a ref on the textarea below and call
+  // .focus() on it after the state updates flush, then move the
+  // caret to the end so the user can continue typing arguments
+  // straight after the inserted command.
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
   const handleCommandSelect = useCallback(
     (commandValue: string) => {
       textInput.setInput(commandValue + " ");
       setButtonMenuOpen(false);
       setMenuDismissed(true);
+      // requestAnimationFrame waits for Radix to finish its
+      // close-animation focus-restoration step; if we focus too
+      // early, Radix's own onCloseAutoFocus pulls focus off the
+      // textarea again.
+      requestAnimationFrame(() => {
+        const textarea = textareaRef.current;
+        if (!textarea) return;
+        textarea.focus();
+        const end = textarea.value.length;
+        textarea.setSelectionRange(end, end);
+      });
     },
     [textInput],
   );
@@ -465,6 +486,7 @@ function ChatComposerInner({
         >
           <PromptInputBody>
             <PromptInputTextarea
+              ref={textareaRef}
               placeholder={
                 disabled
                   ? disabledReason ?? "Session disabled"
