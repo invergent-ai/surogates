@@ -51,6 +51,8 @@ async def load_mcp_configs(
     vault: CredentialVault,
     platform_mcp_dir: str,
     audit_store: AuditStore | None = None,
+    *,
+    is_service_account: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Load, merge, and credential-resolve MCP server configs.
 
@@ -85,6 +87,7 @@ async def load_mcp_configs(
                 _resolve_credentials_safe(
                     server_name, config, credential_refs, vault, org_id,
                     user_id, audit_store,
+                    is_service_account=is_service_account,
                 )
             )
 
@@ -102,12 +105,15 @@ async def _resolve_credentials_safe(
     org_id: UUID,
     user_id: UUID,
     audit_store: AuditStore | None,
+    *,
+    is_service_account: bool = False,
 ) -> None:
     """Wrapper that catches and logs credential resolution failures."""
     try:
         await _resolve_credentials(
             config, credential_refs, vault, org_id, user_id,
             server_name, audit_store,
+            is_service_account=is_service_account,
         )
     except Exception:
         logger.exception(
@@ -185,6 +191,8 @@ async def _resolve_credentials(
     user_id: UUID,
     server_name: str,
     audit_store: AuditStore | None,
+    *,
+    is_service_account: bool = False,
 ) -> None:
     """Resolve credential references and inject into the config.
 
@@ -196,6 +204,10 @@ async def _resolve_credentials(
     env = config.setdefault("env", {})
     headers = config.setdefault("headers", {})
     consumer = f"mcp_server:{server_name}"
+    # See note in pool._scan_and_record: service-account principals must
+    # not populate ``audit_log.user_id`` because that column FKs to
+    # ``users.id``.
+    audit_user_id: UUID | None = None if is_service_account else user_id
 
     for ref in credential_refs:
         if isinstance(ref, str):
@@ -206,7 +218,7 @@ async def _resolve_credentials(
                 vault, org_id, user_id, name,
             )
             await _emit_credential_access(
-                audit_store, org_id, user_id, name, consumer, scope,
+                audit_store, org_id, audit_user_id, name, consumer, scope,
             )
             if value is None:
                 logger.warning(
@@ -228,7 +240,7 @@ async def _resolve_credentials(
                 vault, org_id, user_id, name,
             )
             await _emit_credential_access(
-                audit_store, org_id, user_id, name, consumer, scope,
+                audit_store, org_id, audit_user_id, name, consumer, scope,
             )
             if value is None:
                 logger.warning(
@@ -274,7 +286,7 @@ async def _retrieve_credential(
 async def _emit_credential_access(
     audit_store: AuditStore | None,
     org_id: UUID,
-    user_id: UUID,
+    user_id: UUID | None,
     name: str,
     consumer: str,
     scope: str,

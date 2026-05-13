@@ -43,12 +43,22 @@ class McpProxyClient:
         org_id: UUID,
         user_id: UUID,
         session_id: UUID,
+        *,
+        is_service_account: bool = False,
     ) -> list[str]:
         """Discover MCP tools from the proxy and register them locally.
 
         Returns the list of registered tool names.
+
+        ``is_service_account`` flags the principal so the proxy can skip
+        ``users.id`` foreign keys (e.g. ``audit_log``); pass ``True``
+        when ``session.user_id`` is ``None`` and we fell back to the
+        session's ``service_account_id``.
         """
-        token = create_sandbox_token(org_id, user_id, session_id)
+        token = create_sandbox_token(
+            org_id, user_id, session_id,
+            is_service_account=is_service_account,
+        )
         headers = {"Authorization": f"Bearer {token}"}
 
         resp = await self._client.post("/mcp/v1/tools/list", headers=headers)
@@ -64,7 +74,10 @@ class McpProxyClient:
         registered: list[str] = []
 
         # Mint the token once for all handlers in this session.
-        auth_token = create_sandbox_token(org_id, user_id, session_id)
+        auth_token = create_sandbox_token(
+            org_id, user_id, session_id,
+            is_service_account=is_service_account,
+        )
 
         for tool in tools:
             name = tool.get("name", "")

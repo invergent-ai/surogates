@@ -484,6 +484,7 @@ async def run_worker(settings: Settings) -> None:
                         org_id=configured_org_id,
                         user_id=principal_user_id,
                         session_id=session.id,
+                        is_service_account=session.user_id is None,
                     )
             except Exception:
                 logger.warning(

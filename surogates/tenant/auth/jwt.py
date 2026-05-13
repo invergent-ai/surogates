@@ -118,11 +118,18 @@ def create_sandbox_token(
     user_id: UUID,
     session_id: UUID,
     expires_minutes: int = 60,
+    *,
+    is_service_account: bool = False,
 ) -> str:
     """Create a short-lived token for sandbox-to-MCP-proxy authentication.
 
     Carries the session context (org, user, session) so the MCP proxy
     can scope MCP server access and credential resolution.
+
+    ``is_service_account`` flags sessions whose ``user_id`` claim is
+    actually a ``service_accounts.id`` (because ``sessions.user_id`` was
+    NULL). The proxy uses this to skip foreign keys to ``users.id``
+    (e.g. when writing to ``audit_log``).
     """
     now = int(time.time())
     payload: dict[str, Any] = {
@@ -135,6 +142,8 @@ def create_sandbox_token(
         "iat": now,
         "exp": now + expires_minutes * 60,
     }
+    if is_service_account:
+        payload["is_service_account"] = True
     return jwt.encode(payload, _get_secret(), algorithm=_ALGORITHM)
 
 

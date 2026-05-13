@@ -156,11 +156,17 @@ class ConnectionPool:
         org_id: UUID,
         user_id: UUID,
         configs: dict[str, dict[str, Any]],
+        *,
+        is_service_account: bool = False,
     ) -> list[dict[str, Any]]:
         """Ensure MCP servers for this tenant are connected and return
         their tool schemas.
 
         Idempotent — if already connected, returns cached schemas.
+
+        ``is_service_account`` marks ``user_id`` as a service-account id
+        rather than a real ``users.id``; downstream audit writes use
+        ``user_id=None`` in that case to avoid FK violations.
         """
         key = (org_id, user_id)
         lock = self._locks.setdefault(key, asyncio.Lock())
@@ -249,6 +255,7 @@ class ConnectionPool:
                         server_name=original_server,
                         tool_name=original_tool or clean_name,
                         schema=clean,
+                        is_service_account=is_service_account,
                     ):
                         continue  # unsafe or rug-pulled — exclude from advertised set
 
@@ -286,6 +293,7 @@ class ConnectionPool:
         server_name: str,
         tool_name: str,
         schema: dict[str, Any],
+        is_service_account: bool = False,
     ) -> bool:
         """Scan *schema* for safety + rug-pull; return True if tool is safe.
 
@@ -306,6 +314,12 @@ class ConnectionPool:
         }
         qualified_name = f"{server_name}.{tool_name}"
 
+        # The ``audit_log.user_id`` column FKs to ``users.id``; for
+        # service-account sessions the JWT carries a ``service_accounts.id``
+        # instead, so persist NULL there to avoid FK violations while
+        # still scoping the row by ``org_id``.
+        audit_user_id: UUID | None = None if is_service_account else user_id
+
         # Rug-pull check — only meaningful when we've seen this tool
         # before within the same tenant's governance instance.
         if governance.has_fingerprint(qualified_name):
@@ -313,7 +327,7 @@ class ConnectionPool:
                 if self._audit_store is not None:
                     await self._audit_store.emit(
                         org_id=org_id,
-                        user_id=user_id,
+                        user_id=audit_user_id,
                         type=AuditType.POLICY_RUG_PULL,
                         data=rug_pull_event(
                             server_name, tool_name,
@@ -334,7 +348,7 @@ class ConnectionPool:
         if self._audit_store is not None:
             await self._audit_store.emit(
                 org_id=org_id,
-                user_id=user_id,
+                user_id=audit_user_id,
                 type=AuditType.POLICY_MCP_SCAN,
                 data=mcp_scan_event(
                     server_name, tool_name,

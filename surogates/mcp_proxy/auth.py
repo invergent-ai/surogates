@@ -26,6 +26,10 @@ class ProxyAuthContext:
     org_id: UUID
     user_id: UUID
     session_id: UUID
+    # True when ``user_id`` is actually a service account id. The proxy
+    # uses this to suppress FK writes to ``users.id`` (e.g. ``audit_log``)
+    # while keeping the same UUID for tenant pool scoping.
+    is_service_account: bool = False
 
 
 async def get_proxy_auth(request: Request) -> ProxyAuthContext:
@@ -66,4 +70,5 @@ async def get_proxy_auth(request: Request) -> ProxyAuthContext:
         org_id=UUID(payload["org_id"]),
         user_id=UUID(payload["user_id"]),
         session_id=UUID(session_id_str),
+        is_service_account=bool(payload.get("is_service_account", False)),
     )

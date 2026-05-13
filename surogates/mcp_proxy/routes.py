@@ -84,6 +84,7 @@ async def _ensure_tenant_connected(
         vault=request.app.state.vault,
         platform_mcp_dir=request.app.state.platform_mcp_dir,
         audit_store=getattr(request.app.state, "audit_store", None),
+        is_service_account=auth.is_service_account,
     )
 
     if not configs:
@@ -93,6 +94,7 @@ async def _ensure_tenant_connected(
         org_id=auth.org_id,
         user_id=auth.user_id,
         configs=configs,
+        is_service_account=auth.is_service_account,
     )
 
 
