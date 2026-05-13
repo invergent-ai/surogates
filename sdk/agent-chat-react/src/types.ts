@@ -16,6 +16,48 @@ export interface AgentChatImageAttachment {
   mimeType?: string;
 }
 
+/**
+ * A workspace-resident attachment referenced from a user message.
+ *
+ * ``path`` is the workspace-relative location returned by
+ * ``adapter.uploadWorkspaceFile``.  The harness validates this against the
+ * session's workspace bucket before persisting it on the user.message event.
+ */
+export interface AgentChatAttachment {
+  /** Workspace-relative path returned by uploadWorkspaceFile, e.g.
+   *  ``"uploads/1715-0-report.pdf"``. */
+  path: string;
+  /** Original filename for display (the workspace path is the SDK's
+   *  collision-avoidance rename). */
+  filename: string;
+  mimeType?: string;
+  size?: number;
+}
+
+/**
+ * Display variant used on user-message bubbles.
+ *
+ * ``path`` is optional: an optimistic local message rendered before the
+ * upload completes has the filename + MIME but no workspace path yet, so
+ * the chip renders disabled (not clickable) until the persisted event
+ * replaces it with a full :class:`AgentChatAttachment`.
+ */
+export interface AgentChatDisplayAttachment {
+  path?: string;
+  filename: string;
+  mimeType?: string;
+  size?: number;
+}
+
+/**
+ * Internal-to-runtime variant carrying the raw ``File`` so the runtime
+ * can upload it to the workspace.  Never crosses the network — only
+ * passed from composer to runtime.
+ */
+export interface AgentChatPendingAttachment extends AgentChatDisplayAttachment {
+  file: File;
+}
+
 export interface AgentChatMessage {
   id: string;
   role: AgentChatRole;
@@ -28,6 +70,7 @@ export interface AgentChatMessage {
   systemMeta?: Record<string, unknown>;
   errorInfo?: AgentChatErrorInfo;
   images?: AgentChatImageAttachment[];
+  attachments?: AgentChatDisplayAttachment[];
 }
 
 export interface AgentChatToolCallInfo {
@@ -434,6 +477,8 @@ export interface AgentChatAdapter {
     sessionId: string;
     content: string;
     images?: AgentChatImageAttachment[];
+    metadata?: Record<string, unknown>;
+    attachments?: AgentChatAttachment[];
   }): Promise<{ eventId?: number; status?: string }>;
   defineOutcome?(input: {
     sessionId: string;
