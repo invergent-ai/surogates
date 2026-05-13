@@ -467,6 +467,31 @@ async def run_worker(settings: Settings) -> None:
             service_account_id=session.service_account_id,
         )
 
+        # Proxy-mode MCP tool discovery. The worker shares one tool
+        # registry across sessions; in proxy mode MCP tools have to be
+        # discovered through the MCP proxy with a session-scoped
+        # sandbox JWT (the proxy validates that token to scope server
+        # access + credential resolution). The McpProxyClient caches
+        # already-registered tools, so repeat calls within a worker's
+        # lifetime are cheap. Falls back silently if the proxy is
+        # unreachable — built-in tools still work; only the
+        # platform/copilot MCP tools go missing in that case.
+        if mcp_proxy_client is not None:
+            try:
+                principal_user_id = session.user_id or session.service_account_id
+                if principal_user_id is not None:
+                    await mcp_proxy_client.discover_and_register(
+                        org_id=configured_org_id,
+                        user_id=principal_user_id,
+                        session_id=session.id,
+                    )
+            except Exception:
+                logger.warning(
+                    "MCP proxy tool discovery failed for session %s; "
+                    "built-in tools still available",
+                    session.id, exc_info=True,
+                )
+
         if not settings.llm.model:
             # Worker raises rather than returns a 503 because there's no
             # HTTP response surface here.  ``dispatcher._process``
