@@ -1288,8 +1288,17 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                     meta_payload["chat_user_id"] = str(ops_meta["user_id"])
                 if ops_meta.get("username"):
                     meta_payload["chat_username"] = str(ops_meta["username"])
+            # Prefer the user's active Studio project (stamped by ops's
+            # create_live_session into ops.project_id) over the session's
+            # hosting org_id. The hosting org is where the agent's row
+            # lives — for platform agents like the copilot that's a
+            # hidden system project with no user resources, so scoping
+            # tool calls to it returns empty results. The frontend's
+            # active project is the one the user is actually looking at.
             tenant = kwargs.get("tenant")
-            if tenant is not None and getattr(tenant, "org_id", None):
+            if isinstance(ops_meta, dict) and ops_meta.get("project_id"):
+                meta_payload["project_id"] = str(ops_meta["project_id"])
+            elif tenant is not None and getattr(tenant, "org_id", None):
                 meta_payload["project_id"] = str(tenant.org_id)
             session_id_str = kwargs.get("session_id")
             if session_id_str:
