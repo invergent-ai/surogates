@@ -175,6 +175,14 @@ class MCPServerDef:
     url: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     timeout: int = 120
+    # HTTP transport: extra headers sent on every request to the MCP
+    # server (e.g. ``{"Authorization": "Bearer ..."}``). Ignored for
+    # stdio. The MCP proxy in production resolves ``credential_refs``
+    # against the credential vault and produces these headers; in
+    # dev-mode (no proxy) we accept them inline so a single-process
+    # Surogates instance can still talk to authenticated HTTP MCP
+    # endpoints.
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 # ------------------------------------------------------------------
@@ -1366,6 +1374,7 @@ def _parse_mcp_server(name: str, cfg: dict[str, Any]) -> MCPServerDef:
         url=cfg.get("url"),
         env=cfg.get("env", {}),
         timeout=cfg.get("timeout", 120),
+        headers=dict(cfg.get("headers") or {}),
     )
 
 

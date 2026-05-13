@@ -364,6 +364,12 @@ async def run_worker(settings: Settings) -> None:
                     "url": server_def.url,
                     "env": server_def.env,
                     "timeout": server_def.timeout,
+                    # Forward HTTP headers (Authorization bearer etc.) so
+                    # dev-mode connections to authenticated HTTP MCP
+                    # endpoints don't 401. In proxy-mode these come from
+                    # the credential vault; in dev-mode they are inlined
+                    # in ``servers.json``.
+                    "headers": server_def.headers,
                 }
         except Exception:
             logger.debug("No platform MCP configs found", exc_info=True)
