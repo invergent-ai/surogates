@@ -1271,7 +1271,36 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             })
 
         async def _call():
-            result = await server.session.call_tool(tool_name, arguments=args)
+            # Forward the chat user's identity to the MCP server via the
+            # MCP `_meta` protocol field. Platform MCP servers (e.g.
+            # surogate-ops's copilot) read it to scope queries to the
+            # calling user without a round-trip back to the harness. Falls
+            # back to None (no meta) for sessions that pre-date the
+            # ``ops.username`` stamping in surogate-ops's session create.
+            meta_payload: dict[str, Any] = {}
+            session_config = kwargs.get("session_config") or {}
+            ops_meta = (
+                session_config.get("ops")
+                if isinstance(session_config, dict) else {}
+            ) or {}
+            if isinstance(ops_meta, dict):
+                if ops_meta.get("user_id"):
+                    meta_payload["chat_user_id"] = str(ops_meta["user_id"])
+                if ops_meta.get("username"):
+                    meta_payload["chat_username"] = str(ops_meta["username"])
+            tenant = kwargs.get("tenant")
+            if tenant is not None and getattr(tenant, "org_id", None):
+                meta_payload["project_id"] = str(tenant.org_id)
+            session_id_str = kwargs.get("session_id")
+            if session_id_str:
+                meta_payload["session_id"] = str(session_id_str)
+
+            if meta_payload:
+                result = await server.session.call_tool(
+                    tool_name, arguments=args, meta=meta_payload,
+                )
+            else:
+                result = await server.session.call_tool(tool_name, arguments=args)
             # MCP CallToolResult has .content (list of content blocks) and .isError
             if result.isError:
                 error_text = ""
