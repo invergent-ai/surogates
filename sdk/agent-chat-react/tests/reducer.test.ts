@@ -281,3 +281,165 @@ describe("applyAgentChatEvent", () => {
     expect(destroyed.messages.at(-1)?.content).toMatch(/browser closed/i);
   });
 });
+
+describe("applyAgentChatEvent — user.message images and attachments", () => {
+  it("hydrates images on replay from event.data.images (normalizing mime_type)", () => {
+    const next = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "user.message",
+      eventId: 7,
+      data: {
+        content: "look",
+        images: [
+          { data: "data:image/png;base64,xxxx", mime_type: "image/png" },
+        ],
+      },
+    });
+
+    const msg = next.messages.at(-1)!;
+    expect(msg.role).toBe("user");
+    expect(msg.images).toEqual([
+      { data: "data:image/png;base64,xxxx", mimeType: "image/png" },
+    ]);
+  });
+
+  it("hydrates attachments on replay, normalizing mime_type to mimeType", () => {
+    const next = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "user.message",
+      eventId: 8,
+      data: {
+        content: "summarize",
+        attachments: [{
+          path: "uploads/1715-report.pdf",
+          filename: "report.pdf",
+          mime_type: "application/pdf",
+          size: 12345,
+        }],
+      },
+    });
+
+    const msg = next.messages.at(-1)!;
+    expect(msg.attachments).toEqual([{
+      path: "uploads/1715-report.pdf",
+      filename: "report.pdf",
+      mimeType: "application/pdf",
+      size: 12345,
+    }]);
+  });
+
+  it("replaces optimistic display attachments with persisted refs on event arrival", () => {
+    const state = withMessages([
+      {
+        id: "local-1",
+        role: "user",
+        content: "summarize",
+        createdAt: new Date("2026-01-01T00:00:00Z"),
+        status: "complete",
+        attachments: [
+          { filename: "report.pdf", mimeType: "application/pdf", size: 12345 },
+        ],
+      },
+    ]);
+
+    const next = applyAgentChatEvent(state, {
+      type: "user.message",
+      eventId: 8,
+      data: {
+        content: "summarize",
+        attachments: [{
+          path: "uploads/1715-report.pdf",
+          filename: "report.pdf",
+          mime_type: "application/pdf",
+          size: 12345,
+        }],
+      },
+    });
+
+    expect(next.messages).toHaveLength(1);
+    const msg = next.messages[0]!;
+    expect(msg.id).toBe("evt-8");
+    // After reconciliation the chip is clickable: path is now present.
+    expect(msg.attachments?.[0]?.path).toBe("uploads/1715-report.pdf");
+  });
+
+  it("hydrates both images and attachments on the same user message", () => {
+    const next = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "user.message",
+      eventId: 9,
+      data: {
+        content: "compare these",
+        images: [
+          { data: "data:image/png;base64,abcd", mime_type: "image/png" },
+        ],
+        attachments: [{
+          path: "uploads/notes.txt",
+          filename: "notes.txt",
+          mime_type: "text/plain",
+          size: 42,
+        }],
+      },
+    });
+
+    const msg = next.messages.at(-1)!;
+    expect(msg.images).toHaveLength(1);
+    expect(msg.attachments).toHaveLength(1);
+    expect(msg.attachments?.[0]?.filename).toBe("notes.txt");
+  });
+
+  it("leaves images undefined when payload has no images key", () => {
+    const next = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "user.message",
+      eventId: 10,
+      data: { content: "plain text only" },
+    });
+    expect(next.messages.at(-1)?.images).toBeUndefined();
+    expect(next.messages.at(-1)?.attachments).toBeUndefined();
+  });
+
+  it("skips malformed image entries silently", () => {
+    const next = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "user.message",
+      eventId: 11,
+      data: {
+        content: "x",
+        images: [
+          "garbage",
+          { mime_type: "image/png" }, // missing data
+          { data: "data:image/png;base64,good", mime_type: "image/png" },
+        ],
+      },
+    });
+    expect(next.messages.at(-1)?.images).toHaveLength(1);
+    expect(next.messages.at(-1)?.images?.[0]?.data).toBe(
+      "data:image/png;base64,good",
+    );
+  });
+
+  it("skips malformed attachment entries silently", () => {
+    const next = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "user.message",
+      eventId: 12,
+      data: {
+        content: "x",
+        attachments: [
+          "garbage",
+          { path: "uploads/no-filename" }, // missing filename
+          { filename: "no-path.txt" }, // missing path
+          { path: "uploads/ok.txt", filename: "ok.txt", size: 7 },
+        ],
+      },
+    });
+    const att = next.messages.at(-1)?.attachments;
+    expect(att).toHaveLength(1);
+    expect(att?.[0]?.path).toBe("uploads/ok.txt");
+  });
+
+  it("returns undefined images when the payload value is not an array", () => {
+    const next = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "user.message",
+      eventId: 13,
+      data: { content: "x", images: "nope", attachments: 7 },
+    });
+    expect(next.messages.at(-1)?.images).toBeUndefined();
+    expect(next.messages.at(-1)?.attachments).toBeUndefined();
+  });
+});

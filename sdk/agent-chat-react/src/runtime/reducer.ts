@@ -1,11 +1,13 @@
 import type {
+  AgentChatBrowserState,
+  AgentChatDisplayAttachment,
   AgentChatErrorInfo,
+  AgentChatImageAttachment,
   AgentChatMessage,
   AgentChatRuntimeEvent,
   AgentChatState,
   AgentChatTokenUsage,
   AgentChatToolCallInfo,
-  AgentChatBrowserState,
 } from "../types";
 import { WORKSPACE_MUTATING_TOOLS } from "./events";
 
@@ -241,6 +243,8 @@ function applyUserMessage(
   data: Record<string, unknown>,
 ): AgentChatMessage[] {
   const content = stringValue(data.content);
+  const images = parseUserMessageImages(data.images);
+  const attachments = parseUserMessageAttachments(data.attachments);
   const next = [...messages];
   const localIdx = next.findIndex(
     (m) =>
@@ -249,7 +253,17 @@ function applyUserMessage(
       m.content === content,
   );
   if (localIdx >= 0) {
-    next[localIdx] = { ...next[localIdx]!, id: `evt-${eventId}` };
+    const local = next[localIdx]!;
+    next[localIdx] = {
+      ...local,
+      id: `evt-${eventId}`,
+      // Server-confirmed lists replace any optimistic display-only
+      // entries: chips that were rendered while the upload was in
+      // flight become clickable because the persisted refs include a
+      // workspace path.
+      images: images ?? local.images,
+      attachments: attachments ?? local.attachments,
+    };
     return next;
   }
   next.push({
@@ -258,8 +272,55 @@ function applyUserMessage(
     content,
     createdAt: new Date(),
     status: "complete",
+    images,
+    attachments,
   });
   return next;
+}
+
+function parseUserMessageImages(
+  raw: unknown,
+): AgentChatImageAttachment[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: AgentChatImageAttachment[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const r = item as Record<string, unknown>;
+    const data = typeof r.data === "string" ? r.data : undefined;
+    if (!data) continue;
+    const mimeType =
+      typeof r.mime_type === "string"
+        ? r.mime_type
+        : typeof r.mimeType === "string"
+          ? r.mimeType
+          : undefined;
+    out.push({ data, mimeType });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function parseUserMessageAttachments(
+  raw: unknown,
+): AgentChatDisplayAttachment[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: AgentChatDisplayAttachment[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const r = item as Record<string, unknown>;
+    const filename = typeof r.filename === "string" ? r.filename : undefined;
+    if (!filename) continue;
+    const path = typeof r.path === "string" ? r.path : undefined;
+    if (!path) continue;
+    const mimeType =
+      typeof r.mime_type === "string"
+        ? r.mime_type
+        : typeof r.mimeType === "string"
+          ? r.mimeType
+          : undefined;
+    const size = typeof r.size === "number" ? r.size : undefined;
+    out.push({ path, filename, mimeType, size });
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 function applyBrowserEvent(
