@@ -113,11 +113,40 @@ class McpProxyClient:
         headers = {"Authorization": f"Bearer {auth_token}"}
 
         async def handler(args: dict[str, Any], **kwargs) -> str:
+            # Forward the chat user's identity to the upstream MCP server
+            # via the MCP ``_meta`` channel. The dev-mode client builds
+            # the same payload in ``surogates.tools.mcp.client``; keep
+            # them in sync so platform MCP servers (e.g. surogate-ops's
+            # copilot) authorise proxy-mode calls the same way they
+            # authorise dev-mode calls.
+            meta_payload: dict[str, Any] = {}
+            session_config = kwargs.get("session_config") or {}
+            ops_meta = (
+                session_config.get("ops")
+                if isinstance(session_config, dict) else {}
+            ) or {}
+            if isinstance(ops_meta, dict):
+                if ops_meta.get("user_id"):
+                    meta_payload["chat_user_id"] = str(ops_meta["user_id"])
+                if ops_meta.get("username"):
+                    meta_payload["chat_username"] = str(ops_meta["username"])
+            tenant = kwargs.get("tenant")
+            if isinstance(ops_meta, dict) and ops_meta.get("project_id"):
+                meta_payload["project_id"] = str(ops_meta["project_id"])
+            elif tenant is not None and getattr(tenant, "org_id", None):
+                meta_payload["project_id"] = str(tenant.org_id)
+            session_id_str = kwargs.get("session_id")
+            if session_id_str:
+                meta_payload["session_id"] = str(session_id_str)
+
+            body: dict[str, Any] = {"name": tool_name, "arguments": args}
+            if meta_payload:
+                body["meta"] = meta_payload
             try:
                 resp = await client.post(
                     "/mcp/v1/tools/call",
                     headers=headers,
-                    json={"name": tool_name, "arguments": args},
+                    json=body,
                 )
             except httpx.HTTPError as exc:
                 return json.dumps({

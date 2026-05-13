@@ -411,10 +411,14 @@ class ConnectionPool:
         user_id: UUID,
         tool_name: str,
         arguments: dict[str, Any],
+        meta: dict[str, Any] | None = None,
     ) -> str:
         """Call an MCP tool and return the result string.
 
-        Uses the reverse tool index for O(1) server lookup.
+        Uses the reverse tool index for O(1) server lookup. ``meta``,
+        when present, is forwarded to the upstream MCP server via the
+        ``_meta`` channel so platform servers can scope calls by chat
+        user / project without an extra round-trip.
         """
         key = (org_id, user_id)
         entry = self._entries.get(key)
@@ -439,17 +443,27 @@ class ConnectionPool:
                 "error": f"MCP server for tool '{tool_name}' is not connected.",
             })
 
-        return await self._execute_tool_call(server, original_tool, arguments)
+        return await self._execute_tool_call(
+            server, original_tool, arguments, meta=meta,
+        )
 
     @staticmethod
     async def _execute_tool_call(
         server: Any,
         tool_name: str,
         arguments: dict[str, Any],
+        meta: dict[str, Any] | None = None,
     ) -> str:
         """Execute a tool call on the MCP server session."""
         try:
-            result = await server.session.call_tool(tool_name, arguments=arguments)
+            if meta:
+                result = await server.session.call_tool(
+                    tool_name, arguments=arguments, meta=meta,
+                )
+            else:
+                result = await server.session.call_tool(
+                    tool_name, arguments=arguments,
+                )
 
             if result.isError:
                 error_text = ""

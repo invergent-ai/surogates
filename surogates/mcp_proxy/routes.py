@@ -35,6 +35,10 @@ class ToolCallRequest(BaseModel):
 
     name: str
     arguments: dict[str, Any] = {}
+    # Optional MCP ``_meta`` payload forwarded to the upstream server.
+    # Platform MCP servers (e.g. surogate-ops's copilot) authorise calls
+    # against fields like ``chat_user_id`` / ``project_id`` here.
+    meta: dict[str, Any] | None = None
 
 
 class ToolCallResponse(BaseModel):
@@ -146,6 +150,7 @@ async def call_tool(
         user_id=auth.user_id,
         tool_name=body.name,
         arguments=body.arguments,
+        meta=body.meta,
     )
 
     # Parse the result to separate error from success.
