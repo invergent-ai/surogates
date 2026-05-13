@@ -202,6 +202,76 @@ def _view_context_note(events: list[Any]) -> str | None:
     return note
 
 
+def _format_bytes(n: int) -> str:
+    """Render byte counts as B / KB / MB / GB with one decimal place."""
+    for unit, divisor in (
+        ("GB", 1_000_000_000),
+        ("MB", 1_000_000),
+        ("KB", 1_000),
+    ):
+        if n >= divisor:
+            return f"{n / divisor:.1f} {unit}"
+    return f"{n} B"
+
+
+def _attachments_note(events: list[Any]) -> str | None:
+    """Return a per-turn system note describing user-attached files.
+
+    Mirrors :func:`_view_context_note`: looks at the most recent
+    ``user.message`` event in *events* and reads ``data.attachments``.
+    Returns ``None`` when no user message has been recorded yet, when
+    its payload carries no attachments, when the list is empty, or when
+    every entry is malformed.
+
+    The returned string is meant to be passed verbatim as the
+    ``content`` of a ``role="system"`` message inserted just before the
+    latest user turn.  The lookup is read-only and never raises --
+    malformed payloads (e.g. ``attachments`` not a list, items not
+    dicts) yield ``None`` so the LLM call proceeds unchanged.
+    """
+    latest_attachments: list[Any] | None = None
+    for event in reversed(events):
+        event_type = event.type
+        type_value = (
+            event_type.value if hasattr(event_type, "value") else event_type
+        )
+        if type_value != EventType.USER_MESSAGE.value:
+            continue
+        data = event.data if isinstance(event.data, dict) else {}
+        candidate = data.get("attachments")
+        if isinstance(candidate, list):
+            latest_attachments = candidate
+        break
+
+    if not latest_attachments:
+        return None
+
+    lines = [
+        "The user attached the following files to this message. They are"
+        " available in the workspace and you can read them with your file"
+        " tools:",
+    ]
+    for item in latest_attachments:
+        if not isinstance(item, dict):
+            continue
+        path = item.get("path")
+        filename = item.get("filename")
+        if not path or not filename:
+            continue
+        mime = item.get("mime_type") or "application/octet-stream"
+        raw_size = item.get("size")
+        if isinstance(raw_size, (int, float)) and raw_size >= 0:
+            size_str = _format_bytes(int(raw_size))
+        else:
+            size_str = "unknown size"
+        lines.append(f"- {path} ({mime}, {size_str}) — \"{filename}\"")
+
+    if len(lines) == 1:
+        # All items malformed.
+        return None
+    return "\n".join(lines)
+
+
 def _format_loop_list(rows: list[Any]) -> str:
     if not rows:
         return "No active loops."
@@ -1385,6 +1455,16 @@ class AgentHarness:
         # log or system prompt.
         view_context_note: str | None = _view_context_note(all_events or [])
 
+        # Per-turn attachments note.  Same idempotent placement: a system
+        # message inserted just above the latest user message that lists
+        # every file the user attached to this message (path, MIME, size,
+        # display filename).  Recomputed each iteration from the durable
+        # event log so retries are deterministic.  When both this and
+        # view_context_note are present, attachments_note ends up
+        # adjacent to the user message and view_context_note sits one
+        # position above it.
+        attachments_note: str | None = _attachments_note(all_events or [])
+
         # --- Forced expert consultation for hard tasks (one-shot before loop) ---
         await self._maybe_consult_required_expert(
             session,
@@ -1535,6 +1615,27 @@ class AgentHarness:
                     api_messages.insert(
                         latest_user_idx,
                         {"role": "system", "content": view_context_note},
+                    )
+
+            # Per-turn attachments note: same idempotent placement.
+            # Inserted AFTER view_context_note so it ends up adjacent to
+            # the latest user message (view_context_note above, the
+            # attachments note immediately above the user message).
+            # Re-finds the user index because the previous insert may
+            # have shifted it.
+            if attachments_note is not None:
+                latest_user_idx = next(
+                    (
+                        idx
+                        for idx in range(len(api_messages) - 1, -1, -1)
+                        if api_messages[idx].get("role") == "user"
+                    ),
+                    None,
+                )
+                if latest_user_idx is not None:
+                    api_messages.insert(
+                        latest_user_idx,
+                        {"role": "system", "content": attachments_note},
                     )
 
             await _prepare_messages_for_model_vision_support(

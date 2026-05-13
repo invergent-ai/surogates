@@ -10,6 +10,7 @@ export { useInboxUnreadCount } from "./components/inbox/use-inbox-unread-count";
 export { ScheduledWorkPanel } from "./components/scheduled/scheduled-work-panel";
 export { SessionTreePanel } from "./components/sessions/session-tree-panel";
 export type { AgentChatProps } from "./agent-chat";
+export type { ChatComposerError } from "./components/chat/chat-composer";
 export type { AgentChatAdapterContextValue } from "./adapter-context";
 export type { InboxPanelProps } from "./components/inbox/inbox-panel";
 export type { InboxUnreadCountState } from "./components/inbox/use-inbox-unread-count";
@@ -35,7 +36,10 @@ export type {
   AgentChatInboxListInput,
   AgentChatInboxStatus,
   AgentChatInboxStreamEvent,
+  AgentChatAttachment,
+  AgentChatDisplayAttachment,
   AgentChatImageAttachment,
+  AgentChatPendingAttachment,
   AgentChatEventStream,
   AgentChatEventType,
   AgentChatExpertFeedbackRating,

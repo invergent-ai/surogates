@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AgentChatAdapter,
+  AgentChatAttachment,
+  AgentChatDisplayAttachment,
   AgentChatEventStream,
   AgentChatImageAttachment,
+  AgentChatPendingAttachment,
   AgentChatRuntimeApi,
   AgentChatSession,
   AgentChatState,
@@ -180,7 +183,11 @@ export function useAgentChatRuntime({
   }, [adapter, clearReconnectTimer, closeStream, openStream, sessionId]);
 
   const markSending = useCallback(
-    (content: string, images?: AgentChatImageAttachment[]) => {
+    (
+      content: string,
+      images?: AgentChatImageAttachment[],
+      attachments?: AgentChatDisplayAttachment[],
+    ) => {
       setState((prev) => ({
         ...prev,
         terminal: false,
@@ -195,6 +202,7 @@ export function useAgentChatRuntime({
             createdAt: new Date(),
             status: "complete",
             images: images?.length ? images : undefined,
+            attachments: attachments?.length ? attachments : undefined,
           },
         ],
       }));
@@ -254,15 +262,70 @@ export function useAgentChatRuntime({
   }, []);
 
   const send = useCallback(
-    async (content: string, images?: AgentChatImageAttachment[]) => {
-      markSending(content, images);
-      const goal = images?.length ? null : parseGoalDefinition(content);
+    async (
+      content: string,
+      images?: AgentChatImageAttachment[],
+      pendingAttachments?: AgentChatPendingAttachment[],
+    ) => {
+      // Display-only mirror of pendingAttachments for the optimistic
+      // local user-message: same filename + size, no path (chip renders
+      // disabled).  The reducer reconciles these with the persisted
+      // refs when the user.message event arrives.
+      const displayAttachments: AgentChatDisplayAttachment[] | undefined =
+        pendingAttachments?.length
+          ? pendingAttachments.map((a) => ({
+              filename: a.filename,
+              mimeType: a.mimeType,
+              size: a.size ?? a.file.size,
+              // path absent until upload completes.
+            }))
+          : undefined;
+
+      markSending(content, images, displayAttachments);
+      // Slash-command parsing is suppressed when the user is sending
+      // image vision OR file attachments — neither shape participates
+      // in /goal control flow.
+      const goal =
+        images?.length || pendingAttachments?.length
+          ? null
+          : parseGoalDefinition(content);
+
+      const runUploadsAndSend = async (sid: string): Promise<void> => {
+        let refs: AgentChatAttachment[] | undefined;
+        if (pendingAttachments?.length) {
+          // Same epoch timestamp shared across this batch so all files
+          // from this turn cluster together in the workspace listing.
+          const stamp = Date.now();
+          refs = await Promise.all(
+            pendingAttachments.map(async (a, index) => {
+              const safeName = sanitizeUploadFilename(a.file.name);
+              const renamed = new File(
+                [a.file],
+                `${stamp}-${index}-${safeName}`,
+                { type: a.file.type },
+              );
+              const up = await adapter.uploadWorkspaceFile({
+                sessionId: sid,
+                file: renamed,
+                directory: "uploads",
+              });
+              return {
+                path: up.path,
+                filename: a.filename,
+                mimeType: a.mimeType ?? a.file.type ?? undefined,
+                size: up.size,
+              } satisfies AgentChatAttachment;
+            }),
+          );
+        }
+        await sendTurn(adapter, sid, content, images, refs, goal);
+      };
 
       if (!sessionId) {
         try {
           const session = await adapter.createSession({ agentId });
           onSessionChange?.(session.id);
-          await sendTurn(adapter, session.id, content, images, goal);
+          await runUploadsAndSend(session.id);
         } catch (error) {
           markSendError(error instanceof Error ? error.message : "send failed");
           throw error;
@@ -272,7 +335,7 @@ export function useAgentChatRuntime({
 
       try {
         ensureStreamForNewTurn(sessionId);
-        await sendTurn(adapter, sessionId, content, images, goal);
+        await runUploadsAndSend(sessionId);
       } catch (error) {
         markSendError(error instanceof Error ? error.message : "send failed");
         throw error;
@@ -367,6 +430,7 @@ async function sendTurn(
   sessionId: string,
   content: string,
   images: AgentChatImageAttachment[] | undefined,
+  attachments: AgentChatAttachment[] | undefined,
   goal: ParsedGoalDefinition | null,
 ): Promise<void> {
   if (goal && adapter.defineOutcome) {
@@ -377,7 +441,19 @@ async function sendTurn(
     });
     return;
   }
-  await adapter.sendMessage({ sessionId, content, images });
+  await adapter.sendMessage({ sessionId, content, images, attachments });
+}
+
+/**
+ * Strip characters the harness or storage backend will reject from an
+ * upload filename: path separators, NUL.  When the resulting string is
+ * empty (e.g. the original name was made up entirely of stripped
+ * characters), fall back to a generic placeholder so the workspace key
+ * stays well-formed.  The harness re-validates the path on its end.
+ */
+function sanitizeUploadFilename(name: string): string {
+  const stripped = name.replace(/[\/\\\0]/g, "").trim();
+  return stripped.length > 0 ? stripped : "attachment";
 }
 
 function parseGoalDefinition(content: string): ParsedGoalDefinition | null {

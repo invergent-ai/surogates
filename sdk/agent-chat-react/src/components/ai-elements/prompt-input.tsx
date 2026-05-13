@@ -41,6 +41,24 @@ import {
 } from "../ui/tooltip";
 import { cn } from "../../lib/utils";
 import type { ChatStatus, FileUIPart, SourceDocumentUIPart } from "ai";
+
+/**
+ * Local extension of FileUIPart that retains the original ``File`` object.
+ *
+ * Downstream consumers (e.g. the chat runtime) need the raw ``File`` to
+ * upload a non-image attachment to the session workspace via
+ * ``adapter.uploadWorkspaceFile``.  Keeping it on the FileUIPart avoids
+ * having to refetch the blob URL or otherwise reconstruct the file.
+ *
+ * The field is optional because attachments synthesised from other paths
+ * (e.g. an HTTP source) may legitimately not have a backing ``File``.
+ * We extend locally rather than mutating the upstream ``FileUIPart``
+ * type so future AI SDK upgrades don't fight with this.
+ */
+export type PromptInputFileUIPart = FileUIPart & {
+  id: string;
+  file?: File;
+};
 import {
   CornerDownLeftIcon,
   ImageIcon,
@@ -179,7 +197,7 @@ const captureScreenshot = async (): Promise<File | null> => {
 // ============================================================================
 
 export interface AttachmentsContext {
-  files: (FileUIPart & { id: string })[];
+  files: PromptInputFileUIPart[];
   add: (files: File[] | FileList) => void;
   remove: (id: string) => void;
   clear: () => void;
@@ -255,7 +273,7 @@ export const PromptInputProvider = ({
 
   // ----- attachments state (global when wrapped)
   const [attachmentFiles, setAttachmentFiles] = useState<
-    (FileUIPart & { id: string })[]
+    PromptInputFileUIPart[]
   >([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   // oxlint-disable-next-line eslint(no-empty-function)
@@ -269,12 +287,13 @@ export const PromptInputProvider = ({
 
     setAttachmentFiles((prev) => [
       ...prev,
-      ...incoming.map((file) => ({
+      ...incoming.map<PromptInputFileUIPart>((file) => ({
         filename: file.name,
         id: nanoid(),
         mediaType: file.type,
         type: "file" as const,
         url: URL.createObjectURL(file),
+        file,
       })),
     ]);
   }, []);
@@ -483,7 +502,7 @@ export const PromptInputActionAddScreenshot = ({
 
 export interface PromptInputMessage {
   text: string;
-  files: FileUIPart[];
+  files: PromptInputFileUIPart[];
 }
 
 export type PromptInputProps = Omit<
@@ -533,7 +552,7 @@ export const PromptInput = ({
   const formRef = useRef<HTMLFormElement | null>(null);
 
   // ----- Local attachments (only used when no provider)
-  const [items, setItems] = useState<(FileUIPart & { id: string })[]>([]);
+  const [items, setItems] = useState<PromptInputFileUIPart[]>([]);
   const files = usingProvider ? controller.attachments.files : items;
 
   // ----- Local referenced sources (always local to PromptInput)
@@ -610,7 +629,7 @@ export const PromptInput = ({
             message: "Too many files. Some were not added.",
           });
         }
-        const next: (FileUIPart & { id: string })[] = [];
+        const next: PromptInputFileUIPart[] = [];
         for (const file of capped) {
           next.push({
             filename: file.name,
@@ -618,6 +637,7 @@ export const PromptInput = ({
             mediaType: file.type,
             type: "file",
             url: URL.createObjectURL(file),
+            file,
           });
         }
         return [...prev, ...next];
@@ -860,18 +880,24 @@ export const PromptInput = ({
       }
 
       try {
-        // Convert blob URLs to data URLs asynchronously
-        const convertedFiles: FileUIPart[] = await Promise.all(
-          files.map(async ({ id: _id, ...item }) => {
-            if (item.url?.startsWith("blob:")) {
-              const dataUrl = await convertBlobUrlToDataUrl(item.url);
-              // If conversion failed, keep the original blob URL
+        // Convert blob URLs to data URLs asynchronously for image-like
+        // attachments only.  Non-image files (PDFs, archives, etc.)
+        // skip the base64 round-trip because the consumer reads them
+        // via ``file: File`` and uploads to a workspace, not inline as
+        // a data URL.  For 50 MB attachments this avoids ~67 MB of
+        // pointless base64 expansion per submit.
+        const convertedFiles: PromptInputFileUIPart[] = await Promise.all(
+          files.map(async (entry) => {
+            const isBlob = entry.url?.startsWith("blob:");
+            const isImage = entry.mediaType?.startsWith("image/");
+            if (isBlob && isImage && entry.url) {
+              const dataUrl = await convertBlobUrlToDataUrl(entry.url);
               return {
-                ...item,
-                url: dataUrl ?? item.url,
+                ...entry,
+                url: dataUrl ?? entry.url,
               };
             }
-            return item;
+            return entry;
           })
         );
 
