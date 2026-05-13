@@ -417,6 +417,179 @@ async def test_api_session_create_rejects_user_jwt(
     assert "service-account" in resp.json()["detail"].lower()
 
 
+async def test_patch_api_session_updates_title(
+    client: AsyncClient, session_factory
+):
+    """PATCH /v1/api/sessions/{id} sets sessions.title for a service-account."""
+    org_id = await create_org(session_factory)
+    issued = await issue_service_account_token(
+        session_factory, org_id, name="ops-chat"
+    )
+    headers = {"Authorization": f"Bearer {issued.token}"}
+    create_resp = await client.post(
+        "/v1/api/sessions",
+        json={"config": {"source": "ops"}},
+        headers=headers,
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    session_id = create_resp.json()["id"]
+
+    resp = await client.patch(
+        f"/v1/api/sessions/{session_id}",
+        json={"title": "Debugging model drift"},
+        headers=headers,
+    )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["id"] == session_id
+    assert data["title"] == "Debugging model drift"
+
+    store = SessionStore(session_factory)
+    persisted = await store.get_session(UUID(session_id))
+    assert persisted.title == "Debugging model drift"
+
+
+async def test_patch_api_session_overwrites_existing_title(
+    client: AsyncClient, session_factory
+):
+    """Repeated PATCHes overwrite a prior (auto-generated) title."""
+    org_id = await create_org(session_factory)
+    issued = await issue_service_account_token(
+        session_factory, org_id, name="ops-chat"
+    )
+    headers = {"Authorization": f"Bearer {issued.token}"}
+    create_resp = await client.post(
+        "/v1/api/sessions",
+        json={"config": {"source": "ops"}},
+        headers=headers,
+    )
+    session_id = create_resp.json()["id"]
+
+    store = SessionStore(session_factory)
+    # Simulate the harness-generated title that ``update_session_title_if_empty``
+    # would have written.
+    assert await store.update_session_title_if_empty(
+        UUID(session_id), "Auto Title"
+    ) is True
+
+    resp = await client.patch(
+        f"/v1/api/sessions/{session_id}",
+        json={"title": "User Renamed"},
+        headers=headers,
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["title"] == "User Renamed"
+
+    # And a second user rename must overwrite again.
+    resp2 = await client.patch(
+        f"/v1/api/sessions/{session_id}",
+        json={"title": "Renamed Again"},
+        headers=headers,
+    )
+    assert resp2.status_code == 200
+    assert resp2.json()["title"] == "Renamed Again"
+
+    persisted = await store.get_session(UUID(session_id))
+    assert persisted.title == "Renamed Again"
+
+
+async def test_patch_api_session_rejects_blank_title(
+    client: AsyncClient, session_factory
+):
+    org_id = await create_org(session_factory)
+    issued = await issue_service_account_token(
+        session_factory, org_id, name="ops-chat"
+    )
+    headers = {"Authorization": f"Bearer {issued.token}"}
+    create_resp = await client.post(
+        "/v1/api/sessions",
+        json={"config": {"source": "ops"}},
+        headers=headers,
+    )
+    session_id = create_resp.json()["id"]
+
+    resp = await client.patch(
+        f"/v1/api/sessions/{session_id}",
+        json={"title": "   "},
+        headers=headers,
+    )
+
+    assert resp.status_code == 422, resp.text
+
+
+async def test_patch_api_session_rejects_long_title(
+    client: AsyncClient, session_factory
+):
+    org_id = await create_org(session_factory)
+    issued = await issue_service_account_token(
+        session_factory, org_id, name="ops-chat"
+    )
+    headers = {"Authorization": f"Bearer {issued.token}"}
+    create_resp = await client.post(
+        "/v1/api/sessions",
+        json={"config": {"source": "ops"}},
+        headers=headers,
+    )
+    session_id = create_resp.json()["id"]
+
+    resp = await client.patch(
+        f"/v1/api/sessions/{session_id}",
+        json={"title": "x" * 257},
+        headers=headers,
+    )
+
+    assert resp.status_code == 422, resp.text
+
+
+async def test_patch_api_session_rejects_user_jwt(
+    client: AsyncClient, session_factory
+):
+    """The /v1/api/sessions PATCH alias is service-account only."""
+    org_id, _, token, _ = await _create_test_tenant(session_factory)
+    issued = await issue_service_account_token(
+        session_factory, org_id, name="ops-chat"
+    )
+    create_resp = await client.post(
+        "/v1/api/sessions",
+        json={"config": {"source": "ops"}},
+        headers={"Authorization": f"Bearer {issued.token}"},
+    )
+    session_id = create_resp.json()["id"]
+
+    resp = await client.patch(
+        f"/v1/api/sessions/{session_id}",
+        json={"title": "User rename"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert resp.status_code == 403
+    assert "service-account" in resp.json()["detail"].lower()
+
+
+async def test_patch_session_user_route_renames(
+    client: AsyncClient, session_factory
+):
+    """PATCH /v1/sessions/{id} (web alias) renames for the owning user."""
+    _, _, token, _ = await _create_test_tenant(session_factory)
+    create_resp = await client.post(
+        "/v1/sessions",
+        json={"model": "gpt-4o"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    session_id = create_resp.json()["id"]
+
+    resp = await client.patch(
+        f"/v1/sessions/{session_id}",
+        json={"title": "My session"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["title"] == "My session"
+
+
 async def test_api_live_chat_routes_are_registered(app):
     """Ops-required live chat routes are exposed on the service-account prefix."""
     paths = app.openapi()["paths"]
@@ -424,6 +597,7 @@ async def test_api_live_chat_routes_are_registered(app):
     assert "/v1/api/sessions" in paths
     assert "/v1/api/sessions/{session_id}" in paths
     assert "delete" in paths["/v1/api/sessions/{session_id}"]
+    assert "patch" in paths["/v1/api/sessions/{session_id}"]
     assert "/v1/api/sessions/{session_id}/messages" in paths
     assert "/v1/api/sessions/{session_id}/pause" in paths
     assert "/v1/api/sessions/{session_id}/retry" in paths

@@ -116,6 +116,27 @@ class SendMessageResponse(BaseModel):
     status: str = "processing"
 
 
+_MAX_SESSION_TITLE_LEN = 256
+
+
+class UpdateSessionRequest(BaseModel):
+    """Body for ``PATCH /sessions/{id}`` — user-driven rename."""
+
+    title: str = Field(..., min_length=1, max_length=_MAX_SESSION_TITLE_LEN)
+
+    @field_validator("title")
+    @classmethod
+    def _validate_title(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("title must be non-empty")
+        if len(cleaned) > _MAX_SESSION_TITLE_LEN:
+            raise ValueError(
+                f"title exceeds {_MAX_SESSION_TITLE_LEN} characters",
+            )
+        return cleaned
+
+
 class ListSessionsResponse(BaseModel):
     sessions: list[Session]
     total: int
@@ -805,6 +826,30 @@ async def _destroy_deleted_session_browser(request: Request, session_id: UUID) -
                 session_id,
                 exc_info=True,
             )
+
+
+@router.patch("/api/sessions/{session_id}", response_model=Session)
+@router.patch("/sessions/{session_id}", response_model=Session)
+async def update_session(
+    session_id: UUID,
+    body: UpdateSessionRequest,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> Session:
+    """Update mutable session metadata.
+
+    Currently supports user-driven title renames.  The new title
+    overwrites any prior value (auto-generated or user-set), in contrast
+    to the harness's background ``update_session_title_if_empty`` which
+    only fills an empty title.
+    """
+    _require_service_account_api_route(request, tenant)
+    store = _get_session_store(request)
+    session = await _get_session_for_tenant(request, session_id, tenant)
+    require_user_writable_session(session)
+
+    await store.update_session_title(session_id, body.title)
+    return await store.get_session(session_id)
 
 
 @router.delete(

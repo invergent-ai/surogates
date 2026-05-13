@@ -108,6 +108,60 @@ async def test_update_session_title_if_empty_sets_once(session_store, session_fa
     assert unchanged.title == "Debug Redis Failures"
 
 
+async def test_update_session_title_overwrites_existing(
+    session_store,
+    session_factory,
+):
+    """User-driven renames overwrite both empty and non-empty titles."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
+    )
+
+    # First rename on an empty title.
+    await session_store.update_session_title(session.id, "First Title")
+    first = await session_store.get_session(session.id)
+    assert first.title == "First Title"
+
+    # Repeated rename overwrites, unlike update_session_title_if_empty.
+    await session_store.update_session_title(session.id, "Second Title")
+    second = await session_store.get_session(session.id)
+    assert second.title == "Second Title"
+
+
+async def test_update_session_title_strips_whitespace(
+    session_store,
+    session_factory,
+):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
+    )
+
+    await session_store.update_session_title(session.id, "  Trimmed Title  ")
+    updated = await session_store.get_session(session.id)
+    assert updated.title == "Trimmed Title"
+
+
+async def test_update_session_title_rejects_blank(session_store, session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
+    )
+
+    with pytest.raises(ValueError):
+        await session_store.update_session_title(session.id, "   ")
+
+
+async def test_update_session_title_missing_session_raises(session_store):
+    with pytest.raises(SessionNotFoundError):
+        await session_store.update_session_title(uuid.uuid4(), "Anything")
+
+
 async def test_update_session_config_key_persists_nested_value(
     session_store,
     session_factory,

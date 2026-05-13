@@ -288,6 +288,34 @@ class SessionStore:
                 raise SessionNotFoundError(f"session {session_id} not found")
             return False
 
+    async def update_session_title(
+        self,
+        session_id: UUID,
+        title: str,
+    ) -> None:
+        """Overwrite ``sessions.title`` unconditionally.
+
+        Unlike :meth:`update_session_title_if_empty` (which preserves an
+        existing title so the harness's background auto-title generator
+        does not race a user-set value), this method always overwrites.
+        Used for user-driven renames where the new value must win over
+        any prior auto-generated or user-set title.
+        """
+        cleaned = title.strip()
+        if not cleaned:
+            raise ValueError("title must be non-empty")
+
+        async with self._sf() as db:
+            result = await db.execute(
+                update(SessionRow)
+                .where(SessionRow.id == session_id)
+                .values(title=cleaned, updated_at=func.now())
+            )
+            await db.commit()
+
+            if not result.rowcount:
+                raise SessionNotFoundError(f"session {session_id} not found")
+
     async def update_session_config_key(
         self,
         session_id: UUID,
