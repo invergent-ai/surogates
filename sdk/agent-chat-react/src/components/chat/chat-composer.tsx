@@ -605,29 +605,43 @@ function ChatComposerInner({
       <PopoverContent
         side="top"
         align="start"
-        className="p-0"
+        className="overflow-hidden p-0"
         style={{ width: "var(--radix-popover-trigger-width)" }}
         onOpenAutoFocus={(e) => e.preventDefault()}
         onCloseAutoFocus={(e) => e.preventDefault()}
       >
-        <Command value={filteredCommands[selectedIndex]?.value} filter={() => 1}>
+        {/*
+          Selection state is driven from outside (the user types in the
+          chat textarea, not a CommandInput), so cmdk's own filter and
+          keyboard handling are disabled: ``filter`` returns 1 for
+          every candidate and ``value`` is set explicitly to the
+          ChatComposer's ``selectedIndex``.  The keyboard handler in
+          ``handleKeyDown`` then drives Arrow/Enter/Tab/Escape on the
+          textarea before cmdk sees them.
+        */}
+        <Command
+          value={filteredCommands[selectedIndex]?.value}
+          filter={() => 1}
+        >
           <CommandList>
-            <CommandGroup>
+            <CommandEmpty>No commands found.</CommandEmpty>
+            <CommandGroup heading="Slash commands">
               {filteredCommands.map((cmd) => (
                 <CommandItem
                   key={cmd.value}
                   value={cmd.value}
                   onSelect={() => handleCommandSelect(cmd.value)}
-                  className="grid grid-cols-[6rem_1fr] gap-2 [&_svg]:hidden"
+                  className="flex items-baseline gap-2 [&_svg]:hidden"
                 >
-                  <span className="">{cmd.label}</span>
-                  <span className="text-muted-foreground">
+                  <span className="font-mono text-foreground shrink-0">
+                    {cmd.label}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
                     {cmd.description}
                   </span>
                 </CommandItem>
               ))}
             </CommandGroup>
-            <CommandEmpty>No commands found</CommandEmpty>
           </CommandList>
         </Command>
       </PopoverContent>
