@@ -41,7 +41,8 @@ RUN uv venv /opt/venv \
         markitdown[pptx] \
         Pillow \
         pyfiglet \
-        nano-pdf
+        nano-pdf \
+        pandoc
 
 # ── Stage 2: Final image ─────────────────────────────────────────────
 FROM python:3.12-slim
