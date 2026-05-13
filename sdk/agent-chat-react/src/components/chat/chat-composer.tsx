@@ -5,7 +5,12 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { PromptInputMessage } from "../ai-elements/prompt-input";
 import { useProviderAttachments } from "../ai-elements/prompt-input";
-import type { AgentChatImageAttachment, AgentChatSlashCommand, TokenUsage } from "../../types";
+import type {
+  AgentChatImageAttachment,
+  AgentChatPendingAttachment,
+  AgentChatSlashCommand,
+  TokenUsage,
+} from "../../types";
 import { useAgentChatAdapterContext } from "../../adapter-context";
 import {
   Context,
@@ -52,16 +57,42 @@ type SlashCommand = AgentChatSlashCommand;
 
 // ── Props ────────────────────────────────────────────────────────────
 
+export interface ChatComposerError {
+  /**
+   * Stable error code so callers can route different rejections (e.g.
+   * show a different toast variant per code) without parsing the
+   * human-readable message.
+   */
+  code:
+    | "accept"
+    | "max_files"
+    | "max_file_size"
+    | "max_images"
+    | "max_image_size"
+    | "max_attachments"
+    | "max_attachment_size"
+    | "max_attachments_total";
+  /** Display-ready, single-sentence reason. */
+  message: string;
+}
+
 interface ChatComposerProps {
   onSend: (
     text: string,
     images?: AgentChatImageAttachment[],
+    attachments?: AgentChatPendingAttachment[],
   ) => void | Promise<void>;
   onStop: () => void | Promise<void>;
   isRunning: boolean;
   disabled?: boolean;
   disabledReason?: string;
   tokenUsage?: TokenUsage;
+  /**
+   * Optional handler for client-side rejections (size/count caps,
+   * accept-pattern misses).  Without it, rejections are silent — pass
+   * a toast wiring at the host-app layer if you want them surfaced.
+   */
+  onComposerError?: (err: ChatComposerError) => void;
 }
 
 // ── Outer wrapper (provides controlled text state) ───────────────────
@@ -110,6 +141,17 @@ function AttachmentPreviewStrip() {
 
 // ── Inner component (has access to controller) ──────────────────────
 
+// Per-message caps mirror the server-side limits so the composer can
+// reject without a server round-trip.  Keep these in sync with
+// _MAX_IMAGES_PER_MESSAGE / _MAX_IMAGE_BYTES /
+// _MAX_ATTACHMENTS_PER_MESSAGE / _MAX_ATTACHMENT_BYTES /
+// _MAX_ATTACHMENTS_TOTAL_BYTES on the harness side.
+const MAX_IMAGES_PER_MESSAGE = 5;
+const MAX_IMAGE_BYTES = 20_000_000;
+const MAX_ATTACHMENTS_PER_MESSAGE = 10;
+const MAX_ATTACHMENT_BYTES = 50_000_000;
+const MAX_ATTACHMENTS_TOTAL_BYTES = 200_000_000;
+
 function ChatComposerInner({
   onSend,
   onStop,
@@ -117,6 +159,7 @@ function ChatComposerInner({
   disabled = false,
   disabledReason,
   tokenUsage,
+  onComposerError,
 }: ChatComposerProps) {
   const { adapter } = useAgentChatAdapterContext();
   const { textInput } = usePromptInputController();
@@ -241,19 +284,97 @@ function ChatComposerInner({
       const text = message.text.trim();
       if (!text || disabled) return;
 
-      // Convert file attachments to image blocks.
+      // Split incoming files by MIME bucket: images go through the
+      // existing vision-inline path (base64 data URL on the message
+      // body), everything else becomes a pending attachment uploaded
+      // to the workspace by the runtime.
       const images: AgentChatImageAttachment[] = [];
+      const pending: AgentChatPendingAttachment[] = [];
+
       for (const file of message.files) {
         if (file.mediaType?.startsWith("image/") && file.url) {
           images.push({ data: file.url, mimeType: file.mediaType });
+          continue;
+        }
+        if (!file.file) {
+          // Defensive: PromptInputProvider/local both stamp file: on
+          // each item. If a future consumer constructs a FileUIPart
+          // without it, drop the entry rather than pretending we can
+          // upload nothing.
+          continue;
+        }
+        pending.push({
+          file: file.file,
+          filename: file.filename ?? file.file.name,
+          mimeType: file.mediaType ?? file.file.type ?? undefined,
+          size: file.file.size,
+        });
+      }
+
+      // Split-aware caps — the <PromptInput maxFiles/maxFileSize> caps
+      // are a coarse first line that ignores the image/non-image
+      // distinction; we re-check per bucket here.
+      if (images.length > MAX_IMAGES_PER_MESSAGE) {
+        onComposerError?.({
+          code: "max_images",
+          message: `Maximum ${MAX_IMAGES_PER_MESSAGE} images per message.`,
+        });
+        return;
+      }
+      if (pending.length > MAX_ATTACHMENTS_PER_MESSAGE) {
+        onComposerError?.({
+          code: "max_attachments",
+          message: `Maximum ${MAX_ATTACHMENTS_PER_MESSAGE} attachments per message.`,
+        });
+        return;
+      }
+      for (const img of images) {
+        // Best-effort image-size guard: a base64-encoded image is
+        // roughly 4/3 the raw size, so 27 MB of base64 ≈ 20 MB raw.
+        if (img.data.length > Math.ceil(MAX_IMAGE_BYTES * 4 / 3)) {
+          onComposerError?.({
+            code: "max_image_size",
+            message: `Image exceeds ${MAX_IMAGE_BYTES / 1_000_000} MB.`,
+          });
+          return;
         }
       }
+      let totalAttachmentBytes = 0;
+      for (const a of pending) {
+        if (a.file.size > MAX_ATTACHMENT_BYTES) {
+          onComposerError?.({
+            code: "max_attachment_size",
+            message: `"${a.filename}" exceeds ${MAX_ATTACHMENT_BYTES / 1_000_000} MB.`,
+          });
+          return;
+        }
+        totalAttachmentBytes += a.file.size;
+      }
+      if (totalAttachmentBytes > MAX_ATTACHMENTS_TOTAL_BYTES) {
+        onComposerError?.({
+          code: "max_attachments_total",
+          message: `Attachments exceed ${MAX_ATTACHMENTS_TOTAL_BYTES / 1_000_000} MB total for this message.`,
+        });
+        return;
+      }
+
       if (isRunning) {
         await onStop();
       }
-      await onSend(text, images.length > 0 ? images : undefined);
+      await onSend(
+        text,
+        images.length > 0 ? images : undefined,
+        pending.length > 0 ? pending : undefined,
+      );
     },
-    [onSend, onStop, isRunning, disabled],
+    [onSend, onStop, onComposerError, isRunning, disabled],
+  );
+
+  const handlePromptInputError = useCallback(
+    (err: { code: "max_files" | "max_file_size" | "accept"; message: string }) => {
+      onComposerError?.({ code: err.code, message: err.message });
+    },
+    [onComposerError],
   );
 
   // ── Render ───────────────────────────────────────────────────────
@@ -266,7 +387,13 @@ function ChatComposerInner({
     }}>
       <AttachmentPreviewStrip />
       <PopoverAnchor asChild>
-        <PromptInput onSubmit={handleSubmit} accept="image/*" multiple>
+        <PromptInput
+          onSubmit={handleSubmit}
+          multiple
+          maxFiles={MAX_IMAGES_PER_MESSAGE + MAX_ATTACHMENTS_PER_MESSAGE}
+          maxFileSize={MAX_ATTACHMENT_BYTES}
+          onError={handlePromptInputError}
+        >
           <PromptInputBody>
             <PromptInputTextarea
               placeholder={
@@ -283,7 +410,7 @@ function ChatComposerInner({
               <PromptInputActionMenu>
                 <PromptInputActionMenuTrigger />
                 <PromptInputActionMenuContent>
-                  <PromptInputActionAddAttachments label="Add images" />
+                  <PromptInputActionAddAttachments />
                 </PromptInputActionMenuContent>
               </PromptInputActionMenu>
               <Button
