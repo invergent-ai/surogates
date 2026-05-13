@@ -344,6 +344,11 @@ class TestCreateArtifactHandler:
         data = json.loads(out)
         assert data["success"] is False
         assert "API client" in data["error"]
+        # The earlier wording attributed this to a "unit-test harness",
+        # which misled triage when it surfaced in production for
+        # anonymous website-channel sessions.  Make sure that hint
+        # stays out of the message.
+        assert "unit-test" not in data["error"]
 
     async def test_forwards_to_api_client(self):
         client = _StubAPIClient()

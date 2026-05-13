@@ -228,9 +228,15 @@ async def _create_artifact_handler(
     """Validate locally, then delegate to the session-scoped API client."""
     api_client = kwargs.get("api_client")
     if api_client is None:
+        # Reached when the worker did not wire ``harness_api_client``
+        # (anonymous website-channel session, or
+        # ``use_api_for_harness_tools`` disabled).  The orchestrator
+        # filters ``create_artifact`` out of the tool catalogue in those
+        # modes so the LLM never sees it; this guard is the last-line
+        # fallback for misconfiguration or test harnesses.
         return _error(
             "Artifacts require an API client; none is wired for this "
-            "runtime (likely a unit-test harness).",
+            "session.",
         )
 
     name = arguments.get("name", "")

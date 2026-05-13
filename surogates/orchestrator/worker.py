@@ -565,6 +565,20 @@ async def run_worker(settings: Settings) -> None:
         if not attached_kbs:
             effective_tools.discard("kb_list_pages")
             effective_tools.discard("kb_read_page")
+        # create_artifact requires the harness API client to persist
+        # the rendered artifact.  The wiring block below leaves
+        # ``harness_api_client`` as ``None`` for anonymous website-channel
+        # sessions (no principal to mint a token from) and when the
+        # ``use_api_for_harness_tools`` worker setting is disabled.  In
+        # those cases neither the tool schema nor its prompt-guidance
+        # fragment should reach the LLM — otherwise the model follows
+        # the guidance, calls the tool, and gets the unhelpful
+        # "Artifacts require an API client" error.
+        session_has_principal = (
+            tenant.user_id is not None or session.service_account_id is not None
+        )
+        if not settings.worker.use_api_for_harness_tools or not session_has_principal:
+            effective_tools.discard("create_artifact")
 
         prompt_builder = PromptBuilder(
             tenant,
@@ -624,7 +638,10 @@ async def run_worker(settings: Settings) -> None:
                 # per-user memory is skipped (visitors have none by
                 # design), and auto-artifact creation is silently
                 # bypassed (loop.py:2185 guards on
-                # ``self._api_client is None``). Tool allow-list
+                # ``self._api_client is None``).  The explicit
+                # ``create_artifact`` tool is dropped from
+                # ``effective_tools`` above so the LLM never sees its
+                # schema or guidance fragment.  Tool allow-list
                 # enforcement is unaffected; it reads from
                 # ``session.config`` independently of the API client.
                 logger.info(
