@@ -224,6 +224,47 @@ async def _skills_list_handler(
 # ---------------------------------------------------------------------------
 
 
+def _build_skill_response(
+    *,
+    name: str,
+    description: str,
+    tags: list[str],
+    related_skills: list[str],
+    content: str,
+    linked_files: dict[str, list[str]] | None,
+    compatibility: Any | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """Build the JSON-encoded response shape shared by both view branches.
+
+    The disk-backed branch passes ``compatibility`` / ``metadata`` parsed
+    from on-disk SKILL.md frontmatter; the DB-backed branch leaves them
+    ``None`` since the loader has already stripped frontmatter from the
+    body it stored on ``SkillDef.content``.
+    """
+    result: dict[str, Any] = {
+        "success": True,
+        "name": name,
+        "description": description,
+        "tags": tags,
+        "related_skills": related_skills,
+        "content": content,
+        "linked_files": linked_files if linked_files else None,
+        "usage_hint": (
+            "To view linked files, call skill_view(name, file_path) where "
+            "file_path is e.g. 'references/api.md' or 'assets/config.yaml'"
+        )
+        if linked_files
+        else None,
+        "token_estimate": _estimate_tokens(content),
+    }
+    if compatibility:
+        result["compatibility"] = compatibility
+    if isinstance(metadata, dict):
+        result["metadata"] = metadata
+    return json.dumps(result, ensure_ascii=False)
+
+
 async def _skill_view_handler(
     arguments: dict[str, Any],
     **kwargs: Any,
@@ -234,19 +275,17 @@ async def _skill_view_handler(
     - Tier 2: Full SKILL.md content + linked_files listing
     - Tier 3: Specific linked file content loaded on demand via file_path
     """
+    name = arguments.get("name", "")
+    file_path = arguments.get("file_path")
+
     # API-mediated mode: delegate to the API server.
     api_client = kwargs.get("api_client")
     if api_client is not None:
-        name = arguments.get("name", "")
-        file_path = arguments.get("file_path")
         return await api_client.view_skill(name, file_path)
 
     tenant = kwargs.get("tenant")
     if tenant is None:
         return json.dumps({"error": "No tenant context available"})
-
-    name = arguments.get("name", "")
-    file_path = arguments.get("file_path")
 
     if not name:
         return json.dumps(
@@ -273,6 +312,47 @@ async def _skill_view_handler(
                 "hint": "Use skills_list to see all available skills",
             },
             ensure_ascii=False,
+        )
+
+    # --- DB-backed branch ---------------------------------------------------
+    # The loader (``ResourceLoader.load_skills``) gives DB layers precedence
+    # over filesystem layers, matching the API-mediated ``view_skill`` route.
+    # Branch on source before resolving disk dirs so anonymous website
+    # sessions (no ``api_client``) see the same skill body as authenticated
+    # ones.  DB-stored skills carry no linked files in this schema.
+    from surogates.tools.loader import SKILL_SOURCE_ORG_DB, SKILL_SOURCE_USER_DB
+
+    if matching_skill.source in {SKILL_SOURCE_ORG_DB, SKILL_SOURCE_USER_DB}:
+        if not (matching_skill.content or "").strip():
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": f"Skill '{name}' has no body.",
+                },
+                ensure_ascii=False,
+            )
+        if file_path:
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": (
+                        f"Skill '{name}' is DB-backed and exposes no "
+                        "linked files."
+                    ),
+                    "hint": (
+                        "Call skill_view(name) without file_path to read "
+                        "the skill body."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        return _build_skill_response(
+            name=matching_skill.name,
+            description=matching_skill.description or "",
+            tags=list(matching_skill.tags or []),
+            related_skills=[],
+            content=matching_skill.content,
+            linked_files=None,
         )
 
     # Resolve the skill directory on disk
@@ -467,32 +547,16 @@ async def _skill_view_handler(
     if script_files:
         linked_files["scripts"] = script_files
 
-    skill_name = frontmatter.get("name", name)
-
-    result: dict[str, Any] = {
-        "success": True,
-        "name": skill_name,
-        "description": frontmatter.get("description", ""),
-        "tags": tags,
-        "related_skills": related_skills,
-        "content": content,
-        "linked_files": linked_files if linked_files else None,
-        "usage_hint": (
-            "To view linked files, call skill_view(name, file_path) where "
-            "file_path is e.g. 'references/api.md' or 'assets/config.yaml'"
-        )
-        if linked_files
-        else None,
-        "token_estimate": _estimate_tokens(content),
-    }
-
-    # Surface agentskills.io optional fields when present
-    if frontmatter.get("compatibility"):
-        result["compatibility"] = frontmatter["compatibility"]
-    if isinstance(metadata, dict):
-        result["metadata"] = metadata
-
-    return json.dumps(result, ensure_ascii=False)
+    return _build_skill_response(
+        name=frontmatter.get("name", name),
+        description=frontmatter.get("description", ""),
+        tags=tags,
+        related_skills=related_skills,
+        content=content,
+        linked_files=linked_files if linked_files else None,
+        compatibility=frontmatter.get("compatibility"),
+        metadata=metadata if isinstance(metadata, dict) else None,
+    )
 
 
 # ---------------------------------------------------------------------------
