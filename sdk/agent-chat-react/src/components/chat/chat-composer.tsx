@@ -203,8 +203,20 @@ function AttachmentPreviewStrip() {
                 <Icon />
               )}
             </ItemMedia>
-            <ItemContent>
-              <ItemTitle className="normal-case font-medium text-foreground">
+            <ItemContent className="min-w-0">
+              {/*
+                Override ``flex`` (which the shadcn ItemTitle bakes
+                into its base classes) with ``block`` so the
+                ``truncate`` utility's ``text-overflow: ellipsis``
+                actually takes effect.  Flex would override the
+                ``display: -webkit-box`` that line-clamp-1 relies on
+                AND defeat text-overflow.  ``min-w-0`` on the parent
+                ItemContent is also required: without it, flex's
+                default ``min-width: auto`` lets the title push past
+                the Item's max-width on filenames with long
+                unbreakable runs.
+              */}
+              <ItemTitle className="block w-full truncate normal-case font-medium text-foreground">
                 {file.filename}
               </ItemTitle>
               {sizeLabel && (
