@@ -75,12 +75,39 @@ async def _send_live_view_frame_to_client(
     await websocket.send_bytes(frame)
 
 
+_LIVE_VIEW_STRIPPED_PARAMS = frozenset({"token", "owner_user_id"})
+
+
 def _live_view_query_pairs(query_params: Any) -> list[tuple[str, str]]:
     if hasattr(query_params, "multi_items"):
         items = query_params.multi_items()
     else:
         items = query_params.items()
-    return [(key, value) for key, value in items if key != "token"]
+    return [
+        (key, value)
+        for key, value in items
+        if key not in _LIVE_VIEW_STRIPPED_PARAMS
+    ]
+
+
+def _effective_live_view_user(
+    *,
+    tenant: TenantContext,
+    path: str,
+    query_params: Any,
+) -> str | None:
+    if tenant.user_id is not None:
+        return str(tenant.user_id)
+    # Service-account-auth'd callers (the ops proxy, on /v1/api/*) carry
+    # no per-user JWT, so they assert the effective user via
+    # ``?owner_user_id=``.  The agent has already trusted the caller via
+    # the bearer token at this point — same trust model as the
+    # ``owner_user_id`` JSON field on POST /browser/control.
+    if path.startswith("/v1/api/"):
+        candidate = query_params.get("owner_user_id")
+        if candidate:
+            return str(candidate)
+    return None
 
 
 def _live_view_upstream_ws_url(
@@ -119,14 +146,20 @@ async def _ensure_live_view_control(
     session_id: str,
     tenant: TenantContext,
     control,
+    request: Request,
 ) -> None:
-    if tenant.user_id is None:
+    effective = _effective_live_view_user(
+        tenant=tenant,
+        path=request.url.path,
+        query_params=request.query_params,
+    )
+    if effective is None:
         raise HTTPException(
             status_code=403,
             detail="Browser live view requires browser control.",
         )
     holder = await control.held_by(session_id)
-    if holder != str(tenant.user_id):
+    if holder != effective:
         raise HTTPException(
             status_code=403,
             detail="Browser live view requires browser control.",
@@ -295,6 +328,7 @@ async def proxy_live_view(
         session_id=str(session_id),
         tenant=tenant,
         control=control,
+        request=request,
     )
 
     upstream_base = (
@@ -360,6 +394,7 @@ async def proxy_live_view_ws(
             path=websocket.url.path,
             token=websocket.query_params.get("token"),
             cookies=websocket.cookies,
+            authorization=websocket.headers.get("authorization"),
         )
     except HTTPException:
         await websocket.close(code=4401, reason="unauthenticated")
@@ -374,9 +409,12 @@ async def proxy_live_view_ws(
     if resolved is None:
         await websocket.close(code=4404, reason="no browser")
         return
-    if tenant.user_id is None or await control.held_by(str(session_id)) != str(
-        tenant.user_id
-    ):
+    effective = _effective_live_view_user(
+        tenant=tenant,
+        path=websocket.url.path,
+        query_params=websocket.query_params,
+    )
+    if effective is None or await control.held_by(str(session_id)) != effective:
         await websocket.close(code=4403, reason="browser control required")
         return
 

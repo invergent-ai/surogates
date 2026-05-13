@@ -194,15 +194,35 @@ async def authenticate_websocket_tenant(
     path: str,
     token: str | None,
     cookies: Mapping[str, str] | None = None,
+    authorization: str | None = None,
 ) -> TenantContext:
-    """Authenticate a WebSocket query token and return its tenant context."""
+    """Authenticate a WebSocket and return its tenant context.
+
+    Accepts (in priority order) an ``Authorization: Bearer`` header
+    forwarded by an in-cluster proxy (e.g. the ops live-view forwarder
+    which carries a service-account token), the explicit ``token``
+    argument from a browser-supplied ``?token=`` query param, or — for
+    paths in :func:`_allows_live_view_cookie` — the live-view cookie.
+    """
+    if not token and authorization:
+        token = _extract_bearer(authorization) or None
     if not token:
         token = _query_or_live_view_cookie_token(
             path=path,
             query_params={},
             cookies=cookies or {},
         )
-    if not token or not _allows_query_token(path):
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication credentials.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    # Service-account tokens are gated by ``_tenant_context_from_token``
+    # against ``_SERVICE_ACCOUNT_PATH_PREFIX``; for non-service-account
+    # tokens, restrict WS auth to the same allow-list as HTTP query-token
+    # auth so we don't widen the trust surface.
+    if not is_service_account_token(token) and not _allows_query_token(path):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing authentication credentials.",
