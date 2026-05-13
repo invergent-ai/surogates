@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 _WEBSITE_PATH_PREFIX = "/v1/website/"
 # Headers the browser embed will send: Authorization (bootstrap),
 # X-CSRF-Token (messages), Content-Type (JSON body), plus Accept for SSE.
-_ALLOWED_HEADERS = "Authorization, Content-Type, X-CSRF-Token, Accept"
+_ALLOWED_HEADERS = "Authorization, Content-Type, X-CSRF-Token, Accept, X-Surogates-Widget-Version"
 _ALLOWED_METHODS = "GET, POST, OPTIONS"
 # Cache preflight for 10 minutes.  Any shorter and an active chat
 # triggers a fresh OPTIONS on every message; any longer and a change

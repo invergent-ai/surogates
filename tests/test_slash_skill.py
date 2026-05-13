@@ -258,6 +258,41 @@ class TestExpandSlashSkill:
         )
         assert result is None
 
+    async def test_expands_db_backed_skill_without_staging(self) -> None:
+        """End-to-end shape check for the DB-backed local-fallback response.
+
+        ``_skill_view_handler`` returns no ``staged_at`` for DB skills (they
+        carry no linked files).  ``expand_slash_skill`` must still produce a
+        valid expansion -- the harness emits an audit event with
+        ``staged_at=None`` rather than skipping the expansion.
+        """
+        registry = _FakeRegistry({
+            "success": True,
+            "name": "wiki",
+            "description": "Wiki tool",
+            "tags": ["docs"],
+            "related_skills": [],
+            "content": "# Wiki\nbody",
+            "linked_files": None,
+            "usage_hint": None,
+            "token_estimate": 4,
+        })
+        result = await expand_slash_skill(
+            text="/wiki cancel subscription",
+            tools=registry,
+            tenant=object(),
+            session_id="sess-1",
+            api_client=None,
+            session_factory=object(),
+        )
+
+        assert result is not None
+        expanded, skill_name, staged_at = result
+        assert skill_name == "wiki"
+        assert staged_at is None
+        assert "# Wiki" in expanded
+        assert "cancel subscription" in expanded
+
     async def test_passes_api_client_and_session_factory_through(self) -> None:
         registry = _FakeRegistry({
             "success": True,
