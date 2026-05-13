@@ -48,6 +48,28 @@ def _prefixed_name(org_id: UUID, user_id: UUID, server_name: str) -> str:
     return f"{_tenant_prefix(org_id, user_id)}__{server_name}"
 
 
+def _flatten_openai_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Convert an OpenAI-format tool schema to a flat one.
+
+    The ``ToolRegistry.get_schemas`` output is shaped for
+    ``chat.completions.create(tools=...)``::
+
+        {"type": "function", "function": {"name", "description", "parameters"}}
+
+    The proxy's own protocol and the in-cluster bookkeeping work on the
+    flat ``{name, description, parameters}`` shape.  Already-flat inputs
+    are returned unchanged so this helper is safe to call defensively.
+    """
+    fn = schema.get("function")
+    if isinstance(fn, dict):
+        return {
+            "name": fn.get("name", ""),
+            "description": fn.get("description", ""),
+            "parameters": fn.get("parameters", {}),
+        }
+    return schema
+
+
 @dataclass
 class PoolEntry:
     """Tracks a tenant's MCP server set and its last-access time.
@@ -194,7 +216,17 @@ class ConnectionPool:
                 registry=temp_registry,
             )
 
-            schemas = temp_registry.get_schemas(names=set(registered))
+            # ``ToolRegistry.get_schemas`` emits OpenAI's nested
+            # ``{"type":"function","function":{"name",...}}`` shape; the
+            # rest of this method (and the ``/mcp/v1/tools/list`` route
+            # contract) work on a flat ``{name,description,parameters}``
+            # shape, so unwrap once here. Skipping this step is what
+            # makes the proxy advertise empty-named tools and the worker
+            # silently register zero MCP tools.
+            schemas = [
+                _flatten_openai_schema(s)
+                for s in temp_registry.get_schemas(names=set(registered))
+            ]
 
             # Build clean schemas and reverse tool index.
             tenant_pfx = sanitize_mcp_name_component(
