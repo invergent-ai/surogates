@@ -636,9 +636,9 @@ function ChatComposerInner({
           />
           <CommandList>
             <CommandEmpty>No commands found.</CommandEmpty>
-            {adapterCommands.length > 0 && (
-              <CommandGroup heading="Skills">
-                {adapterCommands.map((cmd) => (
+            {builtinCommands.length > 0 && (
+              <CommandGroup heading="Built-in commands">
+                {builtinCommands.map((cmd) => (
                   <CommandItem
                     key={cmd.value}
                     value={cmd.value}
@@ -662,12 +662,12 @@ function ChatComposerInner({
                 ))}
               </CommandGroup>
             )}
-            {adapterCommands.length > 0 && builtinCommands.length > 0 && (
+            {builtinCommands.length > 0 && adapterCommands.length > 0 && (
               <CommandSeparator />
             )}
-            {builtinCommands.length > 0 && (
-              <CommandGroup heading="Built-in commands">
-                {builtinCommands.map((cmd) => (
+            {adapterCommands.length > 0 && (
+              <CommandGroup heading="Skills">
+                {adapterCommands.map((cmd) => (
                   <CommandItem
                     key={cmd.value}
                     value={cmd.value}
