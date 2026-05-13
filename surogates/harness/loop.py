@@ -1455,6 +1455,16 @@ class AgentHarness:
         # log or system prompt.
         view_context_note: str | None = _view_context_note(all_events or [])
 
+        # Per-turn attachments note.  Same idempotent placement: a system
+        # message inserted just above the latest user message that lists
+        # every file the user attached to this message (path, MIME, size,
+        # display filename).  Recomputed each iteration from the durable
+        # event log so retries are deterministic.  When both this and
+        # view_context_note are present, attachments_note ends up
+        # adjacent to the user message and view_context_note sits one
+        # position above it.
+        attachments_note: str | None = _attachments_note(all_events or [])
+
         # --- Forced expert consultation for hard tasks (one-shot before loop) ---
         await self._maybe_consult_required_expert(
             session,
@@ -1605,6 +1615,27 @@ class AgentHarness:
                     api_messages.insert(
                         latest_user_idx,
                         {"role": "system", "content": view_context_note},
+                    )
+
+            # Per-turn attachments note: same idempotent placement.
+            # Inserted AFTER view_context_note so it ends up adjacent to
+            # the latest user message (view_context_note above, the
+            # attachments note immediately above the user message).
+            # Re-finds the user index because the previous insert may
+            # have shifted it.
+            if attachments_note is not None:
+                latest_user_idx = next(
+                    (
+                        idx
+                        for idx in range(len(api_messages) - 1, -1, -1)
+                        if api_messages[idx].get("role") == "user"
+                    ),
+                    None,
+                )
+                if latest_user_idx is not None:
+                    api_messages.insert(
+                        latest_user_idx,
+                        {"role": "system", "content": attachments_note},
                     )
 
             await _prepare_messages_for_model_vision_support(
