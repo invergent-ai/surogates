@@ -539,6 +539,7 @@ class Settings(BaseSettings):
     # Paths — each individually configurable, each a separate K8s volume mount
     platform_skills_dir: str = "/etc/surogates/skills"
     platform_mcp_dir: str = "/etc/surogates/mcp"
+    platform_agents_dir: str = "/etc/surogates/agents"
     tenant_assets_root: str = "/data/tenant-assets"
 
     # Identity
