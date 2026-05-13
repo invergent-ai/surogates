@@ -180,35 +180,14 @@ function AttachmentPreviewStrip() {
         const isImage =
           file.mediaType?.startsWith("image/") && !!file.url;
         const sizeLabel = formatBytes(file.file?.size);
-
-        if (isImage) {
-          // Images get a square thumbnail with a hover-revealed remove
-          // button — the preview itself communicates what's attached.
-          return (
-            <div key={file.id} className="relative group">
-              <img
-                src={file.url}
-                alt={file.filename}
-                className="h-16 w-16 rounded-lg border border-border object-cover"
-              />
-              <button
-                type="button"
-                onClick={() => attachments.remove(file.id)}
-                aria-label={`Remove ${file.filename}`}
-                className="absolute -top-1.5 -right-1.5 hidden group-hover:flex items-center justify-center w-4 h-4 rounded-full bg-destructive text-destructive-foreground text-[10px]"
-              >
-                &times;
-              </button>
-            </div>
-          );
-        }
-
-        // Non-image files: shadcn ``Item`` primitive so the filename
-        // gets real estate proportional to its length instead of being
-        // cropped into a 64×64 thumbnail-shaped box.  ``w-auto`` +
-        // ``rounded-md`` override the list-row defaults (``w-full``,
-        // ``rounded-none``) so the chips sit inline next to each other.
         const Icon = iconForMime(file.mediaType);
+
+        // Single uniform Item layout for both images and non-images:
+        // the only thing that differs is the ItemMedia slot (a real
+        // thumbnail when we have one, a mime-bucket icon otherwise).
+        // Class overrides on the outer Item drop the list-row defaults
+        // (``w-full``, ``rounded-none``) so the chips sit inline at
+        // intrinsic width.
         return (
           <Item
             key={file.id}
@@ -217,8 +196,12 @@ function AttachmentPreviewStrip() {
             className="group w-auto max-w-[18rem] rounded-md"
             title={file.filename}
           >
-            <ItemMedia variant="icon">
-              <Icon />
+            <ItemMedia variant={isImage ? "image" : "icon"}>
+              {isImage ? (
+                <img src={file.url} alt={file.filename} />
+              ) : (
+                <Icon />
+              )}
             </ItemMedia>
             <ItemContent>
               <ItemTitle className="normal-case font-medium text-foreground">
