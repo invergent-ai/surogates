@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import logging
+from typing import Any
 from uuid import UUID
 
 from datetime import datetime
@@ -76,6 +77,12 @@ class ImageBlock(BaseModel):
 class SendMessageRequest(BaseModel):
     content: str
     images: list[ImageBlock] | None = None
+    # Free-form per-message metadata.  Used by the platform copilot to
+    # carry UI ``view_context`` (the page the user is currently looking
+    # at) so the harness can inject a transient system note for the
+    # next LLM turn.  The shape is intentionally open — the harness
+    # only reads keys it understands and ignores the rest.
+    metadata: dict[str, Any] | None = None
 
     @field_validator("images")
     @classmethod
@@ -389,6 +396,8 @@ async def send_message(
         event_data["images"] = [
             {"data": img.data, "mime_type": img.mime_type} for img in body.images
         ]
+    if body.metadata is not None:
+        event_data["metadata"] = body.metadata
     event_id = await store.emit_event(
         session_id,
         EventType.USER_MESSAGE,

@@ -153,6 +153,55 @@ def _initial_system_message(system_prompt: str, browser_pause_notice: str | None
     }
 
 
+def _view_context_note(events: list[Any]) -> str | None:
+    """Return a per-turn system note describing the user's current UI view.
+
+    Looks at the most recent ``user.message`` event in *events* and reads
+    ``data.metadata.view_context``.  Returns ``None`` when no user message
+    has been recorded yet, when its payload carries no metadata, or when
+    ``view_context`` is missing/empty.  The lookup is read-only and never
+    raises -- malformed payloads (e.g. ``view_context`` not a dict, or
+    missing ``kind``/``id``) yield ``None`` so the LLM call proceeds
+    unchanged.
+
+    The returned string is meant to be passed verbatim as the ``content``
+    of a ``role="system"`` message inserted just before the latest user
+    turn.  Construction is deterministic and idempotent within a turn
+    (same input -> same string), so re-invocations during retry loops
+    cannot drift.
+    """
+    latest_user_metadata: dict[str, Any] | None = None
+    for event in reversed(events):
+        event_type = event.type
+        type_value = event_type.value if hasattr(event_type, "value") else event_type
+        if type_value != EventType.USER_MESSAGE.value:
+            continue
+        data = event.data if isinstance(event.data, dict) else {}
+        metadata = data.get("metadata")
+        if isinstance(metadata, dict):
+            latest_user_metadata = metadata
+        break
+
+    if not latest_user_metadata:
+        return None
+
+    view_context = latest_user_metadata.get("view_context")
+    if not isinstance(view_context, dict):
+        return None
+
+    kind = view_context.get("kind")
+    target_id = view_context.get("id")
+    if not kind or not target_id:
+        return None
+
+    note = f"The user is currently viewing **{kind}** {target_id}"
+    name = view_context.get("name")
+    if name:
+        note += f" ({name})"
+    note += "."
+    return note
+
+
 def _format_loop_list(rows: list[Any]) -> str:
     if not rows:
         return "No active loops."
@@ -1329,6 +1378,13 @@ class AgentHarness:
             all_events or [],
         )
 
+        # Per-turn view-context note (Platform Copilot).  Derived from the
+        # latest user.message event's metadata; injected right before the
+        # latest user message in api_messages so the LLM knows what the
+        # user is currently viewing without polluting the durable event
+        # log or system prompt.
+        view_context_note: str | None = _view_context_note(all_events or [])
+
         # --- Forced expert consultation for hard tasks (one-shot before loop) ---
         await self._maybe_consult_required_expert(
             session,
@@ -1458,6 +1514,28 @@ class AgentHarness:
                 # Keep reasoning_details -- OpenRouter uses this for multi-turn
                 # reasoning context with signature fields.
                 api_messages.append(api_msg)
+
+            # Per-turn view-context note: insert as a system message right
+            # before the latest user message so the LLM sees what page the
+            # user is on when interpreting the prompt.  The note lives
+            # only in this api_messages list -- it is not persisted in
+            # the event log and is recomputed each iteration from the
+            # latest user.message metadata, so a retry yields the same
+            # placement.
+            if view_context_note is not None:
+                latest_user_idx = next(
+                    (
+                        idx
+                        for idx in range(len(api_messages) - 1, -1, -1)
+                        if api_messages[idx].get("role") == "user"
+                    ),
+                    None,
+                )
+                if latest_user_idx is not None:
+                    api_messages.insert(
+                        latest_user_idx,
+                        {"role": "system", "content": view_context_note},
+                    )
 
             await _prepare_messages_for_model_vision_support(
                 api_messages,
