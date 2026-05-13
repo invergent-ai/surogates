@@ -7,15 +7,15 @@ prerelease-mode = "allow"
 
 [[package]]
 name = "agent-os-kernel"
-version = "3.0.2"
+version = "3.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d2/0e/f50a53d41857b3f3b17c4683145096c3fa7ae9ef348a8801e9f9e953433f/agent_os_kernel-3.0.2.tar.gz", hash = "sha256:c1ec92ddfbf3b2a58ae2e605fe8d46eb9fdc1552251964877e5c5c1bfd78b0ff", size = 3005144, upload-time = "2026-04-02T16:47:22.799Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b4/66/6a30c67a49b778cd6c66ebfc0e959cbf4aa05dc8a7a8f43e1afbb1864f2c/agent_os_kernel-3.6.0.tar.gz", hash = "sha256:c2936413c6e33f608edc81f59d259f5f9e0dda4668a34db36834b8650a8608b5", size = 3131118, upload-time = "2026-05-12T17:48:23.483Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7c/5c/a90014e277b3cd489e72ec7ac76d9c265817c2c7089fef593f52102efc12/agent_os_kernel-3.0.2-py3-none-any.whl", hash = "sha256:feda9055865eff8a1285de707f86451a9a9afeb31a9f41ad62e62fa126f06bde", size = 958732, upload-time = "2026-04-02T16:47:24.514Z" },
+    { url = "https://files.pythonhosted.org/packages/83/23/40918eef96a59b420a05ceee3e6f9ce8e422822eb33d2eb213da993276bf/agent_os_kernel-3.6.0-py3-none-any.whl", hash = "sha256:121e74c55d1e43b207f862a3b8d97452fd795441c5ad6ecafe8ee9fe85c4e044", size = 1100212, upload-time = "2026-05-12T17:48:25.663Z" },
 ]
 
 [[package]]
@@ -2210,7 +2210,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agent-os-kernel", specifier = ">=3.0,<4.0" },
+    { name = "agent-os-kernel", specifier = ">=3.6,<4.0" },
     { name = "aioboto3", specifier = ">=14.0" },
     { name = "asyncpg", specifier = ">=0.29,<1.0" },
     { name = "croniter", specifier = ">=3.0,<7.0" },
