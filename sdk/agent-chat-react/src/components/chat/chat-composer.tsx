@@ -327,34 +327,36 @@ function ChatComposerInner({
 
   const menuOpen = showSlashMenu;
 
-  // Selecting a command closes the popup; cmdk + Radix Popover then
-  // tear down the CommandInput, which is the currently-focused
-  // element.  Without an explicit hand-off, focus falls onto the body
-  // and the user has to click back into the chat input before they
-  // can keep typing.  We stash a ref on the textarea below and call
-  // .focus() on it after the state updates flush, then move the
-  // caret to the end so the user can continue typing arguments
-  // straight after the inserted command.
+  // When the slash popup closes — by command selection, Escape, or
+  // click-outside — cmdk + Radix tear down the CommandInput that was
+  // holding focus.  Without an explicit hand-off, focus falls onto
+  // the body and the user has to click back into the chat input.
+  // We stash a ref on the textarea below and route every "the user
+  // is done with the popup" path through this helper.
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const focusTextareaAtEnd = useCallback(() => {
+    // requestAnimationFrame waits for Radix's own close-focus step to
+    // run first; focusing synchronously inside an onSelect or
+    // onEscapeKeyDown handler races Radix and the textarea loses
+    // focus on the next tick.
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      const end = textarea.value.length;
+      textarea.setSelectionRange(end, end);
+    });
+  }, []);
 
   const handleCommandSelect = useCallback(
     (commandValue: string) => {
       textInput.setInput(commandValue + " ");
       setButtonMenuOpen(false);
       setMenuDismissed(true);
-      // requestAnimationFrame waits for Radix to finish its
-      // close-animation focus-restoration step; if we focus too
-      // early, Radix's own onCloseAutoFocus pulls focus off the
-      // textarea again.
-      requestAnimationFrame(() => {
-        const textarea = textareaRef.current;
-        if (!textarea) return;
-        textarea.focus();
-        const end = textarea.value.length;
-        textarea.setSelectionRange(end, end);
-      });
+      focusTextareaAtEnd();
     },
-    [textInput],
+    [textInput, focusTextareaAtEnd],
   );
 
   const handleSearchChange = useCallback(
@@ -608,6 +610,14 @@ function ChatComposerInner({
         className="overflow-hidden p-0"
         style={{ width: "var(--radix-popover-trigger-width)" }}
         onCloseAutoFocus={(e) => e.preventDefault()}
+        onEscapeKeyDown={() => {
+          // Escape is the canonical "back out of the popup, keep
+          // typing in the chat" gesture.  Click-outside is
+          // deliberately NOT routed here — if the user clicked some
+          // other widget on the page they expect focus to land
+          // wherever they clicked, not snap back to the textarea.
+          focusTextareaAtEnd();
+        }}
       >
         {/*
           Native shadcn / cmdk command palette: the CommandInput owns
