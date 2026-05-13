@@ -31,6 +31,7 @@ dist/**
 *.egg
 .dev/
 config.dev.yaml
+config.copilot.yaml
 .venv/
 node_modules/**
 .vscode/launch.json
