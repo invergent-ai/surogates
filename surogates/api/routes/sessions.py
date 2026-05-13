@@ -59,6 +59,10 @@ _ALLOWED_IMAGE_MIMES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 _MAX_IMAGES_PER_MESSAGE = 5
 _MAX_IMAGE_BYTES = 20_000_000  # 20 MB raw
 
+_MAX_ATTACHMENTS_PER_MESSAGE = 10
+_MAX_ATTACHMENT_BYTES = 50_000_000  # 50 MB per file
+_MAX_ATTACHMENTS_TOTAL_BYTES = 200_000_000  # 200 MB total per message
+
 
 class ImageBlock(BaseModel):
     """A single image attachment on a user message."""
@@ -74,6 +78,48 @@ class ImageBlock(BaseModel):
         return v
 
 
+class AttachmentRef(BaseModel):
+    """A reference to a file previously uploaded to the session workspace.
+
+    The harness validates that ``path`` resolves to an existing object in the
+    session's workspace bucket before persisting it on the user.message event.
+    ``size`` is a client-provided hint; the harness overwrites it with the
+    real storage size during validation.
+    """
+
+    path: str
+    filename: str
+    mime_type: str | None = None
+    size: int | None = None
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, v: str) -> str:
+        if not v:
+            raise ValueError("attachment path must be non-empty")
+        if v.startswith("/"):
+            raise ValueError("attachment path must be workspace-relative")
+        if "\x00" in v:
+            raise ValueError("attachment path must not contain NUL")
+        parts = v.split("/")
+        if any(part == ".." for part in parts):
+            raise ValueError("attachment path must not contain '..' segments")
+        return v
+
+    @field_validator("filename")
+    @classmethod
+    def _validate_filename(cls, v: str) -> str:
+        if not v:
+            raise ValueError("attachment filename must be non-empty")
+        if "/" in v or "\\" in v:
+            raise ValueError(
+                "attachment filename must not contain path separators",
+            )
+        if "\x00" in v:
+            raise ValueError("attachment filename must not contain NUL")
+        return v
+
+
 class SendMessageRequest(BaseModel):
     content: str
     images: list[ImageBlock] | None = None
@@ -83,6 +129,14 @@ class SendMessageRequest(BaseModel):
     # next LLM turn.  The shape is intentionally open — the harness
     # only reads keys it understands and ignores the rest.
     metadata: dict[str, Any] | None = None
+    # Non-image attachments previously uploaded to the session workspace
+    # via ``POST /sessions/{id}/workspace/upload``.  Each ref carries the
+    # workspace-relative path plus display metadata; the route resolves
+    # the path against the session's bucket, overwrites the client size
+    # hint with the storage size, scans the filename through the prompt-
+    # injection detector, and persists the resolved refs onto the
+    # user.message event.
+    attachments: list[AttachmentRef] | None = None
 
     @field_validator("images")
     @classmethod
@@ -108,6 +162,21 @@ class SendMessageRequest(BaseModel):
                 raise ValueError(
                     f"Image exceeds {_MAX_IMAGE_BYTES // 1_000_000}MB limit",
                 )
+        return v
+
+    @field_validator("attachments")
+    @classmethod
+    def _validate_attachments(
+        cls,
+        v: list[AttachmentRef] | None,
+    ) -> list[AttachmentRef] | None:
+        if not v:
+            return v
+        if len(v) > _MAX_ATTACHMENTS_PER_MESSAGE:
+            raise ValueError(
+                f"Maximum {_MAX_ATTACHMENTS_PER_MESSAGE} attachments"
+                f" per message",
+            )
         return v
 
 
