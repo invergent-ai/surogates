@@ -3,6 +3,15 @@
 //
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import {
+  File as FileIcon,
+  FileArchive,
+  FileAudio,
+  FileCode,
+  FileSpreadsheet,
+  FileText,
+  FileVideo,
+} from "lucide-react";
 import type { PromptInputMessage } from "../ai-elements/prompt-input";
 import { useProviderAttachments } from "../ai-elements/prompt-input";
 import type {
@@ -107,34 +116,123 @@ export function ChatComposer(props: ChatComposerProps) {
 
 // ── Attachment preview strip ─────────────────────────────────────────
 
+function iconForMime(mime?: string) {
+  if (!mime) return FileIcon;
+  if (mime.startsWith("audio/")) return FileAudio;
+  if (mime.startsWith("video/")) return FileVideo;
+  if (mime === "application/pdf" || mime.startsWith("text/")) return FileText;
+  if (
+    mime === "application/json" ||
+    mime === "application/xml" ||
+    mime.endsWith("+xml") ||
+    mime.endsWith("+json") ||
+    mime.includes("javascript") ||
+    mime.includes("typescript")
+  ) {
+    return FileCode;
+  }
+  if (
+    mime === "application/zip" ||
+    mime === "application/x-7z-compressed" ||
+    mime === "application/x-tar" ||
+    mime === "application/gzip" ||
+    mime === "application/x-rar-compressed"
+  ) {
+    return FileArchive;
+  }
+  if (
+    mime === "text/csv" ||
+    mime === "application/vnd.ms-excel" ||
+    mime.includes("spreadsheet")
+  ) {
+    return FileSpreadsheet;
+  }
+  return FileIcon;
+}
+
+function formatBytes(n?: number): string {
+  if (n == null || !Number.isFinite(n) || n < 0) return "";
+  for (const [unit, divisor] of [
+    ["GB", 1_000_000_000],
+    ["MB", 1_000_000],
+    ["KB", 1_000],
+  ] as const) {
+    if (n >= divisor) return `${(n / divisor).toFixed(1)} ${unit}`;
+  }
+  return `${n} B`;
+}
+
 function AttachmentPreviewStrip() {
   const attachments = useProviderAttachments();
   if (attachments.files.length === 0) return null;
 
   return (
     <div className="flex gap-2 px-3 pt-2 pb-1 flex-wrap">
-      {attachments.files.map((file) => (
-        <div key={file.id} className="relative group">
-          {file.mediaType?.startsWith("image/") && file.url ? (
-            <img
-              src={file.url}
-              alt={file.filename}
-              className="h-16 w-16 rounded-lg border border-border object-cover"
-            />
-          ) : (
-            <div className="h-16 w-16 rounded-lg border border-border bg-muted flex items-center justify-center text-[10px] text-muted-foreground truncate px-1">
-              {file.filename}
+      {attachments.files.map((file) => {
+        const isImage =
+          file.mediaType?.startsWith("image/") && !!file.url;
+        const sizeLabel = formatBytes(file.file?.size);
+
+        if (isImage) {
+          // Images get a square thumbnail with a hover-revealed remove
+          // button — the preview itself communicates what's attached.
+          return (
+            <div key={file.id} className="relative group">
+              <img
+                src={file.url}
+                alt={file.filename}
+                className="h-16 w-16 rounded-lg border border-border object-cover"
+              />
+              <button
+                type="button"
+                onClick={() => attachments.remove(file.id)}
+                aria-label={`Remove ${file.filename}`}
+                className="absolute -top-1.5 -right-1.5 hidden group-hover:flex items-center justify-center w-4 h-4 rounded-full bg-destructive text-destructive-foreground text-[10px]"
+              >
+                &times;
+              </button>
             </div>
-          )}
-          <button
-            type="button"
-            onClick={() => attachments.remove(file.id)}
-            className="absolute -top-1.5 -right-1.5 hidden group-hover:flex items-center justify-center w-4 h-4 rounded-full bg-destructive text-destructive-foreground text-[10px]"
+          );
+        }
+
+        // Non-image files: a rectangular pill with a mime-bucket icon
+        // and the full filename + size legible.  A 64×64 square here
+        // truncates every name; this layout gives the filename real
+        // estate proportional to its length, capped so a single huge
+        // filename can't push other pills off-screen.
+        const Icon = iconForMime(file.mediaType);
+        return (
+          <div
+            key={file.id}
+            className={
+              "relative group inline-flex items-center gap-2 " +
+              "h-12 rounded-lg border border-border bg-muted/40 " +
+              "pl-2 pr-3 max-w-[18rem] text-xs"
+            }
+            title={file.filename}
           >
-            &times;
-          </button>
-        </div>
-      ))}
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-background/70 text-muted-foreground">
+              <Icon className="size-4" />
+            </div>
+            <div className="flex min-w-0 flex-col leading-tight">
+              <span className="truncate font-medium text-foreground">
+                {file.filename}
+              </span>
+              {sizeLabel && (
+                <span className="text-muted-foreground">{sizeLabel}</span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => attachments.remove(file.id)}
+              aria-label={`Remove ${file.filename}`}
+              className="absolute -top-1.5 -right-1.5 hidden group-hover:flex items-center justify-center w-4 h-4 rounded-full bg-destructive text-destructive-foreground text-[10px]"
+            >
+              &times;
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }
