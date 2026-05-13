@@ -914,6 +914,13 @@ class AgentHarness:
         self._interrupt_requested: bool = False
         self._interrupt_message: str | None = None
 
+        # The streaming executor currently in flight, if any. Set by
+        # ``_run_iteration`` while a tool batch is executing and cleared
+        # in its ``finally``. ``interrupt()`` discards it so an in-flight
+        # tool (sandbox exec, browser action) is cancelled immediately
+        # instead of waiting for its own timeout to fire.
+        self._active_executor: StreamingToolExecutor | None = None
+
         # Memory manager (optional).
         self._memory_manager: MemoryManager | None = memory_manager
 
@@ -960,12 +967,19 @@ class AgentHarness:
 
         Also sets the global interrupt event so that tools polling
         :func:`surogates.tools.utils.interrupt.is_interrupted` see the
-        signal immediately.
+        signal immediately, and discards the active streaming executor
+        (if any) so in-flight tool tasks are cancelled now rather than
+        waiting on their own timeout. Without this, a follow-up user
+        message can sit unread for minutes while a sandbox exec or
+        browser action runs to its tool-level timeout.
         """
         self._interrupt_requested = True
         self._interrupt_message = message
         from surogates.tools.utils.interrupt import set_interrupt
         set_interrupt(True)
+        executor = self._active_executor
+        if executor is not None:
+            executor.discard()
 
     def _check_interrupt(self) -> bool:
         """Return ``True`` if an interrupt has been requested."""
@@ -2231,8 +2245,15 @@ class AgentHarness:
                 # because they are never concurrency-safe.
 
                 # Wait for all tools to complete (concurrent ones may
-                # already be done, sequential ones start now).
-                all_results = await streaming_executor.get_all_results()
+                # already be done, sequential ones start now). Publish the
+                # executor on the harness so ``interrupt()`` can preempt
+                # in-flight tools (sandbox exec, browser actions) instead
+                # of letting them run to their tool-level timeout.
+                self._active_executor = streaming_executor
+                try:
+                    all_results = await streaming_executor.get_all_results()
+                finally:
+                    self._active_executor = None
 
                 # Filter results to match the deduped tool call list.
                 # Dedup is rare but possible — if a tool was deduped,

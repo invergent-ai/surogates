@@ -356,9 +356,16 @@ class StreamingToolExecutor:
             tool.errored = _is_error_result(result)
         except asyncio.CancelledError:
             from surogates.harness.message_utils import make_skipped_tool_result
-            tool.result = make_skipped_tool_result(
-                tool.tool_call, reason="cancelled (sibling error)",
-            )
+            # Distinguish interrupt-driven cancellation (harness.interrupt()
+            # called ``discard()`` to preempt the in-flight tool) from
+            # sibling-error abort. The reason text is shown to the LLM in
+            # the synthetic tool result, and ``sibling error`` would lead
+            # it to hunt for a peer failure that didn't happen.
+            if self._interrupt_check():
+                reason = "skipped due to interrupt"
+            else:
+                reason = "cancelled (sibling error)"
+            tool.result = make_skipped_tool_result(tool.tool_call, reason=reason)
             tool.errored = True
             await self._emit_cancelled_result_event(tool)
         except Exception as exc:

@@ -644,6 +644,47 @@ class TestInterruptHandling:
         assert len(results) == 1
         assert "skipped" in results[0]["content"].lower()
 
+    @pytest.mark.asyncio
+    async def test_discard_after_interrupt_marks_tools_interrupted(self) -> None:
+        """When an in-flight tool is cancelled via discard() because the harness
+        was interrupted, its synthetic result must say ``skipped due to
+        interrupt`` rather than ``cancelled (sibling error)`` -- the LLM uses
+        the reason text to decide what to do next, and ``sibling error``
+        misleads it into looking for a peer failure that didn't happen.
+        """
+        started = asyncio.Event()
+        interrupted = False
+
+        def interrupt_check():
+            return interrupted
+
+        async def mock_dispatch(name, args, **kwargs):
+            started.set()
+            await asyncio.sleep(10)  # Will be cancelled.
+            return json.dumps({"ok": True})
+
+        tools = _make_registry("read_file")
+        tools.dispatch = mock_dispatch
+
+        executor = _make_executor(
+            store=_make_store(), tools=tools, interrupt_check=interrupt_check,
+        )
+        executor.add_tool(_make_tool_call("read_file", call_id="tc_1"))
+
+        await started.wait()
+
+        # Simulate harness.interrupt() flow: set the interrupt flag, then
+        # discard the executor to cancel its in-flight task.
+        interrupted = True
+        executor.discard()
+
+        results = await executor.get_all_results()
+        assert len(results) == 1
+        content = results[0].get("content", "").lower()
+        assert "skipped due to interrupt" in content, (
+            f"expected interrupt reason, got: {results[0]['content']!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Stats
