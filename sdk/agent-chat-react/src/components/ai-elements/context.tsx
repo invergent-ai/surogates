@@ -56,7 +56,7 @@ export const Context = ({
 
   return (
     <ContextContext.Provider value={contextValue}>
-      <HoverCard closeDelay={0} openDelay={0} {...props} />
+      <HoverCard closeDelay={100} openDelay={0} {...props} />
     </ContextContext.Provider>
   );
 };

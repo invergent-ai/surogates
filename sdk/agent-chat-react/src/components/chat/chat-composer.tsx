@@ -586,7 +586,7 @@ function ChatComposerInner({
                       )}
                     </ContextContentBody>
                     {tokenUsage.totalTokens > 0 && (
-                      <div className="flex w-full items-center justify-end gap-3 bg-secondary p-3">
+                      <div className="flex w-full items-center justify-end gap-3 bg-secondary p-2">
                         <Button
                           type="button"
                           size="xs"
