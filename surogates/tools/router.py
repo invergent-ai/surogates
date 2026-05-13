@@ -137,10 +137,13 @@ class ToolRouter:
         """Return where *tool_name* should execute.
 
         Tools listed in :data:`TOOL_LOCATIONS` use their explicit mapping.
-        Unknown tools default to :attr:`ToolLocation.SANDBOX` so that any
-        newly-registered tool that is not explicitly classified gets
-        isolation by default.
+        ``mcp_*`` tools are remote calls dispatched by the in-process MCP
+        client and never need sandbox isolation. Everything else defaults
+        to :attr:`ToolLocation.SANDBOX` so a newly-registered, unclassified
+        tool still gets isolation by default.
         """
+        if tool_name.startswith("mcp_"):
+            return ToolLocation.HARNESS
         return TOOL_LOCATIONS.get(tool_name, ToolLocation.SANDBOX)
 
     # ------------------------------------------------------------------

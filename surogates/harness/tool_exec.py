@@ -1183,7 +1183,14 @@ async def execute_single_tool(
     tool_failed = False
     try:
         from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
-        location = TOOL_LOCATIONS.get(tool_name, ToolLocation.SANDBOX)
+        # MCP tools are remote calls (HTTP/stdio) dispatched by the
+        # in-process MCP client; they never need a sandbox pod. Without
+        # this short-circuit the dict default (SANDBOX) tries to spin up
+        # a k8s namespace + S3 secret for every `mcp_*` call.
+        if tool_name.startswith("mcp_"):
+            location = ToolLocation.HARNESS
+        else:
+            location = TOOL_LOCATIONS.get(tool_name, ToolLocation.SANDBOX)
 
         if location == ToolLocation.SANDBOX and sandbox_pool is not None:
             from surogates.sandbox.pool import sandbox_session_key

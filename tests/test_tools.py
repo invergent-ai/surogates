@@ -281,6 +281,22 @@ class TestToolRouterLocationResolution:
 
         assert router.resolve_location("totally_unknown") == ToolLocation.SANDBOX
 
+    def test_mcp_tools_resolve_to_harness(self):
+        """MCP tools are remote calls; they must never trigger sandbox provisioning."""
+        reg = ToolRegistry()
+        pool = MagicMock(spec=SandboxPool)
+        gate = GovernanceGate()
+        router = ToolRouter(reg, pool, gate)
+
+        for tool_name in (
+            "mcp_surogate_ops_copilot_list_agents",
+            "mcp_some_other_server_run_query",
+            "mcp_x_y",
+        ):
+            assert router.resolve_location(tool_name) == ToolLocation.HARNESS, (
+                f"{tool_name} should resolve to HARNESS"
+            )
+
     @pytest.mark.asyncio
     async def test_sandbox_tool_dispatches_to_pool(self):
         reg = ToolRegistry()
