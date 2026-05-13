@@ -621,12 +621,18 @@ function ChatComposerInner({
                     value={cmd.value}
                     keywords={[cmd.description]}
                     onSelect={() => handleCommandSelect(cmd.value)}
-                    className="flex items-baseline gap-2 [&_svg]:hidden"
+                    className="grid grid-cols-[12rem_1fr] items-baseline gap-3 [&_svg]:hidden"
                   >
-                    <span className="font-mono text-foreground shrink-0">
+                    <span
+                      className="font-mono text-foreground truncate"
+                      title={cmd.label}
+                    >
                       {cmd.label}
                     </span>
-                    <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                    <span
+                      className="min-w-0 truncate text-xs text-muted-foreground"
+                      title={cmd.description}
+                    >
                       {cmd.description}
                     </span>
                   </CommandItem>
@@ -644,12 +650,18 @@ function ChatComposerInner({
                     value={cmd.value}
                     keywords={[cmd.description]}
                     onSelect={() => handleCommandSelect(cmd.value)}
-                    className="flex items-baseline gap-2 [&_svg]:hidden"
+                    className="grid grid-cols-[12rem_1fr] items-baseline gap-3 [&_svg]:hidden"
                   >
-                    <span className="font-mono text-foreground shrink-0">
+                    <span
+                      className="font-mono text-foreground truncate"
+                      title={cmd.label}
+                    >
                       {cmd.label}
                     </span>
-                    <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                    <span
+                      className="min-w-0 truncate text-xs text-muted-foreground"
+                      title={cmd.description}
+                    >
                       {cmd.description}
                     </span>
                   </CommandItem>
