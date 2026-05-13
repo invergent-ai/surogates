@@ -1,7 +1,7 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   File as FileIcon,
@@ -327,6 +327,7 @@ function ChatComposerInner({
   );
 
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const commandListRef = useRef<HTMLDivElement | null>(null);
 
   // Reset selection when filter changes.
   useEffect(() => {
@@ -338,6 +339,22 @@ function ChatComposerInner({
       Math.min(index, Math.max(filteredCommands.length - 1, 0)),
     );
   }, [filteredCommands.length]);
+
+  // cmdk auto-scrolls the highlighted item into view only when its
+  // own keyboard handler navigates.  We drive ``value`` externally
+  // (the user types in the chat textarea, not a CommandInput), so
+  // arrow-key navigation moves the highlight without scrolling.  This
+  // effect plugs the gap: every time ``selectedIndex`` changes, look
+  // up the currently-highlighted item by its data attribute and
+  // request a ``block: "nearest"`` scroll so the chip stays visible.
+  useEffect(() => {
+    const root = commandListRef.current;
+    if (!root) return;
+    const selected = root.querySelector<HTMLElement>(
+      "[data-slot='command-item'][data-selected='true']",
+    );
+    selected?.scrollIntoView({ block: "nearest" });
+  }, [selectedIndex, filteredCommands]);
 
   const menuOpen = showSlashMenu && filteredCommands.length > 0;
 
@@ -623,7 +640,7 @@ function ChatComposerInner({
           value={filteredCommands[selectedIndex]?.value}
           filter={() => 1}
         >
-          <CommandList>
+          <CommandList ref={commandListRef}>
             <CommandEmpty>No commands found.</CommandEmpty>
             <CommandGroup heading="Slash commands">
               {filteredCommands.map((cmd) => (
