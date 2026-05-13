@@ -10,6 +10,7 @@ import type {
   AgentChatAdapter,
   AgentChatMessage,
 } from "./types";
+import type { ChatComposerError } from "./components/chat/chat-composer";
 
 export interface AgentChatProps {
   adapter: AgentChatAdapter;
@@ -19,6 +20,12 @@ export interface AgentChatProps {
   onFileSelect?: (path: string) => void;
   onMessagesChange?: (messages: AgentChatMessage[]) => void;
   disabled?: boolean;
+  /**
+   * Called when the composer rejects a file selection before sending —
+   * size/count caps, accept-pattern misses.  Host apps wire this to
+   * their toast system; the SDK does not surface these on its own.
+   */
+  onComposerError?: (err: ChatComposerError) => void;
 }
 
 export function AgentChat({
@@ -29,6 +36,7 @@ export function AgentChat({
   onFileSelect,
   onMessagesChange,
   disabled,
+  onComposerError,
 }: AgentChatProps) {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   const runtime = useAgentChatRuntime({
@@ -89,7 +97,9 @@ export function AgentChat({
               messages={runtime.messages}
               isRunning={runtime.isRunning}
               isLoadingHistory={runtime.isLoadingHistory}
-              onSend={(content, images) => runtime.send(content, images)}
+              onSend={(content, images, attachments) =>
+                runtime.send(content, images, attachments)
+              }
               onStop={() => runtime.stop()}
               onRetry={runtime.retry}
               onFileSelect={handleFileSelect}
@@ -97,6 +107,7 @@ export function AgentChat({
               disabledReason={disabledReason}
               tokenUsage={runtime.tokenUsage}
               retryIndicator={runtime.retryIndicator}
+              onComposerError={onComposerError}
             />
           </div>
           <div

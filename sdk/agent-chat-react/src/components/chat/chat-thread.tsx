@@ -44,12 +44,14 @@ import { AlertTriangle, ChevronDown, ChevronRight, MessageSquareIcon } from "luc
 import { useState } from "react";
 import type {
   AgentChatImageAttachment,
+  AgentChatPendingAttachment,
   ChatMessage as ChatMessageType,
   RetryIndicator,
   ToolCallInfo,
   TokenUsage,
 } from "../../types";
 import type { ArtifactKind } from "../../types";
+import type { ChatComposerError } from "./chat-composer";
 
 interface ChatThreadProps {
   sessionId: string | null;
@@ -59,6 +61,7 @@ interface ChatThreadProps {
   onSend: (
     text: string,
     images?: AgentChatImageAttachment[],
+    attachments?: AgentChatPendingAttachment[],
   ) => void | Promise<void>;
   onStop: () => void | Promise<void>;
   onFileSelect?: (path: string) => void;
@@ -71,6 +74,10 @@ interface ChatThreadProps {
   // User-initiated retry of a failed or paused session.  Called from the
   // Retry button on standalone error bubbles.
   onRetry?: () => Promise<void>;
+  // Forwarded to the composer to surface client-side rejections.  The
+  // SDK does not ship a toast subsystem; callers (e.g. surogate-ops)
+  // wire their own.
+  onComposerError?: (err: ChatComposerError) => void;
 }
 
 // ── Timeline item types ──────────────────────────────────────────────
@@ -748,6 +755,7 @@ export function ChatThread({
   tokenUsage,
   retryIndicator,
   onRetry,
+  onComposerError,
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
 
@@ -904,6 +912,7 @@ export function ChatThread({
             disabled={disabled}
             disabledReason={disabledReason}
             tokenUsage={tokenUsage}
+            onComposerError={onComposerError}
           />
         )}
       </div>

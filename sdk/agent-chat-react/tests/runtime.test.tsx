@@ -672,6 +672,389 @@ describe("useAgentChatRuntime", () => {
   });
 });
 
+describe("useAgentChatRuntime — attachment upload orchestration", () => {
+  type UploadCall = {
+    sessionId: string;
+    directory?: string;
+    filename: string;
+    bytes: number;
+  };
+
+  function buildAttachmentAdapter(opts: {
+    createSession: (
+      input: { agentId?: string; system?: string },
+    ) => Promise<AgentChatSession> | AgentChatSession;
+    uploadWorkspaceFile: (input: {
+      sessionId: string;
+      file: File;
+      directory?: string;
+    }) =>
+      | Promise<{ path: string; size: number }>
+      | { path: string; size: number };
+    sendMessage?: (input: {
+      sessionId: string;
+      content: string;
+      images?: unknown;
+      attachments?: unknown;
+    }) =>
+      | Promise<{ eventId?: number; status?: string }>
+      | { eventId?: number; status?: string };
+    openEventStream?: () => AgentChatEventStream;
+  }): {
+    adapter: AgentChatAdapter;
+    uploads: UploadCall[];
+    sent: Array<{
+      sessionId: string;
+      content: string;
+      images?: unknown;
+      attachments?: unknown;
+    }>;
+  } {
+    const uploads: UploadCall[] = [];
+    const sent: Array<{
+      sessionId: string;
+      content: string;
+      images?: unknown;
+      attachments?: unknown;
+    }> = [];
+    const adapter: AgentChatAdapter = {
+      ...NO_BROWSER_ADAPTER,
+      async listSessions() {
+        return { sessions: [], total: 0 };
+      },
+      async createSession(input) {
+        return await opts.createSession(input);
+      },
+      async getSession(input) {
+        return session(input.sessionId);
+      },
+      async sendMessage(input) {
+        sent.push({
+          sessionId: input.sessionId,
+          content: input.content,
+          images: (input as { images?: unknown }).images,
+          attachments: (input as { attachments?: unknown }).attachments,
+        });
+        return opts.sendMessage
+          ? await opts.sendMessage(input as never)
+          : { eventId: 1, status: "accepted" };
+      },
+      async defineOutcome() {
+        return { eventId: 2, outcomeId: "outc_test" };
+      },
+      async pauseSession() {},
+      async retrySession(input) {
+        return session(input.sessionId);
+      },
+      async getArtifact() {
+        throw new Error("not used by runtime tests");
+      },
+      async submitClarifyResponse() {
+        return { eventId: 1 };
+      },
+      async getWorkspaceTree() {
+        return { root: "workspace", entries: [], truncated: false };
+      },
+      async getWorkspaceFile() {
+        throw new Error("not used by runtime tests");
+      },
+      async uploadWorkspaceFile(input) {
+        const bytes = await input.file.arrayBuffer();
+        uploads.push({
+          sessionId: input.sessionId,
+          directory: input.directory,
+          filename: input.file.name,
+          bytes: bytes.byteLength,
+        });
+        return await opts.uploadWorkspaceFile(input);
+      },
+      async deleteWorkspaceFile() {},
+      getWorkspaceDownloadUrl(input) {
+        return `/api/v1/sessions/${input.sessionId}/workspace/download?path=${encodeURIComponent(input.path)}`;
+      },
+      openEventStream() {
+        return opts.openEventStream
+          ? opts.openEventStream()
+          : new FakeEventStream();
+      },
+    };
+    return { adapter, uploads, sent };
+  }
+
+  it("creates a session, uploads the file to uploads/, then sends attachment refs", async () => {
+    const { adapter, uploads, sent } = buildAttachmentAdapter({
+      createSession: async () => session("s-new"),
+      uploadWorkspaceFile: async ({ file, directory }) => ({
+        path: `${directory ?? ""}/${file.name}`,
+        size: file.size,
+      }),
+    });
+
+    const runtime = renderRuntime({ adapter, sessionId: null });
+
+    const pdf = new File([new Uint8Array([1, 2, 3, 4, 5])], "report.pdf", {
+      type: "application/pdf",
+    });
+
+    await act(async () => {
+      await runtime.api.send("summarize", undefined, [
+        {
+          file: pdf,
+          filename: "report.pdf",
+          mimeType: "application/pdf",
+          size: 5,
+        },
+      ]);
+    });
+
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]?.sessionId).toBe("s-new");
+    expect(uploads[0]?.directory).toBe("uploads");
+    expect(uploads[0]?.filename).toMatch(/^\d+-0-report\.pdf$/);
+    expect(uploads[0]?.bytes).toBe(5);
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.attachments).toEqual([
+      {
+        path: expect.stringMatching(/^uploads\/\d+-0-report\.pdf$/),
+        filename: "report.pdf",
+        mimeType: "application/pdf",
+        size: 5,
+      },
+    ]);
+  });
+
+  it("paints display-only chips on the local message (path absent until SSE replay)", async () => {
+    // The runtime stores the optimistic attachments on the local user
+    // message via markSending.  Those entries omit `path` so the chip
+    // renderer can show them disabled until the user.message SSE event
+    // arrives with the persisted refs (which the reducer test covers).
+    // We never emit that event here, so the optimistic message survives
+    // intact for assertion.
+    const { adapter } = buildAttachmentAdapter({
+      createSession: async () => session("s-new"),
+      uploadWorkspaceFile: async ({ file, directory }) => ({
+        path: `${directory}/${file.name}`,
+        size: file.size,
+      }),
+    });
+
+    const runtime = renderRuntime({ adapter, sessionId: null });
+
+    const pdf = new File([new Uint8Array([1, 2])], "report.pdf", {
+      type: "application/pdf",
+    });
+
+    await act(async () => {
+      await runtime.api.send("summarize", undefined, [
+        {
+          file: pdf,
+          filename: "report.pdf",
+          mimeType: "application/pdf",
+          size: 2,
+        },
+      ]);
+    });
+
+    const local = runtime.api.messages.find(
+      (m) => m.role === "user" && m.id.startsWith("local-"),
+    );
+    expect(local).toBeDefined();
+    expect(local?.attachments).toEqual([
+      {
+        filename: "report.pdf",
+        mimeType: "application/pdf",
+        size: 2,
+        path: undefined,
+      },
+    ]);
+  });
+
+  it("aborts the whole send and calls markSendError when an upload rejects", async () => {
+    const { adapter, sent } = buildAttachmentAdapter({
+      createSession: async () => session("s-new"),
+      uploadWorkspaceFile: async () => {
+        throw new Error("storage offline");
+      },
+    });
+
+    const runtime = renderRuntime({ adapter, sessionId: null });
+
+    const pdf = new File([new Uint8Array([1])], "x.pdf", {
+      type: "application/pdf",
+    });
+
+    await act(async () => {
+      await expect(
+        runtime.api.send("hi", undefined, [
+          {
+            file: pdf,
+            filename: "x.pdf",
+            mimeType: "application/pdf",
+            size: 1,
+          },
+        ]),
+      ).rejects.toThrow("storage offline");
+    });
+
+    expect(sent).toHaveLength(0);
+    const last = runtime.api.messages.at(-1)!;
+    expect(last.status).toBe("error");
+    expect(last.content).toMatch(/storage offline/i);
+  });
+
+  it("uploads on an existing session without calling createSession", async () => {
+    let created = 0;
+    const { adapter, uploads } = buildAttachmentAdapter({
+      createSession: async () => {
+        created += 1;
+        return session("s-other");
+      },
+      uploadWorkspaceFile: async ({ file, directory }) => ({
+        path: `${directory ?? ""}/${file.name}`,
+        size: file.size,
+      }),
+    });
+
+    const runtime = renderRuntime({ adapter, sessionId: "s-existing" });
+
+    const pdf = new File([new Uint8Array([0])], "notes.txt", {
+      type: "text/plain",
+    });
+
+    await act(async () => {
+      await runtime.api.send("hi", undefined, [
+        {
+          file: pdf,
+          filename: "notes.txt",
+          mimeType: "text/plain",
+          size: 1,
+        },
+      ]);
+    });
+
+    expect(created).toBe(0);
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]?.sessionId).toBe("s-existing");
+  });
+
+  it("uploads multiple files in parallel and namespaces them with index", async () => {
+    let inFlight = 0;
+    let peakInFlight = 0;
+    const { adapter, uploads, sent } = buildAttachmentAdapter({
+      createSession: async () => session("s-new"),
+      uploadWorkspaceFile: async ({ file, directory }) => {
+        inFlight += 1;
+        peakInFlight = Math.max(peakInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        inFlight -= 1;
+        return { path: `${directory}/${file.name}`, size: file.size };
+      },
+    });
+
+    const runtime = renderRuntime({ adapter, sessionId: null });
+
+    const a = new File([new Uint8Array([1])], "a.pdf", {
+      type: "application/pdf",
+    });
+    const b = new File([new Uint8Array([2])], "b.pdf", {
+      type: "application/pdf",
+    });
+
+    await act(async () => {
+      await runtime.api.send("hi", undefined, [
+        { file: a, filename: "a.pdf", mimeType: "application/pdf", size: 1 },
+        { file: b, filename: "b.pdf", mimeType: "application/pdf", size: 1 },
+      ]);
+    });
+
+    expect(peakInFlight).toBe(2);
+    expect(uploads.map((u) => u.filename)).toEqual([
+      expect.stringMatching(/^\d+-0-a\.pdf$/),
+      expect.stringMatching(/^\d+-1-b\.pdf$/),
+    ]);
+    expect(sent[0]?.attachments).toHaveLength(2);
+  });
+
+  it("strips path separators and NUL from the upload filename", async () => {
+    const { adapter, uploads } = buildAttachmentAdapter({
+      createSession: async () => session("s-new"),
+      uploadWorkspaceFile: async ({ file, directory }) => ({
+        path: `${directory}/${file.name}`,
+        size: file.size,
+      }),
+    });
+
+    const runtime = renderRuntime({ adapter, sessionId: null });
+
+    // We construct an input ``File`` whose .name we then re-read so the
+    // assertion stays valid regardless of how the runtime's File
+    // constructor normalises directory chars on the host platform
+    // (JSDOM, e.g., rewrites ``/`` to ``:``).  Our sanitiser is only
+    // responsible for stripping the three chars the harness explicitly
+    // rejects: ``/``, ``\``, and NUL.
+    const raw = new File([new Uint8Array([1])], "a\\b\x00c.pdf", {
+      type: "application/pdf",
+    });
+    expect(raw.name).toContain("\\");
+    expect(raw.name).toContain("\x00");
+
+    await act(async () => {
+      await runtime.api.send("hi", undefined, [
+        {
+          file: raw,
+          filename: raw.name,
+          mimeType: "application/pdf",
+          size: 1,
+        },
+      ]);
+    });
+
+    const uploadedName = uploads[0]?.filename ?? "";
+    expect(uploadedName).toMatch(/^\d+-0-/);
+    // The three forbidden chars are gone.
+    expect(uploadedName).not.toContain("/");
+    expect(uploadedName).not.toContain("\\");
+    expect(uploadedName).not.toContain("\x00");
+    // The legitimate ".pdf" suffix and surrounding chars survive.
+    expect(uploadedName).toMatch(/abc\.pdf$/);
+  });
+
+  it("falls back to 'attachment' when a sanitized filename is empty", async () => {
+    const { adapter, uploads } = buildAttachmentAdapter({
+      createSession: async () => session("s-new"),
+      uploadWorkspaceFile: async ({ file, directory }) => ({
+        path: `${directory}/${file.name}`,
+        size: file.size,
+      }),
+    });
+
+    const runtime = renderRuntime({ adapter, sessionId: null });
+
+    // A name built entirely from chars the sanitiser strips (``\`` and
+    // NUL) is empty after sanitisation; the runtime substitutes the
+    // generic "attachment" placeholder so the workspace key stays well-
+    // formed.  ``/`` is excluded from this case because JSDOM's File
+    // constructor rewrites it to ``:`` which the sanitiser preserves.
+    const bad = new File([new Uint8Array([1])], "\\\\\x00\\\x00", {
+      type: "application/octet-stream",
+    });
+
+    await act(async () => {
+      await runtime.api.send("hi", undefined, [
+        {
+          file: bad,
+          filename: bad.name,
+          mimeType: "application/octet-stream",
+          size: 1,
+        },
+      ]);
+    });
+
+    expect(uploads[0]?.filename).toMatch(/^\d+-0-attachment$/);
+  });
+});
+
 function HarnessWrapper(props: {
   adapter: AgentChatAdapter;
   sessionId: string | null;

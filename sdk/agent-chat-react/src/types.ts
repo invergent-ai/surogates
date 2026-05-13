@@ -579,7 +579,11 @@ export interface AgentChatRuntimeApi {
   tokenUsage: AgentChatTokenUsage;
   retryIndicator: AgentChatRetryIndicator | null;
   workspaceRefreshKey: number;
-  send(content: string, images?: AgentChatImageAttachment[]): Promise<void>;
+  send(
+    content: string,
+    images?: AgentChatImageAttachment[],
+    attachments?: AgentChatPendingAttachment[],
+  ): Promise<void>;
   stop(): Promise<void>;
   retry(): Promise<void>;
   markSending(content: string): void;
