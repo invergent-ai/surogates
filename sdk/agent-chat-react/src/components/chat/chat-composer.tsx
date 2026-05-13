@@ -1,15 +1,7 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   File as FileIcon,
   FileArchive,
@@ -69,10 +61,12 @@ import {
 } from "../ui/popover";
 import {
   Command,
-  CommandList,
-  CommandGroup,
-  CommandItem,
   CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+  CommandSeparator,
 } from "../ui/command";
 
 // ── Slash command entry ──────────────────────────────────────────────
@@ -303,8 +297,8 @@ function ChatComposerInner({
     }
   }, [adapter, showSlashMenu, wasClosed]);
 
-  const slashCommands = useMemo(() => {
-    const builtin: SlashCommand[] = [
+  const builtinCommands = useMemo<SlashCommand[]>(
+    () => [
       { value: "/clear", label: "/clear", description: "Clear conversation" },
       { value: "/compress", label: "/compress", description: "Compress context" },
       { value: "/goal", label: "/goal", description: "Define an outcome goal" },
@@ -315,67 +309,23 @@ function ChatComposerInner({
       { value: "/loop", label: "/loop", description: "Schedule recurring prompt" },
       { value: "/loop list", label: "/loop list", description: "List active loops" },
       { value: "/loop cancel", label: "/loop cancel", description: "Cancel a loop by ID" },
-    ];
-    return [...adapterCommands, ...builtin];
-  }, [adapterCommands]);
+    ],
+    [],
+  );
 
   // ── Slash menu state ─────────────────────────────────────────────
 
-  const searchQuery = showSlashMenu ? textInput.value.slice(1).toLowerCase() : "";
+  // The CommandInput inside the popup is the canonical search input
+  // while the menu is open.  Its value mirrors whatever follows the
+  // leading ``/`` in the textarea — typing in either keeps both in
+  // sync (onValueChange writes back to the textarea, the textarea's
+  // controller updates ``searchQuery`` on every render).  cmdk does
+  // the filtering + arrow-key navigation + scroll-into-view itself,
+  // so no manual ``selectedIndex`` or layout effect is needed: the
+  // command palette behaves exactly like the shadcn example.
+  const searchQuery = showSlashMenu ? textInput.value.slice(1) : "";
 
-  const filteredCommands = useMemo(
-    () =>
-      slashCommands.filter(
-        (cmd) =>
-          cmd.value.slice(1).toLowerCase().includes(searchQuery) ||
-          cmd.description.toLowerCase().includes(searchQuery),
-      ),
-    [slashCommands, searchQuery],
-  );
-
-  const [selectedIndex, setSelectedIndex] = useState(0);
-  const commandListRef = useRef<HTMLDivElement | null>(null);
-
-  // Reset selection when filter changes.
-  useEffect(() => {
-    setSelectedIndex(0);
-  }, [searchQuery]);
-
-  useEffect(() => {
-    setSelectedIndex((index) =>
-      Math.min(index, Math.max(filteredCommands.length - 1, 0)),
-    );
-  }, [filteredCommands.length]);
-
-  // cmdk auto-scrolls the highlighted item into view only when its
-  // own keyboard handler navigates.  We drive ``value`` externally
-  // (the user types in the chat textarea, not a CommandInput), so
-  // arrow-key navigation moves the highlight without scrolling.  This
-  // effect plugs the gap.
-  //
-  // Subtlety: ``[data-selected="true"]`` is a poor selector here.
-  // cmdk syncs that attribute in its own ``useEffect``, which fires
-  // AFTER ours when the parent re-renders — so we'd read the
-  // previous selection and scroll one item behind, manifesting as
-  // an off-by-one where the user can step past the visible window
-  // before the list catches up.  Querying by position into the
-  // rendered ``[data-slot="command-item"]`` list is independent of
-  // cmdk's internal sync and lines up with ``filteredCommands``
-  // since both share the same render order.
-  //
-  // ``useLayoutEffect`` ensures the scroll completes before paint so
-  // the next visible frame already shows the highlight in view.
-  useLayoutEffect(() => {
-    const root = commandListRef.current;
-    if (!root) return;
-    const items = root.querySelectorAll<HTMLElement>(
-      "[data-slot='command-item']",
-    );
-    const target = items[selectedIndex];
-    target?.scrollIntoView({ block: "nearest" });
-  }, [selectedIndex, filteredCommands]);
-
-  const menuOpen = showSlashMenu && filteredCommands.length > 0;
+  const menuOpen = showSlashMenu;
 
   const handleCommandSelect = useCallback(
     (commandValue: string) => {
@@ -386,34 +336,14 @@ function ChatComposerInner({
     [textInput],
   );
 
-  // ── Key handling (runs before PromptInputTextarea internals) ─────
-
-  const handleKeyDown = useCallback(
-    (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
-      if (!menuOpen) return;
-
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setSelectedIndex((i) => Math.min(i + 1, filteredCommands.length - 1));
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setSelectedIndex((i) => Math.max(i - 1, 0));
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        const command = filteredCommands[selectedIndex];
-        if (command) handleCommandSelect(command.value);
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        textInput.setInput("");
-        setButtonMenuOpen(false);
-        setMenuDismissed(true);
-      } else if (e.key === "Tab") {
-        e.preventDefault();
-        const command = filteredCommands[selectedIndex];
-        if (command) handleCommandSelect(command.value);
-      }
+  const handleSearchChange = useCallback(
+    (next: string) => {
+      // Mirror the popup's CommandInput back into the textarea so the
+      // two stay in sync and the chat submit picks up exactly what
+      // the user sees in the palette.
+      textInput.setInput("/" + next);
     },
-    [menuOpen, filteredCommands, selectedIndex, handleCommandSelect, textInput],
+    [textInput],
   );
 
   // ── Submit ───────────────────────────────────────────────────────
@@ -541,7 +471,6 @@ function ChatComposerInner({
                   : "Send a message..."
               }
               disabled={disabled}
-              onKeyDown={handleKeyDown}
             />
           </PromptInputBody>
           <PromptInputFooter>
@@ -643,41 +572,68 @@ function ChatComposerInner({
         align="start"
         className="overflow-hidden p-0"
         style={{ width: "var(--radix-popover-trigger-width)" }}
-        onOpenAutoFocus={(e) => e.preventDefault()}
         onCloseAutoFocus={(e) => e.preventDefault()}
       >
         {/*
-          Selection state is driven from outside (the user types in the
-          chat textarea, not a CommandInput), so cmdk's own filter and
-          keyboard handling are disabled: ``filter`` returns 1 for
-          every candidate and ``value`` is set explicitly to the
-          ChatComposer's ``selectedIndex``.  The keyboard handler in
-          ``handleKeyDown`` then drives Arrow/Enter/Tab/Escape on the
-          textarea before cmdk sees them.
+          Native shadcn / cmdk command palette: the CommandInput owns
+          focus while the popup is open, cmdk runs the filter
+          (matching ``value`` plus the ``keywords`` we pass per item,
+          so descriptions count toward matches), and cmdk handles
+          arrow keys / Enter / scroll-into-view itself.  The CommandInput
+          mirrors the textarea so the chat input still reflects the
+          query and sending the message still works the same way.
         */}
-        <Command
-          value={filteredCommands[selectedIndex]?.value}
-          filter={() => 1}
-        >
-          <CommandList ref={commandListRef}>
+        <Command>
+          <CommandInput
+            placeholder="Type a command or search..."
+            value={searchQuery}
+            onValueChange={handleSearchChange}
+          />
+          <CommandList>
             <CommandEmpty>No commands found.</CommandEmpty>
-            <CommandGroup heading="Slash commands">
-              {filteredCommands.map((cmd) => (
-                <CommandItem
-                  key={cmd.value}
-                  value={cmd.value}
-                  onSelect={() => handleCommandSelect(cmd.value)}
-                  className="flex items-baseline gap-2 [&_svg]:hidden"
-                >
-                  <span className="font-mono text-foreground shrink-0">
-                    {cmd.label}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-                    {cmd.description}
-                  </span>
-                </CommandItem>
-              ))}
-            </CommandGroup>
+            {adapterCommands.length > 0 && (
+              <CommandGroup heading="Skills">
+                {adapterCommands.map((cmd) => (
+                  <CommandItem
+                    key={cmd.value}
+                    value={cmd.value}
+                    keywords={[cmd.description]}
+                    onSelect={() => handleCommandSelect(cmd.value)}
+                    className="flex items-baseline gap-2 [&_svg]:hidden"
+                  >
+                    <span className="font-mono text-foreground shrink-0">
+                      {cmd.label}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                      {cmd.description}
+                    </span>
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            )}
+            {adapterCommands.length > 0 && builtinCommands.length > 0 && (
+              <CommandSeparator />
+            )}
+            {builtinCommands.length > 0 && (
+              <CommandGroup heading="Built-in commands">
+                {builtinCommands.map((cmd) => (
+                  <CommandItem
+                    key={cmd.value}
+                    value={cmd.value}
+                    keywords={[cmd.description]}
+                    onSelect={() => handleCommandSelect(cmd.value)}
+                    className="flex items-baseline gap-2 [&_svg]:hidden"
+                  >
+                    <span className="font-mono text-foreground shrink-0">
+                      {cmd.label}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                      {cmd.description}
+                    </span>
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            )}
           </CommandList>
         </Command>
       </PopoverContent>
