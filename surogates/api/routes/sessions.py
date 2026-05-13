@@ -13,13 +13,20 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text as _sql_text
 
+from surogates.api.routes.workspace import (
+    _get_storage,
+    _get_workspace_session_bucket_and_root,
+)
 from surogates.api.session_guards import require_user_writable_session
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
 from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError, SessionStore
-from surogates.storage.tenant import session_workspace_prefix
+from surogates.storage.tenant import (
+    session_workspace_key,
+    session_workspace_prefix,
+)
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 
@@ -465,7 +472,8 @@ async def send_message(
     injection_source = (
         "api_channel" if session.channel == API_CHANNEL else "web_channel"
     )
-    injection_result = _get_injection_detector().detect(
+    detector = _get_injection_detector()
+    injection_result = detector.detect(
         body.content,
         source=injection_source,
     )
@@ -475,11 +483,87 @@ async def send_message(
             detail=(f"Message blocked: {injection_result.explanation}"),
         )
 
+    # Resolve any attachments against the session workspace.  Filenames
+    # are user-controlled too, so they go through the same prompt-
+    # injection detector as the body content.  ``size`` from the client
+    # is treated as a hint and overwritten with the real storage size.
+    attachments_payload: list[dict] | None = None
+    if body.attachments:
+        for attachment in body.attachments:
+            filename_result = detector.detect(
+                attachment.filename,
+                source=injection_source,
+            )
+            if filename_result.is_injection:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        "Attachment filename blocked: "
+                        f"{filename_result.explanation}"
+                    ),
+                )
+
+        _, bucket, root_id = await _get_workspace_session_bucket_and_root(
+            store, session_id, tenant,
+        )
+        storage = _get_storage(request)
+
+        resolved: list[dict] = []
+        total_bytes = 0
+        for attachment in body.attachments:
+            storage_key = session_workspace_key(root_id, attachment.path)
+            if not await storage.exists(bucket, storage_key):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        "Attachment path not found in workspace: "
+                        f"{attachment.path}"
+                    ),
+                )
+            try:
+                stat = await storage.stat(bucket, storage_key)
+            except KeyError:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        "Attachment path not found in workspace: "
+                        f"{attachment.path}"
+                    ),
+                )
+            real_size = int(stat.get("size", 0))
+            if real_size > _MAX_ATTACHMENT_BYTES:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        f"Attachment exceeds "
+                        f"{_MAX_ATTACHMENT_BYTES // 1_000_000}MB limit: "
+                        f"{attachment.path} ({real_size} bytes)"
+                    ),
+                )
+            total_bytes += real_size
+            if total_bytes > _MAX_ATTACHMENTS_TOTAL_BYTES:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        "Attachments exceed total "
+                        f"{_MAX_ATTACHMENTS_TOTAL_BYTES // 1_000_000}MB"
+                        " limit per message"
+                    ),
+                )
+            resolved.append({
+                "path": attachment.path,
+                "filename": attachment.filename,
+                "mime_type": attachment.mime_type,
+                "size": real_size,
+            })
+        attachments_payload = resolved
+
     # Emit the user message event.
     logger.info(
-        "send_message: content_len=%d images=%s",
+        "send_message: content_len=%d images=%s attachments=%s",
         len(body.content),
         len(body.images) if body.images else 0,
+        len(attachments_payload) if attachments_payload else 0,
     )
     event_data: dict = {"content": body.content}
     if body.images:
@@ -488,6 +572,8 @@ async def send_message(
         ]
     if body.metadata is not None:
         event_data["metadata"] = body.metadata
+    if attachments_payload:
+        event_data["attachments"] = attachments_payload
     event_id = await store.emit_event(
         session_id,
         EventType.USER_MESSAGE,
