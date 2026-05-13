@@ -104,7 +104,9 @@ ENV PATH="/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/opt/venv/bin:$
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_USER=1 \
-    NPM_CONFIG_PREFIX="/home/sandbox/.npm-global"
+    NPM_CONFIG_PREFIX="/home/sandbox/.npm-global" \
+    UV_CACHE_DIR="/home/sandbox/.cache/uv" \
+    XDG_CACHE_HOME="/home/sandbox/.cache"
 
 # ── Tool executor ───────────────────────────────────────────────────
 COPY images/sandbox/tool-executor /usr/local/bin/tool-executor
@@ -113,8 +115,8 @@ RUN chmod +x /usr/local/bin/tool-executor
 # ── Non-root user ───────────────────────────────────────────────────
 RUN groupadd --gid 1000 sandbox \
     && useradd --uid 1000 --gid sandbox --create-home sandbox \
-    && mkdir -p /workspace /home/sandbox/.local /home/sandbox/.npm-global \
-    && chown sandbox:sandbox /workspace /home/sandbox/.local /home/sandbox/.npm-global
+    && mkdir -p /workspace /home/sandbox/.local /home/sandbox/.npm-global /home/sandbox/.cache/uv \
+    && chown -R sandbox:sandbox /workspace /home/sandbox/.local /home/sandbox/.npm-global /home/sandbox/.cache
 
 USER sandbox
 WORKDIR /workspace

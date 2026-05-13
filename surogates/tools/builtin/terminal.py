@@ -236,6 +236,11 @@ def _interpret_exit_code(command: str, exit_code: int) -> str | None:
 # propagation, Python falls back to ``$HOME/.local`` — and we override
 # HOME to the workspace below, which would point Python at the wrong
 # (and s3fs-backed) location.
+#
+# ``UV_CACHE_DIR`` and ``XDG_CACHE_HOME`` are inherited for the same
+# reason: uv's default cache is ``$XDG_CACHE_HOME/uv`` (else
+# ``$HOME/.cache/uv``).  With our HOME override they would land on s3fs,
+# and s3fs's locking/rename semantics deadlock uv mid-install.
 _ALWAYS_INHERIT = frozenset({
     "HOME",
     "LANG",
@@ -248,6 +253,8 @@ _ALWAYS_INHERIT = frozenset({
     "TERM",
     "TMPDIR",
     "USER",
+    "UV_CACHE_DIR",
+    "XDG_CACHE_HOME",
     "XDG_RUNTIME_DIR",
 })
 
