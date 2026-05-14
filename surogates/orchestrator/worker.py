@@ -48,6 +48,128 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+#: Channels whose sessions have no human user and no service-account
+#: principal.  The worker mints a ``channel_session`` JWT for these so
+#: the harness can reach the API server via ``HarnessAPIClient`` — the
+#: same path authenticated sessions take.  Without this, ``api_client``
+#: is ``None`` and every api-client-gated feature silently degrades
+#: (skills from the API pod's filesystem, ``create_artifact``, etc.).
+#:
+#: New channels added here MUST satisfy:
+#:
+#: * The channel creates sessions with both ``user_id`` and
+#:   ``service_account_id`` ``NULL`` (the auth shape the JWT is
+#:   designed for).
+#: * The deployment authority — not a per-user principal — is the
+#:   right grant for everything the harness will do.  Today this is
+#:   the public-website widget; future per-product embeds fit the
+#:   same model.
+ANONYMOUS_CHANNELS: frozenset[str] = frozenset({"website"})
+
+
+def _select_harness_token(
+    *,
+    tenant: TenantContext,
+    session: Any,
+    agent_id: str,
+) -> str | None:
+    """Mint the worker→API JWT appropriate to *session*'s principal.
+
+    Three principal shapes produce three token types; an unrecognised
+    shape produces ``None`` (the caller leaves
+    ``harness_api_client = None`` for that session).
+
+    * User principal → ``access`` token carrying the tenant's
+      permissions (falling back to a sensible default when the
+      caller did not pass any).
+    * Service-account principal → ``service_account_session`` token
+      scoped to the session id.
+    * Channel principal (``session.channel`` in ``ANONYMOUS_CHANNELS``)
+      → ``channel_session`` token carrying ``agent_id``, ``session_id``,
+      and ``channel``.
+    """
+    from surogates.tenant.auth.jwt import (
+        create_access_token,
+        create_channel_session_token,
+        create_service_account_session_token,
+    )
+
+    if tenant.user_id is not None:
+        return create_access_token(
+            org_id=tenant.org_id,
+            user_id=tenant.user_id,
+            permissions=set(tenant.permissions)
+            or {
+                "sessions:read",
+                "sessions:write",
+                "tools:read",
+            },
+        )
+    if session.service_account_id is not None:
+        return create_service_account_session_token(
+            org_id=tenant.org_id,
+            service_account_id=session.service_account_id,
+            session_id=session.id,
+        )
+    if session.channel in ANONYMOUS_CHANNELS:
+        return create_channel_session_token(
+            org_id=tenant.org_id,
+            agent_id=agent_id,
+            session_id=session.id,
+            channel=session.channel,
+        )
+    return None
+
+
+def _filter_effective_tools(
+    *,
+    tools: set[str],
+    tenant: TenantContext,
+    session: Any,
+    use_api_for_harness_tools: bool,
+) -> set[str]:
+    """Return the LLM-visible tool set after principal-aware filtering.
+
+    Two rules layered on top of the caller's starting set:
+
+    1. ``create_artifact`` requires the harness API client.  It stays
+       only when the session WILL have one — that is, when
+       ``use_api_for_harness_tools`` is enabled AND the session has a
+       principal that :func:`_select_harness_token` will mint a token
+       for.  Otherwise the LLM would call the tool and get the
+       unhelpful "Artifacts require an API client" error.
+    2. Anonymous-channel sessions never see ``memory`` or
+       ``skill_manage``: the route gates refuse them anyway (see
+       ``api/routes/memory.py`` and the mutating ``/v1/skills``
+       handlers), and exposing the schemas would invite the LLM to
+       try.  Belt + braces: route gate is the hard boundary, tool-set
+       exclusion keeps the LLM from advertising capability it doesn't
+       have.
+
+    All other tools pass through unchanged.
+    """
+    result = set(tools)
+
+    session_will_have_api_client = use_api_for_harness_tools and (
+        tenant.user_id is not None
+        or session.service_account_id is not None
+        or session.channel in ANONYMOUS_CHANNELS
+    )
+    if not session_will_have_api_client:
+        result.discard("create_artifact")
+
+    session_is_anonymous_channel = (
+        tenant.user_id is None
+        and session.service_account_id is None
+        and session.channel in ANONYMOUS_CHANNELS
+    )
+    if session_is_anonymous_channel:
+        result.discard("memory")
+        result.discard("skill_manage")
+
+    return result
+
+
 def _warn_if_base_model_missing_from_metadata(model_id: str) -> None:
     """Warn when the configured base model has no static metadata entry."""
     normalized = str(model_id or "").strip()
@@ -565,20 +687,19 @@ async def run_worker(settings: Settings) -> None:
         if not attached_kbs:
             effective_tools.discard("kb_list_pages")
             effective_tools.discard("kb_read_page")
-        # create_artifact requires the harness API client to persist
-        # the rendered artifact.  The wiring block below leaves
-        # ``harness_api_client`` as ``None`` for anonymous website-channel
-        # sessions (no principal to mint a token from) and when the
-        # ``use_api_for_harness_tools`` worker setting is disabled.  In
-        # those cases neither the tool schema nor its prompt-guidance
-        # fragment should reach the LLM — otherwise the model follows
-        # the guidance, calls the tool, and gets the unhelpful
-        # "Artifacts require an API client" error.
-        session_has_principal = (
-            tenant.user_id is not None or session.service_account_id is not None
+        # Principal-aware tool-set filtering: ``create_artifact``
+        # requires the harness API client (so the session must have a
+        # principal AND ``use_api_for_harness_tools`` must be on), and
+        # anonymous-channel sessions never see ``memory`` /
+        # ``skill_manage`` (the routes refuse them, and exposing the
+        # schemas would invite the LLM to try).  ``_filter_effective_tools``
+        # documents the rules.
+        effective_tools = _filter_effective_tools(
+            tools=effective_tools,
+            tenant=tenant,
+            session=session,
+            use_api_for_harness_tools=settings.worker.use_api_for_harness_tools,
         )
-        if not settings.worker.use_api_for_harness_tools or not session_has_principal:
-            effective_tools.discard("create_artifact")
 
         prompt_builder = PromptBuilder(
             tenant,
@@ -595,63 +716,27 @@ async def run_worker(settings: Settings) -> None:
             available_tools=effective_tools,
         )
 
-        # Interactive sessions get a regular user access token;
-        # service-account sessions get a short-lived session-scoped SA
-        # token so the harness can reach /v1/skills and /v1/memory on
-        # their behalf.
+        # User / SA / channel-session principals each map to a JWT
+        # type via :func:`_select_harness_token`.  A session whose
+        # channel is not in ``ANONYMOUS_CHANNELS`` and which lacks a
+        # user/SA principal yields ``None`` — the harness then runs
+        # with ``api_client=None``, the legacy degraded path.
         harness_api_client = None
         if settings.worker.use_api_for_harness_tools:
             from surogates.harness.api_client import HarnessAPIClient
-            from surogates.tenant.auth.jwt import (
-                create_access_token,
-                create_service_account_session_token,
-            )
 
-            if tenant.user_id is not None:
-                token = create_access_token(
-                    org_id=tenant.org_id,
-                    user_id=tenant.user_id,
-                    permissions=set(tenant.permissions)
-                    or {
-                        "sessions:read",
-                        "sessions:write",
-                        "tools:read",
-                    },
-                )
-            elif session.service_account_id is not None:
-                token = create_service_account_session_token(
-                    org_id=tenant.org_id,
-                    service_account_id=session.service_account_id,
-                    session_id=session.id,
+            token = _select_harness_token(
+                tenant=tenant,
+                session=session,
+                agent_id=settings.agent_id,
+            )
+            if token is None:
+                logger.info(
+                    "session %s has no recognised principal "
+                    "(channel=%r); harness will run without API client",
+                    session.id, session.channel,
                 )
             else:
-                # Anonymous (website-channel) session — no principal to
-                # mint a token from. Visitors hit ``/v1/website/sessions``
-                # which deliberately creates sessions with ``user_id=None``
-                # and no ``service_account_id`` (see
-                # docs/channels/website.md §"Interaction with other
-                # subsystems"). Falling through with
-                # ``harness_api_client = None`` routes the harness into
-                # the same code path the ``use_api_for_harness_tools=False``
-                # config already supports: skill loading goes to local
-                # disk via ``_load_all_skills`` (skills.py:225-229),
-                # per-user memory is skipped (visitors have none by
-                # design), and auto-artifact creation is silently
-                # bypassed (loop.py:2185 guards on
-                # ``self._api_client is None``).  The explicit
-                # ``create_artifact`` tool is dropped from
-                # ``effective_tools`` above so the LLM never sees its
-                # schema or guidance fragment.  Tool allow-list
-                # enforcement is unaffected; it reads from
-                # ``session.config`` independently of the API client.
-                logger.info(
-                    "session %s has no principal; harness will run "
-                    "without API client (anonymous website visitor)",
-                    session.id,
-                )
-                token = None
-
-            if token is not None:
                 harness_api_client = HarnessAPIClient(
                     base_url=settings.worker.api_base_url,
                     token=token,
