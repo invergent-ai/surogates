@@ -220,11 +220,16 @@ class TestMutatingSkillsRouteGate:
             f"{handler_name} must refuse channel principals"
         )
 
+
+
+class TestReadOnlySkillsHandlersUngated:
+    """``list_skills`` / ``view_skill`` / ``read_skill_file`` must
+    remain accessible to channel principals — slash-skill expansion
+    relies on them.  This is a sync source-inspection guard; intentionally
+    not under the ``@pytest.mark.asyncio`` class above.
+    """
+
     def test_read_only_handlers_do_not_call_gate(self):
-        """``list_skills`` / ``view_skill`` / ``read_skill_file`` must
-        remain accessible to channel principals — slash-skill expansion
-        relies on them.
-        """
         from surogates.api.routes import skills as skills_routes
 
         for fn_name in ("list_skills", "view_skill", "read_skill_file"):
