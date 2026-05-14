@@ -37,7 +37,8 @@ class MCPToolProxy:
     :class:`ToolRegistry`.
 
     Each MCP tool is registered with the name prefix
-    ``mcp_{server_name}_{tool_name}`` to avoid collisions across servers.
+    ``mcp__{server_name}__{tool_name}`` to avoid collisions across servers
+    and to give consumers a stable separator to split on.
 
     Integrates AGT :class:`MCPGateway` for governance on every MCP tool
     call.  The gateway enforces allow/deny lists, parameter sanitization

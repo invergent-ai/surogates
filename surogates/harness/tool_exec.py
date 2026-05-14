@@ -1186,8 +1186,8 @@ async def execute_single_tool(
         # MCP tools are remote calls (HTTP/stdio) dispatched by the
         # in-process MCP client; they never need a sandbox pod. Without
         # this short-circuit the dict default (SANDBOX) tries to spin up
-        # a k8s namespace + S3 secret for every `mcp_*` call.
-        if tool_name.startswith("mcp_"):
+        # a k8s namespace + S3 secret for every `mcp__*` call.
+        if tool_name.startswith("mcp__"):
             location = ToolLocation.HARNESS
         else:
             location = TOOL_LOCATIONS.get(tool_name, ToolLocation.SANDBOX)

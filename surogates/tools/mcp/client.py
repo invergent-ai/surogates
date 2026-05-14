@@ -1623,7 +1623,7 @@ def _convert_mcp_schema(server_name: str, mcp_tool) -> dict:
     """
     safe_tool_name = sanitize_mcp_name_component(mcp_tool.name)
     safe_server_name = sanitize_mcp_name_component(server_name)
-    prefixed_name = f"mcp_{safe_server_name}_{safe_tool_name}"
+    prefixed_name = f"mcp__{safe_server_name}__{safe_tool_name}"
     return {
         "name": prefixed_name,
         "description": mcp_tool.description or f"MCP tool {mcp_tool.name} from {server_name}",
@@ -1676,7 +1676,7 @@ def _build_utility_schemas(server_name: str) -> List[dict]:
     return [
         {
             "schema": {
-                "name": f"mcp_{safe_name}_list_resources",
+                "name": f"mcp__{safe_name}__list_resources",
                 "description": f"List available resources from MCP server '{server_name}'",
                 "parameters": {
                     "type": "object",
@@ -1687,7 +1687,7 @@ def _build_utility_schemas(server_name: str) -> List[dict]:
         },
         {
             "schema": {
-                "name": f"mcp_{safe_name}_read_resource",
+                "name": f"mcp__{safe_name}__read_resource",
                 "description": f"Read a resource by URI from MCP server '{server_name}'",
                 "parameters": {
                     "type": "object",
@@ -1704,7 +1704,7 @@ def _build_utility_schemas(server_name: str) -> List[dict]:
         },
         {
             "schema": {
-                "name": f"mcp_{safe_name}_list_prompts",
+                "name": f"mcp__{safe_name}__list_prompts",
                 "description": f"List available prompts from MCP server '{server_name}'",
                 "parameters": {
                     "type": "object",
@@ -1715,7 +1715,7 @@ def _build_utility_schemas(server_name: str) -> List[dict]:
         },
         {
             "schema": {
-                "name": f"mcp_{safe_name}_get_prompt",
+                "name": f"mcp__{safe_name}__get_prompt",
                 "description": f"Get a prompt by name from MCP server '{server_name}'",
                 "parameters": {
                     "type": "object",

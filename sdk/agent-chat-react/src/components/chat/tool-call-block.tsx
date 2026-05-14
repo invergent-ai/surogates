@@ -9,7 +9,7 @@ import type { ToolCallInfo } from "../../types";
 import { TerminalToolBlock } from "./tools/terminal-tool";
 import { TodoToolBlock } from "./tools/todo-tool";
 import { ExecuteCodeToolBlock } from "./tools/execute-code-tool";
-import { SessionSearchBlock, WebToolBlock, VisionAnalyzeBlock } from "./tools/oneliner-tools";
+import { SessionSearchBlock, WebToolBlock, VisionAnalyzeBlock, MCPToolBlock } from "./tools/oneliner-tools";
 import { WebExtractToolBlock } from "./tools/web-extract-tool";
 import { ReadFileBlock, WriteFileBlock, PatchBlock, SearchFilesBlock, ListFilesBlock } from "./tools/file-tools";
 import { ProcessToolBlock } from "./tools/process-tool";
@@ -32,6 +32,10 @@ export function ToolCallBlock({
   resolvedArtifactName?: string;
   onFileSelect?: (path: string) => void;
 }) {
+  if (tc.toolName.startsWith("mcp__")) {
+    return <MCPToolBlock tc={tc} />;
+  }
+
   switch (tc.toolName) {
     case "terminal":
       return <TerminalToolBlock tc={tc} />;

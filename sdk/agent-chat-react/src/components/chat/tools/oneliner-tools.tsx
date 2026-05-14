@@ -61,6 +61,46 @@ export function WebToolBlock({ tc }: { tc: ToolCallInfo }) {
   );
 }
 
+// ── MCP tools ───────────────────────────────────────────────────────
+
+export function MCPToolBlock({ tc }: { tc: ToolCallInfo }) {
+  // Tool names are emitted as `mcp__{server}__{tool}`. Split on the
+  // double-underscore separator; the last segment is the tool name.
+  const segments = tc.toolName.replace(/^mcp__/, "").split("__");
+  const toolName = segments[segments.length - 1] ?? tc.toolName;
+  const label = toolName
+    .split("_")
+    .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+    .join(" ");
+
+  let summary = "";
+  try {
+    const args = JSON.parse(tc.args);
+    if (args && typeof args === "object") {
+      const entries = Object.entries(args).filter(([, v]) => v !== undefined && v !== null && v !== "");
+      if (entries.length > 0) {
+        summary = entries
+          .map(([k, v]) => {
+            const val = typeof v === "string" ? v : JSON.stringify(v);
+            return `${k}=${val}`;
+          })
+          .join(", ");
+      }
+    }
+  } catch { /* ignore */ }
+
+  return (
+    <div className="flex items-center gap-2 text-sm py-0.5">
+      <span className="font-medium text-foreground">{label}</span>
+      {summary && (
+        <span className="text-muted-foreground/60 truncate text-xs">
+          {summary}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ── Vision analyze ──────────────────────────────────────────────────
 
 export function VisionAnalyzeBlock({ tc }: { tc: ToolCallInfo }) {

@@ -246,10 +246,10 @@ class ConnectionPool:
                 clean = dict(schema)
                 raw_name = clean.get("name", "")
 
-                # raw_name: mcp_{tenant_prefix}__{server}_{tool}
-                # clean:    mcp_{server}_{tool}
-                if raw_name.startswith(f"mcp_{tenant_pfx}__"):
-                    clean_name = "mcp_" + raw_name[len(f"mcp_{tenant_pfx}__"):]
+                # raw_name: mcp__{tenant_prefix}__{server}__{tool}
+                # clean:    mcp__{server}__{tool}
+                if raw_name.startswith(f"mcp__{tenant_pfx}__"):
+                    clean_name = "mcp__" + raw_name[len(f"mcp__{tenant_pfx}__"):]
                     clean["name"] = clean_name
                 else:
                     clean_name = raw_name
@@ -262,7 +262,7 @@ class ConnectionPool:
                     for server_key, server in _servers.items():
                         if hasattr(server, "_registered_tool_names") and raw_name in server._registered_tool_names:
                             safe_key = sanitize_mcp_name_component(server_key)
-                            prefix = f"mcp_{safe_key}_"
+                            prefix = f"mcp__{safe_key}__"
                             original_tool = raw_name[len(prefix):] if raw_name.startswith(prefix) else raw_name
                             owning_server_key = server_key
                             break

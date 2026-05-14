@@ -289,9 +289,9 @@ class TestToolRouterLocationResolution:
         router = ToolRouter(reg, pool, gate)
 
         for tool_name in (
-            "mcp_surogate_ops_copilot_list_agents",
-            "mcp_some_other_server_run_query",
-            "mcp_x_y",
+            "mcp__surogate_ops_copilot__list_agents",
+            "mcp__some_other_server__run_query",
+            "mcp__x__y",
         ):
             assert router.resolve_location(tool_name) == ToolLocation.HARNESS, (
                 f"{tool_name} should resolve to HARNESS"
