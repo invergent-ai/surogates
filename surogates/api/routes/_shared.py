@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from fastapi import HTTPException, status
 
+from surogates.tenant.context import PrincipalKind, TenantContext
+
 
 def raise_validation(err: str | None) -> None:
     """Raise HTTP 422 when *err* is truthy; no-op otherwise."""
@@ -32,3 +34,28 @@ def normalize_source(source: str) -> str:
     if source == "user_db":
         return "user"
     return source
+
+
+def require_not_channel_principal(tenant: TenantContext) -> None:
+    """Refuse anonymous-channel sessions on shared-storage routes.
+
+    :class:`~surogates.storage.tenant.TenantStorage` maps
+    ``user_id=None`` to ``shared/*`` paths for skills, agents, and
+    memory.  Service-account contexts use that semantics intentionally
+    (org-wide assets owned by the SA principal), but anonymous-channel
+    sessions must not — a leaked website JWT would otherwise be a
+    write-anywhere credential against org-shared storage.  Routes that
+    read or mutate that storage call this helper to refuse
+    :class:`PrincipalKind.CHANNEL` *before* doing any work, and *only*
+    that kind: user and service-account principals pass through
+    unchanged.
+    """
+    kind, _ = tenant.principal()
+    if kind is PrincipalKind.CHANNEL:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "This endpoint is not available to anonymous-channel "
+                "sessions."
+            ),
+        )
