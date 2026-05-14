@@ -234,3 +234,42 @@ class TestMutatingSkillsRouteGate:
                 f"{fn_name} must NOT call the gate; it is a read-only "
                 "endpoint the channel JWT exists to unlock"
             )
+
+
+# ---------------------------------------------------------------------------
+# /v1/agents route gating (every handler)
+# ---------------------------------------------------------------------------
+
+
+_AGENT_HANDLERS = (
+    "list_agents",
+    "view_agent",
+    "create_agent",
+    "edit_agent",
+    "delete_agent",
+)
+
+
+@pytest.mark.asyncio
+class TestAgentsRouteGate:
+    """Every ``/v1/agents`` handler refuses channel principals.
+
+    Sub-agent definitions are deployment-private metadata; anonymous
+    visitors must not enumerate or modify them even through a leaked
+    channel JWT.
+    """
+
+    @pytest.mark.parametrize("handler_name", _AGENT_HANDLERS)
+    async def test_refuses_channel_principal(
+        self, tmp_path: Path, handler_name: str,
+    ):
+        from surogates.api.routes import agents as agents_routes
+
+        handler = getattr(agents_routes, handler_name)
+        kwargs = _kwargs_for_handler(handler, _channel_ctx(tmp_path))
+
+        with pytest.raises(HTTPException) as exc:
+            await handler(**kwargs)
+        assert exc.value.status_code == 403, (
+            f"{handler_name} must refuse channel principals"
+        )
