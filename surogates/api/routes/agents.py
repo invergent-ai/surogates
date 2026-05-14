@@ -27,7 +27,11 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from surogates.api.routes._shared import normalize_source, raise_validation
+from surogates.api.routes._shared import (
+    normalize_source,
+    raise_validation,
+    require_not_channel_principal,
+)
 from surogates.storage.tenant import TenantStorage
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -269,6 +273,7 @@ async def list_agents(
     Returns lightweight summaries: name, description, source,
     category, model, max_iterations, policy_profile, enabled.
     """
+    require_not_channel_principal(tenant)
     all_agents = await _merged_agent_catalog(request, tenant)
 
     summaries = [
@@ -299,6 +304,7 @@ async def view_agent(
     The ``system_prompt`` field contains the AGENT.md body (everything
     after the YAML frontmatter).
     """
+    require_not_channel_principal(tenant)
     all_agents = await _merged_agent_catalog(request, tenant)
 
     agent_def = next((a for a in all_agents if a.name == name), None)
@@ -333,6 +339,7 @@ async def create_agent(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> AgentActionResponse:
     """Create a new user-scoped sub-agent type."""
+    require_not_channel_principal(tenant)
     raise_validation(_validate_agent_name(body.name))
     raise_validation(_validate_category(body.category))
     raise_validation(_validate_content(body.content))
@@ -364,6 +371,7 @@ async def edit_agent(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> AgentActionResponse:
     """Replace the full AGENT.md content of an existing sub-agent."""
+    require_not_channel_principal(tenant)
     raise_validation(_validate_content(body.content))
     raise_validation(_validate_name_matches_frontmatter(name, body.content))
 
@@ -387,6 +395,7 @@ async def delete_agent(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> None:
     """Delete a sub-agent from tenant storage."""
+    require_not_channel_principal(tenant)
     ts = _get_tenant_storage(request, tenant)
     existing = await ts.agent_exists(name)
     if not existing:

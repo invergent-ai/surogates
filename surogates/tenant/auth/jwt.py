@@ -17,6 +17,7 @@ from jose import JWTError, jwt
 
 __all__ = [
     "create_access_token",
+    "create_channel_session_token",
     "create_refresh_token",
     "create_sandbox_token",
     "create_service_account_session_token",
@@ -107,6 +108,66 @@ def create_service_account_session_token(
         "session_id": str(session_id),
         "permissions": [],
         "type": "service_account_session",
+        "iat": now,
+        "exp": now + expires_minutes * 60,
+    }
+    return jwt.encode(payload, _get_secret(), algorithm=_ALGORITHM)
+
+
+#: Default lifetime for a ``channel_session`` JWT.  Mirrors the
+#: ``service_account_session`` lifetime so a long-running anonymous
+#: visitor session never hits mid-flight token expiry.  Revocation is
+#: bounded by the session-row-existence check the middleware performs
+#: (``_build_channel_session_context``), not by TTL — deleting the
+#: ``sessions`` row immediately invalidates the token on the next call
+#: across every API replica.
+_CHANNEL_SESSION_TOKEN_MINUTES: int = 365 * 24 * 60
+
+
+def create_channel_session_token(
+    org_id: UUID,
+    agent_id: str,
+    session_id: UUID,
+    channel: str,
+    expires_minutes: int = _CHANNEL_SESSION_TOKEN_MINUTES,
+) -> str:
+    """Mint a worker→API JWT for an anonymous-channel session.
+
+    Anonymous-channel sessions (today: the public-website widget) have
+    no human user and no service account; the deployment itself is the
+    authority.  The worker signs this token with
+    ``SUROGATES_JWT_SECRET`` so :class:`HarnessAPIClient` can reach
+    ``/v1/skills`` and other api-client-gated routes that previously
+    degraded silently because no JWT could be minted.
+
+    The token carries ``org_id``, ``agent_id``, ``session_id``, and
+    ``channel`` so the middleware can verify the session row still
+    exists with matching org / agent / channel before producing a
+    ``TenantContext``.  Four independent invariants — any mismatch is
+    401 — make the session row the authority and the JWT a pointer
+    into it.  Revocation is therefore bounded by that existence check:
+    deleting the ``sessions`` row immediately invalidates the token
+    across every replica on the next call.
+
+    The token's effective scope is narrow even within its 1-year
+    lifetime: routes that require a user or service-account principal
+    refuse :class:`PrincipalKind.CHANNEL` via
+    ``surogates.api.routes._shared.require_not_channel_principal``.
+    Specifically, ``/v1/memory``, mutating ``/v1/skills``, and
+    ``/v1/agents`` are off-limits — this is the hard boundary that
+    keeps a leaked website JWT from inheriting the ``user_id=None →
+    shared/*`` semantics that :class:`TenantStorage` applies for
+    service-account contexts.
+    """
+    now = int(time.time())
+    payload: dict[str, Any] = {
+        "sub": str(session_id),
+        "type": "channel_session",
+        "org_id": str(org_id),
+        "agent_id": agent_id,
+        "session_id": str(session_id),
+        "channel": channel,
+        "permissions": [],
         "iat": now,
         "exp": now + expires_minutes * 60,
     }
@@ -204,7 +265,11 @@ def decode_token(token: str) -> dict[str, Any]:
 
     token_type = payload["type"]
     if token_type not in (
-        "access", "refresh", "sandbox", "service_account_session",
+        "access",
+        "refresh",
+        "sandbox",
+        "service_account_session",
+        "channel_session",
     ):
         raise InvalidTokenError(f"Unknown token type: {token_type!r}")
 
@@ -213,6 +278,12 @@ def decode_token(token: str) -> dict[str, Any]:
             if claim not in payload:
                 raise InvalidTokenError(
                     f"service_account_session token is missing claim: {claim!r}"
+                )
+    elif token_type == "channel_session":
+        for claim in ("agent_id", "session_id", "channel"):
+            if claim not in payload:
+                raise InvalidTokenError(
+                    f"channel_session token is missing claim: {claim!r}"
                 )
     else:
         if "user_id" not in payload:

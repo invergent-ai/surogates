@@ -162,6 +162,207 @@ class TestJWT:
         with pytest.raises(InvalidTokenError, match="user_id"):
             decode_token(token)
 
+    def test_channel_session_token_roundtrip(self):
+        """Minting + decoding a channel_session token preserves all claims."""
+        from surogates.tenant.auth.jwt import create_channel_session_token
+
+        org_id = uuid4()
+        agent_id = "support-bot"
+        session_id = uuid4()
+        token = create_channel_session_token(
+            org_id=org_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            channel="website",
+        )
+        payload = decode_token(token)
+
+        assert payload["type"] == "channel_session"
+        assert payload["org_id"] == str(org_id)
+        assert payload["agent_id"] == agent_id
+        assert payload["session_id"] == str(session_id)
+        assert payload["channel"] == "website"
+        assert payload["permissions"] == []
+        # Neither user nor service-account identity present.
+        assert "user_id" not in payload
+        assert "service_account_id" not in payload
+
+    def test_channel_session_token_has_long_expiry(self):
+        """Lifetime mirrors service_account_session (~1 year)."""
+        from surogates.tenant.auth.jwt import create_channel_session_token
+
+        token = create_channel_session_token(
+            org_id=uuid4(),
+            agent_id="x",
+            session_id=uuid4(),
+            channel="website",
+        )
+        payload = decode_token(token)
+        # Should expire well past 30 days from now.
+        assert payload["exp"] > time.time() + 30 * 86400
+
+    def test_channel_session_token_missing_agent_id_rejected(self):
+        """A channel_session JWT without agent_id must 401 at decode."""
+        import time as _time
+
+        from jose import jwt as _jwt
+
+        from surogates.tenant.auth.jwt import _get_secret
+
+        now = int(_time.time())
+        payload = {
+            "sub": str(uuid4()),
+            "type": "channel_session",
+            "org_id": str(uuid4()),
+            # agent_id deliberately omitted.
+            "session_id": str(uuid4()),
+            "channel": "website",
+            "permissions": [],
+            "iat": now,
+            "exp": now + 60,
+        }
+        token = _jwt.encode(payload, _get_secret(), algorithm="HS256")
+        with pytest.raises(InvalidTokenError, match="agent_id"):
+            decode_token(token)
+
+    def test_channel_session_token_missing_session_id_rejected(self):
+        import time as _time
+
+        from jose import jwt as _jwt
+
+        from surogates.tenant.auth.jwt import _get_secret
+
+        now = int(_time.time())
+        payload = {
+            "sub": str(uuid4()),
+            "type": "channel_session",
+            "org_id": str(uuid4()),
+            "agent_id": "support-bot",
+            # session_id deliberately omitted.
+            "channel": "website",
+            "permissions": [],
+            "iat": now,
+            "exp": now + 60,
+        }
+        token = _jwt.encode(payload, _get_secret(), algorithm="HS256")
+        with pytest.raises(InvalidTokenError, match="session_id"):
+            decode_token(token)
+
+    def test_channel_session_token_missing_channel_rejected(self):
+        import time as _time
+
+        from jose import jwt as _jwt
+
+        from surogates.tenant.auth.jwt import _get_secret
+
+        now = int(_time.time())
+        payload = {
+            "sub": str(uuid4()),
+            "type": "channel_session",
+            "org_id": str(uuid4()),
+            "agent_id": "support-bot",
+            "session_id": str(uuid4()),
+            # channel deliberately omitted.
+            "permissions": [],
+            "iat": now,
+            "exp": now + 60,
+        }
+        token = _jwt.encode(payload, _get_secret(), algorithm="HS256")
+        with pytest.raises(InvalidTokenError, match="channel"):
+            decode_token(token)
+
+    def test_channel_session_token_missing_org_id_rejected(self):
+        """Base ``org_id`` claim check still fires for channel_session."""
+        import time as _time
+
+        from jose import jwt as _jwt
+
+        from surogates.tenant.auth.jwt import _get_secret
+
+        now = int(_time.time())
+        payload = {
+            "sub": str(uuid4()),
+            "type": "channel_session",
+            # org_id deliberately omitted.
+            "agent_id": "support-bot",
+            "session_id": str(uuid4()),
+            "channel": "website",
+            "permissions": [],
+            "iat": now,
+            "exp": now + 60,
+        }
+        token = _jwt.encode(payload, _get_secret(), algorithm="HS256")
+        with pytest.raises(InvalidTokenError, match="org_id"):
+            decode_token(token)
+
+
+# =========================================================================
+# PrincipalKind.CHANNEL
+# =========================================================================
+
+
+class TestPrincipalKindChannel:
+    """Anonymous-channel sessions are a third principal kind."""
+
+    def test_channel_principal_returned(self, tmp_path: Path):
+        from surogates.tenant.context import PrincipalKind
+
+        org_id = uuid4()
+        session_id = uuid4()
+        ctx = TenantContext(
+            org_id=org_id,
+            user_id=None,
+            org_config={},
+            user_preferences={},
+            permissions=frozenset(),
+            asset_root=str(tmp_path),
+            service_account_id=None,
+            session_scope_id=session_id,
+        )
+        kind, principal_id = ctx.principal()
+        assert kind == PrincipalKind.CHANNEL
+        assert principal_id == session_id
+
+    def test_user_kind_unchanged_for_user_context(
+        self, tenant_context: TenantContext,
+    ):
+        from surogates.tenant.context import PrincipalKind
+
+        kind, _ = tenant_context.principal()
+        assert kind == PrincipalKind.USER
+
+    def test_judge_kind_for_service_account_context(self, tmp_path: Path):
+        from surogates.tenant.context import PrincipalKind
+
+        sa_id = uuid4()
+        ctx = TenantContext(
+            org_id=uuid4(),
+            user_id=None,
+            org_config={},
+            user_preferences={},
+            permissions=frozenset(),
+            asset_root=str(tmp_path),
+            service_account_id=sa_id,
+            session_scope_id=None,
+        )
+        kind, principal_id = ctx.principal()
+        assert kind == PrincipalKind.JUDGE
+        assert principal_id == sa_id
+
+    def test_no_principal_still_raises(self, tmp_path: Path):
+        ctx = TenantContext(
+            org_id=uuid4(),
+            user_id=None,
+            org_config={},
+            user_preferences={},
+            permissions=frozenset(),
+            asset_root=str(tmp_path),
+            service_account_id=None,
+            session_scope_id=None,
+        )
+        with pytest.raises(RuntimeError, match="no principal"):
+            ctx.principal()
+
 
 # =========================================================================
 # TenantAssetManager

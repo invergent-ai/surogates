@@ -24,30 +24,49 @@ class PrincipalKind(StrEnum):
     """The principal type authenticated on a request.
 
     Used for event-payload discriminators and audit-view projections so
-    the two principal shapes don't propagate as stringly-typed literals
-    across the codebase.
+    the three principal shapes don't propagate as stringly-typed
+    literals across the codebase.
     """
 
     USER = "user"
     JUDGE = "judge"
+    CHANNEL = "channel"
 
 
 @dataclass(frozen=True)
 class TenantContext:
     """Immutable snapshot of the current tenant + principal identity.
 
-    Exactly one of *user_id* or *service_account_id* is non-None.  A
-    JWT-authenticated request sets *user_id*; a service-account request
-    (``POST /v1/api/prompts`` et al.) sets *service_account_id* and
-    leaves *user_id* as ``None``.  Routes that require a human user must
-    check *user_id* is not None before using it.
+    Three valid principal shapes:
 
-    *session_scope_id* is set only on worker-minted service-account
-    *session* JWTs — a short-lived, session-scoped token that lets the
-    harness call ``/v1/skills`` and ``/v1/memory`` for an SA-owned
-    session.  Bare ``surg_sk_`` tokens (which can submit new prompts)
-    leave it ``None``; the ``/v1/api/prompts`` route refuses any context
-    where it is set so a leaked session JWT cannot open new sessions.
+    * **User** — *user_id* set, *service_account_id* unset.  Produced
+      by an ``access`` JWT (interactive UI sessions, programmatic
+      callers with a human identity).
+    * **Service account** — *service_account_id* set, *user_id* unset.
+      Produced by bare ``surg_sk_`` tokens and by worker-minted
+      ``service_account_session`` JWTs.  The latter additionally set
+      *session_scope_id*.
+    * **Channel session** — only *session_scope_id* set (neither
+      *user_id* nor *service_account_id*).  Produced by worker-minted
+      ``channel_session`` JWTs for anonymous-channel sessions (e.g. the
+      public-website widget).  Routes that need a user or
+      service-account principal must refuse this context via
+      :func:`surogates.api.routes._shared.require_not_channel_principal`
+      — :class:`~surogates.storage.tenant.TenantStorage` maps
+      ``user_id=None`` to ``shared/*`` paths, which is the correct
+      semantics for service-account contexts but a write-anywhere
+      hazard for anonymous visitors.
+
+    Routes that require a human user must check *user_id* is not None
+    before using it.
+
+    *session_scope_id* is set on worker-minted JWTs (``service_account_session``
+    and ``channel_session``) — a long-lived, session-scoped token that
+    lets the harness call ``/v1/skills`` and other api-client-gated
+    routes for that one session.  Bare ``surg_sk_`` tokens (which can
+    submit new prompts) leave it ``None``; the ``/v1/api/prompts``
+    route refuses contexts that are not service accounts so a leaked
+    session JWT cannot open new sessions.
     """
 
     org_id: UUID
@@ -84,20 +103,31 @@ class TenantContext:
     def principal(self) -> tuple[PrincipalKind, UUID]:
         """Return the authenticated principal as ``(kind, id)``.
 
-        ``kind`` is ``USER`` for JWT callers and ``JUDGE`` for bare or
-        session-scoped service-account tokens — the discriminator
-        persisted on feedback events and exposed by audit views.
-        Raises if somehow neither identifier is set (the auth middleware
-        guarantees one is, so this only fires on genuine invariant
-        violations).
+        ``kind`` is one of:
+
+        * :attr:`PrincipalKind.USER` — JWT callers (``user_id`` set).
+        * :attr:`PrincipalKind.JUDGE` — bare or session-scoped
+          service-account tokens (``service_account_id`` set); the
+          discriminator persisted on feedback events and exposed by
+          audit views.
+        * :attr:`PrincipalKind.CHANNEL` — anonymous-channel session
+          JWTs (only ``session_scope_id`` set).  The session itself is
+          the principal — there is no human user and no service
+          account behind it.
+
+        Raises if none of the three identifiers is set; the auth
+        middleware guarantees one is, so this only fires on genuine
+        invariant violations.
         """
         if self.service_account_id is not None:
             return PrincipalKind.JUDGE, self.service_account_id
         if self.user_id is not None:
             return PrincipalKind.USER, self.user_id
+        if self.session_scope_id is not None:
+            return PrincipalKind.CHANNEL, self.session_scope_id
         raise RuntimeError(
             "TenantContext has no principal; auth middleware failed to "
-            "set either user_id or service_account_id",
+            "set user_id, service_account_id, or session_scope_id",
         )
 
 

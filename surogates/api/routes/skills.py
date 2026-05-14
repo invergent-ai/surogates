@@ -26,7 +26,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from surogates.api.routes._shared import normalize_source, raise_validation
+from surogates.api.routes._shared import (
+    normalize_source,
+    raise_validation,
+    require_not_channel_principal,
+)
 from surogates.storage.skill_staging import SkillStager, has_stageable_assets
 from surogates.storage.tenant import (
     TenantStorage,
@@ -567,6 +571,7 @@ async def create_skill(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> SkillActionResponse:
     """Create a new user skill."""
+    require_not_channel_principal(tenant)
     raise_validation(validate_name(body.name))
     raise_validation(validate_category(body.category))
     raise_validation(validate_frontmatter(body.content))
@@ -599,6 +604,7 @@ async def edit_skill(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> SkillActionResponse:
     """Replace the full SKILL.md content of an existing skill."""
+    require_not_channel_principal(tenant)
     raise_validation(validate_frontmatter(body.content))
     raise_validation(validate_content_size(body.content))
 
@@ -623,6 +629,7 @@ async def patch_skill(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> SkillActionResponse:
     """Targeted find-and-replace within a skill file."""
+    require_not_channel_principal(tenant)
     ts = _get_tenant_storage(request, tenant)
     existing = await ts.skill_exists(name)
     if not existing:
@@ -674,6 +681,7 @@ async def delete_skill(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> None:
     """Delete a skill and all its files."""
+    require_not_channel_principal(tenant)
     ts = _get_tenant_storage(request, tenant)
     existing = await ts.skill_exists(name)
     if not existing:
@@ -690,6 +698,7 @@ async def write_skill_file(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> SkillActionResponse:
     """Add or overwrite a supporting file within a skill directory."""
+    require_not_channel_principal(tenant)
     raise_validation(validate_file_path(body.file_path))
     raise_validation(validate_content_size(body.file_content, label=body.file_path))
     raise_validation(validate_file_size(body.file_content))
@@ -715,6 +724,7 @@ async def remove_skill_file(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> None:
     """Remove a supporting file from a skill directory."""
+    require_not_channel_principal(tenant)
     raise_validation(validate_file_path(path))
 
     ts = _get_tenant_storage(request, tenant)
