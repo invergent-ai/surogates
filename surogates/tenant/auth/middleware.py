@@ -277,6 +277,12 @@ async def _tenant_context_from_token(
         )
         return ctx
 
+    if token_type == "channel_session":
+        ctx = await _build_channel_session_context(
+            session_factory, payload, tenant_assets_root,
+        )
+        return ctx
+
     if token_type != "access":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -343,6 +349,78 @@ async def _build_service_account_context(
         permissions=frozenset(),
         asset_root=f"{tenant_assets_root}/{sa.org_id}",
         service_account_id=sa.id,
+    )
+
+
+async def _build_channel_session_context(
+    session_factory: async_sessionmaker,
+    payload: dict[str, Any],
+    tenant_assets_root: str,
+) -> TenantContext:
+    """Resolve a ``channel_session`` JWT to a :class:`TenantContext`.
+
+    The session row is the authority — the JWT is a signed pointer
+    into it.  Four independent invariants; any mismatch is 401:
+
+    1. The ``sessions`` row referenced by ``session_id`` must exist.
+    2. The row's ``org_id`` must match the JWT.
+    3. The row's ``agent_id`` must match the JWT (defence in depth
+       against an agent re-deployed under the same org with the same
+       session id reused — practically impossible today, but the cost
+       of checking is zero so we check).
+    4. The row's ``channel`` must match the JWT.
+
+    On success, returns a :class:`TenantContext` with neither
+    ``user_id`` nor ``service_account_id`` set; only
+    ``session_scope_id``.  Routes that require a user or
+    service-account principal refuse this context via
+    :func:`surogates.api.routes._shared.require_not_channel_principal`.
+    """
+    from surogates.db.models import Session as SessionModel
+
+    org_id = UUID(payload["org_id"])
+    agent_id = str(payload["agent_id"])
+    session_id = UUID(payload["session_id"])
+    channel = str(payload["channel"])
+
+    async with session_factory() as db_session:
+        session_row = await db_session.get(SessionModel, session_id)
+
+    if session_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session not found.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if session_row.org_id != org_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Channel-session token org mismatch.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if session_row.agent_id != agent_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Channel-session token agent mismatch.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if session_row.channel != channel:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Channel-session token channel mismatch.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    org = await _load_org_or_401(session_factory, org_id)
+    return TenantContext(
+        org_id=org_id,
+        user_id=None,
+        org_config=org.config or {},
+        user_preferences={},
+        permissions=frozenset(),
+        asset_root=f"{tenant_assets_root}/{org_id}",
+        service_account_id=None,
+        session_scope_id=session_id,
     )
 
 
