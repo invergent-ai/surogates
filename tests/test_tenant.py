@@ -164,6 +164,74 @@ class TestJWT:
 
 
 # =========================================================================
+# PrincipalKind.CHANNEL
+# =========================================================================
+
+
+class TestPrincipalKindChannel:
+    """Anonymous-channel sessions are a third principal kind."""
+
+    def test_channel_principal_returned(self, tmp_path: Path):
+        from surogates.tenant.context import PrincipalKind
+
+        org_id = uuid4()
+        session_id = uuid4()
+        ctx = TenantContext(
+            org_id=org_id,
+            user_id=None,
+            org_config={},
+            user_preferences={},
+            permissions=frozenset(),
+            asset_root=str(tmp_path),
+            service_account_id=None,
+            session_scope_id=session_id,
+        )
+        kind, principal_id = ctx.principal()
+        assert kind == PrincipalKind.CHANNEL
+        assert principal_id == session_id
+
+    def test_user_kind_unchanged_for_user_context(
+        self, tenant_context: TenantContext,
+    ):
+        from surogates.tenant.context import PrincipalKind
+
+        kind, _ = tenant_context.principal()
+        assert kind == PrincipalKind.USER
+
+    def test_judge_kind_for_service_account_context(self, tmp_path: Path):
+        from surogates.tenant.context import PrincipalKind
+
+        sa_id = uuid4()
+        ctx = TenantContext(
+            org_id=uuid4(),
+            user_id=None,
+            org_config={},
+            user_preferences={},
+            permissions=frozenset(),
+            asset_root=str(tmp_path),
+            service_account_id=sa_id,
+            session_scope_id=None,
+        )
+        kind, principal_id = ctx.principal()
+        assert kind == PrincipalKind.JUDGE
+        assert principal_id == sa_id
+
+    def test_no_principal_still_raises(self, tmp_path: Path):
+        ctx = TenantContext(
+            org_id=uuid4(),
+            user_id=None,
+            org_config={},
+            user_preferences={},
+            permissions=frozenset(),
+            asset_root=str(tmp_path),
+            service_account_id=None,
+            session_scope_id=None,
+        )
+        with pytest.raises(RuntimeError, match="no principal"):
+            ctx.principal()
+
+
+# =========================================================================
 # TenantAssetManager
 # =========================================================================
 
