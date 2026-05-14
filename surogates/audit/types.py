@@ -29,3 +29,8 @@ class AuditType(str, Enum):
 
     # Credential vault access (at MCP server resolution, outside session)
     CREDENTIAL_ACCESS = "credential.access"
+
+    # Platform copilot writes (a copilot tool performed a side-effecting
+    # action on the chat user's behalf; data field carries action +
+    # target_id + tool-specific extras).
+    POLICY_COPILOT_ACTION = "policy.copilot_action"
