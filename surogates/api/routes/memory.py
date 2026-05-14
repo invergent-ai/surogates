@@ -16,6 +16,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
+from surogates.api.routes._shared import require_not_channel_principal
 from surogates.memory.store import ENTRY_DELIMITER, scan_memory_content
 from surogates.storage.tenant import TenantStorage
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -112,6 +113,7 @@ async def get_memory(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> MemoryEntries:
     """Load current memory entries for both targets."""
+    require_not_channel_principal(tenant)
     ts = _get_tenant_storage(request, tenant)
     await ts.ensure_bucket()
 
@@ -136,6 +138,7 @@ async def mutate_memory(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> MemoryMutateResponse:
     """Add, replace, or remove a memory entry."""
+    require_not_channel_principal(tenant)
     ts = _get_tenant_storage(request, tenant)
     await ts.ensure_bucket()
 

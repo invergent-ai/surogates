@@ -99,3 +99,68 @@ class TestRequireNotChannelPrincipal:
         with pytest.raises(HTTPException) as exc:
             require_not_channel_principal(ctx)
         assert exc.value.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# /v1/memory route gating
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestMemoryRouteGate:
+    """Channel principals must not read or write memory.
+
+    Memory routes pass ``tenant.user_id`` straight to ``TenantStorage``,
+    which maps ``user_id=None`` to ``shared/memory/*``.  The gate is the
+    hard boundary that keeps channel JWTs out of shared memory while
+    leaving service-account contexts (also ``user_id=None``) intact.
+    """
+
+    async def test_get_memory_refuses_channel_principal(
+        self, tmp_path: Path,
+    ):
+        from surogates.api.routes import memory as memory_routes
+
+        with pytest.raises(HTTPException) as exc:
+            await memory_routes.get_memory(
+                request=None,  # gate fires before request is read
+                tenant=_channel_ctx(tmp_path),
+            )
+        assert exc.value.status_code == 403
+
+    async def test_mutate_memory_refuses_channel_principal(
+        self, tmp_path: Path,
+    ):
+        from surogates.api.routes import memory as memory_routes
+
+        with pytest.raises(HTTPException) as exc:
+            await memory_routes.mutate_memory(
+                body=None,
+                request=None,
+                tenant=_channel_ctx(tmp_path),
+            )
+        assert exc.value.status_code == 403
+
+    async def test_service_account_context_not_refused_by_gate(
+        self, tmp_path: Path,
+    ):
+        """Regression guard: SA contexts (``user_id=None``) must still
+        reach the handler body — ``TenantStorage`` will then route them
+        to ``shared/memory/*``.  We verify the gate doesn't 403; the
+        downstream call may fail because ``request.app.state.storage``
+        isn't wired, but that's a different code path.
+        """
+        from surogates.api.routes import memory as memory_routes
+
+        ctx = _sa_ctx(tmp_path)  # bare SA, user_id=None
+        try:
+            await memory_routes.get_memory(request=None, tenant=ctx)
+        except HTTPException as exc:
+            assert exc.status_code != 403, (
+                "Gate must allow SA contexts with user_id=None"
+            )
+        except Exception:
+            # Anything below the gate (AttributeError on request.app,
+            # storage misconfig, ...) is acceptable — we only assert the
+            # gate did not raise 403.
+            pass
