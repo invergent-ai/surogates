@@ -164,3 +164,73 @@ class TestMemoryRouteGate:
             # storage misconfig, ...) is acceptable — we only assert the
             # gate did not raise 403.
             pass
+
+
+# ---------------------------------------------------------------------------
+# Mutating /v1/skills route gating
+# ---------------------------------------------------------------------------
+
+
+_MUTATING_SKILL_HANDLERS = (
+    "create_skill",
+    "edit_skill",
+    "patch_skill",
+    "delete_skill",
+    "write_skill_file",
+    "remove_skill_file",
+)
+
+
+def _kwargs_for_handler(handler, tenant: TenantContext) -> dict:
+    """Build kwargs satisfying *handler*'s signature.
+
+    Required parameters that aren't ``tenant`` get ``None``; the gate
+    must fire before any of them is dereferenced.  Parameters with
+    defaults are omitted so FastAPI's ``Depends(...)`` defaults remain
+    in place (and the gate uses the ``tenant`` kwarg we pass).
+    """
+    sig = inspect.signature(handler)
+    kwargs: dict = {}
+    for name, param in sig.parameters.items():
+        if name == "tenant":
+            kwargs[name] = tenant
+        elif param.default is not inspect.Parameter.empty:
+            continue
+        else:
+            kwargs[name] = None
+    return kwargs
+
+
+@pytest.mark.asyncio
+class TestMutatingSkillsRouteGate:
+    """Every mutate handler must refuse channel principals."""
+
+    @pytest.mark.parametrize("handler_name", _MUTATING_SKILL_HANDLERS)
+    async def test_refuses_channel_principal(
+        self, tmp_path: Path, handler_name: str,
+    ):
+        from surogates.api.routes import skills as skills_routes
+
+        handler = getattr(skills_routes, handler_name)
+        kwargs = _kwargs_for_handler(handler, _channel_ctx(tmp_path))
+
+        with pytest.raises(HTTPException) as exc:
+            await handler(**kwargs)
+        assert exc.value.status_code == 403, (
+            f"{handler_name} must refuse channel principals"
+        )
+
+    def test_read_only_handlers_do_not_call_gate(self):
+        """``list_skills`` / ``view_skill`` / ``read_skill_file`` must
+        remain accessible to channel principals — slash-skill expansion
+        relies on them.
+        """
+        from surogates.api.routes import skills as skills_routes
+
+        for fn_name in ("list_skills", "view_skill", "read_skill_file"):
+            fn = getattr(skills_routes, fn_name)
+            src = inspect.getsource(fn)
+            assert "require_not_channel_principal" not in src, (
+                f"{fn_name} must NOT call the gate; it is a read-only "
+                "endpoint the channel JWT exists to unlock"
+            )
