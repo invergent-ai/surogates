@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
@@ -68,4 +69,8 @@ def _coerce_structured_result(value: Any, output_model: type[T]) -> T:
         return value
     if isinstance(value, dict):
         return output_model.model_validate(value)
-    return output_model.model_validate_json(str(value or ""))
+    text = str(value or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    return output_model.model_validate_json(text)

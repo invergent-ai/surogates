@@ -85,6 +85,31 @@ async def test_generate_structured_uses_openai_response_format_by_default() -> N
     assert call_kwargs["response_format"]["json_schema"]["schema"]["type"] == "object"
 
 
+async def test_generate_structured_strips_markdown_fences() -> None:
+    llm_client = AsyncOpenAI(api_key="test-key")
+    fenced = "```json\n" + json.dumps(
+        {"route": "clarify", "confidence": 0.42}
+    ) + "\n```"
+    llm_client.chat.completions.create = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=fenced, refusal=None)
+                )
+            ]
+        )
+    )
+
+    decision = await generate_structured(
+        llm_client=llm_client,
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "Route this."}],
+        output_model=RoutingDecision,
+    )
+
+    assert decision == RoutingDecision(route="clarify", confidence=0.42)
+
+
 async def test_generate_structured_returns_none_when_outlines_fails() -> None:
     llm_client = AsyncOpenAI(api_key="test-key")
     llm_client.chat.completions.create = AsyncMock(side_effect=RuntimeError("boom"))
