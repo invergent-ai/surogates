@@ -23,6 +23,7 @@ import {
   ReasoningTrigger,
 } from "../ai-elements/reasoning";
 import { ToolCallBlock } from "./tool-call-block";
+import { useSmoothStream } from "./use-smooth-stream";
 import type {
   AgentChatDisplayAttachment,
   ChatMessage as ChatMessageType,
@@ -187,14 +188,20 @@ function AssistantMessage({
     message.content &&
     message.content !== message.reasoning
   );
+  const reasoningIsStreaming = isStreaming && !hasContent && !hasToolCalls;
+  const displayedContent = useSmoothStream(message.content ?? "", isStreaming);
+  const displayedReasoning = useSmoothStream(
+    message.reasoning ?? "",
+    reasoningIsStreaming,
+  );
 
   return (
     <Message from="assistant">
       <MessageContent>
         {hasReasoning && (
-          <Reasoning isStreaming={isStreaming && !hasContent && !hasToolCalls}>
+          <Reasoning isStreaming={reasoningIsStreaming}>
             <ReasoningTrigger />
-            <ReasoningContent>{message.reasoning!}</ReasoningContent>
+            <ReasoningContent>{displayedReasoning}</ReasoningContent>
           </Reasoning>
         )}
 
@@ -207,7 +214,7 @@ function AssistantMessage({
         )}
 
         {hasContent && (
-          <MessageResponse>{message.content}</MessageResponse>
+          <MessageResponse>{displayedContent}</MessageResponse>
         )}
 
         {isStreaming && !hasContent && !hasToolCalls && !hasReasoning && (
