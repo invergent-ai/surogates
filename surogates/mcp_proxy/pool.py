@@ -454,16 +454,50 @@ class ConnectionPool:
         arguments: dict[str, Any],
         meta: dict[str, Any] | None = None,
     ) -> str:
-        """Execute a tool call on the MCP server session."""
+        """Execute a tool call on the MCP server session.
+
+        The session and its read/write streams are bound to the
+        dedicated ``_mcp_loop`` thread created by
+        :mod:`surogates.tools.mcp.client`. Awaiting ``call_tool``
+        from the FastAPI main loop here would interact with anyio
+        streams owned by a different loop, which Python's asyncio
+        bridges via slow polling — measured at ~15 s per call on the
+        copilot's read tools in PROD. Bridge through
+        :func:`asyncio.run_coroutine_threadsafe` so the coroutine
+        runs on the loop the streams were created on, then await the
+        wrapped future on the current loop.
+        """
+        from surogates.tools.mcp import client as _mcp_client_module
+
         try:
-            if meta:
-                result = await server.session.call_tool(
-                    tool_name, arguments=arguments, meta=meta,
-                )
+            loop = _mcp_client_module._mcp_loop  # type: ignore[attr-defined]
+            if loop is None or not loop.is_running():
+                # No dedicated MCP loop running (unit tests build sessions
+                # inline on the test loop); call directly. Cross-loop
+                # interaction would be slow but functional.
+                if meta:
+                    result = await server.session.call_tool(
+                        tool_name, arguments=arguments, meta=meta,
+                    )
+                else:
+                    result = await server.session.call_tool(
+                        tool_name, arguments=arguments,
+                    )
             else:
-                result = await server.session.call_tool(
-                    tool_name, arguments=arguments,
-                )
+                if meta:
+                    coro = server.session.call_tool(
+                        tool_name, arguments=arguments, meta=meta,
+                    )
+                else:
+                    coro = server.session.call_tool(
+                        tool_name, arguments=arguments,
+                    )
+                future = asyncio.run_coroutine_threadsafe(coro, loop)
+                try:
+                    result = await asyncio.wrap_future(future)
+                except BaseException:
+                    future.cancel()
+                    raise
 
             if result.isError:
                 error_text = ""
