@@ -12,18 +12,7 @@ import {
   FileText,
   FileVideo,
 } from "lucide-react";
-import {
-  Message,
-  MessageContent,
-  MessageResponse,
-} from "../ai-elements/message";
-import {
-  Reasoning,
-  ReasoningContent,
-  ReasoningTrigger,
-} from "../ai-elements/reasoning";
-import { ToolCallBlock } from "./tool-call-block";
-import { useSmoothStream } from "./use-smooth-stream";
+import { Message, MessageContent } from "../ai-elements/message";
 import type {
   AgentChatDisplayAttachment,
   ChatMessage as ChatMessageType,
@@ -31,54 +20,50 @@ import type {
 
 interface ChatMessageProps {
   message: ChatMessageType;
-  isLast: boolean;
   onFileSelect?: (path: string) => void;
 }
 
+// Renders user messages only. Assistant and system messages go through
+// chat-thread's AssistantGroup / OrphanSystemMarker instead.
 export const ChatMessage = memo(function ChatMessage({
   message,
-  isLast,
   onFileSelect,
 }: ChatMessageProps) {
-  if (message.role === "user") {
-    return (
-      <Message from="user">
-        <MessageContent>
-          {message.content}
-          {message.images && message.images.length > 0 && (
-            <div className="flex flex-wrap gap-2 mt-2">
-              {message.images.map((img, i) => (
-                <img
-                  key={i}
-                  src={img.data}
-                  alt="Attached"
-                  className="max-w-64 max-h-48 rounded-lg border border-border object-contain"
-                />
-              ))}
-            </div>
-          )}
-          {message.attachments && message.attachments.length > 0 && (
-            <div className="flex flex-wrap gap-2 mt-2">
-              {message.attachments.map((a, i) => (
-                <AttachmentChip
-                  // Stable key across the optimistic → confirmed
-                  // transition: the local chip starts without a path
-                  // and gains one when the user.message SSE event
-                  // arrives; falling back to the array index keeps the
-                  // chip in place across that swap.
-                  key={a.path ?? `pending-${i}`}
-                  attachment={a}
-                  onSelect={onFileSelect}
-                />
-              ))}
-            </div>
-          )}
-        </MessageContent>
-      </Message>
-    );
-  }
-
-  return <AssistantMessage message={message} isLast={isLast} onFileSelect={onFileSelect} />;
+  return (
+    <Message from="user">
+      <MessageContent>
+        {message.content}
+        {message.images && message.images.length > 0 && (
+          <div className="flex flex-wrap gap-2 mt-2">
+            {message.images.map((img, i) => (
+              <img
+                key={i}
+                src={img.data}
+                alt="Attached"
+                className="max-w-64 max-h-48 rounded-lg border border-border object-contain"
+              />
+            ))}
+          </div>
+        )}
+        {message.attachments && message.attachments.length > 0 && (
+          <div className="flex flex-wrap gap-2 mt-2">
+            {message.attachments.map((a, i) => (
+              <AttachmentChip
+                // Stable key across the optimistic → confirmed
+                // transition: the local chip starts without a path
+                // and gains one when the user.message SSE event
+                // arrives; falling back to the array index keeps the
+                // chip in place across that swap.
+                key={a.path ?? `pending-${i}`}
+                attachment={a}
+                onSelect={onFileSelect}
+              />
+            ))}
+          </div>
+        )}
+      </MessageContent>
+    </Message>
+  );
 });
 
 // ── Attachment chip ──────────────────────────────────────────────────
@@ -171,59 +156,3 @@ function AttachmentChip({
   );
 }
 
-function AssistantMessage({
-  message,
-  isLast,
-  onFileSelect,
-}: {
-  message: ChatMessageType;
-  isLast: boolean;
-  onFileSelect?: (path: string) => void;
-}) {
-  const hasReasoning = !!message.reasoning;
-  const hasToolCalls = !!(message.toolCalls && message.toolCalls.length > 0);
-  const isStreaming = message.status === "streaming" && isLast;
-  // Guard: if content is identical to reasoning, skip it (dedup).
-  const hasContent = !!(
-    message.content &&
-    message.content !== message.reasoning
-  );
-  const reasoningIsStreaming = isStreaming && !hasContent && !hasToolCalls;
-  const displayedContent = useSmoothStream(message.content ?? "", isStreaming);
-  const displayedReasoning = useSmoothStream(
-    message.reasoning ?? "",
-    reasoningIsStreaming,
-  );
-
-  return (
-    <Message from="assistant">
-      <MessageContent>
-        {hasReasoning && (
-          <Reasoning isStreaming={reasoningIsStreaming}>
-            <ReasoningTrigger />
-            <ReasoningContent>{displayedReasoning}</ReasoningContent>
-          </Reasoning>
-        )}
-
-        {hasToolCalls && (
-          <div className="w-full flex flex-col gap-8">
-            {message.toolCalls!.map((tc) => (
-              <ToolCallBlock key={tc.id} tc={tc} onFileSelect={onFileSelect} />
-            ))}
-          </div>
-        )}
-
-        {hasContent && (
-          <MessageResponse>{displayedContent}</MessageResponse>
-        )}
-
-        {isStreaming && !hasContent && !hasToolCalls && !hasReasoning && (
-          <div className="flex items-center gap-1.5 py-1 text-muted-foreground">
-            <span className="inline-block size-1.5 animate-pulse rounded-full bg-primary" />
-            <span className="text-xs">Thinking...</span>
-          </div>
-        )}
-      </MessageContent>
-    </Message>
-  );
-}

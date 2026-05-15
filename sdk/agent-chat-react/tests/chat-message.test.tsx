@@ -61,7 +61,6 @@ describe("ChatMessage — user bubble attachment chips", () => {
             },
           ],
         })}
-        isLast
       />,
     );
 
@@ -87,7 +86,6 @@ describe("ChatMessage — user bubble attachment chips", () => {
             },
           ],
         })}
-        isLast
         onFileSelect={onFileSelect}
       />,
     );
@@ -117,7 +115,6 @@ describe("ChatMessage — user bubble attachment chips", () => {
             },
           ],
         })}
-        isLast
         onFileSelect={onFileSelect}
       />,
     );
@@ -144,7 +141,6 @@ describe("ChatMessage — user bubble attachment chips", () => {
             },
           ],
         })}
-        isLast
       />,
     );
 
@@ -164,7 +160,6 @@ describe("ChatMessage — user bubble attachment chips", () => {
             },
           ],
         })}
-        isLast
       />,
     );
 
@@ -177,7 +172,6 @@ describe("ChatMessage — user bubble attachment chips", () => {
     const node = render(
       <ChatMessage
         message={userMessage({ attachments: undefined })}
-        isLast
       />,
     );
     expect(node.querySelector("button")).toBeNull();
@@ -186,7 +180,6 @@ describe("ChatMessage — user bubble attachment chips", () => {
       root?.render(
         <ChatMessage
           message={userMessage({ attachments: [] })}
-          isLast
         />,
       );
     });
@@ -209,7 +202,6 @@ describe("ChatMessage — user bubble attachment chips", () => {
             },
           ],
         })}
-        isLast
       />,
     );
 

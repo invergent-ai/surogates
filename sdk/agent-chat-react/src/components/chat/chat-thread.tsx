@@ -37,6 +37,7 @@ import { parseTerminalResult } from "./tools/terminal-tool";
 import { statusColorClass, effectiveStatus, toolErrorSummary, parseArgs } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
 import { ChatComposer } from "./chat-composer";
+import { useSmoothStream } from "./use-smooth-stream";
 import { ArtifactBlock } from "./artifacts/artifact-block";
 import { ErrorMessage } from "./error-message";
 import { cn } from "../../lib/utils";
@@ -87,7 +88,7 @@ type TimelineEntry =
   | { kind: "tool"; key: string; tc: ToolCallInfo; resolvedArtifactName?: string }
   | { kind: "browser_activity"; key: string; calls: ToolCallInfo[] }
   | { kind: "web_search_group"; key: string; calls: ToolCallInfo[] }
-  | { kind: "text"; key: string; content: string }
+  | { kind: "text"; key: string; content: string; isStreaming: boolean }
   | { kind: "thinking"; key: string }
   | { kind: "skill_invoked"; key: string; skill: string; stagedAt: string | null }
   | {
@@ -192,7 +193,12 @@ function messageToEntries(
   }
 
   if (effectiveHasContent) {
-    entries.push({ kind: "text", key: `${msg.id}-text`, content: msg.content });
+    entries.push({
+      kind: "text",
+      key: `${msg.id}-text`,
+      content: msg.content,
+      isStreaming,
+    });
   }
 
   // Show "Working on it..." shimmer whenever the turn is active but
@@ -454,20 +460,7 @@ function TimelineEntryItem({
   onFileSelect?: (path: string) => void;
 }) {
   if (entry.kind === "reasoning") {
-    return (
-      <TimelineItem step={step}>
-        <TimelineHeader>
-          <TimelineSeparator style={{ backgroundColor: "var(--color-border)" }} />
-          <TimelineIndicator className="size-2" />
-        </TimelineHeader>
-        <TimelineContent>
-          <Reasoning isStreaming={entry.isStreaming}>
-            <ReasoningTrigger />
-            <ReasoningContent>{entry.reasoning}</ReasoningContent>
-          </Reasoning>
-        </TimelineContent>
-      </TimelineItem>
-    );
+    return <ReasoningEntry entry={entry} step={step} />;
   }
 
   if (entry.kind === "tool") {
@@ -551,17 +544,7 @@ function TimelineEntryItem({
   }
 
   if (entry.kind === "text") {
-    return (
-      <TimelineItem step={step}>
-        <TimelineHeader>
-          <TimelineSeparator style={{ backgroundColor: "var(--color-border)" }} />
-          <TimelineIndicator className="size-2 border-none bg-foreground/40" />
-        </TimelineHeader>
-        <TimelineContent>
-          <MessageResponse>{entry.content}</MessageResponse>
-        </TimelineContent>
-      </TimelineItem>
-    );
+    return <TextEntry entry={entry} step={step} />;
   }
 
   if (entry.kind === "skill_invoked") {
@@ -619,6 +602,53 @@ function TimelineEntryItem({
       </TimelineHeader>
       <TimelineContent>
         <Shimmer duration={3} spread={3} className="text-sm">Working on it...</Shimmer>
+      </TimelineContent>
+    </TimelineItem>
+  );
+}
+
+// ── Streamed-text timeline entries ───────────────────────────────────
+
+function ReasoningEntry({
+  entry,
+  step,
+}: {
+  entry: Extract<TimelineEntry, { kind: "reasoning" }>;
+  step: number;
+}) {
+  const reasoning = useSmoothStream(entry.reasoning, entry.isStreaming);
+  return (
+    <TimelineItem step={step}>
+      <TimelineHeader>
+        <TimelineSeparator style={{ backgroundColor: "var(--color-border)" }} />
+        <TimelineIndicator className="size-2" />
+      </TimelineHeader>
+      <TimelineContent>
+        <Reasoning isStreaming={entry.isStreaming}>
+          <ReasoningTrigger />
+          <ReasoningContent>{reasoning}</ReasoningContent>
+        </Reasoning>
+      </TimelineContent>
+    </TimelineItem>
+  );
+}
+
+function TextEntry({
+  entry,
+  step,
+}: {
+  entry: Extract<TimelineEntry, { kind: "text" }>;
+  step: number;
+}) {
+  const content = useSmoothStream(entry.content, entry.isStreaming);
+  return (
+    <TimelineItem step={step}>
+      <TimelineHeader>
+        <TimelineSeparator style={{ backgroundColor: "var(--color-border)" }} />
+        <TimelineIndicator className="size-2 border-none bg-foreground/40" />
+      </TimelineHeader>
+      <TimelineContent>
+        <MessageResponse>{content}</MessageResponse>
       </TimelineContent>
     </TimelineItem>
   );
@@ -838,7 +868,6 @@ export function ChatThread({
                     <ChatMessage
                       key={msg.id}
                       message={msg}
-                      isLast={group.lastGlobalIndex === messages.length - 1}
                       onFileSelect={onFileSelect}
                     />
                   );
