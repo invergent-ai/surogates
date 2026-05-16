@@ -330,3 +330,97 @@ async def test_apply_verdict_max_iterations_reached(
     )
     m = await store.get(created.mission_id)
     assert m.status == "max_iterations_reached"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_harness_runs_evaluator_when_mission_task_completed(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    """End-to-end: with an active mission and a done mission-task, the
+    harness's mission evaluator hook fires and records an evaluation."""
+    from surogates.harness.loop import _maybe_run_mission_evaluator
+
+    store = MissionStore(session_factory)
+    created = await handle_mission_create(
+        description="d", rubric="trivial — always satisfied",
+        session_id=chat_session.id, user_id=user_id, org_id=org_id,
+        agent_id="orchestrator",
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+    )
+    async with session_factory() as db:
+        db.add(Task(
+            org_id=org_id, parent_session_id=chat_session.id,
+            goal="t", status="done",
+            completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            mission_id=created.mission_id,
+        ))
+        await db.commit()
+
+    judge = AsyncMock(return_value={
+        "result": "satisfied", "explanation": "ok", "feedback": "",
+    })
+
+    await _maybe_run_mission_evaluator(
+        session_id=chat_session.id,
+        coordinator_last_response="some work",
+        session_store=session_store,
+        session_factory=session_factory,
+        mission_store=store,
+        judge=judge,
+    )
+
+    m = await store.get(created.mission_id)
+    assert m.status == "satisfied"
+    assert m.last_evaluation_result == "satisfied"
+    judge.assert_called_once()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_harness_evaluator_records_parse_failure_on_bad_judge_output(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    """A judge that raises MissionJudgeParseError increments
+    evaluator_parse_failures and emits a parse-failed evaluation.end event."""
+    from surogates.harness.loop import (
+        MissionJudgeParseError, _maybe_run_mission_evaluator,
+    )
+
+    store = MissionStore(session_factory)
+    created = await handle_mission_create(
+        description="d", rubric="r",
+        session_id=chat_session.id, user_id=user_id, org_id=org_id,
+        agent_id="orchestrator",
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+    )
+    async with session_factory() as db:
+        db.add(Task(
+            org_id=org_id, parent_session_id=chat_session.id,
+            goal="t", status="done",
+            completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            mission_id=created.mission_id,
+        ))
+        await db.commit()
+
+    bad_judge = AsyncMock(side_effect=MissionJudgeParseError("not JSON"))
+
+    await _maybe_run_mission_evaluator(
+        session_id=chat_session.id,
+        coordinator_last_response="some work",
+        session_store=session_store,
+        session_factory=session_factory,
+        mission_store=store,
+        judge=bad_judge,
+    )
+
+    m = await store.get(created.mission_id)
+    assert m.evaluator_parse_failures == 1
+    async with session_factory() as db:
+        end = (await db.execute(
+            select(Event).where(
+                Event.session_id == chat_session.id,
+                Event.type == EventType.MISSION_EVALUATION_END.value,
+            )
+        )).scalars().all()
+        assert any(e.data.get("parse_failed") is True for e in end)

@@ -25,7 +25,7 @@ Update before each commit. Legend: `[ ]` not started · `[~]` in progress · `[x
 - [x] **Task 7**: `spawn_task` stamps `mission_id` from active mission
 - [x] **Task 8**: Mission evaluator — trigger detection + rate-limit guard
 - [x] **Task 9**: Mission evaluator — prompt building + verdict handling + continuation message
-- [ ] **Task 10**: Wire evaluator into the harness loop
+- [x] **Task 10**: Wire evaluator into the harness loop
 - [ ] **Task 11**: REST API — GET endpoints (list, detail, tasks, workers)
 - [ ] **Task 12**: REST API — POST endpoints (pause, resume, cancel)
 - [ ] **Task 13**: Frontend mission API client + route registration
