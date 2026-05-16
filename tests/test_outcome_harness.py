@@ -185,6 +185,59 @@ async def test_handle_goal_status_without_goal_reports_no_outcome() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_goal_set_rejected_when_outcome_active() -> None:
+    store = FakeStore()
+    harness = _make_harness(store)
+    existing = {
+        "id": "outc_existing",
+        "description": "Fix tests",
+        "rubric": "pytest passes",
+        "status": "active",
+        "iteration": 1,
+        "max_iterations": 5,
+    }
+    session = _session(config={"outcome": existing})
+    lease = _lease(session.id)
+
+    await harness._handle_goal_command(session, "/goal Ship new feature", lease)
+
+    response = [event for event in store.events if event[1] == EventType.LLM_RESPONSE][-1]
+    content = response[2]["message"]["content"]
+    assert "Outcome already active" in content
+    assert "/goal pause" in content and "/goal clear" in content
+    # No state change, no new outcome event, no kickoff, no enqueue.
+    assert store.config_updates == []
+    assert not any(event[1] == EventType.OUTCOME_DEFINED for event in store.events)
+    assert store.synthetic_messages == []
+    assert session.config["outcome"] == existing
+
+
+@pytest.mark.asyncio
+async def test_handle_goal_set_allowed_when_outcome_paused() -> None:
+    store = FakeStore()
+    harness = _make_harness(store)
+    session = _session(config={
+        "outcome": {
+            "id": "outc_old",
+            "description": "Fix tests",
+            "rubric": "pytest passes",
+            "status": "paused",
+            "iteration": 2,
+            "max_iterations": 5,
+        },
+    })
+    lease = _lease(session.id)
+
+    await harness._handle_goal_command(session, "/goal Ship new feature", lease)
+
+    state = store.config_updates[0][2]
+    assert state["description"] == "Ship new feature"
+    assert state["status"] == "active"
+    assert any(event[1] == EventType.OUTCOME_DEFINED for event in store.events)
+    assert store.synthetic_messages[0][1] == "Ship new feature"
+
+
+@pytest.mark.asyncio
 async def test_handle_goal_pause_updates_existing_state() -> None:
     store = FakeStore()
     harness = _make_harness(store)

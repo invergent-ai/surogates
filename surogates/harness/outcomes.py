@@ -13,13 +13,12 @@ from dataclasses import asdict, dataclass
 from typing import Any
 from uuid import uuid4
 
-DEFAULT_MAX_ITERATIONS = 3
+DEFAULT_MAX_ITERATIONS = 20
 MAX_MAX_ITERATIONS = 20
+DEFAULT_EVALUATOR_RESPONSE_MAX_CHARS = 16384
 DEFAULT_OUTCOME_RUBRIC = (
-    "The outcome is satisfied only when the assistant's latest response "
-    "explicitly confirms the requested work is complete, clearly presents "
-    "the final deliverable, or clearly explains that the work is blocked or "
-    "unachievable and what remains outside the agent's control."
+    "Satisfied when the assistant's latest response shows the requested "
+    "work is complete and presents the final deliverable."
 )
 
 _RUBRIC_RE = re.compile(r"\n\s*(?:rubric|criteria)\s*:\s*\n", re.IGNORECASE)
@@ -29,11 +28,20 @@ EVALUATOR_SYSTEM_PROMPT = (
     "You are a strict outcome evaluator for an agent harness. Evaluate the "
     "assistant's latest response against the user's outcome and rubric. Use "
     "a separate, critical perspective. Return only JSON with keys: result, "
-    "explanation, feedback. result must be one of satisfied, needs_revision, "
-    "or failed. Use failed only when the outcome and rubric contradict each "
-    "other or cannot be evaluated. Treat a clearly blocked or unachievable "
-    "outcome as satisfied if the response explains the block and next user "
-    "action clearly."
+    "explanation, feedback.\n\n"
+    "result must be one of: satisfied, needs_revision, blocked, failed.\n"
+    "- satisfied: the response provides concrete evidence that every rubric "
+    "criterion is met. Evidence means a file-contents excerpt, an output "
+    "line, a command result, or a quoted artifact. Do not accept generic "
+    "phrases like \"all requirements met\", \"the work is complete\", or "
+    "claims that merely imply completion.\n"
+    "- needs_revision: at least one rubric criterion lacks specific "
+    "evidence in the response; the agent should keep working.\n"
+    "- blocked: the response clearly explains why the agent cannot make "
+    "further progress (missing access, missing input, external dependency) "
+    "AND names the next user action required to unblock it.\n"
+    "- failed: the outcome and rubric contradict each other, or the "
+    "response cannot be evaluated."
 )
 
 
@@ -186,6 +194,12 @@ def build_defined_outcome_from_event(
 
 
 def build_continuation_prompt(state: OutcomeState) -> str:
+    # Deliberately surfaces the evaluator's feedback to the agent so it has
+    # targeted revision guidance turn-to-turn. The tradeoff is that the agent
+    # sees the judge's reasoning and could learn to echo specific phrases
+    # back. We accept this because the rubric-driven evaluator already
+    # demands concrete evidence (file excerpts, output lines), which is
+    # harder to game than open-ended judgement on a bare goal.
     feedback = (
         state.last_feedback
         or state.last_explanation
@@ -205,13 +219,16 @@ def build_continuation_prompt(state: OutcomeState) -> str:
 def build_evaluator_messages(
     state: OutcomeState,
     latest_response: str,
+    *,
+    response_max_chars: int = DEFAULT_EVALUATOR_RESPONSE_MAX_CHARS,
 ) -> list[dict[str, str]]:
+    limit = max(1, int(response_max_chars or DEFAULT_EVALUATOR_RESPONSE_MAX_CHARS))
     payload = (
         f"Outcome:\n{state.description}\n\n"
         f"Rubric:\n{state.rubric}\n\n"
-        f"Assistant latest response:\n{(latest_response or '')[:4000]}\n\n"
+        f"Assistant latest response:\n{(latest_response or '')[:limit]}\n\n"
         "Return JSON exactly like:\n"
-        '{"result":"satisfied|needs_revision|failed",'
+        '{"result":"satisfied|needs_revision|blocked|failed",'
         '"explanation":"one sentence","feedback":"revision guidance"}'
     )
     return [
@@ -256,7 +273,7 @@ def parse_outcome_evaluation(raw: str) -> OutcomeEvaluation:
         )
 
     result = str(data.get("result") or "needs_revision").strip()
-    if result not in {"satisfied", "needs_revision", "failed"}:
+    if result not in {"satisfied", "needs_revision", "blocked", "failed"}:
         result = "needs_revision"
     explanation = str(data.get("explanation") or "no explanation provided").strip()
     feedback = str(data.get("feedback") or explanation).strip()
@@ -291,6 +308,14 @@ def apply_evaluation(
             result="satisfied",
             should_continue=False,
             message=f"Outcome satisfied: {evaluation.explanation}",
+        )
+
+    if evaluation.result == "blocked":
+        state.status = "blocked"
+        return OutcomeDecision(
+            result="blocked",
+            should_continue=False,
+            message=f"Outcome blocked: {evaluation.explanation}",
         )
 
     if evaluation.result == "failed":

@@ -145,6 +145,21 @@ def test_build_evaluator_messages_contains_outcome_rubric_and_response() -> None
     assert '"result"' in joined
 
 
+def test_evaluator_system_prompt_requires_concrete_evidence() -> None:
+    state = start_outcome(
+        "Fix tests",
+        rubric="pytest passes",
+        max_iterations=3,
+        now_iso="2026-05-12T10:00:00Z",
+    )
+
+    system = build_evaluator_messages(state, "done")[0]["content"]
+
+    assert "concrete evidence" in system
+    assert "needs_revision" in system
+    assert "generic phrases" in system or "Do not accept generic" in system
+
+
 def test_apply_evaluation_satisfied_marks_state_satisfied() -> None:
     state = start_outcome(
         "Fix tests",
@@ -165,6 +180,46 @@ def test_apply_evaluation_satisfied_marks_state_satisfied() -> None:
     assert state.status == "satisfied"
     assert decision.should_continue is False
     assert decision.result == "satisfied"
+
+
+def test_apply_evaluation_blocked_marks_state_blocked() -> None:
+    state = start_outcome(
+        "Fix tests",
+        rubric="",
+        max_iterations=3,
+        now_iso="2026-05-12T10:00:00Z",
+    )
+
+    decision = apply_evaluation(
+        state,
+        parse_outcome_evaluation(
+            '{"result":"blocked","explanation":"needs DB credentials","feedback":""}'
+        ),
+        now_iso="2026-05-12T10:01:00Z",
+        max_parse_failures=3,
+    )
+
+    assert state.status == "blocked"
+    assert decision.result == "blocked"
+    assert decision.should_continue is False
+    assert "blocked" in decision.message.lower()
+    assert "DB credentials" in decision.message
+
+
+def test_build_evaluator_messages_truncates_response_to_max_chars() -> None:
+    state = start_outcome(
+        "Fix tests",
+        rubric="pytest passes",
+        max_iterations=3,
+        now_iso="2026-05-12T10:00:00Z",
+    )
+    long_response = "x" * 500 + "TAIL"
+
+    messages = build_evaluator_messages(state, long_response, response_max_chars=100)
+    user = messages[1]["content"]
+
+    assert "x" * 100 in user
+    assert "TAIL" not in user
 
 
 def test_apply_evaluation_needs_revision_continues_before_budget() -> None:
@@ -251,6 +306,7 @@ def test_outcome_event_type_values_are_stable() -> None:
 def test_outcome_settings_defaults() -> None:
     settings = Settings()
 
-    assert settings.outcomes.max_iterations == 3
+    assert settings.outcomes.max_iterations == 20
     assert settings.outcomes.max_parse_failures == 3
     assert settings.outcomes.evaluator_model == ""
+    assert settings.outcomes.evaluator_response_max_chars == 16384

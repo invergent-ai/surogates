@@ -493,11 +493,12 @@ class OutcomeSettings(BaseSettings):
 
     model_config = {"env_prefix": "SUROGATES_OUTCOMES_"}
 
-    max_iterations: int = 3
+    max_iterations: int = 20
     max_parse_failures: int = 3
     evaluator_model: str = ""
     evaluator_base_url: str = ""
     evaluator_api_key: str = ""
+    evaluator_response_max_chars: int = 16384
 
 
 class ScheduledSessionSettings(BaseSettings):

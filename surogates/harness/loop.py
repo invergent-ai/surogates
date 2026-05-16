@@ -3840,10 +3840,23 @@ class AgentHarness:
         command = parse_goal_command(args)
         current = OutcomeState.from_config((session.config or {}).get("outcome"))
 
+        outcome_kickoff_needed = False
+
         if command.action == "status":
             message = self._format_outcome_status(current)
         elif command.action == "set":
-            message = await self._define_goal_outcome(session, command)
+            # Reject setting a new outcome while one is active — a continuation
+            # kickoff for the prior outcome may be pending in the event log,
+            # and overwriting session.config["outcome"] would orphan it.
+            if current is not None and current.status == "active":
+                message = (
+                    f"Outcome already active ({current.iteration}/"
+                    f"{current.max_iterations}): {current.description}. "
+                    "Use /goal pause or /goal clear before setting a new outcome."
+                )
+            else:
+                message = await self._define_goal_outcome(session, command)
+                outcome_kickoff_needed = True
         elif command.action == "pause":
             message = await self._pause_goal_outcome(session, current)
         elif command.action == "resume":
@@ -3864,7 +3877,7 @@ class AgentHarness:
             lease_token=lease.lease_token,
         )
 
-        if command.action == "set":
+        if outcome_kickoff_needed:
             outcome = OutcomeState.from_config((session.config or {}).get("outcome"))
             if outcome is None:
                 return
@@ -4003,7 +4016,13 @@ class AgentHarness:
     ) -> Any:
         settings = self._outcome_settings()
         eval_model = getattr(settings, "evaluator_model", "") or model
-        messages = build_evaluator_messages(state, latest_response)
+        messages = build_evaluator_messages(
+            state,
+            latest_response,
+            response_max_chars=getattr(
+                settings, "evaluator_response_max_chars", 16384,
+            ),
+        )
         try:
             response = await self._llm.chat.completions.create(
                 model=eval_model,
