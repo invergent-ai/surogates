@@ -133,6 +133,54 @@ async def test_rate_limit_blocks_within_window(
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_first_evaluation_ignores_tasks_predating_mission(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    """Terminal tasks completed BEFORE the mission was created must not
+    trigger the very first evaluator pass (a regression guard against the
+    original ``since is None → no time filter`` bug)."""
+    from datetime import timedelta
+
+    from surogates.missions.evaluator import should_evaluate
+
+    store = MissionStore(session_factory)
+    created = await handle_mission_create(
+        description="d", rubric="r",
+        session_id=chat_session.id, user_id=user_id, org_id=org_id,
+        agent_id="orchestrator",
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+    )
+    # Backdate a terminal task's completed_at to BEFORE the mission's
+    # created_at by an hour. The mission has never been evaluated yet
+    # (last_evaluation_at IS NULL), so the buggy implementation would
+    # treat this as a fresh trigger.
+    mission = await store.get(created.mission_id)
+    pre_mission = mission.created_at - timedelta(hours=1)
+    if pre_mission.tzinfo is not None:
+        pre_mission = pre_mission.replace(tzinfo=None)
+    async with session_factory() as db:
+        db.add(Task(
+            org_id=org_id, parent_session_id=chat_session.id,
+            goal="stale verifier from a prior mission",
+            status="done",
+            completed_at=pre_mission,
+            mission_id=created.mission_id,
+        ))
+        await db.commit()
+
+    decision = await should_evaluate(
+        mission_id=created.mission_id,
+        coordinator_last_response="just spawned the first round",
+        session_factory=session_factory,
+        mission_store=store,
+        rate_limit_seconds=30,
+    )
+    assert decision.should is False
+    assert decision.trigger == "no_trigger"
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_old_terminal_task_does_not_retrigger_after_evaluation(
     session_factory, session_store, org_id, user_id, chat_session,
 ):
@@ -424,3 +472,63 @@ async def test_harness_evaluator_records_parse_failure_on_bad_judge_output(
             )
         )).scalars().all()
         assert any(e.data.get("parse_failed") is True for e in end)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_harness_transport_failure_does_not_consume_iteration_budget(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    """A transport-level judge failure (timeout, rate limit, outage)
+    emits a transport_failed evaluation.end event but does NOT increment
+    the mission iteration. 20 successive outages would otherwise silently
+    terminal-ize the mission as max_iterations_reached."""
+    from surogates.harness.loop import _maybe_run_mission_evaluator
+
+    store = MissionStore(session_factory)
+    created = await handle_mission_create(
+        description="d", rubric="r",
+        session_id=chat_session.id, user_id=user_id, org_id=org_id,
+        agent_id="orchestrator",
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+    )
+    async with session_factory() as db:
+        db.add(Task(
+            org_id=org_id, parent_session_id=chat_session.id,
+            goal="t", status="done",
+            completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            mission_id=created.mission_id,
+        ))
+        await db.commit()
+
+    transport_failed_judge = AsyncMock(
+        side_effect=RuntimeError("provider 429 rate-limit"),
+    )
+
+    await _maybe_run_mission_evaluator(
+        session_id=chat_session.id,
+        coordinator_last_response="some work",
+        session_store=session_store,
+        session_factory=session_factory,
+        mission_store=store,
+        judge=transport_failed_judge,
+    )
+
+    m = await store.get(created.mission_id)
+    # No iteration consumed.
+    assert m.iteration == 0
+    # No needs_revision verdict recorded — the mission stays untouched
+    # so the next trigger gets a fresh evaluation attempt.
+    assert m.last_evaluation_result is None
+    # Transport-failed event emitted for dashboard visibility.
+    async with session_factory() as db:
+        end = (await db.execute(
+            select(Event).where(
+                Event.session_id == chat_session.id,
+                Event.type == EventType.MISSION_EVALUATION_END.value,
+            )
+        )).scalars().all()
+        assert any(e.data.get("transport_failed") is True for e in end)
+        assert any(e.data.get("result") == "transport_failed" for e in end)
+    # Parse-failure counter is NOT incremented (transport != parse).
+    assert m.evaluator_parse_failures == 0

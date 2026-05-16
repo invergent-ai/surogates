@@ -64,9 +64,15 @@ async def _has_recent_terminal_task(
     mission_id: UUID,
     *,
     session_factory: Any,
-    since: datetime | None,
+    since: datetime,
 ) -> bool:
-    """True iff a terminal task has completed since the last evaluation."""
+    """True iff a terminal task has completed strictly after ``since``.
+
+    ``since`` is a hard lower bound — callers pass
+    ``mission.last_evaluation_at or mission.created_at`` so the first
+    evaluator pass only counts tasks completed after the mission was
+    created, not pre-existing terminal rows with the same mission_id.
+    """
     from surogates.db.models import Task
 
     async with session_factory() as db:
@@ -75,14 +81,11 @@ async def _has_recent_terminal_task(
             .where(
                 Task.mission_id == mission_id,
                 Task.status.in_(("done", "failed", "cancelled")),
-            )
-            .limit(1)
-        )
-        if since is not None:
-            stmt = stmt.where(
                 Task.completed_at.isnot(None),
                 Task.completed_at > since,
             )
+            .limit(1)
+        )
         row = await db.scalar(stmt)
     return row is not None
 
@@ -117,10 +120,17 @@ async def should_evaluate(
 
     mission = await mission_store.get(mission_id)
 
+    # Use ``last_evaluation_at`` when present, else fall back to the
+    # mission's ``created_at``. This prevents the first evaluator pass
+    # from firing on terminal tasks that pre-date the mission (possible
+    # with seed data or under-edited mission_id stamps); only work that
+    # happened *after* the mission was defined counts as evidence.
+    since = mission.last_evaluation_at or mission.created_at
+
     if await _has_recent_terminal_task(
         mission_id,
         session_factory=session_factory,
-        since=mission.last_evaluation_at,
+        since=since,
     ):
         return EvaluationDecision(should=True, trigger="task_terminal")
 
