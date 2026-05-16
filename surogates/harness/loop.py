@@ -3917,6 +3917,16 @@ class AgentHarness:
                             "connection (the coordinator must be enqueued "
                             "after kickoff)."
                         )
+                    elif self._tenant.user_id is None:
+                        # Service accounts and channel sessions don't have
+                        # a user_id; ``missions.user_id`` is NOT NULL.
+                        # Reject with a friendly message instead of letting
+                        # the insert fail with NotNullViolationError.
+                        message = (
+                            "/mission requires a user session — service "
+                            "accounts and channel principals cannot own "
+                            "missions."
+                        )
                     else:
                         result = await handle_mission_create(
                             description=command.description or "",
@@ -5037,14 +5047,30 @@ async def _maybe_run_mission_evaluator(
         )
         return
     except Exception as exc:
+        # Transport-level failure (provider outage, rate limit, timeout).
+        # Do NOT synthesize a needs_revision verdict — that would burn
+        # one of the mission's max_iterations on something that wasn't a
+        # real evaluator turn. Emit a transport-failed evaluation.end
+        # event so the dashboard can surface the outage, and return.
+        # The next no-tool-call response triggers another attempt; the
+        # rate-limit guard prevents tight retries.
         logger.warning(
-            "Mission %s evaluator judge call failed: %s", active.id, exc,
+            "Mission %s evaluator judge call failed (transport): %s",
+            active.id, exc,
         )
-        verdict = {
-            "result": "needs_revision",
-            "explanation": "judge call failed",
-            "feedback": str(exc)[:500],
-        }
+        await session_store.emit_event(
+            session_id, EventType.MISSION_EVALUATION_END,
+            {
+                "mission_id": str(active.id),
+                "iteration": active.iteration,
+                "trigger": decision.trigger,
+                "result": "transport_failed",
+                "explanation": "judge call failed (transport)",
+                "feedback": str(exc)[:500],
+                "transport_failed": True,
+            },
+        )
+        return
 
     await apply_verdict(
         mission_id=active.id,
