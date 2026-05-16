@@ -25,7 +25,7 @@ Update this list before each commit. Status legend: `[ ]` not started · `[~]` i
 - [x] **Task 7**: Tool registration + gating (`WORKER_EXCLUDED_TOOLS`, `_AGENT_TYPE_GATED_TOOLS`, `_filter_effective_tools`)
 - [x] **Task 8**: `WORKER_COMPLETE` payload includes `task_id`
 - [x] **Task 9**: `tasks_tick` — promote, finalize, enqueue
-- [ ] **Task 10**: Wire `tasks_tick` into orchestrator + end-to-end integration tests
+- [x] **Task 10**: Wire `tasks_tick` into orchestrator + end-to-end integration tests
 
 **Test placement decision** (added at execution time): DB-backed tests live under `tests/integration/tasks/` to inherit testcontainers fixtures (`engine`, `session_factory`, `session_store`, `redis_client`). Pure mock-based tests live under `tests/tasks/`. Adjust commit messages and `pytest` invocations accordingly.
 

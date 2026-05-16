@@ -45,6 +45,13 @@ _BASE_RETRY_DELAY: float = 1.0
 _ORPHAN_SWEEP_INTERVAL: float = 60.0
 _ORPHAN_STALE_SECONDS: int = 300
 
+# Subagent task layer tick cadence — promote ``todo`` Tasks whose parents
+# have all completed, finalise ended worker Sessions, and atomically
+# claim ``ready`` Tasks. 5s keeps the wake-after-parent-completion
+# latency tight without burning DB cycles. See
+# ``surogates.tasks.dispatcher.tasks_tick`` for what each tick does.
+_TASKS_TICK_INTERVAL: float = 5.0
+
 # A queued wake can race with an already-running harness that still owns
 # the session lease, especially when the user interrupts and immediately
 # sends a replacement message. Back off briefly before requeueing so the
@@ -71,6 +78,8 @@ class Orchestrator:
         max_concurrent: int = 50,
         poll_timeout: int = 5,
         browser_pool: BrowserPool | None = None,
+        session_factory: Any | None = None,
+        tenant_for_task: Callable[[Any], Any] | None = None,
     ) -> None:
         self.redis = redis_client
         self.session_store = session_store
@@ -80,6 +89,12 @@ class Orchestrator:
         self._queue_key = queue_key
         self._poll_timeout = poll_timeout
         self._browser_pool = browser_pool
+        # Subagent task layer plumbing — both must be set for tasks_tick
+        # to run. When either is None the loop logs a warning at startup
+        # and stays disabled (the orchestrator still serves direct
+        # spawn_worker / chat sessions normally).
+        self._session_factory = session_factory
+        self._tenant_for_task = tenant_for_task
         self._running = True
         self._tasks: set[asyncio.Task] = set()
         # Active harnesses by session ID — for delivering interrupt signals.
@@ -145,6 +160,23 @@ class Orchestrator:
             name="orphan-sweeper",
         )
 
+        # Start the subagent task layer tick.  Disabled when the caller
+        # didn't provide ``session_factory`` and ``tenant_for_task`` —
+        # the orchestrator still serves plain spawn_worker / chat
+        # sessions, just without the durable Task abstraction.
+        tasks_tick_task: asyncio.Task | None = None
+        if self._session_factory is not None and self._tenant_for_task is not None:
+            tasks_tick_task = asyncio.create_task(
+                self._tasks_tick_forever(),
+                name="tasks-tick",
+            )
+        else:
+            logger.warning(
+                "Orchestrator started without session_factory/tenant_for_task; "
+                "tasks_tick is disabled. spawn_task tools will create rows but "
+                "deferred (todo) tasks will not be promoted by this worker."
+            )
+
         while self._running:
             try:
                 # BZPOPMIN returns (key, member, score) or None on timeout.
@@ -186,7 +218,10 @@ class Orchestrator:
             task.add_done_callback(self._task_done)
 
         # Stop background helpers.
-        for task in (interrupt_task, orphan_sweeper_task):
+        helpers = [interrupt_task, orphan_sweeper_task]
+        if tasks_tick_task is not None:
+            helpers.append(tasks_tick_task)
+        for task in helpers:
             task.cancel()
             try:
                 await task
@@ -462,5 +497,50 @@ class Orchestrator:
 
             try:
                 await asyncio.sleep(_ORPHAN_SWEEP_INTERVAL)
+            except asyncio.CancelledError:
+                return
+
+    async def _tasks_tick_forever(self) -> None:
+        """Run one ``tasks_tick`` every ``_TASKS_TICK_INTERVAL`` seconds.
+
+        Each tick:
+        1. Promotes ``todo`` Tasks whose every parent has reached ``done``.
+        2. Finalises Tasks whose worker Session ended (done / retry / failed).
+        3. Atomically claims ``ready`` Tasks and enqueues their child Sessions.
+
+        Errors in a single tick are logged and swallowed so a transient
+        DB hiccup doesn't kill the loop. Cancellation (orchestrator
+        shutdown) is propagated normally.
+
+        Caller invariant: ``self._session_factory`` and
+        ``self._tenant_for_task`` are non-None (checked at start in
+        :meth:`run`).
+        """
+        from surogates.tasks.dispatcher import tasks_tick
+
+        # Small random offset so replicas don't all tick in unison after
+        # a fleet restart — keeps the lock contention bounded.
+        await asyncio.sleep(random.uniform(0, _TASKS_TICK_INTERVAL))
+
+        while self._running:
+            try:
+                counts = await tasks_tick(
+                    session_factory=self._session_factory,
+                    redis=self.redis,
+                    session_store=self.session_store,
+                    tenant_for_task=self._tenant_for_task,
+                )
+                if any(counts.values()):
+                    logger.debug(
+                        "tasks_tick: promoted=%d finalized=%d enqueued=%d",
+                        counts["promoted"], counts["finalized"], counts["enqueued"],
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("tasks_tick failed; continuing")
+
+            try:
+                await asyncio.sleep(_TASKS_TICK_INTERVAL)
             except asyncio.CancelledError:
                 return
