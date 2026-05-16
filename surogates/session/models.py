@@ -32,6 +32,10 @@ class Session(BaseModel):
     config: dict = Field(default_factory=dict)
     idempotency_key: str | None = None
     parent_id: UUID | None = None
+    # Subagent task layer: when set, this session is one execution attempt
+    # of the referenced Task (see surogates.db.models.Task). None for plain
+    # chat sessions and for spawn_worker children not backed by a Task.
+    task_id: UUID | None = None
     message_count: int = 0
     tool_call_count: int = 0
     input_tokens: int = 0
