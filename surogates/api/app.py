@@ -211,6 +211,7 @@ def create_app() -> FastAPI:
         health,
         inbox,
         memory,
+        missions,
         prompts,
         scheduled_work,
         sessions,
@@ -242,6 +243,7 @@ def create_app() -> FastAPI:
     app.include_router(browser.router, prefix="/v1", tags=["browser"])
     app.include_router(clarify.router, prefix="/v1", tags=["clarify"])
     app.include_router(inbox.router, prefix="/v1", tags=["inbox"])
+    app.include_router(missions.router, prefix="/v1", tags=["missions"])
     app.include_router(admin.router, prefix="/v1/admin", tags=["admin"])
     app.include_router(admin_mcp.router, prefix="/v1/admin", tags=["admin"])
     app.include_router(admin_credentials.router, prefix="/v1/admin", tags=["admin"])
