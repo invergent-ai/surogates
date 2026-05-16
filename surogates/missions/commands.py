@@ -227,3 +227,126 @@ async def handle_mission_create(
         ok=True, mission_id=mission_id,
         message=f"Mission {mission_id} started.",
     )
+
+
+async def handle_mission_status(
+    *,
+    session_id: UUID,
+    mission_store: MissionStore,
+) -> MissionHandlerResult:
+    """Return a human-readable status string for the session's active mission."""
+    active = await mission_store.get_active_for_session(session_id)
+    if active is None:
+        return MissionHandlerResult(
+            ok=True, message="No active mission on this session.",
+        )
+    return MissionHandlerResult(
+        ok=True, mission_id=active.id,
+        message=(
+            f"Mission {active.id}: status={active.status}, "
+            f"iteration={active.iteration}/{active.max_iterations}.\n"
+            f"Description: {active.description}\n"
+            f"Latest evaluator verdict: "
+            f"{active.last_evaluation_result or '(none yet)'}"
+        ),
+    )
+
+
+async def handle_mission_pause(
+    *,
+    session_id: UUID,
+    reason: str | None,
+    session_store: Any,
+    mission_store: MissionStore,
+) -> MissionHandlerResult:
+    active = await mission_store.get_active_for_session(session_id)
+    if active is None:
+        return MissionHandlerResult(ok=False, error="No active mission to pause.")
+    if active.status != "active":
+        return MissionHandlerResult(
+            ok=False, mission_id=active.id,
+            error=f"Mission is not active (status={active.status}); cannot pause.",
+        )
+    await mission_store.set_status(
+        active.id, "paused", paused_reason=reason,
+    )
+    await session_store.emit_event(
+        session_id, EventType.MISSION_PAUSED,
+        {"mission_id": str(active.id), "reason": reason},
+    )
+    return MissionHandlerResult(
+        ok=True, mission_id=active.id, message="Mission paused.",
+    )
+
+
+async def handle_mission_resume(
+    *,
+    session_id: UUID,
+    agent_id: str,
+    session_store: Any,
+    mission_store: MissionStore,
+    redis: Any,
+) -> MissionHandlerResult:
+    active = await mission_store.get_active_for_session(session_id)
+    if active is None or active.status != "paused":
+        return MissionHandlerResult(
+            ok=False, error="No paused mission on this session.",
+        )
+    await mission_store.set_status(active.id, "active")
+    await session_store.emit_event(
+        session_id, EventType.MISSION_RESUMED,
+        {"mission_id": str(active.id)},
+    )
+    # Wake the coordinator so pending continuations are processed.
+    await enqueue_session(redis, agent_id, session_id)
+    return MissionHandlerResult(
+        ok=True, mission_id=active.id, message="Mission resumed.",
+    )
+
+
+async def handle_mission_cancel(
+    *,
+    session_id: UUID,
+    reason: str | None,
+    cascade_to_workers: bool,
+    session_store: Any,
+    session_factory: Any,
+    mission_store: MissionStore,
+    redis: Any,
+) -> MissionHandlerResult:
+    active = await mission_store.get_active_for_session(session_id)
+    if active is None:
+        return MissionHandlerResult(ok=False, error="No active mission to cancel.")
+    if active.status not in ("active", "paused"):
+        return MissionHandlerResult(
+            ok=False, mission_id=active.id,
+            error=f"Mission already terminal (status={active.status}).",
+        )
+    await mission_store.set_status(
+        active.id, "cancelled", cancelled_reason=reason,
+    )
+    await session_store.clear_session_config_key(session_id, "active_mission_id")
+    if cascade_to_workers:
+        await _cascade_cancel_workers(
+            mission_id=active.id,
+            session_factory=session_factory,
+            redis=redis,
+        )
+    await session_store.emit_event(
+        session_id, EventType.MISSION_CANCELLED,
+        {
+            "mission_id": str(active.id),
+            "reason": reason,
+            "cascade_to_workers": cascade_to_workers,
+        },
+    )
+    return MissionHandlerResult(
+        ok=True, mission_id=active.id, message="Mission cancelled.",
+    )
+
+
+async def _cascade_cancel_workers(
+    *, mission_id: UUID, session_factory: Any, redis: Any,
+) -> None:
+    """Stub — real implementation lands in Task 6."""
+    return None

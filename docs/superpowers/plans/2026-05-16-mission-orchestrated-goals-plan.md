@@ -20,7 +20,7 @@ Update before each commit. Legend: `[ ]` not started · `[~]` in progress · `[x
 - [x] **Task 2**: Mission store (CRUD + rate-limit guard + mutual-exclusion check)
 - [x] **Task 3**: `/mission` command parser (description + rubric + subcommand dispatch)
 - [x] **Task 4**: `/mission` create handler with `/goal` mutual exclusion + kickoff event + skill preload
-- [ ] **Task 5**: `/mission status` + pause/resume/cancel slash handlers
+- [x] **Task 5**: `/mission status` + pause/resume/cancel slash handlers
 - [ ] **Task 6**: Cascade cancel (issues `cancel_task` per non-terminal child)
 - [ ] **Task 7**: `spawn_task` stamps `mission_id` from active mission
 - [ ] **Task 8**: Mission evaluator — trigger detection + rate-limit guard

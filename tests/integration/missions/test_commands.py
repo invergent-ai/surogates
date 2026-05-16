@@ -136,3 +136,150 @@ async def test_create_rejects_when_active_mission_already_on_session(
     )
     assert second.ok is False
     assert "mission" in second.error.lower()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_status_returns_active_mission_summary(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    from surogates.missions.commands import (
+        handle_mission_create, handle_mission_status,
+    )
+    from surogates.missions.store import MissionStore
+
+    store = MissionStore(session_factory)
+    created = await handle_mission_create(
+        description="d", rubric="r",
+        session_id=chat_session.id, user_id=user_id, org_id=org_id,
+        agent_id="orchestrator",
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+    )
+    status = await handle_mission_status(
+        session_id=chat_session.id, mission_store=store,
+    )
+    assert status.ok is True
+    assert str(created.mission_id) in status.message
+    assert "active" in status.message
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_status_when_no_active_mission(
+    session_factory, session_store, org_id, user_id,
+):
+    from surogates.missions.commands import handle_mission_status
+    from surogates.missions.store import MissionStore
+
+    fresh = uuid.uuid4()
+    async with session_factory() as db:
+        db.add(ORMSession(
+            id=fresh, org_id=org_id, user_id=user_id, agent_id="orchestrator",
+            channel="web", status="active",
+        ))
+        await db.commit()
+
+    status = await handle_mission_status(
+        session_id=fresh, mission_store=MissionStore(session_factory),
+    )
+    assert status.ok is True
+    assert "no active mission" in status.message.lower()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_pause_transitions_status_and_emits_event(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    from surogates.missions.commands import (
+        handle_mission_create, handle_mission_pause,
+    )
+    from surogates.missions.store import MissionStore
+
+    store = MissionStore(session_factory)
+    redis = AsyncMock(zadd=AsyncMock())
+    await handle_mission_create(
+        description="d", rubric="r",
+        session_id=chat_session.id, user_id=user_id, org_id=org_id,
+        agent_id="orchestrator",
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store, redis=redis,
+    )
+    result = await handle_mission_pause(
+        session_id=chat_session.id, reason="waiting on review",
+        session_store=session_store, mission_store=store,
+    )
+    assert result.ok is True
+    m = await store.get(result.mission_id)
+    assert m.status == "paused"
+    assert m.paused_reason == "waiting on review"
+
+    async with session_factory() as db:
+        evs = (await db.execute(
+            select(Event).where(
+                Event.session_id == chat_session.id,
+                Event.type == EventType.MISSION_PAUSED.value,
+            )
+        )).scalars().all()
+        assert len(evs) == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_resume_transitions_back_to_active(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    from surogates.missions.commands import (
+        handle_mission_create, handle_mission_pause, handle_mission_resume,
+    )
+    from surogates.missions.store import MissionStore
+
+    store = MissionStore(session_factory)
+    redis = AsyncMock(zadd=AsyncMock())
+    await handle_mission_create(
+        description="d", rubric="r",
+        session_id=chat_session.id, user_id=user_id, org_id=org_id,
+        agent_id="orchestrator",
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store, redis=redis,
+    )
+    await handle_mission_pause(
+        session_id=chat_session.id, reason="x",
+        session_store=session_store, mission_store=store,
+    )
+    res = await handle_mission_resume(
+        session_id=chat_session.id, agent_id="orchestrator",
+        session_store=session_store, mission_store=store, redis=redis,
+    )
+    assert res.ok is True
+    m = await store.get(res.mission_id)
+    assert m.status == "active"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_cancel_without_cascade_marks_cancelled(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    from surogates.missions.commands import (
+        handle_mission_create, handle_mission_cancel,
+    )
+    from surogates.missions.store import MissionStore
+
+    store = MissionStore(session_factory)
+    redis = AsyncMock(zadd=AsyncMock(), publish=AsyncMock())
+    await handle_mission_create(
+        description="d", rubric="r",
+        session_id=chat_session.id, user_id=user_id, org_id=org_id,
+        agent_id="orchestrator",
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store, redis=redis,
+    )
+    res = await handle_mission_cancel(
+        session_id=chat_session.id,
+        reason="user changed mind",
+        cascade_to_workers=False,
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store, redis=redis,
+    )
+    assert res.ok is True
+    m = await store.get(res.mission_id)
+    assert m.status == "cancelled"
+    assert m.cancelled_reason == "user changed mind"
+    redis.publish.assert_not_called()
