@@ -213,6 +213,43 @@ async def test_handle_goal_set_rejected_when_outcome_active() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_mission_create_rejects_service_account_principal() -> None:
+    """A tenant with user_id=None (service-account/channel session) must
+    not be allowed to create a mission — missions.user_id is NOT NULL
+    and a bare attempt to insert would surface as NotNullViolationError."""
+    store = FakeStore()
+    # Override the harness tenant to have user_id=None (service account).
+    sa_tenant = TenantContext(
+        org_id=UUID("00000000-0000-0000-0000-000000000001"),
+        user_id=None,
+        org_config={},
+        user_preferences={},
+        permissions=frozenset(),
+        asset_root="/tmp/test",
+        service_account_id=UUID("00000000-0000-0000-0000-000000000099"),
+    )
+    harness = _make_harness(
+        store, tenant=sa_tenant, redis_client=AsyncMock(),
+        session_factory=MagicMock(),
+    )
+    session = _session()
+    lease = _lease(session.id)
+
+    await harness._handle_mission_command(
+        session,
+        "/mission Train the model\n\nRubric:\nReach gsm8k >= 0.8",
+        lease,
+    )
+
+    response = [event for event in store.events if event[1] == EventType.LLM_RESPONSE][-1]
+    content = response[2]["message"]["content"]
+    assert "user session" in content
+    # No mission was created — config wasn't touched, no kickoff queued.
+    assert store.config_updates == []
+    assert store.synthetic_messages == []
+
+
+@pytest.mark.asyncio
 async def test_handle_goal_set_rejected_when_active_mission_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
