@@ -75,6 +75,12 @@ class EventType(str, Enum):
     # triggers the dispatcher's retry path when the session re-wakes.
     HARNESS_RECOVERED = "harness.recovered"
 
+    # Sub-agent delegation (delegate_task tool)
+    DELEGATION_START = "delegation.start"
+    DELEGATION_COMPLETE = "delegation.complete"
+    DELEGATION_FAILED = "delegation.failed"
+    DELEGATION_STALE = "delegation.stale"
+
     # Expert delegation
     EXPERT_DELEGATION = "expert.delegation"
     EXPERT_RESULT = "expert.result"
