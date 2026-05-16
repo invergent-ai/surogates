@@ -211,6 +211,25 @@ delegate_task(
 )
 ```
 
+For parallel fan-out, pass an array via `goals`:
+
+```
+delegate_task(
+    goals=[
+        {"goal": "Review src/auth.py", "agent_type": "code-reviewer"},
+        {"goal": "Review src/billing.py", "agent_type": "code-reviewer"},
+    ]
+)
+```
+
+Each item may carry its own `context`, `model`, `agent_type`, and
+`role`. The handler launches all children concurrently via
+`asyncio.gather` and returns a JSON array of `{goal, result}` pairs
+once every child finishes (or fails / times out).
+
+See [`delegate_task` reference](#12-delegate_task-reference) below for
+the full schema, recursion controls, and observability.
+
 ### Precedence Rules
 
 Explicit arguments on `spawn_worker` / `delegate_task` always win over the agent def's presets:
@@ -389,3 +408,143 @@ End-to-end flow for a coordinator spawning two sub-agents in parallel:
 ```
 
 Sub-agents are the composability primitive for problems that decompose into independent subtasks with divergent tool/model/governance needs — multi-step research, parallel code review, fan-out experiments, anything where a fresh context window and a tighter governance envelope beat doing the work inline.
+
+## 12. `delegate_task` Reference
+
+`delegate_task` is the synchronous counterpart to `spawn_worker`. The
+coordinator blocks until every child finishes, and the children's final
+responses come back as the tool result. Use it when the coordinator
+needs each child's answer in hand before continuing; use `spawn_worker`
+when fire-and-forget is acceptable.
+
+### Schema
+
+```json
+{
+  "goal": "string (optional — required unless goals is set)",
+  "goals": [
+    {
+      "goal": "string (required)",
+      "context": "string (optional)",
+      "model": "string (optional)",
+      "agent_type": "string (optional)",
+      "role": "leaf | orchestrator (optional, default leaf)"
+    }
+  ],
+  "context": "string (optional, shared across all goals when batched)",
+  "model": "string (optional, shared across all goals)",
+  "agent_type": "string (optional, shared across all goals)",
+  "role": "leaf | orchestrator (optional, default leaf)"
+}
+```
+
+Exactly one of `goal` or `goals` must be set. Top-level `context` /
+`model` / `agent_type` / `role` act as defaults for each item in
+`goals` and are overridden per-item.
+
+### Recursion: Roles and Depth
+
+Children carry a `delegation_depth` value in their session config. The
+root coordinator has depth `0`; every `delegate_task` call increments
+the depth for the child it spawns.
+
+| Role | Child receives `delegate_task`? | Effect |
+|---|---|---|
+| `leaf` (default) | No | The tool is stripped from the child's allowed/excluded toolset so it cannot delegate further |
+| `orchestrator` | Yes | The child can call `delegate_task` itself, subject to the depth limit |
+
+The hard depth limit is **2** (one orchestrator level beneath the
+root). Any `delegate_task` call from a session whose
+`delegation_depth ≥ 2` is rejected with a clear error before any child
+session is created. This prevents runaway delegation trees while still
+permitting two-level orchestration patterns.
+
+### Toolset Resolution for Children
+
+When a child is spawned, its tool envelope is computed in this order:
+
+1. Start with the agent type's `tools` / `disallowed_tools` (if any).
+2. **Inherit parent exclusions:** anything in `parent.config["excluded_tools"]` is added to the child's denylist.
+3. **Intersect with parent allowlist:** if the parent has `allowed_tools` set, the child's allowlist becomes `child_allowed ∩ parent_allowed`. A preset cannot grant the child a tool the parent itself doesn't have.
+4. **Apply the hardcoded delegation blocklist:** the following tools are always stripped from delegated children regardless of preset:
+   - `clarify` — child has no surface to ask the user
+   - `spawn_worker`, `send_worker_message`, `stop_worker` — children cannot fork their own worker pools
+5. **Apply the role guard:** `role=leaf` strips `delegate_task` from the child.
+
+### Observability
+
+Every delegated child emits four event types on the **parent**'s event
+log:
+
+| Event | Emitted when | Payload |
+|---|---|---|
+| `delegation.start` | A child session has been created and enqueued | `{child_session_id, goal, role, depth, agent_type, model}` |
+| `delegation.complete` | The child finished successfully | `{child_session_id, goal, duration_seconds, tool_call_count, trace, files_written, files_read}` |
+| `delegation.failed` | The child errored, timed out, or hit `SESSION_FAIL` | `{child_session_id, goal, reason, duration_seconds}` |
+| `delegation.stale` | One-shot per child: the child stopped emitting events for longer than the threshold | `{child_session_id, idle_seconds, in_tool, threshold_seconds}` |
+
+The `trace` payload is built by walking the child's `tool.call` /
+`tool.result` events and recording `{name, ok, tool_call_id}` per
+invocation. `files_written` and `files_read` collect `path` arguments
+from `write_file`, `patch` (replace mode), and `read_file` calls,
+deduplicated in first-seen order. The same trace, file list, and a
+truncated trail are appended to the tool-result string so the
+coordinator LLM sees what the child touched:
+
+```text
+The PR review surfaced three issues...
+
+[delegation trace: 7 tool calls — read_file, search_files, read_file, ...
+ | files modified: src/auth.py
+ | files read: src/auth.py, tests/test_auth.py]
+```
+
+Operators and observability consumers should prefer the structured
+event payloads (full lists, no truncation) over the result-text
+summary (last `N=10` tool calls, comma-joined).
+
+### Stale Detection
+
+While polling for the child's `SESSION_COMPLETE` / `SESSION_FAIL`, the
+handler tracks the timestamp of the last child event. If the gap
+exceeds a threshold without progress, a single `delegation.stale`
+event fires on the parent. Two thresholds apply:
+
+| Mode | Threshold | When it applies |
+|---|---|---|
+| **Idle** | 60 s | The child's most recent event is anything other than an unmatched `tool.call` |
+| **In-tool** | 180 s | The child's last event is a `tool.call` without a matching `tool.result` — a tool is still running |
+
+A stale event is a warning, not a kill — the hard 300 s timeout still
+applies. The `in_tool` flag in the payload tells you whether the child
+is genuinely stuck or just running a slow tool.
+
+### Workspace Sharing
+
+Children inherit the parent's `storage_bucket` and `workspace_path`
+verbatim — they read and write into the same workspace prefix as the
+root session, without a `sessions/{child_id}/` allocation. The
+workspace path is auto-injected into every child's system prompt by
+the prompt builder, so children always know where they are even when
+no explicit hint is passed.
+
+Because file mutations land in the shared workspace, the parent should
+treat its own previously-read file caches as potentially stale once a
+`delegation.complete` event arrives with non-empty `files_written`.
+
+### Result Shape
+
+For a single goal, the result is the child's final assistant message
+(plus the trace summary suffix described above), exactly as before.
+
+For batched goals, the result is a JSON array:
+
+```json
+[
+  {"goal": "Review src/auth.py", "result": "Three issues found..."},
+  {"goal": "Review src/billing.py", "result": "Looks clean..."}
+]
+```
+
+Errors and timeouts are returned per-child as `{"error": "..."}` JSON
+in the `result` field; the surrounding tool call does not fail.

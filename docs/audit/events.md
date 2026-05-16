@@ -227,6 +227,114 @@ by the training-data selector to prioritize or exclude trajectories.
 `worker.spawned`, `worker.complete`, `worker.failed` — used by the
 coordinator pattern to track spawned sub-agents.
 
+### Outcome / `/goal` loop
+
+`user.define_outcome` — programmatic equivalent of `/goal`; defines an
+outcome via the events API.
+
+| key | type | notes |
+|---|---|---|
+| `description` | string | Outcome text. |
+| `rubric` | object | Optional `{type, content}` block with evaluation criteria. |
+| `max_iterations` | int | Optional override for `outcomes.max_iterations`. |
+
+`outcome.defined` — outcome state was saved on the session.
+
+| key | type | notes |
+|---|---|---|
+| `outcome_id` | string | Internal id (`outc_<hex>`). |
+| `description` | string | Outcome text. |
+| `rubric` | string | Resolved rubric text (default rubric when none was supplied). |
+| `max_iterations` | int | Iteration budget for this outcome. |
+
+`span.outcome_evaluation_start`, `span.outcome_evaluation_ongoing`,
+`span.outcome_evaluation_end` — evaluator span across one turn.
+
+| key | type | notes |
+|---|---|---|
+| `outcome_id` | string | |
+| `iteration` | int | 1-based iteration counter. |
+| `response_event_id` | int | `events.id` of the `llm.response` being graded (start only). |
+| `outcome_evaluation_start_id` | int | Back-reference to the matching start event (end only). |
+| `result` | string | `satisfied`, `needs_revision`, `blocked`, or `failed` (end only). |
+| `explanation` | string | One-sentence rationale from the evaluator (end only). |
+| `feedback` | string | Revision guidance the agent will see on the next continuation (end only). |
+| `parse_failed` | bool | True when the evaluator output couldn't be parsed; flipping repeatedly auto-pauses the outcome (end only). |
+
+`outcome.continuation` — Surogates queued another attempt; the
+synthetic `user.message` that follows carries `synthetic:
+outcome_continuation` and the model-visible continuation prompt.
+
+| key | type | notes |
+|---|---|---|
+| `outcome_id` | string | |
+| `iteration` | int | |
+| `status_event_id` | int \| null | `events.id` of the assistant status message that preceded this continuation. |
+
+`outcome.paused` — outcome paused by the user (`/goal pause`) or by
+repeated evaluator parse failures.
+
+| key | type | notes |
+|---|---|---|
+| `outcome_id` | string | |
+| `reason` | string | `user-paused` or a specific evaluator-failure reason. |
+
+`outcome.cleared` — outcome state was removed (`/goal clear`).
+
+| key | type | notes |
+|---|---|---|
+| `outcome_id` | string \| null | Null when no outcome was active at clear time. |
+
+### Sub-agent delegation
+
+`delegation.start`, `delegation.complete`, `delegation.failed`,
+`delegation.stale` — emitted on the **parent**'s event log by the
+`delegate_task` tool. The child's own event log is still the source of
+truth for everything that happened inside it; these events are the
+parent-side audit trail.
+
+`delegation.start` — a child session has been created and enqueued.
+
+| key | type | notes |
+|---|---|---|
+| `child_session_id` | string | UUID of the new child session. |
+| `goal` | string | Child's goal text. |
+| `role` | string | `leaf` or `orchestrator`. |
+| `depth` | int | Child's `delegation_depth` (root coordinator is `0`). |
+| `agent_type` | string \| null | Resolved sub-agent name, if specified. |
+| `model` | string \| null | Resolved model override, if any. |
+
+`delegation.complete` — child finished successfully.
+
+| key | type | notes |
+|---|---|---|
+| `child_session_id` | string | |
+| `goal` | string | |
+| `duration_seconds` | number | Wall-clock from spawn to completion. |
+| `tool_call_count` | int | Number of `tool.call` events in the child. |
+| `trace` | object[] | Each entry: `{name, ok, tool_call_id}`. `ok=false` means the matching `tool.result` had an error or never arrived. |
+| `files_written` | string[] | `path` arguments from `write_file` / `patch` (replace mode) calls in the child, deduplicated. |
+| `files_read` | string[] | `path` arguments from `read_file` calls in the child, deduplicated. |
+
+`delegation.failed` — child errored, timed out, or hit `session.fail`.
+
+| key | type | notes |
+|---|---|---|
+| `child_session_id` | string | |
+| `goal` | string | |
+| `reason` | string | Failure description. |
+| `duration_seconds` | number | |
+
+`delegation.stale` — one-shot per child, fired when the child stops
+emitting events for longer than the configured threshold during poll.
+
+| key | type | notes |
+|---|---|---|
+| `child_session_id` | string | |
+| `idle_seconds` | number | Time since the last child event. |
+| `in_tool` | bool | True when the child's last event is an unmatched `tool.call` (a tool is still running). |
+| `threshold_seconds` | number | The threshold that was crossed (60 s idle, 180 s in-tool). |
+
 ### Saga orchestration
 
 `saga.start` — multi-step tool chain began.

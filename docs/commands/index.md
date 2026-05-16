@@ -116,10 +116,17 @@ Controls:
 
 Outcome behavior:
 
-- One outcome is active per session.
-- Default iteration budget is `outcomes.max_iterations` (`3`, max `20`).
+- One outcome is active per session. While status is `active`,
+  `/goal <new text>` is rejected — pause or clear the existing outcome
+  first.
+- Default iteration budget is `outcomes.max_iterations` (`20`, capped at
+  `20`).
 - Evaluator lifecycle events are emitted as `span.outcome_evaluation_start`,
   `span.outcome_evaluation_ongoing`, and `span.outcome_evaluation_end`.
+- The evaluator returns one of `satisfied`, `needs_revision`, `blocked`,
+  or `failed`. `satisfied` and `failed` end the loop; `blocked` ends it
+  with an explanation of what user action is required to unblock;
+  `needs_revision` queues a continuation.
 - Continuations are normal `user.message` events marked with
   `synthetic: outcome_continuation`.
 - User messages can steer the work while the outcome is active; evaluation
