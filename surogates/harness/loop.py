@@ -4680,6 +4680,7 @@ class AgentHarness:
                     agent_id=session.agent_id,
                     redis=self._redis,
                     task_id=getattr(session, "task_id", None),
+                    session_factory=self._session_factory,
                 )
             except Exception:
                 logger.warning(

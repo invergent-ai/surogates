@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 
 def test_register_builtins_includes_task_tools():
-    """After register_builtins, the 4 task tools are in the registry."""
+    """After register_builtins, all six task tools are in the registry."""
     from surogates.tools.registry import ToolRegistry
     from surogates.tools.runtime import ToolRuntime
 
@@ -24,10 +24,14 @@ def test_register_builtins_includes_task_tools():
     ToolRuntime(reg).register_builtins()
 
     names = reg.tool_names
+    # Coordinator-side
     assert "spawn_task" in names
     assert "unblock_task" in names
     assert "cancel_task" in names
+    # Self-tools (gated on session.task_id)
     assert "task_block" in names
+    assert "task_complete" in names
+    assert "task_show" in names
 
 
 def test_task_tools_handlers_are_async_and_callable():
@@ -43,6 +47,8 @@ def test_task_tools_handlers_are_async_and_callable():
     assert reg.get("unblock_task").handler is task_tools_module._unblock_task_handler
     assert reg.get("cancel_task").handler is task_tools_module._cancel_task_handler
     assert reg.get("task_block").handler is task_tools_module._task_block_handler
+    assert reg.get("task_complete").handler is task_tools_module._task_complete_handler
+    assert reg.get("task_show").handler is task_tools_module._task_show_handler
 
 
 def test_worker_excluded_tools_contains_task_layer_tools():
@@ -71,8 +77,8 @@ def test_agent_type_gated_includes_spawn_task():
     assert "spawn_worker" in _AGENT_TYPE_GATED_TOOLS
 
 
-def test_filter_effective_tools_discards_task_block_when_no_task_id():
-    """Plain (non-task) sessions never see task_block in their tool schema."""
+def test_filter_effective_tools_discards_task_self_tools_when_no_task_id():
+    """Plain (non-task) sessions never see task_block/task_complete/task_show."""
     from surogates.orchestrator.worker import _filter_effective_tools
 
     tenant = MagicMock(user_id=uuid.uuid4())
@@ -83,17 +89,19 @@ def test_filter_effective_tools_discards_task_block_when_no_task_id():
     )
 
     out = _filter_effective_tools(
-        tools={"task_block", "other_tool", "memory"},
+        tools={"task_block", "task_complete", "task_show", "other_tool", "memory"},
         tenant=tenant,
         session=session,
         use_api_for_harness_tools=True,
     )
     assert "task_block" not in out
+    assert "task_complete" not in out
+    assert "task_show" not in out
     assert "other_tool" in out  # unrelated tools pass through
 
 
-def test_filter_effective_tools_keeps_task_block_when_session_has_task_id():
-    """Sessions executing a task DO see task_block."""
+def test_filter_effective_tools_keeps_task_self_tools_when_session_has_task_id():
+    """Sessions executing a task see all three task self-tools."""
     from surogates.orchestrator.worker import _filter_effective_tools
 
     tenant = MagicMock(user_id=uuid.uuid4())
@@ -104,18 +112,21 @@ def test_filter_effective_tools_keeps_task_block_when_session_has_task_id():
     )
 
     out = _filter_effective_tools(
-        tools={"task_block", "other_tool"},
+        tools={"task_block", "task_complete", "task_show", "other_tool"},
         tenant=tenant,
         session=session,
         use_api_for_harness_tools=True,
     )
     assert "task_block" in out
+    assert "task_complete" in out
+    assert "task_show" in out
     assert "other_tool" in out
 
 
-def test_filter_effective_tools_task_block_independent_of_other_gates():
-    """Anonymous-channel sessions still get task_block stripped if no task_id.
-    The other gates (memory/skill_manage exclusion) operate independently."""
+def test_filter_effective_tools_task_self_tools_independent_of_other_gates():
+    """Anonymous-channel sessions still get all 3 task self-tools stripped
+    when there's no task_id. The other gates (memory/skill_manage
+    exclusion for anonymous channels) operate independently."""
     from surogates.orchestrator.worker import _filter_effective_tools
 
     tenant = MagicMock(user_id=None)
@@ -126,11 +137,15 @@ def test_filter_effective_tools_task_block_independent_of_other_gates():
     )
 
     out = _filter_effective_tools(
-        tools={"task_block", "memory", "skill_manage", "regular_tool"},
+        tools={
+            "task_block", "task_complete", "task_show",
+            "memory", "skill_manage", "regular_tool",
+        },
         tenant=tenant,
         session=session,
         use_api_for_harness_tools=True,
     )
     assert "task_block" not in out
+    assert "task_complete" not in out
+    assert "task_show" not in out
     # The existing exclusions for anonymous-channel sessions still apply.
-    # (memory and skill_manage are stripped for anonymous sessions.)

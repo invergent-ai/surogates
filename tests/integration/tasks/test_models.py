@@ -77,6 +77,40 @@ async def test_task_link_unique(session_factory, org_id: uuid.UUID):
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_task_result_metadata_round_trip(session_factory, org_id: uuid.UUID):
+    """JSONB result_metadata column round-trips dict values."""
+    parent_session_id = uuid.uuid4()
+    async with session_factory() as db:
+        db.add(ORMSession(
+            id=parent_session_id, org_id=org_id, agent_id="agent-a",
+            channel="web", status="active",
+        ))
+        await db.flush()
+        task = Task(
+            org_id=org_id,
+            parent_session_id=parent_session_id,
+            goal="g",
+            result="shipped",
+            result_metadata={
+                "changed_files": ["a.py", "b.py"],
+                "tests_run": 14,
+                "decisions": ["used user_id as primary key"],
+            },
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        tid = task.id
+
+    async with session_factory() as db:
+        from sqlalchemy import select as _sel
+        loaded = (await db.execute(_sel(Task).where(Task.id == tid))).scalar_one()
+        assert loaded.result == "shipped"
+        assert loaded.result_metadata["tests_run"] == 14
+        assert loaded.result_metadata["changed_files"] == ["a.py", "b.py"]
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_sessions_task_id_nullable_fk(session_factory, org_id: uuid.UUID):
     """sessions.task_id is nullable and FKs to tasks(id)."""
     parent_session_id = uuid.uuid4()

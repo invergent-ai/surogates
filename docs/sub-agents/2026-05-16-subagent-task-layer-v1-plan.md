@@ -29,6 +29,19 @@ Update this list before each commit. Status legend: `[ ]` not started · `[~]` i
 
 **Test placement decision** (added at execution time): DB-backed tests live under `tests/integration/tasks/` to inherit testcontainers fixtures (`engine`, `session_factory`, `session_store`, `redis_client`). Pure mock-based tests live under `tests/tasks/`. Adjust commit messages and `pytest` invocations accordingly.
 
+## v1.5 — Worker observability stream
+
+All v1 tasks complete. v1.5 closes the "worker can't see anything about its own task" gap.
+
+- [x] **v1.5-A**: `result_metadata jsonb` column on `tasks` (ORM + retrofit DDL + Pydantic)
+- [x] **v1.5-B**: `task_complete(summary, metadata)` self-tool — explicit structured handoff
+- [x] **v1.5-C**: `task_show()` self-tool — returns full task + parents (with results) + prior attempts
+- [x] **v1.5-D**: Retry context injected into next-attempt USER_MESSAGE (when `attempt_count > 1`)
+- [x] **v1.5-E**: `notify_parent_on_completion` overrides result/metadata from the task row when set
+- [x] **v1.5-F**: Per-tick skipset in `_enqueue_ready_tasks` so a single broken task can't starve the queue
+
+12 new tests; the v1.5 stream went from 122 → 134 passing.
+
 ---
 
 ## File Map

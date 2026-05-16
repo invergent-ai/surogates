@@ -126,6 +126,38 @@ async def _create_session_for_task(
 
     worker_config = _build_task_worker_config(agent_def, task)
 
+    # Build the initial USER_MESSAGE BEFORE creating the child Session
+    # so prior-attempt fetching sees only the actually-prior sessions
+    # (the new attempt's session row doesn't exist yet).
+    user_msg = task.goal
+    if task.context:
+        user_msg = f"{task.goal}\n\n## Context\n{task.context}"
+
+    # On retry (attempt_count > 1 by the time we're spawning), inject a
+    # summary of prior attempts so the new worker can avoid repeating
+    # what already failed. Skip on the first attempt — there's no
+    # history to show and the section header would just be noise.
+    if task.attempt_count and task.attempt_count > 1:
+        from surogates.tasks.completion import (
+            fetch_prior_attempt_summaries,
+            render_prior_attempts_section,
+        )
+
+        prior = await fetch_prior_attempt_summaries(
+            session_factory=session_factory,
+            session_store=session_store,
+            task_id=task.id,
+        )
+        body = render_prior_attempts_section(prior)
+        if body:
+            user_msg += (
+                "\n\n## Prior attempts on this task\n"
+                "Earlier worker sessions for this task and what they "
+                "produced or why they ended. Use ``task_show`` for "
+                "full detail; don't repeat the paths that failed.\n\n"
+                + body
+            )
+
     child = await create_child_session(
         store=session_store,
         parent=parent,
@@ -135,12 +167,6 @@ async def _create_session_for_task(
         task_id=task.id,
     )
 
-    # Seed the child with the goal as its first user message. With a
-    # context block when set; without if not (avoids a stranded
-    # '## Context' header that confuses the model on simple tasks).
-    user_msg = task.goal
-    if task.context:
-        user_msg = f"{task.goal}\n\n## Context\n{task.context}"
     await session_store.emit_event(
         child.id, EventType.USER_MESSAGE, {"content": user_msg},
     )

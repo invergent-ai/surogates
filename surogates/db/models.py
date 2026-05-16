@@ -928,8 +928,18 @@ class Task(Base):
     status: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="todo",
     )
-    # Worker's final summary; populated from WORKER_COMPLETE event payload.
+    # Worker's final summary; populated from WORKER_COMPLETE event payload
+    # (auto-extracted on natural session end), or set explicitly by the
+    # ``task_complete`` self-tool when a worker wants a structured handoff.
     result: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Structured handoff metadata — set only when the worker called
+    # ``task_complete(summary, metadata=...)`` explicitly. Shape is a
+    # free-form JSON object (e.g. ``{"changed_files": [...],
+    # "tests_run": 12, "decisions": [...]}``).  Plain workers that
+    # complete naturally never populate this field.
+    result_metadata: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=True,
+    )
     # One-sentence reason captured by the ``task_block`` tool.
     blocked_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Number of Sessions that have been claimed for this task (including

@@ -201,6 +201,62 @@ _CANCEL_TASK_SCHEMA = ToolSchema(
 )
 
 
+_TASK_COMPLETE_SCHEMA = ToolSchema(
+    name="task_complete",
+    description=(
+        "Mark your own task done with a structured handoff. Available "
+        "only when running for a task. Prefer this over letting the "
+        "harness emit WORKER_COMPLETE implicitly when you want to give "
+        "the parent agent (or future retries) machine-readable "
+        "structured output: changed_files, tests_run, decisions, "
+        "findings, etc. The ``summary`` is a 1-3 sentence human-readable "
+        "description; ``metadata`` is a free-form JSON object."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "summary": {
+                "type": "string",
+                "description": (
+                    "1-3 sentence human-readable handoff. Becomes "
+                    "``task.result`` and appears in the WORKER_COMPLETE "
+                    "event delivered to the spawning parent agent."
+                ),
+            },
+            "metadata": {
+                "type": "object",
+                "description": (
+                    "Optional structured handoff. Free-form JSON; "
+                    "common keys: ``changed_files``, ``tests_run``, "
+                    "``tests_passed``, ``decisions``, ``findings``, "
+                    "``approved``."
+                ),
+            },
+        },
+        "required": ["summary"],
+        "additionalProperties": False,
+    },
+)
+
+
+_TASK_SHOW_SCHEMA = ToolSchema(
+    name="task_show",
+    description=(
+        "Read the current task's full context: goal, accumulated "
+        "context, parent tasks (with their results), and prior "
+        "attempts of THIS task (with summaries / errors / outcomes). "
+        "Available only when running for a task. Useful on retry to "
+        "see why earlier attempts failed and what they produced before "
+        "failing — don't repeat their mistakes."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+)
+
+
 _TASK_BLOCK_SCHEMA = ToolSchema(
     name="task_block",
     description=(
@@ -564,6 +620,195 @@ async def _cancel_task_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     return _tool_ok(task_id=str(task_id), status="cancelled")
 
 
+async def _task_complete_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+    """Worker explicitly marks its own task done with a structured handoff.
+
+    Gating: per-session filter strips this from the schema when
+    ``Session.task_id is None``.  Runtime check is belt-and-suspenders.
+
+    The handler updates the Task row to terminal ``done`` state and
+    publishes an interrupt on the worker's own Redis channel so the
+    harness loop exits between iterations.  The harness's natural
+    session-end path then runs ``notify_parent_on_completion``, which
+    reads ``task.result``/``task.result_metadata`` from the row and
+    delivers them to the parent in the ``WORKER_COMPLETE`` event
+    payload — so parents see the explicit summary, not the LLM's last
+    response (see :func:`surogates.harness.worker_notify.notify_parent_on_completion`).
+    """
+    session_factory = kwargs.get("session_factory")
+    session_id_str = kwargs.get("session_id")
+    redis = kwargs.get("redis")
+    if not session_factory or not session_id_str or not redis:
+        return _tool_error("required harness context not available")
+
+    summary = arguments.get("summary")
+    if not summary or not str(summary).strip():
+        return _tool_error("summary is required")
+    summary_clean = str(summary).strip()
+
+    metadata = arguments.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        return _tool_error(
+            f"metadata must be a JSON object, got {type(metadata).__name__}"
+        )
+
+    try:
+        session_id = UUID(str(session_id_str))
+    except (ValueError, TypeError):
+        return _tool_error("invalid calling session id (internal harness bug)")
+
+    async with session_factory() as db:
+        session_row = await db.get(ORMSession, session_id)
+        if session_row is None:
+            return _tool_error(
+                f"calling session {session_id} not found (internal harness bug)"
+            )
+        if session_row.task_id is None:
+            return _tool_error(
+                "task_complete is only available when running for a task"
+            )
+        task_id = session_row.task_id
+
+    async with session_factory() as db:
+        task = await db.scalar(
+            select(Task).where(Task.id == task_id).with_for_update()
+        )
+        if task is None:
+            return _tool_error(
+                f"task {task_id} not found (was the row deleted mid-run?)"
+            )
+        if task.current_session_id != session_id:
+            return _tool_error(
+                "this attempt is no longer the current task attempt "
+                "(likely reclaimed by stale-claim recovery)"
+            )
+        if task.status != "running":
+            return _tool_error(
+                f"task is not running (current status: {task.status})"
+            )
+
+        task.status = "done"
+        task.result = summary_clean
+        task.result_metadata = metadata
+        task.completed_at = func.now()
+        await db.commit()
+
+    # Interrupt this session so the harness loop exits cleanly. The
+    # harness's normal session-end path then emits WORKER_COMPLETE
+    # carrying our explicit summary + metadata via the override in
+    # notify_parent_on_completion.
+    await redis.publish(
+        f"{INTERRUPT_CHANNEL_PREFIX}{session_id}", "task_complete",
+    )
+    return _tool_ok(task_id=str(task_id), status="done")
+
+
+async def _task_show_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+    """Return the calling worker's full task context.
+
+    Includes: the task row itself, parent tasks with their completed
+    results, and prior attempt summaries for this same task (from
+    sessions linked via ``sessions.task_id``).  Workers use this on
+    retry to understand why earlier attempts failed and what they
+    produced — the new attempt's initial USER_MESSAGE includes a brief
+    summary already, but ``task_show`` exposes the full detail when
+    needed.
+    """
+    session_factory = kwargs.get("session_factory")
+    session_store = kwargs.get("session_store")
+    session_id_str = kwargs.get("session_id")
+    if not session_factory or not session_store or not session_id_str:
+        return _tool_error("required harness context not available")
+
+    try:
+        session_id = UUID(str(session_id_str))
+    except (ValueError, TypeError):
+        return _tool_error("invalid calling session id (internal harness bug)")
+
+    async with session_factory() as db:
+        session_row = await db.get(ORMSession, session_id)
+        if session_row is None or session_row.task_id is None:
+            return _tool_error(
+                "task_show is only available when running for a task"
+            )
+        task_id = session_row.task_id
+        task = await db.get(Task, task_id)
+        if task is None:
+            return _tool_error(f"task {task_id} not found")
+
+        # Parents: read each parent task's status, goal, and result.
+        from surogates.db.models import TaskLink as _TaskLink
+        parent_link_rows = (await db.execute(
+            select(_TaskLink).where(_TaskLink.child_id == task_id)
+        )).scalars().all()
+        parent_ids = [row.parent_id for row in parent_link_rows]
+        parents_payload: list[dict[str, Any]] = []
+        if parent_ids:
+            parent_rows = (await db.execute(
+                select(Task).where(Task.id.in_(parent_ids))
+            )).scalars().all()
+            for p in parent_rows:
+                parents_payload.append({
+                    "id": str(p.id),
+                    "goal": p.goal,
+                    "status": p.status,
+                    "result": p.result,
+                    "result_metadata": p.result_metadata,
+                })
+
+        # Prior attempts: sessions for this task other than the current
+        # one, ordered by created_at (earliest first).
+        prior_sessions = (await db.execute(
+            select(ORMSession)
+            .where(ORMSession.task_id == task_id)
+            .where(ORMSession.id != session_id)
+            .order_by(ORMSession.created_at)
+        )).scalars().all()
+
+    prior_payload: list[dict[str, Any]] = []
+    for sess in prior_sessions:
+        try:
+            events = await session_store.get_events(sess.id)
+        except Exception:
+            events = []
+        from surogates.tasks.completion import (
+            classify_attempt_outcome,
+            extract_result_from_completion_event,
+        )
+        outcome, last_event = classify_attempt_outcome(events)
+        entry: dict[str, Any] = {
+            "session_id": str(sess.id),
+            "outcome": outcome.value,
+        }
+        if outcome.value == "completed" and last_event is not None:
+            entry["result"] = extract_result_from_completion_event(last_event)
+        elif outcome.value == "blocked" and last_event is not None:
+            raw = getattr(last_event, "payload", None) or getattr(last_event, "data", None) or {}
+            if isinstance(raw, str):
+                import json as _json
+                try:
+                    raw = _json.loads(raw)
+                except Exception:
+                    raw = {}
+            entry["blocked_reason"] = (raw or {}).get("reason")
+        prior_payload.append(entry)
+
+    return json.dumps({
+        "task": {
+            "id": str(task.id),
+            "goal": task.goal,
+            "context": task.context,
+            "status": task.status,
+            "attempt_count": task.attempt_count,
+            "max_attempts": task.max_attempts,
+            "agent_def_name": task.agent_def_name,
+            "blocked_reason": task.blocked_reason,
+        },
+        "parents": parents_payload,
+        "prior_attempts": prior_payload,
+    })
+
+
 async def _task_block_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     """Pause the calling Session's task without consuming a retry attempt.
 
@@ -685,5 +930,17 @@ def register(registry: ToolRegistry) -> None:
         name="task_block",
         schema=_TASK_BLOCK_SCHEMA,
         handler=_task_block_handler,
+        toolset="core",
+    )
+    registry.register(
+        name="task_complete",
+        schema=_TASK_COMPLETE_SCHEMA,
+        handler=_task_complete_handler,
+        toolset="core",
+    )
+    registry.register(
+        name="task_show",
+        schema=_TASK_SHOW_SCHEMA,
+        handler=_task_show_handler,
         toolset="core",
     )

@@ -65,6 +65,96 @@ def classify_attempt_outcome(events: list[Any]) -> tuple[TaskAttemptOutcome, Any
     return TaskAttemptOutcome.CRASHED, None
 
 
+async def fetch_prior_attempt_summaries(
+    session_factory: Any,
+    session_store: Any,
+    task_id: Any,
+    *,
+    exclude_session_id: Any | None = None,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Fetch summary records for prior Session attempts of a Task.
+
+    Returns a list of dicts ``[{outcome, summary, session_id}, …]``
+    ordered earliest-first, capped at ``limit`` entries (most recent
+    ones win when truncated — useful for the retry-context injection
+    where the latest failures are most informative).
+
+    ``outcome`` is the string form of :class:`TaskAttemptOutcome`
+    (``"completed"`` / ``"blocked"`` / ``"crashed"``).  ``summary`` is
+    the most relevant prose for that outcome: the WORKER_COMPLETE
+    result text for completed, the block reason for blocked, or a
+    generic crashed-with-no-completion-event placeholder otherwise.
+
+    Used by ``_create_session_for_task`` to inject a "Prior attempts"
+    section into the next attempt's initial USER_MESSAGE so the
+    retried worker can avoid repeating what already failed.
+    """
+    from sqlalchemy import select as _sel
+
+    from surogates.db.models import Session as _ORMSession
+
+    async with session_factory() as db:
+        stmt = (
+            _sel(_ORMSession)
+            .where(_ORMSession.task_id == task_id)
+            .order_by(_ORMSession.created_at)
+        )
+        if exclude_session_id is not None:
+            stmt = stmt.where(_ORMSession.id != exclude_session_id)
+        sessions = (await db.execute(stmt)).scalars().all()
+
+    out: list[dict[str, Any]] = []
+    for sess in sessions:
+        try:
+            events = await session_store.get_events(sess.id)
+        except Exception:
+            events = []
+        outcome, last_event = classify_attempt_outcome(events)
+        entry: dict[str, Any] = {
+            "session_id": str(sess.id),
+            "outcome": outcome.value,
+            "summary": None,
+        }
+        if outcome is TaskAttemptOutcome.COMPLETED and last_event is not None:
+            entry["summary"] = extract_result_from_completion_event(last_event)
+        elif outcome is TaskAttemptOutcome.BLOCKED and last_event is not None:
+            import json as _json
+            raw = getattr(last_event, "payload", None) or getattr(last_event, "data", None) or {}
+            if isinstance(raw, str):
+                try:
+                    raw = _json.loads(raw)
+                except Exception:
+                    raw = {}
+            entry["summary"] = (raw or {}).get("reason")
+        else:
+            entry["summary"] = "(no completion event — likely crashed or timed out)"
+        out.append(entry)
+
+    # Cap to the most recent ``limit`` so deep retry chains stay bounded.
+    if len(out) > limit:
+        out = out[-limit:]
+    return out
+
+
+def render_prior_attempts_section(prior: list[dict[str, Any]]) -> str:
+    """Render the prior-attempts summary as a markdown section for the
+    worker's initial USER_MESSAGE.
+
+    Returns the section *body* (no leading/trailing blanks); the caller
+    is responsible for prepending its own delimiter ("\\n\\n## ...").
+    Returns an empty string when ``prior`` is empty so callers can
+    unconditionally concatenate without worrying about empty headers.
+    """
+    if not prior:
+        return ""
+    lines = []
+    for i, entry in enumerate(prior, 1):
+        summary = entry.get("summary") or "(no summary recorded)"
+        lines.append(f"- Attempt {i} ({entry['outcome']}): {summary}")
+    return "\n".join(lines)
+
+
 def extract_result_from_completion_event(event: Any) -> str | None:
     """Return the ``result`` field from a ``WORKER_COMPLETE`` event payload.
 

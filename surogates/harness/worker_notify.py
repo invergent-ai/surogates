@@ -38,6 +38,7 @@ async def notify_parent_on_completion(
     agent_id: str,
     redis: Redis | None = None,
     task_id: UUID | None = None,
+    session_factory: Any | None = None,
 ) -> None:
     """Emit a ``WORKER_COMPLETE`` event into the parent session and re-enqueue it.
 
@@ -52,6 +53,16 @@ async def notify_parent_on_completion(
     the dispatcher tick).  The coordinator agent uses it to correlate
     the completion with the ``spawn_task`` call it made earlier; plain
     ``spawn_worker`` sessions pass ``None`` and the key is omitted.
+
+    When ``task_id`` is set AND ``session_factory`` is provided, the
+    function reads the Task row and overrides the auto-extracted result
+    with ``task.result`` / ``task.result_metadata`` if the worker called
+    the ``task_complete`` self-tool explicitly.  This keeps the
+    parent's view of "what did the worker produce" consistent with what
+    the worker chose to hand off (rather than the LLM's last response
+    text, which may differ from the explicit summary).  When the worker
+    completed naturally without ``task_complete``, ``task.result`` is
+    typically ``None`` and we fall back to the extracted LLM response.
     """
     try:
         from surogates.harness.message_utils import extract_final_response
@@ -65,6 +76,31 @@ async def notify_parent_on_completion(
         }
         if task_id is not None:
             payload["task_id"] = str(task_id)
+            # Override result/metadata with explicit handoff from
+            # task_complete when the worker called it. Defensive: any
+            # error reading the Task falls through to the LLM-response
+            # default so we never lose the notification.
+            if session_factory is not None:
+                try:
+                    from sqlalchemy import select as _sel
+                    from surogates.db.models import Task as _Task
+
+                    async with session_factory() as _db:
+                        explicit = await _db.scalar(
+                            _sel(_Task).where(_Task.id == task_id)
+                        )
+                        if explicit is not None and explicit.result is not None:
+                            payload["result"] = (
+                                explicit.result[:_MAX_RESULT_CHARS]
+                            )
+                        if explicit is not None and explicit.result_metadata is not None:
+                            payload["metadata"] = explicit.result_metadata
+                except Exception:
+                    logger.warning(
+                        "Failed to read task %s for completion override; "
+                        "falling back to LLM-extracted result",
+                        task_id, exc_info=True,
+                    )
 
         await session_store.emit_event(
             parent_session_id,

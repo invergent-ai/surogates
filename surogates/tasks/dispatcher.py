@@ -178,6 +178,12 @@ async def _enqueue_ready_tasks(
     from surogates.tasks.spawn import _create_session_for_task
 
     enqueued = 0
+    # Tasks whose spawn raised within this tick.  Excluded from
+    # subsequent iterations so a single broken task (missing AgentDef,
+    # bad workspace config) can't hot-loop and starve the rest of the
+    # ready queue.  A different tick will see the rolled-back row again
+    # — the exclusion is per-tick, not permanent.
+    failed_this_tick: set[UUID] = set()
     for _ in range(_MAX_ENQUEUES_PER_TICK):
         # Phase A: atomic claim.
         async with session_factory() as db:
@@ -195,12 +201,15 @@ async def _enqueue_ready_tasks(
             # Limit to one row per iteration: Postgres doesn't natively
             # support LIMIT inside UPDATE, but a subquery achieves the
             # same effect with SKIP LOCKED semantics by id ordering.
-            limited_id = await db.scalar(
+            select_stmt = (
                 select(Task.id)
                 .where(Task.status == "ready")
                 .with_for_update(skip_locked=True)
                 .limit(1)
             )
+            if failed_this_tick:
+                select_stmt = select_stmt.where(~Task.id.in_(failed_this_tick))
+            limited_id = await db.scalar(select_stmt)
             if limited_id is None:
                 await db.rollback()
                 break
@@ -223,6 +232,7 @@ async def _enqueue_ready_tasks(
                 "rolling back claim",
                 claimed.id,
             )
+            failed_this_tick.add(claimed.id)
             await _rollback_claim(session_factory, claimed.id)
             continue
 
@@ -234,10 +244,16 @@ async def _enqueue_ready_tasks(
                 tenant=tenant,
             )
         except ValueError as exc:
+            # Config-level error (unknown agent_def_name, missing
+            # workspace fields on the parent session). Rolling back
+            # gives a human a chance to fix the catalog / config; the
+            # within-tick exclusion prevents hot-looping on this same
+            # row for the rest of THIS tick.
             logger.warning(
-                "tasks_tick: agent_def resolution failed for task %s: %s",
+                "tasks_tick: spawn failed for task %s: %s",
                 claimed.id, exc,
             )
+            failed_this_tick.add(claimed.id)
             await _rollback_claim(session_factory, claimed.id)
             continue
         except Exception:
@@ -245,6 +261,7 @@ async def _enqueue_ready_tasks(
                 "tasks_tick: unexpected error spawning task %s; rolling back",
                 claimed.id,
             )
+            failed_this_tick.add(claimed.id)
             await _rollback_claim(session_factory, claimed.id)
             continue
 

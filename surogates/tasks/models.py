@@ -58,6 +58,7 @@ class Task(BaseModel):
     current_session_id: UUID | None = None
     status: TaskStatus
     result: str | None = None
+    result_metadata: dict | None = None
     blocked_reason: str | None = None
     attempt_count: int = 0
     max_attempts: int = 3

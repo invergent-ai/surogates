@@ -182,6 +182,11 @@ CREATE TABLE IF NOT EXISTS task_links (
 ALTER TABLE sessions
     ADD COLUMN IF NOT EXISTS task_id uuid REFERENCES tasks(id);
 
+-- v1.5: structured handoff metadata (set by the task_complete self-tool;
+-- plain workers that complete naturally leave it NULL).
+ALTER TABLE tasks
+    ADD COLUMN IF NOT EXISTS result_metadata jsonb;
+
 CREATE INDEX IF NOT EXISTS idx_tasks_org_status
     ON tasks (org_id, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_parent_session
