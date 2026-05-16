@@ -29,7 +29,7 @@ Update before each commit. Legend: `[ ]` not started · `[~]` in progress · `[x
 - [x] **Task 11**: REST API — GET endpoints (list, detail, tasks, workers)
 - [x] **Task 12**: REST API — POST endpoints (pause, resume, cancel)
 - [x] **Task 13**: Frontend mission API client + route registration
-- [ ] **Task 14**: Dedicated mission dashboard page with task graph, worker activity, evidence, and controls
+- [x] **Task 14**: Dedicated mission dashboard page with task graph, worker activity, evidence, and controls
 - [ ] **Task 15**: Skill addendum — `subagent-task-orchestrator` criterion-loop section
 
 **Test placement:** DB-backed tests under `tests/integration/missions/` to inherit testcontainers fixtures from `tests/integration/conftest.py`. Pure mock-based tests under `tests/missions/`.
