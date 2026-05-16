@@ -1666,7 +1666,8 @@ class AgentHarness:
             create_kwargs: dict[str, Any] = {
                 "model": model_id,
                 "messages": api_messages,
-                "temperature": session.config.get("temperature", 0.7),
+                "temperature": session.config.get("temperature", 0.3),
+                "max_tokens": session.config.get("max_tokens", 16384),
             }
             if tool_schemas:
                 create_kwargs["tools"] = tool_schemas
@@ -3694,6 +3695,7 @@ class AgentHarness:
                 "model": model_id,
                 "messages": api_messages,
                 "temperature": session.config.get("temperature", 0.7),
+                "max_tokens": session.config.get("max_tokens", 16384),
                 # No tools -- force a text-only response.
             }
 
