@@ -28,7 +28,7 @@ Update before each commit. Legend: `[ ]` not started · `[~]` in progress · `[x
 - [x] **Task 10**: Wire evaluator into the harness loop
 - [x] **Task 11**: REST API — GET endpoints (list, detail, tasks, workers)
 - [x] **Task 12**: REST API — POST endpoints (pause, resume, cancel)
-- [ ] **Task 13**: Frontend mission API client + route registration
+- [x] **Task 13**: Frontend mission API client + route registration
 - [ ] **Task 14**: Dedicated mission dashboard page with task graph, worker activity, evidence, and controls
 - [ ] **Task 15**: Skill addendum — `subagent-task-orchestrator` criterion-loop section
 
