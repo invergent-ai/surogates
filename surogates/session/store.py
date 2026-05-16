@@ -98,6 +98,7 @@ class SessionStore:
         parent_id: UUID | None = None,
         service_account_id: UUID | None = None,
         idempotency_key: str | None = None,
+        task_id: UUID | None = None,
     ) -> Session:
         """Create a new session and return its Pydantic representation.
 
@@ -116,6 +117,11 @@ class SessionStore:
         *idempotency_key* is optional; when supplied, a unique-constraint
         violation on ``(org_id, idempotency_key)`` lets callers detect
         retries of the same logical request.
+
+        *task_id* links this session to a row in ``tasks`` when the
+        session is one execution attempt of a subagent task (created via
+        the ``spawn_task`` tool).  Left as ``None`` for plain chat and
+        ``spawn_worker`` sessions.
         """
         row = SessionRow(
             id=session_id or uuid.uuid4(),
@@ -129,6 +135,7 @@ class SessionStore:
             parent_id=parent_id,
             service_account_id=service_account_id,
             idempotency_key=idempotency_key,
+            task_id=task_id,
         )
         async with self._sf() as db:
             db.add(row)

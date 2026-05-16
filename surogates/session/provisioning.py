@@ -75,6 +75,7 @@ async def create_child_session(
     service_account_id: UUID | None = None,
     idempotency_key: str | None = None,
     session_id: UUID | None = None,
+    task_id: UUID | None = None,
 ) -> Session:
     """Create a session that shares its parent's workspace.
 
@@ -88,6 +89,10 @@ async def create_child_session(
     ``user_id``, and ``service_account_id`` (unless explicitly
     overridden via *service_account_id*).  ``model`` falls back to
     ``parent.model`` when not supplied.
+
+    *task_id* links the child to a ``tasks`` row when the spawn is a
+    subagent task attempt.  Plain ``spawn_worker`` children pass
+    ``None`` (the default), keeping their existing semantics unchanged.
     """
     merged_config = dict(config or {})
 
@@ -124,4 +129,5 @@ async def create_child_session(
         parent_id=parent.id,
         service_account_id=effective_service_account_id,
         idempotency_key=idempotency_key,
+        task_id=task_id,
     )
