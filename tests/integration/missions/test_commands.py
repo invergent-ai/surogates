@@ -1,0 +1,138 @@
+"""Integration tests for /mission slash command handlers."""
+from __future__ import annotations
+
+import uuid
+from unittest.mock import AsyncMock
+
+import pytest
+from sqlalchemy import select
+
+from surogates.db.models import Event, Session as ORMSession
+from surogates.session.events import EventType
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_inserts_mission_emits_event_and_kickoff(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    """A successful /mission create writes a Mission row, emits
+    mission.defined, emits a synthetic kickoff user.message, and updates
+    session.config with active_mission_id + coordinator=True + the
+    preloaded orchestrator skill."""
+    from surogates.missions.commands import handle_mission_create
+    from surogates.missions.store import MissionStore
+
+    redis = AsyncMock()
+    redis.zadd = AsyncMock()
+
+    store = MissionStore(session_factory)
+    result = await handle_mission_create(
+        description="Train 0.6B model",
+        rubric="gsm8k >= 0.8 (verifier reports result_metadata.score)",
+        session_id=chat_session.id,
+        user_id=user_id,
+        org_id=org_id,
+        agent_id="orchestrator",
+        session_store=session_store,
+        session_factory=session_factory,
+        mission_store=store,
+        redis=redis,
+    )
+
+    assert result.ok is True
+    mid = result.mission_id
+
+    m = await store.get(mid)
+    assert m.status == "active"
+    assert m.description == "Train 0.6B model"
+
+    async with session_factory() as db:
+        defined = (await db.execute(
+            select(Event).where(
+                Event.session_id == chat_session.id,
+                Event.type == EventType.MISSION_DEFINED.value,
+            )
+        )).scalars().all()
+        assert len(defined) == 1
+        assert defined[0].data["mission_id"] == str(mid)
+
+        kickoffs = (await db.execute(
+            select(Event).where(
+                Event.session_id == chat_session.id,
+                Event.type == EventType.USER_MESSAGE.value,
+            )
+        )).scalars().all()
+        assert any(
+            ev.data.get("synthetic") == "mission_kickoff"
+            for ev in kickoffs
+        )
+
+        sess = await db.get(ORMSession, chat_session.id)
+        assert sess.config["active_mission_id"] == str(mid)
+        assert sess.config["coordinator"] is True
+        preloaded = sess.config.get("preloaded_skills") or []
+        assert "subagent-task-orchestrator" in preloaded
+
+    redis.zadd.assert_called_once()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_rejects_when_active_goal_present(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    """If session.config has a non-terminal /goal outcome, /mission create fails."""
+    from surogates.missions.commands import handle_mission_create
+    from surogates.missions.store import MissionStore
+
+    async with session_factory() as db:
+        sess = await db.get(ORMSession, chat_session.id)
+        cfg = dict(sess.config or {})
+        cfg["outcome"] = {
+            "id": "outc_x", "status": "active",
+            "description": "...", "rubric": "...",
+            "iteration": 0, "max_iterations": 20,
+        }
+        sess.config = cfg
+        await db.commit()
+
+    result = await handle_mission_create(
+        description="d", rubric="r",
+        session_id=chat_session.id,
+        user_id=user_id, org_id=org_id, agent_id="orchestrator",
+        session_store=session_store,
+        session_factory=session_factory,
+        mission_store=MissionStore(session_factory),
+        redis=AsyncMock(zadd=AsyncMock()),
+    )
+    assert result.ok is False
+    assert "goal" in result.error.lower()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_rejects_when_active_mission_already_on_session(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    from surogates.missions.commands import handle_mission_create
+    from surogates.missions.store import MissionStore
+
+    store = MissionStore(session_factory)
+    redis = AsyncMock(zadd=AsyncMock())
+
+    await handle_mission_create(
+        description="first", rubric="r",
+        session_id=chat_session.id,
+        user_id=user_id, org_id=org_id, agent_id="orchestrator",
+        session_store=session_store,
+        session_factory=session_factory,
+        mission_store=store, redis=redis,
+    )
+    second = await handle_mission_create(
+        description="second", rubric="r2",
+        session_id=chat_session.id,
+        user_id=user_id, org_id=org_id, agent_id="orchestrator",
+        session_store=session_store,
+        session_factory=session_factory,
+        mission_store=store, redis=redis,
+    )
+    assert second.ok is False
+    assert "mission" in second.error.lower()

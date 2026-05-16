@@ -213,6 +213,34 @@ async def test_handle_goal_set_rejected_when_outcome_active() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_goal_set_rejected_when_active_mission_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutual exclusion: /goal must refuse to set while a /mission is active."""
+    store = FakeStore()
+    harness = _make_harness(store)
+    session = _session()
+    lease = _lease(session.id)
+
+    # Stub the mission check to simulate an active mission on the session.
+    async def _stub(self: AgentHarness, sid: UUID) -> bool:
+        return True
+    monkeypatch.setattr(
+        AgentHarness, "_session_has_active_mission", _stub,
+    )
+
+    await harness._handle_goal_command(session, "/goal Ship new feature", lease)
+
+    response = [event for event in store.events if event[1] == EventType.LLM_RESPONSE][-1]
+    content = response[2]["message"]["content"]
+    assert "active /mission" in content
+    # No outcome was created.
+    assert store.config_updates == []
+    assert not any(event[1] == EventType.OUTCOME_DEFINED for event in store.events)
+    assert store.synthetic_messages == []
+
+
+@pytest.mark.asyncio
 async def test_handle_goal_set_allowed_when_outcome_paused() -> None:
     store = FakeStore()
     harness = _make_harness(store)

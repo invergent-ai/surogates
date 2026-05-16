@@ -3831,6 +3831,27 @@ class AgentHarness:
                 max_parse_failures=3,
             )
 
+    async def _session_has_active_mission(self, session_id: UUID) -> bool:
+        """True iff the session has an active or paused mission row.
+
+        Used by ``_handle_goal_command`` to enforce mutual exclusion: only
+        one evaluator loop per session is allowed, so a /mission already
+        in flight blocks /goal creation (and vice versa).
+        """
+        if self._session_factory is None:
+            return False
+        try:
+            from surogates.missions.store import MissionStore
+
+            store = MissionStore(self._session_factory)
+            return (await store.get_active_for_session(session_id)) is not None
+        except Exception:
+            logger.debug(
+                "Mission active-check failed for session %s; treating as no mission",
+                session_id, exc_info=True,
+            )
+            return False
+
     async def _handle_goal_command(
         self,
         session: Session,
@@ -3854,6 +3875,15 @@ class AgentHarness:
                     f"Outcome already active ({current.iteration}/"
                     f"{current.max_iterations}): {current.description}. "
                     "Use /goal pause or /goal clear before setting a new outcome."
+                )
+            elif await self._session_has_active_mission(session.id):
+                # Mutual exclusion: only one evaluator loop per session.
+                # /mission already runs an evaluator — adding a /goal would
+                # produce two competing judges on the same chat.
+                message = (
+                    "This session has an active /mission. Cancel or pause it "
+                    "before setting a /goal (only one evaluator loop per "
+                    "session is allowed)."
                 )
             else:
                 message = await self._define_goal_outcome(session, command)
