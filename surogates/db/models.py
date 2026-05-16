@@ -951,6 +951,15 @@ class Task(Base):
     max_attempts: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="3"
     )
+    # Mission layer: when set, this task belongs to a mission (the
+    # coordinator session is the mission's session). Stamped at spawn
+    # time by ``_spawn_task_handler`` reading
+    # ``session.config["active_mission_id"]``. Nullable so non-mission
+    # tasks (plain spawn_task, or spawn_task from a session without an
+    # active mission) carry None.
+    mission_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("missions.id"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=func.now()
     )
@@ -971,4 +980,79 @@ class TaskLink(Base):
     )
     child_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tasks.id"), primary_key=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Mission layer
+#
+# A Mission is a long-running, durable, multi-worker objective attached
+# to a chat (coordinator) session. The mission's rubric is graded by an
+# LLM judge fired on (a) mission-task terminal events, or (b) an
+# explicit ``[[mission-complete]]`` marker in the coordinator's prose —
+# never on every no-tool-call response (that's `/goal`'s rule and it's
+# wrong for orchestrator workloads).
+#
+# See docs/superpowers/specs/2026-05-16-mission-orchestrated-goals-design.md.
+# ---------------------------------------------------------------------------
+
+
+class Mission(Base):
+    """A durable orchestrated objective with rubric-judged completion."""
+
+    __tablename__ = "missions"
+    __table_args__ = (
+        Index("idx_missions_session", "session_id"),
+        Index(
+            "idx_missions_user_agent_status",
+            "org_id", "user_id", "agent_id", "status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=False
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    rubric: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="active",
+    )
+    iteration: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    max_iterations: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="20"
+    )
+    last_evaluation_result: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    last_evaluation_explanation: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    last_evaluation_feedback: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    last_evaluation_at: Mapped[Optional[datetime]] = mapped_column(
+        nullable=True
+    )
+    evaluator_parse_failures: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    paused_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    cancelled_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now(), onupdate=func.now()
     )

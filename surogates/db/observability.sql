@@ -196,6 +196,50 @@ CREATE INDEX IF NOT EXISTS idx_tasks_current_session
 
 
 -- ----------------------------------------------------------------------------
+-- Mission layer (orchestrated goals) — retrofits.
+--
+-- ``Base.metadata.create_all`` creates ``missions`` and the indexes on
+-- fresh databases, but does NOT add ``tasks.mission_id`` to an existing
+-- ``tasks`` table. Each statement guarded for idempotent re-runs.
+--
+-- See ``surogates/db/models.py`` (``Mission``, ``Task.mission_id``) and
+-- ``docs/superpowers/specs/2026-05-16-mission-orchestrated-goals-design.md``.
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS missions (
+    id                          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id                      uuid NOT NULL REFERENCES orgs(id),
+    user_id                     uuid NOT NULL REFERENCES users(id),
+    session_id                  uuid NOT NULL REFERENCES sessions(id),
+    agent_id                    text NOT NULL,
+    description                 text NOT NULL,
+    rubric                      text NOT NULL,
+    status                      text NOT NULL DEFAULT 'active',
+    iteration                   integer NOT NULL DEFAULT 0,
+    max_iterations              integer NOT NULL DEFAULT 20,
+    last_evaluation_result      text,
+    last_evaluation_explanation text,
+    last_evaluation_feedback    text,
+    last_evaluation_at          timestamptz,
+    evaluator_parse_failures    integer NOT NULL DEFAULT 0,
+    paused_reason               text,
+    cancelled_reason            text,
+    created_at                  timestamptz NOT NULL DEFAULT now(),
+    updated_at                  timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE tasks
+    ADD COLUMN IF NOT EXISTS mission_id uuid REFERENCES missions(id);
+
+CREATE INDEX IF NOT EXISTS idx_missions_session
+    ON missions (session_id);
+CREATE INDEX IF NOT EXISTS idx_missions_user_agent_status
+    ON missions (org_id, user_id, agent_id, status);
+CREATE INDEX IF NOT EXISTS idx_tasks_mission
+    ON tasks (mission_id);
+
+
+-- ----------------------------------------------------------------------------
 -- v_session_tree -- recursive ancestry of sessions via parent_id.
 --
 -- Each row has the session's ``root_session_id`` (the top-level ancestor),

@@ -103,6 +103,18 @@ class EventType(str, Enum):
     TASK_BLOCKED = "task.blocked"
     TASK_FAILED = "task.failed"
 
+    # Mission layer (orchestrated goals).
+    # Emitted on the coordinator chat session. The dashboard polls these
+    # to render mission state; see
+    # docs/superpowers/specs/2026-05-16-mission-orchestrated-goals-design.md.
+    MISSION_DEFINED = "mission.defined"
+    MISSION_EVALUATION_START = "mission.evaluation.start"
+    MISSION_EVALUATION_END = "mission.evaluation.end"
+    MISSION_CONTINUATION = "mission.continuation"
+    MISSION_PAUSED = "mission.paused"
+    MISSION_RESUMED = "mission.resumed"
+    MISSION_CANCELLED = "mission.cancelled"
+
     # Governance
     POLICY_ALLOWED = "policy.allowed"
     POLICY_DENIED = "policy.denied"

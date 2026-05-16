@@ -16,7 +16,7 @@
 
 Update before each commit. Legend: `[ ]` not started · `[~]` in progress · `[x]` complete.
 
-- [ ] **Task 1**: SQLAlchemy schema — `missions` table, `tasks.mission_id`, retrofit DDL, Pydantic Mission, EventType extensions
+- [x] **Task 1**: SQLAlchemy schema — `missions` table, `tasks.mission_id`, retrofit DDL, Pydantic Mission, EventType extensions
 - [ ] **Task 2**: Mission store (CRUD + rate-limit guard + mutual-exclusion check)
 - [ ] **Task 3**: `/mission` command parser (description + rubric + subcommand dispatch)
 - [ ] **Task 4**: `/mission` create handler with `/goal` mutual exclusion + kickoff event + skill preload
