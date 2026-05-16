@@ -20,14 +20,30 @@ async def user_id(session_factory, org_id) -> uuid.UUID:
     return await create_user(session_factory, org_id)
 
 
+def _session_workspace_config(sid: uuid.UUID) -> dict:
+    """Minimal config required by spawn_task's workspace-seeding helper.
+
+    ``_spawn_task_handler`` validates these three fields before spawning
+    a child session so the worker inherits a usable workspace. Mission
+    handlers don't read them, but tests that exercise spawn_task on a
+    mission-bearing session must provide them.
+    """
+    return {
+        "storage_bucket": "test-bucket",
+        "workspace_path": f"/workspace/test/{sid}",
+        "supports_vision": False,
+    }
+
+
 @pytest_asyncio.fixture(loop_scope="session")
 async def chat_session(session_factory, org_id, user_id):
-    """A fresh chat session (web channel) per test."""
+    """A fresh chat session (web channel) per test, with workspace config."""
     sid = uuid.uuid4()
     async with session_factory() as db:
         s = ORMSession(
             id=sid, org_id=org_id, user_id=user_id, agent_id="orchestrator",
             channel="web", status="active",
+            config=_session_workspace_config(sid),
         )
         db.add(s)
         await db.commit()

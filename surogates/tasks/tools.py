@@ -333,6 +333,31 @@ async def _spawn_task_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
 
     org_id: UUID = tenant.org_id
 
+    # ----- Phase 0: read the calling session's active_mission_id so the
+    # spawned Task inherits the mission scope.  The session row is the
+    # source of truth (matches /mission's writes); reading config from a
+    # stale in-memory Session object would miss missions created after
+    # the harness loaded its snapshot.
+    active_mission_id: UUID | None = None
+    try:
+        async with session_factory() as db:
+            sess_row = await db.get(ORMSession, parent_session_id)
+            if sess_row is not None:
+                raw = (sess_row.config or {}).get("active_mission_id")
+                if raw:
+                    try:
+                        active_mission_id = UUID(str(raw))
+                    except (ValueError, TypeError):
+                        logger.warning(
+                            "spawn_task: session %s has malformed active_mission_id=%r; ignoring",
+                            parent_session_id, raw,
+                        )
+    except Exception:
+        logger.exception(
+            "spawn_task: failed to read active_mission_id for session %s",
+            parent_session_id,
+        )
+
     # ----- Phase 1: validate parents + insert Task row + links --------------
     try:
         async with session_factory() as db:
@@ -366,6 +391,7 @@ async def _spawn_task_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
                 context=context,
                 status=initial_status,
                 max_attempts=max_attempts,
+                mission_id=active_mission_id,
             )
             db.add(task)
             await db.flush()
