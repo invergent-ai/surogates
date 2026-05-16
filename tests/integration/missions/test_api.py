@@ -150,3 +150,107 @@ async def test_get_mission_rejects_cross_tenant_access(
             headers=intruder.auth_headers,
         )
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_post_pause_transitions_to_paused(
+    inbox_app, session_factory, session_store,
+):
+    user_session = await create_user_token_session(
+        session_factory, session_store, agent_id="orchestrator",
+    )
+    store = MissionStore(session_factory)
+    created = await handle_mission_create(
+        description="d", rubric="r",
+        session_id=user_session.session.id,
+        user_id=user_session.user_id, org_id=user_session.org_id,
+        agent_id="orchestrator",
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=inbox_app), base_url="http://test",
+    ) as client:
+        resp = await client.post(
+            f"/v1/missions/{created.mission_id}/pause",
+            json={"reason": "manual"},
+            headers=user_session.auth_headers,
+        )
+    assert resp.status_code == 200, resp.text
+    m = await store.get(created.mission_id)
+    assert m.status == "paused"
+    assert m.paused_reason == "manual"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_post_cancel_with_cascade_marks_tasks_cancelled(
+    inbox_app, session_factory, session_store,
+):
+    user_session = await create_user_token_session(
+        session_factory, session_store, agent_id="orchestrator",
+    )
+    store = MissionStore(session_factory)
+    created = await handle_mission_create(
+        description="d", rubric="r",
+        session_id=user_session.session.id,
+        user_id=user_session.user_id, org_id=user_session.org_id,
+        agent_id="orchestrator",
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+    )
+    async with session_factory() as db:
+        db.add(Task(
+            org_id=user_session.org_id,
+            parent_session_id=user_session.session.id,
+            goal="t", status="ready", mission_id=created.mission_id,
+        ))
+        await db.commit()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=inbox_app), base_url="http://test",
+    ) as client:
+        resp = await client.post(
+            f"/v1/missions/{created.mission_id}/cancel",
+            json={"reason": "abort", "cascade_to_workers": True},
+            headers=user_session.auth_headers,
+        )
+    assert resp.status_code == 200, resp.text
+    m = await store.get(created.mission_id)
+    assert m.status == "cancelled"
+    async with session_factory() as db:
+        from sqlalchemy import select
+        tasks = (await db.execute(
+            select(Task).where(Task.mission_id == created.mission_id)
+        )).scalars().all()
+        statuses = [t.status for t in tasks]
+        assert "cancelled" in statuses
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_post_resume_returns_active(
+    inbox_app, session_factory, session_store,
+):
+    user_session = await create_user_token_session(
+        session_factory, session_store, agent_id="orchestrator",
+    )
+    store = MissionStore(session_factory)
+    created = await handle_mission_create(
+        description="d", rubric="r",
+        session_id=user_session.session.id,
+        user_id=user_session.user_id, org_id=user_session.org_id,
+        agent_id="orchestrator",
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+    )
+    await store.set_status(created.mission_id, "paused", paused_reason="x")
+
+    async with AsyncClient(
+        transport=ASGITransport(app=inbox_app), base_url="http://test",
+    ) as client:
+        resp = await client.post(
+            f"/v1/missions/{created.mission_id}/resume",
+            headers=user_session.auth_headers,
+        )
+    assert resp.status_code == 200, resp.text
+    m = await store.get(created.mission_id)
+    assert m.status == "active"

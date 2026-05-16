@@ -15,6 +15,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -218,3 +219,121 @@ async def get_mission_workers(
                 "transcript_url": f"/chat/{sess.id}",
             })
     return {"workers": workers}
+
+
+# ---------------------------------------------------------------------------
+# Mutating routes
+# ---------------------------------------------------------------------------
+
+
+class _PauseBody(BaseModel):
+    reason: str | None = None
+
+
+class _CancelBody(BaseModel):
+    reason: str | None = None
+    cascade_to_workers: bool = False
+
+
+def _redis_dep(request: Request) -> Any:
+    redis = getattr(request.app.state, "redis", None)
+    if redis is None:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "redis client not configured on app.state",
+        )
+    return redis
+
+
+def _session_store_dep(request: Request) -> Any:
+    store = getattr(request.app.state, "session_store", None)
+    if store is None:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "session_store not configured on app.state",
+        )
+    return store
+
+
+@router.post("/{mission_id}/pause")
+async def pause_mission_endpoint(
+    mission_id: UUID,
+    body: _PauseBody,
+    session_factory: async_sessionmaker = Depends(_session_factory_dep),
+    session_store: Any = Depends(_session_store_dep),
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> dict[str, Any]:
+    row = await _load_mission_authorized(
+        mission_id, session_factory=session_factory, tenant=tenant,
+    )
+    from surogates.missions.commands import handle_mission_pause
+    from surogates.missions.store import MissionStore
+
+    result = await handle_mission_pause(
+        session_id=row.session_id, reason=body.reason,
+        session_store=session_store,
+        mission_store=MissionStore(session_factory),
+    )
+    if not result.ok:
+        raise HTTPException(status.HTTP_409_CONFLICT, result.error)
+    return {
+        "ok": True, "mission_id": str(result.mission_id), "status": "paused",
+    }
+
+
+@router.post("/{mission_id}/resume")
+async def resume_mission_endpoint(
+    mission_id: UUID,
+    session_factory: async_sessionmaker = Depends(_session_factory_dep),
+    session_store: Any = Depends(_session_store_dep),
+    redis: Any = Depends(_redis_dep),
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> dict[str, Any]:
+    row = await _load_mission_authorized(
+        mission_id, session_factory=session_factory, tenant=tenant,
+    )
+    from surogates.missions.commands import handle_mission_resume
+    from surogates.missions.store import MissionStore
+
+    result = await handle_mission_resume(
+        session_id=row.session_id, agent_id=row.agent_id,
+        session_store=session_store,
+        mission_store=MissionStore(session_factory),
+        redis=redis,
+    )
+    if not result.ok:
+        raise HTTPException(status.HTTP_409_CONFLICT, result.error)
+    return {
+        "ok": True, "mission_id": str(result.mission_id), "status": "active",
+    }
+
+
+@router.post("/{mission_id}/cancel")
+async def cancel_mission_endpoint(
+    mission_id: UUID,
+    body: _CancelBody,
+    session_factory: async_sessionmaker = Depends(_session_factory_dep),
+    session_store: Any = Depends(_session_store_dep),
+    redis: Any = Depends(_redis_dep),
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> dict[str, Any]:
+    row = await _load_mission_authorized(
+        mission_id, session_factory=session_factory, tenant=tenant,
+    )
+    from surogates.missions.commands import handle_mission_cancel
+    from surogates.missions.store import MissionStore
+
+    result = await handle_mission_cancel(
+        session_id=row.session_id, reason=body.reason,
+        cascade_to_workers=body.cascade_to_workers,
+        session_store=session_store, session_factory=session_factory,
+        mission_store=MissionStore(session_factory),
+        redis=redis,
+    )
+    if not result.ok:
+        raise HTTPException(status.HTTP_409_CONFLICT, result.error)
+    return {
+        "ok": True, "mission_id": str(result.mission_id),
+        "status": "cancelled",
+        "cascade_to_workers": body.cascade_to_workers,
+    }
