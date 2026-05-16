@@ -196,3 +196,67 @@ When a child task keeps crashing, blocking on the same question, or hallucinatin
 3. **Cancel and respawn with a different `agent_type` or refined `goal`.** This is the "reassignment" pattern: rather than retry the same agent_type with different prose, give the task to a different specialist.
 
 A child will auto-fail after `max_attempts` (default 3) consecutive crashes/timeouts. You'll receive a `task.failed` event on your session — that's your cue to decide between cancel-dependent-children, respawn with revised parameters, or surface the failure to the user.
+
+## Criterion-driven loops (the `/mission` pattern)
+
+When you're the coordinator of a `/mission`, your job has one more step
+than a one-shot fan-out: **end each round with a verifier task and
+iterate until the rubric is met**.
+
+### How to structure each round
+
+1. Spawn the work tasks for this round (research, training, dataset
+   generation — whatever advances the rubric).
+2. Spawn a **verifier task** with `parents=[…]` set to every work task
+   from this round. The verifier's job is to compute the measurable
+   signal the rubric checks (`gsm8k score`, `coverage %`, etc.) and
+   write it to `result_metadata` so the mission evaluator can read it
+   directly.
+3. When the verifier completes, the mission evaluator fires
+   automatically (you don't have to call it). It reads the rubric +
+   your latest response + the completed-tasks block (where the
+   verifier's `result_metadata` lives) and returns one of `satisfied`,
+   `needs_revision`, `blocked`, or `failed`.
+4. If `needs_revision`: you get a synthetic continuation message
+   listing the evaluator's feedback and the current task state. Spawn
+   the corrective round; repeat from step 1.
+
+### When you believe the rubric is met
+
+Most of the time, **let the evaluator decide** — emit your normal
+end-of-round summary and the evaluator will pick it up via the
+task-terminal trigger on the verifier.
+
+When you're SURE the rubric is met and want to short-circuit the
+trigger (rare), emit `[[mission-complete]]` on its own line in your
+response. The evaluator will fire on the explicit claim and grade the
+workstream. **Do not** use this marker as a substitute for evidence —
+the evaluator still requires a verifier task's metadata to back the
+claim.
+
+### Pitfalls
+
+**Spawning work without a verifier.** If the round has no verifier,
+the evaluator's `result_metadata` block is empty and it cannot judge
+satisfaction. You'll loop until `max_iterations`. Always end a round
+with a measurable signal.
+
+**Spawning the verifier as a peer instead of a child.** The verifier
+must list the work tasks as `parents=[…]` so it runs AFTER they
+complete. A peer verifier runs in parallel with incomplete work and
+produces meaningless numbers.
+
+**Claiming completion in prose.** "I think we're done!" without a
+verifier task in `done` state will fail evaluation. The judge ignores
+prose-only completion claims.
+
+**Giving up too early.** The evaluator gives you `max_iterations` (20
+by default). Use them. If you're stuck after 3-4 rounds, call
+`task_block` on your own session — describe what you've tried and what
+external input would help. The user (or another agent) can answer and
+unblock.
+
+**Giving up too late.** If the rubric is fundamentally unreachable
+(contradictory criteria, missing data, infeasible target), call
+`task_complete` on your own session with a failure summary in
+`result`. The evaluator will read this as evidence and return `failed`.
