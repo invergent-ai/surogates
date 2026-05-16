@@ -22,7 +22,7 @@ Update this list before each commit. Status legend: `[ ]` not started · `[~]` i
 - [x] **Task 4**: `spawn_task` tool (eager spawn when ready, DAG validation)
 - [x] **Task 5**: `unblock_task` and `cancel_task` tool handlers
 - [x] **Task 6**: `task_block` self-tool
-- [ ] **Task 7**: Tool registration + gating (`WORKER_EXCLUDED_TOOLS`, `_AGENT_TYPE_GATED_TOOLS`, `_filter_effective_tools`)
+- [x] **Task 7**: Tool registration + gating (`WORKER_EXCLUDED_TOOLS`, `_AGENT_TYPE_GATED_TOOLS`, `_filter_effective_tools`)
 - [ ] **Task 8**: `WORKER_COMPLETE` payload includes `task_id`
 - [ ] **Task 9**: `tasks_tick` — promote, finalize, enqueue
 - [ ] **Task 10**: Wire `tasks_tick` into orchestrator + end-to-end integration tests

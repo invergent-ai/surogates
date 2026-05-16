@@ -39,10 +39,18 @@ logger = logging.getLogger(__name__)
 _WORKER_MAX_ITERATIONS: int = 30
 
 # Tools that workers are NOT allowed to use (prevents recursive spawning).
+# Both the spawn_worker family and the spawn_task family are excluded so
+# children inherited the same recursion-prevention regardless of which
+# primitive spawned them.  task_block is NOT in this set — it's a
+# self-tool and children running for a task SHOULD be able to block
+# themselves; gating is by Session.task_id in _filter_effective_tools.
 WORKER_EXCLUDED_TOOLS: frozenset[str] = frozenset({
     "spawn_worker",
     "send_worker_message",
     "stop_worker",
+    "spawn_task",
+    "unblock_task",
+    "cancel_task",
 })
 
 # ---------------------------------------------------------------------------

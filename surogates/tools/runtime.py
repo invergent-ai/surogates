@@ -67,6 +67,7 @@ class ToolRuntime:
             vision,
             web_search,
         )
+        from surogates.tasks import tools as task_tools
 
         modules = [
             memory,
@@ -87,6 +88,7 @@ class ToolRuntime:
             expert,
             coordinator,
             artifact,
+            task_tools,  # spawn_task, unblock_task, cancel_task, task_block
         ]
 
         for mod in modules:

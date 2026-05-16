@@ -167,6 +167,13 @@ def _filter_effective_tools(
         result.discard("memory")
         result.discard("skill_manage")
 
+    # task_block is only meaningful when this session is executing a
+    # subagent task (the dispatcher set ``Session.task_id``). Plain chat
+    # and spawn_worker children never have a task to block, so we strip
+    # it from their schema so the LLM is not tempted to call it.
+    if getattr(session, "task_id", None) is None:
+        result.discard("task_block")
+
     return result
 
 
