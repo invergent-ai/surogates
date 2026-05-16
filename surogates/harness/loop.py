@@ -1347,6 +1347,7 @@ class AgentHarness:
                         agent_id=session.agent_id,
                         error=traceback.format_exc()[-500:],
                         redis=self._redis,
+                        task_id=getattr(session, "task_id", None),
                     )
                 except Exception:
                     logger.debug("Failed to notify parent on crash", exc_info=True)
@@ -4678,6 +4679,7 @@ class AgentHarness:
                     parent_session_id=session.parent_id,
                     agent_id=session.agent_id,
                     redis=self._redis,
+                    task_id=getattr(session, "task_id", None),
                 )
             except Exception:
                 logger.warning(
