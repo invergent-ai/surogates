@@ -283,3 +283,74 @@ async def test_cancel_without_cascade_marks_cancelled(
     assert m.status == "cancelled"
     assert m.cancelled_reason == "user changed mind"
     redis.publish.assert_not_called()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_cancel_with_cascade_publishes_interrupt_per_running_worker(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    """cascade_to_workers=True publishes an interrupt for each running task
+    and marks every non-terminal mission task as cancelled."""
+    from surogates.config import INTERRUPT_CHANNEL_PREFIX
+    from surogates.db.models import Task
+    from surogates.missions.commands import (
+        handle_mission_create, handle_mission_cancel,
+    )
+    from surogates.missions.store import MissionStore
+
+    store = MissionStore(session_factory)
+    redis = AsyncMock(zadd=AsyncMock(), publish=AsyncMock())
+    created = await handle_mission_create(
+        description="d", rubric="r",
+        session_id=chat_session.id, user_id=user_id, org_id=org_id,
+        agent_id="orchestrator",
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store, redis=redis,
+    )
+
+    worker_session_id = uuid.uuid4()
+    async with session_factory() as db:
+        db.add(ORMSession(
+            id=worker_session_id, org_id=org_id, user_id=user_id,
+            agent_id="orchestrator", channel="task", status="active",
+        ))
+        await db.flush()
+        running = Task(
+            org_id=org_id, parent_session_id=chat_session.id,
+            goal="train", status="running", mission_id=created.mission_id,
+            current_session_id=worker_session_id, attempt_count=1,
+        )
+        ready = Task(
+            org_id=org_id, parent_session_id=chat_session.id,
+            goal="eval", status="ready", mission_id=created.mission_id,
+        )
+        done = Task(
+            org_id=org_id, parent_session_id=chat_session.id,
+            goal="research", status="done", mission_id=created.mission_id,
+        )
+        db.add_all([running, ready, done])
+        await db.commit()
+        running_id = running.id
+        ready_id = ready.id
+        done_id = done.id
+
+    res = await handle_mission_cancel(
+        session_id=chat_session.id,
+        reason="abort",
+        cascade_to_workers=True,
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store, redis=redis,
+    )
+    assert res.ok is True
+
+    channels_published = [c.args[0] for c in redis.publish.call_args_list]
+    assert f"{INTERRUPT_CHANNEL_PREFIX}:{worker_session_id}" in channels_published
+
+    async with session_factory() as db:
+        for tid, expected in (
+            (running_id, "cancelled"),
+            (ready_id, "cancelled"),
+            (done_id, "done"),
+        ):
+            t = await db.get(Task, tid)
+            assert t.status == expected

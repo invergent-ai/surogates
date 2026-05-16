@@ -11,6 +11,7 @@ handlers (``handle_mission_create``, ``handle_mission_status``,
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -23,6 +24,8 @@ from surogates.missions.store import (
     MissionStore,
 )
 from surogates.session.events import EventType
+
+logger = logging.getLogger(__name__)
 
 
 MissionAction = Literal["create", "status", "pause", "resume", "cancel"]
@@ -348,5 +351,49 @@ async def handle_mission_cancel(
 async def _cascade_cancel_workers(
     *, mission_id: UUID, session_factory: Any, redis: Any,
 ) -> None:
-    """Stub — real implementation lands in Task 6."""
-    return None
+    """Cancel every non-terminal task belonging to ``mission_id``.
+
+    For each ``running`` task, publishes an interrupt on its current
+    Session's ``INTERRUPT_CHANNEL_PREFIX:<session_id>`` channel (the same
+    mechanism ``cancel_task`` / ``stop_worker`` use). All non-terminal
+    rows then transition to ``cancelled`` in a single UPDATE so we do
+    not leave a window in which the dispatcher could re-claim a ready
+    task while we are still iterating.
+    """
+    from sqlalchemy import func as _func, select as _sel, update as _upd
+
+    from surogates.config import INTERRUPT_CHANNEL_PREFIX
+    from surogates.db.models import Task
+
+    async with session_factory() as db:
+        running_session_ids = (await db.execute(
+            _sel(Task.current_session_id).where(
+                Task.mission_id == mission_id,
+                Task.status == "running",
+                Task.current_session_id.isnot(None),
+            )
+        )).scalars().all()
+        await db.execute(
+            _upd(Task)
+            .where(
+                Task.mission_id == mission_id,
+                Task.status.in_(("todo", "ready", "running", "blocked")),
+            )
+            .values(status="cancelled", completed_at=_func.now())
+        )
+        await db.commit()
+
+    for sid in running_session_ids:
+        try:
+            await redis.publish(
+                f"{INTERRUPT_CHANNEL_PREFIX}:{sid}",
+                "mission_cancel_cascade",
+            )
+        except Exception:
+            # Don't let one bad publish strand the rest of the cascade.
+            # The worker session times out naturally if the interrupt
+            # doesn't land; the task is already marked cancelled in DB.
+            logger.warning(
+                "Failed to publish interrupt for session %s during mission %s cascade",
+                sid, mission_id, exc_info=True,
+            )
