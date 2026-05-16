@@ -16,14 +16,18 @@ same module so the evaluator's public surface stays in one place).
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from textwrap import dedent
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
+
+from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
 
@@ -124,3 +128,282 @@ async def should_evaluate(
         return EvaluationDecision(should=True, trigger="completion_claim")
 
     return EvaluationDecision(should=False, trigger="no_trigger")
+
+
+# ---------------------------------------------------------------------------
+# Prompt building + verdict handling
+# ---------------------------------------------------------------------------
+
+
+# Caps on prompt content so a chatty coordinator response or a huge
+# completed-tasks block can't blow past the judge's context window.
+_RESPONSE_MAX_CHARS: int = 16_384
+_RESULT_MAX_CHARS: int = 400
+_TASKS_BLOCK_LIMIT: int = 20
+
+
+_SYSTEM_PROMPT = dedent("""\
+    You are the rubric judge for a Surogates Mission. Read the rubric and
+    the structured workstream state, then decide whether the rubric is
+    satisfied. Be strict — only return `satisfied` when concrete evidence
+    in the completed mission tasks demonstrates the rubric was met
+    (typically `result_metadata` from a verifier task).
+
+    Respond with a single JSON object, no prose around it:
+
+        {"result": "satisfied" | "needs_revision" | "blocked" | "failed",
+         "explanation": "<1-3 sentences>",
+         "feedback": "<actionable feedback for the coordinator if needs_revision; empty otherwise>"}
+
+    Verdict guidance:
+    - "satisfied": evidence backs rubric completion.
+    - "needs_revision": work is in progress or incomplete; feedback names
+      what's missing or wrong.
+    - "blocked": the rubric cannot be progressed without external input
+      that the coordinator has not yet requested (rare; usually the
+      coordinator should call ``task_block`` instead and this verdict
+      should be reserved for true dead-ends).
+    - "failed": the rubric is unreachable from current state (e.g. data
+      is impossible, contradictory rubric).
+
+    Do not honour completion claims in prose alone. The coordinator's
+    response may contain `[[mission-complete]]` as a hint that you should
+    look closely; the verdict still depends on evidence from the
+    completed mission tasks block.
+""").strip()
+
+
+async def build_evaluator_prompt(
+    *,
+    mission_id: UUID,
+    coordinator_last_response: str | None,
+    session_factory: Any,
+    mission_store: Any,
+) -> str:
+    """Render the user-side prompt the judge LLM consumes.
+
+    Includes four blocks: rubric, coordinator's latest response,
+    completed mission tasks (with result + result_metadata), in-flight
+    mission tasks. Each task block is bounded to the most recent
+    ``_TASKS_BLOCK_LIMIT`` rows.
+    """
+    from surogates.db.models import Task
+
+    mission = await mission_store.get(mission_id)
+    response_excerpt = (coordinator_last_response or "")[:_RESPONSE_MAX_CHARS]
+
+    async with session_factory() as db:
+        completed_rows = (await db.execute(
+            select(Task)
+            .where(
+                Task.mission_id == mission_id,
+                Task.status == "done",
+            )
+            .order_by(Task.completed_at.desc().nulls_last())
+            .limit(_TASKS_BLOCK_LIMIT)
+        )).scalars().all()
+        in_flight_rows = (await db.execute(
+            select(Task)
+            .where(
+                Task.mission_id == mission_id,
+                Task.status.in_(("todo", "ready", "running", "blocked")),
+            )
+            .order_by(Task.created_at.desc())
+            .limit(_TASKS_BLOCK_LIMIT)
+        )).scalars().all()
+
+    def _render_completed(rows: list[Any]) -> str:
+        if not rows:
+            return "(none)"
+        lines: list[str] = []
+        for t in rows:
+            short_id = str(t.id)[:8]
+            label = t.agent_def_name or "worker"
+            result = (t.result or "")[:_RESULT_MAX_CHARS]
+            meta = json.dumps(t.result_metadata) if t.result_metadata else "{}"
+            lines.append(
+                f"- T{short_id} ({label}) goal={t.goal!r}: "
+                f"result={result!r}; metadata={meta}"
+            )
+        return "\n".join(lines)
+
+    def _render_in_flight(rows: list[Any]) -> str:
+        if not rows:
+            return "(none)"
+        lines: list[str] = []
+        for t in rows:
+            short_id = str(t.id)[:8]
+            label = t.agent_def_name or "worker"
+            lines.append(
+                f"- T{short_id} ({label}) goal={t.goal!r}: "
+                f"status={t.status}; attempts={t.attempt_count}"
+            )
+        return "\n".join(lines)
+
+    prompt = dedent("""\
+        # Mission rubric
+
+        {rubric}
+
+        # Coordinator's latest response
+
+        {response}
+
+        # Completed mission tasks ({n_done})
+
+        {completed_block}
+
+        # In-flight mission tasks ({n_in_flight})
+
+        {in_flight_block}
+
+        # Verdict
+
+        Return JSON only.
+    """).format(
+        rubric=mission.rubric,
+        response=response_excerpt or "(empty)",
+        n_done=len(completed_rows),
+        completed_block=_render_completed(completed_rows),
+        n_in_flight=len(in_flight_rows),
+        in_flight_block=_render_in_flight(in_flight_rows),
+    )
+    return prompt
+
+
+def evaluator_system_prompt() -> str:
+    """The system message for the judge LLM call."""
+    return _SYSTEM_PROMPT
+
+
+_CONTINUATION_TEMPLATE = dedent("""\
+    [Continuing toward your mission]
+
+    Description: {description}
+
+    Rubric:
+    {rubric}
+
+    Evaluator verdict: needs_revision
+    Evaluator feedback: {feedback}
+
+    Current mission state:
+    - {n_done} task(s) completed
+    - {n_in_flight} task(s) in flight (running/ready/todo/blocked)
+    - Iteration {iteration}/{max_iterations}
+
+    Inspect the mission task tree via ``task_show`` on a recent child if
+    you need detail. Then either:
+      (a) spawn one or more corrective tasks (via ``spawn_task``) to
+          address the evaluator's feedback, OR
+      (b) call ``task_block`` on your own session with a question if you
+          need human input, OR
+      (c) call ``task_complete`` on your own session with a failure
+          summary if you believe the rubric cannot be satisfied.
+
+    Do NOT claim completion in prose alone. The evaluator only honours a
+    completion claim when a verifier task's result_metadata supports it,
+    or when you explicitly mark completion with ``[[mission-complete]]``
+    on its own line.
+""").strip()
+
+
+async def apply_verdict(
+    *,
+    mission_id: UUID,
+    verdict: dict[str, Any],
+    coordinator_session_id: UUID,
+    session_store: Any,
+    mission_store: Any,
+    trigger: str,
+) -> None:
+    """Record the evaluator's verdict and act on it.
+
+    Writes the ``last_evaluation_*`` fields, emits the
+    ``mission.evaluation.end`` event, then dispatches by verdict:
+
+    * ``satisfied`` / ``blocked`` / ``failed`` → set the matching status
+      (terminal), clear the session's ``active_mission_id`` so the
+      coordinator wakes free of mission context.
+    * ``needs_revision`` → increment iteration. If at or past
+      ``max_iterations`` → status ``max_iterations_reached``. Else
+      emit ``mission.continuation`` + a synthetic user.message with the
+      continuation prompt so the coordinator wakes with revised guidance.
+    """
+    result = verdict.get("result", "needs_revision")
+    explanation = verdict.get("explanation", "") or ""
+    feedback = verdict.get("feedback", "") or ""
+
+    await mission_store.record_evaluation(
+        mission_id, result=result, explanation=explanation, feedback=feedback,
+    )
+
+    await session_store.emit_event(
+        coordinator_session_id, EventType.MISSION_EVALUATION_END,
+        {
+            "mission_id": str(mission_id),
+            "trigger": trigger,
+            "result": result,
+            "explanation": explanation,
+            "feedback": feedback,
+        },
+    )
+
+    if result in ("satisfied", "blocked", "failed"):
+        await mission_store.set_status(mission_id, result)
+        await session_store.clear_session_config_key(
+            coordinator_session_id, "active_mission_id",
+        )
+        return
+
+    if result != "needs_revision":
+        logger.warning(
+            "Unknown mission evaluator verdict %r for mission %s; "
+            "treating as needs_revision",
+            result, mission_id,
+        )
+
+    new_iter = await mission_store.increment_iteration(mission_id)
+    mission = await mission_store.get(mission_id)
+    if new_iter >= mission.max_iterations:
+        await mission_store.set_status(mission_id, "max_iterations_reached")
+        await session_store.clear_session_config_key(
+            coordinator_session_id, "active_mission_id",
+        )
+        return
+
+    # Re-fetch counts to render an up-to-date continuation prompt.
+    from sqlalchemy import func as _func
+
+    from surogates.db.models import Task
+
+    async with mission_store._sf() as db:
+        n_done = int(await db.scalar(
+            select(_func.count(Task.id)).where(
+                Task.mission_id == mission_id, Task.status == "done",
+            )
+        ) or 0)
+        n_in_flight = int(await db.scalar(
+            select(_func.count(Task.id)).where(
+                Task.mission_id == mission_id,
+                Task.status.in_(("todo", "ready", "running", "blocked")),
+            )
+        ) or 0)
+
+    continuation = _CONTINUATION_TEMPLATE.format(
+        description=mission.description,
+        rubric=mission.rubric,
+        feedback=feedback or explanation,
+        n_done=n_done,
+        n_in_flight=n_in_flight,
+        iteration=new_iter,
+        max_iterations=mission.max_iterations,
+    )
+    await session_store.emit_event(
+        coordinator_session_id, EventType.MISSION_CONTINUATION,
+        {"mission_id": str(mission_id), "iteration": new_iter},
+    )
+    await session_store.emit_event(
+        coordinator_session_id, EventType.USER_MESSAGE,
+        {"content": continuation, "synthetic": "mission_continuation"},
+    )
