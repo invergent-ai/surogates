@@ -74,6 +74,17 @@ def _build_task_worker_config(agent_def: Any | None, task: Any) -> dict[str, Any
         if "allowed_tools" not in cfg:
             cfg["excluded_tools"] = list(existing)
 
+    # Auto-enforce the subagent-task-worker skill so every spawned worker
+    # sees the lifecycle + pitfalls playbook inlined into its system
+    # prompt (rendered by PromptBuilder._preloaded_skills_section). This
+    # is the equivalent of Hermes's ``--skills kanban-worker`` auto-load
+    # on every dispatched worker: workers shouldn't have to discover the
+    # task contract; it's the manual for their role.
+    preloaded = list(cfg.get("preloaded_skills") or [])
+    if "subagent-task-worker" not in preloaded:
+        preloaded.append("subagent-task-worker")
+    cfg["preloaded_skills"] = preloaded
+
     return cfg
 
 
