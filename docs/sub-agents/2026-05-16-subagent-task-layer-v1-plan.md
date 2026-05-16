@@ -16,7 +16,7 @@
 
 Update this list before each commit. Status legend: `[ ]` not started · `[~]` in progress · `[x]` complete.
 
-- [ ] **Task 1**: SQLAlchemy schema — `tasks`, `task_links`, `sessions.task_id` + retrofit DDL
+- [x] **Task 1**: SQLAlchemy schema — `tasks`, `task_links`, `sessions.task_id` + retrofit DDL
 - [ ] **Task 2**: Pydantic models + new event types (`TASK_BLOCKED`, `TASK_FAILED`)
 - [ ] **Task 3**: Factor `_create_session_for_task` primitive + extend `create_child_session`/`create_session` with `task_id`
 - [ ] **Task 4**: `spawn_task` tool (eager spawn when ready, DAG validation)

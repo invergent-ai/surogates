@@ -143,6 +143,54 @@ CREATE TRIGGER events_populate_tenant_trg
 
 
 -- ----------------------------------------------------------------------------
+-- Subagent task layer — retrofits.
+--
+-- ``Base.metadata.create_all`` creates ``tasks`` and ``task_links`` on
+-- fresh databases, but does not add the ``sessions.task_id`` column to
+-- an already-existing ``sessions`` table. Each statement is guarded so
+-- re-running the DDL is a no-op on fresh and upgraded databases alike.
+--
+-- See ``surogates/db/models.py`` (``Task``, ``TaskLink``, ``Session.task_id``)
+-- and ``docs/sub-agents/2026-05-16-subagent-task-layer-v1.md`` for the
+-- design rationale.
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id             uuid NOT NULL REFERENCES orgs(id),
+    parent_session_id  uuid NOT NULL REFERENCES sessions(id),
+    agent_def_name     text,
+    goal               text NOT NULL,
+    context            text,
+    current_session_id uuid REFERENCES sessions(id),
+    status             text NOT NULL DEFAULT 'todo',
+    result             text,
+    blocked_reason     text,
+    attempt_count      integer NOT NULL DEFAULT 0,
+    max_attempts       integer NOT NULL DEFAULT 3,
+    created_at         timestamp NOT NULL DEFAULT now(),
+    started_at         timestamp,
+    completed_at       timestamp
+);
+
+CREATE TABLE IF NOT EXISTS task_links (
+    parent_id uuid NOT NULL REFERENCES tasks(id),
+    child_id  uuid NOT NULL REFERENCES tasks(id),
+    PRIMARY KEY (parent_id, child_id)
+);
+
+ALTER TABLE sessions
+    ADD COLUMN IF NOT EXISTS task_id uuid REFERENCES tasks(id);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_org_status
+    ON tasks (org_id, status);
+CREATE INDEX IF NOT EXISTS idx_tasks_parent_session
+    ON tasks (parent_session_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_current_session
+    ON tasks (current_session_id);
+
+
+-- ----------------------------------------------------------------------------
 -- v_session_tree -- recursive ancestry of sessions via parent_id.
 --
 -- Each row has the session's ``root_session_id`` (the top-level ancestor),
