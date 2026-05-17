@@ -1,6 +1,0 @@
-apiVersion: v2
-name: surogates
-description: Surogates managed agent deployment — one release per agent
-type: application
-version: 0.1.0
-appVersion: "latest"

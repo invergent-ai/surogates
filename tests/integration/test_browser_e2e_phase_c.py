@@ -3,7 +3,7 @@
 Setup:
 
     kind create cluster --name surogates-test
-    helm install surogates /work/surogates/helm/surogates \
+    helm install surogates <PATH_TO_CHART> \
         --namespace surogates --create-namespace \
         --set browser.backend=kubernetes
     PUSH=0 ./images/build.sh latest browser

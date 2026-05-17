@@ -7,7 +7,7 @@ Setup before running:
     kind load docker-image \
         ghcr.io/invergent-ai/surogates-agent-browser:latest \
         --name surogates-test
-    helm install surogates /work/surogates/helm/surogates \
+    helm install surogates <PATH_TO_CHART> \
         --namespace surogates --create-namespace \
         --set browser.backend=kubernetes \
         --set browser.image=ghcr.io/invergent-ai/surogates-agent-browser:latest
