@@ -34,7 +34,6 @@ function mission(
   input: Partial<AgentChatMissionSummary> & { id: string },
 ): AgentChatMissionSummary {
   return {
-    id: input.id,
     orgId: "org-1",
     userId: "user-1",
     sessionId: "sess-1",
