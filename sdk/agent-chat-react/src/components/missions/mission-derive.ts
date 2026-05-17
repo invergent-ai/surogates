@@ -2,28 +2,36 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // Pure derivers for the mission dashboard. Extracted so the logic can
-// be unit-tested without rendering React.
+// be unit-tested without rendering React and shared across host apps.
 import type {
   AgentChatMissionStatus,
   AgentChatMissionTask,
   AgentChatMissionWorker,
-} from "@invergent/agent-chat-react";
+} from "../../types";
+
 
 /** Mission statuses that are still actively producing events. */
-export const ACTIVE_STATUSES: ReadonlySet<AgentChatMissionStatus> = new Set([
-  "active",
-  "paused",
-]);
+export const ACTIVE_MISSION_STATUSES: ReadonlySet<AgentChatMissionStatus> =
+  new Set(["active", "paused"]);
+
 
 /** Mission statuses past which no further work happens. */
-export function isTerminalStatus(status: AgentChatMissionStatus): boolean {
-  return !ACTIVE_STATUSES.has(status);
+export function isTerminalMissionStatus(
+  status: AgentChatMissionStatus,
+): boolean {
+  return !ACTIVE_MISSION_STATUSES.has(status);
 }
 
-/** Bucket label for grouping tasks in the dashboard. */
-export type TaskBucket = "in_flight" | "done" | "blocked" | "failed_or_cancelled";
 
-export function taskBucket(status: string): TaskBucket {
+/** Bucket label for grouping tasks in the dashboard. */
+export type MissionTaskBucket =
+  | "in_flight"
+  | "done"
+  | "blocked"
+  | "failed_or_cancelled";
+
+
+export function missionTaskBucket(status: string): MissionTaskBucket {
   if (status === "done") return "done";
   if (status === "blocked") return "blocked";
   if (status === "failed" || status === "cancelled") {
@@ -32,20 +40,22 @@ export function taskBucket(status: string): TaskBucket {
   return "in_flight";
 }
 
-export function groupTasksByBucket(
+
+export function groupMissionTasksByBucket(
   tasks: AgentChatMissionTask[],
-): Record<TaskBucket, AgentChatMissionTask[]> {
-  const buckets: Record<TaskBucket, AgentChatMissionTask[]> = {
+): Record<MissionTaskBucket, AgentChatMissionTask[]> {
+  const buckets: Record<MissionTaskBucket, AgentChatMissionTask[]> = {
     in_flight: [],
     done: [],
     blocked: [],
     failed_or_cancelled: [],
   };
   for (const t of tasks) {
-    buckets[taskBucket(t.status)].push(t);
+    buckets[missionTaskBucket(t.status)].push(t);
   }
   return buckets;
 }
+
 
 /**
  * Derive a human-friendly activity label for a worker row. The server
@@ -53,7 +63,7 @@ export function groupTasksByBucket(
  * signal in this order: a recent tool.call summary, a recent
  * llm.response, else the worker's session status.
  */
-export function deriveWorkerActivityLabel(
+export function deriveMissionWorkerActivityLabel(
   worker: AgentChatMissionWorker,
 ): string {
   const kind = worker.latestEventKind;
@@ -71,6 +81,7 @@ export function deriveWorkerActivityLabel(
   }
   return worker.sessionStatus || "active";
 }
+
 
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
