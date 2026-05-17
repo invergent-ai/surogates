@@ -108,6 +108,7 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - Dispatcher tick (promote, finalize, enqueue at 5s cadence)
 - Retry-with-history and prior-attempt context injection
 - Event vocabulary (`worker.complete` extended with `task_id`, plus `task.blocked` / `task.failed`)
+- **Missions** (rubric-judged, long-running objectives): `/mission` slash command, evaluator triggers, verifier-task pattern, mission dashboard, pause/resume/cancel
 
 ### [12. Experts](experts/index.md)
 - What is an expert? (task-specialized model as a skill)

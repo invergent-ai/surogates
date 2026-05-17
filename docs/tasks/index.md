@@ -145,9 +145,109 @@ No new configuration. The dispatcher tick is enabled automatically when the orch
 
 Both can coexist within one parent session; pick per call.
 
+## Missions: orchestrated, rubric-judged objectives
+
+A **mission** is a long-running objective with a written rubric. The coordinator agent spawns tasks (using everything described above), and an LLM judge keeps grading the workstream against the rubric — spawning more rounds when the rubric isn't yet met, ending the mission when it is.
+
+Use a mission when "done" is criterion-driven and the user wants to set the bar up front (`gsm8k score >= 0.8`, `coverage >= 95%`, `all critical TODOs resolved`). Use raw `spawn_task` when the orchestrator's own judgement is enough.
+
+### Starting a mission
+
+Open a chat with your agent and send:
+
+```
+/mission Train a small classifier on the customer-feedback dataset. Generate training data if needed; iterate until the eval metric is met.
+
+Rubric:
+A verifier task must run the eval suite and record result_metadata.accuracy. Satisfied when accuracy >= 0.85.
+```
+
+That's the whole API. The agent becomes the mission's coordinator, the rubric is preserved on the session, and a kickoff message tells the agent to decompose the work.
+
+The slash command's other forms:
+
+| Form | Effect |
+|---|---|
+| `/mission` or `/mission status` | Show the current mission's status, iteration, latest verdict |
+| `/mission pause [reason]` | Pause the evaluator loop. Workers in flight keep running. |
+| `/mission resume` | Resume a paused mission |
+| `/mission cancel [reason]` | Cancel without touching workers — they finish whatever they're on |
+| `/mission cancel --cascade [reason]` | Cancel and interrupt every still-running worker |
+
+You can have at most one `/mission` or `/goal` per chat session — they share an evaluator loop.
+
+### Mission states
+
+| Status | Meaning |
+|---|---|
+| `active` | The judge is grading new evidence as it arrives |
+| `paused` | Evaluator suspended; workers continue. `/mission resume` reactivates. |
+| `satisfied` | Terminal — rubric met |
+| `blocked` | Terminal — judge says the rubric needs external input the agent hasn't requested |
+| `failed` | Terminal — judge says the rubric is unreachable from where things stand |
+| `cancelled` | Terminal — user cancelled |
+| `max_iterations_reached` | Terminal — hit the 20-iteration cap without a `satisfied` verdict |
+
+### When the judge runs
+
+The judge does **not** run after every agent response. That would be expensive and would grade unchanged state. It runs only when:
+
+1. A task the coordinator spawned (or any of its sub-tasks) reaches a terminal state — there's actual new evidence to grade. **This is the normal path.**
+2. The coordinator emits `[[mission-complete]]` on its own line — an explicit "look now" hint from the agent.
+
+A 30-second rate limit per mission keeps a burst of completing tasks from triggering a flurry of judge calls.
+
+### How to design a rubric the judge can answer
+
+The judge can't grade prose. It needs evidence in a structured form. The pattern that always works:
+
+1. The orchestrator spawns the work tasks (research, training, generation, fixing, whatever).
+2. The orchestrator spawns a **verifier task** that depends on the work tasks (`parents=[…]` so it runs after they finish). The verifier's job is to compute the measurable signal the rubric mentions and call `task_complete(summary, metadata={"<key>": <value>})` with it.
+3. When the verifier finishes, the judge sees the verifier's metadata and grades against it.
+
+So write rubrics in terms of metadata a verifier can produce:
+
+- ✅ "Satisfied when `result_metadata.accuracy >= 0.85`"
+- ✅ "Satisfied when `result_metadata.coverage_percent >= 95`"
+- ✅ "Satisfied when `result_metadata.failing_tests == 0`"
+- ❌ "Satisfied when the agent says it's done" (the judge ignores prose claims)
+- ❌ "Satisfied when the code is clean" (no measurable signal)
+
+The orchestrator skill bundled with the platform walks the coordinator through this pattern; you don't have to spell it out in every prompt.
+
+### What happens when the judge says "needs revision"
+
+The judge picks one of four verdicts: `satisfied`, `needs_revision`, `blocked`, `failed`. The first and last three are terminal. `needs_revision` means "keep going":
+
+- The mission's iteration counter bumps.
+- The judge's feedback is delivered to the coordinator as a continuation message ("here's what's missing; spawn the next round").
+- The coordinator wakes, reads the feedback, decides what to do next — usually spawn corrective tasks.
+- After 20 iterations without a `satisfied` verdict, the mission terminates as `max_iterations_reached`.
+
+If the coordinator decides the rubric genuinely can't be met (contradictory criteria, missing data), it can call `task_complete` on itself with a failure summary; the judge reads that as evidence and returns `failed`.
+
+### Pausing, resuming, cancelling
+
+- **Pause** stops the evaluator from grading new evidence. Workers in flight keep running and recording their results; the judge just won't react. Useful when you want to inspect the workstream without it changing under you.
+- **Resume** turns the evaluator back on and wakes the coordinator so any pending continuations get processed.
+- **Cancel** terminates the mission. Without `--cascade`, currently-running tasks finish (their results are no longer graded). With `--cascade`, every running worker session for this mission gets an interrupt — use this when you've decided the whole direction is wrong.
+
+If the judge fails to return parseable output three times in a row, the mission auto-pauses with reason `evaluator parse failure` so you can investigate; a single recoverable failure doesn't pause anything.
+
+### Where to watch a mission run
+
+Each agent surfaces missions in two places:
+
+- A **Missions** panel in the sidebar, listing every active or paused mission. Click a row to open the dashboard.
+- A **mission dashboard** that shows the rubric, current iteration, latest verdict, the task DAG (grouped by status), and live worker activity with links into each worker session's transcript. Active missions auto-refresh every 5 seconds; terminal missions stop polling.
+
+The dashboard is the right place to watch a mission in flight; the chat thread is the right place to talk to the coordinator about it.
+
 ## See also
 
 - [Sub-Agents](../sub-agents/index.md) -- the `AgentDef` catalog that `spawn_task`'s `agent_type` parameter resolves into.
 - [Tools](../tools/index.md) -- full parameter tables for `spawn_task`, `task_complete`, `task_show`, etc.
 - Design spec: [`docs/sub-agents/2026-05-16-subagent-task-layer-v1.md`](../sub-agents/2026-05-16-subagent-task-layer-v1.md)
 - Implementation plan: [`docs/sub-agents/2026-05-16-subagent-task-layer-v1-plan.md`](../sub-agents/2026-05-16-subagent-task-layer-v1-plan.md)
+- Mission spec: [`docs/superpowers/specs/2026-05-16-mission-orchestrated-goals-design.md`](../superpowers/specs/2026-05-16-mission-orchestrated-goals-design.md)
+- Mission orchestrator playbook: [`skills/kanban/subagent-task-orchestrator/SKILL.md`](../../skills/kanban/subagent-task-orchestrator/SKILL.md) (the "Criterion-driven loops" section)
