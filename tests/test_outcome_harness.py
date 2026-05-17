@@ -213,6 +213,91 @@ async def test_handle_goal_set_rejected_when_outcome_active() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_mission_create_propagates_config_to_in_memory_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: after /mission create, the in-memory ``session.config``
+    must reflect ``coordinator=True``, ``active_mission_id``, and the
+    orchestrator preload — otherwise the rest of the wake processes the
+    kickoff message with stale config and ``spawn_task`` gets filtered
+    out as a WORKER_EXCLUDED_TOOL."""
+    from uuid import uuid4
+
+    from surogates.missions.commands import MissionHandlerResult
+
+    store = FakeStore()
+    harness = _make_harness(
+        store, redis_client=AsyncMock(), session_factory=MagicMock(),
+    )
+    session = _session()
+    lease = _lease(session.id)
+
+    mission_id = uuid4()
+
+    async def fake_create(**_kwargs: Any) -> MissionHandlerResult:
+        return MissionHandlerResult(
+            ok=True, mission_id=mission_id, message="started",
+        )
+
+    monkeypatch.setattr(
+        "surogates.missions.commands.handle_mission_create", fake_create,
+    )
+
+    await harness._handle_mission_command(
+        session,
+        "/mission Train the model\n\nRubric:\nReach gsm8k >= 0.8",
+        lease,
+    )
+
+    assert session.config["coordinator"] is True
+    assert session.config["active_mission_id"] == str(mission_id)
+    assert "subagent-task-orchestrator" in session.config["preloaded_skills"]
+
+
+@pytest.mark.asyncio
+async def test_handle_mission_cancel_clears_in_memory_active_mission_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: cancelling a mission must drop ``active_mission_id``
+    from the in-memory session so the same wake's `/goal` mutual-exclusion
+    check no longer treats the cancelled mission as in flight."""
+    from uuid import uuid4
+
+    from surogates.missions.commands import MissionHandlerResult
+
+    store = FakeStore()
+    harness = _make_harness(
+        store, redis_client=AsyncMock(), session_factory=MagicMock(),
+    )
+    # Seed an active mission on the in-memory session.
+    mission_id = uuid4()
+    session = _session(
+        config={
+            "active_mission_id": str(mission_id),
+            "coordinator": True,
+        },
+    )
+    lease = _lease(session.id)
+
+    async def fake_cancel(**_kwargs: Any) -> MissionHandlerResult:
+        return MissionHandlerResult(
+            ok=True, mission_id=mission_id, message="cancelled",
+        )
+
+    monkeypatch.setattr(
+        "surogates.missions.commands.handle_mission_cancel", fake_cancel,
+    )
+
+    await harness._handle_mission_command(
+        session, "/mission cancel", lease,
+    )
+
+    assert "active_mission_id" not in session.config
+    # coordinator stays True for the rest of this wake — the session
+    # retains its orchestrator role until the session itself terminates.
+
+
+@pytest.mark.asyncio
 async def test_handle_mission_create_rejects_service_account_principal() -> None:
     """A tenant with user_id=None (service-account/channel session) must
     not be allowed to create a mission — missions.user_id is NOT NULL

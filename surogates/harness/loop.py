@@ -3941,6 +3941,23 @@ class AgentHarness:
                             redis=redis_client,
                         )
                         message = result.message or result.error
+                        if result.ok and result.mission_id is not None:
+                            # Propagate the config write back to the
+                            # in-memory session so the rest of this wake
+                            # sees ``coordinator=True`` + the orchestrator
+                            # skill preload. Without this, the kickoff
+                            # message gets processed by the same wake
+                            # against a stale config and tools gated on
+                            # ``coordinator`` (``spawn_task`` &c) get
+                            # filtered out as worker-excluded.
+                            cfg = dict(session.config or {})
+                            cfg["active_mission_id"] = str(result.mission_id)
+                            cfg["coordinator"] = True
+                            preloaded = list(cfg.get("preloaded_skills") or [])
+                            if "subagent-task-orchestrator" not in preloaded:
+                                preloaded.append("subagent-task-orchestrator")
+                            cfg["preloaded_skills"] = preloaded
+                            session.config = cfg
                 elif command.action == "status":
                     result = await handle_mission_status(
                         session_id=session.id, mission_store=mission_store,
@@ -3985,6 +4002,15 @@ class AgentHarness:
                             redis=redis_client,
                         )
                         message = result.message or result.error
+                        if result.ok:
+                            # Mirror the DB ``clear_session_config_key``
+                            # call in the in-memory session so subsequent
+                            # iterations of this wake (and the next /goal
+                            # mutual-exclusion check) see no active
+                            # mission.
+                            cfg = dict(session.config or {})
+                            cfg.pop("active_mission_id", None)
+                            session.config = cfg
                 else:
                     message = (
                         "Usage: /mission <description>\\n\\nRubric:\\n<criterion>"
