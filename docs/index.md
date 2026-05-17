@@ -26,16 +26,6 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - Trust boundaries (API server / Worker / Sandbox isolation)
 - Storage architecture (Garage buckets, tenant assets, workspace files)
 
-### [4. Deployment](deployment/index.md)
-- Kubernetes manifests (namespace, deployments, services, ingress)
-- API server deployment and configuration
-- Worker deployment and HPA scaling
-- Sandbox pods (K8sSandbox lifecycle, s3fs-fuse sidecar, activeDeadlineSeconds)
-- Channel adapters (per-channel deployment)
-- MCP proxy deployment
-- Infrastructure dependencies (PostgreSQL, Redis, Garage)
-- Platform volumes (skills, tools, MCP configs, policies)
-
 ### [5. Multi-Tenancy](multi-tenancy/index.md)
 - Tenant model (orgs, users, channel identities)
 - Authentication (database provider)
