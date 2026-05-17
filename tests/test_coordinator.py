@@ -23,6 +23,7 @@ from surogates.session.events import EventType
 def _default_workspace_config() -> dict:
     return {
         "storage_bucket": "tenant-bucket",
+        "storage_key_prefix": "",
         "workspace_path": "/workspace/tenant-bucket/parent",
         "supports_vision": False,
     }

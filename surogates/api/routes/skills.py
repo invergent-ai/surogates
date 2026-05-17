@@ -146,21 +146,34 @@ def _get_tenant_storage(request: Request, tenant: TenantContext) -> TenantStorag
     )
 
 
-def _get_skill_stager(request: Request) -> SkillStager:
+def _get_skill_stager(
+    request: Request, storage_key_prefix: str = "",
+) -> SkillStager:
     """Create a ``SkillStager`` bound to the request's storage backend.
 
     Threads the app-wide Redis client through so concurrent staging calls
     for the same ``(session_id, skill_name)`` are serialised across
     worker replicas.  When Redis is not wired (tests / dev without a
     broker), the stager falls back to an in-process ``asyncio.Lock``.
+
+    *storage_key_prefix* is the per-agent prefix under the shared
+    workspace bucket (typically ``{project_id}/{agent_id}``).  Callers
+    fetch it from the session config; ``""`` reproduces the
+    bucket-rooted layout used before the shared-bucket cutover.
     """
     redis = getattr(request.app.state, "redis", None)
     bucket = agent_session_bucket(request.app.state.settings.storage.bucket)
     return SkillStager(
         backend=request.app.state.storage,
         storage_bucket=bucket,
+        storage_key_prefix=storage_key_prefix,
         redis=redis,
     )
+
+
+def _session_storage_key_prefix(session: Any) -> str:
+    """Return the per-agent storage prefix stamped onto *session*."""
+    return (session.config or {}).get("storage_key_prefix", "") or ""
 
 
 def _resource_loader(request: Request):
@@ -197,20 +210,23 @@ async def _authorize_session_for_staging(
     request: Request,
     tenant: TenantContext,
     session_id: UUID,
-) -> None:
-    """Verify *session_id* belongs to the tenant before staging into storage.
+) -> Any:
+    """Verify *session_id* belongs to the tenant and return the session.
 
     Staging writes under ``sessions/{session_id}/`` in the agent bucket;
     without this check any authenticated user could pollute another tenant's
     sessions or trigger arbitrary workspace writes with forged UUIDs.  Raises
     ``HTTPException(404)`` with a generic message for both the not-found
     and wrong-tenant cases to avoid leaking session existence.
+
+    Returns the authorized session so callers can read its
+    ``storage_key_prefix`` without re-fetching from the store.
     """
     from surogates.api.routes.sessions import _get_session_for_tenant
 
     # Delegates to the sessions helper — matches the authorization model
     # used by every other session-scoped endpoint (events, workspace, etc.).
-    await _get_session_for_tenant(request, session_id, tenant)
+    return await _get_session_for_tenant(request, session_id, tenant)
 
 
 async def _stage_skill_for_session(
@@ -219,6 +235,7 @@ async def _stage_skill_for_session(
     skill_def: Any,
     session_id: UUID,
     linked_files: list[str] | dict[str, list[str]] | None,
+    storage_key_prefix: str = "",
 ) -> str | None:
     """Auto-stage a skill into the session workspace when it has assets to stage.
 
@@ -238,7 +255,7 @@ async def _stage_skill_for_session(
     if not has_stageable_assets(linked_files):
         return None
 
-    stager = _get_skill_stager(request)
+    stager = _get_skill_stager(request, storage_key_prefix=storage_key_prefix)
 
     if skill_def.source == SKILL_SOURCE_PLATFORM:
         loader = _resource_loader(request)
@@ -437,13 +454,14 @@ async def view_skill(
     # files beyond SKILL.md itself.  Authorize first: the session must
     # belong to this tenant before we write into its bucket.
     if session_id is not None:
-        await _authorize_session_for_staging(request, tenant, session_id)
+        session = await _authorize_session_for_staging(request, tenant, session_id)
         staged_at = await _stage_skill_for_session(
             request=request,
             tenant=tenant,
             skill_def=skill_def,
             session_id=session_id,
             linked_files=detail.linked_files,
+            storage_key_prefix=_session_storage_key_prefix(session),
         )
         if staged_at is not None:
             detail.staged_at = staged_at
@@ -477,8 +495,11 @@ async def read_skill_file(
     # Authorize the session up-front: any redirect-to-staged path writes
     # into the session workspace, so ownership must be verified even though
     # the caller may only be reading a text file in the end.
+    session_for_staging: Any | None = None
     if session_id is not None:
-        await _authorize_session_for_staging(request, tenant, session_id)
+        session_for_staging = await _authorize_session_for_staging(
+            request, tenant, session_id,
+        )
 
     loader = _resource_loader(request)
     session_factory = request.app.state.session_factory
@@ -490,18 +511,20 @@ async def read_skill_file(
 
     async def _redirect_to_staged(skill_def_to_stage: Any) -> dict[str, Any] | None:
         """Stage the skill and return a redirect response, or ``None``."""
-        if session_id is None:
+        if session_id is None or session_for_staging is None:
             return None
+        key_prefix = _session_storage_key_prefix(session_for_staging)
         staged_at = await _stage_skill_for_session(
             request=request,
             tenant=tenant,
             skill_def=skill_def_to_stage,
             session_id=session_id,
             linked_files=[path],  # forces stageable_assets to be True
+            storage_key_prefix=key_prefix,
         )
         if staged_at is None:
             return None
-        stager = _get_skill_stager(request)
+        stager = _get_skill_stager(request, storage_key_prefix=key_prefix)
         return {
             "file_path": path,
             "binary": True,

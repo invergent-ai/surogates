@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, AsyncIterator, Final
 from uuid import UUID
 
 from surogates.storage.backend import StorageBackend
+from surogates.storage.keys import prefixed
 from surogates.storage.tenant import session_workspace_key
 
 if TYPE_CHECKING:
@@ -86,15 +87,26 @@ class SkillStager:
         backend: StorageBackend,
         storage_bucket: str,
         redis: "Redis | None" = None,
+        storage_key_prefix: str = "",
     ) -> None:
         self._backend = backend
         self._storage_bucket = storage_bucket
+        self._storage_key_prefix = storage_key_prefix
         self._redis = redis
         # In-process fallback locks — only used when Redis isn't available.
         # Keyed by the same string as the Redis lock so the two code paths
         # produce identical contention semantics.
         self._local_locks: dict[str, asyncio.Lock] = {}
         self._local_locks_guard = asyncio.Lock()
+
+    def _physical_key(self, session_id: UUID | str, sub_key: str) -> str:
+        """Return the physical object key for *sub_key* under the session prefix.
+
+        Layers ``storage_key_prefix`` on top of the hard-coded
+        ``sessions/{id}/`` prefix so staged keys land under the agent's
+        share of the bucket.
+        """
+        return prefixed(session_workspace_key(session_id, sub_key), self._storage_key_prefix)
 
     # ------------------------------------------------------------------
     # Path helpers
@@ -127,7 +139,7 @@ class SkillStager:
         marker = f"{self.staged_key_prefix(skill_name)}/{STAGING_MARKER}"
         return await self._backend.exists(
             self._storage_bucket,
-            session_workspace_key(session_id, marker),
+            self._physical_key(session_id, marker),
         )
 
     # ------------------------------------------------------------------
@@ -227,16 +239,14 @@ class SkillStager:
                 data = src_file.read_bytes()
                 await self._backend.write(
                     self._storage_bucket,
-                    session_workspace_key(session_id, f"{dest_prefix}/{rel}"),
+                    self._physical_key(session_id, f"{dest_prefix}/{rel}"),
                     data,
                 )
                 copied += 1
 
             await self._backend.write(
                 self._storage_bucket,
-                session_workspace_key(
-                    session_id, f"{dest_prefix}/{STAGING_MARKER}",
-                ),
+                self._physical_key(session_id, f"{dest_prefix}/{STAGING_MARKER}"),
                 b"",
             )
             logger.info(
@@ -294,16 +304,14 @@ class SkillStager:
                 data = await self._backend.read(tenant_bucket_name, key)
                 await self._backend.write(
                     self._storage_bucket,
-                    session_workspace_key(session_id, f"{dest_prefix}/{rel}"),
+                    self._physical_key(session_id, f"{dest_prefix}/{rel}"),
                     data,
                 )
                 copied += 1
 
             await self._backend.write(
                 self._storage_bucket,
-                session_workspace_key(
-                    session_id, f"{dest_prefix}/{STAGING_MARKER}",
-                ),
+                self._physical_key(session_id, f"{dest_prefix}/{STAGING_MARKER}"),
                 b"",
             )
             logger.info(
