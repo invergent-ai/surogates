@@ -227,6 +227,10 @@ describe("AgentChat", () => {
     expect(document.body.textContent).toContain("Schedule recurring prompt");
     expect(document.body.textContent).toContain("/goal");
     expect(document.body.textContent).toContain("Define an outcome goal");
+    expect(document.body.textContent).toContain("/mission");
+    expect(document.body.textContent).toContain(
+      "Start an orchestrated rubric-judged mission",
+    );
     expect(document.body.textContent).toContain("/review");
     expect(document.body.textContent).toContain("Review the current work");
   });
