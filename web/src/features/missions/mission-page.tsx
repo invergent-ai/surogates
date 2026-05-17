@@ -7,6 +7,7 @@
 // active or paused; stops polling on terminal status. All API calls
 // flow through the AgentChatAdapter contract (the SDK), not directly
 // through fetch — see `features/chat/surogates-web-chat-adapter.ts`.
+import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import {
@@ -35,6 +36,7 @@ import {
 } from "@/components/ui/card";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Separator } from "@/components/ui/separator";
+import { SessionSidebar } from "@/components/navbar";
 
 import { surogatesWebChatAdapter } from "@/features/chat/surogates-web-chat-adapter";
 
@@ -78,6 +80,16 @@ const adapterMission = missionApi as {
 
 
 const POLL_INTERVAL_MS = 5_000;
+
+
+function MissionPageShell({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex h-screen w-full overflow-hidden">
+      <SessionSidebar />
+      <main className="flex-1 overflow-y-auto">{children}</main>
+    </div>
+  );
+}
 
 
 type MissionState = {
@@ -170,38 +182,42 @@ export function MissionPage() {
 
   if (!missionId) {
     return (
-      <div className="p-6 text-sm">
-        Missing mission id in URL.
-      </div>
+      <MissionPageShell>
+        <div className="p-6 text-sm">Missing mission id in URL.</div>
+      </MissionPageShell>
     );
   }
 
   if (state.loading && !state.mission) {
     return (
-      <div className="flex h-full items-center justify-center p-6">
-        <Loader2 className="size-5 animate-spin text-muted-foreground" />
-      </div>
+      <MissionPageShell>
+        <div className="flex h-full items-center justify-center p-6">
+          <Loader2 className="size-5 animate-spin text-muted-foreground" />
+        </div>
+      </MissionPageShell>
     );
   }
 
   if (state.error && !state.mission) {
     return (
-      <div className="p-6 space-y-3">
-        <div className="flex items-center gap-2 text-destructive">
-          <AlertCircle className="size-4" />
-          Failed to load mission: {state.error}
+      <MissionPageShell>
+        <div className="p-6 space-y-3">
+          <div className="flex items-center gap-2 text-destructive">
+            <AlertCircle className="size-4" />
+            Failed to load mission: {state.error}
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setState(INITIAL_STATE);
+              void refresh();
+            }}
+          >
+            <RefreshCw className="size-4" /> Retry
+          </Button>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            setState(INITIAL_STATE);
-            void refresh();
-          }}
-        >
-          <RefreshCw className="size-4" /> Retry
-        </Button>
-      </div>
+      </MissionPageShell>
     );
   }
 
@@ -249,8 +265,9 @@ export function MissionPage() {
       : "secondary";
 
   return (
-    <div className="flex flex-col gap-6 p-6 max-w-6xl mx-auto">
-      {/* ----- Header ------------------------------------------------ */}
+    <MissionPageShell>
+      <div className="flex flex-col gap-6 p-6 max-w-6xl mx-auto">
+        {/* ----- Header ---------------------------------------------- */}
       <Card>
         <CardHeader>
           <div className="flex items-start justify-between gap-4">
@@ -521,6 +538,7 @@ export function MissionPage() {
         onConfirm={doCancel}
         onCancel={() => setCancelOpen(false)}
       />
-    </div>
+      </div>
+    </MissionPageShell>
   );
 }
