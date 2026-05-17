@@ -4,6 +4,7 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  MissionsPanel,
   ScheduledWorkPanel,
   SessionTreePanel,
   useInboxUnreadCount,
@@ -60,6 +61,13 @@ export function SessionSidebar() {
 
   function handleScheduleChanged() {
     void fetchSessions();
+  }
+
+  function handleMissionSelect(missionId: string) {
+    void navigate({
+      to: "/missions/$missionId",
+      params: { missionId },
+    });
   }
 
   function handleLogout() {
@@ -197,6 +205,10 @@ export function SessionSidebar() {
         </div>
         {!collapsed && (
           <div className="shrink-0 max-h-[45%] overflow-y-auto">
+            <MissionsPanel
+              adapter={surogatesWebChatAdapter}
+              onMissionSelect={handleMissionSelect}
+            />
             <ScheduledWorkPanel
               adapter={surogatesWebChatAdapter}
               onSessionSelect={handleSelectSession}
