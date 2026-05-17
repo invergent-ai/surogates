@@ -209,6 +209,12 @@ class Session(Base):
     parent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=True
     )
+    # Subagent task layer: when set, this session is one execution attempt
+    # of the referenced Task. Nullable because plain chat / spawn_worker
+    # sessions are not backed by a Task.
+    task_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=True
+    )
     message_count: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
     )
@@ -851,4 +857,202 @@ class McpServer(Base):
     org: Mapped[Org] = relationship(back_populates="mcp_servers", lazy="raise")
     user: Mapped[Optional[User]] = relationship(
         back_populates="mcp_servers", lazy="raise"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Subagent task layer
+#
+# A Task is a durable, DAG-aware coordination unit that wraps zero or more
+# Session attempts. Created by the ``spawn_task`` tool; promoted through
+# todo -> ready -> running -> done/failed/blocked/cancelled by the
+# ``tasks_tick`` dispatcher loop (see ``surogates/tasks/dispatcher.py``).
+#
+# ``task_links`` carries the parent->child DAG edges separately so a single
+# child can depend on multiple parents (fan-in synthesis pattern).
+# ---------------------------------------------------------------------------
+
+
+class Task(Base):
+    """Durable subagent task — coordinates retries, DAG dependencies, and
+    block/unblock lifecycle around a goal that may be executed by zero or
+    more Session attempts.
+
+    Status state machine (see ``surogates/tasks/dispatcher.py``):
+
+    * ``todo``      — created; one or more parents not yet done
+    * ``ready``     — parents complete; eligible for atomic claim
+    * ``running``   — a Session (``current_session_id``) is executing
+    * ``blocked``   — worker called ``task_block``; awaiting unblock
+    * ``done``      — worker session ended with WORKER_COMPLETE
+    * ``failed``    — exhausted ``max_attempts`` after crash/timeout
+    * ``cancelled`` — parent or operator aborted before terminal state
+
+    ``cancelled`` and ``failed`` parents intentionally do **not** unblock
+    children — downstream tasks stay in ``todo`` until the orchestrator
+    cancels or replans them explicitly.
+    """
+
+    __tablename__ = "tasks"
+    __table_args__ = (
+        Index("idx_tasks_org_status", "org_id", "status"),
+        Index("idx_tasks_parent_session", "parent_session_id"),
+        Index("idx_tasks_current_session", "current_session_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
+    )
+    # The Session that called spawn_task. Used for ownership checks on
+    # unblock_task / cancel_task and as the target of completion events.
+    parent_session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=False
+    )
+    # Optional pre-configured sub-agent type (matches an AgentDef name).
+    # Resolved at spawn time via ``surogates.harness.agent_resolver``.
+    agent_def_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    goal: Mapped[str] = mapped_column(Text, nullable=False)
+    # Free-form context the parent provided at spawn time. Appended to
+    # (not replaced) on each ``unblock_task`` call with a timestamp marker
+    # so subsequent attempts see all accumulated context.
+    context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Points at the in-flight Session attempt. Cleared only when
+    # transitioning back to ``ready`` (retry) — terminal states keep it
+    # set for history.
+    current_session_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="todo",
+    )
+    # Worker's final summary; populated from WORKER_COMPLETE event payload
+    # (auto-extracted on natural session end), or set explicitly by the
+    # ``task_complete`` self-tool when a worker wants a structured handoff.
+    result: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Structured handoff metadata — set only when the worker called
+    # ``task_complete(summary, metadata=...)`` explicitly. Shape is a
+    # free-form JSON object (e.g. ``{"changed_files": [...],
+    # "tests_run": 12, "decisions": [...]}``).  Plain workers that
+    # complete naturally never populate this field.
+    result_metadata: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=True,
+    )
+    # One-sentence reason captured by the ``task_block`` tool.
+    blocked_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Number of Sessions that have been claimed for this task (including
+    # in-flight). ``task_block`` deliberately does not increment this —
+    # blocking is a pause, not a failure.
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="3"
+    )
+    # Mission layer: when set, this task belongs to a mission (the
+    # coordinator session is the mission's session). Stamped at spawn
+    # time by ``_spawn_task_handler`` reading
+    # ``session.config["active_mission_id"]``. Nullable so non-mission
+    # tasks (plain spawn_task, or spawn_task from a session without an
+    # active mission) carry None.
+    mission_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("missions.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now()
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+
+
+class TaskLink(Base):
+    """Parent -> child DAG edge between Tasks. Supports fan-in: a child
+    may have multiple parents and stays in ``todo`` until every parent
+    reaches ``done`` (cancelled/failed parents do not unblock children).
+    """
+
+    __tablename__ = "task_links"
+
+    parent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id"), primary_key=True,
+    )
+    child_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id"), primary_key=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Mission layer
+#
+# A Mission is a long-running, durable, multi-worker objective attached
+# to a chat (coordinator) session. The mission's rubric is graded by an
+# LLM judge fired on (a) mission-task terminal events, or (b) an
+# explicit ``[[mission-complete]]`` marker in the coordinator's prose —
+# never on every no-tool-call response (that's `/goal`'s rule and it's
+# wrong for orchestrator workloads).
+#
+# See docs/superpowers/specs/2026-05-16-mission-orchestrated-goals-design.md.
+# ---------------------------------------------------------------------------
+
+
+class Mission(Base):
+    """A durable orchestrated objective with rubric-judged completion."""
+
+    __tablename__ = "missions"
+    __table_args__ = (
+        Index("idx_missions_session", "session_id"),
+        Index(
+            "idx_missions_user_agent_status",
+            "org_id", "user_id", "agent_id", "status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=False
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    rubric: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="active",
+    )
+    iteration: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    max_iterations: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="20"
+    )
+    last_evaluation_result: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    last_evaluation_explanation: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    last_evaluation_feedback: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    last_evaluation_at: Mapped[Optional[datetime]] = mapped_column(
+        nullable=True
+    )
+    evaluator_parse_failures: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    paused_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    cancelled_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now(), onupdate=func.now()
     )

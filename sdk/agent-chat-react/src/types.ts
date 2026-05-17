@@ -206,6 +206,78 @@ export interface AgentChatScheduledWorkList {
   total: number;
 }
 
+// ---------------------------------------------------------------------------
+// Missions — orchestrated, rubric-judged objectives
+//
+// Wire format mirrors the backend `/v1/missions/*` REST surface; see
+// `surogates/api/routes/missions.py` and
+// `docs/superpowers/specs/2026-05-16-mission-orchestrated-goals-design.md`.
+// ---------------------------------------------------------------------------
+
+export type AgentChatMissionStatus =
+  | "active"
+  | "paused"
+  | "satisfied"
+  | "blocked"
+  | "failed"
+  | "cancelled"
+  | "max_iterations_reached"
+  | (string & {});
+
+export interface AgentChatMissionSummary {
+  id: string;
+  orgId: string;
+  userId: string;
+  sessionId: string;
+  agentId: string;
+  description: string;
+  rubric: string;
+  status: AgentChatMissionStatus;
+  iteration: number;
+  maxIterations: number;
+  lastEvaluationResult: string | null;
+  lastEvaluationExplanation: string | null;
+  lastEvaluationFeedback: string | null;
+  lastEvaluationAt: string | null;
+  evaluatorParseFailures: number;
+  pausedReason: string | null;
+  cancelledReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentChatMissionTask {
+  id: string;
+  goal: string;
+  status: string;
+  attemptCount: number;
+  maxAttempts: number;
+  agentDefName: string | null;
+  result: string | null;
+  resultMetadata: Record<string, unknown> | null;
+  parentIds: string[];
+  currentSessionId: string | null;
+  createdAt: string | null;
+  completedAt: string | null;
+}
+
+export interface AgentChatMissionWorker {
+  taskId: string;
+  workerSessionId: string;
+  agentDefName: string | null;
+  taskStatus: string;
+  sessionStatus: string;
+  latestEventId: number | null;
+  latestEventKind: string | null;
+  latestEventAt: string | null;
+  latestEventSummary: string | null;
+  transcriptUrl: string;
+}
+
+export interface AgentChatMissionList {
+  missions: AgentChatMissionSummary[];
+}
+
 export type AgentChatInboxKind =
   | "input_required"
   | "action_required"
@@ -501,6 +573,31 @@ export interface AgentChatAdapter {
     scheduleId: string;
   }): Promise<{ sessionId?: string } | void>;
   cancelScheduledWork?(input: { scheduleId: string }): Promise<void>;
+  // ---- Missions (orchestrated rubric-judged objectives) ----
+  // Optional so adapters that don't implement /v1/missions pass type
+  // checks. The dashboard probes for `listMissions` at runtime.
+  listMissions?(input?: {
+    status?: string;
+    agentId?: string;
+  }): Promise<AgentChatMissionList>;
+  getMission?(input: { missionId: string }): Promise<AgentChatMissionSummary>;
+  getMissionTasks?(input: {
+    missionId: string;
+  }): Promise<{ tasks: AgentChatMissionTask[] }>;
+  getMissionWorkers?(input: {
+    missionId: string;
+  }): Promise<{ workers: AgentChatMissionWorker[] }>;
+  pauseMission?(input: {
+    missionId: string;
+    reason?: string;
+  }): Promise<void>;
+  resumeMission?(input: { missionId: string }): Promise<void>;
+  cancelMission?(input: {
+    missionId: string;
+    reason?: string;
+    cascadeToWorkers?: boolean;
+  }): Promise<void>;
+
   listInbox?(input?: AgentChatInboxListInput): Promise<AgentChatInboxList>;
   getInboxItem?(input: { itemId: number }): Promise<AgentChatInboxItem>;
   markInboxItemRead?(input: { itemId: number }): Promise<AgentChatInboxItem>;

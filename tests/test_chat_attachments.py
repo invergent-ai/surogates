@@ -224,7 +224,7 @@ def patched_send_message(monkeypatch):
     ``workspace_files`` (mapping ``relative_path -> size_in_bytes``) and
     runs the route end-to-end, returning ``(result, store, detector)``.
 
-    The fake ``session_workspace_key`` is the identity function on the
+    The fake ``prefixed_session_workspace_key`` is the identity function on the
     user-supplied path, so workspace_files keys are the same as the paths
     the client sends in.  This keeps the test's mental model simple
     without coupling it to the real session/root-id prefix.
@@ -281,8 +281,8 @@ def patched_send_message(monkeypatch):
             _get_bucket_and_root,
         )
         monkeypatch.setattr(
-            "surogates.api.routes.sessions.session_workspace_key",
-            lambda _root_id, path: path,
+            "surogates.api.routes.sessions.prefixed_session_workspace_key",
+            lambda _config, _root_id, path: path,
         )
 
         monkeypatch.setattr(

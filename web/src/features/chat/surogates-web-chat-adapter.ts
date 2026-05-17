@@ -7,6 +7,9 @@ import type {
   AgentChatEventType,
   AgentChatInboxEventStream,
   AgentChatInboxStreamEvent,
+  AgentChatMissionSummary,
+  AgentChatMissionTask,
+  AgentChatMissionWorker,
   AgentChatScheduledWorkItem,
   AgentChatSession,
   AgentChatSlashCommand,
@@ -16,6 +19,7 @@ import { getArtifact } from "@/api/artifacts";
 import { submitClarifyResponse as submitClarifyResponseApi } from "@/api/clarify";
 import { submitExpertFeedback as submitExpertFeedbackApi } from "@/api/feedback";
 import * as inboxApi from "@/api/inbox";
+import * as missionsApi from "@/api/missions";
 import { listSkills, type SkillSummary } from "@/api/skills";
 import * as sessionsApi from "@/api/sessions";
 import * as workspaceApi from "@/api/workspace";
@@ -290,6 +294,44 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     url.searchParams.set("pwd", "admin");
     return url.pathname + url.search;
   },
+
+  // ---- Missions --------------------------------------------------------
+  async listMissions(input) {
+    const response = await missionsApi.listMissions({
+      status: input?.status,
+      agentId: input?.agentId,
+    });
+    return { missions: response.missions.map(toAgentChatMission) };
+  },
+
+  async getMission(input) {
+    return toAgentChatMission(await missionsApi.getMission(input.missionId));
+  },
+
+  async getMissionTasks(input) {
+    const response = await missionsApi.getMissionTasks(input.missionId);
+    return { tasks: response.tasks.map(toAgentChatMissionTask) };
+  },
+
+  async getMissionWorkers(input) {
+    const response = await missionsApi.getMissionWorkers(input.missionId);
+    return { workers: response.workers.map(toAgentChatMissionWorker) };
+  },
+
+  async pauseMission(input) {
+    await missionsApi.pauseMission(input.missionId, input.reason);
+  },
+
+  async resumeMission(input) {
+    await missionsApi.resumeMission(input.missionId);
+  },
+
+  async cancelMission(input) {
+    await missionsApi.cancelMission(input.missionId, {
+      reason: input.reason,
+      cascadeToWorkers: input.cascadeToWorkers,
+    });
+  },
 };
 
 function blobToDataUrl(blob: Blob): Promise<string> {
@@ -331,6 +373,66 @@ export function toAgentChatSession(session: Session): AgentChatSession {
     estimatedCostUsd: session.estimated_cost_usd,
     createdAt: session.created_at,
     updatedAt: session.updated_at,
+  };
+}
+
+function toAgentChatMission(row: missionsApi.MissionRow): AgentChatMissionSummary {
+  return {
+    id: row.id,
+    orgId: row.org_id,
+    userId: row.user_id,
+    sessionId: row.session_id,
+    agentId: row.agent_id,
+    description: row.description,
+    rubric: row.rubric,
+    status: row.status,
+    iteration: row.iteration,
+    maxIterations: row.max_iterations,
+    lastEvaluationResult: row.last_evaluation_result,
+    lastEvaluationExplanation: row.last_evaluation_explanation,
+    lastEvaluationFeedback: row.last_evaluation_feedback,
+    lastEvaluationAt: row.last_evaluation_at,
+    evaluatorParseFailures: row.evaluator_parse_failures,
+    pausedReason: row.paused_reason,
+    cancelledReason: row.cancelled_reason,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toAgentChatMissionTask(
+  row: missionsApi.MissionTaskRow,
+): AgentChatMissionTask {
+  return {
+    id: row.id,
+    goal: row.goal,
+    status: row.status,
+    attemptCount: row.attempt_count,
+    maxAttempts: row.max_attempts,
+    agentDefName: row.agent_def_name,
+    result: row.result,
+    resultMetadata: row.result_metadata,
+    parentIds: row.parent_ids,
+    currentSessionId: row.current_session_id,
+    createdAt: row.created_at,
+    completedAt: row.completed_at,
+  };
+}
+
+function toAgentChatMissionWorker(
+  row: missionsApi.MissionWorkerRow,
+): AgentChatMissionWorker {
+  return {
+    taskId: row.task_id,
+    workerSessionId: row.worker_session_id,
+    agentDefName: row.agent_def_name,
+    taskStatus: row.task_status,
+    sessionStatus: row.session_status,
+    latestEventId: row.latest_event_id,
+    latestEventKind: row.latest_event_kind,
+    latestEventAt: row.latest_event_at,
+    latestEventSummary: row.latest_event_summary,
+    transcriptUrl: row.transcript_url,
   };
 }
 

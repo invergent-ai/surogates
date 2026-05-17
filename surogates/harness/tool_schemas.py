@@ -15,6 +15,7 @@ from typing import Any
 _AGENT_TYPE_GATED_TOOLS: frozenset[str] = frozenset({
     "delegate_task",
     "spawn_worker",
+    "spawn_task",
 })
 
 

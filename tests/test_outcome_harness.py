@@ -213,6 +213,352 @@ async def test_handle_goal_set_rejected_when_outcome_active() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_mission_create_propagates_config_to_in_memory_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: after /mission create, the in-memory ``session.config``
+    must reflect ``coordinator=True``, ``active_mission_id``, and the
+    orchestrator preload — otherwise the rest of the wake processes the
+    kickoff message with stale config and ``spawn_task`` gets filtered
+    out as a WORKER_EXCLUDED_TOOL."""
+    from uuid import uuid4
+
+    from surogates.missions.commands import MissionHandlerResult
+
+    store = FakeStore()
+    harness = _make_harness(
+        store, redis_client=AsyncMock(), session_factory=MagicMock(),
+    )
+    session = _session()
+    lease = _lease(session.id)
+
+    mission_id = uuid4()
+
+    async def fake_create(**_kwargs: Any) -> MissionHandlerResult:
+        return MissionHandlerResult(
+            ok=True, mission_id=mission_id, message="started",
+        )
+
+    monkeypatch.setattr(
+        "surogates.missions.commands.handle_mission_create", fake_create,
+    )
+
+    await harness._handle_mission_command(
+        session,
+        "/mission Train the model\n\nRubric:\nReach gsm8k >= 0.8",
+        lease,
+    )
+
+    assert session.config["coordinator"] is True
+    assert session.config["active_mission_id"] == str(mission_id)
+    assert "subagent-task-orchestrator" in session.config["preloaded_skills"]
+
+
+@pytest.mark.asyncio
+async def test_handle_mission_cancel_clears_in_memory_active_mission_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: cancelling a mission must drop ``active_mission_id``
+    from the in-memory session so the same wake's `/goal` mutual-exclusion
+    check no longer treats the cancelled mission as in flight."""
+    from uuid import uuid4
+
+    from surogates.missions.commands import MissionHandlerResult
+
+    store = FakeStore()
+    harness = _make_harness(
+        store, redis_client=AsyncMock(), session_factory=MagicMock(),
+    )
+    # Seed an active mission on the in-memory session.
+    mission_id = uuid4()
+    session = _session(
+        config={
+            "active_mission_id": str(mission_id),
+            "coordinator": True,
+        },
+    )
+    lease = _lease(session.id)
+
+    async def fake_cancel(**_kwargs: Any) -> MissionHandlerResult:
+        return MissionHandlerResult(
+            ok=True, mission_id=mission_id, message="cancelled",
+        )
+
+    monkeypatch.setattr(
+        "surogates.missions.commands.handle_mission_cancel", fake_cancel,
+    )
+
+    await harness._handle_mission_command(
+        session, "/mission cancel", lease,
+    )
+
+    assert "active_mission_id" not in session.config
+    # coordinator stays True for the rest of this wake — the session
+    # retains its orchestrator role until the session itself terminates.
+
+
+@pytest.mark.asyncio
+async def test_mission_has_pending_work_returns_false_without_session_factory(
+) -> None:
+    """No session_factory wired => fall back to allowing completion. The
+    helper must never raise; a False return preserves the pre-mission
+    completion behaviour for harnesses that aren't DB-backed (test rigs)."""
+    store = FakeStore()
+    harness = _make_harness(store)
+    # _make_harness leaves session_factory unset; assert the helper
+    # short-circuits without trying to import MissionStore.
+    assert (
+        await harness._mission_has_pending_work(uuid4()) is False
+    )
+
+
+def test_parse_judge_json_strips_fenced_markdown_block() -> None:
+    from surogates.harness.loop import _parse_judge_json
+
+    raw = """```json
+{"result": "satisfied", "explanation": "ok", "feedback": ""}
+```"""
+    assert _parse_judge_json(raw) == {
+        "result": "satisfied",
+        "explanation": "ok",
+        "feedback": "",
+    }
+
+
+def test_parse_judge_json_extracts_object_from_prose() -> None:
+    from surogates.harness.loop import _parse_judge_json
+
+    raw = (
+        "Let me think about this carefully. The verifier returned 244. "
+        'The rubric required >= 4. Therefore:\n\n'
+        '{"result": "satisfied", "explanation": "244 >= 4", "feedback": ""}'
+    )
+    parsed = _parse_judge_json(raw)
+    assert parsed["result"] == "satisfied"
+
+
+def test_parse_judge_json_rejects_empty() -> None:
+    import pytest
+
+    from surogates.harness.loop import _parse_judge_json
+
+    with pytest.raises(ValueError):
+        _parse_judge_json("")
+    with pytest.raises(ValueError):
+        _parse_judge_json("   \n\n")
+
+
+def test_parse_judge_json_rejects_non_object() -> None:
+    import pytest
+
+    from surogates.harness.loop import _parse_judge_json
+
+    with pytest.raises(ValueError, match="non-object"):
+        _parse_judge_json('"just a string"')
+
+
+def test_judge_prefers_structured_generation_when_outlines_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``generate_structured`` returns a typed verdict, the judge
+    returns its dump without falling back to the chat-completion path —
+    so a misbehaving raw chat completion (empty content, broken JSON)
+    can't override a successful structured result."""
+    import asyncio
+
+    from surogates.harness.loop import _MissionVerdict, _build_mission_judge
+
+    async def fake_generate_structured(**kwargs: Any) -> _MissionVerdict:
+        return _MissionVerdict(
+            result="satisfied", explanation="rubric met", feedback="",
+        )
+
+    monkeypatch.setattr(
+        "surogates.harness.loop.generate_structured", fake_generate_structured,
+    )
+
+    class ExplodingClient:
+        @property
+        def chat(self):
+            raise AssertionError(
+                "fallback chat completion must NOT run when "
+                "structured generation succeeded",
+            )
+
+    judge = _build_mission_judge(
+        llm_client=ExplodingClient(), eval_model="m",
+    )
+    assert asyncio.run(judge("sys", "user")) == {
+        "result": "satisfied",
+        "explanation": "rubric met",
+        "feedback": "",
+    }
+
+
+def test_judge_fallback_rejects_malformed_verdict_shape() -> None:
+    """The fallback JSON parser validates against the verdict schema —
+    a JSON object with an invalid ``result`` value must raise so the
+    evaluator records a parse failure rather than passing a bogus
+    verdict to ``apply_verdict``."""
+    import asyncio
+
+    from surogates.harness.loop import (
+        MissionJudgeParseError,
+        _build_mission_judge,
+    )
+
+    class FakeMessage:
+        content = '{"result": "not-a-real-status", "explanation": "x", "feedback": ""}'
+
+    class FakeChoice:
+        message = FakeMessage()
+
+    class FakeResponse:
+        choices = [FakeChoice()]
+
+    class FakeChatCompletions:
+        async def create(self, **kwargs):
+            return FakeResponse()
+
+    class FakeChat:
+        completions = FakeChatCompletions()
+
+    class FakeClient:
+        chat = FakeChat()
+
+    judge = _build_mission_judge(llm_client=FakeClient(), eval_model="m")
+    with pytest.raises(MissionJudgeParseError):
+        asyncio.run(judge("sys", "user"))
+
+
+def test_judge_falls_back_to_reasoning_content_when_content_empty() -> None:
+    """Reasoning-mode models (GLM, DeepSeek) sometimes leave
+    ``content`` empty and put the answer in ``reasoning_content``.
+    The judge must read the fallback rather than parse-failing."""
+    import asyncio
+
+    from surogates.harness.loop import _build_mission_judge
+
+    class FakeMessage:
+        content = ""
+        reasoning_content = (
+            '{"result": "satisfied", "explanation": "ok", "feedback": ""}'
+        )
+
+    class FakeChoice:
+        message = FakeMessage()
+
+    class FakeResponse:
+        choices = [FakeChoice()]
+
+    class FakeChatCompletions:
+        async def create(self, **kwargs):
+            return FakeResponse()
+
+    class FakeChat:
+        completions = FakeChatCompletions()
+
+    class FakeClient:
+        chat = FakeChat()
+
+    judge = _build_mission_judge(llm_client=FakeClient(), eval_model="m")
+    verdict = asyncio.run(judge("sys", "user"))
+    assert verdict == {
+        "result": "satisfied",
+        "explanation": "ok",
+        "feedback": "",
+    }
+
+
+@pytest.mark.asyncio
+async def test_mission_has_pending_work_false_when_no_active_mission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An active session_factory but no active mission for this session
+    must return False so /chat sessions (no mission) complete normally."""
+    from surogates.missions.models import Mission as PydMission
+
+    store = FakeStore()
+    harness = _make_harness(store, session_factory=MagicMock())
+
+    async def fake_get_active_for_session(self: Any, sid: UUID) -> PydMission | None:
+        return None
+
+    monkeypatch.setattr(
+        "surogates.missions.store.MissionStore.get_active_for_session",
+        fake_get_active_for_session,
+    )
+    assert (
+        await harness._mission_has_pending_work(uuid4()) is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_mission_create_rejects_service_account_principal() -> None:
+    """A tenant with user_id=None (service-account/channel session) must
+    not be allowed to create a mission — missions.user_id is NOT NULL
+    and a bare attempt to insert would surface as NotNullViolationError."""
+    store = FakeStore()
+    # Override the harness tenant to have user_id=None (service account).
+    sa_tenant = TenantContext(
+        org_id=UUID("00000000-0000-0000-0000-000000000001"),
+        user_id=None,
+        org_config={},
+        user_preferences={},
+        permissions=frozenset(),
+        asset_root="/tmp/test",
+        service_account_id=UUID("00000000-0000-0000-0000-000000000099"),
+    )
+    harness = _make_harness(
+        store, tenant=sa_tenant, redis_client=AsyncMock(),
+        session_factory=MagicMock(),
+    )
+    session = _session()
+    lease = _lease(session.id)
+
+    await harness._handle_mission_command(
+        session,
+        "/mission Train the model\n\nRubric:\nReach gsm8k >= 0.8",
+        lease,
+    )
+
+    response = [event for event in store.events if event[1] == EventType.LLM_RESPONSE][-1]
+    content = response[2]["message"]["content"]
+    assert "user session" in content
+    # No mission was created — config wasn't touched, no kickoff queued.
+    assert store.config_updates == []
+    assert store.synthetic_messages == []
+
+
+@pytest.mark.asyncio
+async def test_handle_goal_set_rejected_when_active_mission_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutual exclusion: /goal must refuse to set while a /mission is active."""
+    store = FakeStore()
+    harness = _make_harness(store)
+    session = _session()
+    lease = _lease(session.id)
+
+    # Stub the mission check to simulate an active mission on the session.
+    async def _stub(self: AgentHarness, sid: UUID) -> bool:
+        return True
+    monkeypatch.setattr(
+        AgentHarness, "_session_has_active_mission", _stub,
+    )
+
+    await harness._handle_goal_command(session, "/goal Ship new feature", lease)
+
+    response = [event for event in store.events if event[1] == EventType.LLM_RESPONSE][-1]
+    content = response[2]["message"]["content"]
+    assert "active /mission" in content
+    # No outcome was created.
+    assert store.config_updates == []
+    assert not any(event[1] == EventType.OUTCOME_DEFINED for event in store.events)
+    assert store.synthetic_messages == []
+
+
+@pytest.mark.asyncio
 async def test_handle_goal_set_allowed_when_outcome_paused() -> None:
     store = FakeStore()
     harness = _make_harness(store)

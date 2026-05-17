@@ -25,7 +25,7 @@ import re
 import traceback
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -1260,6 +1260,10 @@ class AgentHarness:
                 await self._handle_goal_command(session, last_user_content, lease)
                 return
 
+            if last_user_content == "/mission" or last_user_content.startswith("/mission "):
+                await self._handle_mission_command(session, last_user_content, lease)
+                return
+
             if last_user_content.startswith("/loop"):
                 # Idempotency guard: ``_handle_loop_command`` creates a fresh
                 # scheduled-loop row each time it runs against a ``/loop ...``
@@ -1347,6 +1351,7 @@ class AgentHarness:
                         agent_id=session.agent_id,
                         error=traceback.format_exc()[-500:],
                         redis=self._redis,
+                        task_id=getattr(session, "task_id", None),
                     )
                 except Exception:
                     logger.debug("Failed to notify parent on crash", exc_info=True)
@@ -2135,6 +2140,36 @@ class AgentHarness:
                     response_event_id=event_id,
                     model=model_id,
                 ):
+                    return
+
+                # /mission evaluator — only fires when triggered (a
+                # mission task reached terminal state, or the coordinator
+                # emitted the [[mission-complete]] marker). Failures here
+                # must not break the response path; log and continue.
+                try:
+                    await self._maybe_run_mission_evaluator_for_session(
+                        session=session,
+                        latest_response=assistant_message.get("content") or "",
+                        model=model_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Mission evaluator hook failed for session %s; continuing",
+                        session.id,
+                    )
+
+                # If the mission is still in flight, do NOT complete the
+                # session — the worker.complete events that follow will
+                # re-wake the coordinator so the evaluator hook above can
+                # fire on the next no-tool-call response. Completing here
+                # would set status=completed, and the next wake would bail
+                # at the top of process_wake_cycle, leaving the mission
+                # active forever even after its verifier task finishes.
+                if await self._mission_has_pending_work(session.id):
+                    logger.debug(
+                        "Session %s: mission has in-flight tasks; deferring completion",
+                        session.id,
+                    )
                     return
 
                 # A response without tool calls completes the current
@@ -3830,6 +3865,221 @@ class AgentHarness:
                 max_parse_failures=3,
             )
 
+    async def _session_has_active_mission(self, session_id: UUID) -> bool:
+        """True iff the session has an active or paused mission row.
+
+        Used by ``_handle_goal_command`` to enforce mutual exclusion: only
+        one evaluator loop per session is allowed, so a /mission already
+        in flight blocks /goal creation (and vice versa).
+        """
+        if self._session_factory is None:
+            return False
+        try:
+            from surogates.missions.store import MissionStore
+
+            store = MissionStore(self._session_factory)
+            return (await store.get_active_for_session(session_id)) is not None
+        except Exception:
+            logger.debug(
+                "Mission active-check failed for session %s; treating as no mission",
+                session_id, exc_info=True,
+            )
+            return False
+
+    async def _mission_has_pending_work(self, session_id: UUID) -> bool:
+        """True iff the session's mission is in a non-terminal status.
+
+        The session is owned by the mission's lifecycle: while the
+        mission is ``active`` or ``paused`` it can still produce work
+        (more tasks to spawn, an evaluator retry after a parse failure,
+        a ``/mission resume`` after a manual pause). Completing the
+        session here would set ``status=completed``, every subsequent
+        wake would bail at the status guard in ``process_wake_cycle``,
+        and the mission could never progress.
+
+        Only when the mission reaches a terminal status (``satisfied``,
+        ``blocked``, ``failed``, ``cancelled``, ``max_iterations_reached``)
+        does ``apply_verdict`` clear ``active_mission_id`` from the
+        session config; ``get_active_for_session`` then returns ``None``,
+        this method returns ``False``, and the session completes
+        normally on the next no-tool-call response.
+
+        Returns ``False`` (allow completion) on any failure path so a
+        bug in the mission layer can't strand sessions forever.
+        """
+        if self._session_factory is None:
+            return False
+        try:
+            from surogates.missions.store import MissionStore
+
+            store = MissionStore(self._session_factory)
+            active = await store.get_active_for_session(session_id)
+            return active is not None
+        except Exception:
+            logger.debug(
+                "Mission pending-work check failed for session %s; "
+                "falling back to completing session",
+                session_id, exc_info=True,
+            )
+            return False
+
+    async def _handle_mission_command(
+        self,
+        session: Session,
+        content: str,
+        lease: SessionLease,
+    ) -> None:
+        """Dispatch ``/mission ...`` to the matching handler.
+
+        Mirrors :meth:`_handle_goal_command`: parses args, calls into
+        :mod:`surogates.missions.commands`, then emits an LLM_RESPONSE
+        carrying the operator-visible message and advances the harness
+        cursor so the same wake does not re-process the command.
+        """
+        from surogates.missions.commands import (
+            MissionCommandParseError,
+            handle_mission_cancel,
+            handle_mission_create,
+            handle_mission_pause,
+            handle_mission_resume,
+            handle_mission_status,
+            parse_mission_command,
+        )
+        from surogates.missions.store import MissionStore
+
+        args = content[len("/mission"):].strip()
+        try:
+            command = parse_mission_command(args)
+        except MissionCommandParseError as exc:
+            message = f"/mission parse error: {exc}"
+        else:
+            if self._session_factory is None:
+                message = (
+                    "/mission requires a configured session factory; "
+                    "this looks like a harness initialization bug."
+                )
+            else:
+                mission_store = MissionStore(self._session_factory)
+                redis_client = self._redis
+                if command.action == "create":
+                    if redis_client is None:
+                        message = (
+                            "/mission create cannot run without a Redis "
+                            "connection (the coordinator must be enqueued "
+                            "after kickoff)."
+                        )
+                    elif self._tenant.user_id is None:
+                        # Service accounts and channel sessions don't have
+                        # a user_id; ``missions.user_id`` is NOT NULL.
+                        # Reject with a friendly message instead of letting
+                        # the insert fail with NotNullViolationError.
+                        message = (
+                            "/mission requires a user session — service "
+                            "accounts and channel principals cannot own "
+                            "missions."
+                        )
+                    else:
+                        result = await handle_mission_create(
+                            description=command.description or "",
+                            rubric=command.rubric or "",
+                            session_id=session.id,
+                            user_id=self._tenant.user_id,
+                            org_id=self._tenant.org_id,
+                            agent_id=session.agent_id,
+                            session_store=self._store,
+                            session_factory=self._session_factory,
+                            mission_store=mission_store,
+                            redis=redis_client,
+                        )
+                        message = result.message or result.error
+                        if result.ok and result.mission_id is not None:
+                            # Propagate the config write back to the
+                            # in-memory session so the rest of this wake
+                            # sees ``coordinator=True`` + the orchestrator
+                            # skill preload. Without this, the kickoff
+                            # message gets processed by the same wake
+                            # against a stale config and tools gated on
+                            # ``coordinator`` (``spawn_task`` &c) get
+                            # filtered out as worker-excluded.
+                            cfg = dict(session.config or {})
+                            cfg["active_mission_id"] = str(result.mission_id)
+                            cfg["coordinator"] = True
+                            preloaded = list(cfg.get("preloaded_skills") or [])
+                            if "subagent-task-orchestrator" not in preloaded:
+                                preloaded.append("subagent-task-orchestrator")
+                            cfg["preloaded_skills"] = preloaded
+                            session.config = cfg
+                elif command.action == "status":
+                    result = await handle_mission_status(
+                        session_id=session.id, mission_store=mission_store,
+                    )
+                    message = result.message
+                elif command.action == "pause":
+                    result = await handle_mission_pause(
+                        session_id=session.id,
+                        reason=command.reason,
+                        session_store=self._store,
+                        mission_store=mission_store,
+                    )
+                    message = result.message or result.error
+                elif command.action == "resume":
+                    if redis_client is None:
+                        message = (
+                            "/mission resume cannot wake the coordinator "
+                            "without a Redis connection."
+                        )
+                    else:
+                        result = await handle_mission_resume(
+                            session_id=session.id, agent_id=session.agent_id,
+                            session_store=self._store,
+                            mission_store=mission_store,
+                            redis=redis_client,
+                        )
+                        message = result.message or result.error
+                elif command.action == "cancel":
+                    if redis_client is None:
+                        message = (
+                            "/mission cancel cannot cascade interrupts "
+                            "without a Redis connection."
+                        )
+                    else:
+                        result = await handle_mission_cancel(
+                            session_id=session.id,
+                            reason=command.reason,
+                            cascade_to_workers=command.cascade_to_workers,
+                            session_store=self._store,
+                            session_factory=self._session_factory,
+                            mission_store=mission_store,
+                            redis=redis_client,
+                        )
+                        message = result.message or result.error
+                        if result.ok:
+                            # Mirror the DB ``clear_session_config_key``
+                            # call in the in-memory session so subsequent
+                            # iterations of this wake (and the next /goal
+                            # mutual-exclusion check) see no active
+                            # mission.
+                            cfg = dict(session.config or {})
+                            cfg.pop("active_mission_id", None)
+                            session.config = cfg
+                else:
+                    message = (
+                        "Usage: /mission <description>\\n\\nRubric:\\n<criterion>"
+                        " | /mission status | /mission pause [reason]"
+                        " | /mission resume | /mission cancel [--cascade] [reason]"
+                    )
+
+        response_event_id = await self._store.emit_event(
+            session.id,
+            EventType.LLM_RESPONSE,
+            {"message": {"role": "assistant", "content": message}},
+        )
+        await self._store.advance_harness_cursor(
+            session.id,
+            through_event_id=response_event_id,
+            lease_token=lease.lease_token,
+        )
+
     async def _handle_goal_command(
         self,
         session: Session,
@@ -3853,6 +4103,15 @@ class AgentHarness:
                     f"Outcome already active ({current.iteration}/"
                     f"{current.max_iterations}): {current.description}. "
                     "Use /goal pause or /goal clear before setting a new outcome."
+                )
+            elif await self._session_has_active_mission(session.id):
+                # Mutual exclusion: only one evaluator loop per session.
+                # /mission already runs an evaluator — adding a /goal would
+                # produce two competing judges on the same chat.
+                message = (
+                    "This session has an active /mission. Cancel or pause it "
+                    "before setting a /goal (only one evaluator loop per "
+                    "session is allowed)."
                 )
             else:
                 message = await self._define_goal_outcome(session, command)
@@ -4006,6 +4265,40 @@ class AgentHarness:
         if state.paused_reason:
             lines.append(f"Paused reason: {state.paused_reason}")
         return "\n".join(lines)
+
+    async def _maybe_run_mission_evaluator_for_session(
+        self,
+        *,
+        session: Session,
+        latest_response: str,
+        model: str,
+    ) -> None:
+        """Bind self's session_factory / store / LLM and dispatch to the
+        module-level :func:`_maybe_run_mission_evaluator`.
+
+        Kept as an instance method so it can pull the configured eval
+        model and LLM client; the actual logic (trigger detection,
+        prompt building, verdict handling) lives on the module-level
+        helper so tests can drive it with a stubbed judge without
+        constructing a full harness.
+        """
+        if self._session_factory is None:
+            return
+        from surogates.missions.store import MissionStore
+
+        settings = self._outcome_settings()
+        eval_model = getattr(settings, "evaluator_model", "") or model
+        judge = _build_mission_judge(
+            llm_client=self._llm, eval_model=eval_model,
+        )
+        await _maybe_run_mission_evaluator(
+            session_id=session.id,
+            coordinator_last_response=latest_response,
+            session_store=self._store,
+            session_factory=self._session_factory,
+            mission_store=MissionStore(self._session_factory),
+            judge=judge,
+        )
 
     async def _evaluate_outcome(
         self,
@@ -4678,6 +4971,8 @@ class AgentHarness:
                     parent_session_id=session.parent_id,
                     agent_id=session.agent_id,
                     redis=self._redis,
+                    task_id=getattr(session, "task_id", None),
+                    session_factory=self._session_factory,
                 )
             except Exception:
                 logger.warning(
@@ -4735,3 +5030,260 @@ class AgentHarness:
             delay_seconds=DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS,
             reason="The agent did not call loop_wait; using the fallback delay.",
         )
+
+
+# ---------------------------------------------------------------------------
+# Mission evaluator hook
+#
+# Called after every no-tool-call assistant response. The hook itself is
+# cheap when no mission is active (one SELECT on `missions` for the
+# session); a real evaluation only fires when ``should_evaluate``
+# returns ``should=True``. See:
+#   docs/superpowers/specs/2026-05-16-mission-orchestrated-goals-design.md
+# ---------------------------------------------------------------------------
+
+
+class MissionJudgeParseError(ValueError):
+    """Raised when the mission judge returns non-JSON or malformed JSON.
+
+    The harness hook records a parse-failure verdict on the mission row
+    and emits a parse-failed evaluation.end event instead of treating
+    the malformed response as a regular needs_revision verdict; three
+    consecutive parse failures pause the mission per the
+    :class:`~surogates.missions.store.MissionStore` contract.
+    """
+
+
+async def _maybe_run_mission_evaluator(
+    *,
+    session_id: UUID,
+    coordinator_last_response: str | None,
+    session_store: Any,
+    session_factory: Any,
+    mission_store: Any,
+    judge: Any,
+) -> None:
+    """Run the mission evaluator iff the session has an active mission
+    and a trigger condition fires.
+
+    ``judge`` is an async callable ``(system_prompt, user_prompt) -> dict``
+    that returns the parsed verdict JSON. Tests inject a stub; production
+    wires it via :func:`_build_mission_judge` below.
+    """
+    from surogates.missions.evaluator import (
+        apply_verdict,
+        build_evaluator_prompt,
+        evaluator_system_prompt,
+        should_evaluate,
+    )
+
+    active = await mission_store.get_active_for_session(session_id)
+    if active is None or active.status != "active":
+        return
+
+    decision = await should_evaluate(
+        mission_id=active.id,
+        coordinator_last_response=coordinator_last_response,
+        session_factory=session_factory,
+        mission_store=mission_store,
+    )
+    if not decision.should:
+        return
+
+    await session_store.emit_event(
+        session_id, EventType.MISSION_EVALUATION_START,
+        {
+            "mission_id": str(active.id),
+            "iteration": active.iteration,
+            "trigger": decision.trigger,
+        },
+    )
+
+    user_prompt = await build_evaluator_prompt(
+        mission_id=active.id,
+        coordinator_last_response=coordinator_last_response,
+        session_factory=session_factory,
+        mission_store=mission_store,
+    )
+    try:
+        verdict = await judge(evaluator_system_prompt(), user_prompt)
+    except MissionJudgeParseError as exc:
+        failures = await mission_store.record_parse_failure(active.id)
+        await session_store.emit_event(
+            session_id, EventType.MISSION_EVALUATION_END,
+            {
+                "mission_id": str(active.id),
+                "iteration": active.iteration,
+                "trigger": decision.trigger,
+                "result": "needs_revision",
+                "explanation": "judge parse failure",
+                "feedback": str(exc)[:500],
+                "parse_failed": True,
+                "parse_failures": failures,
+            },
+        )
+        return
+    except Exception as exc:
+        # Transport-level failure (provider outage, rate limit, timeout).
+        # Do NOT synthesize a needs_revision verdict — that would burn
+        # one of the mission's max_iterations on something that wasn't a
+        # real evaluator turn. Emit a transport-failed evaluation.end
+        # event so the dashboard can surface the outage, and return.
+        # The next no-tool-call response triggers another attempt; the
+        # rate-limit guard prevents tight retries.
+        logger.warning(
+            "Mission %s evaluator judge call failed (transport): %s",
+            active.id, exc,
+        )
+        await session_store.emit_event(
+            session_id, EventType.MISSION_EVALUATION_END,
+            {
+                "mission_id": str(active.id),
+                "iteration": active.iteration,
+                "trigger": decision.trigger,
+                "result": "transport_failed",
+                "explanation": "judge call failed (transport)",
+                "feedback": str(exc)[:500],
+                "transport_failed": True,
+            },
+        )
+        return
+
+    await apply_verdict(
+        mission_id=active.id,
+        verdict=verdict,
+        coordinator_session_id=session_id,
+        session_store=session_store,
+        mission_store=mission_store,
+        trigger=decision.trigger,
+    )
+
+
+def _parse_judge_json(raw: str) -> dict[str, Any]:
+    """Tolerant JSON extraction for the mission judge.
+
+    Mirrors :meth:`AgentHarness._parse_json_object`: strips Markdown
+    fences, falls back to the first ``{...}`` block in prose, and
+    raises ``ValueError`` on empty / non-object payloads so the caller
+    can surface the error as a ``MissionJudgeParseError``.
+    """
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    text = text.strip()
+    if not text:
+        raise ValueError("empty payload")
+    # Some reasoning models prefix the JSON with their thought process.
+    # Find the first balanced ``{ ... }`` block if the payload isn't
+    # already a JSON object.
+    if not text.startswith("{"):
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start:end + 1]
+    parsed = json.loads(text)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"judge returned non-object JSON: {type(parsed).__name__}")
+    return parsed
+
+
+class _MissionVerdict(BaseModel):
+    """Structured shape the judge must return.
+
+    Used both for ``outlines``-backed constrained generation (preferred,
+    via :func:`generate_structured`) and for tolerant fallback parsing
+    when outlines isn't installed or fails to coerce the model's output.
+    Keeping the schema in one place means the prompt's documented JSON
+    shape and the parser's expected shape stay in lockstep.
+    """
+
+    result: Literal["satisfied", "needs_revision", "blocked", "failed"]
+    explanation: str = ""
+    feedback: str = ""
+
+
+def _build_mission_judge(*, llm_client: Any, eval_model: str) -> Any:
+    """Return an async ``(system, user) -> dict`` judge bound to ``llm_client``.
+
+    Prefers ``outlines``-backed structured generation against the
+    :class:`_MissionVerdict` schema so the LLM cannot emit malformed
+    JSON or omit required fields. Falls back to a free-form chat
+    completion with tolerant JSON extraction when structured generation
+    is unavailable (no outlines, provider doesn't support it) — the
+    fallback also reads ``reasoning_content`` for reasoning-mode models
+    (GLM, DeepSeek) that leave ``content`` empty.
+
+    A parse / coercion failure raises :class:`MissionJudgeParseError`
+    so :func:`_maybe_run_mission_evaluator` can distinguish parse vs.
+    transport failure and record the right counter.
+    """
+
+    async def judge(system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        # Preferred path: constrain the LLM to the verdict schema.
+        # Returns None when outlines isn't available, the provider
+        # isn't supported, or coercion fails — fall through to the
+        # tolerant free-form parser in that case.
+        try:
+            verdict = await generate_structured(
+                llm_client=llm_client,
+                model=eval_model,
+                messages=messages,
+                output_model=_MissionVerdict,
+                max_tokens=600,
+                temperature=0,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Mission judge structured generation raised %r; "
+                "falling back to free-form JSON parsing",
+                exc,
+            )
+            verdict = None
+        if verdict is not None:
+            return verdict.model_dump()
+
+        # Fallback: free-form completion + tolerant parser.
+        resp = await llm_client.chat.completions.create(
+            model=eval_model,
+            messages=messages,
+            temperature=0.0,
+            max_tokens=600,
+        )
+        try:
+            message = resp.choices[0].message
+        except (AttributeError, IndexError) as exc:
+            raise MissionJudgeParseError(
+                f"judge returned an unexpected shape: {exc}",
+            ) from exc
+        if isinstance(message, dict):
+            raw = (
+                message.get("content")
+                or message.get("reasoning_content")
+                or message.get("reasoning")
+                or ""
+            )
+        else:
+            raw = (
+                getattr(message, "content", None)
+                or getattr(message, "reasoning_content", None)
+                or getattr(message, "reasoning", None)
+                or ""
+            )
+        if not raw or not str(raw).strip():
+            raise MissionJudgeParseError("judge returned empty content")
+        try:
+            parsed = _parse_judge_json(str(raw))
+            # Validate against the verdict schema so the caller always
+            # sees the documented shape (or a parse error, never a
+            # silently-malformed dict).
+            return _MissionVerdict.model_validate(parsed).model_dump()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise MissionJudgeParseError(str(exc)) from exc
+
+    return judge

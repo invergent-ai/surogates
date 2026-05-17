@@ -28,8 +28,23 @@ from typing import Any
 from uuid import UUID
 
 from surogates.storage.backend import StorageBackend
+from surogates.storage.keys import prefixed
 
 logger = logging.getLogger(__name__)
+
+
+def storage_key_prefix(config: dict | None) -> str:
+    """Return the session's shared-bucket key prefix, if configured.
+
+    Sessions stamped after the shared-bucket cutover carry
+    ``storage_key_prefix = "{project_id}/{agent_id}"``.  Older sessions
+    or pre-cutover tests pass an empty string (or no config), in which
+    case every key lives at the bucket root.
+    """
+    if not isinstance(config, dict):
+        return ""
+    value = config.get("storage_key_prefix")
+    return str(value) if value else ""
 
 
 def tenant_bucket(org_id: UUID | str) -> str:
@@ -68,6 +83,38 @@ def session_workspace_prefix(session_id: UUID | str) -> str:
 def session_workspace_key(session_id: UUID | str, key: str = "") -> str:
     """Return *key* scoped under the session workspace prefix."""
     return f"{session_workspace_prefix(session_id)}{key.lstrip('/')}"
+
+
+def prefixed_session_workspace_prefix(
+    config: dict | None,
+    session_id: UUID | str,
+) -> str:
+    """Return the physical object prefix for a session workspace.
+
+    Layers ``storage_key_prefix`` (from session config) on top of the
+    hard-coded ``sessions/{id}/`` prefix.  Use this everywhere a route
+    or job lists/deletes a session's workspace objects.
+    """
+    return prefixed(
+        session_workspace_prefix(session_id),
+        storage_key_prefix(config),
+    )
+
+
+def prefixed_session_workspace_key(
+    config: dict | None,
+    session_id: UUID | str,
+    key: str = "",
+) -> str:
+    """Return the physical object key for a session workspace file.
+
+    Same layering as :func:`prefixed_session_workspace_prefix` but
+    targets a specific file inside the session prefix.
+    """
+    return prefixed(
+        session_workspace_key(session_id, key),
+        storage_key_prefix(config),
+    )
 
 
 class TenantStorage:

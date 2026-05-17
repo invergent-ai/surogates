@@ -24,8 +24,8 @@ from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.tenant import (
-    session_workspace_key,
-    session_workspace_prefix,
+    prefixed_session_workspace_key,
+    prefixed_session_workspace_prefix,
 )
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -503,7 +503,7 @@ async def send_message(
                     ),
                 )
 
-        _, bucket, root_id = await _get_workspace_session_bucket_and_root(
+        session, bucket, root_id = await _get_workspace_session_bucket_and_root(
             store, session_id, tenant,
         )
         storage = _get_storage(request)
@@ -511,7 +511,9 @@ async def send_message(
         resolved: list[dict] = []
         total_bytes = 0
         for attachment in body.attachments:
-            storage_key = session_workspace_key(root_id, attachment.path)
+            storage_key = prefixed_session_workspace_key(
+                session.config, root_id, attachment.path,
+            )
             if not await storage.exists(bucket, storage_key):
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -930,7 +932,9 @@ async def _cleanup_archived_workspaces(
                 archived_session.id,
             )
             continue
-        prefix = session_workspace_prefix(archived_session.id)
+        prefix = prefixed_session_workspace_prefix(
+            archived_session.config, archived_session.id,
+        )
         try:
             deleted = await storage.delete_prefix(storage_bucket, prefix)
             logger.info(

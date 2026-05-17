@@ -169,6 +169,7 @@ class PromptBuilder:
 
         sections.append(self._memory_section())
         sections.append(self._skills_section())
+        sections.append(self._preloaded_skills_section())
         sections.append(self._available_agents_section())
         sections.append(self._kb_section())
         sections.append(self._context_files_section())
@@ -496,6 +497,54 @@ class PromptBuilder:
             )
 
         return "\n\n".join(sections)
+
+    def _preloaded_skills_section(self) -> str:
+        """Inline the full SKILL.md body of every skill named in
+        ``session.config["preloaded_skills"]``.
+
+        Unlike the catalog rendering above (which only shows name +
+        description), this section emits the entire skill content so
+        the agent has the playbook in its system prompt without having
+        to call ``skill_view``. Used to auto-enforce role-specific
+        playbooks like ``subagent-task-worker`` for sessions running a
+        Task — set by ``surogates.tasks.spawn._build_task_worker_config``.
+
+        Returns an empty string when ``preloaded_skills`` is unset or
+        empty, or when no listed name resolves against the tenant skill
+        catalog (logged at debug; missing skills don't fail the wake).
+        """
+        if self._session is None:
+            return ""
+        cfg = getattr(self._session, "config", None) or {}
+        names = cfg.get("preloaded_skills") or []
+        if not names:
+            return ""
+
+        from surogates.tools.loader import SkillDef
+
+        wanted = set(names)
+        bodies: list[str] = []
+        for skill in self.skills:
+            if isinstance(skill, SkillDef):
+                name, content = skill.name, skill.content
+            elif isinstance(skill, dict):
+                name = skill.get("name") or ""
+                content = skill.get("content") or ""
+            else:
+                continue
+            if name in wanted and content:
+                safe = self._sanitise(content, f"skill:{name}")
+                bodies.append(f"## {name}\n\n{safe}")
+                wanted.discard(name)
+
+        if wanted:
+            logger.debug(
+                "preloaded_skills not found in tenant catalog: %s",
+                sorted(wanted),
+            )
+        if not bodies:
+            return ""
+        return "# Loaded Skills\n\n" + "\n\n".join(bodies)
 
     def _skill_visible(
         self,

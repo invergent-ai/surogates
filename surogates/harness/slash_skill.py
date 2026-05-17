@@ -42,6 +42,7 @@ _BUILTIN_SLASH_COMMANDS: Final[frozenset[str]] = frozenset({
     "compress",
     "goal",
     "loop",
+    "mission",
 })
 
 

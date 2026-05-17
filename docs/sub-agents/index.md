@@ -40,6 +40,8 @@ The base LLM always decides when to spawn. No transparent interception — the c
 
 A task suits a sub-agent when it (a) benefits from a fresh context window, (b) needs its own tool envelope, or (c) should run in parallel with the parent.
 
+For durable, DAG-aware coordination on top of sub-agents — fan-in dependencies, retry-with-history, mid-flight pause for input — see [Tasks (Subagent Task Layer)](../tasks/index.md). The task layer's `spawn_task` tool wraps `spawn_worker` and reuses the same `AgentDef` catalog via `agent_type`.
+
 ## Design Principles
 
 1. **Child sessions share the tenant.** Sub-agents inherit the parent's skills, MCP servers, experts, tenant memory, and configured agent bucket. Only the preset (prompt, tool filter, model, iteration cap, policy profile) is scoped per sub-agent.

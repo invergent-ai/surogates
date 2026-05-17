@@ -20,6 +20,7 @@ from surogates.tools.loader import AgentDef
 def _default_workspace_config() -> dict:
     return {
         "storage_bucket": "tenant-bucket",
+        "storage_key_prefix": "",
         "workspace_path": "/workspace/tenant-bucket/parent",
         "supports_vision": False,
     }
@@ -444,6 +445,7 @@ def _parent_with_workspace(
     parent_id = uuid4()
     cfg: dict[str, Any] = {
         "storage_bucket": "agent-a-bucket",
+        "storage_key_prefix": "",
         "workspace_path": f"/workspace/agent-a-bucket/sessions/{parent_id}",
         "supports_vision": True,
     }

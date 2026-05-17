@@ -229,6 +229,90 @@ normal session.
 
 Spawn a child session for parallel or scoped work.  Pass an optional `agent_type=<name>` to apply a pre-configured [sub-agent](../sub-agents/index.md) preset (system prompt, tool filter, model, iteration cap, policy profile).  `delegate_task` blocks until the child completes; `spawn_worker` returns immediately with a worker ID and the result flows back as a `worker.complete` event in the parent's log.
 
+### Subagent Task Layer Tools
+
+The task layer wraps `spawn_worker` with durable, DAG-aware, retry-with-history semantics. See [Tasks](../tasks/index.md) for the full conceptual chapter (when to use, state machine, dispatcher tick, event vocabulary). Six tools register into the same `core` toolset:
+
+| Tool | Available to | Purpose |
+|---|---|---|
+| `spawn_task` | Coordinator agents | Create a durable task; optionally with DAG `parents=[...]` |
+| `unblock_task` | Coordinator agents | Resume a blocked task with optional context |
+| `cancel_task` | Coordinator agents | Abort a non-terminal task |
+| `task_complete` | Workers running for a task | Mark own task done with structured handoff |
+| `task_block` | Workers running for a task | Self-pause without consuming a retry |
+| `task_show` | Workers running for a task | Read own task + parents + prior attempts |
+
+The three "self-tools" are gated by `Session.task_id is not None`; plain chat and `spawn_worker` children never see them. Children spawned via either `spawn_worker` or `spawn_task` cannot recursively spawn tasks (the coordinator-side tools are in `WORKER_EXCLUDED_TOOLS`).
+
+#### `spawn_task` -- Durable Subagent Task
+
+Create a Task row that survives parent crash, supports fan-in dependencies, and retries on transient failure. Eager-spawns the child Session when no parents are pending; otherwise stays in `todo` until the dispatcher tick promotes it.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `goal` | string | Complete, self-contained description of the task. Subagents do not see the parent's conversation. |
+| `context` | string | Optional structured context appended as a `## Context` block in the worker's first user message |
+| `agent_type` | string | Optional pre-configured sub-agent type name (see [Sub-Agents](../sub-agents/index.md)) |
+| `parents` | array | Task ids this task depends on. Stays `todo` until every parent reaches `done`. Cancelled/failed parents do **not** promote children -- orchestrate explicitly. |
+| `max_attempts` | integer | Retry budget (default 3). Transitions to `failed` after this many consecutive crash/timeout attempts. |
+
+Returns `{"task_id": str, "status": "todo" | "ready" | "running"}`. Status is `running` (with `worker_id`) when the task was eagerly spawned, `todo` when waiting on parents, `ready` when the dispatcher tick beat the eager-spawn path and already claimed it.
+
+#### `unblock_task` -- Resume a Blocked Task
+
+| Parameter | Type | Description |
+|---|---|---|
+| `task_id` | string | Task to unblock |
+| `additional_context` | string | Optional new context appended to the task; surfaced as part of the next attempt's initial user message |
+
+Only the spawning parent session may unblock its own children. Status must be `blocked`; transitions back to `ready` for re-claim on the next tick.
+
+#### `cancel_task` -- Abort a Non-Terminal Task
+
+| Parameter | Type | Description |
+|---|---|---|
+| `task_id` | string | Task to cancel |
+| `reason` | string | Optional human-readable reason |
+
+Only the spawning parent session may cancel. Status must be non-terminal (`todo` / `ready` / `running` / `blocked`). If `running`, publishes to `INTERRUPT_CHANNEL_PREFIX<worker_id>` (the same channel `stop_worker` uses) so the in-flight Session exits cleanly.
+
+#### `task_complete` -- Explicit Structured Handoff
+
+Available only when running for a task. Marks the task `done` and writes the structured handoff fields. Prefer this over the natural-completion path when you want machine-readable output for downstream automation.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `summary` | string | 1-3 sentence human-readable handoff. Becomes `task.result` and the `result` field on the `worker.complete` event delivered to the parent. |
+| `metadata` | object | Free-form JSON dict. Common keys: `changed_files`, `tests_run`, `tests_passed`, `decisions`, `findings`, `approved`. Becomes `task.result_metadata` and the `metadata` field on the parent's `worker.complete` event. |
+
+Plain workers that complete naturally (without calling this tool) get their auto-extracted LLM final response as `result` and no `metadata` -- the existing `spawn_worker` contract is unchanged.
+
+#### `task_block` -- Self-Pause for Context
+
+Available only when running for a task. Pauses the current attempt without consuming a retry budget (blocking is a deliberate pause, not a failure).
+
+| Parameter | Type | Description |
+|---|---|---|
+| `reason` | string | One-sentence reason naming the specific decision needed. Surfaced in the `task.blocked` event the parent receives. |
+
+Emits a `task.blocked` event to the spawning parent and publishes an interrupt on the worker's own session channel so the harness exits cleanly. The task stays in `blocked` until someone calls `unblock_task` -- the spawning parent agent or a future human-facing dashboard control.
+
+#### `task_show` -- Read Own Task Context
+
+Available only when running for a task. Returns a JSON object with the calling worker's task, its parent tasks (with their completed results and metadata), and prior attempt summaries linked via `sessions.task_id`. Use this on retry to read the full detail of every prior attempt -- the new attempt's USER_MESSAGE already includes a brief summary, but `task_show` exposes the structured form.
+
+No parameters. Returns:
+
+```json
+{
+  "task": {"id", "goal", "context", "status", "attempt_count", "max_attempts", "agent_def_name", "blocked_reason"},
+  "parents": [{"id", "goal", "status", "result", "result_metadata"}, ...],
+  "prior_attempts": [{"session_id", "outcome", "summary"? | "blocked_reason"?}, ...]
+}
+```
+
+Prior attempts are classified as `"completed"` (worker finished, summary present), `"blocked"` (called `task_block`, reason present), or `"crashed"` (no completion event -- timeout / hard-kill / OOM).
+
 ### `clarify` -- Interactive Clarification
 
 Ask the user one or more structured clarifying questions and block until they submit all answers.  The web channel renders the call as a tabbed widget; each tab is one question with labeled radio choices and an optional "Other" free-form field.

@@ -23,41 +23,51 @@ from uuid import UUID
 from surogates.config import load_settings
 from surogates.db.engine import async_engine_from_settings, async_session_factory
 from surogates.storage.backend import create_backend
+from surogates.storage.keys import prefixed
 from surogates.storage.tenant import agent_session_bucket, session_workspace_prefix
 
 logger = logging.getLogger(__name__)
 
-SESSION_PREFIX_ROOT = "sessions/"
+_SESSIONS_DIR = "sessions/"
 
 
 async def cleanup_orphaned_session_prefixes(
     storage,
     *,
     bucket: str,
+    storage_key_prefix: str,
     active_session_ids: set[str],
     dry_run: bool = False,
 ) -> int:
-    """Delete session prefixes in the agent bucket with no active DB row."""
+    """Delete session prefixes in the agent bucket with no active DB row.
+
+    Scopes the listing to the agent's ``storage_key_prefix`` so the
+    cleanup is safe to run against a shared bucket: it only touches
+    keys under ``{storage_key_prefix}/sessions/``.
+    """
     bucket = agent_session_bucket(bucket)
-    keys = await storage.list_keys(bucket, prefix=SESSION_PREFIX_ROOT)
-    session_ids = sorted(
-        {
-            key.split("/", 2)[1]
-            for key in keys
-            if key.startswith(SESSION_PREFIX_ROOT) and len(key.split("/", 2)) >= 2
-        }
-    )
+    list_prefix = prefixed(_SESSIONS_DIR, storage_key_prefix)
+    keys = await storage.list_keys(bucket, prefix=list_prefix)
+    # Extract the session_id segment that follows ``sessions/`` in each key.
+    session_ids: set[str] = set()
+    for key in keys:
+        relative = key[len(storage_key_prefix.rstrip("/")) + 1:] if storage_key_prefix else key
+        if not relative.startswith(_SESSIONS_DIR):
+            continue
+        parts = relative.split("/", 2)
+        if len(parts) >= 2:
+            session_ids.add(parts[1])
 
     deleted = 0
-    for session_id in session_ids:
+    for session_id in sorted(session_ids):
         if session_id in active_session_ids:
             logger.debug(
                 "Session prefix %s belongs to active session, skipping.",
-                session_workspace_prefix(session_id),
+                prefixed(session_workspace_prefix(session_id), storage_key_prefix),
             )
             continue
 
-        prefix = session_workspace_prefix(session_id)
+        prefix = prefixed(session_workspace_prefix(session_id), storage_key_prefix)
         if dry_run:
             logger.info("[DRY RUN] Would delete workspace prefix: %s", prefix)
         else:
@@ -96,6 +106,7 @@ async def cleanup_orphaned_buckets(dry_run: bool = False) -> int:
         deleted = await cleanup_orphaned_session_prefixes(
             storage,
             bucket=settings.storage.bucket,
+            storage_key_prefix=settings.storage.key_prefix,
             active_session_ids=active_session_ids,
             dry_run=dry_run,
         )

@@ -100,6 +100,16 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - "Running" panel + session tree endpoints
 - Web UI library page and REST API reference
 
+### [11a. Tasks](tasks/index.md)
+- What is a task? (durable, DAG-aware coordination on top of `spawn_worker`)
+- Tasks vs. `delegate_task` vs. `spawn_worker` (when to use which)
+- Status state machine (`todo` -> `ready` -> `running` -> `done` / `blocked` / `failed` / `cancelled`)
+- The six tools (`spawn_task`, `unblock_task`, `cancel_task`, `task_block`, `task_complete`, `task_show`)
+- Dispatcher tick (promote, finalize, enqueue at 5s cadence)
+- Retry-with-history and prior-attempt context injection
+- Event vocabulary (`worker.complete` extended with `task_id`, plus `task.blocked` / `task.failed`)
+- **Missions** (rubric-judged, long-running objectives): `/mission` slash command, evaluator triggers, verifier-task pattern, mission dashboard, pause/resume/cancel
+
 ### [12. Experts](experts/index.md)
 - What is an expert? (task-specialized model as a skill)
 - Define an expert (`SKILL.md` with type: expert)

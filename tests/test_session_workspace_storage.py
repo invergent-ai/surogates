@@ -453,6 +453,7 @@ async def test_cleanup_deletes_orphaned_session_prefixes_only():
     deleted = await cleanup_orphaned_session_prefixes(
         storage,
         bucket="ops-agent-bucket",
+        storage_key_prefix="",
         active_session_ids={str(active_id)},
         dry_run=False,
     )

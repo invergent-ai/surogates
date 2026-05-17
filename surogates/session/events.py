@@ -95,6 +95,26 @@ class EventType(str, Enum):
     WORKER_COMPLETE = "worker.complete"
     WORKER_FAILED = "worker.failed"
 
+    # Subagent task layer (spawn_task tool / tasks_tick dispatcher).
+    # Emitted to the parent (spawning) session so the coordinator agent
+    # observes task state transitions on its next wake. ``WORKER_COMPLETE``
+    # is reused for successful task completion; the payload carries the
+    # ``task_id`` so the parent can correlate.
+    TASK_BLOCKED = "task.blocked"
+    TASK_FAILED = "task.failed"
+
+    # Mission layer (orchestrated goals).
+    # Emitted on the coordinator chat session. The dashboard polls these
+    # to render mission state; see
+    # docs/superpowers/specs/2026-05-16-mission-orchestrated-goals-design.md.
+    MISSION_DEFINED = "mission.defined"
+    MISSION_EVALUATION_START = "mission.evaluation.start"
+    MISSION_EVALUATION_END = "mission.evaluation.end"
+    MISSION_CONTINUATION = "mission.continuation"
+    MISSION_PAUSED = "mission.paused"
+    MISSION_RESUMED = "mission.resumed"
+    MISSION_CANCELLED = "mission.cancelled"
+
     # Governance
     POLICY_ALLOWED = "policy.allowed"
     POLICY_DENIED = "policy.denied"
