@@ -335,6 +335,7 @@ class StorageSettings(BaseSettings):
 
     backend: Literal["local", "s3"] = "local"
     bucket: str = ""  # Agent bucket for session workspaces
+    key_prefix: str = ""  # Object-key prefix under the shared bucket, e.g. "{project_id}/{agent_id}"
     base_path: str = ""  # LocalBackend root (defaults to tenant_assets_root)
 
     # S3-compatible settings (only used when backend == "s3")

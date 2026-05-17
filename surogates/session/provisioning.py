@@ -15,6 +15,7 @@ from surogates.storage.tenant import agent_session_bucket
 # break workspace sharing.
 _WORKSPACE_SHARING_FIELDS = (
     "storage_bucket",
+    "storage_key_prefix",
     "workspace_path",
     "supports_vision",
 )
@@ -42,6 +43,9 @@ async def create_agent_session(
 
     merged_config = dict(config or {})
     merged_config["storage_bucket"] = bucket
+    merged_config["storage_key_prefix"] = (
+        getattr(settings.storage, "key_prefix", "") or ""
+    )
     merged_config["workspace_path"] = storage.resolve_workspace_path(bucket, sid)
 
     model_info = get_model_info(model)

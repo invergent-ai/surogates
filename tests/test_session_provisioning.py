@@ -19,6 +19,7 @@ def _workspace_config() -> dict:
     """Minimum config a parent must carry to seed a shared child workspace."""
     return {
         "storage_bucket": "tenant-bucket",
+        "storage_key_prefix": "",
         "workspace_path": "/workspace/tenant-bucket/parent",
         "supports_vision": False,
     }
@@ -94,6 +95,8 @@ async def test_create_agent_session_populates_storage_and_model_metadata():
     assert call["model"] == "gpt-4o"
     assert call["config"]["system"] == "be useful"
     assert call["config"]["storage_bucket"] == "tenant-bucket"
+    # storage_key_prefix is stamped (empty when settings.storage doesn't set it).
+    assert call["config"]["storage_key_prefix"] == ""
     assert call["config"]["workspace_path"] == f"/workspace/tenant-bucket/{session_id}"
     assert call["config"]["supports_vision"] is True
 
@@ -103,6 +106,7 @@ async def test_create_child_session_inherits_workspace_from_root_parent():
     parent = _make_session(
         config={
             "storage_bucket": "tenant-bucket",
+            "storage_key_prefix": "",
             "workspace_path": "/workspace/tenant-bucket/abc",
             "supports_vision": True,
             "system": "parent-system",  # non-sharing field — not inherited
@@ -143,6 +147,7 @@ async def test_create_child_session_grandchild_preserves_root():
     parent = _make_session(
         config={
             "storage_bucket": "b",
+            "storage_key_prefix": "",
             "workspace_path": "/workspace/b/root",
             "supports_vision": False,
             "sandbox_root_session_id": str(grandparent_id),
@@ -189,6 +194,7 @@ async def test_create_child_session_caller_cannot_override_workspace_fields():
     parent = _make_session(
         config={
             "storage_bucket": "parent-bucket",
+            "storage_key_prefix": "p-1/a-1",
             "workspace_path": "/workspace/parent",
             "supports_vision": True,
         },
@@ -201,6 +207,7 @@ async def test_create_child_session_caller_cannot_override_workspace_fields():
         channel="worker",
         config={
             "storage_bucket": "attacker-bucket",
+            "storage_key_prefix": "p-evil/a-evil",
             "workspace_path": "/elsewhere",
             "supports_vision": False,
         },
@@ -208,6 +215,7 @@ async def test_create_child_session_caller_cannot_override_workspace_fields():
 
     cfg = store.create_session.await_args.kwargs["config"]
     assert cfg["storage_bucket"] == "parent-bucket"
+    assert cfg["storage_key_prefix"] == "p-1/a-1"
     assert cfg["workspace_path"] == "/workspace/parent"
     assert cfg["supports_vision"] is True
 
@@ -220,6 +228,7 @@ async def test_create_child_session_inherits_service_account_from_parent():
         service_account_id=sa_id,
         config={
             "storage_bucket": "b",
+            "storage_key_prefix": "",
             "workspace_path": "/w",
             "supports_vision": False,
             "service_account_id": str(sa_id),
@@ -302,6 +311,7 @@ async def test_create_child_session_does_not_touch_storage():
     parent = _make_session(
         config={
             "storage_bucket": "b",
+            "storage_key_prefix": "",
             "workspace_path": "/w",
             "supports_vision": False,
         },
