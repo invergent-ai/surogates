@@ -135,6 +135,7 @@ async def test_runner_links_scheduled_run_to_origin_session(
         channel="web",
         config={
             "storage_bucket": "agent-a-bucket",
+            "storage_key_prefix": "",
             "workspace_path": "/workspace/agent-a-bucket/sessions/origin",
             "supports_vision": False,
         },
@@ -195,6 +196,7 @@ async def test_runner_child_session_inherits_creator_workspace(
         channel="web",
         config={
             "storage_bucket": "agent-a-bucket",
+            "storage_key_prefix": "",
             "workspace_path": creator_workspace,
             "supports_vision": False,
         },

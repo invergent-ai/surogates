@@ -247,10 +247,10 @@ class TestDiscoveryCache:
 
 class TestResolveModelInfo:
     def test_static_catalog_wins_for_known_id(self) -> None:
-        # gpt-4o is in the static catalog.
-        info = resolve_model_info("gpt-4o")
+        # gpt-5.5 is in the static catalog.
+        info = resolve_model_info("gpt-5.5")
         assert info is not None
-        assert info.context_window == MODEL_CATALOG["gpt-4o"].context_window
+        assert info.context_window == MODEL_CATALOG["gpt-5.5"].context_window
 
     def test_discovery_fills_gap_when_static_misses(self) -> None:
         _install_mock({
@@ -269,13 +269,13 @@ class TestResolveModelInfo:
 
     def test_override_beats_static(self) -> None:
         info = resolve_model_info(
-            "gpt-4o",
-            overrides={"gpt-4o": {"context_window": 999_000}},
+            "gpt-5.5",
+            overrides={"gpt-5.5": {"context_window": 999_000}},
         )
         assert info is not None
         assert info.context_window == 999_000
         # Other fields preserved from the static entry.
-        assert info.input_cost_per_1k == MODEL_CATALOG["gpt-4o"].input_cost_per_1k
+        assert info.input_cost_per_1k == MODEL_CATALOG["gpt-5.5"].input_cost_per_1k
 
     def test_override_beats_discovery(self) -> None:
         _install_mock({

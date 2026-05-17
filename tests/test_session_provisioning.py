@@ -79,7 +79,7 @@ async def test_create_agent_session_populates_storage_and_model_metadata():
         user_id=user_id,
         agent_id="agent-a",
         channel="web",
-        model="gpt-4o",
+        model="gpt-5.5",
         config={"system": "be useful"},
         session_id=session_id,
     )
@@ -92,7 +92,7 @@ async def test_create_agent_session_populates_storage_and_model_metadata():
     assert call["user_id"] == user_id
     assert call["agent_id"] == "agent-a"
     assert call["channel"] == "web"
-    assert call["model"] == "gpt-4o"
+    assert call["model"] == "gpt-5.5"
     assert call["config"]["system"] == "be useful"
     assert call["config"]["storage_bucket"] == "tenant-bucket"
     # storage_key_prefix is stamped (empty when settings.storage doesn't set it).

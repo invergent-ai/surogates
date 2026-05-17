@@ -154,8 +154,8 @@ async def test_context_compressor_uses_summary_client_for_summaries() -> None:
     )
     main_client = SimpleNamespace(chat=SimpleNamespace(completions=main_completions))
     compressor = ContextCompressor(
-        "gpt-4o",
-        summary_model_override="gpt-4o-mini",
+        "gpt-5.5",
+        summary_model_override="gpt-5.4-mini",
         summary_client=summary_client,
         quiet_mode=True,
     )
@@ -168,5 +168,5 @@ async def test_context_compressor_uses_summary_client_for_summaries() -> None:
     assert summary is not None
     assert summary.startswith(SUMMARY_PREFIX)
     assert len(summary_completions.calls) == 1
-    assert summary_completions.calls[0]["model"] == "gpt-4o-mini"
+    assert summary_completions.calls[0]["model"] == "gpt-5.4-mini"
     assert main_completions.calls == []

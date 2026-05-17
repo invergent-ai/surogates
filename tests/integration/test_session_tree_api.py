@@ -381,7 +381,7 @@ async def test_delete_parent_session_archives_descendants_and_cancels_schedules(
     for session in (root, child, grandchild):
         await app.state.storage.write_text(
             bucket,
-            f"sessions/{session.id}/workspace.txt",
+            f"{session.id}/workspace.txt",
             "delete me",
         )
 
@@ -433,5 +433,5 @@ async def test_delete_parent_session_archives_descendants_and_cancels_schedules(
     for session in (root, child, grandchild):
         assert not await app.state.storage.exists(
             bucket,
-            f"sessions/{session.id}/workspace.txt",
+            f"{session.id}/workspace.txt",
         )

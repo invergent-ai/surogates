@@ -40,6 +40,7 @@ async def parent_session(session_factory, org_id: uuid.UUID) -> ORMSession:
             status="active",
             config={
                 "storage_bucket": "test-bucket",
+                "storage_key_prefix": "",
                 "workspace_path": f"/workspace/test/{parent_id}",
                 "supports_vision": False,
             },
