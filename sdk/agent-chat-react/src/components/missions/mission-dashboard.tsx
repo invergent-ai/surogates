@@ -194,7 +194,7 @@ export function MissionDashboard({
   if (state.loading && !state.mission) {
     return (
       <div className="flex h-full items-center justify-center p-6">
-        <Loader2 className="size-5 animate-spin text-muted-foreground" />
+        <Loader2 className="size-5 animate-spin text-foreground/70" />
       </div>
     );
   }
@@ -268,21 +268,21 @@ export function MissionDashboard({
         <CardHeader>
           <div className="flex items-start justify-between gap-4">
             <div className="space-y-1">
-              <CardTitle className="text-lg wrap-break-word">
+              <CardTitle className="wrap-break-word -uppercase text-sm">
                 {mission.description}
               </CardTitle>
-              <CardDescription className="wrap-break-word">
+              <CardDescription className="wrap-break-word text-foreground/70">
                 Rubric: {mission.rubric}
               </CardDescription>
-              <div className="flex items-center gap-3 pt-2 text-xs text-muted-foreground">
-                <Badge variant={statusVariant}>{mission.status}</Badge>
-                <span>
+              <div className="flex items-center gap-3 pt-2 text-xs text-foreground/70">
+                <Badge variant={statusVariant} className="font-mono text-foreground">{mission.status}</Badge>
+                <span className="font-mono text-primary">
                   Iteration {mission.iteration}/{mission.maxIterations}
                 </span>
                 {mission.lastEvaluationResult ? (
                   <span>
                     Last verdict:{" "}
-                    <span className="font-mono">
+                    <span className="font-mono text-primary">
                       {mission.lastEvaluationResult}
                     </span>
                   </span>
@@ -333,14 +333,14 @@ export function MissionDashboard({
         </CardHeader>
         {mission.lastEvaluationFeedback ? (
           <CardContent className="space-y-2">
-            <div className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+            <div className="text-xs font-semibold uppercase tracking-widest text-foreground/70">
               Evaluator feedback
             </div>
             <p className="text-sm whitespace-pre-wrap wrap-break-word">
               {mission.lastEvaluationFeedback}
             </p>
             {mission.lastEvaluationExplanation ? (
-              <p className="text-xs text-muted-foreground whitespace-pre-wrap wrap-break-word">
+              <p className="text-xs text-foreground/70 whitespace-pre-wrap wrap-break-word">
                 {mission.lastEvaluationExplanation}
               </p>
             ) : null}
@@ -369,7 +369,7 @@ export function MissionDashboard({
             )[bucket];
             return (
               <div key={bucket} className="space-y-2">
-                <div className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+                <div className="text-xs font-semibold uppercase tracking-widest text-foreground/70">
                   {heading} ({rows.length})
                 </div>
                 <ul className="space-y-1.5">
@@ -380,17 +380,13 @@ export function MissionDashboard({
                     >
                       <div className="min-w-0 flex-1 space-y-1">
                         <div className="flex items-center gap-2">
-                          <span className="font-mono text-xs text-muted-foreground">
-                            {task.id.slice(0, 8)}
-                          </span>
-                          <Badge variant="secondary">{task.status}</Badge>
                           {task.agentDefName ? (
-                            <span className="text-xs text-muted-foreground">
+                            <span className="text-xs text-foreground/70">
                               {task.agentDefName}
                             </span>
                           ) : null}
                           {task.attemptCount > 1 ? (
-                            <span className="text-xs text-muted-foreground">
+                            <span className="text-xs text-foreground/70">
                               attempt {task.attemptCount}/{task.maxAttempts}
                             </span>
                           ) : null}
@@ -399,7 +395,7 @@ export function MissionDashboard({
                           {task.goal}
                         </div>
                         {task.parentIds.length > 0 ? (
-                          <div className="text-xs text-muted-foreground">
+                          <div className="text-xs text-foreground/70">
                             after:{" "}
                             {task.parentIds
                               .map((p) => p.slice(0, 8))
@@ -424,7 +420,7 @@ export function MissionDashboard({
             );
           })}
           {state.tasks.length === 0 ? (
-            <div className="text-sm text-muted-foreground">
+            <div className="text-sm text-foreground/70">
               No tasks spawned yet.
             </div>
           ) : null}
@@ -438,7 +434,7 @@ export function MissionDashboard({
         </CardHeader>
         <CardContent>
           {state.workers.length === 0 ? (
-            <div className="text-sm text-muted-foreground">
+            <div className="text-sm text-foreground/70">
               No workers attached to this mission right now.
             </div>
           ) : (
@@ -459,12 +455,9 @@ export function MissionDashboard({
                   >
                     <div className="min-w-0 flex-1 space-y-1">
                       <div className="flex items-center gap-2">
-                        <span className="font-mono text-xs text-muted-foreground">
-                          T{w.taskId.slice(0, 8)}
-                        </span>
-                        <Badge variant="secondary">{w.taskStatus}</Badge>
+                        <Badge className="text-foreground/70">{w.taskStatus}</Badge>
                         {w.agentDefName ? (
-                          <span className="text-xs text-muted-foreground">
+                          <span className="text-xs text-foreground/70">
                             {w.agentDefName}
                           </span>
                         ) : null}
@@ -473,7 +466,7 @@ export function MissionDashboard({
                         {deriveMissionWorkerActivityLabel(w)}
                       </div>
                       {w.latestEventAt ? (
-                        <div className="text-xs text-muted-foreground">
+                        <div className="text-xs text-foreground/70">
                           {new Date(w.latestEventAt).toLocaleTimeString()}
                         </div>
                       ) : null}
@@ -485,7 +478,7 @@ export function MissionDashboard({
                       onClick={onTranscriptClick}
                       className="text-xs text-primary hover:underline self-start"
                     >
-                      transcript
+                      View session
                     </a>
                   </li>
                 );
@@ -496,7 +489,7 @@ export function MissionDashboard({
       </Card>
 
       <Separator />
-      <div className="flex justify-between items-center text-xs text-muted-foreground">
+      <div className="flex justify-between items-center text-xs text-foreground/70">
         <span>
           Auto-refresh every {pollIntervalMs / 1000}s while mission is active.
         </span>
