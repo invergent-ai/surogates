@@ -27,6 +27,8 @@ from surogates.harness.tool_guardrails import (
     toolguard_synthetic_result,
 )
 from surogates.tools.coerce import coerce_tool_args
+from surogates.storage.keys import prefixed
+from surogates.storage.tenant import session_workspace_prefix
 
 # ---------------------------------------------------------------------------
 # Path sanitisation — replace workspace absolute paths with __WORKSPACE__
@@ -37,6 +39,22 @@ _WORKSPACE_TOKEN = "__WORKSPACE__"
 
 
 _WORKSPACE_MOUNT_PATH = "/workspace"
+
+
+def build_workspace_source_ref(
+    *,
+    storage_bucket: str,
+    storage_key_prefix: str,
+    workspace_prefix: str,
+) -> str:
+    """Build the ``s3://`` URI used to mount a sandbox workspace.
+
+    The agent's ``storage_key_prefix`` (``{project_id}/{agent_id}``) is
+    inserted between the bucket name and the session-scoped
+    ``workspace_prefix`` (``sessions/{root_id}/``). With an empty
+    storage prefix the call collapses to the legacy bucket-rooted URI.
+    """
+    return f"s3://{storage_bucket}/{prefixed(workspace_prefix, storage_key_prefix)}"
 
 
 def _build_session_sandbox_spec(
@@ -58,7 +76,6 @@ def _build_session_sandbox_spec(
     across sessions sharing the same tenant context.
     """
     from surogates.sandbox.base import Resource, SandboxSpec
-    from surogates.storage.tenant import session_workspace_prefix
     from surogates.tools.utils.env_passthrough import get_sandbox_env
 
     baseline = getattr(tenant, "sandbox_spec", None)
@@ -81,15 +98,17 @@ def _build_session_sandbox_spec(
         )
 
     storage_bucket = session.config.get("storage_bucket", "")
+    storage_key_prefix = session.config.get("storage_key_prefix", "") or ""
     has_workspace_mount = any(
         r.mount_path == _WORKSPACE_MOUNT_PATH for r in sandbox_spec.resources
     )
     if storage_bucket and not has_workspace_mount:
         sandbox_spec.resources.append(
             Resource(
-                source_ref=(
-                    f"s3://{storage_bucket}/"
-                    f"{session_workspace_prefix(sandbox_owner)}"
+                source_ref=build_workspace_source_ref(
+                    storage_bucket=storage_bucket,
+                    storage_key_prefix=storage_key_prefix,
+                    workspace_prefix=session_workspace_prefix(sandbox_owner),
                 ),
                 mount_path=_WORKSPACE_MOUNT_PATH,
             ),
