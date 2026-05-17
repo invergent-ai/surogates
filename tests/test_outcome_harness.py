@@ -298,6 +298,44 @@ async def test_handle_mission_cancel_clears_in_memory_active_mission_id(
 
 
 @pytest.mark.asyncio
+async def test_mission_has_pending_work_returns_false_without_session_factory(
+) -> None:
+    """No session_factory wired => fall back to allowing completion. The
+    helper must never raise; a False return preserves the pre-mission
+    completion behaviour for harnesses that aren't DB-backed (test rigs)."""
+    store = FakeStore()
+    harness = _make_harness(store)
+    # _make_harness leaves session_factory unset; assert the helper
+    # short-circuits without trying to import MissionStore.
+    assert (
+        await harness._mission_has_pending_work(uuid4()) is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_mission_has_pending_work_false_when_no_active_mission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An active session_factory but no active mission for this session
+    must return False so /chat sessions (no mission) complete normally."""
+    from surogates.missions.models import Mission as PydMission
+
+    store = FakeStore()
+    harness = _make_harness(store, session_factory=MagicMock())
+
+    async def fake_get_active_for_session(self: Any, sid: UUID) -> PydMission | None:
+        return None
+
+    monkeypatch.setattr(
+        "surogates.missions.store.MissionStore.get_active_for_session",
+        fake_get_active_for_session,
+    )
+    assert (
+        await harness._mission_has_pending_work(uuid4()) is False
+    )
+
+
+@pytest.mark.asyncio
 async def test_handle_mission_create_rejects_service_account_principal() -> None:
     """A tenant with user_id=None (service-account/channel session) must
     not be allowed to create a mission — missions.user_id is NOT NULL

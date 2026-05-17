@@ -2158,6 +2158,20 @@ class AgentHarness:
                         session.id,
                     )
 
+                # If the mission is still in flight, do NOT complete the
+                # session — the worker.complete events that follow will
+                # re-wake the coordinator so the evaluator hook above can
+                # fire on the next no-tool-call response. Completing here
+                # would set status=completed, and the next wake would bail
+                # at the top of process_wake_cycle, leaving the mission
+                # active forever even after its verifier task finishes.
+                if await self._mission_has_pending_work(session.id):
+                    logger.debug(
+                        "Session %s: mission has in-flight tasks; deferring completion",
+                        session.id,
+                    )
+                    return
+
                 # A response without tool calls completes the current
                 # objective.  Follow-up messages revive the session into a
                 # new objective rather than keeping completed work "active".
@@ -3868,6 +3882,46 @@ class AgentHarness:
         except Exception:
             logger.debug(
                 "Mission active-check failed for session %s; treating as no mission",
+                session_id, exc_info=True,
+            )
+            return False
+
+    async def _mission_has_pending_work(self, session_id: UUID) -> bool:
+        """True iff the session's active mission has tasks not yet in a
+        terminal state.
+
+        Used in the no-tool-call branch of the harness loop to defer
+        ``_complete_session`` while sub-agent work is still in flight. If
+        we completed the session here, ``status=completed`` would block
+        every subsequent wake (see process_wake_cycle's status guard) —
+        the verifier's ``worker.complete`` would arrive into a session
+        that refuses to re-run the evaluator hook, leaving the mission
+        active forever.
+        """
+        if self._session_factory is None:
+            return False
+        try:
+            from sqlalchemy import func as _func, select as _sel
+
+            from surogates.db.models import Task
+            from surogates.missions.store import MissionStore
+
+            store = MissionStore(self._session_factory)
+            active = await store.get_active_for_session(session_id)
+            if active is None:
+                return False
+            async with self._session_factory() as db:
+                count = await db.scalar(
+                    _sel(_func.count(Task.id)).where(
+                        Task.mission_id == active.id,
+                        Task.status.in_(("todo", "ready", "running", "blocked")),
+                    )
+                )
+            return bool(count and int(count) > 0)
+        except Exception:
+            logger.debug(
+                "Mission pending-work check failed for session %s; "
+                "falling back to completing session",
                 session_id, exc_info=True,
             )
             return False
