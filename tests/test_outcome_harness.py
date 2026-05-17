@@ -312,6 +312,164 @@ async def test_mission_has_pending_work_returns_false_without_session_factory(
     )
 
 
+def test_parse_judge_json_strips_fenced_markdown_block() -> None:
+    from surogates.harness.loop import _parse_judge_json
+
+    raw = """```json
+{"result": "satisfied", "explanation": "ok", "feedback": ""}
+```"""
+    assert _parse_judge_json(raw) == {
+        "result": "satisfied",
+        "explanation": "ok",
+        "feedback": "",
+    }
+
+
+def test_parse_judge_json_extracts_object_from_prose() -> None:
+    from surogates.harness.loop import _parse_judge_json
+
+    raw = (
+        "Let me think about this carefully. The verifier returned 244. "
+        'The rubric required >= 4. Therefore:\n\n'
+        '{"result": "satisfied", "explanation": "244 >= 4", "feedback": ""}'
+    )
+    parsed = _parse_judge_json(raw)
+    assert parsed["result"] == "satisfied"
+
+
+def test_parse_judge_json_rejects_empty() -> None:
+    import pytest
+
+    from surogates.harness.loop import _parse_judge_json
+
+    with pytest.raises(ValueError):
+        _parse_judge_json("")
+    with pytest.raises(ValueError):
+        _parse_judge_json("   \n\n")
+
+
+def test_parse_judge_json_rejects_non_object() -> None:
+    import pytest
+
+    from surogates.harness.loop import _parse_judge_json
+
+    with pytest.raises(ValueError, match="non-object"):
+        _parse_judge_json('"just a string"')
+
+
+def test_judge_prefers_structured_generation_when_outlines_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``generate_structured`` returns a typed verdict, the judge
+    returns its dump without falling back to the chat-completion path —
+    so a misbehaving raw chat completion (empty content, broken JSON)
+    can't override a successful structured result."""
+    import asyncio
+
+    from surogates.harness.loop import _MissionVerdict, _build_mission_judge
+
+    async def fake_generate_structured(**kwargs: Any) -> _MissionVerdict:
+        return _MissionVerdict(
+            result="satisfied", explanation="rubric met", feedback="",
+        )
+
+    monkeypatch.setattr(
+        "surogates.harness.loop.generate_structured", fake_generate_structured,
+    )
+
+    class ExplodingClient:
+        @property
+        def chat(self):
+            raise AssertionError(
+                "fallback chat completion must NOT run when "
+                "structured generation succeeded",
+            )
+
+    judge = _build_mission_judge(
+        llm_client=ExplodingClient(), eval_model="m",
+    )
+    assert asyncio.run(judge("sys", "user")) == {
+        "result": "satisfied",
+        "explanation": "rubric met",
+        "feedback": "",
+    }
+
+
+def test_judge_fallback_rejects_malformed_verdict_shape() -> None:
+    """The fallback JSON parser validates against the verdict schema —
+    a JSON object with an invalid ``result`` value must raise so the
+    evaluator records a parse failure rather than passing a bogus
+    verdict to ``apply_verdict``."""
+    import asyncio
+
+    from surogates.harness.loop import (
+        MissionJudgeParseError,
+        _build_mission_judge,
+    )
+
+    class FakeMessage:
+        content = '{"result": "not-a-real-status", "explanation": "x", "feedback": ""}'
+
+    class FakeChoice:
+        message = FakeMessage()
+
+    class FakeResponse:
+        choices = [FakeChoice()]
+
+    class FakeChatCompletions:
+        async def create(self, **kwargs):
+            return FakeResponse()
+
+    class FakeChat:
+        completions = FakeChatCompletions()
+
+    class FakeClient:
+        chat = FakeChat()
+
+    judge = _build_mission_judge(llm_client=FakeClient(), eval_model="m")
+    with pytest.raises(MissionJudgeParseError):
+        asyncio.run(judge("sys", "user"))
+
+
+def test_judge_falls_back_to_reasoning_content_when_content_empty() -> None:
+    """Reasoning-mode models (GLM, DeepSeek) sometimes leave
+    ``content`` empty and put the answer in ``reasoning_content``.
+    The judge must read the fallback rather than parse-failing."""
+    import asyncio
+
+    from surogates.harness.loop import _build_mission_judge
+
+    class FakeMessage:
+        content = ""
+        reasoning_content = (
+            '{"result": "satisfied", "explanation": "ok", "feedback": ""}'
+        )
+
+    class FakeChoice:
+        message = FakeMessage()
+
+    class FakeResponse:
+        choices = [FakeChoice()]
+
+    class FakeChatCompletions:
+        async def create(self, **kwargs):
+            return FakeResponse()
+
+    class FakeChat:
+        completions = FakeChatCompletions()
+
+    class FakeClient:
+        chat = FakeChat()
+
+    judge = _build_mission_judge(llm_client=FakeClient(), eval_model="m")
+    verdict = asyncio.run(judge("sys", "user"))
+    assert verdict == {
+        "result": "satisfied",
+        "explanation": "ok",
+        "feedback": "",
+    }
+
+
 @pytest.mark.asyncio
 async def test_mission_has_pending_work_false_when_no_active_mission(
     monkeypatch: pytest.MonkeyPatch,

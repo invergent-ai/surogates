@@ -25,7 +25,7 @@ import re
 import traceback
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -3887,37 +3887,34 @@ class AgentHarness:
             return False
 
     async def _mission_has_pending_work(self, session_id: UUID) -> bool:
-        """True iff the session's active mission has tasks not yet in a
-        terminal state.
+        """True iff the session's mission is in a non-terminal status.
 
-        Used in the no-tool-call branch of the harness loop to defer
-        ``_complete_session`` while sub-agent work is still in flight. If
-        we completed the session here, ``status=completed`` would block
-        every subsequent wake (see process_wake_cycle's status guard) —
-        the verifier's ``worker.complete`` would arrive into a session
-        that refuses to re-run the evaluator hook, leaving the mission
-        active forever.
+        The session is owned by the mission's lifecycle: while the
+        mission is ``active`` or ``paused`` it can still produce work
+        (more tasks to spawn, an evaluator retry after a parse failure,
+        a ``/mission resume`` after a manual pause). Completing the
+        session here would set ``status=completed``, every subsequent
+        wake would bail at the status guard in ``process_wake_cycle``,
+        and the mission could never progress.
+
+        Only when the mission reaches a terminal status (``satisfied``,
+        ``blocked``, ``failed``, ``cancelled``, ``max_iterations_reached``)
+        does ``apply_verdict`` clear ``active_mission_id`` from the
+        session config; ``get_active_for_session`` then returns ``None``,
+        this method returns ``False``, and the session completes
+        normally on the next no-tool-call response.
+
+        Returns ``False`` (allow completion) on any failure path so a
+        bug in the mission layer can't strand sessions forever.
         """
         if self._session_factory is None:
             return False
         try:
-            from sqlalchemy import func as _func, select as _sel
-
-            from surogates.db.models import Task
             from surogates.missions.store import MissionStore
 
             store = MissionStore(self._session_factory)
             active = await store.get_active_for_session(session_id)
-            if active is None:
-                return False
-            async with self._session_factory() as db:
-                count = await db.scalar(
-                    _sel(_func.count(Task.id)).where(
-                        Task.mission_id == active.id,
-                        Task.status.in_(("todo", "ready", "running", "blocked")),
-                    )
-                )
-            return bool(count and int(count) > 0)
+            return active is not None
         except Exception:
             logger.debug(
                 "Mission pending-work check failed for session %s; "
@@ -5162,38 +5159,130 @@ async def _maybe_run_mission_evaluator(
     )
 
 
+def _parse_judge_json(raw: str) -> dict[str, Any]:
+    """Tolerant JSON extraction for the mission judge.
+
+    Mirrors :meth:`AgentHarness._parse_json_object`: strips Markdown
+    fences, falls back to the first ``{...}`` block in prose, and
+    raises ``ValueError`` on empty / non-object payloads so the caller
+    can surface the error as a ``MissionJudgeParseError``.
+    """
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    text = text.strip()
+    if not text:
+        raise ValueError("empty payload")
+    # Some reasoning models prefix the JSON with their thought process.
+    # Find the first balanced ``{ ... }`` block if the payload isn't
+    # already a JSON object.
+    if not text.startswith("{"):
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start:end + 1]
+    parsed = json.loads(text)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"judge returned non-object JSON: {type(parsed).__name__}")
+    return parsed
+
+
+class _MissionVerdict(BaseModel):
+    """Structured shape the judge must return.
+
+    Used both for ``outlines``-backed constrained generation (preferred,
+    via :func:`generate_structured`) and for tolerant fallback parsing
+    when outlines isn't installed or fails to coerce the model's output.
+    Keeping the schema in one place means the prompt's documented JSON
+    shape and the parser's expected shape stay in lockstep.
+    """
+
+    result: Literal["satisfied", "needs_revision", "blocked", "failed"]
+    explanation: str = ""
+    feedback: str = ""
+
+
 def _build_mission_judge(*, llm_client: Any, eval_model: str) -> Any:
     """Return an async ``(system, user) -> dict`` judge bound to ``llm_client``.
 
-    Reuses the same chat-completions interface as ``_evaluate_outcome``;
-    a JSON parse error is raised as :class:`MissionJudgeParseError` so
-    :func:`_maybe_run_mission_evaluator` can branch on parse vs. transport
-    failure.
+    Prefers ``outlines``-backed structured generation against the
+    :class:`_MissionVerdict` schema so the LLM cannot emit malformed
+    JSON or omit required fields. Falls back to a free-form chat
+    completion with tolerant JSON extraction when structured generation
+    is unavailable (no outlines, provider doesn't support it) — the
+    fallback also reads ``reasoning_content`` for reasoning-mode models
+    (GLM, DeepSeek) that leave ``content`` empty.
+
+    A parse / coercion failure raises :class:`MissionJudgeParseError`
+    so :func:`_maybe_run_mission_evaluator` can distinguish parse vs.
+    transport failure and record the right counter.
     """
 
     async def judge(system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        # Preferred path: constrain the LLM to the verdict schema.
+        # Returns None when outlines isn't available, the provider
+        # isn't supported, or coercion fails — fall through to the
+        # tolerant free-form parser in that case.
+        try:
+            verdict = await generate_structured(
+                llm_client=llm_client,
+                model=eval_model,
+                messages=messages,
+                output_model=_MissionVerdict,
+                max_tokens=600,
+                temperature=0,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Mission judge structured generation raised %r; "
+                "falling back to free-form JSON parsing",
+                exc,
+            )
+            verdict = None
+        if verdict is not None:
+            return verdict.model_dump()
+
+        # Fallback: free-form completion + tolerant parser.
         resp = await llm_client.chat.completions.create(
             model=eval_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            messages=messages,
             temperature=0.0,
             max_tokens=600,
         )
-        # Mirror ``_extract_chat_message_content`` (a method on
-        # ``AgentHarness``) inline so this factory stays usable without an
-        # instance. The OpenAI-compatible shape is choices[0].message.content.
         try:
-            raw = resp.choices[0].message.content
+            message = resp.choices[0].message
         except (AttributeError, IndexError) as exc:
             raise MissionJudgeParseError(
                 f"judge returned an unexpected shape: {exc}",
             ) from exc
-        if raw is None:
+        if isinstance(message, dict):
+            raw = (
+                message.get("content")
+                or message.get("reasoning_content")
+                or message.get("reasoning")
+                or ""
+            )
+        else:
+            raw = (
+                getattr(message, "content", None)
+                or getattr(message, "reasoning_content", None)
+                or getattr(message, "reasoning", None)
+                or ""
+            )
+        if not raw or not str(raw).strip():
             raise MissionJudgeParseError("judge returned empty content")
         try:
-            return json.loads(raw)
+            parsed = _parse_judge_json(str(raw))
+            # Validate against the verdict schema so the caller always
+            # sees the documented shape (or a parse error, never a
+            # silently-malformed dict).
+            return _MissionVerdict.model_validate(parsed).model_dump()
         except (json.JSONDecodeError, ValueError) as exc:
             raise MissionJudgeParseError(str(exc)) from exc
 

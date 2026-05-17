@@ -30,6 +30,7 @@ def _session_workspace_config(sid: uuid.UUID) -> dict:
     """
     return {
         "storage_bucket": "test-bucket",
+        "storage_key_prefix": f"test/{sid}",
         "workspace_path": f"/workspace/test/{sid}",
         "supports_vision": False,
     }
