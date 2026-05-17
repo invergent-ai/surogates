@@ -80,7 +80,7 @@ class _RecordingStorage:
         return f"/bucket-root/{bucket}"
 
     def resolve_workspace_path(self, bucket: str, session_id: UUID | str) -> str:
-        return f"/bucket-root/{bucket}/sessions/{session_id}"
+        return f"/bucket-root/{bucket}/{session_id}"
 
 
 class _Redis:
@@ -228,7 +228,7 @@ async def test_create_web_session_uses_agent_bucket_and_session_path():
     assert storage.created_buckets == ["ops-agent-bucket"]
     assert store.session.config["storage_bucket"] == "ops-agent-bucket"
     assert store.session.config["workspace_path"] == (
-        f"/bucket-root/ops-agent-bucket/sessions/{store.session.id}"
+        f"/bucket-root/ops-agent-bucket/{store.session.id}"
     )
 
 
@@ -253,7 +253,7 @@ async def test_submit_prompt_uses_agent_bucket_and_session_path():
     assert storage.created_buckets == ["ops-agent-bucket"]
     assert store.session.config["storage_bucket"] == "ops-agent-bucket"
     assert store.session.config["workspace_path"] == (
-        f"/bucket-root/ops-agent-bucket/sessions/{store.session.id}"
+        f"/bucket-root/ops-agent-bucket/{store.session.id}"
     )
 
 
@@ -270,10 +270,12 @@ async def test_delete_session_deletes_session_prefix_not_agent_bucket():
         config={"storage_bucket": "ops-agent-bucket"},
     )
     storage = _RecordingStorage()
+    # Shared-bucket layout: session prefixes live directly under the
+    # agent's storage_key_prefix (empty here, so at the bucket root).
     storage.keys["ops-agent-bucket"] = [
-        f"sessions/{session_id}/file.txt",
-        f"sessions/{session_id}/sub/other.txt",
-        "sessions/other-session/file.txt",
+        f"{session_id}/file.txt",
+        f"{session_id}/sub/other.txt",
+        "other-session/file.txt",
     ]
     request = _request(store, storage, _Redis())
     background_tasks = BackgroundTasks()
@@ -287,8 +289,8 @@ async def test_delete_session_deletes_session_prefix_not_agent_bucket():
 
     assert storage.deleted_buckets == []
     assert storage.deleted_keys == [
-        ("ops-agent-bucket", f"sessions/{session_id}/file.txt"),
-        ("ops-agent-bucket", f"sessions/{session_id}/sub/other.txt"),
+        ("ops-agent-bucket", f"{session_id}/file.txt"),
+        ("ops-agent-bucket", f"{session_id}/sub/other.txt"),
     ]
 
 
@@ -353,7 +355,7 @@ async def test_workspace_upload_read_tree_and_delete_use_session_prefix():
 
     assert uploaded.path == "src/app.py"
     assert (
-        storage.objects[("ops-agent-bucket", f"sessions/{session_id}/src/app.py")]
+        storage.objects[("ops-agent-bucket", f"{session_id}/src/app.py")]
         == b"print('hi')"
     )
 
@@ -378,7 +380,7 @@ async def test_workspace_upload_read_tree_and_delete_use_session_prefix():
     )
     assert storage.deleted_keys[-1] == (
         "ops-agent-bucket",
-        f"sessions/{session_id}/src/app.py",
+        f"{session_id}/src/app.py",
     )
 
 
@@ -394,7 +396,7 @@ async def test_workspace_pdf_files_are_read_as_base64_previews():
         config={"storage_bucket": "ops-agent-bucket"},
     )
     storage = _RecordingStorage()
-    storage.objects[("ops-agent-bucket", f"sessions/{session_id}/docs/report.pdf")] = (
+    storage.objects[("ops-agent-bucket", f"{session_id}/docs/report.pdf")] = (
         b"%PDF-1.4\n"
     )
     request = _request(store, storage, _Redis())
@@ -421,7 +423,7 @@ async def test_artifact_store_writes_under_session_prefix():
         storage,
         session_id=session_id,
         bucket="ops-agent-bucket",
-        key_prefix=f"sessions/{session_id}/",
+        key_prefix=f"{session_id}/",
     )
 
     meta = await store.create(
@@ -432,11 +434,11 @@ async def test_artifact_store_writes_under_session_prefix():
 
     assert (
         "ops-agent-bucket",
-        f"sessions/{session_id}/_artifacts/index.json",
+        f"{session_id}/_artifacts/index.json",
     ) in storage.objects
     assert (
         "ops-agent-bucket",
-        f"sessions/{session_id}/_artifacts/{meta.artifact_id}/v1.json",
+        f"{session_id}/_artifacts/{meta.artifact_id}/v1.json",
     ) in storage.objects
 
 
@@ -445,9 +447,9 @@ async def test_cleanup_deletes_orphaned_session_prefixes_only():
     orphan_id = uuid4()
     storage = _RecordingStorage()
     storage.keys["ops-agent-bucket"] = [
-        f"sessions/{active_id}/keep.txt",
-        f"sessions/{orphan_id}/delete.txt",
-        f"sessions/{orphan_id}/sub/delete.txt",
+        f"{active_id}/keep.txt",
+        f"{orphan_id}/delete.txt",
+        f"{orphan_id}/sub/delete.txt",
     ]
 
     deleted = await cleanup_orphaned_session_prefixes(
@@ -461,6 +463,6 @@ async def test_cleanup_deletes_orphaned_session_prefixes_only():
     assert deleted == 1
     assert storage.deleted_buckets == []
     assert storage.deleted_keys == [
-        ("ops-agent-bucket", f"sessions/{orphan_id}/delete.txt"),
-        ("ops-agent-bucket", f"sessions/{orphan_id}/sub/delete.txt"),
+        ("ops-agent-bucket", f"{orphan_id}/delete.txt"),
+        ("ops-agent-bucket", f"{orphan_id}/sub/delete.txt"),
     ]

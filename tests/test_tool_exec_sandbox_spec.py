@@ -33,7 +33,7 @@ def test_root_session_mounts_its_own_prefix():
     spec = _build_session_sandbox_spec(session, tenant=SimpleNamespace(), sandbox_owner=owner)
 
     sources = [r.source_ref for r in spec.resources]
-    assert sources == [f"s3://agent-a-bucket/sessions/{sid}/"]
+    assert sources == [f"s3://agent-a-bucket/{sid}/"]
     mount_paths = [r.mount_path for r in spec.resources]
     assert mount_paths == [_WORKSPACE_MOUNT_PATH]
 
@@ -60,7 +60,7 @@ def test_delegation_child_mounts_root_prefix_via_sandbox_root_session_id():
 
     assert owner == str(root_id)
     sources = [r.source_ref for r in spec.resources]
-    assert sources == [f"s3://agent-a-bucket/sessions/{root_id}/"]
+    assert sources == [f"s3://agent-a-bucket/{root_id}/"]
 
 
 def test_legacy_child_without_root_falls_back_to_parent_id():
@@ -80,7 +80,7 @@ def test_legacy_child_without_root_falls_back_to_parent_id():
 
     assert owner == str(parent_id)
     sources = [r.source_ref for r in spec.resources]
-    assert sources == [f"s3://agent-a-bucket/sessions/{parent_id}/"]
+    assert sources == [f"s3://agent-a-bucket/{parent_id}/"]
 
 
 def test_no_storage_bucket_emits_no_workspace_mount():
@@ -102,7 +102,7 @@ def test_existing_workspace_mount_on_tenant_spec_is_not_duplicated():
     from surogates.sandbox.base import Resource, SandboxSpec
 
     pre_existing = Resource(
-        source_ref="s3://preset-bucket/sessions/preset/",
+        source_ref="s3://preset-bucket/preset/",
         mount_path=_WORKSPACE_MOUNT_PATH,
     )
     tenant = SimpleNamespace(
@@ -114,7 +114,7 @@ def test_existing_workspace_mount_on_tenant_spec_is_not_duplicated():
 
     workspace_mounts = [r for r in spec.resources if r.mount_path == _WORKSPACE_MOUNT_PATH]
     assert len(workspace_mounts) == 1
-    assert workspace_mounts[0].source_ref == "s3://preset-bucket/sessions/preset/"
+    assert workspace_mounts[0].source_ref == "s3://preset-bucket/preset/"
 
 
 def test_unrelated_s3_resource_does_not_suppress_workspace_mount():
@@ -140,7 +140,7 @@ def test_unrelated_s3_resource_does_not_suppress_workspace_mount():
 
     by_mount = {r.mount_path: r.source_ref for r in spec.resources}
     assert by_mount["/preset"] == "s3://other-bucket/preset/"
-    assert by_mount[_WORKSPACE_MOUNT_PATH] == f"s3://agent-a-bucket/sessions/{sid}/"
+    assert by_mount[_WORKSPACE_MOUNT_PATH] == f"s3://agent-a-bucket/{sid}/"
 
 
 def test_baseline_tenant_spec_is_not_mutated():

@@ -25,20 +25,20 @@ def test_storage_key_prefix_coerces_none_to_empty():
 
 
 def test_prefixed_session_workspace_prefix_without_storage_prefix():
-    assert prefixed_session_workspace_prefix({}, "s-1") == "sessions/s-1/"
+    assert prefixed_session_workspace_prefix({}, "s-1") == "s-1/"
 
 
 def test_prefixed_session_workspace_prefix_with_storage_prefix():
     assert (
         prefixed_session_workspace_prefix({"storage_key_prefix": "p-1/a-1"}, "s-1")
-        == "p-1/a-1/sessions/s-1/"
+        == "p-1/a-1/s-1/"
     )
 
 
 def test_prefixed_session_workspace_key_without_storage_prefix():
     assert (
         prefixed_session_workspace_key({}, "s-1", "docs/readme.md")
-        == "sessions/s-1/docs/readme.md"
+        == "s-1/docs/readme.md"
     )
 
 
@@ -49,7 +49,7 @@ def test_prefixed_session_workspace_key_with_storage_prefix():
             "s-1",
             "docs/readme.md",
         )
-        == "p-1/a-1/sessions/s-1/docs/readme.md"
+        == "p-1/a-1/s-1/docs/readme.md"
     )
 
 
@@ -59,5 +59,5 @@ def test_prefixed_session_workspace_key_empty_key():
         prefixed_session_workspace_key(
             {"storage_key_prefix": "p-1/a-1"}, "s-1", "",
         )
-        == "p-1/a-1/sessions/s-1/"
+        == "p-1/a-1/s-1/"
     )

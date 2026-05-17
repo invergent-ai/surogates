@@ -28,8 +28,6 @@ from surogates.storage.tenant import agent_session_bucket, session_workspace_pre
 
 logger = logging.getLogger(__name__)
 
-_SESSIONS_DIR = "sessions/"
-
 
 async def cleanup_orphaned_session_prefixes(
     storage,
@@ -43,20 +41,23 @@ async def cleanup_orphaned_session_prefixes(
 
     Scopes the listing to the agent's ``storage_key_prefix`` so the
     cleanup is safe to run against a shared bucket: it only touches
-    keys under ``{storage_key_prefix}/sessions/``.
+    keys under ``{storage_key_prefix}/{session_id}/...``.
     """
     bucket = agent_session_bucket(bucket)
-    list_prefix = prefixed(_SESSIONS_DIR, storage_key_prefix)
+    # In the shared-bucket layout, sessions live directly under the
+    # agent's prefix (``{p}/{a}/{sid}/...``).  List everything under
+    # the prefix and pull the first path segment as the session id.
+    list_prefix = (
+        storage_key_prefix.rstrip("/") + "/" if storage_key_prefix else ""
+    )
     keys = await storage.list_keys(bucket, prefix=list_prefix)
-    # Extract the session_id segment that follows ``sessions/`` in each key.
+    strip_len = len(list_prefix)
     session_ids: set[str] = set()
     for key in keys:
-        relative = key[len(storage_key_prefix.rstrip("/")) + 1:] if storage_key_prefix else key
-        if not relative.startswith(_SESSIONS_DIR):
-            continue
-        parts = relative.split("/", 2)
-        if len(parts) >= 2:
-            session_ids.add(parts[1])
+        relative = key[strip_len:] if strip_len else key
+        parts = relative.split("/", 1)
+        if parts and parts[0]:
+            session_ids.add(parts[0])
 
     deleted = 0
     for session_id in sorted(session_ids):

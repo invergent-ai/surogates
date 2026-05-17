@@ -211,17 +211,18 @@ class TestSessionWorkspaceHelpers:
         with pytest.raises(ValueError, match="S3-compatible"):
             agent_session_bucket("Bad_Bucket")
 
-    def test_session_workspace_prefix_is_hard_coded_sessions_path(self):
-        assert session_workspace_prefix("abc-123") == "sessions/abc-123/"
+    def test_session_workspace_prefix_is_just_session_id(self):
+        """Shared-bucket layout: session lives directly under the agent's prefix."""
+        assert session_workspace_prefix("abc-123") == "abc-123/"
 
     def test_session_workspace_key_prefixes_relative_key(self):
         assert session_workspace_key("abc-123", "src/app.py") == (
-            "sessions/abc-123/src/app.py"
+            "abc-123/src/app.py"
         )
 
     def test_session_workspace_key_strips_leading_slash(self):
         assert session_workspace_key("abc-123", "/src/app.py") == (
-            "sessions/abc-123/src/app.py"
+            "abc-123/src/app.py"
         )
 
 

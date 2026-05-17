@@ -244,7 +244,7 @@ class TestNavigateHandler:
         assert pool.specs[0].workspace_path == str(tmp_path)
         assert (
             pool.specs[0].workspace_source_ref
-            == f"s3://agent-bucket/sessions/{session_id}"
+            == f"s3://agent-bucket/{session_id}"
         )
 
     async def test_short_circuits_when_user_in_control(self, tenant) -> None:
@@ -548,7 +548,7 @@ class TestScreenshotHandler:
         assert storage.writes == [
             (
                 "agent-bucket",
-                f"sessions/{session_id}/{body['relative_path']}",
+                f"{session_id}/{body['relative_path']}",
                 b"\x89PNG\r\n\x1a\n" + (b"x" * 300_000),
             )
         ]

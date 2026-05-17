@@ -76,8 +76,15 @@ def agent_session_bucket(bucket: str) -> str:
 
 
 def session_workspace_prefix(session_id: UUID | str) -> str:
-    """Return the hard-coded object prefix for a session workspace."""
-    return f"sessions/{session_id}/"
+    """Return the object prefix for a session workspace.
+
+    The shared-bucket layout puts every session at the top of the
+    agent's storage_key_prefix slice: ``{project_id}/{agent_id}/{session_id}/``.
+    No intermediate ``sessions/`` segment — the agent owns its full
+    prefix in the shared bucket so there's no other competing data
+    that would need a namespace separator.
+    """
+    return f"{session_id}/"
 
 
 def session_workspace_key(session_id: UUID | str, key: str = "") -> str:
@@ -92,8 +99,9 @@ def prefixed_session_workspace_prefix(
     """Return the physical object prefix for a session workspace.
 
     Layers ``storage_key_prefix`` (from session config) on top of the
-    hard-coded ``sessions/{id}/`` prefix.  Use this everywhere a route
-    or job lists/deletes a session's workspace objects.
+    session id.  Final shape: ``{project_id}/{agent_id}/{session_id}/``.
+    Use this everywhere a route or job lists/deletes a session's
+    workspace objects.
     """
     return prefixed(
         session_workspace_prefix(session_id),

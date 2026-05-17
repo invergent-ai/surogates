@@ -84,11 +84,11 @@ class TestStageFromFilesystem:
         # staged_at points to the LocalBackend bucket dir + .skills prefix
         assert staged_at.endswith("/.skills/pptx_builder/")
         assert STORAGE_BUCKET in staged_at
-        assert f"sessions/{session_id}" in staged_at
+        assert f"{session_id}" in staged_at
 
         # All files are present in the session workspace.
         keys = await backend.list_keys(
-            STORAGE_BUCKET, prefix=f"sessions/{session_id}/.skills/",
+            STORAGE_BUCKET, prefix=f"{session_id}/.skills/",
         )
         assert session_workspace_key(session_id, ".skills/pptx_builder/SKILL.md") in keys
         assert session_workspace_key(session_id, ".skills/pptx_builder/scripts/build.py") in keys
@@ -176,7 +176,7 @@ class TestStageFromTenantBucket:
         assert staged_at.endswith("/.skills/pptx_builder/")
 
         keys = await backend.list_keys(
-            STORAGE_BUCKET, prefix=f"sessions/{session_id}/.skills/",
+            STORAGE_BUCKET, prefix=f"{session_id}/.skills/",
         )
         assert session_workspace_key(session_id, ".skills/pptx_builder/SKILL.md") in keys
         assert session_workspace_key(session_id, ".skills/pptx_builder/scripts/build.py") in keys
@@ -254,7 +254,7 @@ class TestStagedFilePath:
         path = stager.staged_file_path(session_id, "pptx", "assets/t.pptx")
         assert path.endswith(f"/.skills/pptx/assets/t.pptx")
         assert STORAGE_BUCKET in path
-        assert f"sessions/{session_id}" in path
+        assert f"{session_id}" in path
 
 
 # =========================================================================
@@ -349,7 +349,7 @@ class TestStageSkillForSessionHelper:
             assert staged_at.endswith("/.skills/pptx_builder/")
 
             keys = await backend.list_keys(
-                STORAGE_BUCKET, prefix=f"sessions/{session_id}/.skills/",
+                STORAGE_BUCKET, prefix=f"{session_id}/.skills/",
             )
             assert session_workspace_key(
                 session_id, ".skills/pptx_builder/scripts/build.py",
