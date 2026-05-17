@@ -81,6 +81,17 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "spawn_worker": ToolLocation.HARNESS,
     "send_worker_message": ToolLocation.HARNESS,
     "stop_worker": ToolLocation.HARNESS,
+    # Subagent task layer — handlers need the worker's DB session
+    # factory, redis client, and session store. They cannot run in a
+    # sandbox pod (no DB connectivity); the default ``SANDBOX`` fallback
+    # would route them there and surface as ``Unknown tool`` from the
+    # sandbox executor.
+    "spawn_task": ToolLocation.HARNESS,
+    "task_block": ToolLocation.HARNESS,
+    "task_complete": ToolLocation.HARNESS,
+    "task_show": ToolLocation.HARNESS,
+    "cancel_task": ToolLocation.HARNESS,
+    "unblock_task": ToolLocation.HARNESS,
     # Sandbox (code execution, file mutation, need isolation)
     "terminal": ToolLocation.SANDBOX,
     "read_file": ToolLocation.SANDBOX,
