@@ -45,13 +45,19 @@ EvaluationResult = Literal[
 
 
 class Mission(BaseModel):
-    """Snapshot of a Mission row."""
+    """Snapshot of a Mission row.
+
+    Exactly one of ``user_id`` / ``service_account_id`` is set, mirroring
+    the principal-shape invariant enforced by the DB CHECK constraint
+    ``ck_missions_one_principal``.
+    """
 
     model_config = {"from_attributes": True}
 
     id: UUID
     org_id: UUID
-    user_id: UUID
+    user_id: UUID | None = None
+    service_account_id: UUID | None = None
     session_id: UUID
     agent_id: str
     description: str
