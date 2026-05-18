@@ -25,6 +25,7 @@ from surogates.harness.message_utils import (
     reconstruct_message_from_deltas,
 )
 from surogates.harness.error_classifier import FailoverReason, classify_api_error
+from surogates.harness.expert_routing import model_supports_thinking_toggle
 from surogates.harness.image_shrink import shrink_image_parts_in_messages
 from surogates.harness.model_metadata import (
     get_next_probe_tier,
@@ -64,6 +65,14 @@ STREAM_STALE_TIMEOUT_EXPLICIT: bool = "SUROGATES_STREAM_STALE_TIMEOUT" in os.env
 STREAM_STALE_TIMEOUT: float = float(
     os.environ.get("SUROGATES_STREAM_STALE_TIMEOUT", "180.0")
 )
+
+# Reasoning-capable models (GLM-5, Qwen3, QwQ) often go silent on the
+# wire for several minutes during their reasoning phase -- the upstream
+# only emits chunks once thinking resolves.  Bump the watchdog ceiling
+# for these models so legitimate long reasoning isn't killed.  Verified
+# against PROD session 5274a540: iter 8 was killed by the 180s watchdog
+# while GLM-5.1 was still reasoning silently.
+STREAM_STALE_TIMEOUT_REASONING: float = 600.0
 
 # Polling interval (seconds) used to wake up between chunk reads so the
 # stale-stream and interrupt checks run even when the upstream provider
@@ -105,13 +114,20 @@ def compute_stream_stale_timeout(
     if not STREAM_STALE_TIMEOUT_EXPLICIT and _is_local_base_url(base_url):
         return float("inf")
 
+    # Reasoning-capable upstreams need a much higher ceiling -- they
+    # routinely go silent for multiple minutes during the reasoning
+    # phase.  The env-var explicit override (handled above) still wins.
+    if not STREAM_STALE_TIMEOUT_EXPLICIT and model_supports_thinking_toggle(model):
+        baseline = STREAM_STALE_TIMEOUT_REASONING
+    else:
+        baseline = STREAM_STALE_TIMEOUT
+
     approx_tokens = _estimate_message_tokens(messages or [])
-    timeout = STREAM_STALE_TIMEOUT
     if approx_tokens > 100_000:
-        return max(timeout, 300.0)
+        return max(baseline, 300.0)
     if approx_tokens > 50_000:
-        return max(timeout, 240.0)
-    return timeout
+        return max(baseline, 240.0)
+    return baseline
 
 
 def _is_local_base_url(base_url: str) -> bool:
