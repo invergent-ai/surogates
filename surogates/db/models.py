@@ -10,6 +10,7 @@ from typing import Any, Optional
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -998,14 +999,27 @@ class TaskLink(Base):
 
 
 class Mission(Base):
-    """A durable orchestrated objective with rubric-judged completion."""
+    """A durable orchestrated objective with rubric-judged completion.
+
+    A mission is owned by exactly one principal: either a human user
+    (``user_id`` set) or a service account (``service_account_id`` set).
+    Anonymous-channel sessions cannot own missions — the session itself
+    is the principal there and would not outlive the mission's life-cycle.
+    The DB CHECK constraint enforces the XOR; the application layer
+    rejects ahead of the insert so callers see a clean error instead of
+    an ``IntegrityError``.
+    """
 
     __tablename__ = "missions"
     __table_args__ = (
         Index("idx_missions_session", "session_id"),
         Index(
-            "idx_missions_user_agent_status",
-            "org_id", "user_id", "agent_id", "status",
+            "idx_missions_principal_agent_status",
+            "org_id", "user_id", "service_account_id", "agent_id", "status",
+        ),
+        CheckConstraint(
+            "(user_id IS NOT NULL)::int + (service_account_id IS NOT NULL)::int = 1",
+            name="ck_missions_one_principal",
         ),
     )
 
@@ -1015,8 +1029,11 @@ class Mission(Base):
     org_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    service_account_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("service_accounts.id"), nullable=True
     )
     session_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=False
