@@ -49,6 +49,11 @@ from surogates.harness.expert_routing import (
     select_expert_for_task,
 )
 from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
+from surogates.harness.self_discover import (
+    SCAFFOLD_CATEGORIES,
+    build_scaffold,
+    format_scaffold_for_injection,
+)
 from surogates.harness.message_utils import (
     coerce_message_content,
     make_skipped_tool_result,
@@ -1682,6 +1687,7 @@ class AgentHarness:
                 create_kwargs["tools"] = tool_schemas
 
             await self._maybe_apply_thinking_gate(create_kwargs, api_messages)
+            await self._maybe_apply_self_discover(create_kwargs, api_messages)
 
             # Create a streaming tool executor when eligible.  The executor
             # starts executing concurrency-safe (read-only) tools as their
@@ -3289,6 +3295,74 @@ class AgentHarness:
         )
 
     # ------------------------------------------------------------------
+    # SELF-DISCOVER planning preamble
+    # ------------------------------------------------------------------
+
+    async def _maybe_apply_self_discover(
+        self,
+        create_kwargs: dict[str, Any],
+        messages: list[dict[str, Any]],
+    ) -> None:
+        """Inject a SELF-DISCOVER scaffold as a synthetic user message.
+
+        Runs the cached classifier (free after the thinking-gate has
+        already invoked it this turn), and only fires for categories
+        that benefit from a planning preamble.  The scaffold itself
+        is also cached per-turn so iterations within a user turn reuse
+        it without re-paying the auxiliary-LLM cost.
+
+        The scaffold is appended to a **copy** of the messages list
+        on ``create_kwargs``; the persistent conversation log is not
+        mutated.  This keeps the prompt cache, compressor, and event
+        log untouched -- the scaffold is per-call ephemeral context.
+        """
+        if not messages:
+            return
+
+        try:
+            classification = await classify_hard_task_async(
+                messages,
+                tenant=self._tenant,
+            )
+        except Exception:
+            logger.debug(
+                "SELF-DISCOVER classification failed; skipping scaffold.",
+                exc_info=True,
+            )
+            return
+
+        if classification.category not in SCAFFOLD_CATEGORIES:
+            return
+
+        try:
+            scaffold = await build_scaffold(
+                messages,
+                category=classification.category,
+                tenant=self._tenant,
+            )
+        except Exception:
+            logger.debug(
+                "SELF-DISCOVER build_scaffold raised; skipping scaffold.",
+                exc_info=True,
+            )
+            return
+
+        if scaffold is None:
+            return
+
+        injected = {
+            "role": "user",
+            "content": format_scaffold_for_injection(scaffold),
+            "_surogate_synthetic": "self_discover_scaffold",
+        }
+        create_kwargs["messages"] = list(create_kwargs["messages"]) + [injected]
+        logger.debug(
+            "SELF-DISCOVER: injected scaffold (category=%s, modules=%s).",
+            classification.category,
+            scaffold.relevant_modules,
+        )
+
+    # ------------------------------------------------------------------
     # Expert preflight routing
     # ------------------------------------------------------------------
 
@@ -3802,6 +3876,7 @@ class AgentHarness:
             }
 
             await self._maybe_apply_thinking_gate(create_kwargs, api_messages)
+            await self._maybe_apply_self_discover(create_kwargs, api_messages)
 
             assistant_message, usage_data = await call_llm_with_retry(
                 session=session,
