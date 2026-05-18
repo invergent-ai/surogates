@@ -187,3 +187,126 @@ async def test_watchdog_emits_heartbeat_during_silent_stream(monkeypatch):
     )
     payload = heartbeat_calls[0].args[2]
     assert payload["iteration"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 4: in-stream runaway-reasoning detector
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_runaway_reasoning_cancels_stream(monkeypatch):
+    """When reasoning_content chars exceed RUNAWAY_REASONING_CHAR_THRESHOLD
+    without any content or tool_call delta, the stream is cancelled and
+    the response is marked with stream_error_reason='runaway_reasoning'."""
+    monkeypatch.setattr(
+        "surogates.harness.llm_call.STREAM_STALE_TIMEOUT", 30.0,
+    )
+    monkeypatch.setattr(
+        "surogates.harness.llm_call.STREAM_STALE_TIMEOUT_EXPLICIT", True,
+    )
+    monkeypatch.setattr(
+        "surogates.harness.llm_call.RUNAWAY_REASONING_CHAR_THRESHOLD", 100,
+    )
+    monkeypatch.setattr(
+        "surogates.harness.llm_call.STREAM_CHUNK_POLL_INTERVAL", 0.02,
+    )
+
+    # 6 reasoning chunks × 30 chars = 180 chars, crosses the 100 threshold.
+    chunks = [_chunk(reasoning_content="x" * 30) for _ in range(6)]
+
+    class _ReasoningStream(_BlockingStream):
+        async def __anext__(self):
+            if self._i < len(self._prefix):
+                chunk = self._prefix[self._i]
+                self._i += 1
+                await asyncio.sleep(0.01)
+                return chunk
+            await self._close_event.wait()
+            raise StopAsyncIteration
+
+    stream = _ReasoningStream(chunks)
+    llm_client = MagicMock()
+    llm_client.chat.completions.create = AsyncMock(return_value=stream)
+    store = AsyncMock()
+
+    msg, usage = await asyncio.wait_for(
+        call_llm_streaming_inner(
+            session=_make_session(),
+            create_kwargs={"model": "zai-org/GLM-5.1", "messages": []},
+            iteration=1,
+            llm_client=llm_client,
+            store=store,
+            interrupt_check=lambda: False,
+        ),
+        timeout=3.0,
+    )
+
+    assert stream.closed is True
+    assert usage["finish_reason"] == "interrupted"
+    assert usage["stream_error_reason"] == "runaway_reasoning"
+
+
+@pytest.mark.asyncio
+async def test_runaway_detector_silent_after_content_arrives(monkeypatch):
+    """Once any content delta has arrived, runaway detection MUST NOT
+    fire even if reasoning continues to accumulate.  Some models
+    interleave reasoning and content; we only care about the
+    'all reasoning, never any visible output' failure mode."""
+    monkeypatch.setattr(
+        "surogates.harness.llm_call.STREAM_STALE_TIMEOUT", 30.0,
+    )
+    monkeypatch.setattr(
+        "surogates.harness.llm_call.STREAM_STALE_TIMEOUT_EXPLICIT", True,
+    )
+    monkeypatch.setattr(
+        "surogates.harness.llm_call.RUNAWAY_REASONING_CHAR_THRESHOLD", 50,
+    )
+    monkeypatch.setattr(
+        "surogates.harness.llm_call.STREAM_CHUNK_POLL_INTERVAL", 0.02,
+    )
+
+    # Content arrives first, then a flood of reasoning -- not a runaway.
+    chunks = [
+        _chunk(content="Hello"),
+        *[_chunk(reasoning_content="x" * 30) for _ in range(10)],
+        _chunk(finish_reason="stop"),
+    ]
+
+    class _Stream:
+        def __init__(self, chunks):
+            self._chunks = chunks
+            self._i = 0
+            self.closed = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._i >= len(self._chunks):
+                raise StopAsyncIteration
+            chunk = self._chunks[self._i]
+            self._i += 1
+            await asyncio.sleep(0.01)
+            return chunk
+
+        async def aclose(self):
+            self.closed = True
+
+    stream = _Stream(chunks)
+    llm_client = MagicMock()
+    llm_client.chat.completions.create = AsyncMock(return_value=stream)
+    store = AsyncMock()
+
+    msg, usage = await call_llm_streaming_inner(
+        session=_make_session(),
+        create_kwargs={"model": "zai-org/GLM-5.1", "messages": []},
+        iteration=1,
+        llm_client=llm_client,
+        store=store,
+        interrupt_check=lambda: False,
+    )
+
+    assert usage["finish_reason"] == "stop"
+    assert usage.get("stream_error_reason") is None
+    assert msg["content"] == "Hello"

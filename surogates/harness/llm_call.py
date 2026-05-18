@@ -88,6 +88,15 @@ STREAM_CHUNK_POLL_INTERVAL: float = 1.0
 # enough that users see motion within ~15s of silence.
 STREAM_HEARTBEAT_INTERVAL: float = 15.0
 
+# Maximum reasoning_content characters allowed before any visible
+# content or tool-call delta has arrived.  Above this, the stream is
+# treated as a runaway-reasoning failure and cancelled so the outer
+# retry layer can retry with thinking disabled.  ~4 chars/token on
+# GLM-5.1, so 16 000 chars ≈ 4 000 reasoning tokens.  PROD iter-6
+# dead-end was ~60 KB (well over); iter-4 legitimate was ~5 KB (well
+# under).  Configurable for testing only -- no env var.
+RUNAWAY_REASONING_CHAR_THRESHOLD: int = 16_000
+
 _LOCAL_STREAM_HOSTS: frozenset[str] = frozenset({
     "localhost",
     "127.0.0.1",
@@ -1033,6 +1042,14 @@ async def call_llm_streaming_inner(
     # the stream is considered stale and will be cancelled.
     last_chunk_time: float = time.monotonic()
 
+    # Runaway-reasoning detection: count reasoning_content chars
+    # received and whether any content or tool-call delta has landed.
+    # If the model emits a large amount of reasoning_content before
+    # any visible output, the stream is cancelled and the outer retry
+    # re-issues with enable_thinking=False (see Task 7).
+    reasoning_char_count: int = 0
+    content_or_tool_emitted: bool = False
+
     async def _close_stream() -> None:
         close_method = getattr(response, "aclose", None) or getattr(
             response, "close", None,
@@ -1177,13 +1194,14 @@ async def call_llm_streaming_inner(
             if hasattr(delta, "role") and delta.role:
                 role = delta.role
 
-            # Reasoning content delta (DeepSeek, Qwen, Moonshot, etc.)
+            # Reasoning content delta (DeepSeek, Qwen, Moonshot, GLM-5).
             reasoning_text = (
                 getattr(delta, "reasoning_content", None)
                 or getattr(delta, "reasoning", None)
             )
             if reasoning_text:
                 reasoning_parts.append(reasoning_text)
+                reasoning_char_count += len(reasoning_text)
                 # Emit LLM_DELTA event for reasoning so the frontend can
                 # stream reasoning content incrementally (same as text deltas).
                 await store.emit_event(
@@ -1197,6 +1215,7 @@ async def call_llm_streaming_inner(
             if text_delta:
                 visible_delta = context_scrubber.feed(think_scrubber.feed(text_delta))
                 if visible_delta:
+                    content_or_tool_emitted = True
                     content_parts.append(visible_delta)
                     # Emit LLM_DELTA event.
                     await store.emit_event(
@@ -1212,6 +1231,7 @@ async def call_llm_streaming_inner(
             # call starting at the same index and redirect it to a fresh slot.
             tc_deltas = getattr(delta, "tool_calls", None)
             if tc_deltas:
+                content_or_tool_emitted = True
                 for tc_delta in tc_deltas:
                     raw_idx = tc_delta.index if tc_delta.index is not None else 0
                     delta_id = getattr(tc_delta, "id", None) or ""
@@ -1260,6 +1280,27 @@ async def call_llm_streaming_inner(
                                     _notified_slots.add(prev_slot)
                                     on_tool_call_complete(prev_entry)
                         _highest_known_slot = idx
+
+            # Runaway-reasoning: model has emitted > threshold chars of
+            # reasoning_content without any visible content or tool call.
+            # Cancel; the outer retry will reissue with thinking disabled.
+            if (
+                not content_or_tool_emitted
+                and reasoning_char_count > RUNAWAY_REASONING_CHAR_THRESHOLD
+            ):
+                logger.warning(
+                    "Runaway reasoning: %d chars of reasoning_content with no "
+                    "content/tool_call (threshold %d). Cancelling stream for "
+                    "session %s (iteration %d).",
+                    reasoning_char_count,
+                    RUNAWAY_REASONING_CHAR_THRESHOLD,
+                    session.id,
+                    iteration,
+                )
+                stop_reason = "runaway_reasoning"
+                await _close_stream()
+                interrupted = True
+                break
     except Exception as exc:
         # The watchdog closed the stream (stale or interrupt) -- the
         # SDK's iterator raises when the underlying response is closed
