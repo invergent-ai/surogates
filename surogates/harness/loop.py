@@ -4608,8 +4608,17 @@ class AgentHarness:
         )
         from surogates.scheduled.store import ScheduledSessionStore
 
-        if self._tenant.user_id is None:
-            message = "/loop schedules are available only for authenticated users."
+        principal_user_id = self._tenant.user_id
+        principal_sa_id = self._tenant.service_account_id
+        if principal_user_id is None and principal_sa_id is None:
+            # Anonymous-channel sessions have neither a user nor a
+            # service-account principal — there is no durable owner that
+            # outlives a recurring loop.  Reject explicitly with a
+            # message that matches the /mission gate's phrasing.
+            message = (
+                "/loop requires a user or service-account session — "
+                "anonymous channel sessions cannot own schedules."
+            )
             await self._emit_loop_response(
                 session, lease, message, user_content=content,
             )
@@ -4622,7 +4631,8 @@ class AgentHarness:
         elif raw == "list":
             rows = await store.list_for_user(
                 org_id=self._tenant.org_id,
-                user_id=self._tenant.user_id,
+                user_id=principal_user_id,
+                service_account_id=principal_sa_id,
                 agent_id=session.agent_id,
             )
             message = _format_loop_list(rows)
@@ -4636,7 +4646,8 @@ class AgentHarness:
                 deleted = await store.delete_for_user(
                     schedule_id,
                     org_id=self._tenant.org_id,
-                    user_id=self._tenant.user_id,
+                    user_id=principal_user_id,
+                    service_account_id=principal_sa_id,
                     agent_id=session.agent_id,
                 )
                 message = (
@@ -4652,7 +4663,8 @@ class AgentHarness:
                     schedule = parse_dynamic_loop_schedule(timezone_name="UTC")
                     created = await store.create_dynamic_loop(
                         org_id=self._tenant.org_id,
-                        user_id=self._tenant.user_id,
+                        user_id=principal_user_id,
+                        service_account_id=principal_sa_id,
                         agent_id=session.agent_id,
                         prompt=parsed.prompt,
                         schedule=schedule,
@@ -4670,7 +4682,8 @@ class AgentHarness:
                     schedule = parse_schedule(parsed.interval, timezone_name="UTC")
                     created = await store.create_loop(
                         org_id=self._tenant.org_id,
-                        user_id=self._tenant.user_id,
+                        user_id=principal_user_id,
+                        service_account_id=principal_sa_id,
                         agent_id=session.agent_id,
                         prompt=parsed.prompt,
                         schedule=schedule,
@@ -5148,7 +5161,12 @@ class AgentHarness:
         if not session.config.get("scheduled_dynamic_loop"):
             return
         schedule_id_raw = session.config.get("scheduled_session_id")
-        if not schedule_id_raw or self._tenant.user_id is None:
+        if not schedule_id_raw:
+            return
+        # Either the user or the service account that minted the schedule
+        # may own the row.  Anonymous-channel sessions never reach here
+        # (they cannot create schedules), but defensive check anyway.
+        if self._tenant.user_id is None and self._tenant.service_account_id is None:
             return
 
         from surogates.scheduled.schedule import DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS
@@ -5172,6 +5190,7 @@ class AgentHarness:
             schedule_id=schedule_id,
             org_id=self._tenant.org_id,
             user_id=self._tenant.user_id,
+            service_account_id=self._tenant.service_account_id,
             agent_id=session.agent_id,
             session_id=session.id,
             delay_seconds=DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS,

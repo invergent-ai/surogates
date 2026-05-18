@@ -23,6 +23,18 @@
 - [x] Task 9: Ops mission routes resolve SA principal
 - [x] Task 10: SDK + ops frontend wire shape
 
+## Follow-up: /loop symmetric fix
+
+- [x] Loop Task 1: ScheduledSession ORM + observability.sql retrofit
+- [x] Loop Task 2: Pydantic ScheduledSession model
+- [x] Loop Task 3: ScheduledSessionStore XOR principal (incl. loop_control + harness `_finalize_dynamic_loop_if_needed`)
+- [x] Loop Task 4: scheduled runner — SA-aware session creation
+- [x] Loop Task 5: Harness /loop gating
+- [ ] **Loop Task 6: Surogates store + runner tests — IN PROGRESS**
+- [ ] Loop Task 7: SurogatesClient scheduled-work XOR principal
+- [ ] Loop Task 8: Ops scheduled-work routes resolve SA
+- [ ] Loop Task 9: Ops route tests + final verification
+
 ---
 
 ## File Structure

@@ -281,6 +281,49 @@ CREATE INDEX IF NOT EXISTS idx_tasks_mission
 
 
 -- ----------------------------------------------------------------------------
+-- Scheduled sessions — relax single-principal ownership.  ``user_id`` was
+-- NOT NULL with a FK to users(id) — only user JWTs could create /loop
+-- schedules.  Sessions created through ops's Work UI authenticate as
+-- per-user service accounts (the surogates session row has user_id=NULL,
+-- service_account_id=<sa>), so they could never start a /loop.
+--
+-- Drop NOT NULL on user_id, add service_account_id, and enforce the
+-- principal invariant (exactly one of the two is set) via CHECK.  The
+-- table itself is created by ``Base.metadata.create_all`` (no fallback
+-- CREATE TABLE here), so the only retrofit work is the column / index /
+-- constraint reshape for existing PROD DBs.
+-- ----------------------------------------------------------------------------
+
+ALTER TABLE scheduled_sessions
+    ALTER COLUMN user_id DROP NOT NULL,
+    ADD COLUMN IF NOT EXISTS service_account_id uuid
+        REFERENCES service_accounts(id);
+
+-- Replace the old (org, user, agent) index with one that covers both
+-- principal shapes.  Old index is dropped explicitly because the name
+-- is changing.
+DROP INDEX IF EXISTS idx_scheduled_sessions_user;
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_principal
+    ON scheduled_sessions (org_id, user_id, service_account_id, agent_id);
+
+-- Exactly one principal must be set.  Wrapped in DO block so the ADD is
+-- idempotent (PG has no ADD CONSTRAINT IF NOT EXISTS).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'ck_scheduled_sessions_one_principal'
+          AND conrelid = 'scheduled_sessions'::regclass
+    ) THEN
+        ALTER TABLE scheduled_sessions
+            ADD CONSTRAINT ck_scheduled_sessions_one_principal
+            CHECK ((user_id IS NOT NULL)::int
+                 + (service_account_id IS NOT NULL)::int = 1);
+    END IF;
+END $$;
+
+
+-- ----------------------------------------------------------------------------
 -- v_session_tree -- recursive ancestry of sessions via parent_id.
 --
 -- Each row has the session's ``root_session_id`` (the top-level ancestor),

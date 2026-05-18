@@ -504,9 +504,23 @@ class DeliveryCursor(Base):
 
 
 class ScheduledSession(Base):
+    """A persisted /loop or scheduled-prompt definition.
+
+    A schedule is owned by exactly one principal: a human user
+    (``user_id`` set) or a service account (``service_account_id`` set).
+    Anonymous-channel sessions cannot create schedules — the session
+    itself is the principal there and would not outlive a recurring
+    loop. The DB CHECK constraint enforces the XOR; the application
+    layer rejects ahead of insert so callers see a clean error instead
+    of an ``IntegrityError``.
+    """
+
     __tablename__ = "scheduled_sessions"
     __table_args__ = (
-        Index("idx_scheduled_sessions_user", "org_id", "user_id", "agent_id"),
+        Index(
+            "idx_scheduled_sessions_principal",
+            "org_id", "user_id", "service_account_id", "agent_id",
+        ),
         Index(
             "idx_scheduled_sessions_due",
             "agent_id",
@@ -515,6 +529,10 @@ class ScheduledSession(Base):
             postgresql_where=text("status = 'active'"),
         ),
         Index("idx_scheduled_sessions_lock", "locked_until"),
+        CheckConstraint(
+            "(user_id IS NOT NULL)::int + (service_account_id IS NOT NULL)::int = 1",
+            name="ck_scheduled_sessions_one_principal",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -523,8 +541,11 @@ class ScheduledSession(Base):
     org_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    service_account_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("service_accounts.id"), nullable=True
     )
     agent_id: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)

@@ -99,8 +99,14 @@ def register(registry: ToolRegistry) -> None:
 
 async def _loop_wait_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     tenant = kwargs.get("tenant")
-    if tenant is None or getattr(tenant, "user_id", None) is None:
-        return _json({"success": False, "error": "Dynamic loops are user-owned only"})
+    if tenant is None or (
+        getattr(tenant, "user_id", None) is None
+        and getattr(tenant, "service_account_id", None) is None
+    ):
+        return _json({
+            "success": False,
+            "error": "Dynamic loops require a user or service-account principal",
+        })
 
     agent_id = str(kwargs.get("agent_id") or "")
     if not agent_id:
@@ -137,6 +143,7 @@ async def _loop_wait_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         schedule_id=schedule_id,
         org_id=tenant.org_id,
         user_id=tenant.user_id,
+        service_account_id=tenant.service_account_id,
         agent_id=agent_id,
         session_id=session_id,
         delay_seconds=delay,
@@ -158,10 +165,15 @@ async def _loop_wait_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
 
 async def _loop_complete_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     tenant = kwargs.get("tenant")
-    if tenant is None or getattr(tenant, "user_id", None) is None:
+    if tenant is None or (
+        getattr(tenant, "user_id", None) is None
+        and getattr(tenant, "service_account_id", None) is None
+    ):
         return _json({
             "success": False,
-            "error": "/loop schedules are user-owned only",
+            "error": (
+                "/loop schedules require a user or service-account principal"
+            ),
         })
 
     agent_id = str(kwargs.get("agent_id") or "")
@@ -205,6 +217,7 @@ async def _loop_complete_handler(arguments: dict[str, Any], **kwargs: Any) -> st
         schedule_id=schedule_id,
         org_id=tenant.org_id,
         user_id=tenant.user_id,
+        service_account_id=tenant.service_account_id,
         agent_id=agent_id,
         session_id=session_id,
         reason=reason,
