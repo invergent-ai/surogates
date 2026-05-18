@@ -1511,6 +1511,9 @@ class AgentHarness:
 
         # --- User turn tracking for memory nudge ---
         self._user_turn_count += 1
+        # New user turn clears any prior runaway-thinking suppression.
+        # Future turns get thinking back automatically.
+        self._thinking_disabled_for_turn = False
         should_review_memory = False
         if (
             self._memory_nudge_interval > 0

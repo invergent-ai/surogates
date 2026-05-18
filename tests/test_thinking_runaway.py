@@ -373,3 +373,26 @@ async def test_thinking_gate_unchanged_when_flag_not_set(monkeypatch):
     # Either no extra_body at all, or it doesn't disable thinking.
     if "chat_template_kwargs" in extra:
         assert extra["chat_template_kwargs"].get("enable_thinking") is not False
+
+
+# ---------------------------------------------------------------------------
+# Task 6: flag resets at user-turn boundary
+# ---------------------------------------------------------------------------
+
+
+def test_thinking_disabled_flag_resets_with_user_turn_count():
+    """The per-turn flag must clear whenever the loop increments
+    _user_turn_count (start of a new user turn).  This is a structural
+    test -- it inspects the source to confirm the reset lives next to
+    the counter increment, since the full wake() pipeline is too heavy
+    to exercise in a unit test."""
+    import inspect
+    from surogates.harness import loop as loop_module
+
+    source = inspect.getsource(loop_module)
+    inc_idx = source.index("self._user_turn_count += 1")
+    snippet = source[inc_idx:inc_idx + 400]
+    assert "self._thinking_disabled_for_turn = False" in snippet, (
+        "_thinking_disabled_for_turn must be reset within ~5 lines of "
+        "the _user_turn_count increment"
+    )
