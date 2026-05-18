@@ -11,7 +11,7 @@ from surogates.scheduled.schedule import (
 )
 from surogates.scheduled.store import ScheduledSessionStore
 
-from .conftest import create_org, create_user
+from .conftest import create_org, create_user, issue_service_account_token
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -348,3 +348,135 @@ async def test_find_retryable_stalled_dynamic_loop_runs(
     ]
     updated = await store.get(loop.id)
     assert updated.next_run_at is None
+
+
+# ---------------------------------------------------------------------------
+# Service-account principal coverage
+# ---------------------------------------------------------------------------
+
+
+async def test_create_with_service_account_principal(session_factory):
+    """A schedule created under an SA principal persists with
+    service_account_id (not user_id) and survives the CHECK constraint."""
+    org_id = await create_org(session_factory)
+    issued = await issue_service_account_token(
+        session_factory, org_id, name="loop-test-sa",
+    )
+    store = ScheduledSessionStore(session_factory)
+
+    created = await store.create_loop(
+        org_id=org_id,
+        service_account_id=issued.id,
+        agent_id="agent-sa",
+        prompt="check CI",
+        schedule=parse_schedule("10m"),
+        created_from_session_id=None,
+    )
+
+    fetched = await store.get(created.id)
+    assert fetched.user_id is None
+    assert fetched.service_account_id == issued.id
+
+
+async def test_list_for_user_scopes_to_principal(session_factory):
+    """A user-principal listing must not surface SA-owned schedules and
+    vice versa — even in the same org. Locks the cross-principal isolation."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    issued = await issue_service_account_token(
+        session_factory, org_id, name="loop-listing-sa",
+    )
+    store = ScheduledSessionStore(session_factory)
+
+    user_schedule = await store.create_loop(
+        org_id=org_id, user_id=user_id, agent_id="agent-x",
+        prompt="user prompt", schedule=parse_schedule("10m"),
+        created_from_session_id=None,
+    )
+    sa_schedule = await store.create_loop(
+        org_id=org_id, service_account_id=issued.id, agent_id="agent-x",
+        prompt="sa prompt", schedule=parse_schedule("15m"),
+        created_from_session_id=None,
+    )
+
+    user_rows = await store.list_for_user(
+        org_id=org_id, user_id=user_id, agent_id="agent-x",
+    )
+    assert {row.id for row in user_rows} == {user_schedule.id}
+
+    sa_rows = await store.list_for_user(
+        org_id=org_id, service_account_id=issued.id, agent_id="agent-x",
+    )
+    assert {row.id for row in sa_rows} == {sa_schedule.id}
+
+
+async def test_create_rejects_when_neither_principal(session_factory):
+    """No principal at all is a ValueError — matches the DB CHECK."""
+    org_id = await create_org(session_factory)
+    store = ScheduledSessionStore(session_factory)
+    with pytest.raises(ValueError, match="user_id"):
+        await store.create_loop(
+            org_id=org_id, agent_id="a", prompt="p",
+            schedule=parse_schedule("10m"), created_from_session_id=None,
+        )
+
+
+async def test_create_rejects_when_both_principals(session_factory):
+    """Both principals set is a ValueError — caught ahead of the DB CHECK
+    so the error surfaces as ValueError, not IntegrityError."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    issued = await issue_service_account_token(
+        session_factory, org_id, name="loop-both-sa",
+    )
+    store = ScheduledSessionStore(session_factory)
+    with pytest.raises(ValueError, match="user_id"):
+        await store.create_loop(
+            org_id=org_id, user_id=user_id, service_account_id=issued.id,
+            agent_id="a", prompt="p", schedule=parse_schedule("10m"),
+            created_from_session_id=None,
+        )
+
+
+async def test_sa_principal_cancel_and_pause_resume_round_trip(session_factory):
+    """Mutating ops on an SA-owned schedule respect the SA principal:
+    user_id-only callers don't accidentally cancel/pause the row."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    issued = await issue_service_account_token(
+        session_factory, org_id, name="loop-mutation-sa",
+    )
+    store = ScheduledSessionStore(session_factory)
+
+    sa_schedule = await store.create_loop(
+        org_id=org_id, service_account_id=issued.id, agent_id="agent-x",
+        prompt="sa prompt", schedule=parse_schedule("10m"),
+        created_from_session_id=None,
+    )
+
+    # A user in the same org cannot mutate the SA-owned row.
+    rejected = await store.pause(
+        org_id=org_id, user_id=user_id, agent_id="agent-x",
+        schedule_id=sa_schedule.id,
+    )
+    assert rejected is False
+
+    paused = await store.pause(
+        org_id=org_id, service_account_id=issued.id, agent_id="agent-x",
+        schedule_id=sa_schedule.id,
+    )
+    assert paused is True
+    assert (await store.get(sa_schedule.id)).status == "paused"
+
+    resumed = await store.resume(
+        org_id=org_id, service_account_id=issued.id, agent_id="agent-x",
+        schedule_id=sa_schedule.id,
+    )
+    assert resumed is True
+    assert (await store.get(sa_schedule.id)).status == "active"
+
+    deleted = await store.delete(
+        org_id=org_id, service_account_id=issued.id, agent_id="agent-x",
+        schedule_id=sa_schedule.id,
+    )
+    assert deleted is True
