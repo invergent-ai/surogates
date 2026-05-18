@@ -1,12 +1,20 @@
 """FastAPI routes for the missions REST surface.
 
-Read-only GET endpoints in this module; POST endpoints (pause, resume,
-cancel) are added in Task 12 of the implementation plan.
-
 Auth: every route depends on :func:`get_current_tenant` to extract
-``org_id`` and ``user_id`` from the bearer token. Mission rows are
-filtered to ``(tenant.org_id, tenant.user_id)`` so cross-tenant access
-returns 404 (not 403) — the same shape as ``sessions.py``.
+``org_id`` and the calling principal (``user_id`` or
+``service_account_id``) from the bearer token. Mission rows are
+filtered to ``(org_id, principal)`` so cross-tenant access returns 404
+(not 403) — the same shape as ``sessions.py``.
+
+Two principal shapes are accepted:
+* **User principal** (``user_id`` set) — rows match ``user_id``.
+* **Service-account principal** (``service_account_id`` set) — rows
+  match ``service_account_id``. This covers Work-chat sessions opened
+  through ops, which authenticate as per-user SAs.
+
+Anonymous-channel sessions (neither user nor SA) own no missions and
+get empty lists / 404 detail responses — consistent with the harness
+loop's gate on ``/mission`` for the same principal shape.
 """
 from __future__ import annotations
 
@@ -16,7 +24,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from surogates.db.models import (
@@ -48,6 +56,37 @@ def _session_factory_dep(request: Request) -> async_sessionmaker:
     return factory
 
 
+def _principal_owns(row: MissionRow, tenant: TenantContext) -> bool:
+    """Return True iff the mission belongs to the tenant's principal.
+
+    User-principal tenants match rows where ``user_id == tenant.user_id``;
+    service-account-principal tenants match rows where
+    ``service_account_id == tenant.service_account_id``. Anonymous-channel
+    tenants (no user, no SA) match nothing — they cannot own missions.
+    """
+    if row.org_id != tenant.org_id:
+        return False
+    if tenant.user_id is not None:
+        return row.user_id == tenant.user_id
+    if tenant.service_account_id is not None:
+        return row.service_account_id == tenant.service_account_id
+    return False
+
+
+def _principal_where_clause(tenant: TenantContext) -> ColumnElement[bool] | None:
+    """Return a SQLAlchemy predicate matching missions owned by the tenant.
+
+    ``None`` when the tenant has no owning principal (channel session) —
+    callers should short-circuit to an empty result rather than emit a
+    query that would unconditionally match by the ``org_id`` filter.
+    """
+    if tenant.user_id is not None:
+        return MissionRow.user_id == tenant.user_id
+    if tenant.service_account_id is not None:
+        return MissionRow.service_account_id == tenant.service_account_id
+    return None
+
+
 async def _load_mission_authorized(
     mission_id: UUID,
     *,
@@ -57,11 +96,7 @@ async def _load_mission_authorized(
     """Fetch a mission row and authorize against the request's tenant."""
     async with session_factory() as db:
         row = await db.get(MissionRow, mission_id)
-        if row is None:
-            raise HTTPException(
-                status.HTTP_404_NOT_FOUND, f"mission {mission_id} not found",
-            )
-        if row.org_id != tenant.org_id or row.user_id != tenant.user_id:
+        if row is None or not _principal_owns(row, tenant):
             # 404 (not 403) so cross-tenant probes can't confirm existence.
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, f"mission {mission_id} not found",
@@ -80,13 +115,17 @@ async def list_missions(
 
     ``status`` is a comma-separated allowlist (e.g. ``active,paused``).
     """
+    principal_filter = _principal_where_clause(tenant)
+    if principal_filter is None:
+        # Anonymous-channel tenant — no owned missions possible.
+        return {"missions": []}
     statuses = [s.strip() for s in status_filter.split(",") if s.strip()]
     async with session_factory() as db:
         stmt = (
             select(MissionRow)
             .where(
                 MissionRow.org_id == tenant.org_id,
-                MissionRow.user_id == tenant.user_id,
+                principal_filter,
             )
             .order_by(MissionRow.created_at.desc())
             .limit(100)
