@@ -152,15 +152,21 @@ async def handle_mission_create(
     description: str,
     rubric: str,
     session_id: UUID,
-    user_id: UUID,
     org_id: UUID,
     agent_id: str,
     session_store: Any,
     session_factory: Any,
     mission_store: MissionStore,
     redis: Any,
+    user_id: UUID | None = None,
+    service_account_id: UUID | None = None,
 ) -> MissionHandlerResult:
     """Create a new mission on the calling session.
+
+    Exactly one of ``user_id`` / ``service_account_id`` must be set —
+    the caller (the harness loop or the REST route) checks the session
+    principal before invoking. Anonymous-channel sessions, which have
+    neither, cannot own missions.
 
     Rejects when the session already has:
     * a non-terminal /goal outcome (``session.config['outcome']`` in
@@ -173,6 +179,14 @@ async def handle_mission_create(
     ``mission.defined``; emits a synthetic ``user.message`` with the
     kickoff prompt; enqueues the session for immediate processing.
     """
+    if (user_id is None) == (service_account_id is None):
+        return MissionHandlerResult(
+            ok=False,
+            error=(
+                "handle_mission_create requires exactly one principal "
+                "(user_id or service_account_id)"
+            ),
+        )
     async with session_factory() as db:
         sess = await db.get(ORMSession, session_id)
         if sess is None:
@@ -191,8 +205,13 @@ async def handle_mission_create(
 
     try:
         mission_id = await mission_store.create(
-            org_id=org_id, user_id=user_id, session_id=session_id,
-            agent_id=agent_id, description=description, rubric=rubric,
+            org_id=org_id,
+            user_id=user_id,
+            service_account_id=service_account_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            description=description,
+            rubric=rubric,
         )
     except ActiveMissionConflictError as exc:
         return MissionHandlerResult(ok=False, error=str(exc))
