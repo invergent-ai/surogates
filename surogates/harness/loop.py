@@ -4106,28 +4106,31 @@ class AgentHarness:
                 mission_store = MissionStore(self._session_factory)
                 redis_client = self._redis
                 if command.action == "create":
+                    principal_user_id = self._tenant.user_id
+                    principal_sa_id = self._tenant.service_account_id
                     if redis_client is None:
                         message = (
                             "/mission create cannot run without a Redis "
                             "connection (the coordinator must be enqueued "
                             "after kickoff)."
                         )
-                    elif self._tenant.user_id is None:
-                        # Service accounts and channel sessions don't have
-                        # a user_id; ``missions.user_id`` is NOT NULL.
-                        # Reject with a friendly message instead of letting
-                        # the insert fail with NotNullViolationError.
+                    elif principal_user_id is None and principal_sa_id is None:
+                        # Anonymous-channel sessions have neither a user nor
+                        # a service-account principal — the session itself is
+                        # the principal.  Missions need a durable owner that
+                        # outlives the session, so reject these explicitly.
                         message = (
-                            "/mission requires a user session — service "
-                            "accounts and channel principals cannot own "
-                            "missions."
+                            "/mission requires a user or service-account "
+                            "session — anonymous channel sessions cannot "
+                            "own missions."
                         )
                     else:
                         result = await handle_mission_create(
                             description=command.description or "",
                             rubric=command.rubric or "",
                             session_id=session.id,
-                            user_id=self._tenant.user_id,
+                            user_id=principal_user_id,
+                            service_account_id=principal_sa_id,
                             org_id=self._tenant.org_id,
                             agent_id=session.agent_id,
                             session_store=self._store,
