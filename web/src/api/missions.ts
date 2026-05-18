@@ -12,7 +12,8 @@ import { authFetch } from "./auth";
 export interface MissionRow {
   id: string;
   org_id: string;
-  user_id: string;
+  user_id: string | null;
+  service_account_id: string | null;
   session_id: string;
   agent_id: string;
   description: string;

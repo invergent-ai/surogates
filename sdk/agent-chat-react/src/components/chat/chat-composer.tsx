@@ -68,11 +68,9 @@ import {
 import {
   Command,
   CommandEmpty,
-  CommandGroup,
   CommandInput,
   CommandItem,
   CommandList,
-  CommandSeparator,
 } from "../ui/command";
 
 // ── Slash command entry ──────────────────────────────────────────────
@@ -279,6 +277,9 @@ function ChatComposerInner({
 
   const [adapterCommands, setAdapterCommands] = useState<SlashCommand[]>([]);
   const [buttonMenuOpen, setButtonMenuOpen] = useState(false);
+  const [menuMode, setMenuMode] = useState<
+    "commands" | "skills" | "scheduled" | "all"
+  >("all");
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [menuDismissed, setMenuDismissed] = useState(false);
   const showSlashMenu = !menuDismissed && (textInput.value.startsWith("/") || buttonMenuOpen);
@@ -290,19 +291,21 @@ function ChatComposerInner({
     }
   }, [buttonMenuOpen, menuDismissed, textInput.value]);
 
-  // Re-fetch app-provided commands each time the slash menu opens.
-  const [wasClosed, setWasClosed] = useState(true);
+  // Slash typing shows the combined commands + skills menu.
   useEffect(() => {
-    if (showSlashMenu && wasClosed) {
-      setWasClosed(false);
+    if (textInput.value.startsWith("/")) {
+      setMenuMode("all");
+    }
+  }, [textInput.value]);
+
+  // Re-fetch app-provided skills each time the menu opens with skills in scope.
+  useEffect(() => {
+    if (showSlashMenu && (menuMode === "skills" || menuMode === "all")) {
       adapter.listSlashCommands?.()
         .then(setAdapterCommands)
         .catch(() => { /* best-effort */ });
     }
-    if (!showSlashMenu && !wasClosed) {
-      setWasClosed(true);
-    }
-  }, [adapter, showSlashMenu, wasClosed]);
+  }, [adapter, showSlashMenu, menuMode]);
 
   const builtinCommands = useMemo<SlashCommand[]>(
     () => [
@@ -321,6 +324,24 @@ function ChatComposerInner({
       { value: "/loop", label: "/loop", description: "Schedule recurring prompt" },
       { value: "/loop list", label: "/loop list", description: "List active loops" },
       { value: "/loop cancel", label: "/loop cancel", description: "Cancel a loop by ID" },
+    ],
+    [],
+  );
+
+  const scheduledExamples = useMemo<SlashCommand[]>(
+    () => [
+      { value: "/loop list", label: "/loop list", description: "List your active scheduled tasks" },
+      { value: "/loop cancel ", label: "/loop cancel <id>", description: "Cancel a scheduled task by ID" },
+      { value: "/loop 5m check the deployment status and surface any failures", label: "/loop 5m deployment check", description: "Every 5 minutes: poll deployment status" },
+      { value: "/loop 10m pull the build queue and report any stuck jobs", label: "/loop 10m build queue", description: "Every 10 minutes: review the build queue" },
+      { value: "/loop 15m triage new PRs assigned to me", label: "/loop 15m PR triage", description: "Every 15 minutes: triage incoming PRs" },
+      { value: "/loop 30m summarize new threads in support inbox", label: "/loop 30m support inbox", description: "Every 30 minutes: summarize support traffic" },
+      { value: "/loop 1h review the on-call dashboard and flag anomalies", label: "/loop 1h on-call check", description: "Hourly: review the on-call dashboard" },
+      { value: "/loop 2h scan production error rates and alert if elevated", label: "/loop 2h error scan", description: "Every 2 hours: production error scan" },
+      { value: "/loop 1d give me a morning briefing of yesterday's activity", label: "/loop 1d daily briefing", description: "Daily: morning briefing of prior day" },
+      { value: "/loop every 5 minutes check whether CI on the current branch has finished", label: "/loop every 5 minutes (verbose)", description: "Verbose interval form" },
+      { value: "/loop watch the active deploy and notify me when it stabilises or rolls back", label: "/loop <prompt> (dynamic)", description: "Dynamic loop — model self-paces 1m–1h via loop_wait" },
+      { value: "/loop babysit the long-running data migration and only ping me on errors or completion", label: "/loop migration watcher (dynamic)", description: "Dynamic loop — best when cadence is unpredictable" },
     ],
     [],
   );
@@ -363,7 +384,7 @@ function ChatComposerInner({
 
   const handleCommandSelect = useCallback(
     (commandValue: string) => {
-      textInput.setInput(commandValue + " ");
+      textInput.setInput(`${commandValue} `);
       setButtonMenuOpen(false);
       setMenuDismissed(true);
       focusTextareaAtEnd();
@@ -376,7 +397,7 @@ function ChatComposerInner({
       // Mirror the popup's CommandInput back into the textarea so the
       // two stay in sync and the chat submit picks up exactly what
       // the user sees in the palette.
-      textInput.setInput("/" + next);
+      textInput.setInput(`/${next}`);
     },
     [textInput],
   );
@@ -510,6 +531,7 @@ function ChatComposerInner({
           size="sm"
           className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent"
           onClick={() => {
+            setMenuMode("commands");
             setMenuDismissed(false);
             setButtonMenuOpen(true);
           }}
@@ -517,11 +539,31 @@ function ChatComposerInner({
           <TerminalIcon />
           Commands
         </Button>
-        <Button type="button" variant="secondary" size="sm" className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent" disabled>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent"
+          onClick={() => {
+            setMenuMode("skills");
+            setMenuDismissed(false);
+            setButtonMenuOpen(true);
+          }}
+        >
           <SparklesIcon />
           Skills
         </Button>
-        <Button type="button" variant='secondary' size="sm" className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent" disabled>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent"
+          onClick={() => {
+            setMenuMode("scheduled");
+            setMenuDismissed(false);
+            setButtonMenuOpen(true);
+          }}
+        >
           <ClockIcon />
           Scheduled Tasks
         </Button>
@@ -690,68 +732,94 @@ function ChatComposerInner({
           query and sending the message still works the same way.
         */}
         <Command>
-          <CommandInput
-            placeholder="Type a command or search..."
-            value={searchQuery}
-            onValueChange={handleSearchChange}
-          />
+          {menuMode === "skills" ? (
+            <CommandInput placeholder="Search skills..." />
+          ) : menuMode === "scheduled" ? (
+            <CommandInput placeholder="Search scheduled tasks..." />
+          ) : (
+            <CommandInput
+              placeholder="Type a command or search..."
+              value={searchQuery}
+              onValueChange={handleSearchChange}
+            />
+          )}
           <CommandList>
-            <CommandEmpty>No commands found.</CommandEmpty>
-            {builtinCommands.length > 0 && (
-              <CommandGroup heading="Built-in commands">
-                {builtinCommands.map((cmd) => (
-                  <CommandItem
-                    key={cmd.value}
-                    value={cmd.value}
-                    keywords={[cmd.description]}
-                    onSelect={() => handleCommandSelect(cmd.value)}
-                    className="grid grid-cols-[12rem_1fr] items-baseline gap-3 [&_svg]:hidden"
+            <CommandEmpty>
+              {menuMode === "skills"
+                ? "No skills found."
+                : menuMode === "scheduled"
+                ? "No scheduled tasks found."
+                : "No commands found."}
+            </CommandEmpty>
+            {menuMode === "scheduled" &&
+              scheduledExamples.map((cmd) => (
+                <CommandItem
+                  key={cmd.value}
+                  value={cmd.value}
+                  keywords={[cmd.description]}
+                  onSelect={() => handleCommandSelect(cmd.value)}
+                  className="grid grid-cols-[14rem_1fr] items-baseline gap-3 [&_svg]:hidden"
+                >
+                  <span
+                    className="font-mono font-semibold text-foreground truncate"
+                    title={cmd.label}
                   >
-                    <span
-                      className="font-mono font-semibold text-foreground truncate"
-                      title={cmd.label}
-                    >
-                      {cmd.label}
-                    </span>
-                    <span
-                      className="min-w-0 truncate text-sm text-muted-foreground"
-                      title={cmd.description}
-                    >
-                      {cmd.description}
-                    </span>
-                  </CommandItem>
-                ))}
-              </CommandGroup>
-            )}
-            {builtinCommands.length > 0 && adapterCommands.length > 0 && (
-              <CommandSeparator />
-            )}
-            {adapterCommands.length > 0 && (
-              <CommandGroup heading="Skills">
-                {adapterCommands.map((cmd) => (
-                  <CommandItem
-                    key={cmd.value}
-                    value={cmd.value}
-                    keywords={[cmd.description]}
-                    onSelect={() => handleCommandSelect(cmd.value)}
-                    className="grid grid-cols-[12rem_1fr] items-baseline gap-3 [&_svg]:hidden"
+                    {cmd.label}
+                  </span>
+                  <span
+                    className="min-w-0 truncate text-sm text-muted-foreground"
+                    title={cmd.description}
                   >
-                    <span
-                      className="font-mono font-semibold text-foreground truncate"
-                      title={cmd.label}
-                    >
-                      {cmd.label}
-                    </span>
-                    <span
-                      className="min-w-0 truncate text-sm text-muted-foreground"
-                      title={cmd.description}
-                    >
-                      {cmd.description}
-                    </span>
-                  </CommandItem>
-                ))}
-              </CommandGroup>
-            )}
+                    {cmd.description}
+                  </span>
+                </CommandItem>
+              ))}
+            {(menuMode === "commands" || menuMode === "all") &&
+              builtinCommands.map((cmd) => (
+                <CommandItem
+                  key={cmd.value}
+                  value={cmd.value}
+                  keywords={[cmd.description]}
+                  onSelect={() => handleCommandSelect(cmd.value)}
+                  className="grid grid-cols-[12rem_1fr] items-baseline gap-3 [&_svg]:hidden"
+                >
+                  <span
+                    className="font-mono font-semibold text-foreground truncate"
+                    title={cmd.label}
+                  >
+                    {cmd.label}
+                  </span>
+                  <span
+                    className="min-w-0 truncate text-sm text-muted-foreground"
+                    title={cmd.description}
+                  >
+                    {cmd.description}
+                  </span>
+                </CommandItem>
+              ))}
+            {(menuMode === "skills" || menuMode === "all") &&
+              adapterCommands.map((cmd) => (
+                <CommandItem
+                  key={cmd.value}
+                  value={cmd.value}
+                  keywords={[cmd.description]}
+                  onSelect={() => handleCommandSelect(cmd.value)}
+                  className="grid grid-cols-[12rem_1fr] items-baseline gap-3 [&_svg]:hidden"
+                >
+                  <span
+                    className="font-mono font-semibold text-foreground truncate"
+                    title={cmd.label}
+                  >
+                    {cmd.label}
+                  </span>
+                  <span
+                    className="min-w-0 truncate text-sm text-muted-foreground"
+                    title={cmd.description}
+                  >
+                    {cmd.description}
+                  </span>
+                </CommandItem>
+              ))}
           </CommandList>
         </Command>
       </PopoverContent>

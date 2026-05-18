@@ -381,6 +381,7 @@ function toAgentChatMission(row: missionsApi.MissionRow): AgentChatMissionSummar
     id: row.id,
     orgId: row.org_id,
     userId: row.user_id,
+    serviceAccountId: row.service_account_id,
     sessionId: row.session_id,
     agentId: row.agent_id,
     description: row.description,
