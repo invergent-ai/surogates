@@ -37,10 +37,20 @@ Read the full [documentation](docs/index.md).
 - Workspace browsing, file viewing, uploads, downloads, and artifact rendering
   in the web UI.
 
+### Multi-Tenancy
+
+- Orgs, users, and channel identities with database-backed authentication.
+- Per-org provider configuration (LLM endpoints, MCP servers, credentials).
+- Service-account tokens for programmatic and batch access.
+- Channel identity mapping (link Slack/Telegram users to internal accounts).
+- Tenant context and per-org credential vault for secret isolation.
+
+See [Multi-Tenancy](docs/multi-tenancy/index.md).
+
 ### Channels
 
 - Web chat SPA with streaming events, workspace browsing, browser live view,
-  session tree navigation, scheduled work, and agent inbox.
+  session tree navigation, scheduled work, missions panel, and agent inbox.
 - Slack and Telegram channel adapters for messaging workflows.
 - Website widget SDK for embedding public chat entry points.
 - API channel for non-interactive batch and pipeline use cases with
@@ -108,6 +118,60 @@ See [Tools](docs/tools/index.md) and
 See [Skills](docs/skills/index.md), [Sub-Agents](docs/sub-agents/index.md), and
 [Experts](docs/experts/index.md).
 
+### Commands and Goals
+
+Slash commands shape the next harness turn without going through a tool call:
+
+- `/clear` — drop the current context and destroy the session sandbox while
+  keeping the durable event log intact.
+- `/compress` — force context compression on demand.
+- `/goal <description>` — define an outcome with optional rubric. Surogates
+  works the conversation, grades each final response against the rubric, and
+  appends synthetic continuations until the evaluator returns `satisfied`,
+  `blocked`, `failed`, or the iteration budget is reached.
+- `/loop [interval] <prompt>` — schedule recurring user-owned work. Supports
+  fixed intervals (`5m`, `1h`, `2d`) or dynamic self-pacing via `loop_wait`.
+- `/<skill-name> [args...]` — invoke any skill directly from chat.
+
+Programmatic clients can drive the same goal flow via `user.define_outcome` on
+the `/v1/sessions/{id}/events` endpoint.
+
+See [Commands](docs/commands/index.md) and
+[Goals Quick Start](docs/goals/index.md).
+
+### Tasks and Missions
+
+The **task layer** adds durable, DAG-aware coordination on top of
+`spawn_worker`:
+
+- A task is a database row wrapping zero or more attempt sessions with a goal,
+  optional `parents=[...]` for fan-in dependencies, structured `result` /
+  `result_metadata`, and a `todo → ready → running → done/blocked/failed/cancelled`
+  state machine.
+- Six tools: `spawn_task`, `unblock_task`, `cancel_task`, `task_complete`,
+  `task_block`, `task_show`.
+- A 5-second dispatcher tick promotes ready tasks, finalizes completed attempts,
+  retries on crash up to `max_attempts`, and enqueues new workers.
+- Retry attempts get a "Prior attempts on this task" section injected into the
+  initial user message, plus full structured access via `task_show`.
+
+**Missions** are long-running, rubric-judged objectives built on the task
+layer:
+
+- `/mission <description>` plus a written rubric defines criterion-driven work
+  (e.g. "satisfied when `result_metadata.accuracy >= 0.85`").
+- The coordinator agent decomposes the goal into work tasks and a verifier task
+  that records the measurable signal in `result_metadata`.
+- An LLM judge grades the workstream against the rubric whenever a task reaches
+  a terminal state, returning `satisfied`, `needs_revision`, `blocked`, or
+  `failed`.
+- `/mission pause`, `/mission resume`, `/mission cancel [--cascade]` control
+  the loop without losing in-flight workers.
+- A dedicated mission dashboard renders the rubric, current iteration, latest
+  verdict, task DAG, and live worker activity.
+
+See [Tasks and Missions](docs/tasks/index.md).
+
 ### Memory
 
 Memory is stored as file-shaped assets:
@@ -124,14 +188,17 @@ See [Memory](docs/memory/index.md).
 - Tenant-scoped auth, storage, credentials, skills, memory, MCP config, and
   policies.
 - Policy engine for allow-lists, deny-lists, ABAC rules, and file path
-  containment.
+  containment, with per-session immutability once a session is frozen.
 - Policy profiles that narrow child-session permissions.
 - MCP tool scanning for prompt injection, invisible unicode, schema abuse, and
-  rug-pull attacks.
-- Credential vault with tenant/user isolation.
-- Saga tracking for multi-step tool chains with compensation support.
-- Session event log and tenant audit log for compliance, debugging, and
-  training data.
+  rug-pull attacks (SHA-256 fingerprinting of tool definitions).
+- Sandbox network isolation via Kubernetes NetworkPolicy.
+- Credential vault, encrypted at rest, with per-org and per-user scoping.
+- Saga tracking for multi-step tool chains with automatic compensation on
+  failure.
+- Per-org and per-user sliding-window rate limiting.
+- Session event log, tenant audit log, and SQL views (typed projections) for
+  compliance, debugging, dashboards, and training data.
 
 See [Governance and Security](docs/governance-and-security/index.md) and
 [Audit & Observability](docs/audit/index.md).
@@ -253,16 +320,21 @@ Kubernetes depending on the test marker.
 
 ## Documentation Map
 
+- [Introduction](docs/intro/index.md)
 - [Getting Started](docs/getting-started/index.md)
 - [Architecture](docs/architecture/index.md)
+- [Multi-Tenancy](docs/multi-tenancy/index.md)
 - [Channels](docs/channels/index.md)
 - [Browser Use](docs/browser-use/index.md)
 - [Agent Inbox](docs/agent-inbox/index.md)
+- [Commands](docs/commands/index.md)
+- [Goals Quick Start](docs/goals/index.md)
 - [Tools](docs/tools/index.md)
-- [MCP Integration](docs/mcp-integration/index.md)
 - [Skills](docs/skills/index.md)
 - [Sub-Agents](docs/sub-agents/index.md)
+- [Tasks and Missions](docs/tasks/index.md)
 - [Experts](docs/experts/index.md)
+- [MCP Integration](docs/mcp-integration/index.md)
 - [Memory](docs/memory/index.md)
 - [Governance and Security](docs/governance-and-security/index.md)
 - [Audit & Observability](docs/audit/index.md)
