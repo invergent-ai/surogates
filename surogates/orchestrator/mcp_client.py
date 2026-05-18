@@ -73,18 +73,12 @@ class McpProxyClient:
         tools = data.get("tools", [])
         registered: list[str] = []
 
-        # Mint the token once for all handlers in this session.
-        auth_token = create_sandbox_token(
-            org_id, user_id, session_id,
-            is_service_account=is_service_account,
-        )
-
         for tool in tools:
             name = tool.get("name", "")
             if not name or name in self._discovered:
                 continue
 
-            handler = self._make_proxy_handler(name, auth_token)
+            handler = self._make_proxy_handler(name)
 
             self._registry.register(
                 name=name,
@@ -107,12 +101,37 @@ class McpProxyClient:
 
         return registered
 
-    def _make_proxy_handler(self, tool_name: str, auth_token: str):
-        """Create a handler function that forwards tool calls to the proxy."""
+    def _make_proxy_handler(self, tool_name: str):
+        """Create a handler function that forwards tool calls to the proxy.
+
+        The sandbox JWT is minted at call time from the active session's
+        ``tenant`` + ``session_id`` rather than baked into the closure: a
+        cached token expired after its 60-minute lifetime and would leak
+        the first session's identity into every later session served by
+        the same worker.
+        """
         client = self._client
-        headers = {"Authorization": f"Bearer {auth_token}"}
 
         async def handler(args: dict[str, Any], **kwargs) -> str:
+            tenant = kwargs.get("tenant")
+            session_id = kwargs.get("session_id")
+            if tenant is None or session_id is None:
+                return json.dumps({
+                    "error": "MCP proxy handler missing tenant/session context",
+                })
+            principal_user_id = tenant.user_id or tenant.service_account_id
+            if principal_user_id is None:
+                return json.dumps({
+                    "error": "MCP proxy handler has no principal id",
+                })
+            token = create_sandbox_token(
+                tenant.org_id,
+                principal_user_id,
+                session_id,
+                is_service_account=tenant.user_id is None,
+            )
+            headers = {"Authorization": f"Bearer {token}"}
+
             # Forward the chat user's identity to the upstream MCP server
             # via the MCP ``_meta`` channel. The dev-mode client builds
             # the same payload in ``surogates.tools.mcp.client``; keep
@@ -130,14 +149,11 @@ class McpProxyClient:
                     meta_payload["chat_user_id"] = str(ops_meta["user_id"])
                 if ops_meta.get("username"):
                     meta_payload["chat_username"] = str(ops_meta["username"])
-            tenant = kwargs.get("tenant")
             if isinstance(ops_meta, dict) and ops_meta.get("project_id"):
                 meta_payload["project_id"] = str(ops_meta["project_id"])
             elif tenant is not None and getattr(tenant, "org_id", None):
                 meta_payload["project_id"] = str(tenant.org_id)
-            session_id_str = kwargs.get("session_id")
-            if session_id_str:
-                meta_payload["session_id"] = str(session_id_str)
+            meta_payload["session_id"] = str(session_id)
 
             body: dict[str, Any] = {"name": tool_name, "arguments": args}
             if meta_payload:
