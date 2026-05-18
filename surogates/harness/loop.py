@@ -1772,6 +1772,7 @@ class AgentHarness:
                     ),
                     rate_limit_guard=self._provider_rate_limit_guard(),
                 )
+                self._propagate_runaway_flag(session, usage_data)
             except Exception as exc:
                 logger.exception(
                     "LLM call failed for session %s (iteration %d)",
@@ -3251,6 +3252,31 @@ class AgentHarness:
     # Auto-think gate
     # ------------------------------------------------------------------
 
+    def _propagate_runaway_flag(
+        self,
+        session: Session,
+        usage_data: dict[str, Any] | None,
+    ) -> None:
+        """Flip the per-turn thinking-disabled flag if the LLM-call layer
+        recovered from a runaway-reasoning stream by retrying with
+        ``enable_thinking=False``.
+
+        The flag is cleared at the start of every new user turn, so
+        future turns get thinking back automatically.
+        """
+        if not usage_data:
+            return
+        if not usage_data.get("thinking_disabled_due_to_runaway"):
+            return
+        if self._thinking_disabled_for_turn:
+            return
+        self._thinking_disabled_for_turn = True
+        logger.info(
+            "Runaway-reasoning recovery: disabling thinking for "
+            "remainder of user turn (session=%s).",
+            session.id,
+        )
+
     async def _maybe_apply_thinking_gate(
         self,
         create_kwargs: dict[str, Any],
@@ -3922,6 +3948,7 @@ class AgentHarness:
                 context_compressor=self._compressor,
                 rate_limit_guard=self._provider_rate_limit_guard(),
             )
+            self._propagate_runaway_flag(session, usage_data)
 
             # Strip thinking blocks from the summary.
             reasoning_text = extract_reasoning(assistant_message)

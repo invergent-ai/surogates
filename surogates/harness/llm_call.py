@@ -419,6 +419,9 @@ async def call_llm_with_retry(
     compression_attempts = 0
     max_compression_attempts = 3
     active_on_tool_call_complete = on_tool_call_complete
+    # Runaway-reasoning soft retry: we allow at most one in-flight
+    # thinking-off retry per call.  See the success-path branch below.
+    runaway_retry_used: bool = False
 
     # Pre-call sanitization: clean surrogates and fix orphaned tool pairs.
     if "messages" in create_kwargs:
@@ -471,6 +474,41 @@ async def call_llm_with_retry(
                         create_kwargs["model"] = current_model
                     continue
                 raise ValueError("LLM returned empty response")
+
+            # Runaway-reasoning soft retry: model produced > threshold
+            # of reasoning_content without any visible content/tool_call.
+            # Re-issue once with enable_thinking=False; the same task
+            # plus thinking-on would runaway again.  Per-call budget of
+            # one silent retry; further runaways fall through as
+            # interrupted responses (the loop layer surfaces them).
+            if (
+                usage_data.get("stream_error_reason") == "runaway_reasoning"
+                and not runaway_retry_used
+                and attempt < MAX_LLM_RETRIES
+            ):
+                runaway_retry_used = True
+                from surogates.harness.expert_routing import (
+                    build_thinking_extra_body,
+                    merge_extra_body,
+                )
+                thinking_extra = build_thinking_extra_body(
+                    enable_thinking=False,
+                )
+                create_kwargs["extra_body"] = merge_extra_body(
+                    create_kwargs.get("extra_body"),
+                    thinking_extra,
+                )
+                logger.warning(
+                    "Runaway reasoning on session %s iter %d; retrying "
+                    "with enable_thinking=False (attempt %d).",
+                    session.id, iteration, attempt + 1,
+                )
+                continue
+
+            # If a runaway retry succeeded, stamp the response so the
+            # outer loop knows to flip its per-turn flag.
+            if runaway_retry_used:
+                usage_data["thinking_disabled_due_to_runaway"] = True
 
             return result
 

@@ -10,7 +10,7 @@
 - [x] Task 4: In-stream runaway-reasoning detector
 - [x] Task 5: Per-turn `thinking_disabled_for_turn` flag in AgentHarness
 - [x] Task 6: Reset flag at user-turn boundary
-- [ ] Task 7: Outer retry path — re-issue runaway streams with thinking disabled
+- [x] Task 7: Outer retry path — re-issue runaway streams with thinking disabled
 - [ ] Final integration check
 
 **Goal:** Prevent the three GLM-5.1 thinking-runaway failure modes observed in PROD session `5274a540-50d7-46ed-8642-f38320f14cad` by (1) bumping the stream-stale watchdog for reasoning-capable models, (2) surfacing a transient "still working" heartbeat during silent reasoning, and (3) detecting in-stream runaway reasoning and retrying once with thinking disabled — for the remainder of that user turn only.

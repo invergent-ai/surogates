@@ -396,3 +396,194 @@ def test_thinking_disabled_flag_resets_with_user_turn_count():
         "_thinking_disabled_for_turn must be reset within ~5 lines of "
         "the _user_turn_count increment"
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 7: outer retry path re-issues runaway with thinking disabled
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_runaway_retry_disables_thinking(monkeypatch):
+    """After a runaway-reasoning cancel, the next attempt within
+    call_llm_with_retry must re-issue with
+    chat_template_kwargs.enable_thinking=False and stamp the response."""
+    from surogates.harness.llm_call import call_llm_with_retry
+
+    monkeypatch.setattr(
+        "surogates.harness.llm_call.STREAM_STALE_TIMEOUT_EXPLICIT", True,
+    )
+
+    # First call returns a runaway-marked response; second returns a
+    # clean response.  We assert the second call had enable_thinking=False
+    # injected into extra_body.
+    call_log: list[dict] = []
+
+    async def fake_streaming(*, session, create_kwargs, iteration,
+                              llm_client, store, interrupt_check,
+                              set_streaming_enabled,
+                              on_tool_call_complete):
+        call_log.append({
+            "extra_body": dict(create_kwargs.get("extra_body") or {}),
+        })
+        if len(call_log) == 1:
+            return (
+                {"role": "assistant", "content": ""},
+                {
+                    "finish_reason": "interrupted",
+                    "stream_error_reason": "runaway_reasoning",
+                    "input_tokens": 100, "output_tokens": 0,
+                    "model": "zai-org/GLM-5.1",
+                },
+            )
+        return (
+            {"role": "assistant", "content": "Hello"},
+            {
+                "finish_reason": "stop",
+                "input_tokens": 100, "output_tokens": 5,
+                "model": "zai-org/GLM-5.1",
+            },
+        )
+
+    monkeypatch.setattr(
+        "surogates.harness.llm_call.call_llm_streaming", fake_streaming,
+    )
+
+    session = _make_session()
+    llm_client = MagicMock()
+    store = AsyncMock()
+
+    msg, usage = await call_llm_with_retry(
+        session=session,
+        create_kwargs={
+            "model": "zai-org/GLM-5.1",
+            "messages": [{"role": "user", "content": "build a video"}],
+        },
+        iteration=1,
+        llm_client=llm_client,
+        store=store,
+        streaming_enabled=True,
+        interrupt_check=lambda: False,
+        rotate_credential=lambda *args, **kwargs: False,
+        activate_fallback=lambda: False,
+        get_current_model=lambda: None,
+        set_streaming_enabled=lambda enabled: None,
+        context_compressor=None,
+        rate_limit_guard=None,
+    )
+
+    assert len(call_log) == 2, "must retry once after runaway"
+    # First call: no enable_thinking constraint.
+    first_extra = call_log[0]["extra_body"]
+    first_ct = first_extra.get("chat_template_kwargs", {})
+    assert first_ct.get("enable_thinking") is not False
+    # Second call: enable_thinking forced off.
+    second_extra = call_log[1]["extra_body"]
+    second_ct = second_extra.get("chat_template_kwargs", {})
+    assert second_ct.get("enable_thinking") is False
+    # Response marker propagates to loop.
+    assert usage["thinking_disabled_due_to_runaway"] is True
+    assert msg["content"] == "Hello"
+
+
+def test_propagate_runaway_flag_sets_per_turn_flag():
+    """When the LLM layer stamps thinking_disabled_due_to_runaway,
+    AgentHarness._propagate_runaway_flag must flip the per-turn flag."""
+    from surogates.harness.loop import AgentHarness
+
+    loop = AgentHarness.__new__(AgentHarness)
+    loop._thinking_disabled_for_turn = False
+
+    session = _make_session()
+    loop._propagate_runaway_flag(
+        session,
+        {"thinking_disabled_due_to_runaway": True, "finish_reason": "stop"},
+    )
+    assert loop._thinking_disabled_for_turn is True
+
+
+def test_propagate_runaway_flag_noop_without_marker():
+    """No marker → flag stays False.  No marker plus flag already True
+    → flag stays True (we don't accidentally clear it mid-turn)."""
+    from surogates.harness.loop import AgentHarness
+
+    loop = AgentHarness.__new__(AgentHarness)
+    loop._thinking_disabled_for_turn = False
+    session = _make_session()
+
+    loop._propagate_runaway_flag(session, {"finish_reason": "stop"})
+    assert loop._thinking_disabled_for_turn is False
+
+    loop._thinking_disabled_for_turn = True
+    loop._propagate_runaway_flag(session, {"finish_reason": "stop"})
+    assert loop._thinking_disabled_for_turn is True
+
+    loop._propagate_runaway_flag(session, None)
+    assert loop._thinking_disabled_for_turn is True
+
+
+@pytest.mark.asyncio
+async def test_runaway_retry_only_fires_once_per_call(monkeypatch):
+    """If the model runs away on the retry too, fall through with the
+    interrupted response rather than burning the rest of the retry
+    budget on more thinking-off retries."""
+    from surogates.harness.llm_call import call_llm_with_retry
+
+    monkeypatch.setattr(
+        "surogates.harness.llm_call.STREAM_STALE_TIMEOUT_EXPLICIT", True,
+    )
+
+    call_log: list[dict] = []
+
+    async def always_runaway(*, session, create_kwargs, iteration,
+                              llm_client, store, interrupt_check,
+                              set_streaming_enabled,
+                              on_tool_call_complete):
+        call_log.append({
+            "extra_body": dict(create_kwargs.get("extra_body") or {}),
+        })
+        return (
+            {"role": "assistant", "content": ""},
+            {
+                "finish_reason": "interrupted",
+                "stream_error_reason": "runaway_reasoning",
+                "input_tokens": 100, "output_tokens": 0,
+                "model": "zai-org/GLM-5.1",
+            },
+        )
+
+    monkeypatch.setattr(
+        "surogates.harness.llm_call.call_llm_streaming", always_runaway,
+    )
+
+    session = _make_session()
+    llm_client = MagicMock()
+    store = AsyncMock()
+
+    msg, usage = await call_llm_with_retry(
+        session=session,
+        create_kwargs={
+            "model": "zai-org/GLM-5.1",
+            "messages": [{"role": "user", "content": "build a video"}],
+        },
+        iteration=1,
+        llm_client=llm_client,
+        store=store,
+        streaming_enabled=True,
+        interrupt_check=lambda: False,
+        rotate_credential=lambda *args, **kwargs: False,
+        activate_fallback=lambda: False,
+        get_current_model=lambda: None,
+        set_streaming_enabled=lambda enabled: None,
+        context_compressor=None,
+        rate_limit_guard=None,
+    )
+
+    # Exactly two calls: original + one thinking-off retry.  Then fall
+    # through with the second interrupted response.
+    assert len(call_log) == 2
+    assert call_log[1]["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+    # The fall-through response is still surfaced as interrupted so
+    # the harness loop sees the failure mode.
+    assert usage["finish_reason"] == "interrupted"
+    assert usage["stream_error_reason"] == "runaway_reasoning"
