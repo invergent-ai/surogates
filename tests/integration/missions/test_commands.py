@@ -70,6 +70,7 @@ async def test_create_inserts_mission_emits_event_and_kickoff(
         sess = await db.get(ORMSession, chat_session.id)
         assert sess.config["active_mission_id"] == str(mid)
         assert sess.config["coordinator"] is True
+        assert sess.config["strict_coordinator"] is True
         preloaded = sess.config.get("preloaded_skills") or []
         assert "subagent-task-orchestrator" in preloaded
 
@@ -400,6 +401,12 @@ async def test_create_with_service_account_principal(
         sess = await db.get(ORMSession, sa_chat_session.id)
         assert sess.config["active_mission_id"] == str(result.mission_id)
         assert sess.config["coordinator"] is True
+        # ``strict_coordinator`` is what makes ``_tool_filter_for_session``
+        # strip implementation tools (terminal, read_file, browser_*, web_*,
+        # etc.) — the structural enforcement the subagent-task-orchestrator
+        # skill assumes is in place.  Without it the LLM just does the work
+        # itself instead of spawning subagent tasks.
+        assert sess.config["strict_coordinator"] is True
 
     redis.zadd.assert_called_once()
 

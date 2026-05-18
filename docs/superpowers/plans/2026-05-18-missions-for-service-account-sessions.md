@@ -35,6 +35,20 @@
 - [x] Loop Task 8: Ops scheduled-work routes resolve SA
 - [x] Loop Task 9: Ops route tests + final verification
 
+## Follow-up: strict coordinator (auto-strip implementation tools)
+
+PROD session `1eb30435-0385-4b44-9f26-1acbbf6f1c82` revealed that
+`/mission` coordinators have full tool access (`_tool_filter_for_session`
+returns `None` when `coordinator=True`), so GLM 5.1 just executes the
+work directly instead of spawning subagent tasks. The
+`subagent-task-orchestrator` skill documents the failure mode and
+prescribes "strip implementation tools" — but the harness never did.
+
+- [x] Strict Task 1: Define `COORDINATOR_IMPLEMENTATION_TOOLS` constant in `surogates/tools/builtin/coordinator.py` (23 tools: terminal, process, read/write/list/search/patch, web_*, browser_*, vision_analyze, kb_*, create_artifact)
+- [x] Strict Task 2: `_tool_filter_for_session` honors `excluded_tools` + `COORDINATOR_IMPLEMENTATION_TOOLS` when `strict_coordinator=True` on the session config; legacy coordinators (flag off) keep full access
+- [x] Strict Task 3: `/mission` (harness loop + `handle_mission_create`) sets `strict_coordinator=True` so every mission session gets the strip
+- [x] Strict Task 4: Tests — 5 filter tests (legacy, strict, combined with operator excludes) + 3 integration tests updated to assert `strict_coordinator=True` propagation
+
 ---
 
 ## File Structure

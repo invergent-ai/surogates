@@ -295,6 +295,99 @@ class TestDynamicLoopToolPolicy:
         assert "clarify" in tool_names
         assert "web_search" in tool_names
 
+    def test_coordinator_without_strict_flag_keeps_all_tools(self) -> None:
+        """Legacy behaviour: a coordinator session with no strict flag
+        and no excluded_tools gets the full registry (no filter applied).
+        This protects AgentDef-driven coordinators from a silent shape
+        change."""
+        from surogates.tools.registry import ToolRegistry, ToolSchema
+
+        reg = ToolRegistry()
+        for name in ("spawn_task", "terminal", "read_file"):
+            reg.register(
+                name,
+                ToolSchema(name=name, description="test", parameters={}),
+                lambda _: "{}",
+            )
+        harness = _make_harness(tool_registry=reg)
+        session = _session_with_config({"coordinator": True})
+
+        tool_names = harness._tool_filter_for_session(session)
+
+        # ``None`` here means "no filter applied" — the LLM sees every
+        # tool the registry knows about.
+        assert tool_names is None
+
+    def test_strict_coordinator_strips_implementation_tools(self) -> None:
+        """/mission sets strict_coordinator=True so implementation tools
+        (terminal, read_file, write_file, browser_*, web_*, vision_analyze,
+        kb_*, create_artifact, list_files, search_files, patch, process)
+        are stripped — the LLM has to delegate via spawn_task/delegate_task."""
+        from surogates.tools.builtin.coordinator import (
+            COORDINATOR_IMPLEMENTATION_TOOLS,
+        )
+        from surogates.tools.registry import ToolRegistry, ToolSchema
+
+        reg = ToolRegistry()
+        registered = {
+            "spawn_task", "delegate_task", "consult_expert", "memory",
+            "terminal", "read_file", "write_file", "browser_navigate",
+            "web_search", "vision_analyze", "create_artifact",
+        }
+        for name in registered:
+            reg.register(
+                name,
+                ToolSchema(name=name, description="test", parameters={}),
+                lambda _: "{}",
+            )
+        harness = _make_harness(tool_registry=reg)
+        session = _session_with_config({
+            "coordinator": True,
+            "strict_coordinator": True,
+        })
+
+        tool_names = harness._tool_filter_for_session(session)
+
+        assert tool_names is not None
+        # Coordination + reasoning tools survive.
+        assert "spawn_task" in tool_names
+        assert "delegate_task" in tool_names
+        assert "consult_expert" in tool_names
+        assert "memory" in tool_names
+        # Implementation tools are stripped.
+        for stripped in COORDINATOR_IMPLEMENTATION_TOOLS & registered:
+            assert stripped not in tool_names, (
+                f"{stripped} should be stripped from strict coordinator"
+            )
+
+    def test_strict_coordinator_combines_with_user_excluded_tools(self) -> None:
+        """Operator-supplied ``excluded_tools`` adds to the implementation
+        strip set — both are honored, not one or the other."""
+        from surogates.tools.registry import ToolRegistry, ToolSchema
+
+        reg = ToolRegistry()
+        for name in ("spawn_task", "consult_expert", "todo", "terminal"):
+            reg.register(
+                name,
+                ToolSchema(name=name, description="test", parameters={}),
+                lambda _: "{}",
+            )
+        harness = _make_harness(tool_registry=reg)
+        session = _session_with_config({
+            "coordinator": True,
+            "strict_coordinator": True,
+            "excluded_tools": ["todo"],
+        })
+
+        tool_names = harness._tool_filter_for_session(session)
+
+        assert tool_names is not None
+        assert "spawn_task" in tool_names
+        assert "consult_expert" in tool_names
+        # Operator excluded 'todo', strict-coordinator excluded 'terminal'.
+        assert "todo" not in tool_names
+        assert "terminal" not in tool_names
+
 
 class TestSessionLifecycle:
     async def test_final_summary_describes_images_before_non_vision_model(

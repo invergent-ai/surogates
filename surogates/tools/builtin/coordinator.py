@@ -53,6 +53,56 @@ WORKER_EXCLUDED_TOOLS: frozenset[str] = frozenset({
     "cancel_task",
 })
 
+
+# Tools a *strict coordinator* is NOT allowed to use.  ``/mission`` sets
+# ``session.config['strict_coordinator'] = True`` so the harness strips
+# this set on top of the user's ``excluded_tools`` — the harness loop
+# would otherwise let the LLM "just do the work itself" instead of
+# spawning subagent tasks.
+#
+# The skill ``subagent-task-orchestrator`` documents this exact policy:
+# implementation tools are filtered structurally, not just behaviorally,
+# so the model can't fall back to direct execution when the prompt
+# instructions ask for delegation.
+#
+# Coordination tools (``spawn_task``, ``delegate_task``, ``spawn_worker``,
+# ``cancel_task``, ``unblock_task``, ``task_show``, ``send_worker_message``,
+# ``stop_worker``, ``consult_expert``, ``clarify``, ``memory``, ``todo``,
+# ``session_search``, ``skills_list``, ``skill_view``, ``skill_manage``,
+# ``cron_*``, ``loop_wait``, ``loop_complete``) stay available.
+COORDINATOR_IMPLEMENTATION_TOOLS: frozenset[str] = frozenset({
+    # File I/O
+    "read_file",
+    "write_file",
+    "patch",
+    "list_files",
+    "search_files",
+    # Code execution
+    "terminal",
+    "process",
+    # Web
+    "web_search",
+    "web_extract",
+    # Browser automation
+    "browser_click",
+    "browser_close",
+    "browser_drag",
+    "browser_get_state",
+    "browser_navigate",
+    "browser_press_key",
+    "browser_screenshot",
+    "browser_scroll",
+    "browser_type",
+    "browser_wait",
+    # Image analysis
+    "vision_analyze",
+    # Knowledge-base access
+    "kb_list_pages",
+    "kb_read_page",
+    # Artifact materialisation (workers produce; coordinator orchestrates)
+    "create_artifact",
+})
+
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------

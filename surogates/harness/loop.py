@@ -3102,6 +3102,20 @@ class AgentHarness:
 
         if config.get("coordinator"):
             tool_filter: set[str] | None = None
+            # ``strict_coordinator`` is the structural-enforcement flag the
+            # ``subagent-task-orchestrator`` skill assumes: implementation
+            # tools (terminal, file I/O, web, browser, vision, KB) are
+            # stripped so the LLM can only delegate, not "fix it quickly"
+            # in-band.  ``/mission`` sets it; AgentDef-driven coordinators
+            # leave it off and keep the legacy full-tool behaviour.
+            if config.get("strict_coordinator"):
+                from surogates.tools.builtin.coordinator import (
+                    COORDINATOR_IMPLEMENTATION_TOOLS,
+                )
+
+                excluded = set(config.get("excluded_tools") or [])
+                excluded.update(COORDINATOR_IMPLEMENTATION_TOOLS)
+                tool_filter = set(self._tools.tool_names) - excluded
         elif explicit_allowed:
             tool_filter = set(config["allowed_tools"])
         else:
@@ -4204,6 +4218,11 @@ class AgentHarness:
                             cfg = dict(session.config or {})
                             cfg["active_mission_id"] = str(result.mission_id)
                             cfg["coordinator"] = True
+                            # Strip implementation tools so the LLM has to
+                            # delegate via spawn_task/delegate_task instead of
+                            # "fixing it quickly" itself.  See
+                            # COORDINATOR_IMPLEMENTATION_TOOLS for the set.
+                            cfg["strict_coordinator"] = True
                             preloaded = list(cfg.get("preloaded_skills") or [])
                             if "subagent-task-orchestrator" not in preloaded:
                                 preloaded.append("subagent-task-orchestrator")

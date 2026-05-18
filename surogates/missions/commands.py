@@ -221,6 +221,13 @@ async def handle_mission_create(
         cfg = dict(sess.config or {})
         cfg["active_mission_id"] = str(mission_id)
         cfg["coordinator"] = True
+        # Strip implementation tools so the LLM has to delegate via
+        # spawn_task/delegate_task instead of "fixing it quickly"
+        # itself.  ``_tool_filter_for_session`` reads this flag and
+        # subtracts ``COORDINATOR_IMPLEMENTATION_TOOLS`` from the
+        # effective tool set — the structural enforcement that the
+        # ``subagent-task-orchestrator`` skill assumes is in place.
+        cfg["strict_coordinator"] = True
         preloaded = list(cfg.get("preloaded_skills") or [])
         if "subagent-task-orchestrator" not in preloaded:
             preloaded.append("subagent-task-orchestrator")

@@ -250,6 +250,7 @@ async def test_handle_mission_create_propagates_config_to_in_memory_session(
     )
 
     assert session.config["coordinator"] is True
+    assert session.config["strict_coordinator"] is True
     assert session.config["active_mission_id"] == str(mission_id)
     assert "subagent-task-orchestrator" in session.config["preloaded_skills"]
 
@@ -544,8 +545,10 @@ async def test_handle_mission_create_forwards_service_account_principal(
     assert forwarded.get("user_id") is None
     assert forwarded.get("service_account_id") == sa_id
     # In-memory session.config is updated so the rest of the wake sees
-    # coordinator=True / active_mission_id (same as the user path).
+    # coordinator=True / strict_coordinator=True / active_mission_id (same
+    # as the user path).
     assert session.config["coordinator"] is True
+    assert session.config["strict_coordinator"] is True
     assert session.config["active_mission_id"] == str(mission_id)
 
 
