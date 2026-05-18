@@ -244,6 +244,16 @@ def create_app() -> FastAPI:
     app.include_router(clarify.router, prefix="/v1", tags=["clarify"])
     app.include_router(inbox.router, prefix="/v1", tags=["inbox"])
     app.include_router(missions.router, prefix="/v1", tags=["missions"])
+    # Service-account callers (ops's Work-chat forwarding path mints
+    # bare ``surg_sk_`` tokens; the auth middleware only allows those
+    # on ``/v1/api/*`` routes — see
+    # ``tenant.auth.middleware._tenant_context_from_token``) reach the
+    # same handlers via this second mount.  Read routes here are
+    # principal-scoped by ``_principal_owns``, and mutating routes
+    # (pause/resume/cancel) authorize against the same predicate, so
+    # exposing the surface at /v1/api/missions is safe — an SA token
+    # only sees its own rows.  Mirrors the feedback router mount above.
+    app.include_router(missions.router, prefix="/v1/api", tags=["missions"])
     app.include_router(admin.router, prefix="/v1/admin", tags=["admin"])
     app.include_router(admin_mcp.router, prefix="/v1/admin", tags=["admin"])
     app.include_router(admin_credentials.router, prefix="/v1/admin", tags=["admin"])

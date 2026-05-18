@@ -36,29 +36,38 @@ from tests.integration.conftest import (
 
 @dataclass(frozen=True)
 class SaSession:
-    """Bundle of identifiers + JWT for an SA-owned chat session."""
+    """Bundle of identifiers + JWT + bare token for an SA-owned chat session."""
 
     org_id: UUID
     service_account_id: UUID
     session_id: UUID
     token: str
+    bare_token: str
 
     @property
     def auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"}
 
+    @property
+    def bare_auth_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.bare_token}"}
+
 
 async def _create_sa_session(
     session_factory, session_store, *, agent_id: str = "orchestrator",
 ) -> SaSession:
-    """Provision a real (org, service_account, session) trio + a session-scoped JWT.
+    """Provision a real (org, service_account, session) trio + JWTs.
 
     Mirrors :func:`create_user_token_session` but for the SA principal
-    shape produced by ops's Work UI in PROD. The session-scoped JWT is
-    minted with :func:`create_service_account_session_token` — the same
-    helper the worker uses when calling back into ``/v1/skills`` etc. —
-    so the middleware's ``service_account_session`` validation path is
-    actually exercised here, not bypassed.
+    shape produced by ops's Work UI in PROD. Two tokens come back:
+
+    * ``token`` — a session-scoped ``service_account_session`` JWT,
+      legal on all /v1/* routes.  Used by REST tests that don't care
+      about the /v1/api/* gate.
+    * ``bare_token`` — the raw ``surg_sk_`` token. The auth middleware
+      restricts these to /v1/api/* (see ``_tenant_context_from_token``).
+      Used by the dual-mount regression test that proves
+      ops's bare-token forwarding path works.
     """
     org_id = await create_org(session_factory)
     issued = await issue_service_account_token(
@@ -82,6 +91,7 @@ async def _create_sa_session(
         service_account_id=sa_id,
         session_id=session.id,
         token=token,
+        bare_token=issued.token,
     )
 
 
@@ -219,3 +229,82 @@ async def test_user_principal_listing_excludes_sa_owned_missions(
     assert listing.status_code == 200, listing.text
     ids = [m["id"] for m in listing.json()["missions"]]
     assert str(sa_mission_id) not in ids
+
+
+# ---------------------------------------------------------------------------
+# Bare service-account token (ops Work-chat forwarding path)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_bare_sa_token_rejected_on_v1_missions_route(
+    inbox_app, session_factory, session_store,
+):
+    """The auth middleware refuses bare ``surg_sk_`` tokens on /v1/*
+    routes outside the /v1/api/* allowlist. This is the gate that
+    surfaced the PROD bug — ops forwarded mission cancel/pause/resume
+    to /v1/missions/... and got 403."""
+    sa = await _create_sa_session(session_factory, session_store)
+    mission_id = await _insert_sa_mission(
+        session_factory=session_factory, session_store=session_store,
+        sa_session=sa,
+    )
+
+    async with _client(inbox_app, sa.bare_auth_headers) as client:
+        resp = await client.post(
+            f"/v1/missions/{mission_id}/pause",
+            json={"reason": "test"},
+        )
+    assert resp.status_code == 403, resp.text
+    assert "Service-account tokens" in resp.text
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_bare_sa_token_can_pause_owned_mission_via_api_mount(
+    inbox_app, session_factory, session_store, redis_client,
+):
+    """The /v1/api/missions/... mount lets ops forward bare-SA-token
+    pause/resume/cancel calls. Positive path: the SA that owns the
+    mission can pause it via the api-mount and the row transitions
+    to ``paused``.
+
+    Pause is the right verb to test because it doesn't require redis
+    enqueue or session re-coordination; resume / cancel exercise the
+    same auth path."""
+    sa = await _create_sa_session(session_factory, session_store)
+    mission_id = await _insert_sa_mission(
+        session_factory=session_factory, session_store=session_store,
+        sa_session=sa,
+    )
+
+    async with _client(inbox_app, sa.bare_auth_headers) as client:
+        resp = await client.post(
+            f"/v1/api/missions/{mission_id}/pause",
+            json={"reason": "scheduled outage"},
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["mission_id"] == str(mission_id)
+    assert body["status"] == "paused"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_bare_sa_token_cross_principal_404_on_api_mount(
+    inbox_app, session_factory, session_store,
+):
+    """Authorization still applies on /v1/api/missions/...: a bare SA
+    token can reach the handler but the principal predicate refuses
+    rows owned by a different SA in the same DB."""
+    owner = await _create_sa_session(session_factory, session_store)
+    other = await _create_sa_session(session_factory, session_store)
+    mission_id = await _insert_sa_mission(
+        session_factory=session_factory, session_store=session_store,
+        sa_session=owner,
+    )
+
+    async with _client(inbox_app, other.bare_auth_headers) as client:
+        resp = await client.post(
+            f"/v1/api/missions/{mission_id}/pause",
+            json={"reason": "test"},
+        )
+    assert resp.status_code == 404, resp.text
