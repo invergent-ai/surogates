@@ -22,6 +22,11 @@ class EventType(str, Enum):
     LLM_RESPONSE = "llm.response"
     LLM_THINKING = "llm.thinking"
     LLM_DELTA = "llm.delta"
+    # Emitted by the streaming watchdog when the upstream has been
+    # silent past STREAM_HEARTBEAT_INTERVAL but is still inside the
+    # stale-timeout window. Lets the UI distinguish "model is silently
+    # reasoning" from "stream is dead".
+    LLM_HEARTBEAT = "llm.heartbeat"
 
     # Tool execution
     TOOL_CALL = "tool.call"

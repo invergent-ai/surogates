@@ -4,7 +4,7 @@
 
 ## Execution status
 
-- [ ] Task 1: Add `LLM_HEARTBEAT` event type
+- [x] Task 1: Add `LLM_HEARTBEAT` event type
 - [ ] Task 2: Conditional stale-timeout bump for reasoning models
 - [ ] Task 3: Heartbeat emission from the watchdog
 - [ ] Task 4: In-stream runaway-reasoning detector
