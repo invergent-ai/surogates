@@ -25,6 +25,7 @@ from surogates.harness.message_utils import (
     reconstruct_message_from_deltas,
 )
 from surogates.harness.error_classifier import FailoverReason, classify_api_error
+from surogates.harness.expert_routing import model_supports_thinking_toggle
 from surogates.harness.image_shrink import shrink_image_parts_in_messages
 from surogates.harness.model_metadata import (
     get_next_probe_tier,
@@ -65,12 +66,36 @@ STREAM_STALE_TIMEOUT: float = float(
     os.environ.get("SUROGATES_STREAM_STALE_TIMEOUT", "180.0")
 )
 
+# Reasoning-capable models (GLM-5, Qwen3, QwQ) often go silent on the
+# wire for several minutes during their reasoning phase -- the upstream
+# only emits chunks once thinking resolves.  Bump the watchdog ceiling
+# for these models so legitimate long reasoning isn't killed.  Verified
+# against PROD session 5274a540: iter 8 was killed by the 180s watchdog
+# while GLM-5.1 was still reasoning silently.
+STREAM_STALE_TIMEOUT_REASONING: float = 600.0
+
 # Polling interval (seconds) used to wake up between chunk reads so the
 # stale-stream and interrupt checks run even when the upstream provider
 # stops sending bytes entirely.  Short enough that user-initiated stops
 # feel responsive; long enough that it doesn't burn CPU on a healthy
 # stream.
 STREAM_CHUNK_POLL_INTERVAL: float = 1.0
+
+# Heartbeat interval (seconds).  When the stream is silent past this
+# threshold but still inside the stale-timeout window, the watchdog
+# emits an LLM_HEARTBEAT event so the UI can distinguish "model is
+# silently reasoning" from "stream is dead".  Picked to be short
+# enough that users see motion within ~15s of silence.
+STREAM_HEARTBEAT_INTERVAL: float = 15.0
+
+# Maximum reasoning_content characters allowed before any visible
+# content or tool-call delta has arrived.  Above this, the stream is
+# treated as a runaway-reasoning failure and cancelled so the outer
+# retry layer can retry with thinking disabled.  ~4 chars/token on
+# GLM-5.1, so 16 000 chars ≈ 4 000 reasoning tokens.  PROD iter-6
+# dead-end was ~60 KB (well over); iter-4 legitimate was ~5 KB (well
+# under).  Configurable for testing only -- no env var.
+RUNAWAY_REASONING_CHAR_THRESHOLD: int = 16_000
 
 _LOCAL_STREAM_HOSTS: frozenset[str] = frozenset({
     "localhost",
@@ -105,13 +130,20 @@ def compute_stream_stale_timeout(
     if not STREAM_STALE_TIMEOUT_EXPLICIT and _is_local_base_url(base_url):
         return float("inf")
 
+    # Reasoning-capable upstreams need a much higher ceiling -- they
+    # routinely go silent for multiple minutes during the reasoning
+    # phase.  The env-var explicit override (handled above) still wins.
+    if not STREAM_STALE_TIMEOUT_EXPLICIT and model_supports_thinking_toggle(model):
+        baseline = STREAM_STALE_TIMEOUT_REASONING
+    else:
+        baseline = STREAM_STALE_TIMEOUT
+
     approx_tokens = _estimate_message_tokens(messages or [])
-    timeout = STREAM_STALE_TIMEOUT
     if approx_tokens > 100_000:
-        return max(timeout, 300.0)
+        return max(baseline, 300.0)
     if approx_tokens > 50_000:
-        return max(timeout, 240.0)
-    return timeout
+        return max(baseline, 240.0)
+    return baseline
 
 
 def _is_local_base_url(base_url: str) -> bool:
@@ -387,6 +419,9 @@ async def call_llm_with_retry(
     compression_attempts = 0
     max_compression_attempts = 3
     active_on_tool_call_complete = on_tool_call_complete
+    # Runaway-reasoning soft retry: we allow at most one in-flight
+    # thinking-off retry per call.  See the success-path branch below.
+    runaway_retry_used: bool = False
 
     # Pre-call sanitization: clean surrogates and fix orphaned tool pairs.
     if "messages" in create_kwargs:
@@ -439,6 +474,41 @@ async def call_llm_with_retry(
                         create_kwargs["model"] = current_model
                     continue
                 raise ValueError("LLM returned empty response")
+
+            # Runaway-reasoning soft retry: model produced > threshold
+            # of reasoning_content without any visible content/tool_call.
+            # Re-issue once with enable_thinking=False; the same task
+            # plus thinking-on would runaway again.  Per-call budget of
+            # one silent retry; further runaways fall through as
+            # interrupted responses (the loop layer surfaces them).
+            if (
+                usage_data.get("stream_error_reason") == "runaway_reasoning"
+                and not runaway_retry_used
+                and attempt < MAX_LLM_RETRIES
+            ):
+                runaway_retry_used = True
+                from surogates.harness.expert_routing import (
+                    build_thinking_extra_body,
+                    merge_extra_body,
+                )
+                thinking_extra = build_thinking_extra_body(
+                    enable_thinking=False,
+                )
+                create_kwargs["extra_body"] = merge_extra_body(
+                    create_kwargs.get("extra_body"),
+                    thinking_extra,
+                )
+                logger.warning(
+                    "Runaway reasoning on session %s iter %d; retrying "
+                    "with enable_thinking=False (attempt %d).",
+                    session.id, iteration, attempt + 1,
+                )
+                continue
+
+            # If a runaway retry succeeded, stamp the response so the
+            # outer loop knows to flip its per-turn flag.
+            if runaway_retry_used:
+                usage_data["thinking_disabled_due_to_runaway"] = True
 
             return result
 
@@ -1010,6 +1080,14 @@ async def call_llm_streaming_inner(
     # the stream is considered stale and will be cancelled.
     last_chunk_time: float = time.monotonic()
 
+    # Runaway-reasoning detection: count reasoning_content chars
+    # received and whether any content or tool-call delta has landed.
+    # If the model emits a large amount of reasoning_content before
+    # any visible output, the stream is cancelled and the outer retry
+    # re-issues with enable_thinking=False (see Task 7).
+    reasoning_char_count: int = 0
+    content_or_tool_emitted: bool = False
+
     async def _close_stream() -> None:
         close_method = getattr(response, "aclose", None) or getattr(
             response, "close", None,
@@ -1035,9 +1113,10 @@ async def call_llm_streaming_inner(
     # the response is the SDK-sanctioned way to abort.
     stop_reason: str | None = None
     stop_event = asyncio.Event()
+    last_heartbeat_time: float = time.monotonic()
 
     async def _watchdog() -> None:
-        nonlocal stop_reason
+        nonlocal stop_reason, last_heartbeat_time
         while not stop_event.is_set():
             try:
                 await asyncio.wait_for(
@@ -1071,6 +1150,34 @@ async def call_llm_streaming_inner(
                 await _close_stream()
                 return
 
+            # Heartbeat: stream is silent but still inside the stale
+            # window.  Surface a transient signal so the UI can show
+            # "model is still working" rather than appearing dead.
+            silent_for = now - last_chunk_time
+            since_last_beat = now - last_heartbeat_time
+            if (
+                silent_for >= STREAM_HEARTBEAT_INTERVAL
+                and since_last_beat >= STREAM_HEARTBEAT_INTERVAL
+            ):
+                last_heartbeat_time = now
+                try:
+                    await store.emit_event(
+                        session.id,
+                        EventType.LLM_HEARTBEAT,
+                        {
+                            "iteration": iteration,
+                            "silent_for_seconds": round(silent_for, 1),
+                        },
+                    )
+                except Exception:
+                    # Heartbeat is best-effort -- never fail the stream
+                    # because the store transiently rejected an event.
+                    logger.debug(
+                        "Heartbeat emit failed for session %s",
+                        session.id,
+                        exc_info=True,
+                    )
+
     watchdog_task = asyncio.create_task(
         _watchdog(), name=f"llm-stream-watchdog-{session.id}",
     )
@@ -1078,6 +1185,7 @@ async def call_llm_streaming_inner(
     try:
         async for chunk in response:
             last_chunk_time = time.monotonic()
+            last_heartbeat_time = last_chunk_time
             if stop_reason is not None:
                 interrupted = True
                 break
@@ -1124,13 +1232,14 @@ async def call_llm_streaming_inner(
             if hasattr(delta, "role") and delta.role:
                 role = delta.role
 
-            # Reasoning content delta (DeepSeek, Qwen, Moonshot, etc.)
+            # Reasoning content delta (DeepSeek, Qwen, Moonshot, GLM-5).
             reasoning_text = (
                 getattr(delta, "reasoning_content", None)
                 or getattr(delta, "reasoning", None)
             )
             if reasoning_text:
                 reasoning_parts.append(reasoning_text)
+                reasoning_char_count += len(reasoning_text)
                 # Emit LLM_DELTA event for reasoning so the frontend can
                 # stream reasoning content incrementally (same as text deltas).
                 await store.emit_event(
@@ -1144,6 +1253,7 @@ async def call_llm_streaming_inner(
             if text_delta:
                 visible_delta = context_scrubber.feed(think_scrubber.feed(text_delta))
                 if visible_delta:
+                    content_or_tool_emitted = True
                     content_parts.append(visible_delta)
                     # Emit LLM_DELTA event.
                     await store.emit_event(
@@ -1159,6 +1269,7 @@ async def call_llm_streaming_inner(
             # call starting at the same index and redirect it to a fresh slot.
             tc_deltas = getattr(delta, "tool_calls", None)
             if tc_deltas:
+                content_or_tool_emitted = True
                 for tc_delta in tc_deltas:
                     raw_idx = tc_delta.index if tc_delta.index is not None else 0
                     delta_id = getattr(tc_delta, "id", None) or ""
@@ -1207,6 +1318,27 @@ async def call_llm_streaming_inner(
                                     _notified_slots.add(prev_slot)
                                     on_tool_call_complete(prev_entry)
                         _highest_known_slot = idx
+
+            # Runaway-reasoning: model has emitted > threshold chars of
+            # reasoning_content without any visible content or tool call.
+            # Cancel; the outer retry will reissue with thinking disabled.
+            if (
+                not content_or_tool_emitted
+                and reasoning_char_count > RUNAWAY_REASONING_CHAR_THRESHOLD
+            ):
+                logger.warning(
+                    "Runaway reasoning: %d chars of reasoning_content with no "
+                    "content/tool_call (threshold %d). Cancelling stream for "
+                    "session %s (iteration %d).",
+                    reasoning_char_count,
+                    RUNAWAY_REASONING_CHAR_THRESHOLD,
+                    session.id,
+                    iteration,
+                )
+                stop_reason = "runaway_reasoning"
+                await _close_stream()
+                interrupted = True
+                break
     except Exception as exc:
         # The watchdog closed the stream (stale or interrupt) -- the
         # SDK's iterator raises when the underlying response is closed

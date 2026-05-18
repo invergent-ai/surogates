@@ -948,6 +948,14 @@ class AgentHarness:
         self._iters_since_skill: int = 0
         self._user_turn_count: int = 0
 
+        # When set, the thinking gate forces enable_thinking=False for
+        # every iteration in the current user turn, overriding the
+        # classifier.  Set by the LLM-call retry path when a
+        # runaway-reasoning stream was cancelled and re-issued with
+        # thinking disabled (the same task would runaway again otherwise).
+        # Cleared at the start of each new user turn.
+        self._thinking_disabled_for_turn: bool = False
+
         # Fallback provider chain.
         self._fallback_chain: list[dict] = []
         self._fallback_index: int = 0
@@ -1503,6 +1511,9 @@ class AgentHarness:
 
         # --- User turn tracking for memory nudge ---
         self._user_turn_count += 1
+        # New user turn clears any prior runaway-thinking suppression.
+        # Future turns get thinking back automatically.
+        self._thinking_disabled_for_turn = False
         should_review_memory = False
         if (
             self._memory_nudge_interval > 0
@@ -1761,6 +1772,7 @@ class AgentHarness:
                     ),
                     rate_limit_guard=self._provider_rate_limit_guard(),
                 )
+                self._propagate_runaway_flag(session, usage_data)
             except Exception as exc:
                 logger.exception(
                     "LLM call failed for session %s (iteration %d)",
@@ -3240,6 +3252,31 @@ class AgentHarness:
     # Auto-think gate
     # ------------------------------------------------------------------
 
+    def _propagate_runaway_flag(
+        self,
+        session: Session,
+        usage_data: dict[str, Any] | None,
+    ) -> None:
+        """Flip the per-turn thinking-disabled flag if the LLM-call layer
+        recovered from a runaway-reasoning stream by retrying with
+        ``enable_thinking=False``.
+
+        The flag is cleared at the start of every new user turn, so
+        future turns get thinking back automatically.
+        """
+        if not usage_data:
+            return
+        if not usage_data.get("thinking_disabled_due_to_runaway"):
+            return
+        if self._thinking_disabled_for_turn:
+            return
+        self._thinking_disabled_for_turn = True
+        logger.info(
+            "Runaway-reasoning recovery: disabling thinking for "
+            "remainder of user turn (session=%s).",
+            session.id,
+        )
+
     async def _maybe_apply_thinking_gate(
         self,
         create_kwargs: dict[str, Any],
@@ -3247,14 +3284,17 @@ class AgentHarness:
     ) -> None:
         """Disable upstream reasoning on easy turns when the model supports it.
 
-        Runs the cached LLM classifier on the conversation slice and, when
-        it returns ``required=False`` *and* the model honors the vLLM
-        ``chat_template_kwargs.enable_thinking`` toggle, mutates
-        ``create_kwargs["extra_body"]`` in place to suppress reasoning.
-        On cache hit the call is effectively free, so it's safe to
-        invoke on every LLM iteration; the classifier's cache key is
-        stable within a user turn so repeated iterations don't
-        re-classify.
+        Two paths can disable thinking:
+
+        1. ``self._thinking_disabled_for_turn`` is True -- a prior
+           runaway in this user turn already proved that thinking is
+           failing here.  Force it off and skip the classifier entirely.
+        2. The cached LLM classifier returns ``required=False`` for
+           this turn.
+
+        The flag in (1) clears on the next user turn (see the user-turn
+        bookkeeping where ``_user_turn_count`` is incremented), so
+        future turns get thinking back automatically.
 
         Failures (aux unavailable, network error, structured-output
         parse miss) fall through silently -- the request just keeps
@@ -3265,6 +3305,18 @@ class AgentHarness:
         if not model_supports_thinking_toggle(model_id):
             return
         if not messages:
+            return
+
+        if self._thinking_disabled_for_turn:
+            thinking_extra = build_thinking_extra_body(enable_thinking=False)
+            create_kwargs["extra_body"] = merge_extra_body(
+                create_kwargs.get("extra_body"),
+                thinking_extra,
+            )
+            logger.debug(
+                "Thinking-gate: forcing reasoning off "
+                "(runaway flag set for current user turn).",
+            )
             return
 
         try:
@@ -3896,6 +3948,7 @@ class AgentHarness:
                 context_compressor=self._compressor,
                 rate_limit_guard=self._provider_rate_limit_guard(),
             )
+            self._propagate_runaway_flag(session, usage_data)
 
             # Strip thinking blocks from the summary.
             reasoning_text = extract_reasoning(assistant_message)
