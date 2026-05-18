@@ -39,9 +39,13 @@ from surogates.harness.cost_tracker import SessionCostTracker
 from surogates.harness.credentials import CredentialPool
 from surogates.harness.error_classify import classify_harness_error
 from surogates.harness.expert_routing import (
+    build_thinking_extra_body,
     classify_hard_task,
+    classify_hard_task_async,
     classify_tool_calls,
     load_skills_for_expert_routing,
+    merge_extra_body,
+    model_supports_thinking_toggle,
     select_expert_for_task,
 )
 from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
@@ -1677,6 +1681,8 @@ class AgentHarness:
             if tool_schemas:
                 create_kwargs["tools"] = tool_schemas
 
+            await self._maybe_apply_thinking_gate(create_kwargs, api_messages)
+
             # Create a streaming tool executor when eligible.  The executor
             # starts executing concurrency-safe (read-only) tools as their
             # tool_use blocks complete during LLM streaming, overlapping
@@ -3225,6 +3231,64 @@ class AgentHarness:
         return make_skipped_tool_result(tc)
 
     # ------------------------------------------------------------------
+    # Auto-think gate
+    # ------------------------------------------------------------------
+
+    async def _maybe_apply_thinking_gate(
+        self,
+        create_kwargs: dict[str, Any],
+        messages: list[dict[str, Any]],
+    ) -> None:
+        """Disable upstream reasoning on easy turns when the model supports it.
+
+        Runs the cached LLM classifier on the conversation slice and, when
+        it returns ``required=False`` *and* the model honors the vLLM
+        ``chat_template_kwargs.enable_thinking`` toggle, mutates
+        ``create_kwargs["extra_body"]`` in place to suppress reasoning.
+        On cache hit the call is effectively free, so it's safe to
+        invoke on every LLM iteration; the classifier's cache key is
+        stable within a user turn so repeated iterations don't
+        re-classify.
+
+        Failures (aux unavailable, network error, structured-output
+        parse miss) fall through silently -- the request just keeps
+        the model default (thinking on), matching the previous
+        behavior.
+        """
+        model_id = str(create_kwargs.get("model") or "")
+        if not model_supports_thinking_toggle(model_id):
+            return
+        if not messages:
+            return
+
+        try:
+            classification = await classify_hard_task_async(
+                messages,
+                tenant=self._tenant,
+            )
+        except Exception:
+            logger.debug(
+                "Thinking-gate classification failed; leaving model default.",
+                exc_info=True,
+            )
+            return
+
+        if classification.required:
+            return
+
+        thinking_extra = build_thinking_extra_body(enable_thinking=False)
+        create_kwargs["extra_body"] = merge_extra_body(
+            create_kwargs.get("extra_body"),
+            thinking_extra,
+        )
+        logger.debug(
+            "Auto-think gate: disabling reasoning for easy turn "
+            "(category=%s, reason=%s).",
+            classification.category,
+            classification.reason,
+        )
+
+    # ------------------------------------------------------------------
     # Expert preflight routing
     # ------------------------------------------------------------------
 
@@ -3242,7 +3306,10 @@ class AgentHarness:
             return False
 
         user_content = str(last_user.get("content") or "")
-        classification = classify_hard_task(user_content)
+        classification = await classify_hard_task_async(
+            messages,
+            tenant=self._tenant,
+        )
         if not classification.required or classification.category is None:
             return False
 
@@ -3733,6 +3800,8 @@ class AgentHarness:
                 "max_tokens": session.config.get("max_tokens", 16384),
                 # No tools -- force a text-only response.
             }
+
+            await self._maybe_apply_thinking_gate(create_kwargs, api_messages)
 
             assistant_message, usage_data = await call_llm_with_retry(
                 session=session,
