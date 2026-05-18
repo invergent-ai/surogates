@@ -310,3 +310,66 @@ async def test_runaway_detector_silent_after_content_arrives(monkeypatch):
     assert usage["finish_reason"] == "stop"
     assert usage.get("stream_error_reason") is None
     assert msg["content"] == "Hello"
+
+
+# ---------------------------------------------------------------------------
+# Task 5: per-turn thinking-disabled flag on AgentHarness
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_thinking_gate_respects_disabled_flag(monkeypatch):
+    """When _thinking_disabled_for_turn is True, the thinking gate
+    forces enable_thinking=False regardless of the classifier."""
+    from surogates.harness.loop import AgentHarness
+
+    # Build a minimal AgentHarness without the full constructor by
+    # directly instantiating and patching only what the gate uses.
+    loop = AgentHarness.__new__(AgentHarness)
+    loop._tenant = None
+    loop._thinking_disabled_for_turn = True
+
+    monkeypatch.setattr(
+        "surogates.harness.loop.classify_hard_task_async",
+        AsyncMock(side_effect=AssertionError("classifier should not be called")),
+    )
+
+    create_kwargs = {"model": "zai-org/GLM-5.1", "extra_body": {}}
+    await loop._maybe_apply_thinking_gate(
+        create_kwargs,
+        messages=[{"role": "user", "content": "easy"}],
+    )
+
+    extra = create_kwargs["extra_body"]
+    assert extra["chat_template_kwargs"]["enable_thinking"] is False
+
+
+@pytest.mark.asyncio
+async def test_thinking_gate_unchanged_when_flag_not_set(monkeypatch):
+    """When flag is False and classifier says required=True, gate must
+    leave extra_body alone (model default = thinking on)."""
+    from surogates.harness.loop import AgentHarness
+
+    loop = AgentHarness.__new__(AgentHarness)
+    loop._tenant = None
+    loop._thinking_disabled_for_turn = False
+
+    monkeypatch.setattr(
+        "surogates.harness.loop.classify_hard_task_async",
+        AsyncMock(return_value=SimpleNamespace(
+            required=True,
+            category="debugging",
+            reason="test",
+        )),
+    )
+
+    create_kwargs = {"model": "zai-org/GLM-5.1"}
+    await loop._maybe_apply_thinking_gate(
+        create_kwargs,
+        messages=[{"role": "user", "content": "Debug this Python stack trace and explain the root cause."}],
+    )
+
+    extra = create_kwargs.get("extra_body") or {}
+    # Either no extra_body at all, or it doesn't disable thinking.
+    if "chat_template_kwargs" in extra:
+        assert extra["chat_template_kwargs"].get("enable_thinking") is not False
