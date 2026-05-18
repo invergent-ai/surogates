@@ -81,6 +81,13 @@ STREAM_STALE_TIMEOUT_REASONING: float = 600.0
 # stream.
 STREAM_CHUNK_POLL_INTERVAL: float = 1.0
 
+# Heartbeat interval (seconds).  When the stream is silent past this
+# threshold but still inside the stale-timeout window, the watchdog
+# emits an LLM_HEARTBEAT event so the UI can distinguish "model is
+# silently reasoning" from "stream is dead".  Picked to be short
+# enough that users see motion within ~15s of silence.
+STREAM_HEARTBEAT_INTERVAL: float = 15.0
+
 _LOCAL_STREAM_HOSTS: frozenset[str] = frozenset({
     "localhost",
     "127.0.0.1",
@@ -1051,9 +1058,10 @@ async def call_llm_streaming_inner(
     # the response is the SDK-sanctioned way to abort.
     stop_reason: str | None = None
     stop_event = asyncio.Event()
+    last_heartbeat_time: float = time.monotonic()
 
     async def _watchdog() -> None:
-        nonlocal stop_reason
+        nonlocal stop_reason, last_heartbeat_time
         while not stop_event.is_set():
             try:
                 await asyncio.wait_for(
@@ -1087,6 +1095,34 @@ async def call_llm_streaming_inner(
                 await _close_stream()
                 return
 
+            # Heartbeat: stream is silent but still inside the stale
+            # window.  Surface a transient signal so the UI can show
+            # "model is still working" rather than appearing dead.
+            silent_for = now - last_chunk_time
+            since_last_beat = now - last_heartbeat_time
+            if (
+                silent_for >= STREAM_HEARTBEAT_INTERVAL
+                and since_last_beat >= STREAM_HEARTBEAT_INTERVAL
+            ):
+                last_heartbeat_time = now
+                try:
+                    await store.emit_event(
+                        session.id,
+                        EventType.LLM_HEARTBEAT,
+                        {
+                            "iteration": iteration,
+                            "silent_for_seconds": round(silent_for, 1),
+                        },
+                    )
+                except Exception:
+                    # Heartbeat is best-effort -- never fail the stream
+                    # because the store transiently rejected an event.
+                    logger.debug(
+                        "Heartbeat emit failed for session %s",
+                        session.id,
+                        exc_info=True,
+                    )
+
     watchdog_task = asyncio.create_task(
         _watchdog(), name=f"llm-stream-watchdog-{session.id}",
     )
@@ -1094,6 +1130,7 @@ async def call_llm_streaming_inner(
     try:
         async for chunk in response:
             last_chunk_time = time.monotonic()
+            last_heartbeat_time = last_chunk_time
             if stop_reason is not None:
                 interrupted = True
                 break

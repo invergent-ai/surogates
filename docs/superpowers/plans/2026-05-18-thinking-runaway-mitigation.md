@@ -6,7 +6,7 @@
 
 - [x] Task 1: Add `LLM_HEARTBEAT` event type
 - [x] Task 2: Conditional stale-timeout bump for reasoning models
-- [ ] Task 3: Heartbeat emission from the watchdog
+- [x] Task 3: Heartbeat emission from the watchdog
 - [ ] Task 4: In-stream runaway-reasoning detector
 - [ ] Task 5: Per-turn `thinking_disabled_for_turn` flag in AgentHarness
 - [ ] Task 6: Reset flag at user-turn boundary
