@@ -10,6 +10,14 @@ import {
   FileSpreadsheet,
   FileText,
   FileVideo,
+  ChevronRightIcon,
+  ClockIcon,
+  CloudIcon,
+  HardDriveIcon,
+  PaperclipIcon,
+  PlusIcon,
+  SparklesIcon,
+  TerminalIcon,
 } from "lucide-react";
 import type { PromptInputMessage } from "../ai-elements/prompt-input";
 import { useProviderAttachments } from "../ai-elements/prompt-input";
@@ -43,14 +51,11 @@ import {
 import {
   PromptInput,
   PromptInputBody,
+  PromptInputButton,
   PromptInputFooter,
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputTools,
-  PromptInputActionMenu,
-  PromptInputActionMenuTrigger,
-  PromptInputActionMenuContent,
-  PromptInputActionAddAttachments,
   PromptInputProvider,
   usePromptInputController,
 } from "../ai-elements/prompt-input";
@@ -58,6 +63,7 @@ import {
   Popover,
   PopoverAnchor,
   PopoverContent,
+  PopoverTrigger,
 } from "../ui/popover";
 import {
   Command,
@@ -266,13 +272,14 @@ function ChatComposerInner({
   onComposerError,
 }: ChatComposerProps) {
   const { adapter } = useAgentChatAdapterContext();
-  const { textInput } = usePromptInputController();
+  const { textInput, attachments } = usePromptInputController();
   const status = isRunning ? "streaming" : disabled ? "error" : "ready";
 
   // ── Load skills from backend ─────────────────────────────────────
 
   const [adapterCommands, setAdapterCommands] = useState<SlashCommand[]>([]);
   const [buttonMenuOpen, setButtonMenuOpen] = useState(false);
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [menuDismissed, setMenuDismissed] = useState(false);
   const showSlashMenu = !menuDismissed && (textInput.value.startsWith("/") || buttonMenuOpen);
 
@@ -496,6 +503,29 @@ function ChatComposerInner({
       }}
     >
       <AttachmentPreviewStrip />
+      <div className="flex flex-wrap items-center justify-end gap-2 px-1 pb-2">
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent"
+          onClick={() => {
+            setMenuDismissed(false);
+            setButtonMenuOpen(true);
+          }}
+        >
+          <TerminalIcon />
+          Commands
+        </Button>
+        <Button type="button" variant="secondary" size="sm" className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent" disabled>
+          <SparklesIcon />
+          Skills
+        </Button>
+        <Button type="button" variant='secondary' size="sm" className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent" disabled>
+          <ClockIcon />
+          Scheduled Tasks
+        </Button>
+      </div>
       <PopoverAnchor asChild>
         <PromptInput
           onSubmit={handleSubmit}
@@ -517,25 +547,48 @@ function ChatComposerInner({
           </PromptInputBody>
           <PromptInputFooter>
             <PromptInputTools>
-              <PromptInputActionMenu>
-                <PromptInputActionMenuTrigger />
-                <PromptInputActionMenuContent>
-                  <PromptInputActionAddAttachments />
-                </PromptInputActionMenuContent>
-              </PromptInputActionMenu>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                className="text-muted-foreground"
-                onClick={(e) => {
-                  e.preventDefault();
-                  setButtonMenuOpen((v) => !v);
-                }}
-                aria-label="Slash commands"
-              >
-                <span className="text-xs  font-bold">/</span>
-              </Button>
+              <Popover open={addMenuOpen} onOpenChange={setAddMenuOpen}>
+                <PopoverTrigger asChild>
+                  <PromptInputButton aria-label="Add">
+                    <PlusIcon className="size-4" />
+                  </PromptInputButton>
+                </PopoverTrigger>
+                <PopoverContent
+                  side="top"
+                  align="start"
+                  className="w-64 overflow-hidden rounded-xl p-1"
+                >
+                  <Command>
+                    <CommandList>
+                      <CommandItem
+                        disabled
+                        className="gap-3 rounded-md px-3 py-2 [&>svg:last-child]:hidden"
+                      >
+                        <CloudIcon className="size-4 shrink-0 text-sky-500" />
+                        Add from OneDrive
+                        <ChevronRightIcon className="ml-auto size-4 shrink-0 text-muted-foreground" />
+                      </CommandItem>
+                      <CommandItem
+                        disabled
+                        className="gap-3 rounded-md px-3 py-2 [&>svg:last-child]:hidden"
+                      >
+                        <HardDriveIcon className="size-4 shrink-0 text-emerald-500" />
+                        Add from Google Drive
+                      </CommandItem>
+                      <CommandItem
+                        onSelect={() => {
+                          setAddMenuOpen(false);
+                          attachments.openFileDialog();
+                        }}
+                        className="gap-3 rounded-md px-3 py-2 [&>svg:last-child]:hidden"
+                      >
+                        <PaperclipIcon className="size-4 shrink-0 text-muted-foreground" />
+                        Add local files
+                      </CommandItem>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
               {tokenUsage && tokenUsage.contextWindow > 0 && (
                 <Context
                   usedTokens={tokenUsage.totalTokens}
@@ -551,7 +604,10 @@ function ChatComposerInner({
                     outputTokenDetails: undefined as never,
                   }}
                 >
-                  <ContextTrigger />
+                  <ContextTrigger
+                    size="icon-sm"
+                    className="rounded-sm border border-input/70 text-foreground hover:bg-accent"
+                  />
                   <ContextContent>
                     <ContextContentHeader />
                     <ContextContentBody>
@@ -612,7 +668,7 @@ function ChatComposerInner({
       <PopoverContent
         side="top"
         align="start"
-        className="overflow-hidden p-0"
+        className="overflow-hidden rounded-xl p-0"
         style={{ width: "var(--radix-popover-trigger-width)" }}
         onCloseAutoFocus={(e) => e.preventDefault()}
         onEscapeKeyDown={() => {
@@ -652,13 +708,13 @@ function ChatComposerInner({
                     className="grid grid-cols-[12rem_1fr] items-baseline gap-3 [&_svg]:hidden"
                   >
                     <span
-                      className="font-mono text-foreground truncate"
+                      className="font-mono font-semibold text-foreground truncate"
                       title={cmd.label}
                     >
                       {cmd.label}
                     </span>
                     <span
-                      className="min-w-0 truncate text-xs text-muted-foreground"
+                      className="min-w-0 truncate text-sm text-muted-foreground"
                       title={cmd.description}
                     >
                       {cmd.description}
@@ -681,13 +737,13 @@ function ChatComposerInner({
                     className="grid grid-cols-[12rem_1fr] items-baseline gap-3 [&_svg]:hidden"
                   >
                     <span
-                      className="font-mono text-foreground truncate"
+                      className="font-mono font-semibold text-foreground truncate"
                       title={cmd.label}
                     >
                       {cmd.label}
                     </span>
                     <span
-                      className="min-w-0 truncate text-xs text-muted-foreground"
+                      className="min-w-0 truncate text-sm text-muted-foreground"
                       title={cmd.description}
                     >
                       {cmd.description}

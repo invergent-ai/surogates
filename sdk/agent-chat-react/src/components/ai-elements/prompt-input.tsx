@@ -60,7 +60,7 @@ export type PromptInputFileUIPart = FileUIPart & {
   file?: File;
 };
 import {
-  CornerDownLeftIcon,
+  ArrowUpIcon,
   ImageIcon,
   Monitor,
   PlusIcon,
@@ -947,7 +947,9 @@ export const PromptInput = ({
         ref={formRef}
         {...props}
       >
-        <InputGroup className="overflow-hidden">{children}</InputGroup>
+        <InputGroup className="overflow-hidden rounded-3xl border border-input bg-white px-3 py-1 shadow-sm dark:bg-card dark:shadow-none dark:ring-1 dark:ring-white/5 has-[textarea]:rounded-3xl has-[>[data-align=block-end]]:rounded-3xl has-[>[data-align=block-start]]:rounded-3xl">
+          {children}
+        </InputGroup>
       </form>
     </>
   );
@@ -1081,7 +1083,7 @@ export const PromptInputTextarea = ({
 
   return (
     <InputGroupTextarea
-      className={cn("field-sizing-content max-h-48 min-h-16", className)}
+      className={cn("field-sizing-content max-h-48 min-h-16 px-1.5 py-3", className)}
       name="message"
       onCompositionEnd={handleCompositionEnd}
       onCompositionStart={handleCompositionStart}
@@ -1162,7 +1164,11 @@ export const PromptInputButton = ({
 
   const button = (
     <InputGroupButton
-      className={cn(className)}
+      className={cn(
+        "rounded-sm border border-input/70 text-foreground hover:bg-accent",
+        newSize === "icon-sm" && "size-9",
+        className
+      )}
       size={newSize}
       type="button"
       variant={variant}
@@ -1241,7 +1247,7 @@ export type PromptInputSubmitProps = ComponentProps<typeof InputGroupButton> & {
 
 export const PromptInputSubmit = ({
   className,
-  variant = "default",
+  variant = "secondary",
   size = "icon-sm",
   status,
   onStop,
@@ -1251,12 +1257,12 @@ export const PromptInputSubmit = ({
 }: PromptInputSubmitProps) => {
   const isGenerating = status === "submitted" || status === "streaming";
 
-  let Icon = <CornerDownLeftIcon className="size-4" />;
+  let Icon = <ArrowUpIcon className="size-4" />;
 
   if (status === "submitted") {
     Icon = <Spinner />;
   } else if (status === "streaming") {
-    Icon = <SquareIcon className="size-4" />;
+    Icon = <SquareIcon className="size-3 fill-current" />;
   } else if (status === "error") {
     Icon = <XIcon className="size-4" />;
   }
@@ -1276,7 +1282,7 @@ export const PromptInputSubmit = ({
   return (
     <InputGroupButton
       aria-label={isGenerating ? "Stop" : "Submit"}
-      className={cn(className)}
+      className={cn("rounded-full", className)}
       onClick={handleClick}
       size={size}
       type={isGenerating && onStop ? "button" : "submit"}

@@ -2,10 +2,10 @@
 
 import { Button } from "../ui/button";
 import {
-  HoverCard,
-  HoverCardContent,
-  HoverCardTrigger,
-} from "../ui/hover-card";
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "../ui/popover";
 import { Progress } from "../ui/progress";
 import { cn } from "../../lib/utils";
 import type { LanguageModelUsage } from "ai";
@@ -40,7 +40,7 @@ const useContextValue = () => {
   return context;
 };
 
-export type ContextProps = ComponentProps<typeof HoverCard> & ContextSchema;
+export type ContextProps = ComponentProps<typeof Popover> & ContextSchema;
 
 export const Context = ({
   usedTokens,
@@ -56,7 +56,7 @@ export const Context = ({
 
   return (
     <ContextContext.Provider value={contextValue}>
-      <HoverCard closeDelay={100} openDelay={0} {...props} />
+      <Popover {...props} />
     </ContextContext.Provider>
   );
 };
@@ -104,25 +104,25 @@ const ContextIcon = () => {
 
 export type ContextTriggerProps = ComponentProps<typeof Button>;
 
-export const ContextTrigger = ({ children, ...props }: ContextTriggerProps) => { 
+export const ContextTrigger = ({ children, ...props }: ContextTriggerProps) => {
   return (
-    <HoverCardTrigger asChild>
+    <PopoverTrigger asChild>
       {children ?? (
         <Button type="button" variant="ghost" {...props}>
           <ContextIcon />
         </Button>
       )}
-    </HoverCardTrigger>
+    </PopoverTrigger>
   );
 };
 
-export type ContextContentProps = ComponentProps<typeof HoverCardContent>;
+export type ContextContentProps = ComponentProps<typeof PopoverContent>;
 
 export const ContextContent = ({
   className,
   ...props
 }: ContextContentProps) => (
-  <HoverCardContent
+  <PopoverContent
     className={cn("min-w-60 divide-y overflow-hidden p-0", className)}
     {...props}
   />

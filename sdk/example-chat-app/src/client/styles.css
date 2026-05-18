@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "tw-animate-css";
 @import "@fontsource-variable/noto-sans";
 @source "../../../agent-chat-react/src";
 
