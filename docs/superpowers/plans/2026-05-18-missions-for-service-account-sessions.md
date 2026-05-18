@@ -20,8 +20,8 @@
 - [x] Task 6: Surogates mission REST API principal-aware auth
 - [x] Task 7: SA-principal end-to-end integration test
 - [x] Task 8: SurogatesClient (ops) mission queries by principal
-- [ ] **Task 9: Ops mission routes resolve SA principal — IN PROGRESS**
-- [ ] Task 10: SDK + ops frontend wire shape
+- [x] Task 9: Ops mission routes resolve SA principal
+- [x] Task 10: SDK + ops frontend wire shape
 
 ---
 

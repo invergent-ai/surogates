@@ -227,7 +227,8 @@ export type AgentChatMissionStatus =
 export interface AgentChatMissionSummary {
   id: string;
   orgId: string;
-  userId: string;
+  userId: string | null;
+  serviceAccountId: string | null;
   sessionId: string;
   agentId: string;
   description: string;
