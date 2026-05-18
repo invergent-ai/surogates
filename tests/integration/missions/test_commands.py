@@ -354,3 +354,109 @@ async def test_cancel_with_cascade_publishes_interrupt_per_running_worker(
         ):
             t = await db.get(Task, tid)
             assert t.status == expected
+
+
+# ---------------------------------------------------------------------------
+# Service-account principal
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_with_service_account_principal(
+    session_factory, session_store, org_id, service_account_id,
+    sa_chat_session,
+):
+    """A mission created from a service-account session is persisted with
+    service_account_id (not user_id), the active_mission_id config write
+    still propagates, and the kickoff machinery runs as for a user-owned
+    mission."""
+    from surogates.missions.commands import handle_mission_create
+    from surogates.missions.store import MissionStore
+
+    redis = AsyncMock()
+    redis.zadd = AsyncMock()
+
+    store = MissionStore(session_factory)
+    result = await handle_mission_create(
+        description="Audit failing CI jobs",
+        rubric="Every red job is triaged with a ticket link.",
+        session_id=sa_chat_session.id,
+        service_account_id=service_account_id,
+        org_id=org_id,
+        agent_id="orchestrator",
+        session_store=session_store,
+        session_factory=session_factory,
+        mission_store=store,
+        redis=redis,
+    )
+
+    assert result.ok is True, result.error
+    m = await store.get(result.mission_id)
+    assert m.user_id is None
+    assert m.service_account_id == service_account_id
+    assert m.status == "active"
+
+    async with session_factory() as db:
+        sess = await db.get(ORMSession, sa_chat_session.id)
+        assert sess.config["active_mission_id"] == str(result.mission_id)
+        assert sess.config["coordinator"] is True
+
+    redis.zadd.assert_called_once()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_rejects_when_neither_principal_provided(
+    session_factory, session_store, org_id, sa_chat_session,
+):
+    """Calling handle_mission_create without either principal must be a
+    clean rejection — not an IntegrityError at the DB layer."""
+    from surogates.missions.commands import handle_mission_create
+    from surogates.missions.store import MissionStore
+
+    redis = AsyncMock()
+    redis.zadd = AsyncMock()
+
+    store = MissionStore(session_factory)
+    result = await handle_mission_create(
+        description="x", rubric="y",
+        session_id=sa_chat_session.id,
+        org_id=org_id,
+        agent_id="orchestrator",
+        session_store=session_store,
+        session_factory=session_factory,
+        mission_store=store,
+        redis=redis,
+    )
+    assert result.ok is False
+    assert "principal" in (result.error or "").lower()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_rejects_when_both_principals_provided(
+    session_factory, session_store, org_id, user_id, service_account_id,
+    sa_chat_session,
+):
+    """Passing both user_id and service_account_id violates the XOR
+    invariant; reject ahead of the DB CHECK so callers see a clean
+    error."""
+    from surogates.missions.commands import handle_mission_create
+    from surogates.missions.store import MissionStore
+
+    redis = AsyncMock()
+    redis.zadd = AsyncMock()
+
+    store = MissionStore(session_factory)
+    result = await handle_mission_create(
+        description="x", rubric="y",
+        session_id=sa_chat_session.id,
+        user_id=user_id,
+        service_account_id=service_account_id,
+        org_id=org_id,
+        agent_id="orchestrator",
+        session_store=session_store,
+        session_factory=session_factory,
+        mission_store=store,
+        redis=redis,
+    )
+    assert result.ok is False
+    assert "principal" in (result.error or "").lower()
