@@ -463,7 +463,11 @@ async def classify_hard_task_async(
                 {"role": "user", "content": transcript},
             ],
             output_model=HardTaskJudgment,
-            max_tokens=80,
+            # Bumped from 80: the JSON is ~15 tokens but Outlines' grammar
+            # generator can emit intermediate scaffolding (and some models
+            # prefix a thinking preamble) that eats the budget before the
+            # actual JSON lands.
+            max_tokens=200,
             temperature=0,
         )
     except Exception:
