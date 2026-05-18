@@ -36,6 +36,7 @@ function mission(
   return {
     orgId: "org-1",
     userId: "user-1",
+    serviceAccountId: null,
     sessionId: "sess-1",
     agentId: "agent-1",
     description: "Train a 0.6B model",

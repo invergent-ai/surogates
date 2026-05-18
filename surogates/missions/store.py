@@ -49,18 +49,28 @@ class MissionStore:
         self,
         *,
         org_id: UUID,
-        user_id: UUID,
         session_id: UUID,
         agent_id: str,
         description: str,
         rubric: str,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
         max_iterations: int = 20,
     ) -> UUID:
         """Insert a new mission with status='active'.
 
+        Exactly one of ``user_id`` / ``service_account_id`` must be set —
+        the DB CHECK constraint enforces it, but reject up front so the
+        error surfaces as a ``ValueError`` instead of an ``IntegrityError``.
+
         Rejects with :class:`ActiveMissionConflictError` if any mission
         with ``session_id`` is already in ``active`` or ``paused``.
         """
+        if (user_id is None) == (service_account_id is None):
+            raise ValueError(
+                "MissionStore.create requires exactly one of user_id / "
+                "service_account_id (the principal that owns the mission)"
+            )
         async with self._sf() as db:
             existing = await db.scalar(
                 select(MissionRow.id)
@@ -77,6 +87,7 @@ class MissionStore:
             row = MissionRow(
                 org_id=org_id,
                 user_id=user_id,
+                service_account_id=service_account_id,
                 session_id=session_id,
                 agent_id=agent_id,
                 description=description,

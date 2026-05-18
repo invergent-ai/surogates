@@ -21,6 +21,35 @@ from surogates.scheduled.schedule import (
 )
 
 
+def _validate_principal(
+    user_id: UUID | None,
+    service_account_id: UUID | None,
+    *,
+    caller: str,
+) -> None:
+    """Reject calls that don't specify exactly one owning principal.
+
+    The DB CHECK constraint ``ck_scheduled_sessions_one_principal``
+    enforces the invariant, but rejecting up front surfaces a clean
+    ``ValueError`` instead of an ``IntegrityError`` at commit time.
+    """
+    if (user_id is None) == (service_account_id is None):
+        raise ValueError(
+            f"{caller} requires exactly one of user_id / service_account_id"
+        )
+
+
+def _owner_filter_clauses(user_id: UUID | None, service_account_id: UUID | None):
+    """SQL predicate matching the row owned by the given principal.
+
+    Caller is responsible for invoking :func:`_validate_principal`
+    first; this helper just emits the WHERE fragment.
+    """
+    if user_id is not None:
+        return ScheduledSessionRow.user_id == user_id
+    return ScheduledSessionRow.service_account_id == service_account_id
+
+
 class ScheduledSessionStore:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
@@ -29,20 +58,25 @@ class ScheduledSessionStore:
         self,
         *,
         org_id: UUID,
-        user_id: UUID,
         agent_id: str,
         name: str,
         prompt: str,
         schedule: ParsedSchedule,
         source: str,
         created_from_session_id: UUID | None,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
         repeat_limit: int | None = None,
         next_run_at: datetime | None = None,
         expires_at: datetime | None = None,
     ) -> ScheduledSession:
+        _validate_principal(
+            user_id, service_account_id, caller="ScheduledSessionStore.create",
+        )
         row = ScheduledSessionRow(
             org_id=org_id,
             user_id=user_id,
+            service_account_id=service_account_id,
             agent_id=agent_id,
             name=name.strip() or _default_name(prompt),
             prompt=prompt,
@@ -66,15 +100,17 @@ class ScheduledSessionStore:
         self,
         *,
         org_id: UUID,
-        user_id: UUID,
         agent_id: str,
         prompt: str,
         schedule: ParsedSchedule,
         created_from_session_id: UUID | None,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
     ) -> ScheduledSession:
         return await self.create(
             org_id=org_id,
             user_id=user_id,
+            service_account_id=service_account_id,
             agent_id=agent_id,
             name=f"Loop: {prompt[:60]}",
             prompt=prompt,
@@ -88,16 +124,18 @@ class ScheduledSessionStore:
         self,
         *,
         org_id: UUID,
-        user_id: UUID,
         agent_id: str,
         prompt: str,
         created_from_session_id: UUID | None,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
         schedule: ParsedSchedule | None = None,
     ) -> ScheduledSession:
         now = _utcnow()
         return await self.create(
             org_id=org_id,
             user_id=user_id,
+            service_account_id=service_account_id,
             agent_id=agent_id,
             name=f"Loop: {prompt[:60]}",
             prompt=prompt,
@@ -119,18 +157,23 @@ class ScheduledSessionStore:
         self,
         *,
         org_id: UUID,
-        user_id: UUID,
         agent_id: str,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
         include_inactive: bool = False,
         status: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[ScheduledSession]:
+        _validate_principal(
+            user_id, service_account_id,
+            caller="ScheduledSessionStore.list_for_user",
+        )
         stmt = (
             select(ScheduledSessionRow)
             .where(
                 ScheduledSessionRow.org_id == org_id,
-                ScheduledSessionRow.user_id == user_id,
+                _owner_filter_clauses(user_id, service_account_id),
                 ScheduledSessionRow.agent_id == agent_id,
             )
             .order_by(ScheduledSessionRow.created_at.desc())
@@ -152,13 +195,15 @@ class ScheduledSessionStore:
         self,
         *,
         org_id: UUID,
-        user_id: UUID,
         agent_id: str,
         schedule_id: UUID,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
     ) -> bool:
         return await self._set_status(
             org_id=org_id,
             user_id=user_id,
+            service_account_id=service_account_id,
             agent_id=agent_id,
             schedule_id=schedule_id,
             status="paused",
@@ -168,10 +213,15 @@ class ScheduledSessionStore:
         self,
         *,
         org_id: UUID,
-        user_id: UUID,
         agent_id: str,
         schedule_id: UUID,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
     ) -> bool:
+        _validate_principal(
+            user_id, service_account_id,
+            caller="ScheduledSessionStore.resume",
+        )
         schedule = await self.get(schedule_id)
         if schedule.schedule.get("kind") == "dynamic_loop":
             next_run_at = _utcnow()
@@ -183,7 +233,7 @@ class ScheduledSessionStore:
                 .where(
                     ScheduledSessionRow.id == schedule_id,
                     ScheduledSessionRow.org_id == org_id,
-                    ScheduledSessionRow.user_id == user_id,
+                    _owner_filter_clauses(user_id, service_account_id),
                     ScheduledSessionRow.agent_id == agent_id,
                 )
                 .values(
@@ -201,16 +251,21 @@ class ScheduledSessionStore:
         self,
         *,
         org_id: UUID,
-        user_id: UUID,
         agent_id: str,
         schedule_id: UUID,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
     ) -> bool:
+        _validate_principal(
+            user_id, service_account_id,
+            caller="ScheduledSessionStore.delete",
+        )
         async with self._sf() as db:
             result = await db.execute(
                 delete(ScheduledSessionRow).where(
                     ScheduledSessionRow.id == schedule_id,
                     ScheduledSessionRow.org_id == org_id,
-                    ScheduledSessionRow.user_id == user_id,
+                    _owner_filter_clauses(user_id, service_account_id),
                     ScheduledSessionRow.agent_id == agent_id,
                 )
             )
@@ -222,12 +277,14 @@ class ScheduledSessionStore:
         schedule_id: UUID,
         *,
         org_id: UUID,
-        user_id: UUID,
         agent_id: str,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
     ) -> bool:
         return await self.delete(
             org_id=org_id,
             user_id=user_id,
+            service_account_id=service_account_id,
             agent_id=agent_id,
             schedule_id=schedule_id,
         )
@@ -236,17 +293,22 @@ class ScheduledSessionStore:
         self,
         *,
         org_id: UUID,
-        user_id: UUID,
         agent_id: str,
         schedule_id: UUID,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
     ) -> bool:
+        _validate_principal(
+            user_id, service_account_id,
+            caller="ScheduledSessionStore.run_now",
+        )
         async with self._sf() as db:
             result = await db.execute(
                 update(ScheduledSessionRow)
                 .where(
                     ScheduledSessionRow.id == schedule_id,
                     ScheduledSessionRow.org_id == org_id,
-                    ScheduledSessionRow.user_id == user_id,
+                    _owner_filter_clauses(user_id, service_account_id),
                     ScheduledSessionRow.agent_id == agent_id,
                     ScheduledSessionRow.status == "active",
                 )
@@ -379,22 +441,31 @@ class ScheduledSessionStore:
         *,
         schedule_id: UUID,
         org_id: UUID,
-        user_id: UUID,
         agent_id: str,
         session_id: UUID,
         delay_seconds: int,
         reason: str,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
         completed: bool = False,
     ) -> bool:
+        _validate_principal(
+            user_id, service_account_id,
+            caller="ScheduledSessionStore.mark_dynamic_run_finished",
+        )
         delay = clamp_dynamic_loop_delay(delay_seconds)
         now = _utcnow()
         async with self._sf() as db:
             row = await db.get(ScheduledSessionRow, schedule_id, with_for_update=True)
             if row is None:
                 return False
+            if user_id is not None:
+                principal_match = row.user_id == user_id
+            else:
+                principal_match = row.service_account_id == service_account_id
             if (
                 row.org_id != org_id
-                or row.user_id != user_id
+                or not principal_match
                 or row.agent_id != agent_id
                 or row.last_session_id != session_id
                 or row.schedule.get("kind") != "dynamic_loop"
@@ -424,30 +495,39 @@ class ScheduledSessionStore:
         *,
         schedule_id: UUID,
         org_id: UUID,
-        user_id: UUID,
         agent_id: str,
         session_id: UUID,
         reason: str,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
     ) -> bool:
         """Mark a scheduled loop completed at the request of its running session.
 
         Used by the ``loop_complete`` tool so a fixed-cron ``/loop`` child
         can self-terminate when its prompt's stop condition is met.  The
-        tenant/agent/session tuple is enforced — only the currently-running
-        session can complete its own schedule, mirroring the guard in
-        ``mark_dynamic_run_finished``.
+        tenant/principal/agent/session tuple is enforced — only the
+        currently-running session can complete its own schedule, mirroring
+        the guard in ``mark_dynamic_run_finished``.
 
         Returns ``True`` on success, ``False`` when the row doesn't exist
         or the tuple doesn't match.
         """
+        _validate_principal(
+            user_id, service_account_id,
+            caller="ScheduledSessionStore.mark_loop_completed",
+        )
         now = _utcnow()
         async with self._sf() as db:
             row = await db.get(ScheduledSessionRow, schedule_id, with_for_update=True)
             if row is None:
                 return False
+            if user_id is not None:
+                principal_match = row.user_id == user_id
+            else:
+                principal_match = row.service_account_id == service_account_id
             if (
                 row.org_id != org_id
-                or row.user_id != user_id
+                or not principal_match
                 or row.agent_id != agent_id
                 or row.last_session_id != session_id
             ):
@@ -571,11 +651,16 @@ class ScheduledSessionStore:
         self,
         *,
         org_id: UUID,
-        user_id: UUID,
         agent_id: str,
         schedule_id: UUID,
         status: str,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
     ) -> bool:
+        _validate_principal(
+            user_id, service_account_id,
+            caller="ScheduledSessionStore._set_status",
+        )
         values: dict[str, Any] = {"status": status, "updated_at": func.now()}
         if status != "active":
             values["locked_by"] = None
@@ -586,7 +671,7 @@ class ScheduledSessionStore:
                 .where(
                     ScheduledSessionRow.id == schedule_id,
                     ScheduledSessionRow.org_id == org_id,
-                    ScheduledSessionRow.user_id == user_id,
+                    _owner_filter_clauses(user_id, service_account_id),
                     ScheduledSessionRow.agent_id == agent_id,
                 )
                 .values(**values)

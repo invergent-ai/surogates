@@ -209,7 +209,8 @@ CREATE INDEX IF NOT EXISTS idx_tasks_current_session
 CREATE TABLE IF NOT EXISTS missions (
     id                          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     org_id                      uuid NOT NULL REFERENCES orgs(id),
-    user_id                     uuid NOT NULL REFERENCES users(id),
+    user_id                     uuid REFERENCES users(id),
+    service_account_id          uuid REFERENCES service_accounts(id),
     session_id                  uuid NOT NULL REFERENCES sessions(id),
     agent_id                    text NOT NULL,
     description                 text NOT NULL,
@@ -225,18 +226,101 @@ CREATE TABLE IF NOT EXISTS missions (
     paused_reason               text,
     cancelled_reason            text,
     created_at                  timestamptz NOT NULL DEFAULT now(),
-    updated_at                  timestamptz NOT NULL DEFAULT now()
+    updated_at                  timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT ck_missions_one_principal
+        CHECK ((user_id IS NOT NULL)::int
+             + (service_account_id IS NOT NULL)::int = 1)
 );
+
+-- ----------------------------------------------------------------------------
+-- Missions — relax single-principal ownership.  ``user_id`` was NOT NULL with
+-- a FK to users(id) — only user JWTs could own missions.  Sessions created
+-- through ops's Work UI authenticate as per-user service accounts (the
+-- surogates session row has user_id=NULL, service_account_id=<sa>), so they
+-- could never start a /mission.
+--
+-- Drop NOT NULL on user_id, add service_account_id, and enforce the
+-- principal invariant (exactly one of the two is set) via CHECK.
+-- ----------------------------------------------------------------------------
+
+ALTER TABLE missions
+    ALTER COLUMN user_id DROP NOT NULL,
+    ADD COLUMN IF NOT EXISTS service_account_id uuid
+        REFERENCES service_accounts(id);
+
+-- Replace the old (org, user, agent, status) index with one that covers
+-- both principal shapes.  Old index is dropped explicitly because the
+-- name is changing.
+DROP INDEX IF EXISTS idx_missions_user_agent_status;
+CREATE INDEX IF NOT EXISTS idx_missions_principal_agent_status
+    ON missions (org_id, user_id, service_account_id, agent_id, status);
+
+-- Exactly one principal must be set.  Wrapped in DO block so the ADD is
+-- idempotent (PG has no ADD CONSTRAINT IF NOT EXISTS).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'ck_missions_one_principal'
+          AND conrelid = 'missions'::regclass
+    ) THEN
+        ALTER TABLE missions
+            ADD CONSTRAINT ck_missions_one_principal
+            CHECK ((user_id IS NOT NULL)::int
+                 + (service_account_id IS NOT NULL)::int = 1);
+    END IF;
+END $$;
 
 ALTER TABLE tasks
     ADD COLUMN IF NOT EXISTS mission_id uuid REFERENCES missions(id);
 
 CREATE INDEX IF NOT EXISTS idx_missions_session
     ON missions (session_id);
-CREATE INDEX IF NOT EXISTS idx_missions_user_agent_status
-    ON missions (org_id, user_id, agent_id, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_mission
     ON tasks (mission_id);
+
+
+-- ----------------------------------------------------------------------------
+-- Scheduled sessions — relax single-principal ownership.  ``user_id`` was
+-- NOT NULL with a FK to users(id) — only user JWTs could create /loop
+-- schedules.  Sessions created through ops's Work UI authenticate as
+-- per-user service accounts (the surogates session row has user_id=NULL,
+-- service_account_id=<sa>), so they could never start a /loop.
+--
+-- Drop NOT NULL on user_id, add service_account_id, and enforce the
+-- principal invariant (exactly one of the two is set) via CHECK.  The
+-- table itself is created by ``Base.metadata.create_all`` (no fallback
+-- CREATE TABLE here), so the only retrofit work is the column / index /
+-- constraint reshape for existing PROD DBs.
+-- ----------------------------------------------------------------------------
+
+ALTER TABLE scheduled_sessions
+    ALTER COLUMN user_id DROP NOT NULL,
+    ADD COLUMN IF NOT EXISTS service_account_id uuid
+        REFERENCES service_accounts(id);
+
+-- Replace the old (org, user, agent) index with one that covers both
+-- principal shapes.  Old index is dropped explicitly because the name
+-- is changing.
+DROP INDEX IF EXISTS idx_scheduled_sessions_user;
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_principal
+    ON scheduled_sessions (org_id, user_id, service_account_id, agent_id);
+
+-- Exactly one principal must be set.  Wrapped in DO block so the ADD is
+-- idempotent (PG has no ADD CONSTRAINT IF NOT EXISTS).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'ck_scheduled_sessions_one_principal'
+          AND conrelid = 'scheduled_sessions'::regclass
+    ) THEN
+        ALTER TABLE scheduled_sessions
+            ADD CONSTRAINT ck_scheduled_sessions_one_principal
+            CHECK ((user_id IS NOT NULL)::int
+                 + (service_account_id IS NOT NULL)::int = 1);
+    END IF;
+END $$;
 
 
 -- ----------------------------------------------------------------------------

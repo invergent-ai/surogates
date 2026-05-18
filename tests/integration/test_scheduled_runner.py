@@ -10,7 +10,7 @@ from surogates.scheduled.store import ScheduledSessionStore
 from surogates.session.events import EventType
 from surogates.session.store import SessionStore
 
-from .conftest import create_org, create_user
+from .conftest import create_org, create_user, issue_service_account_token
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -378,3 +378,46 @@ async def test_runner_requeues_stalled_dynamic_loop_sessions(
     assert score is not None
     updated = await scheduled_store.get(schedule.id)
     assert updated.next_run_at is None
+
+
+async def test_runner_creates_sa_owned_run_session(session_factory, redis_client):
+    """A schedule owned by a service account fires a run whose session
+    carries the same SA principal (and no user_id) — this is how the
+    Work-chat /loop reaches its run in PROD."""
+    org_id = await create_org(session_factory)
+    issued = await issue_service_account_token(
+        session_factory, org_id, name="loop-runner-sa",
+    )
+    scheduled_store = ScheduledSessionStore(session_factory)
+    schedule = await scheduled_store.create(
+        org_id=org_id,
+        service_account_id=issued.id,
+        agent_id="agent-a",
+        name="SA loop",
+        prompt="/status",
+        schedule=parse_schedule("10m"),
+        source="loop",
+        created_from_session_id=None,
+        next_run_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+
+    queue = agent_queue_key("agent-a")
+    await redis_client.delete(queue)
+    session_store = SessionStore(session_factory, redis=redis_client)
+    runner = ScheduledSessionRunner(
+        settings=FakeSettings(),
+        session_factory=session_factory,
+        session_store=session_store,
+        scheduled_store=scheduled_store,
+        redis=redis_client,
+        storage=FakeStorage(),
+    )
+
+    processed = await runner.tick_once()
+    assert processed == 1
+
+    updated = await scheduled_store.get(schedule.id)
+    assert updated.last_session_id is not None
+    run = await session_store.get_session(updated.last_session_id)
+    assert run.user_id is None
+    assert run.service_account_id == issued.id

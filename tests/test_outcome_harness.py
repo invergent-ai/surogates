@@ -494,12 +494,17 @@ async def test_mission_has_pending_work_false_when_no_active_mission(
 
 
 @pytest.mark.asyncio
-async def test_handle_mission_create_rejects_service_account_principal() -> None:
-    """A tenant with user_id=None (service-account/channel session) must
-    not be allowed to create a mission — missions.user_id is NOT NULL
-    and a bare attempt to insert would surface as NotNullViolationError."""
+async def test_handle_mission_create_forwards_service_account_principal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tenant with service_account_id set (Work-chat path in PROD) must
+    be allowed to create a mission. The harness passes its principal
+    through to handle_mission_create; the call site resolves to the SA
+    owner so the row's ck_missions_one_principal CHECK is satisfied."""
+    from surogates.missions.commands import MissionHandlerResult
+
     store = FakeStore()
-    # Override the harness tenant to have user_id=None (service account).
+    sa_id = UUID("00000000-0000-0000-0000-000000000099")
     sa_tenant = TenantContext(
         org_id=UUID("00000000-0000-0000-0000-000000000001"),
         user_id=None,
@@ -507,10 +512,61 @@ async def test_handle_mission_create_rejects_service_account_principal() -> None
         user_preferences={},
         permissions=frozenset(),
         asset_root="/tmp/test",
-        service_account_id=UUID("00000000-0000-0000-0000-000000000099"),
+        service_account_id=sa_id,
     )
     harness = _make_harness(
         store, tenant=sa_tenant, redis_client=AsyncMock(),
+        session_factory=MagicMock(),
+    )
+    session = _session()
+    lease = _lease(session.id)
+
+    forwarded: dict[str, Any] = {}
+    mission_id = uuid4()
+
+    async def fake_create(**kwargs: Any) -> MissionHandlerResult:
+        forwarded.update(kwargs)
+        return MissionHandlerResult(
+            ok=True, mission_id=mission_id, message="started",
+        )
+
+    monkeypatch.setattr(
+        "surogates.missions.commands.handle_mission_create", fake_create,
+    )
+
+    await harness._handle_mission_command(
+        session,
+        "/mission Train the model\n\nRubric:\nReach gsm8k >= 0.8",
+        lease,
+    )
+
+    # The harness forwarded the SA principal, not the (absent) user.
+    assert forwarded.get("user_id") is None
+    assert forwarded.get("service_account_id") == sa_id
+    # In-memory session.config is updated so the rest of the wake sees
+    # coordinator=True / active_mission_id (same as the user path).
+    assert session.config["coordinator"] is True
+    assert session.config["active_mission_id"] == str(mission_id)
+
+
+@pytest.mark.asyncio
+async def test_handle_mission_create_rejects_anonymous_channel_principal() -> None:
+    """A tenant without either principal (anonymous-channel session)
+    cannot own a mission — the session itself is the principal and
+    a mission needs a durable owner outliving the session."""
+    store = FakeStore()
+    channel_tenant = TenantContext(
+        org_id=UUID("00000000-0000-0000-0000-000000000001"),
+        user_id=None,
+        org_config={},
+        user_preferences={},
+        permissions=frozenset(),
+        asset_root="/tmp/test",
+        service_account_id=None,
+        session_scope_id=UUID("00000000-0000-0000-0000-0000000000aa"),
+    )
+    harness = _make_harness(
+        store, tenant=channel_tenant, redis_client=AsyncMock(),
         session_factory=MagicMock(),
     )
     session = _session()
@@ -524,7 +580,7 @@ async def test_handle_mission_create_rejects_service_account_principal() -> None
 
     response = [event for event in store.events if event[1] == EventType.LLM_RESPONSE][-1]
     content = response[2]["message"]["content"]
-    assert "user session" in content
+    assert "anonymous channel" in content
     # No mission was created — config wasn't touched, no kickoff queued.
     assert store.config_updates == []
     assert store.synthetic_messages == []

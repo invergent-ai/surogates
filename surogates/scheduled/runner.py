@@ -142,6 +142,7 @@ class ScheduledSessionRunner:
                     settings=self._settings,
                     org_id=schedule.org_id,
                     user_id=schedule.user_id,
+                    service_account_id=schedule.service_account_id,
                     agent_id=schedule.agent_id,
                     channel="scheduled",
                     model=self._settings.llm.model,

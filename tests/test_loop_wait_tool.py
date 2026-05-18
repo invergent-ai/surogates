@@ -28,7 +28,7 @@ class FakeStore:
 async def test_loop_wait_requires_dynamic_loop_session():
     result = json.loads(await _loop_wait_handler(
         {"delay_seconds": 120, "reason": "waiting for CI"},
-        tenant=SimpleNamespace(org_id=uuid4(), user_id=uuid4()),
+        tenant=SimpleNamespace(org_id=uuid4(), user_id=uuid4(), service_account_id=None),
         agent_id="agent-a",
         session_id=str(uuid4()),
         session_config={},
@@ -49,7 +49,7 @@ async def test_loop_wait_clamps_and_persists_next_delay():
 
     result = json.loads(await _loop_wait_handler(
         {"delay_seconds": 5, "reason": "fast retry"},
-        tenant=SimpleNamespace(org_id=org_id, user_id=user_id),
+        tenant=SimpleNamespace(org_id=org_id, user_id=user_id, service_account_id=None),
         agent_id="agent-a",
         session_id=str(session_id),
         session_config={
@@ -66,6 +66,7 @@ async def test_loop_wait_clamps_and_persists_next_delay():
         "schedule_id": schedule_id,
         "org_id": org_id,
         "user_id": user_id,
+        "service_account_id": None,
         "agent_id": "agent-a",
         "session_id": session_id,
         "delay_seconds": 60,
@@ -84,7 +85,7 @@ async def test_loop_wait_passes_completed_flag_to_store():
 
     result = json.loads(await _loop_wait_handler(
         {"delay_seconds": 3600, "reason": "task done", "completed": True},
-        tenant=SimpleNamespace(org_id=org_id, user_id=user_id),
+        tenant=SimpleNamespace(org_id=org_id, user_id=user_id, service_account_id=None),
         agent_id="agent-a",
         session_id=str(session_id),
         session_config={
@@ -103,7 +104,7 @@ async def test_loop_wait_passes_completed_flag_to_store():
 async def test_loop_wait_rejects_invalid_schedule_id():
     result = json.loads(await _loop_wait_handler(
         {"delay_seconds": 120, "reason": "waiting"},
-        tenant=SimpleNamespace(org_id=uuid4(), user_id=uuid4()),
+        tenant=SimpleNamespace(org_id=uuid4(), user_id=uuid4(), service_account_id=None),
         agent_id="agent-a",
         session_id=str(uuid4()),
         session_config={
@@ -127,7 +128,7 @@ async def test_loop_complete_marks_schedule_completed():
 
     result = json.loads(await _loop_complete_handler(
         {"reason": "Collected 2 BTC prices as requested"},
-        tenant=SimpleNamespace(org_id=org_id, user_id=user_id),
+        tenant=SimpleNamespace(org_id=org_id, user_id=user_id, service_account_id=None),
         agent_id="agent-a",
         session_id=str(session_id),
         session_config={
@@ -142,6 +143,7 @@ async def test_loop_complete_marks_schedule_completed():
         "schedule_id": schedule_id,
         "org_id": org_id,
         "user_id": user_id,
+        "service_account_id": None,
         "agent_id": "agent-a",
         "session_id": session_id,
         "reason": "Collected 2 BTC prices as requested",
@@ -153,7 +155,7 @@ async def test_loop_complete_rejects_dynamic_loop():
     """Dynamic loops should use loop_wait(completed=true), not loop_complete."""
     result = json.loads(await _loop_complete_handler(
         {"reason": "done"},
-        tenant=SimpleNamespace(org_id=uuid4(), user_id=uuid4()),
+        tenant=SimpleNamespace(org_id=uuid4(), user_id=uuid4(), service_account_id=None),
         agent_id="agent-a",
         session_id=str(uuid4()),
         session_config={
@@ -171,7 +173,7 @@ async def test_loop_complete_rejects_dynamic_loop():
 async def test_loop_complete_rejects_non_scheduled_session():
     result = json.loads(await _loop_complete_handler(
         {"reason": "done"},
-        tenant=SimpleNamespace(org_id=uuid4(), user_id=uuid4()),
+        tenant=SimpleNamespace(org_id=uuid4(), user_id=uuid4(), service_account_id=None),
         agent_id="agent-a",
         session_id=str(uuid4()),
         session_config={},
@@ -186,7 +188,7 @@ async def test_loop_complete_rejects_non_scheduled_session():
 async def test_loop_complete_requires_reason():
     result = json.loads(await _loop_complete_handler(
         {"reason": "   "},
-        tenant=SimpleNamespace(org_id=uuid4(), user_id=uuid4()),
+        tenant=SimpleNamespace(org_id=uuid4(), user_id=uuid4(), service_account_id=None),
         agent_id="agent-a",
         session_id=str(uuid4()),
         session_config={
