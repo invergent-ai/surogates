@@ -262,11 +262,24 @@ export interface AgentChatMissionTask {
   completedAt: string | null;
 }
 
+export type AgentChatMissionWorkerKind = "task" | "worker" | "delegation";
+
 export interface AgentChatMissionWorker {
-  taskId: string;
+  /**
+   * Which delegation primitive produced this child:
+   *
+   * - "task"       — `spawn_task` (durable Task row, retried by dispatcher)
+   * - "worker"     — `spawn_worker` (async one-shot, durable session)
+   * - "delegation" — `delegate_task` (sync fork-join, ephemeral session)
+   *
+   * `taskId` / `taskStatus` are non-null only for `kind === "task"` —
+   * the other two primitives don't create Task rows.
+   */
+  kind: AgentChatMissionWorkerKind;
+  taskId: string | null;
   workerSessionId: string;
   agentDefName: string | null;
-  taskStatus: string;
+  taskStatus: string | null;
   sessionStatus: string;
   latestEventId: number | null;
   latestEventKind: string | null;
