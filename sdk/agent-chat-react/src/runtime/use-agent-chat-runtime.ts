@@ -176,6 +176,28 @@ export function useAgentChatRuntime({
       })
       .catch(() => undefined);
 
+    // Replayed events alone aren't enough to know whether the browser is
+    // currently alive — a session can have a `browser.provisioned` event
+    // in its history without a matching `destroyed` (e.g., a completed
+    // session whose browser is still up, or one whose teardown event was
+    // never emitted). Hydrate the actual current browser state via the
+    // adapter when the session opens.
+    void adapter
+      .getBrowserState(sessionId)
+      .then((browserState) => {
+        if (sessionIdRef.current !== sessionId) return;
+        setState((prev) => ({
+          ...prev,
+          browser: browserState
+            ? {
+                status: browserState.status,
+                controlOwner: browserState.controlOwner ?? null,
+              }
+            : null,
+        }));
+      })
+      .catch(() => undefined);
+
     return () => {
       clearReconnectTimer();
       closeStream();
