@@ -212,52 +212,106 @@ async def get_mission_workers(
     session_factory: async_sessionmaker = Depends(_session_factory_dep),
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> dict[str, Any]:
-    """Return live/recent worker activity rows for the mission.
+    """Return worker activity rows for the mission.
+
+    Returns three categories of children, distinguished by ``kind``:
+
+    * ``"task"`` — task-backed workers (the coordinator called ``spawn_task``).
+      Carry a ``task_id`` and a ``task_status``; mature, durable, retried by
+      the dispatcher.
+    * ``"worker"`` — async one-shot children spawned via ``spawn_worker``.
+      No Task row, but the session is durable. ``task_id``/``task_status``
+      are ``None``.
+    * ``"delegation"`` — sync fork-join children spawned via
+      ``delegate_task``. The coordinator's wake blocks until they finish;
+      sessions are usually short-lived. Same null-task shape as workers.
+
+    Direct ``spawn_worker``/``delegate_task`` children were previously
+    invisible — they have no Task row, so the old task-driven query
+    returned an empty list even though the coordinator was actively
+    delegating. Merging them in surfaces real activity without changing
+    agent behaviour.
 
     The client derives a human-friendly activity label from the
     ``latest_event_*`` fields; the server's job is just to expose them.
     """
-    await _load_mission_authorized(
+    mission_row = await _load_mission_authorized(
         mission_id, session_factory=session_factory, tenant=tenant,
     )
+    workers: list[dict[str, Any]] = []
     async with session_factory() as db:
+        # 1. Task-backed workers (the spawn_task path).
         tasks = (await db.execute(
             select(TaskRow).where(
                 TaskRow.mission_id == mission_id,
                 TaskRow.current_session_id.isnot(None),
             )
         )).scalars().all()
-
-        workers: list[dict[str, Any]] = []
         for t in tasks:
             sess = await db.get(ORMSession, t.current_session_id)
             if sess is None:
                 continue
-            latest = (await db.execute(
-                select(Event)
-                .where(Event.session_id == sess.id)
-                .order_by(Event.id.desc())
-                .limit(1)
-            )).scalar_one_or_none()
-            workers.append({
-                "task_id": str(t.id),
-                "worker_session_id": str(sess.id),
-                "agent_def_name": t.agent_def_name,
-                "task_status": t.status,
-                "session_status": sess.status,
-                "latest_event_id": latest.id if latest else None,
-                "latest_event_kind": latest.type if latest else None,
-                "latest_event_at": (
-                    latest.created_at.isoformat()
-                    if latest and latest.created_at else None
-                ),
-                "latest_event_summary": (
-                    json.dumps(latest.data)[:200]
-                    if latest and latest.data else None
-                ),
-                "transcript_url": f"/chat/{sess.id}",
-            })
+            workers.append(await _worker_row(
+                db, kind="task", task=t, session=sess,
+            ))
+
+        # 2. Direct children of the coordinator's session (spawn_worker +
+        # delegate_task). These don't have Task rows.  Channel discriminates:
+        #   * ``worker`` — spawn_worker
+        #   * ``delegation`` — delegate_task
+        # Filtering to those two channels keeps unrelated child shapes
+        # (``scheduled``, ``api``, etc.) out — only the coordinator-driven
+        # primitives surface here.
+        direct_children = (await db.execute(
+            select(ORMSession).where(
+                ORMSession.parent_id == mission_row.session_id,
+                ORMSession.channel.in_(("worker", "delegation")),
+            ).order_by(ORMSession.created_at.asc())
+        )).scalars().all()
+        for sess in direct_children:
+            kind = "worker" if sess.channel == "worker" else "delegation"
+            workers.append(await _worker_row(
+                db, kind=kind, task=None, session=sess,
+            ))
     return {"workers": workers}
+
+
+async def _worker_row(
+    db,
+    *,
+    kind: str,
+    task: TaskRow | None,
+    session: ORMSession,
+) -> dict[str, Any]:
+    """Build one worker entry, joining the session's latest event."""
+    latest = (await db.execute(
+        select(Event)
+        .where(Event.session_id == session.id)
+        .order_by(Event.id.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+    return {
+        "kind": kind,
+        "task_id": str(task.id) if task is not None else None,
+        "worker_session_id": str(session.id),
+        "agent_def_name": (
+            task.agent_def_name if task is not None
+            else (session.config or {}).get("agent_def_name")
+        ),
+        "task_status": task.status if task is not None else None,
+        "session_status": session.status,
+        "latest_event_id": latest.id if latest else None,
+        "latest_event_kind": latest.type if latest else None,
+        "latest_event_at": (
+            latest.created_at.isoformat()
+            if latest and latest.created_at else None
+        ),
+        "latest_event_summary": (
+            json.dumps(latest.data)[:200]
+            if latest and latest.data else None
+        ),
+        "transcript_url": f"/chat/{session.id}",
+    }
 
 
 # ---------------------------------------------------------------------------
