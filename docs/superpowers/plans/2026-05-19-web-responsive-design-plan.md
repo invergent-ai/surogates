@@ -12,6 +12,31 @@
 
 ---
 
+## Progress
+
+- [ ] **Task 1** Branch + baseline verification — _in progress_
+- [ ] **Task 2** Sheet primitive (web)
+- [ ] **Task 3** useVisualViewport hook (web)
+- [ ] **Task 4** AppShell component (web)
+- [ ] **Task 5** Refactor SessionSidebar to parent-driven
+- [ ] **Task 6** Update `__root.tsx` to `h-dvh` + mount viewport hook
+- [ ] **Task 7** Wrap `/chat` route in AppShell
+- [ ] **Task 8** Wrap `/inbox` in AppShell with URL-driven list/detail
+- [ ] **Task 9** Wrap `/missions/$missionId` route in AppShell
+- [ ] **Task 10** Wrap `/agents` route in AppShell + reflow
+- [ ] **Task 11** Wrap `/skills` route in AppShell + reflow
+- [ ] **Task 12** Wrap `/settings` route in AppShell + tabs reflow
+- [ ] **Task 13** Fix bare routes (`/login`, `/link`) for phone widths
+- [ ] **Task 14** SDK — sidebar panels touch targets and overflow
+- [ ] **Task 15** SDK — `MissionDashboard` grid + tabstrip
+- [ ] **Task 16** SDK — `BrowserPane` and `WorkspacePanel`
+- [ ] **Task 17** SDK — `AgentChat` mobile Chat/Workspace toggle
+- [ ] **Task 18** SDK — UI primitive touch-target sweep
+- [ ] **Task 19** Composer keyboard awareness wiring
+- [ ] **Task 20** Final verification — typecheck, biome, build, dev sanity
+
+---
+
 ## File Structure
 
 ### New files (web)
