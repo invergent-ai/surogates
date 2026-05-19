@@ -18,8 +18,8 @@
 - [x] **Task 2** Sheet primitive (web)
 - [x] **Task 3** useVisualViewport hook (web)
 - [x] **Task 4** AppShell component (web)
-- [ ] **Task 5** Refactor SessionSidebar to parent-driven — _in progress_
-- [ ] **Task 6** Update `__root.tsx` to `h-dvh` + mount viewport hook
+- [x] **Task 5** Refactor SessionSidebar to parent-driven
+- [ ] **Task 6** Update `__root.tsx` to `h-dvh` + mount viewport hook — _in progress_
 - [ ] **Task 7** Wrap `/chat` route in AppShell
 - [ ] **Task 8** Wrap `/inbox` in AppShell with URL-driven list/detail
 - [ ] **Task 9** Wrap `/missions/$missionId` route in AppShell
