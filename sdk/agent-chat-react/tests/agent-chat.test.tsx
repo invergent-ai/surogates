@@ -211,15 +211,15 @@ describe("AgentChat", () => {
 
     await act(async () => {
       root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
     });
 
-    const trigger = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Slash commands"]',
-    );
-    expect(trigger).not.toBeNull();
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea");
+    if (!textarea) throw new Error("textarea not rendered");
 
     await act(async () => {
-      trigger!.click();
+      setTextareaValue(textarea, "/");
+      await Promise.resolve();
       await Promise.resolve();
     });
 
