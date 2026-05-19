@@ -3,6 +3,7 @@
 
 import { createRoute } from "@tanstack/react-router";
 import { lazy } from "react";
+
 import { requireAuth } from "../auth-guards";
 import { Route as rootRoute } from "./__root";
 
@@ -16,5 +17,13 @@ export const Route = createRoute({
   getParentRoute: () => rootRoute,
   path: "/inbox",
   beforeLoad: () => requireAuth(),
+  validateSearch: (search: Record<string, unknown>): { item?: number } => {
+    const raw = search.item;
+    if (typeof raw === "number") return { item: raw };
+    if (typeof raw === "string" && /^\d+$/.test(raw)) {
+      return { item: Number(raw) };
+    }
+    return {};
+  },
   component: InboxPage,
 });

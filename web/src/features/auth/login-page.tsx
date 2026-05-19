@@ -155,7 +155,7 @@ export function LoginPage() {
   const clearError = () => setLoginError(null);
 
   return (
-    <div className=" bg-background text-foreground h-screen flex flex-col items-center justify-center overflow-hidden text-sm leading-normal antialiased relative">
+    <div className="bg-background text-foreground min-h-dvh flex flex-col items-center justify-center overflow-hidden text-sm leading-normal antialiased relative px-4 py-6">
       {/* animated grid */}
       <canvas
         ref={canvasRef}
@@ -199,7 +199,7 @@ export function LoginPage() {
       {/* ── card ── */}
       <Card
         className={cn(
-          "relative z-10 block w-full max-w-[420px] overflow-visible rounded-2xl border border-line bg-card/80 px-10 py-10 text-card-foreground opacity-0 shadow-xl backdrop-blur-xl ring-0",
+          "relative z-10 block w-full max-w-[420px] overflow-visible rounded-2xl border border-line bg-card/80 px-6 py-8 sm:px-10 sm:py-10 text-card-foreground opacity-0 shadow-xl backdrop-blur-xl ring-0",
           "animate-fade-up",
         )}
         style={{ animationDelay: "0.1s" }}

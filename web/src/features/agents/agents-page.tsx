@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { dump as yamlDump } from "js-yaml";
 import {
   BotIcon,
+  ChevronLeftIcon,
   FileTextIcon,
   Loader2Icon,
   PencilIcon,
@@ -58,6 +59,7 @@ import {
   InputGroupInput,
 } from "@/components/ui/input-group";
 import { Textarea } from "@/components/ui/textarea";
+import { AppShell } from "@/components/app-shell";
 import { SessionSidebar } from "@/components/navbar";
 
 const SOURCE_LABELS: Record<AgentSource, string> = {
@@ -214,10 +216,15 @@ export function AgentsPage() {
   }, [deleteTarget, selectedName]);
 
   return (
-    <>
-      <SessionSidebar />
-      <main className="flex-1 flex overflow-hidden">
-        <section className="flex flex-col w-80 min-w-80 border-r border-line">
+    <AppShell sidebar={<SessionSidebar />}>
+      <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
+        <section
+          className={cn(
+            "flex flex-col border-r border-line",
+            "w-full md:w-72 md:min-w-72 lg:w-80 lg:min-w-80",
+            selectedName && "hidden md:flex",
+          )}
+        >
           <header className="px-4 py-4 border-b border-line space-y-3">
             <div className="flex items-center justify-between gap-2">
               <h1 className="text-lg font-bold tracking-tight text-foreground">
@@ -278,7 +285,24 @@ export function AgentsPage() {
           </div>
         </section>
 
-        <section className="flex-1 overflow-y-auto">
+        <section
+          className={cn(
+            "flex-1 flex-col overflow-y-auto",
+            selectedName ? "flex" : "hidden md:flex",
+          )}
+        >
+          {selectedName && (
+            <div className="md:hidden flex items-center border-b border-line px-2 py-2">
+              <button
+                type="button"
+                onClick={() => setSelectedName(null)}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-md text-subtle hover:bg-input hover:text-foreground"
+                aria-label="Back to sub-agents list"
+              >
+                <ChevronLeftIcon className="h-5 w-5" />
+              </button>
+            </div>
+          )}
           {detailLoading ? (
             <div className="flex items-center justify-center h-full text-muted-foreground">
               <Loader2Icon className="w-4 h-4 animate-spin mr-2" />
@@ -295,7 +319,7 @@ export function AgentsPage() {
             />
           )}
         </section>
-      </main>
+      </div>
 
       <CreateAgentDialog
         open={createOpen}
@@ -325,7 +349,7 @@ export function AgentsPage() {
         onConfirm={handleDelete}
         onCancel={() => setDeleteTarget(null)}
       />
-    </>
+    </AppShell>
   );
 }
 

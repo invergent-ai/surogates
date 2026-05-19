@@ -4,6 +4,7 @@ import { BrowserPane } from "./components/browser/browser-pane";
 import { ChatThread } from "./components/chat/chat-thread";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { WorkspacePanel } from "./components/workspace/workspace-panel";
+import { cn } from "./lib/utils";
 import { isScheduledRunSession } from "./lib/sessions";
 import { useAgentChatRuntime } from "./runtime/use-agent-chat-runtime";
 import type {
@@ -28,6 +29,12 @@ export interface AgentChatProps {
   onComposerError?: (err: ChatComposerError) => void;
 }
 
+// CSS variable controlling the desktop right-stack width. Inlined as a style
+// so it stays component-local; arbitrary-value Tailwind classes read it.
+const RIGHT_STACK_STYLE = {
+  ["--right-stack-w" as string]: "440px",
+} as React.CSSProperties;
+
 export function AgentChat({
   adapter,
   agentId,
@@ -39,6 +46,10 @@ export function AgentChat({
   onComposerError,
 }: AgentChatProps) {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
+  // On phones the chat and workspace panes don't fit side-by-side. A
+  // segmented control at the top of the layout swaps between them. On md+
+  // both are visible and the toggle is hidden.
+  const [mobileView, setMobileView] = useState<"chat" | "workspace">("chat");
   const runtime = useAgentChatRuntime({
     adapter,
     agentId,
@@ -60,10 +71,19 @@ export function AgentChat({
   const handleFileSelect = useCallback(
     (path: string) => {
       setWorkspacePath(path);
+      // Selecting a file on mobile should bring the workspace tab to the
+      // front so the user can see the file they just opened.
+      setMobileView("workspace");
       onFileSelect?.(path);
     },
     [onFileSelect],
   );
+
+  // Mobile toggle should only appear once there's something in the right
+  // stack — otherwise it would just toggle to an empty pane. The workspace
+  // panel always renders, but we still want the toggle even without a
+  // browser panel because there can be files to browse.
+  const showMobileToggle = Boolean(sessionId);
 
   return (
     <AgentChatAdapterProvider
@@ -76,21 +96,62 @@ export function AgentChat({
       <TooltipProvider>
         <section
           data-testid="agent-chat-layout"
-          className={
+          data-mobile-view={mobileView}
+          className={cn(
+            // Phone: flex column, tab toggle on top, then either chat or
+            // right stack visible based on `data-mobile-view`.
+            "flex min-h-0 flex-1 flex-col overflow-hidden bg-background text-sm text-foreground",
+            // md+: restore desktop two-pane layout.
             hasBrowserPanel
-              ? "relative min-h-0 flex-1 overflow-hidden bg-background text-sm text-foreground"
-              : "flex min-h-0 flex-1 overflow-hidden bg-background text-sm text-foreground"
-          }
-          style={{ direction: "ltr" }}
+              ? "md:relative md:flex-row"
+              : "md:flex-row",
+          )}
+          style={{ direction: "ltr", ...RIGHT_STACK_STYLE }}
         >
+          {showMobileToggle && (
+            <div className="md:hidden flex shrink-0 border-b border-line bg-card">
+              <button
+                type="button"
+                onClick={() => setMobileView("chat")}
+                aria-pressed={mobileView === "chat"}
+                className={cn(
+                  "flex-1 px-4 py-3 text-sm font-medium border-b-2 -mb-px transition-colors",
+                  mobileView === "chat"
+                    ? "border-primary text-foreground"
+                    : "border-transparent text-subtle hover:text-foreground",
+                )}
+              >
+                Chat
+              </button>
+              <button
+                type="button"
+                onClick={() => setMobileView("workspace")}
+                aria-pressed={mobileView === "workspace"}
+                className={cn(
+                  "flex-1 px-4 py-3 text-sm font-medium border-b-2 -mb-px transition-colors",
+                  mobileView === "workspace"
+                    ? "border-primary text-foreground"
+                    : "border-transparent text-subtle hover:text-foreground",
+                )}
+              >
+                Workspace
+              </button>
+            </div>
+          )}
+
           <div
             data-testid="chat-panel"
-            className={
+            data-mobile-view={mobileView}
+            className={cn(
+              // Phone: full width column, hidden when workspace tab active.
+              "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
+              showMobileToggle &&
+                "data-[mobile-view=workspace]:hidden md:flex!",
+              // md+: restore desktop positioning.
               hasBrowserPanel
-                ? "absolute inset-y-0 left-0 flex min-h-0 min-w-0 flex-col overflow-hidden"
-                : "flex min-w-0 flex-1 flex-col overflow-hidden"
-            }
-            style={hasBrowserPanel ? { right: 440 } : undefined}
+                ? "md:absolute md:inset-y-0 md:left-0 md:right-(--right-stack-w,440px) md:flex"
+                : "md:relative md:flex-1",
+            )}
           >
             <ChatThread
               sessionId={sessionId}
@@ -112,12 +173,19 @@ export function AgentChat({
           </div>
           <div
             data-testid="right-stack"
-            className={
+            data-mobile-view={mobileView}
+            className={cn(
+              // Phone: full width column, hidden when chat tab active.
+              "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
+              showMobileToggle &&
+                "data-[mobile-view=chat]:hidden md:flex!",
+              // md+: restore desktop positioning. With browser panel the
+              // right stack is absolutely positioned at the configured
+              // width; without it the stack flows in the row.
               hasBrowserPanel
-                ? "absolute inset-y-0 flex min-h-0 flex-col overflow-hidden"
-                : "flex min-h-0 shrink-0 flex-col"
-            }
-            style={hasBrowserPanel ? { right: 0, width: 440 } : undefined}
+                ? "md:absolute md:inset-y-0 md:right-0 md:w-(--right-stack-w,440px) md:flex-none"
+                : "md:relative md:shrink-0 md:flex-none md:w-(--right-stack-w,440px)",
+            )}
           >
             {hasBrowserPanel && (
               <div

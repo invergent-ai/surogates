@@ -8,6 +8,7 @@ import {
   type AgentChatAdapter,
   type AgentChatMessage,
 } from "@invergent/agent-chat-react";
+import { AppShell } from "@/components/app-shell";
 import { SessionSidebar } from "@/components/navbar";
 import { TransparencyBanner } from "@/components/transparency-banner";
 import { useAppStore } from "@/stores/app-store";
@@ -164,9 +165,8 @@ export function ChatPage() {
   // ── Render ────────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-screen w-full overflow-hidden">
-      <SessionSidebar />
-      <main className="flex-1 flex flex-col overflow-hidden relative">
+    <AppShell sidebar={<SessionSidebar />}>
+      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
         {needsDisclosure && (
           <div className="absolute inset-x-0 top-0 z-30 p-4 flex justify-center">
             <TransparencyBanner
@@ -207,7 +207,7 @@ export function ChatPage() {
             />
           </div>
         )}
-      </main>
-    </div>
+      </div>
+    </AppShell>
   );
 }

@@ -85,9 +85,9 @@ All non-bare routes are wrapped in `<AppShell>`. Inside `<main>`, each route han
 
 ### `/chat` and `/chat/$sessionId`
 
-- `headerSlot` on mobile = segmented control with two options: "Chat" and "Workspace". State lives in `chat-page.tsx`.
-- The two panes (messages, workspace) are wrapped so that on `< md`: messages visible iff toggle = Chat, workspace visible iff toggle = Workspace; on `md+` both always visible side-by-side and the toggle itself is `md:hidden`.
-- Composer wrapper: `sticky bottom-0` inside the scroll container; container is `h-[var(--viewport-h,100dvh)]`. The `use-visual-viewport` hook keeps `--viewport-h` accurate when the on-screen keyboard appears.
+- The chat workspace pane lives inside the SDK's `<AgentChat>` component (not in the web route), using hardcoded `width: 440px` for the right stack and `right: 440` for the chat panel. The Chat/Workspace toggle therefore lives **inside `<AgentChat>`**, not in `<AppShell>`'s `headerSlot`. See SDK changes below.
+- `headerSlot` for `/chat` is left empty (or available for future use).
+- Composer wrapper: the SDK's chat composer is `sticky bottom-0` inside its scroll container; the AppShell's root is `h-dvh`. The `use-visual-viewport` hook mounted at the web layer keeps `--viewport-h` accurate when the on-screen keyboard appears; the SDK's composer reads it via a CSS class.
 
 ### `/inbox`
 
@@ -129,6 +129,15 @@ Pure className sweeps in `/work/surogates/sdk/agent-chat-react/src/components/`.
 
 - Convert the desktop two-column grid `grid-cols-[1fr_320px]` to `grid-cols-1 lg:grid-cols-[1fr_320px]` so the stats sidebar drops below content on phone/tablet.
 - Tab strip becomes `flex overflow-x-auto` on `< md` with `whitespace-nowrap` tabs.
+
+### `AgentChat` layout (workspace toggle on mobile)
+
+This is the one SDK component that needs more than a className sweep, because its layout uses inline `style={{ width: 440 }}` / `style={{ right: 440 }}` for the right stack.
+
+- Move the inline positioning into Tailwind classes via CSS custom properties (`style={{ "--right-stack-w": "440px" }}` plus class `md:[right:var(--right-stack-w)]`), and on `< md` switch to a single-column tab layout.
+- Add **internal-only** state `const [mobileView, setMobileView] = useState<"chat" | "workspace">("chat")` and a top-of-layout segmented control rendered only on `< md` (`md:hidden`). Default tab is "chat"; selecting "workspace" requires `hasBrowserPanel` or a non-empty workspace.
+- The chat panel gets `data-mobile-view={mobileView}` plus classes `data-[mobile-view=workspace]:hidden md:!flex` so the tab swap is Tailwind-driven; same pattern for the right stack with `data-[mobile-view=chat]:hidden md:!flex`.
+- No public prop changes. The toggle is purely internal to `<AgentChat>`.
 
 ### `BrowserPane`, `WorkspacePanel`
 

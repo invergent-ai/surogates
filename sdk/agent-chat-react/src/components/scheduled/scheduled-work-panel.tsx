@@ -161,6 +161,7 @@ function ScheduledWorkRow({
     <div
       className={cn(
         "group flex min-w-0 items-start gap-2 border-l-2 border-l-transparent px-3 py-2 text-sm transition-colors hover:border-l-primary hover:bg-input",
+        "min-h-11 md:min-h-0",
         lastSessionId && "cursor-pointer",
       )}
       onClick={openLastRun}
@@ -208,7 +209,7 @@ function ScheduledWorkRow({
         {showRunNow && (
           <button
             type="button"
-            className="rounded p-1 text-faint opacity-70 transition-all hover:bg-line hover:text-foreground disabled:pointer-events-none disabled:opacity-40 group-hover:opacity-100"
+            className="rounded p-2 md:p-1 text-faint opacity-100 md:opacity-70 transition-all hover:bg-line hover:text-foreground disabled:pointer-events-none disabled:opacity-40 md:group-hover:opacity-100"
             onClick={(e) => {
               stopActionClick(e);
               onRunNow(item.id);
@@ -223,7 +224,7 @@ function ScheduledWorkRow({
         {canCancel && isActive && (
           <button
             type="button"
-            className="rounded p-1 text-faint opacity-70 transition-all hover:bg-destructive/10 hover:text-destructive disabled:pointer-events-none disabled:opacity-40 group-hover:opacity-100"
+            className="rounded p-2 md:p-1 text-faint opacity-100 md:opacity-70 transition-all hover:bg-destructive/10 hover:text-destructive disabled:pointer-events-none disabled:opacity-40 md:group-hover:opacity-100"
             onClick={(e) => {
               stopActionClick(e);
               onCancel(item.id);
