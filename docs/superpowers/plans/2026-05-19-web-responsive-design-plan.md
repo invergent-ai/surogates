@@ -15,8 +15,8 @@
 ## Progress
 
 - [x] **Task 1** Branch + baseline verification
-- [ ] **Task 2** Sheet primitive (web) — _in progress_
-- [ ] **Task 3** useVisualViewport hook (web)
+- [x] **Task 2** Sheet primitive (web)
+- [ ] **Task 3** useVisualViewport hook (web) — _in progress_
 - [ ] **Task 4** AppShell component (web)
 - [ ] **Task 5** Refactor SessionSidebar to parent-driven
 - [ ] **Task 6** Update `__root.tsx` to `h-dvh` + mount viewport hook
