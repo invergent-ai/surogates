@@ -62,12 +62,20 @@ export function AgentChat({
     ? "Scheduled run is read-only"
     : undefined;
   const browserState = runtime.state.browser;
-  // A "closed" browser state is functionally the same as no browser — the
-  // BrowserPane would otherwise render an empty "preview unavailable" panel.
-  // The reducer's `browser.destroyed` event already nulls the state; this
-  // guard also handles hydration paths that surface a closed status.
+  // Hide the BrowserPane when the browser is closed or when the session
+  // itself is finished. Old sessions replay the `browser.provisioned`
+  // event but the server doesn't always replay the matching `destroyed`
+  // event for sessions whose browser was torn down with the session, so
+  // we'd otherwise render an empty "preview unavailable" panel for any
+  // historical session that ever used the browser.
+  const sessionFinished =
+    runtime.session?.status === "completed" ||
+    runtime.session?.status === "failed";
   const hasBrowserPanel =
-    browserState !== null && browserState.status !== "closed" && sessionId;
+    browserState !== null &&
+    browserState.status !== "closed" &&
+    !sessionFinished &&
+    sessionId;
 
   useEffect(() => {
     onMessagesChange?.(runtime.messages);
