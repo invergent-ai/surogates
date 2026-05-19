@@ -231,7 +231,8 @@ def create_app() -> FastAPI:
     # reaches the same handler through the SA-token path prefix.
     app.include_router(feedback.router, prefix="/v1/api", tags=["feedback"])
     app.include_router(tools.router, prefix="/v1", tags=["tools"])
-    app.include_router(skills.router, prefix="/v1", tags=["skills"])
+    app.include_router(skills.read_router, prefix="/v1", tags=["skills"])
+    app.include_router(skills.write_router, prefix="/v1", tags=["skills"])
     app.include_router(agents.router, prefix="/v1", tags=["agents"])
     app.include_router(memory.router, prefix="/v1", tags=["memory"])
     app.include_router(prompts.router, prefix="/v1", tags=["prompts"])
