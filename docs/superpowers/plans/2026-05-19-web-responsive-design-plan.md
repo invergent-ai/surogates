@@ -14,8 +14,8 @@
 
 ## Progress
 
-- [ ] **Task 1** Branch + baseline verification — _in progress_
-- [ ] **Task 2** Sheet primitive (web)
+- [x] **Task 1** Branch + baseline verification
+- [ ] **Task 2** Sheet primitive (web) — _in progress_
 - [ ] **Task 3** useVisualViewport hook (web)
 - [ ] **Task 4** AppShell component (web)
 - [ ] **Task 5** Refactor SessionSidebar to parent-driven
