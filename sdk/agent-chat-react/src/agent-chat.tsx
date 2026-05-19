@@ -6,12 +6,15 @@ import { TooltipProvider } from "./components/ui/tooltip";
 import { WorkspacePanel } from "./components/workspace/workspace-panel";
 import { cn } from "./lib/utils";
 import { isScheduledRunSession } from "./lib/sessions";
+import { useDelayedUnmount } from "./lib/use-delayed-unmount";
 import { useAgentChatRuntime } from "./runtime/use-agent-chat-runtime";
 import type {
   AgentChatAdapter,
   AgentChatMessage,
 } from "./types";
 import type { ChatComposerError } from "./components/chat/chat-composer";
+
+const ANIMATION_MS = 200;
 
 export interface AgentChatProps {
   adapter: AgentChatAdapter;
@@ -105,6 +108,12 @@ export function AgentChat({
   // Mobile toggle only makes sense if the right stack has something to show.
   const showMobileToggle = rightStackVisible;
 
+  // Delayed unmount so the right stack and its individual panes get a
+  // chance to play exit animations before they're removed from the DOM.
+  const rightStackAnim = useDelayedUnmount(rightStackVisible, ANIMATION_MS);
+  const browserAnim = useDelayedUnmount(browserVisible, ANIMATION_MS);
+  const workspaceAnim = useDelayedUnmount(workspaceVisible, ANIMATION_MS);
+
   return (
     <AgentChatAdapterProvider
       value={{
@@ -179,6 +188,8 @@ export function AgentChat({
               browserVisible
                 ? "md:absolute md:inset-y-0 md:left-0 md:right-(--right-stack-w,440px) md:flex"
                 : "md:relative md:flex-1",
+              // Animate the right offset as the right stack mounts/unmounts.
+              "md:transition-[right] md:duration-200 md:ease-out",
             )}
           >
             <ChatThread
@@ -205,10 +216,11 @@ export function AgentChat({
               canShowWorkspace={workspaceAvailable}
             />
           </div>
-          {rightStackVisible && (
+          {rightStackAnim.mounted && (
             <div
               data-testid="right-stack"
               data-mobile-view={mobileView}
+              data-state={rightStackAnim.transitionState}
               className={cn(
                 // Phone: full width column, hidden when chat tab active.
                 "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
@@ -223,16 +235,30 @@ export function AgentChat({
                 browserVisible
                   ? "md:absolute md:inset-y-0 md:right-0 md:w-(--right-stack-w,440px) md:flex-none"
                   : "md:relative md:shrink-0 md:flex-none md:w-auto",
+                // Enter/exit animation on md+: slide in/out from the right
+                // and fade. The chat-panel's right offset is animated
+                // alongside via its own transition.
+                "md:transition-[transform,opacity] md:duration-200 md:ease-out",
+                "md:data-[state=entering]:translate-x-full md:data-[state=entering]:opacity-0",
+                "md:data-[state=entered]:translate-x-0 md:data-[state=entered]:opacity-100",
+                "md:data-[state=exiting]:translate-x-full md:data-[state=exiting]:opacity-0 md:data-[state=exiting]:pointer-events-none",
               )}
             >
-              {browserVisible && (
+              {browserAnim.mounted && browserState && sessionId && (
                 <div
                   data-testid="browser-panel"
+                  data-state={browserAnim.transitionState}
                   className={cn(
                     "min-h-0 w-full overflow-hidden",
                     bothPanesVisible
                       ? "h-1/2 border-b border-line"
                       : "h-full",
+                    // Inner pane fade — slide-from-top so it feels like
+                    // the browser drops in above the workspace.
+                    "transition-[transform,opacity] duration-200 ease-out",
+                    "data-[state=entering]:-translate-y-2 data-[state=entering]:opacity-0",
+                    "data-[state=entered]:translate-y-0 data-[state=entered]:opacity-100",
+                    "data-[state=exiting]:-translate-y-2 data-[state=exiting]:opacity-0 data-[state=exiting]:pointer-events-none",
                   )}
                 >
                   <BrowserPane
@@ -242,14 +268,21 @@ export function AgentChat({
                   />
                 </div>
               )}
-              {workspaceVisible && (
+              {workspaceAnim.mounted && sessionId && (
                 <div
                   data-testid="workspace-panel-frame"
-                  className={
+                  data-state={workspaceAnim.transitionState}
+                  className={cn(
                     bothPanesVisible
                       ? "h-1/2 min-h-0 w-full overflow-hidden"
-                      : "min-h-0 h-full"
-                  }
+                      : "min-h-0 h-full",
+                    // Slide-from-bottom — feels like the workspace lifts
+                    // up under the browser when both are visible.
+                    "transition-[transform,opacity] duration-200 ease-out",
+                    "data-[state=entering]:translate-y-2 data-[state=entering]:opacity-0",
+                    "data-[state=entered]:translate-y-0 data-[state=entered]:opacity-100",
+                    "data-[state=exiting]:translate-y-2 data-[state=exiting]:opacity-0 data-[state=exiting]:pointer-events-none",
+                  )}
                 >
                   <WorkspacePanel
                     adapter={adapter}

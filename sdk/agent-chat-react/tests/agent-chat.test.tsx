@@ -818,15 +818,17 @@ describe("AgentChat", () => {
       await Promise.resolve();
     });
 
-    // After switching to a sessionless chat the workspace pane is hidden
-    // entirely (no right stack at all). Stale files from the previous
-    // session must not leak into the DOM.
+    // After switching to a sessionless chat the workspace panel is not
+    // rendered — the outer right-stack container may briefly stay mounted
+    // while its exit animation plays, but the WorkspacePanel itself is
+    // gated on sessionId so stale files from the previous session cannot
+    // leak into the DOM.
     expect(container.textContent).not.toContain("old-session.txt");
     expect(
       container.querySelector('[data-testid="workspace-panel"]'),
     ).toBeNull();
     expect(
-      container.querySelector('[data-testid="right-stack"]'),
+      container.querySelector('[data-testid="workspace-panel-frame"]'),
     ).toBeNull();
   });
 
