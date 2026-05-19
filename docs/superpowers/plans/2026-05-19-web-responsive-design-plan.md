@@ -24,8 +24,8 @@
 - [x] **Task 8** Wrap `/inbox` in AppShell with URL-driven list/detail
 - [x] **Task 9** Wrap `/missions/$missionId` route in AppShell
 - [x] **Task 10** Wrap `/agents` route in AppShell + reflow
-- [ ] **Task 11** Wrap `/skills` route in AppShell + reflow — _in progress_
-- [ ] **Task 12** Wrap `/settings` route in AppShell + tabs reflow
+- [x] **Task 11** Wrap `/skills` route in AppShell + reflow
+- [ ] **Task 12** Wrap `/settings` route in AppShell + tabs reflow — _in progress_
 - [ ] **Task 13** Fix bare routes (`/login`, `/link`) for phone widths
 - [ ] **Task 14** SDK — sidebar panels touch targets and overflow
 - [ ] **Task 15** SDK — `MissionDashboard` grid + tabstrip

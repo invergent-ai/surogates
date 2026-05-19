@@ -20,6 +20,7 @@ import {
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { AppShell } from "@/components/app-shell";
 import { SessionSidebar } from "@/components/navbar";
 import {
   Tabs,
@@ -127,10 +128,9 @@ export function SettingsPage() {
   }, [unlinkTarget]);
 
   return (
-    <>
-      <SessionSidebar />
-      <main className="flex-1 overflow-y-auto">
-        <div className="max-w-2xl mx-auto px-6 py-10">
+    <AppShell sidebar={<SessionSidebar />}>
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 sm:py-10">
           {/* Header */}
           <div className="flex items-center gap-3 mb-8">
             <h1 className="text-xl font-bold tracking-tight text-foreground">
@@ -139,7 +139,7 @@ export function SettingsPage() {
           </div>
 
           <Tabs defaultValue="profile">
-            <TabsList variant="line" className="mb-6">
+            <TabsList variant="line" className="mb-6 overflow-x-auto">
               <TabsTrigger value="profile">Profile</TabsTrigger>
               <TabsTrigger
                 value="channels"
@@ -302,7 +302,7 @@ export function SettingsPage() {
             </TabsContent>
           </Tabs>
         </div>
-      </main>
-    </>
+      </div>
+    </AppShell>
   );
 }
