@@ -21,8 +21,8 @@
 - [x] **Task 5** Refactor SessionSidebar to parent-driven
 - [x] **Task 6** Update `__root.tsx` to `h-dvh` + mount viewport hook
 - [x] **Task 7** Wrap `/chat` route in AppShell
-- [ ] **Task 8** Wrap `/inbox` in AppShell with URL-driven list/detail — _in progress_
-- [ ] **Task 9** Wrap `/missions/$missionId` route in AppShell
+- [x] **Task 8** Wrap `/inbox` in AppShell with URL-driven list/detail
+- [ ] **Task 9** Wrap `/missions/$missionId` route in AppShell — _in progress_
 - [ ] **Task 10** Wrap `/agents` route in AppShell + reflow
 - [ ] **Task 11** Wrap `/skills` route in AppShell + reflow
 - [ ] **Task 12** Wrap `/settings` route in AppShell + tabs reflow
