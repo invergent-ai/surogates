@@ -359,15 +359,22 @@ describe("AgentChat", () => {
     );
     expect(browserPane).not.toBeNull();
     expect((layout as HTMLElement | null)?.style.direction).toBe("ltr");
-    expect(layout?.className).toContain("relative");
-    expect((chatPanel as HTMLElement | null)?.style.right).toBe("440px");
-    expect((rightStack as HTMLElement | null)?.style.right).toBe("0px");
-    expect((rightStack as HTMLElement | null)?.style.width).toBe("440px");
-    expect(chatPanel?.className).toContain("absolute");
+    // Right-stack width is exposed as a CSS custom property on the layout
+    // element so responsive classes can reference it via var().
+    expect(
+      (layout as HTMLElement | null)?.style.getPropertyValue("--right-stack-w"),
+    ).toBe("440px");
+    // Desktop two-pane layout is `md:`-prefixed (mobile-first single column).
+    expect(layout?.className).toContain("md:relative");
+    expect(chatPanel?.className).toContain("md:absolute");
+    expect(chatPanel?.className).toContain("md:left-0");
+    expect(chatPanel?.className).toContain("md:right-(--right-stack-w,440px)");
     expect(chatPanel?.className).toContain("flex");
     expect(chatPanel?.className).toContain("flex-col");
     expect(chatPanel?.className).toContain("min-h-0");
-    expect(rightStack?.className).toContain("absolute");
+    expect(rightStack?.className).toContain("md:absolute");
+    expect(rightStack?.className).toContain("md:right-0");
+    expect(rightStack?.className).toContain("md:w-(--right-stack-w,440px)");
     expect(browserPanel?.className).toContain("w-full");
     expect(browserPanel?.className).toContain("h-1/2");
     expect(browserPanel?.className).toContain("overflow-hidden");
