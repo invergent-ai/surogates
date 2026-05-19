@@ -1,3 +1,15 @@
+import { getArtifact } from "@/api/artifacts";
+import { refreshSession } from "@/api/auth";
+import { submitClarifyResponse as submitClarifyResponseApi } from "@/api/clarify";
+import { submitExpertFeedback as submitExpertFeedbackApi } from "@/api/feedback";
+import * as inboxApi from "@/api/inbox";
+import * as missionsApi from "@/api/missions";
+import * as sessionsApi from "@/api/sessions";
+import { type SkillSummary, listSkills } from "@/api/skills";
+import * as workspaceApi from "@/api/workspace";
+import { getAuthToken } from "@/features/auth";
+import { useAppStore } from "@/stores/app-store";
+import type { ScheduledWorkItem, Session } from "@/types/session";
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
@@ -15,17 +27,6 @@ import type {
   AgentChatSlashCommand,
   AgentChatSseMessageEvent,
 } from "@invergent/agent-chat-react";
-import { getArtifact } from "@/api/artifacts";
-import { submitClarifyResponse as submitClarifyResponseApi } from "@/api/clarify";
-import { submitExpertFeedback as submitExpertFeedbackApi } from "@/api/feedback";
-import * as inboxApi from "@/api/inbox";
-import * as missionsApi from "@/api/missions";
-import { listSkills, type SkillSummary } from "@/api/skills";
-import * as sessionsApi from "@/api/sessions";
-import * as workspaceApi from "@/api/workspace";
-import { getAuthToken } from "@/features/auth";
-import { useAppStore } from "@/stores/app-store";
-import type { ScheduledWorkItem, Session } from "@/types/session";
 
 const DEFAULT_OUTCOME_RUBRIC =
   "The outcome is satisfied only when the assistant's latest response " +
@@ -172,10 +173,7 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
   },
 
   openInboxStream() {
-    const token = getAuthToken();
-    const url = new URL("/api/v1/inbox/stream", window.location.origin);
-    if (token) url.searchParams.set("token", token);
-    return wrapInboxEventSource(new EventSource(url.toString()));
+    return openSelfRefreshingInboxStream();
   },
 
   async stopSession(input) {
@@ -337,7 +335,8 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
 function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onerror = () => reject(reader.error ?? new Error("Failed to read blob"));
+    reader.onerror = () =>
+      reject(reader.error ?? new Error("Failed to read blob"));
     reader.onload = () => resolve(String(reader.result));
     reader.readAsDataURL(blob);
   });
@@ -345,7 +344,9 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 
 function skillToSlashCommand(skill: SkillSummary): AgentChatSlashCommand {
   const trigger = skill.trigger
-    ? skill.trigger.startsWith("/") ? skill.trigger : `/${skill.trigger}`
+    ? skill.trigger.startsWith("/")
+      ? skill.trigger
+      : `/${skill.trigger}`
     : `/${skill.name}`;
   return {
     value: trigger,
@@ -376,7 +377,9 @@ export function toAgentChatSession(session: Session): AgentChatSession {
   };
 }
 
-function toAgentChatMission(row: missionsApi.MissionRow): AgentChatMissionSummary {
+function toAgentChatMission(
+  row: missionsApi.MissionRow,
+): AgentChatMissionSummary {
   return {
     id: row.id,
     orgId: row.org_id,
@@ -525,30 +528,95 @@ function wrapEventSource(
   };
 }
 
-function wrapInboxEventSource(source: EventSource): AgentChatInboxEventStream {
-  let errorHandler: (() => void) | null = null;
+// EventSource auto-reconnects on failure with the same URL — including
+// the same access token. When the token has expired the server returns
+// 401 forever, hammering at ~3s intervals. This wrapper intercepts the
+// failure, refreshes the token, and reopens with the new one. If the
+// refresh itself fails the wrapper surfaces the error and stops.
+function openSelfRefreshingInboxStream(): AgentChatInboxEventStream {
+  type InboxStreamType = "item" | "snapshot";
+  type RawHandler = (event: MessageEvent<string>) => void;
+
+  const handlers = new Map<InboxStreamType, Set<RawHandler>>();
+  let source: EventSource | null = null;
+  let closed = false;
+  let consecutiveFailures = 0;
+  let externalErrorHandler: (() => void) | null = null;
+  const MAX_CONSECUTIVE_FAILURES = 3;
+
+  function buildUrl(): string {
+    const token = getAuthToken();
+    const url = new URL("/api/v1/inbox/stream", window.location.origin);
+    if (token) url.searchParams.set("token", token);
+    return url.toString();
+  }
+
+  function open(): void {
+    if (closed) return;
+    const next = new EventSource(buildUrl());
+    source = next;
+
+    for (const [type, set] of handlers.entries()) {
+      for (const fn of set) {
+        next.addEventListener(type, fn as EventListener);
+      }
+    }
+
+    next.onopen = () => {
+      consecutiveFailures = 0;
+    };
+    next.onerror = () => {
+      if (closed) return;
+      // Close immediately — we don't want EventSource's automatic retry
+      // racing our refresh-then-reopen cycle.
+      next.close();
+      if (source === next) source = null;
+
+      consecutiveFailures++;
+      if (consecutiveFailures > MAX_CONSECUTIVE_FAILURES) {
+        externalErrorHandler?.();
+        return;
+      }
+
+      void refreshSession().then((ok) => {
+        if (closed) return;
+        if (!ok) {
+          externalErrorHandler?.();
+          return;
+        }
+        open();
+      });
+    };
+  }
+
+  open();
+
   return {
     addEventListener(
-      type: "item" | "snapshot",
+      type: InboxStreamType,
       listener: (event: AgentChatInboxStreamEvent) => void,
     ) {
-      source.addEventListener(type, (event) => {
-        const message = event as MessageEvent<string>;
+      const wrapper: RawHandler = (event) => {
         listener({
-          data: message.data,
-          lastEventId: message.lastEventId,
+          data: event.data,
+          lastEventId: event.lastEventId,
         });
-      });
+      };
+      const set = handlers.get(type) ?? new Set<RawHandler>();
+      set.add(wrapper);
+      handlers.set(type, set);
+      source?.addEventListener(type, wrapper as EventListener);
     },
     close() {
-      source.close();
+      closed = true;
+      source?.close();
+      source = null;
     },
     get onerror() {
-      return errorHandler;
+      return externalErrorHandler;
     },
     set onerror(handler: (() => void) | null) {
-      errorHandler = handler;
-      source.onerror = handler ? () => handler() : null;
+      externalErrorHandler = handler;
     },
   };
 }
