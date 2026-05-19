@@ -32,8 +32,8 @@
 - [x] **Task 16** SDK — `BrowserPane` and `WorkspacePanel`
 - [x] **Task 17** SDK — `AgentChat` mobile Chat/Workspace toggle
 - [x] **Task 18** SDK — UI primitive touch-target sweep
-- [ ] **Task 19** Composer keyboard awareness wiring — _in progress_
-- [ ] **Task 20** Final verification — typecheck, biome, build, dev sanity
+- [x] **Task 19** Composer keyboard awareness wiring
+- [x] **Task 20** Final verification — typecheck, biome, build, dev sanity
 
 ---
 
