@@ -27,8 +27,8 @@
 - [x] **Task 11** Wrap `/skills` route in AppShell + reflow
 - [x] **Task 12** Wrap `/settings` route in AppShell + tabs reflow
 - [x] **Task 13** Fix bare routes (`/login`, `/link`) for phone widths
-- [ ] **Task 14** SDK — sidebar panels touch targets and overflow — _in progress_
-- [ ] **Task 15** SDK — `MissionDashboard` grid + tabstrip
+- [x] **Task 14** SDK — sidebar panels touch targets and overflow
+- [ ] **Task 15** SDK — `MissionDashboard` grid + tabstrip — _in progress_
 - [ ] **Task 16** SDK — `BrowserPane` and `WorkspacePanel`
 - [ ] **Task 17** SDK — `AgentChat` mobile Chat/Workspace toggle
 - [ ] **Task 18** SDK — UI primitive touch-target sweep

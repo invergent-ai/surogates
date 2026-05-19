@@ -262,19 +262,19 @@ export function MissionDashboard({
         : "secondary";
 
   return (
-    <div className="flex flex-col gap-6 p-6 max-w-6xl mx-auto">
+    <div className="flex flex-col gap-4 p-4 sm:gap-6 sm:p-6 max-w-6xl mx-auto">
       {/* ----- Header ------------------------------------------------ */}
       <Card>
         <CardHeader>
-          <div className="flex items-start justify-between gap-4">
-            <div className="space-y-1">
+          <div className="flex flex-col items-stretch gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="space-y-1 min-w-0 flex-1">
               <CardTitle className="wrap-break-word -uppercase text-sm">
                 {mission.description}
               </CardTitle>
               <CardDescription className="wrap-break-word text-foreground/70">
                 Rubric: {mission.rubric}
               </CardDescription>
-              <div className="flex items-center gap-3 pt-2 text-xs text-foreground/70">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-2 text-xs text-foreground/70">
                 <Badge variant={statusVariant} className="font-mono text-foreground">{mission.status}</Badge>
                 <span className="font-mono text-primary">
                   Iteration {mission.iteration}/{mission.maxIterations}
@@ -289,7 +289,7 @@ export function MissionDashboard({
                 ) : null}
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
               {ACTIVE_MISSION_STATUSES.has(mission.status) ? (
                 <>
                   {mission.status === "active" ? (
@@ -451,7 +451,7 @@ export function MissionDashboard({
                 return (
                   <li
                     key={w.workerSessionId}
-                    className="flex items-start justify-between gap-3 rounded border border-border/40 px-3 py-2 text-sm"
+                    className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between rounded border border-border/40 px-3 py-2 text-sm"
                   >
                     <div className="min-w-0 flex-1 space-y-1">
                       <div className="flex items-center gap-2">
