@@ -305,11 +305,12 @@ class ResourceLoader:
         """
         asset_root = Path(tenant.asset_root)
         org_id = str(tenant.org_id)
-        user_id = str(tenant.user_id)
-
-        user_skills_dir = str(
-            asset_root / org_id / "users" / user_id / "skills"
-        )
+        # Service-account principals reach this method with
+        # ``user_id=None`` — the user-files and user-DB layers don't
+        # apply to them, so skip both rather than synthesising a
+        # ``"None"`` path component or filtering DB rows on a literal
+        # string.
+        user_id = tenant.user_id
 
         # Layer 1: platform filesystem
         platform = self._load_skills_from_dir(
@@ -317,17 +318,29 @@ class ResourceLoader:
         )
 
         # Layer 2: user bucket files
-        user_files = self._load_skills_from_dir(user_skills_dir, SKILL_SOURCE_USER)
+        if user_id is not None:
+            user_skills_dir = str(
+                asset_root / org_id / "users" / str(user_id) / "skills"
+            )
+            user_files = self._load_skills_from_dir(
+                user_skills_dir, SKILL_SOURCE_USER,
+            )
+        else:
+            user_files = []
 
         if db_session is not None:
             # Layer 3: org-wide DB entries
             org_db = await self._load_skills_from_db(
                 db_session, tenant.org_id, user_id=None, source=SKILL_SOURCE_ORG_DB,
             )
-            # Layer 4: user-specific DB entries
-            user_db = await self._load_skills_from_db(
-                db_session, tenant.org_id, tenant.user_id, source=SKILL_SOURCE_USER_DB,
-            )
+            # Layer 4: user-specific DB entries — ``user_id=None`` short-
+            # circuits the per-user filter, returning no rows.
+            if user_id is not None:
+                user_db = await self._load_skills_from_db(
+                    db_session, tenant.org_id, user_id, source=SKILL_SOURCE_USER_DB,
+                )
+            else:
+                user_db = []
             return self._merge(platform, user_files, org_db, user_db)
 
         # Fallback: legacy 3-layer filesystem merge (no DB).
