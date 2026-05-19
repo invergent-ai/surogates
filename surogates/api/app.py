@@ -233,6 +233,14 @@ def create_app() -> FastAPI:
     app.include_router(tools.router, prefix="/v1", tags=["tools"])
     app.include_router(skills.read_router, prefix="/v1", tags=["skills"])
     app.include_router(skills.write_router, prefix="/v1", tags=["skills"])
+    # Service-account callers (ops's Work-chat slash menu mints bare
+    # ``surg_sk_`` tokens; the auth middleware only allows those on
+    # ``/v1/api/*`` routes — see
+    # ``tenant.auth.middleware._tenant_context_from_token``) reach the
+    # read endpoints via this second mount.  Mutating endpoints stay
+    # JWT-only because ``write_router`` is not mounted here.  Mirrors
+    # the feedback + missions pattern above.
+    app.include_router(skills.read_router, prefix="/v1/api", tags=["skills"])
     app.include_router(agents.router, prefix="/v1", tags=["agents"])
     app.include_router(memory.router, prefix="/v1", tags=["memory"])
     app.include_router(prompts.router, prefix="/v1", tags=["prompts"])
