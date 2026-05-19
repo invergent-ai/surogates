@@ -270,3 +270,65 @@ class TestLoadMCPFromDir:
         assert defs[0].transport == "stdio"
         assert defs[0].timeout == 120
         assert defs[0].env == {}
+
+
+# =========================================================================
+# load_skills with tenant.user_id = None (service-account principals)
+# =========================================================================
+
+
+class TestLoadSkillsWithUserIdNone:
+    """SA-token callers reach the loader with ``user_id=None``.
+
+    Platform + org-DB layers must still resolve; user-files and user-DB
+    layers must be skipped cleanly without constructing a path containing
+    the literal string ``"None"``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_user_id_none_returns_platform_only(self, tmp_path: Path):
+        platform_dir = tmp_path / "platform-skills"
+        skill_dir = platform_dir / "demo"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: demo\ndescription: Demo skill\n---\nBody\n",
+            encoding="utf-8",
+        )
+
+        # Booby-trap: a regression that re-introduces ``str(None)`` as a
+        # path component would pick this file up.
+        asset_root = tmp_path / "assets"
+        booby_trap = (
+            asset_root
+            / "00000000-0000-0000-0000-000000000001"
+            / "users"
+            / "None"
+            / "skills"
+        )
+        booby_trap.mkdir(parents=True)
+        (booby_trap / "evil.md").write_text(
+            "---\nname: evil\ndescription: Should not appear\n---\nBody\n",
+            encoding="utf-8",
+        )
+
+        sa_tenant = TenantContext(
+            org_id=UUID("00000000-0000-0000-0000-000000000001"),
+            user_id=None,
+            org_config={},
+            user_preferences={},
+            permissions=frozenset(),
+            asset_root=str(asset_root),
+        )
+
+        loader = ResourceLoader(
+            platform_skills_dir=str(platform_dir),
+            platform_mcp_dir=str(tmp_path / "mcp"),
+        )
+        skills = await loader.load_skills(sa_tenant, db_session=None)
+
+        names = {s.name for s in skills}
+        assert "demo" in names
+        assert "evil" not in names, (
+            "user-files layer must be skipped when tenant.user_id is None; "
+            "the loader is constructing a path containing 'None'"
+        )

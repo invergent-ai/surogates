@@ -50,7 +50,13 @@ from surogates.tools.builtin.skill_validation import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+# Read endpoints (list / view / file fetch) are mounted at both ``/v1/``
+# (JWT) and ``/v1/api/`` (service-account) so ops can populate the chat
+# slash menu with the harness's merged skill catalogue without forwarding
+# a user JWT.  Write endpoints (create/edit/delete + expert lifecycle)
+# stay JWT-only — service-account principals don't manage skills.
+read_router = APIRouter()
+write_router = APIRouter()
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +359,7 @@ def _populate_expert_detail(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/skills", response_model=SkillListResponse)
+@read_router.get("/skills", response_model=SkillListResponse)
 async def list_skills(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
@@ -395,7 +401,7 @@ async def list_skills(
     return SkillListResponse(skills=summaries, total=len(summaries))
 
 
-@router.get("/skills/{name}", response_model=SkillDetail)
+@read_router.get("/skills/{name}", response_model=SkillDetail)
 async def view_skill(
     name: str,
     request: Request,
@@ -470,7 +476,7 @@ async def view_skill(
     return detail
 
 
-@router.get("/skills/{name}/file")
+@read_router.get("/skills/{name}/file")
 async def read_skill_file(
     name: str,
     path: str,
@@ -587,7 +593,7 @@ def _is_within(child: Any, parent: Any) -> bool:
         return False
 
 
-@router.post("/skills", response_model=SkillActionResponse, status_code=status.HTTP_201_CREATED)
+@write_router.post("/skills", response_model=SkillActionResponse, status_code=status.HTTP_201_CREATED)
 async def create_skill(
     body: CreateSkillRequest,
     request: Request,
@@ -619,7 +625,7 @@ async def create_skill(
     )
 
 
-@router.put("/skills/{name}", response_model=SkillActionResponse)
+@write_router.put("/skills/{name}", response_model=SkillActionResponse)
 async def edit_skill(
     name: str,
     body: EditSkillRequest,
@@ -644,7 +650,7 @@ async def edit_skill(
     )
 
 
-@router.patch("/skills/{name}", response_model=SkillActionResponse)
+@write_router.patch("/skills/{name}", response_model=SkillActionResponse)
 async def patch_skill(
     name: str,
     body: PatchSkillRequest,
@@ -697,7 +703,7 @@ async def patch_skill(
     )
 
 
-@router.delete("/skills/{name}", status_code=status.HTTP_204_NO_CONTENT)
+@write_router.delete("/skills/{name}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_skill(
     name: str,
     request: Request,
@@ -713,7 +719,7 @@ async def delete_skill(
     await ts.delete_skill(existing["key_prefix"])
 
 
-@router.post("/skills/{name}/files", response_model=SkillActionResponse, status_code=status.HTTP_201_CREATED)
+@write_router.post("/skills/{name}/files", response_model=SkillActionResponse, status_code=status.HTTP_201_CREATED)
 async def write_skill_file(
     name: str,
     body: WriteFileRequest,
@@ -739,7 +745,7 @@ async def write_skill_file(
     )
 
 
-@router.delete("/skills/{name}/files", status_code=status.HTTP_204_NO_CONTENT)
+@write_router.delete("/skills/{name}/files", status_code=status.HTTP_204_NO_CONTENT)
 async def remove_skill_file(
     name: str,
     path: str,
@@ -777,7 +783,7 @@ class ExpertTrainingDataResponse(BaseModel):
     total: int
 
 
-@router.post("/skills/{name}/activate", response_model=SkillActionResponse)
+@write_router.post("/skills/{name}/activate", response_model=SkillActionResponse)
 async def activate_expert(
     name: str,
     request: Request,
@@ -832,7 +838,7 @@ async def activate_expert(
     )
 
 
-@router.post("/skills/{name}/retire", response_model=SkillActionResponse)
+@write_router.post("/skills/{name}/retire", response_model=SkillActionResponse)
 async def retire_expert(
     name: str,
     request: Request,
@@ -862,7 +868,7 @@ async def retire_expert(
     )
 
 
-@router.post("/skills/{name}/collect", response_model=SkillActionResponse)
+@write_router.post("/skills/{name}/collect", response_model=SkillActionResponse)
 async def collect_training_data(
     name: str,
     request: Request,
@@ -931,7 +937,7 @@ async def collect_training_data(
     )
 
 
-@router.get("/skills/{name}/training-data", response_model=ExpertTrainingDataResponse)
+@write_router.get("/skills/{name}/training-data", response_model=ExpertTrainingDataResponse)
 async def list_training_data(
     name: str,
     request: Request,
