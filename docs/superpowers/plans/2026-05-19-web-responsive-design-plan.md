@@ -25,8 +25,8 @@
 - [x] **Task 9** Wrap `/missions/$missionId` route in AppShell
 - [x] **Task 10** Wrap `/agents` route in AppShell + reflow
 - [x] **Task 11** Wrap `/skills` route in AppShell + reflow
-- [ ] **Task 12** Wrap `/settings` route in AppShell + tabs reflow — _in progress_
-- [ ] **Task 13** Fix bare routes (`/login`, `/link`) for phone widths
+- [x] **Task 12** Wrap `/settings` route in AppShell + tabs reflow
+- [ ] **Task 13** Fix bare routes (`/login`, `/link`) for phone widths — _in progress_
 - [ ] **Task 14** SDK — sidebar panels touch targets and overflow
 - [ ] **Task 15** SDK — `MissionDashboard` grid + tabstrip
 - [ ] **Task 16** SDK — `BrowserPane` and `WorkspacePanel`
