@@ -238,6 +238,7 @@ function TreeNodeRow({
         }}
         className={cn(
           "group flex items-center gap-2 w-full py-2 pr-2 text-left cursor-pointer transition-colors border-l-2",
+          "min-h-11 md:min-h-0",
           isActive
             ? "bg-line text-foreground border-l-primary"
             : "bg-transparent text-subtle hover:bg-input hover:text-foreground border-l-transparent",
@@ -247,7 +248,7 @@ function TreeNodeRow({
         {hasChildren ? (
           <button
             type="button"
-            className="p-0.5 rounded hover:bg-line shrink-0"
+            className="p-2 md:p-0.5 rounded hover:bg-line shrink-0"
             onClick={(e) => {
               e.stopPropagation();
               setExpanded(!expanded);
@@ -271,7 +272,7 @@ function TreeNodeRow({
         {isRunning && canStop && isChildSession && (
           <button
             type="button"
-            className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive transition-all"
+            className="p-2 md:p-1 rounded opacity-100 md:opacity-0 md:group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive transition-all"
             onClick={(e) => {
               e.stopPropagation();
               onStop(entry.id);
@@ -286,10 +287,10 @@ function TreeNodeRow({
           <button
             type="button"
             className={cn(
-              "p-1 rounded hover:bg-destructive/10 hover:text-destructive disabled:pointer-events-none transition-all",
+              "p-2 md:p-1 rounded hover:bg-destructive/10 hover:text-destructive disabled:pointer-events-none transition-all",
               deletingSessionId === entry.id
                 ? "opacity-100"
-                : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
+                : "opacity-100 md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100",
             )}
             onClick={(e) => {
               e.stopPropagation();
