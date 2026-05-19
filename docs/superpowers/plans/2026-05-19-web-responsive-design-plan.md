@@ -22,8 +22,8 @@
 - [x] **Task 6** Update `__root.tsx` to `h-dvh` + mount viewport hook
 - [x] **Task 7** Wrap `/chat` route in AppShell
 - [x] **Task 8** Wrap `/inbox` in AppShell with URL-driven list/detail
-- [ ] **Task 9** Wrap `/missions/$missionId` route in AppShell — _in progress_
-- [ ] **Task 10** Wrap `/agents` route in AppShell + reflow
+- [x] **Task 9** Wrap `/missions/$missionId` route in AppShell
+- [ ] **Task 10** Wrap `/agents` route in AppShell + reflow — _in progress_
 - [ ] **Task 11** Wrap `/skills` route in AppShell + reflow
 - [ ] **Task 12** Wrap `/settings` route in AppShell + tabs reflow
 - [ ] **Task 13** Fix bare routes (`/login`, `/link`) for phone widths
