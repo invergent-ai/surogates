@@ -29,8 +29,8 @@
 - [x] **Task 13** Fix bare routes (`/login`, `/link`) for phone widths
 - [x] **Task 14** SDK — sidebar panels touch targets and overflow
 - [x] **Task 15** SDK — `MissionDashboard` grid + tabstrip
-- [ ] **Task 16** SDK — `BrowserPane` and `WorkspacePanel` — _in progress_
-- [ ] **Task 17** SDK — `AgentChat` mobile Chat/Workspace toggle
+- [x] **Task 16** SDK — `BrowserPane` and `WorkspacePanel`
+- [ ] **Task 17** SDK — `AgentChat` mobile Chat/Workspace toggle — _in progress_
 - [ ] **Task 18** SDK — UI primitive touch-target sweep
 - [ ] **Task 19** Composer keyboard awareness wiring
 - [ ] **Task 20** Final verification — typecheck, biome, build, dev sanity
