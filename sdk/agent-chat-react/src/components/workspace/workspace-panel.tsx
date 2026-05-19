@@ -121,7 +121,7 @@ function RenderEntries({
                 {formatFileSize(entry.size)}
               </span>
             )}
-            <div className="ml-1 flex shrink-0 items-center gap-0 opacity-0 transition-opacity group-hover:opacity-100">
+            <div className="ml-1 flex shrink-0 items-center gap-0 opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100">
               <a
                 href={downloadUrlFor(entry.path)}
                 download={fileName}

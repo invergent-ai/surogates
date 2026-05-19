@@ -221,7 +221,7 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
       <Dialog open={fullscreenOpen} onOpenChange={handleFullscreenOpenChange}>
         <DialogContent
           aria-describedby={undefined}
-          className="flex h-screen w-screen max-w-none flex-col gap-0 overflow-hidden rounded-none border-0 bg-background p-0 shadow-none ring-0 sm:max-w-none"
+          className="flex h-dvh w-screen max-w-none flex-col gap-0 overflow-hidden rounded-none border-0 bg-background p-0 shadow-none ring-0 sm:max-w-none"
         >
           <DialogHeader className="h-10 shrink-0 flex-row items-center gap-2 border-b border-line bg-card px-4 py-0">
             <ZapIcon className="size-3.5 text-muted-foreground" aria-hidden="true" />
