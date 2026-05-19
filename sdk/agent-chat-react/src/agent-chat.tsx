@@ -50,6 +50,11 @@ export function AgentChat({
   // segmented control at the top of the layout swaps between them. On md+
   // both are visible and the toggle is hidden.
   const [mobileView, setMobileView] = useState<"chat" | "workspace">("chat");
+  // User-controlled visibility for the desktop right-stack panes. Both
+  // default to visible; the composer renders toggle buttons that flip these.
+  const [showBrowser, setShowBrowser] = useState(true);
+  const [showWorkspace, setShowWorkspace] = useState(true);
+
   const runtime = useAgentChatRuntime({
     adapter,
     agentId,
@@ -64,11 +69,13 @@ export function AgentChat({
   const browserState = runtime.state.browser;
   // A "closed" browser state is functionally the same as no browser — the
   // BrowserPane would otherwise render an empty "preview unavailable" panel.
-  // The reducer's `browser.destroyed` event already nulls the state; this
-  // guard covers hydration paths that surface a closed status (see the
-  // browser-state hydration call inside use-agent-chat-runtime).
-  const hasBrowserPanel =
-    browserState !== null && browserState.status !== "closed" && sessionId;
+  const browserAvailable =
+    browserState !== null && browserState.status !== "closed" && !!sessionId;
+  const browserVisible = browserAvailable && showBrowser;
+  const workspaceAvailable = !!sessionId;
+  const workspaceVisible = workspaceAvailable && showWorkspace;
+  const rightStackVisible = browserVisible || workspaceVisible;
+  const bothPanesVisible = browserVisible && workspaceVisible;
 
   useEffect(() => {
     onMessagesChange?.(runtime.messages);
@@ -78,18 +85,25 @@ export function AgentChat({
     (path: string) => {
       setWorkspacePath(path);
       // Selecting a file on mobile should bring the workspace tab to the
-      // front so the user can see the file they just opened.
+      // front so the user can see the file they just opened. Also force
+      // the workspace pane visible if the user had hidden it.
       setMobileView("workspace");
+      setShowWorkspace(true);
       onFileSelect?.(path);
     },
     [onFileSelect],
   );
 
-  // Mobile toggle should only appear once there's something in the right
-  // stack — otherwise it would just toggle to an empty pane. The workspace
-  // panel always renders, but we still want the toggle even without a
-  // browser panel because there can be files to browse.
-  const showMobileToggle = Boolean(sessionId);
+  const handleToggleBrowser = useCallback(() => {
+    setShowBrowser((prev) => !prev);
+  }, []);
+
+  const handleToggleWorkspace = useCallback(() => {
+    setShowWorkspace((prev) => !prev);
+  }, []);
+
+  // Mobile toggle only makes sense if the right stack has something to show.
+  const showMobileToggle = rightStackVisible;
 
   return (
     <AgentChatAdapterProvider
@@ -107,8 +121,11 @@ export function AgentChat({
             // Phone: flex column, tab toggle on top, then either chat or
             // right stack visible based on `data-mobile-view`.
             "flex min-h-0 flex-1 flex-col overflow-hidden bg-background text-sm text-foreground",
-            // md+: restore desktop two-pane layout.
-            hasBrowserPanel
+            // md+: restore desktop two-pane layout when the right stack
+            // is visible. With both panes, absolute positioning lets the
+            // browser/workspace split occupy a fixed width. Without the
+            // right stack, the chat takes the full width.
+            browserVisible
               ? "md:relative md:flex-row"
               : "md:flex-row",
           )}
@@ -153,8 +170,13 @@ export function AgentChat({
               "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
               showMobileToggle &&
                 "data-[mobile-view=workspace]:hidden md:flex!",
-              // md+: restore desktop positioning.
-              hasBrowserPanel
+              // md+: positioning depends on whether the browser/workspace
+              // right stack is laid out. When the browser pane is shown
+              // we pin a fixed-width column on the right and absolutely
+              // position the chat panel beside it. Otherwise the chat
+              // panel just flexes alongside the workspace (or fills the
+              // space when nothing else is visible).
+              browserVisible
                 ? "md:absolute md:inset-y-0 md:left-0 md:right-(--right-stack-w,440px) md:flex"
                 : "md:relative md:flex-1",
             )}
@@ -175,56 +197,73 @@ export function AgentChat({
               tokenUsage={runtime.tokenUsage}
               retryIndicator={runtime.retryIndicator}
               onComposerError={onComposerError}
+              showBrowser={showBrowser}
+              onToggleBrowser={handleToggleBrowser}
+              showWorkspace={showWorkspace}
+              onToggleWorkspace={handleToggleWorkspace}
+              canShowBrowser={browserAvailable}
+              canShowWorkspace={workspaceAvailable}
             />
           </div>
-          <div
-            data-testid="right-stack"
-            data-mobile-view={mobileView}
-            className={cn(
-              // Phone: full width column, hidden when chat tab active.
-              "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
-              showMobileToggle &&
-                "data-[mobile-view=chat]:hidden md:flex!",
-              // md+: restore desktop positioning. With browser panel the
-              // right stack is absolutely positioned at the configured
-              // width. Without it the stack lets the WorkspacePanel control
-              // its own width (it has an internal user-resizable width).
-              hasBrowserPanel
-                ? "md:absolute md:inset-y-0 md:right-0 md:w-(--right-stack-w,440px) md:flex-none"
-                : "md:relative md:shrink-0 md:flex-none md:w-auto",
-            )}
-          >
-            {hasBrowserPanel && (
-              <div
-                data-testid="browser-panel"
-                className="h-1/2 min-h-0 w-full overflow-hidden border-b border-line"
-              >
-                <BrowserPane
-                  sessionId={sessionId}
-                  state={browserState}
-                  adapter={adapter}
-                />
-              </div>
-            )}
+          {rightStackVisible && (
             <div
-              data-testid="workspace-panel-frame"
-              className={
-                hasBrowserPanel
-                  ? "h-1/2 min-h-0 w-full overflow-hidden"
-                  : "min-h-0 h-full"
-              }
+              data-testid="right-stack"
+              data-mobile-view={mobileView}
+              className={cn(
+                // Phone: full width column, hidden when chat tab active.
+                "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
+                showMobileToggle &&
+                  "data-[mobile-view=chat]:hidden md:flex!",
+                // md+: positioning differs depending on what is inside.
+                // - browser visible (with or without workspace): absolute
+                //   right column at the configured width.
+                // - workspace only: relative shrink-0 column letting
+                //   WorkspacePanel manage its own width via the resize
+                //   handle.
+                browserVisible
+                  ? "md:absolute md:inset-y-0 md:right-0 md:w-(--right-stack-w,440px) md:flex-none"
+                  : "md:relative md:shrink-0 md:flex-none md:w-auto",
+              )}
             >
-              <WorkspacePanel
-                adapter={adapter}
-                sessionId={sessionId}
-                selectedPath={workspacePath}
-                onSelectedPathChange={setWorkspacePath}
-                refreshSignal={runtime.workspaceRefreshKey}
-                disabled={effectiveDisabled}
-                fillParent={Boolean(hasBrowserPanel)}
-              />
+              {browserVisible && (
+                <div
+                  data-testid="browser-panel"
+                  className={cn(
+                    "min-h-0 w-full overflow-hidden",
+                    bothPanesVisible
+                      ? "h-1/2 border-b border-line"
+                      : "h-full",
+                  )}
+                >
+                  <BrowserPane
+                    sessionId={sessionId}
+                    state={browserState}
+                    adapter={adapter}
+                  />
+                </div>
+              )}
+              {workspaceVisible && (
+                <div
+                  data-testid="workspace-panel-frame"
+                  className={
+                    bothPanesVisible
+                      ? "h-1/2 min-h-0 w-full overflow-hidden"
+                      : "min-h-0 h-full"
+                  }
+                >
+                  <WorkspacePanel
+                    adapter={adapter}
+                    sessionId={sessionId}
+                    selectedPath={workspacePath}
+                    onSelectedPathChange={setWorkspacePath}
+                    refreshSignal={runtime.workspaceRefreshKey}
+                    disabled={effectiveDisabled}
+                    fillParent={bothPanesVisible}
+                  />
+                </div>
+              )}
             </div>
-          </div>
+          )}
         </section>
       </TooltipProvider>
     </AgentChatAdapterProvider>

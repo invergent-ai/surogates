@@ -79,6 +79,15 @@ interface ChatThreadProps {
   // SDK does not ship a toast subsystem; callers (e.g. surogate-ops)
   // wire their own.
   onComposerError?: (err: ChatComposerError) => void;
+
+  // Pane toggle wiring — forwarded to the composer's tools row. AgentChat
+  // owns the visibility state; the composer renders the buttons.
+  showBrowser?: boolean;
+  onToggleBrowser?: () => void;
+  showWorkspace?: boolean;
+  onToggleWorkspace?: () => void;
+  canShowBrowser?: boolean;
+  canShowWorkspace?: boolean;
 }
 
 // ── Timeline item types ──────────────────────────────────────────────
@@ -786,6 +795,12 @@ export function ChatThread({
   retryIndicator,
   onRetry,
   onComposerError,
+  showBrowser = false,
+  onToggleBrowser,
+  showWorkspace = false,
+  onToggleWorkspace,
+  canShowBrowser = false,
+  canShowWorkspace = false,
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
 
@@ -942,6 +957,12 @@ export function ChatThread({
             disabledReason={disabledReason}
             tokenUsage={tokenUsage}
             onComposerError={onComposerError}
+            showBrowser={showBrowser}
+            onToggleBrowser={onToggleBrowser}
+            showWorkspace={showWorkspace}
+            onToggleWorkspace={onToggleWorkspace}
+            canShowBrowser={canShowBrowser}
+            canShowWorkspace={canShowWorkspace}
           />
         )}
       </div>

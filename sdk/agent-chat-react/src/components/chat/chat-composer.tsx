@@ -13,6 +13,8 @@ import {
   ChevronRightIcon,
   ClockIcon,
   CloudIcon,
+  FolderIcon,
+  GlobeIcon,
   HardDriveIcon,
   PaperclipIcon,
   PlusIcon,
@@ -115,6 +117,19 @@ interface ChatComposerProps {
    * a toast wiring at the host-app layer if you want them surfaced.
    */
   onComposerError?: (err: ChatComposerError) => void;
+
+  // ── Pane toggles ──────────────────────────────────────────────────
+  // Optional. When provided, render a button in the composer tools that
+  // toggles the corresponding pane. The button shows an active style
+  // when the pane is visible.
+  showBrowser?: boolean;
+  onToggleBrowser?: () => void;
+  showWorkspace?: boolean;
+  onToggleWorkspace?: () => void;
+  /** When false (default), the browser toggle button is omitted entirely. */
+  canShowBrowser?: boolean;
+  /** When false (default), the workspace toggle button is omitted entirely. */
+  canShowWorkspace?: boolean;
 }
 
 // ── Outer wrapper (provides controlled text state) ───────────────────
@@ -268,6 +283,12 @@ function ChatComposerInner({
   disabledReason,
   tokenUsage,
   onComposerError,
+  showBrowser = false,
+  onToggleBrowser,
+  showWorkspace = false,
+  onToggleWorkspace,
+  canShowBrowser = false,
+  canShowWorkspace = false,
 }: ChatComposerProps) {
   const { adapter } = useAgentChatAdapterContext();
   const { textInput, attachments } = usePromptInputController();
@@ -631,6 +652,48 @@ function ChatComposerInner({
                   </Command>
                 </PopoverContent>
               </Popover>
+              {canShowBrowser && onToggleBrowser && (
+                <PromptInputButton
+                  aria-label={
+                    showBrowser ? "Hide browser pane" : "Show browser pane"
+                  }
+                  aria-pressed={showBrowser}
+                  onClick={onToggleBrowser}
+                  tooltip={
+                    showBrowser ? "Hide browser pane" : "Show browser pane"
+                  }
+                  className={
+                    showBrowser
+                      ? "bg-accent text-foreground"
+                      : undefined
+                  }
+                >
+                  <GlobeIcon className="size-4" />
+                </PromptInputButton>
+              )}
+              {canShowWorkspace && onToggleWorkspace && (
+                <PromptInputButton
+                  aria-label={
+                    showWorkspace
+                      ? "Hide workspace pane"
+                      : "Show workspace pane"
+                  }
+                  aria-pressed={showWorkspace}
+                  onClick={onToggleWorkspace}
+                  tooltip={
+                    showWorkspace
+                      ? "Hide workspace pane"
+                      : "Show workspace pane"
+                  }
+                  className={
+                    showWorkspace
+                      ? "bg-accent text-foreground"
+                      : undefined
+                  }
+                >
+                  <FolderIcon className="size-4" />
+                </PromptInputButton>
+              )}
               {tokenUsage && tokenUsage.contextWindow > 0 && (
                 <Context
                   usedTokens={tokenUsage.totalTokens}

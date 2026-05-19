@@ -423,7 +423,11 @@ function toAgentChatMissionTask(
 function toAgentChatMissionWorker(
   row: missionsApi.MissionWorkerRow,
 ): AgentChatMissionWorker {
+  // The web missions API only returns durable Task-backed workers, so
+  // every row here is `kind: "task"`. Workers spawned via `spawn_worker`
+  // or `delegate_task` are not surfaced through this endpoint.
   return {
+    kind: "task",
     taskId: row.task_id,
     workerSessionId: row.worker_session_id,
     agentDefName: row.agent_def_name,

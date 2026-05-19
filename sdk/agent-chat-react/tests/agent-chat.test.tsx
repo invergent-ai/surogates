@@ -818,8 +818,16 @@ describe("AgentChat", () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain("No workspace files");
+    // After switching to a sessionless chat the workspace pane is hidden
+    // entirely (no right stack at all). Stale files from the previous
+    // session must not leak into the DOM.
     expect(container.textContent).not.toContain("old-session.txt");
+    expect(
+      container.querySelector('[data-testid="workspace-panel"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="right-stack"]'),
+    ).toBeNull();
   });
 
   it("renders scheduled run sessions as read-only", async () => {
