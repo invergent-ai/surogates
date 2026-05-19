@@ -181,10 +181,11 @@ export function AgentChat({
                 "data-[mobile-view=chat]:hidden md:flex!",
               // md+: restore desktop positioning. With browser panel the
               // right stack is absolutely positioned at the configured
-              // width; without it the stack flows in the row.
+              // width. Without it the stack lets the WorkspacePanel control
+              // its own width (it has an internal user-resizable width).
               hasBrowserPanel
                 ? "md:absolute md:inset-y-0 md:right-0 md:w-(--right-stack-w,440px) md:flex-none"
-                : "md:relative md:shrink-0 md:flex-none md:w-(--right-stack-w,440px)",
+                : "md:relative md:shrink-0 md:flex-none md:w-auto",
             )}
           >
             {hasBrowserPanel && (
