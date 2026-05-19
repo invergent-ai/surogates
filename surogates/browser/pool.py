@@ -79,9 +79,19 @@ class BrowserPool:
                     session_id,
                     status.value,
                 )
-                await self._backend.destroy(slot.browser_id)
+                stale_browser_id = slot.browser_id
+                await self._backend.destroy(stale_browser_id)
                 self._mapping.pop(session_id, None)
                 await self._registry.delete(session_id)
+                # The replaced pod is gone — surface that to consumers
+                # (UI, audit, billing) before the new provision so they
+                # see a clean destroyed→provisioned pair instead of two
+                # consecutive provisioneds against different pod ids.
+                await self._emit_event(
+                    session_id,
+                    EventType.BROWSER_DESTROYED.value,
+                    {"session_id": session_id, "browser_id": stale_browser_id},
+                )
 
             browser_id, endpoint = await self._backend.provision(
                 spec,
@@ -119,12 +129,25 @@ class BrowserPool:
         async with lock:
             slot = self._mapping.pop(session_id, None)
             if slot is None:
+                # Cold path — the worker either restarted or never owned
+                # this session's slot. We still need to clean up the
+                # backend and registry, and we still need to emit so the
+                # SDK / audit log learn that the browser is gone. The
+                # browser_id is unknown here; the event consumer should
+                # treat the absence as authoritative.
+                registry_entry = await self._registry.get(session_id)
                 destroy_for_session = getattr(
                     self._backend, "destroy_for_session", None
                 )
                 if callable(destroy_for_session):
                     await destroy_for_session(session_id)
                 await self._registry.delete(session_id)
+                if registry_entry is not None:
+                    await self._emit_event(
+                        session_id,
+                        EventType.BROWSER_DESTROYED.value,
+                        {"session_id": session_id, "browser_id": None},
+                    )
                 return
             await self._backend.destroy(slot.browser_id)
             await self._registry.delete(session_id)

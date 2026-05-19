@@ -419,10 +419,24 @@ async def run_worker(settings: Settings) -> None:
     ) -> None:
         from surogates.session.events import EventType
 
+        # Shield against cancellation. Browser provision/destroy callers
+        # often emit at the tail of an awaitable that the harness can
+        # cancel (session.pause). Without shield, a pause arriving while
+        # we're mid-emit drops the event row even though the underlying
+        # k8s/Redis state has already changed, leaving the SDK with a
+        # stale view of the browser. emit_event itself is idempotent on
+        # session counters via raw SQL, so shielding is safe.
         try:
-            await session_store.emit_event(
-                UUID(session_id), EventType(event_type), data
+            await asyncio.shield(
+                session_store.emit_event(
+                    UUID(session_id), EventType(event_type), data
+                )
             )
+        except asyncio.CancelledError:
+            # The shielded task continues to completion; CancelledError
+            # here means our caller was cancelled. Re-raise so the
+            # cancellation propagates correctly.
+            raise
         except Exception:
             logger.exception("Failed to emit browser event %s", event_type)
 

@@ -200,3 +200,92 @@ class TestEvents:
 
         types = [event_type for event_type, _ in events]
         assert "browser.destroyed" in types
+
+    async def test_destroy_with_cold_mapping_still_emits_destroyed(
+        self,
+    ) -> None:
+        # Simulates a worker restart: registry still has the entry from
+        # a previous worker but the in-memory mapping is empty. The SDK
+        # must still learn that the browser is gone.
+        events: list[tuple[str, dict]] = []
+
+        async def emitter(session_id: str, event_type: str, data: dict) -> None:
+            events.append((event_type, data))
+
+        backend = FakeBackend()
+        registry = FakeRegistry()
+        registry.entries["sess-1"] = BrowserEntry(
+            session_id="sess-1",
+            org_id="o",
+            user_id="u",
+            rest_url="http://x:30000",
+            cdp_url="ws://x:31000",
+            live_view_url="ws://x:32000",
+            provisioned_at=datetime.now(timezone.utc),
+        )
+        pool = BrowserPool(
+            backend=backend,
+            registry=registry,  # type: ignore[arg-type]
+            event_emitter=emitter,
+        )
+
+        await pool.destroy_for_session("sess-1")
+
+        types = [event_type for event_type, _ in events]
+        assert "browser.destroyed" in types
+        # The browser_id is unknown on the cold path; consumers should
+        # treat the event as authoritative regardless of payload.
+        destroy_event = next(e for e in events if e[0] == "browser.destroyed")
+        assert destroy_event[1]["session_id"] == "sess-1"
+        assert destroy_event[1]["browser_id"] is None
+
+    async def test_destroy_with_cold_mapping_and_empty_registry_skips_emit(
+        self,
+    ) -> None:
+        # If neither the mapping nor the registry knew about the session
+        # there's nothing to announce — don't emit a phantom destroy.
+        events: list[tuple[str, dict]] = []
+
+        async def emitter(session_id: str, event_type: str, data: dict) -> None:
+            events.append((event_type, data))
+
+        pool = BrowserPool(
+            backend=FakeBackend(),
+            registry=FakeRegistry(),  # type: ignore[arg-type]
+            event_emitter=emitter,
+        )
+        await pool.destroy_for_session("nope")
+        assert events == []
+
+    async def test_reprovision_emits_destroyed_then_provisioned(self) -> None:
+        # When ensure() finds a stale slot it tears the old pod down and
+        # provisions a fresh one. Consumers must see a clean
+        # destroyed→provisioned pair instead of two provisioneds against
+        # different pod ids.
+        events: list[tuple[str, dict]] = []
+
+        async def emitter(session_id: str, event_type: str, data: dict) -> None:
+            events.append((event_type, data))
+
+        backend = FakeBackend()
+        pool = BrowserPool(
+            backend=backend,
+            registry=FakeRegistry(),  # type: ignore[arg-type]
+            event_emitter=emitter,
+        )
+
+        await pool.ensure("sess-1", "o", "u", BrowserSpec())
+        backend.status_overrides["b1"] = BrowserStatus.FAILED
+        await pool.ensure("sess-1", "o", "u", BrowserSpec())
+
+        types = [event_type for event_type, _ in events]
+        assert types == [
+            "browser.provisioned",
+            "browser.destroyed",
+            "browser.provisioned",
+        ]
+        # The destroyed event carries the stale browser_id.
+        destroy_event = next(e for e in events if e[0] == "browser.destroyed")
+        assert destroy_event[1]["browser_id"] == "b1"
+        # The new provisioned event carries the fresh browser_id.
+        assert events[-1][1]["browser_id"] == "b2"
