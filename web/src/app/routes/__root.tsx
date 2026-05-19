@@ -20,8 +20,8 @@ function RootLayout() {
       <div
         className={
           isBare
-            ? "h-dvh bg-background text-foreground"
-            : "flex h-dvh overflow-hidden bg-background text-foreground"
+            ? "h-(--viewport-h,100dvh) bg-background text-foreground"
+            : "flex h-(--viewport-h,100dvh) overflow-hidden bg-background text-foreground"
         }
       >
         <Suspense fallback={null}>

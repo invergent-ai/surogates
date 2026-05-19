@@ -920,7 +920,7 @@ export function ChatThread({
         <ConversationScrollButton />
       </Conversation>
 
-      <div className="mx-auto w-full max-w-4xl px-6 pb-5 pt-3">
+      <div className="mx-auto w-full max-w-4xl px-3 sm:px-6 pb-3 sm:pb-5 pt-3">
         {retryIndicator && (
           <div className="mb-2">
             <RetryBanner indicator={retryIndicator} />
