@@ -54,6 +54,32 @@ import {
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
+// Worker-row "kind" badge — visually distinguishes the three
+// delegation primitives the coordinator can use.  Order of mention
+// matches the durability gradient: ``task`` is durable + retried,
+// ``worker`` is durable + one-shot, ``delegation`` is ephemeral.
+const MISSION_WORKER_KIND_BADGE_CLASS: Record<
+  AgentChatMissionWorker["kind"],
+  string
+> = {
+  task: "border-primary/40 bg-primary/10 text-primary uppercase tracking-wide text-[10px]",
+  worker:
+    "border-foreground/30 bg-foreground/5 text-foreground/80 uppercase tracking-wide text-[10px]",
+  delegation:
+    "border-foreground/20 bg-foreground/[0.03] text-foreground/60 uppercase tracking-wide text-[10px]",
+};
+
+const MISSION_WORKER_KIND_TOOLTIP: Record<
+  AgentChatMissionWorker["kind"],
+  string
+> = {
+  task: "Durable Task row created by spawn_task. Retried by the dispatcher; survives across coordinator wakes.",
+  worker:
+    "Async one-shot session spawned by spawn_worker. Durable session, no retry/DAG.",
+  delegation:
+    "Sync fork-join child spawned by delegate_task. Coordinator's wake blocked until it finished.",
+};
+
 
 export interface MissionDashboardProps {
   adapter: AgentChatAdapter;
@@ -187,7 +213,15 @@ export function MissionDashboard({
   );
 
   const runningWorkerCount = useMemo(
-    () => state.workers.filter((w) => w.taskStatus === "running").length,
+    // "running" means the child is still consuming compute right now.
+    // For task-backed children that's ``taskStatus === "running"``; for
+    // spawn_worker / delegate_task direct children the Task row doesn't
+    // exist, so fall back to the session-level signal.
+    () => state.workers.filter((w) => (
+      w.kind === "task"
+        ? w.taskStatus === "running"
+        : w.sessionStatus === "active"
+    )).length,
     [state.workers],
   );
 
@@ -455,7 +489,22 @@ export function MissionDashboard({
                   >
                     <div className="min-w-0 flex-1 space-y-1">
                       <div className="flex items-center gap-2">
-                        <Badge className="text-foreground/70">{w.taskStatus}</Badge>
+                        <Badge
+                          variant="outline"
+                          className={MISSION_WORKER_KIND_BADGE_CLASS[w.kind]}
+                          title={MISSION_WORKER_KIND_TOOLTIP[w.kind]}
+                        >
+                          {w.kind}
+                        </Badge>
+                        <Badge className="text-foreground/70">
+                          {/* task-backed children show the Task lifecycle
+                              status (running / done / cancelled).  worker
+                              / delegation children have no Task row, so
+                              fall back to the session lifecycle. */}
+                          {w.kind === "task"
+                            ? w.taskStatus ?? "—"
+                            : w.sessionStatus}
+                        </Badge>
                         {w.agentDefName ? (
                           <span className="text-xs text-foreground/70">
                             {w.agentDefName}
