@@ -19,8 +19,8 @@
 - [x] **Task 3** useVisualViewport hook (web)
 - [x] **Task 4** AppShell component (web)
 - [x] **Task 5** Refactor SessionSidebar to parent-driven
-- [ ] **Task 6** Update `__root.tsx` to `h-dvh` + mount viewport hook — _in progress_
-- [ ] **Task 7** Wrap `/chat` route in AppShell
+- [x] **Task 6** Update `__root.tsx` to `h-dvh` + mount viewport hook
+- [ ] **Task 7** Wrap `/chat` route in AppShell — _in progress_
 - [ ] **Task 8** Wrap `/inbox` in AppShell with URL-driven list/detail
 - [ ] **Task 9** Wrap `/missions/$missionId` route in AppShell
 - [ ] **Task 10** Wrap `/agents` route in AppShell + reflow
