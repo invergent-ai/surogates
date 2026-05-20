@@ -28,6 +28,7 @@ import {
 
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Card, CardContent } from "../ui/card";
 import {
   Collapsible,
   CollapsibleContent,
@@ -41,6 +42,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "../ui/dialog";
+import { Progress } from "../ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import {
   Tooltip,
@@ -472,134 +474,195 @@ export function MissionDashboard({
 
   const statusTone =
     mission.status === "satisfied"
-      ? "text-emerald-600"
+      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
       : mission.status === "failed" || mission.status === "cancelled"
-        ? "text-destructive"
+        ? "border-destructive/40 bg-destructive/10 text-destructive"
         : mission.status === "paused"
-          ? "text-amber-600"
-          : "text-primary";
+          ? "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+          : "border-primary/40 bg-primary/10 text-primary";
 
   const activity = buildMissionActivity(mission, state.tasks, state.workers);
   const isActive = ACTIVE_MISSION_STATUSES.has(mission.status);
+  const iterationPct =
+    mission.maxIterations > 0
+      ? Math.min(100, (mission.iteration / mission.maxIterations) * 100)
+      : 0;
 
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="flex h-full flex-1 flex-col overflow-hidden">
-        {/* ----- Header (SessionDetail-style: dense, one line of identity
-            + flags + actions, one line of metadata) ------------------- */}
-        <div className="shrink-0 border-b border-border px-5 py-3">
-          <div className="mb-2 flex items-start justify-between gap-3">
-            <div className="min-w-0 flex-1">
-              <div className="mb-0.5 flex flex-wrap items-center gap-2">
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="truncate font-display text-sm font-bold tracking-tight text-foreground">
-                      {firstLine(mission.description, 120)}
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent className="max-w-md">
-                    <p className="whitespace-pre-wrap text-xs">
-                      {mission.description}
-                    </p>
-                  </TooltipContent>
-                </Tooltip>
-                <IdChip value={mission.id} />
-                <span
-                  className={`font-display text-[9px] uppercase ${statusTone}`}
-                >
-                  {mission.status}
-                </span>
-                <span className="font-mono text-[10px] text-primary">
-                  iter {mission.iteration}/{mission.maxIterations}
-                </span>
-                {mission.lastEvaluationResult ? (
-                  <span className="text-[10px] text-muted-foreground/60">
-                    verdict:{" "}
-                    <span className="font-mono text-primary">
-                      {mission.lastEvaluationResult}
-                    </span>
+      <div className="flex h-full flex-1 flex-col overflow-hidden bg-muted/30">
+        {/* ----- Hero card -------------------------------------------- */}
+        <div className="shrink-0 px-5 pt-5 sm:px-6 sm:pt-6">
+          <Card className="border-border/60 bg-card shadow-sm">
+            <CardContent className="space-y-4 p-5 sm:p-6">
+              {/* Top row: status pill + iteration metric + actions */}
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-3">
+                  <span
+                    className={`rounded-md border px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider ${statusTone}`}
+                  >
+                    {mission.status}
                   </span>
-                ) : null}
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="font-display text-2xl font-bold tracking-tight tabular-nums text-foreground">
+                      {mission.iteration}
+                    </span>
+                    <span className="text-sm text-muted-foreground/70">
+                      / {mission.maxIterations}
+                    </span>
+                    <span className="ml-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">
+                      iterations
+                    </span>
+                  </div>
+                  {mission.lastEvaluationResult ? (
+                    <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground/70">
+                      <span className="opacity-70">last verdict</span>
+                      <span className="rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-primary">
+                        {mission.lastEvaluationResult}
+                      </span>
+                    </div>
+                  ) : null}
+                  <IdChip value={mission.id} />
+                </div>
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
+                  {isActive ? (
+                    <>
+                      {mission.status === "active" ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={doPause}
+                          disabled={busy}
+                        >
+                          <Pause className="size-4" /> Pause
+                        </Button>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={doResume}
+                          disabled={busy}
+                        >
+                          <Play className="size-4" /> Resume
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        onClick={() => {
+                          setCancelCascade(false);
+                          setCancelOpen(true);
+                        }}
+                        disabled={busy}
+                      >
+                        <Ban className="size-4" /> Cancel
+                      </Button>
+                    </>
+                  ) : onNavigateBack ? (
+                    <Button size="sm" variant="outline" onClick={onNavigateBack}>
+                      Back
+                    </Button>
+                  ) : null}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void refresh()}
+                    disabled={busy}
+                    aria-label="Refresh"
+                    title="Refresh"
+                  >
+                    <RefreshCw className="size-4" />
+                  </Button>
+                </div>
               </div>
-              <div className="flex flex-wrap items-center gap-3 text-[10px] text-muted-foreground/60">
+
+              {/* Iteration progress bar — fades when terminal. */}
+              <Progress
+                value={iterationPct}
+                className={`h-1 ${isActive ? "" : "opacity-40"}`}
+              />
+
+              {/* Description — full text, generously sized.  Long
+                  descriptions clamp to ~4 lines with the rest revealed
+                  on hover via tooltip. */}
+              <div>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <span className="truncate">
-                      rubric: {firstLine(mission.rubric, 80)}
-                    </span>
+                    <h1 className="line-clamp-4 cursor-default font-display text-lg font-semibold leading-snug text-foreground wrap-break-word">
+                      {mission.description}
+                    </h1>
                   </TooltipTrigger>
-                  <TooltipContent className="max-w-md">
-                    <p className="whitespace-pre-wrap text-xs">
+                  {mission.description.length > 240 ? (
+                    <TooltipContent className="max-w-lg" side="bottom">
+                      <p className="whitespace-pre-wrap text-xs">
+                        {mission.description}
+                      </p>
+                    </TooltipContent>
+                  ) : null}
+                </Tooltip>
+              </div>
+
+              {/* Rubric — clearly labelled, also clamped */}
+              <div className="rounded-md border border-border/60 bg-muted/40 px-3 py-2">
+                <div className="mb-0.5 font-mono text-[9px] uppercase tracking-widest text-muted-foreground/70">
+                  Rubric
+                </div>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <p className="line-clamp-3 cursor-default text-sm leading-relaxed text-foreground/90 wrap-break-word">
                       {mission.rubric}
                     </p>
-                  </TooltipContent>
+                  </TooltipTrigger>
+                  {mission.rubric.length > 200 ? (
+                    <TooltipContent className="max-w-lg" side="bottom">
+                      <p className="whitespace-pre-wrap text-xs">
+                        {mission.rubric}
+                      </p>
+                    </TooltipContent>
+                  ) : null}
                 </Tooltip>
-                <span>{state.tasks.length} tasks</span>
-                <span>{state.workers.length} workers</span>
-                <span className="ml-auto opacity-50">
+              </div>
+
+              {/* Stat strip — compact counts + auto-refresh meta. */}
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-t border-border/40 pt-3 text-[11px]">
+                <div className="flex items-baseline gap-1">
+                  <span className="font-mono text-sm font-semibold tabular-nums text-foreground">
+                    {state.tasks.length}
+                  </span>
+                  <span className="text-muted-foreground/70">
+                    {state.tasks.length === 1 ? "task" : "tasks"}
+                  </span>
+                </div>
+                <div className="flex items-baseline gap-1">
+                  <span className="font-mono text-sm font-semibold tabular-nums text-foreground">
+                    {state.workers.length}
+                  </span>
+                  <span className="text-muted-foreground/70">
+                    {state.workers.length === 1 ? "worker" : "workers"}
+                  </span>
+                </div>
+                <div className="flex items-baseline gap-1">
+                  <span className="font-mono text-sm font-semibold tabular-nums text-foreground">
+                    {activity.length}
+                  </span>
+                  <span className="text-muted-foreground/70">
+                    {activity.length === 1 ? "event" : "events"}
+                  </span>
+                </div>
+                <span className="ml-auto text-[10px] text-muted-foreground/50">
                   auto-refresh {pollIntervalMs / 1000}s
                 </span>
               </div>
-            </div>
-            <div className="flex shrink-0 flex-wrap items-center gap-2">
-              {isActive ? (
-                <>
-                  {mission.status === "active" ? (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={doPause}
-                      disabled={busy}
-                    >
-                      <Pause className="size-4" /> Pause
-                    </Button>
-                  ) : (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={doResume}
-                      disabled={busy}
-                    >
-                      <Play className="size-4" /> Resume
-                    </Button>
-                  )}
-                  <Button
-                    size="sm"
-                    variant="destructive"
-                    onClick={() => {
-                      setCancelCascade(false);
-                      setCancelOpen(true);
-                    }}
-                    disabled={busy}
-                  >
-                    <Ban className="size-4" /> Cancel
-                  </Button>
-                </>
-              ) : onNavigateBack ? (
-                <Button size="sm" variant="outline" onClick={onNavigateBack}>
-                  Back
-                </Button>
-              ) : null}
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => void refresh()}
-                disabled={busy}
-                aria-label="Refresh"
-                title="Refresh"
-              >
-                <RefreshCw className="size-4" />
-              </Button>
-            </div>
-          </div>
+            </CardContent>
+          </Card>
         </div>
 
         {/* ----- Tabs ------------------------------------------------ */}
         <Tabs
           defaultValue="activity"
-          className="flex flex-1 flex-col overflow-hidden"
+          className="mt-5 flex flex-1 flex-col overflow-hidden sm:mt-6"
         >
-          <div className="shrink-0 border-b border-border px-5">
+          <div className="shrink-0 border-b border-border bg-background px-5 sm:px-6">
             <TabsList variant="line">
               <TabsTrigger value="activity">
                 Activity
@@ -617,7 +680,7 @@ export function MissionDashboard({
             </TabsList>
           </div>
 
-          <div className="flex-1 overflow-y-auto px-5 py-4">
+          <div className="flex-1 overflow-y-auto bg-background px-5 py-4 sm:px-6">
             <TabsContent value="activity" className="mt-0">
               <ActivityTimeline entries={activity} />
             </TabsContent>
