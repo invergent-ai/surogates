@@ -21,10 +21,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from surogates.db.models import (
     Event as EventRow,
     InboxItem,
+    Mission as MissionRow,
     ScheduledSession as ScheduledSessionRow,
     Session as SessionRow,
     SessionCursor,
     SessionLease as LeaseRow,
+    Task as TaskRow,
+    TaskLink,
 )
 from surogates.harness.redact import redact_sensitive_data
 from surogates.session.events import EventType
@@ -197,14 +200,27 @@ class SessionStore:
         org_id: UUID,
         agent_id: str,
     ) -> list[Session]:
-        """Archive a session subtree and delete schedules tied to any node.
+        """Archive a session subtree and delete schedules + missions tied to it.
 
         Session deletion is user-facing "remove from my workspace" semantics,
         not physical event-log deletion.  For parent sessions, descendants must
         disappear with the parent; otherwise scheduled-loop runs and
-        delegation children are left dangling in tree/list UIs.  Schedules are
-        physical job definitions, so rows created from or last run by the tree
-        are deleted in the same transaction.
+        delegation children are left dangling in tree/list UIs.
+
+        Three categories of related rows are physically deleted in the same
+        transaction (they have no value once the owning session is gone):
+
+        * **Schedules** (``scheduled_sessions``) — job definitions whose
+          ``created_from_session_id`` or ``last_session_id`` is in the tree.
+        * **Missions** (``missions``) — orchestrated objectives whose
+          ``session_id`` is in the tree.  Mission tasks (``tasks``) and the
+          DAG edges (``task_links``) cascade with them; any
+          ``sessions.task_id`` pointing at a deleted task is NULL'd so the
+          archive update doesn't violate the FK.
+
+        Running worker / delegation children are interrupted by the route
+        layer (``api/routes/sessions.delete_session`` publishes on
+        ``INTERRUPT_CHANNEL_PREFIX:<id>`` for every archived session).
         """
         async with self._sf() as db:
             result = await db.execute(
@@ -251,6 +267,54 @@ class SessionStore:
                     ),
                 )
             )
+
+            # Missions tied to the archive tree — cascade-delete their
+            # tasks and DAG edges first, then the mission rows.  The
+            # cascade is hand-rolled because the existing FKs don't carry
+            # ON DELETE CASCADE; doing it here keeps the schema migration
+            # surface zero and matches the schedule-deletion pattern above.
+            mission_ids = (await db.execute(
+                select(MissionRow.id).where(
+                    MissionRow.org_id == org_id,
+                    MissionRow.session_id.in_(session_ids),
+                )
+            )).scalars().all()
+            if mission_ids:
+                task_ids = (await db.execute(
+                    select(TaskRow.id).where(
+                        TaskRow.mission_id.in_(mission_ids),
+                    )
+                )).scalars().all()
+                if task_ids:
+                    # task_links has composite-PK FKs to tasks(id) without
+                    # cascade; clear edges where either end is in the
+                    # deleted task set so the task DELETE doesn't reject.
+                    await db.execute(
+                        delete(TaskLink).where(
+                            or_(
+                                TaskLink.parent_id.in_(task_ids),
+                                TaskLink.child_id.in_(task_ids),
+                            ),
+                        )
+                    )
+                    # ``sessions.task_id`` may still point at one of the
+                    # tasks we're about to delete (a worker session
+                    # running a mission task).  NULL it out before the
+                    # task DELETE so the FK doesn't reject.  These
+                    # sessions are in the archive tree anyway and will be
+                    # archived in the UPDATE below.
+                    await db.execute(
+                        update(SessionRow)
+                        .where(SessionRow.task_id.in_(task_ids))
+                        .values(task_id=None)
+                    )
+                    await db.execute(
+                        delete(TaskRow).where(TaskRow.id.in_(task_ids))
+                    )
+                await db.execute(
+                    delete(MissionRow).where(MissionRow.id.in_(mission_ids))
+                )
+
             await db.execute(
                 update(SessionRow)
                 .where(SessionRow.id.in_(session_ids))

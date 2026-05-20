@@ -12,8 +12,11 @@ from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
+from surogates.db.models import Mission as MissionRow
 from surogates.db.models import ScheduledSession as ScheduledSessionRow
 from surogates.db.models import Session as SessionRow
+from surogates.db.models import Task as TaskRow
+from surogates.db.models import TaskLink
 from surogates.session.store import SessionStore
 from surogates.scheduled.schedule import parse_dynamic_loop_schedule
 from surogates.scheduled.store import ScheduledSessionStore
@@ -435,3 +438,150 @@ async def test_delete_parent_session_archives_descendants_and_cancels_schedules(
             bucket,
             f"{session.id}/workspace.txt",
         )
+
+
+async def test_delete_parent_session_also_deletes_owned_mission(
+    client: AsyncClient, app, session_factory, session_store,
+):
+    """Deleting a session physically removes the Mission row (and its
+    tasks + DAG edges) tied to that session.
+
+    Before this fix, missions were left in ``status='active'`` forever,
+    visible in the Missions UI even though the parent session was
+    archived.  Workers were also leaking — Task rows still pointed at
+    the soft-deleted coordinator session.
+    """
+    org_id, user_id, token = await _tenant(session_factory)
+    bucket = "delete-parent-session-mission"
+    await app.state.storage.create_bucket(bucket)
+
+    coordinator = await session_store.create_session(
+        user_id=user_id,
+        org_id=org_id,
+        agent_id=_AGENT_ID,
+        config={"storage_bucket": bucket},
+    )
+
+    # Mission row tied to the coordinator session.
+    mission_id = uuid.uuid4()
+    async with session_factory() as db:
+        db.add(MissionRow(
+            id=mission_id,
+            org_id=org_id,
+            user_id=user_id,
+            session_id=coordinator.id,
+            agent_id=_AGENT_ID,
+            description="x",
+            rubric="y",
+        ))
+        await db.commit()
+
+    # Two mission-owned tasks with a parent → child DAG edge, plus a
+    # worker session linked back to one of them via ``sessions.task_id``.
+    parent_task_id = uuid.uuid4()
+    child_task_id = uuid.uuid4()
+    async with session_factory() as db:
+        db.add_all([
+            TaskRow(
+                id=parent_task_id, org_id=org_id,
+                parent_session_id=coordinator.id,
+                goal="parent task", status="done",
+                mission_id=mission_id,
+            ),
+            TaskRow(
+                id=child_task_id, org_id=org_id,
+                parent_session_id=coordinator.id,
+                goal="child task", status="running",
+                mission_id=mission_id,
+            ),
+            TaskLink(parent_id=parent_task_id, child_id=child_task_id),
+        ])
+        await db.commit()
+
+    worker = await session_store.create_session(
+        user_id=user_id,
+        org_id=org_id,
+        agent_id=_AGENT_ID,
+        parent_id=coordinator.id,
+        channel="worker",
+        task_id=child_task_id,
+        config={"storage_bucket": bucket},
+    )
+
+    await app.state.storage.write_text(
+        bucket, f"{coordinator.id}/workspace.txt", "x",
+    )
+    await app.state.storage.write_text(
+        bucket, f"{worker.id}/workspace.txt", "x",
+    )
+
+    resp = await client.delete(
+        f"/v1/sessions/{coordinator.id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 204, resp.text
+
+    async with session_factory() as db:
+        sessions = (await db.execute(
+            select(SessionRow).where(
+                SessionRow.id.in_([coordinator.id, worker.id])
+            )
+        )).scalars().all()
+        missions = (await db.execute(
+            select(MissionRow).where(MissionRow.id == mission_id)
+        )).scalars().all()
+        tasks = (await db.execute(
+            select(TaskRow).where(
+                TaskRow.id.in_([parent_task_id, child_task_id])
+            )
+        )).scalars().all()
+        links = (await db.execute(
+            select(TaskLink).where(
+                TaskLink.parent_id == parent_task_id
+            )
+        )).scalars().all()
+
+    # Sessions archived (soft-delete keeps the row).
+    assert all(s.status == "archived" for s in sessions)
+    # ``sessions.task_id`` on the worker is NULL'd before the Task
+    # DELETE so the FK doesn't reject.
+    worker_after = next(s for s in sessions if s.id == worker.id)
+    assert worker_after.task_id is None
+
+    # Mission + tasks + edges are physically gone.
+    assert missions == []
+    assert tasks == []
+    assert links == []
+
+
+async def test_delete_session_without_mission_is_a_noop_for_mission_table(
+    client: AsyncClient, app, session_factory, session_store,
+):
+    """Plain session deletion (no associated mission) must still work —
+    the mission-cascade branch short-circuits when there's nothing to
+    delete.  Guards against a no-op refactor silently regressing the
+    happy path."""
+    org_id, user_id, token = await _tenant(session_factory)
+    bucket = "delete-no-mission"
+    await app.state.storage.create_bucket(bucket)
+
+    sess = await session_store.create_session(
+        user_id=user_id,
+        org_id=org_id,
+        agent_id=_AGENT_ID,
+        config={"storage_bucket": bucket},
+    )
+    await app.state.storage.write_text(
+        bucket, f"{sess.id}/workspace.txt", "x",
+    )
+
+    resp = await client.delete(
+        f"/v1/sessions/{sess.id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 204, resp.text
+
+    async with session_factory() as db:
+        row = await db.get(SessionRow, sess.id)
+    assert row is not None
+    assert row.status == "archived"
