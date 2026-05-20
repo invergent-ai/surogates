@@ -109,25 +109,6 @@ function CountBadge({ n }: { n: number }) {
 }
 
 
-/** Render a chip-style code element for an id; wraps with a tooltip
- * showing the full id when truncated, matching SessionDetail's id chip. */
-function IdChip({ value, max = 8 }: { value: string; max?: number }) {
-  const short = value.length > max ? `${value.slice(0, max)}…` : value;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <code className="rounded bg-muted px-1.5 py-px text-[9px] text-muted-foreground/40">
-          {short}
-        </code>
-      </TooltipTrigger>
-      <TooltipContent>
-        <code className="text-[11px]">{value}</code>
-      </TooltipContent>
-    </Tooltip>
-  );
-}
-
-
 /** First non-empty line of *text*, normalised + truncated to *max* chars.
  * Used for collapsed-row previews of task goals + result blobs. */
 function firstLine(text: string, max = 140): string {
@@ -522,7 +503,6 @@ export function MissionDashboard({
                       </span>
                     </div>
                   ) : null}
-                  <IdChip value={mission.id} />
                 </div>
                 <div className="flex shrink-0 flex-wrap items-center gap-2">
                   {isActive ? (
