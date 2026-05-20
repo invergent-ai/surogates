@@ -93,13 +93,10 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
           scope: "@invergent"
           cache: pnpm
-
-      - name: Upgrade npm for OIDC trusted publishing
-        run: npm install -g npm@^11.5.1
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
