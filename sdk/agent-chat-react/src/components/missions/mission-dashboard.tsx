@@ -2,13 +2,20 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // MissionDashboard — host-agnostic component that renders the full
-// mission state: header (status + iteration + last verdict), task DAG,
-// live workers, and the controls (pause/resume/cancel-with-cascade).
-//
-// Hosts wrap this in their own page shell (sidebar, layout, route
-// title). The dashboard owns its data layer: polls the adapter every
-// 5s while active/paused, stops on terminal status.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// mission state.  Layout mirrors SessionDetail: a compact header (one
+// line of identity + flags + actions, one line of dense metadata) and
+// a tab-style body so a long task goal or long rubric never blows out
+// the page.  Hosts wrap this in their own page shell (sidebar, layout,
+// route title).  The dashboard owns its data layer: polls the adapter
+// every 5s while active/paused, stops on terminal status.
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   Ban,
   Loader2,
@@ -16,17 +23,16 @@ import {
   Play,
   RefreshCw,
   AlertCircle,
+  ChevronRight,
 } from "lucide-react";
 
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "../ui/card";
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "../ui/collapsible";
 import {
   Dialog,
   DialogContent,
@@ -35,7 +41,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "../ui/dialog";
-import { Separator } from "../ui/separator";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "../ui/tooltip";
 
 import type {
   AgentChatAdapter,
@@ -79,6 +91,176 @@ const MISSION_WORKER_KIND_TOOLTIP: Record<
   delegation:
     "Sync fork-join child spawned by delegate_task. Coordinator's wake blocked until it finished.",
 };
+
+
+/** Small count chip shown next to tab labels — same shape as
+ * ``frontend/src/components/sessions/session-detail.tsx``'s CountBadge.
+ * Hidden when ``n === 0`` so empty tabs don't look noisy.
+ */
+function CountBadge({ n }: { n: number }) {
+  if (n === 0) return null;
+  return (
+    <span className="ml-1 rounded bg-muted px-1 py-px text-[9px] text-muted-foreground/70">
+      {n}
+    </span>
+  );
+}
+
+
+/** Render a chip-style code element for an id; wraps with a tooltip
+ * showing the full id when truncated, matching SessionDetail's id chip. */
+function IdChip({ value, max = 8 }: { value: string; max?: number }) {
+  const short = value.length > max ? `${value.slice(0, max)}…` : value;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <code className="rounded bg-muted px-1.5 py-px text-[9px] text-muted-foreground/40">
+          {short}
+        </code>
+      </TooltipTrigger>
+      <TooltipContent>
+        <code className="text-[11px]">{value}</code>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+
+/** First non-empty line of *text*, normalised + truncated to *max* chars.
+ * Used for collapsed-row previews of task goals + result blobs. */
+function firstLine(text: string, max = 140): string {
+  const trimmed = text.replace(/\s+/g, " ").trim();
+  if (trimmed.length <= max) return trimmed;
+  return `${trimmed.slice(0, max).trimEnd()}…`;
+}
+
+
+/** Mission activity event derived from the existing data set — we
+ * synthesise these from ``mission.createdAt``, ``task.createdAt``,
+ * ``task.completedAt``, ``worker.latestEventAt``, and
+ * ``mission.lastEvaluationAt``.  No new adapter calls required.
+ *
+ * Sorted newest-first by the dashboard so the timeline reads top-down. */
+type ActivityEntry = {
+  at: string;
+  kind:
+    | "mission.defined"
+    | "mission.paused"
+    | "mission.cancelled"
+    | "task.spawned"
+    | "task.completed"
+    | "task.failed"
+    | "task.cancelled"
+    | "worker.latest"
+    | "evaluator.verdict";
+  label: string;
+  detail?: string;
+};
+
+
+const ACTIVITY_KIND_TONE: Record<ActivityEntry["kind"], string> = {
+  "mission.defined": "bg-primary/10 text-primary border-primary/30",
+  "mission.paused": "bg-amber-500/10 text-amber-600 border-amber-500/30",
+  "mission.cancelled": "bg-destructive/10 text-destructive border-destructive/30",
+  "task.spawned": "bg-foreground/5 text-foreground/80 border-foreground/20",
+  "task.completed": "bg-emerald-500/10 text-emerald-600 border-emerald-500/30",
+  "task.failed": "bg-destructive/10 text-destructive border-destructive/30",
+  "task.cancelled": "bg-muted text-muted-foreground border-border",
+  "worker.latest": "bg-foreground/5 text-foreground/70 border-foreground/15",
+  "evaluator.verdict": "bg-primary/10 text-primary border-primary/30",
+};
+
+
+function buildMissionActivity(
+  mission: AgentChatMissionSummary,
+  tasks: AgentChatMissionTask[],
+  workers: AgentChatMissionWorker[],
+): ActivityEntry[] {
+  const entries: ActivityEntry[] = [];
+
+  entries.push({
+    at: mission.createdAt,
+    kind: "mission.defined",
+    label: "Mission defined",
+    detail: mission.description,
+  });
+
+  if (mission.status === "paused" && mission.pausedReason) {
+    entries.push({
+      at: mission.updatedAt,
+      kind: "mission.paused",
+      label: "Paused",
+      detail: mission.pausedReason,
+    });
+  }
+  if (mission.status === "cancelled" && mission.cancelledReason) {
+    entries.push({
+      at: mission.updatedAt,
+      kind: "mission.cancelled",
+      label: "Cancelled",
+      detail: mission.cancelledReason,
+    });
+  }
+
+  for (const task of tasks) {
+    if (task.createdAt) {
+      entries.push({
+        at: task.createdAt,
+        kind: "task.spawned",
+        label: `Spawn · ${task.agentDefName ?? "task"}`,
+        detail: firstLine(task.goal, 200),
+      });
+    }
+    if (task.completedAt) {
+      const kind: ActivityEntry["kind"] =
+        task.status === "done"
+          ? "task.completed"
+          : task.status === "failed"
+            ? "task.failed"
+            : task.status === "cancelled"
+              ? "task.cancelled"
+              : "task.completed";
+      entries.push({
+        at: task.completedAt,
+        kind,
+        label: `${task.status} · ${task.agentDefName ?? "task"}`,
+        detail: task.result ? firstLine(task.result, 200) : undefined,
+      });
+    }
+  }
+
+  for (const worker of workers) {
+    if (worker.latestEventAt && worker.latestEventKind) {
+      entries.push({
+        at: worker.latestEventAt,
+        kind: "worker.latest",
+        label: `${worker.kind} · ${worker.latestEventKind}`,
+        detail: deriveMissionWorkerActivityLabel(worker),
+      });
+    }
+  }
+
+  if (mission.lastEvaluationAt && mission.lastEvaluationResult) {
+    entries.push({
+      at: mission.lastEvaluationAt,
+      kind: "evaluator.verdict",
+      label: `Verdict · ${mission.lastEvaluationResult}`,
+      detail: mission.lastEvaluationFeedback ?? undefined,
+    });
+  }
+
+  entries.sort((a, b) => b.at.localeCompare(a.at));
+  return entries;
+}
+
+
+function formatTimestamp(iso: string): string {
+  try {
+    return new Date(iso).toLocaleTimeString();
+  } catch {
+    return iso;
+  }
+}
 
 
 export interface MissionDashboardProps {
@@ -288,43 +470,79 @@ export function MissionDashboard({
     }
   };
 
-  const statusVariant: "default" | "destructive" | "secondary" =
+  const statusTone =
     mission.status === "satisfied"
-      ? "default"
+      ? "text-emerald-600"
       : mission.status === "failed" || mission.status === "cancelled"
-        ? "destructive"
-        : "secondary";
+        ? "text-destructive"
+        : mission.status === "paused"
+          ? "text-amber-600"
+          : "text-primary";
+
+  const activity = buildMissionActivity(mission, state.tasks, state.workers);
+  const isActive = ACTIVE_MISSION_STATUSES.has(mission.status);
 
   return (
-    <div className="flex flex-col gap-4 p-4 sm:gap-6 sm:p-6">
-      {/* ----- Header ------------------------------------------------ */}
-      <Card>
-        <CardHeader>
-          <div className="flex flex-col items-stretch gap-4 sm:flex-row sm:items-start sm:justify-between">
-            <div className="space-y-1 min-w-0 flex-1">
-              <CardTitle className="wrap-break-word -uppercase text-sm">
-                {mission.description}
-              </CardTitle>
-              <CardDescription className="wrap-break-word text-foreground/70">
-                Rubric: {mission.rubric}
-              </CardDescription>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-2 text-xs text-foreground/70">
-                <Badge variant={statusVariant} className="font-mono text-foreground">{mission.status}</Badge>
-                <span className="font-mono text-primary">
-                  Iteration {mission.iteration}/{mission.maxIterations}
+    <TooltipProvider delayDuration={300}>
+      <div className="flex h-full flex-1 flex-col overflow-hidden">
+        {/* ----- Header (SessionDetail-style: dense, one line of identity
+            + flags + actions, one line of metadata) ------------------- */}
+        <div className="shrink-0 border-b border-border px-5 py-3">
+          <div className="mb-2 flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="mb-0.5 flex flex-wrap items-center gap-2">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="truncate font-display text-sm font-bold tracking-tight text-foreground">
+                      {firstLine(mission.description, 120)}
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-md">
+                    <p className="whitespace-pre-wrap text-xs">
+                      {mission.description}
+                    </p>
+                  </TooltipContent>
+                </Tooltip>
+                <IdChip value={mission.id} />
+                <span
+                  className={`font-display text-[9px] uppercase ${statusTone}`}
+                >
+                  {mission.status}
+                </span>
+                <span className="font-mono text-[10px] text-primary">
+                  iter {mission.iteration}/{mission.maxIterations}
                 </span>
                 {mission.lastEvaluationResult ? (
-                  <span>
-                    Last verdict:{" "}
+                  <span className="text-[10px] text-muted-foreground/60">
+                    verdict:{" "}
                     <span className="font-mono text-primary">
                       {mission.lastEvaluationResult}
                     </span>
                   </span>
                 ) : null}
               </div>
+              <div className="flex flex-wrap items-center gap-3 text-[10px] text-muted-foreground/60">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="truncate">
+                      rubric: {firstLine(mission.rubric, 80)}
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-md">
+                    <p className="whitespace-pre-wrap text-xs">
+                      {mission.rubric}
+                    </p>
+                  </TooltipContent>
+                </Tooltip>
+                <span>{state.tasks.length} tasks</span>
+                <span>{state.workers.length} workers</span>
+                <span className="ml-auto opacity-50">
+                  auto-refresh {pollIntervalMs / 1000}s
+                </span>
+              </div>
             </div>
-            <div className="flex flex-wrap items-center gap-2 shrink-0">
-              {ACTIVE_MISSION_STATUSES.has(mission.status) ? (
+            <div className="flex shrink-0 flex-wrap items-center gap-2">
+              {isActive ? (
                 <>
                   {mission.status === "active" ? (
                     <Button
@@ -362,249 +580,474 @@ export function MissionDashboard({
                   Back
                 </Button>
               ) : null}
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void refresh()}
+                disabled={busy}
+                aria-label="Refresh"
+                title="Refresh"
+              >
+                <RefreshCw className="size-4" />
+              </Button>
             </div>
           </div>
-        </CardHeader>
-        {mission.lastEvaluationFeedback ? (
-          <CardContent className="space-y-2">
-            <div className="text-xs font-semibold uppercase tracking-widest text-foreground/70">
-              Evaluator feedback
-            </div>
-            <p className="text-sm whitespace-pre-wrap wrap-break-word">
-              {mission.lastEvaluationFeedback}
-            </p>
-            {mission.lastEvaluationExplanation ? (
-              <p className="text-xs text-foreground/70 whitespace-pre-wrap wrap-break-word">
-                {mission.lastEvaluationExplanation}
-              </p>
-            ) : null}
-          </CardContent>
-        ) : null}
-      </Card>
+        </div>
 
-      {/* ----- Tasks -------------------------------------------------- */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Tasks ({state.tasks.length})</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {(
-            ["in_flight", "blocked", "done", "failed_or_cancelled"] as const
-          ).map((bucket) => {
-            const rows = taskBuckets[bucket];
-            if (rows.length === 0) return null;
-            const heading = (
-              {
-                in_flight: "In flight",
-                blocked: "Blocked",
-                done: "Done",
-                failed_or_cancelled: "Failed / cancelled",
-              } as const
-            )[bucket];
-            return (
-              <div key={bucket} className="space-y-2">
-                <div className="text-xs font-semibold uppercase tracking-widest text-foreground/70">
-                  {heading} ({rows.length})
-                </div>
-                <ul className="space-y-1.5">
-                  {rows.map((task) => (
-                    <li
-                      key={task.id}
-                      className="flex items-start justify-between gap-3 rounded border border-border/40 px-3 py-2 text-sm"
-                    >
-                      <div className="min-w-0 flex-1 space-y-1">
-                        <div className="flex items-center gap-2">
-                          {task.agentDefName ? (
-                            <span className="text-xs text-foreground/70">
-                              {task.agentDefName}
-                            </span>
-                          ) : null}
-                          {task.attemptCount > 1 ? (
-                            <span className="text-xs text-foreground/70">
-                              attempt {task.attemptCount}/{task.maxAttempts}
-                            </span>
-                          ) : null}
-                        </div>
-                        <div className="text-sm wrap-break-word">
-                          {task.goal}
-                        </div>
-                        {task.parentIds.length > 0 ? (
-                          <div className="text-xs text-foreground/70">
-                            after:{" "}
-                            {task.parentIds
-                              .map((p) => p.slice(0, 8))
-                              .join(", ")}
-                          </div>
-                        ) : null}
-                        {task.result ? (
-                          <pre className="text-xs whitespace-pre-wrap bg-muted/30 rounded px-2 py-1 max-h-32 overflow-auto">
-                            {task.result}
-                          </pre>
-                        ) : null}
-                        {task.resultMetadata ? (
-                          <pre className="text-xs whitespace-pre-wrap bg-muted/30 rounded px-2 py-1 max-h-32 overflow-auto">
-                            {JSON.stringify(task.resultMetadata, null, 2)}
-                          </pre>
-                        ) : null}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            );
-          })}
-          {state.tasks.length === 0 ? (
-            <div className="text-sm text-foreground/70">
-              No tasks spawned yet.
+        {/* ----- Tabs ------------------------------------------------ */}
+        <Tabs
+          defaultValue="activity"
+          className="flex flex-1 flex-col overflow-hidden"
+        >
+          <div className="shrink-0 border-b border-border px-5">
+            <TabsList variant="line">
+              <TabsTrigger value="activity">
+                Activity
+                <CountBadge n={activity.length} />
+              </TabsTrigger>
+              <TabsTrigger value="tasks">
+                Tasks
+                <CountBadge n={state.tasks.length} />
+              </TabsTrigger>
+              <TabsTrigger value="workers">
+                Workers
+                <CountBadge n={state.workers.length} />
+              </TabsTrigger>
+              <TabsTrigger value="metadata">Metadata</TabsTrigger>
+            </TabsList>
+          </div>
+
+          <div className="flex-1 overflow-y-auto px-5 py-4">
+            <TabsContent value="activity" className="mt-0">
+              <ActivityTimeline entries={activity} />
+            </TabsContent>
+            <TabsContent value="tasks" className="mt-0">
+              <TasksList
+                taskBuckets={taskBuckets}
+                totalTasks={state.tasks.length}
+              />
+            </TabsContent>
+            <TabsContent value="workers" className="mt-0">
+              <WorkersList
+                workers={state.workers}
+                onOpenTranscript={onOpenTranscript}
+              />
+            </TabsContent>
+            <TabsContent value="metadata" className="mt-0">
+              <MetadataPane mission={mission} />
+            </TabsContent>
+          </div>
+        </Tabs>
+
+        {/* ----- Cancel confirm dialog --------------------------------- */}
+        <Dialog
+          open={cancelOpen}
+          onOpenChange={(open) => {
+            if (!open && !busy) setCancelOpen(false);
+          }}
+        >
+          <DialogContent className="sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>Cancel mission?</DialogTitle>
+              <DialogDescription>
+                This terminates the mission and clears its evaluator loop.
+              </DialogDescription>
+            </DialogHeader>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={cancelCascade}
+                onChange={(e) => setCancelCascade(e.target.checked)}
+              />
+              <span>
+                Also cancel <strong>{runningWorkerCount}</strong> running worker
+                {runningWorkerCount === 1 ? "" : "s"} (sends an interrupt to each
+                worker session).
+              </span>
+            </label>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setCancelOpen(false)}
+                disabled={busy}
+              >
+                Keep mission
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={doCancel}
+                disabled={busy}
+              >
+                {busy ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Ban className="size-4" />
+                )}
+                Cancel mission
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      </div>
+    </TooltipProvider>
+  );
+}
+
+
+// ===========================================================================
+// Tab content components — split out so the outer dashboard stays readable.
+// ===========================================================================
+
+
+function ActivityTimeline({ entries }: { entries: ActivityEntry[] }) {
+  if (entries.length === 0) {
+    return (
+      <div className="py-8 text-center text-sm text-muted-foreground/60">
+        No mission activity yet.
+      </div>
+    );
+  }
+  return (
+    <ol className="space-y-1">
+      {entries.map((e, i) => (
+        <li
+          key={`${e.kind}-${e.at}-${i}`}
+          className="flex items-start gap-3 rounded px-2 py-1.5 text-sm hover:bg-muted/30"
+        >
+          <span className="w-20 shrink-0 font-mono text-[10px] text-muted-foreground/60">
+            {formatTimestamp(e.at)}
+          </span>
+          <span
+            className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide ${ACTIVITY_KIND_TONE[e.kind]}`}
+          >
+            {e.label}
+          </span>
+          {e.detail ? (
+            <span className="min-w-0 flex-1 truncate text-foreground/80">
+              {e.detail}
+            </span>
+          ) : null}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+
+function TaskRow({ task }: { task: AgentChatMissionTask }) {
+  const [open, setOpen] = useState(false);
+  const goalPreview = firstLine(task.goal, 160);
+  const hasMore =
+    task.goal.length > 160 ||
+    Boolean(task.result) ||
+    Boolean(task.resultMetadata);
+
+  const statusTone =
+    task.status === "done"
+      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600"
+      : task.status === "failed"
+        ? "border-destructive/30 bg-destructive/10 text-destructive"
+        : task.status === "cancelled"
+          ? "border-border bg-muted text-muted-foreground"
+          : task.status === "running"
+            ? "border-primary/30 bg-primary/10 text-primary"
+            : "border-foreground/20 bg-foreground/5 text-foreground/70";
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} asChild>
+      <li className="rounded border border-border/40 text-sm">
+        <CollapsibleTrigger
+          asChild
+          disabled={!hasMore}
+        >
+          <button
+            type="button"
+            className="flex w-full items-start gap-3 px-3 py-2 text-left hover:bg-muted/30 disabled:hover:bg-transparent"
+          >
+            <ChevronRight
+              className={`mt-0.5 size-3.5 shrink-0 text-muted-foreground/60 transition-transform ${
+                open ? "rotate-90" : ""
+              } ${hasMore ? "" : "opacity-0"}`}
+            />
+            <span
+              className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide ${statusTone}`}
+            >
+              {task.status}
+            </span>
+            {task.agentDefName ? (
+              <span className="shrink-0 text-[10px] text-muted-foreground/70">
+                {task.agentDefName}
+              </span>
+            ) : null}
+            {task.attemptCount > 1 ? (
+              <span className="shrink-0 text-[10px] text-muted-foreground/60">
+                ({task.attemptCount}/{task.maxAttempts})
+              </span>
+            ) : null}
+            <span className="min-w-0 flex-1 truncate text-foreground/80">
+              {goalPreview}
+            </span>
+          </button>
+        </CollapsibleTrigger>
+        <CollapsibleContent className="border-t border-border/40 px-3 py-2 text-xs">
+          <div className="mb-2">
+            <div className="mb-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground/60">
+              Goal
+            </div>
+            <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-muted/30 px-2 py-1.5 text-[11px] text-foreground/90">
+              {task.goal}
+            </pre>
+          </div>
+          {task.parentIds.length > 0 ? (
+            <div className="mb-2 text-[10px] text-muted-foreground/70">
+              after: {task.parentIds.map((p) => p.slice(0, 8)).join(", ")}
             </div>
           ) : null}
-        </CardContent>
-      </Card>
-
-      {/* ----- Live workers ------------------------------------------ */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Live workers ({state.workers.length})</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {state.workers.length === 0 ? (
-            <div className="text-sm text-foreground/70">
-              No workers attached to this mission right now.
+          {task.result ? (
+            <div className="mb-2">
+              <div className="mb-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground/60">
+                Result
+              </div>
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-muted/30 px-2 py-1.5 text-[11px] text-foreground/90">
+                {task.result}
+              </pre>
             </div>
-          ) : (
-            <ul className="space-y-1.5">
-              {state.workers.map((w) => {
-                const onTranscriptClick = (
-                  e: React.MouseEvent<HTMLAnchorElement>,
-                ) => {
-                  if (onOpenTranscript) {
-                    e.preventDefault();
-                    onOpenTranscript(w.workerSessionId);
-                  }
-                };
-                return (
-                  <li
-                    key={w.workerSessionId}
-                    className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between rounded border border-border/40 px-3 py-2 text-sm"
-                  >
-                    <div className="min-w-0 flex-1 space-y-1">
-                      <div className="flex items-center gap-2">
-                        <Badge
-                          variant="outline"
-                          className={MISSION_WORKER_KIND_BADGE_CLASS[w.kind]}
-                          title={MISSION_WORKER_KIND_TOOLTIP[w.kind]}
-                        >
-                          {w.kind}
-                        </Badge>
-                        <Badge className="text-foreground/70">
-                          {/* task-backed children show the Task lifecycle
-                              status (running / done / cancelled).  worker
-                              / delegation children have no Task row, so
-                              fall back to the session lifecycle. */}
-                          {w.kind === "task"
-                            ? w.taskStatus ?? "—"
-                            : w.sessionStatus}
-                        </Badge>
-                        {w.agentDefName ? (
-                          <span className="text-xs text-foreground/70">
-                            {w.agentDefName}
-                          </span>
-                        ) : null}
-                      </div>
-                      <div className="text-sm wrap-break-word">
-                        {deriveMissionWorkerActivityLabel(w)}
-                      </div>
-                      {w.latestEventAt ? (
-                        <div className="text-xs text-foreground/70">
-                          {new Date(w.latestEventAt).toLocaleTimeString()}
-                        </div>
-                      ) : null}
-                    </div>
-                    <a
-                      href={w.transcriptUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      onClick={onTranscriptClick}
-                      className="text-xs text-primary hover:underline self-start"
-                    >
-                      View session
-                    </a>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </CardContent>
-      </Card>
+          ) : null}
+          {task.resultMetadata ? (
+            <div>
+              <div className="mb-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground/60">
+                Result metadata
+              </div>
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-muted/30 px-2 py-1.5 text-[11px] text-foreground/90">
+                {JSON.stringify(task.resultMetadata, null, 2)}
+              </pre>
+            </div>
+          ) : null}
+        </CollapsibleContent>
+      </li>
+    </Collapsible>
+  );
+}
 
-      <Separator />
-      <div className="flex justify-between items-center text-xs text-foreground/70">
-        <span>
-          Auto-refresh every {pollIntervalMs / 1000}s while mission is active.
-        </span>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => {
-            void refresh();
-          }}
-          disabled={busy}
-        >
-          <RefreshCw className="size-4" /> Refresh
-        </Button>
+
+function TasksList({
+  taskBuckets,
+  totalTasks,
+}: {
+  taskBuckets: ReturnType<typeof groupMissionTasksByBucket>;
+  totalTasks: number;
+}) {
+  if (totalTasks === 0) {
+    return (
+      <div className="py-8 text-center text-sm text-muted-foreground/60">
+        No tasks spawned yet.
       </div>
+    );
+  }
+  const headings: Record<keyof typeof taskBuckets, string> = {
+    in_flight: "In flight",
+    blocked: "Blocked",
+    done: "Done",
+    failed_or_cancelled: "Failed / cancelled",
+  };
+  return (
+    <div className="space-y-4">
+      {(Object.keys(headings) as (keyof typeof taskBuckets)[]).map((bucket) => {
+        const rows = taskBuckets[bucket];
+        if (rows.length === 0) return null;
+        return (
+          <Fragment key={bucket}>
+            <div className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
+              {headings[bucket]} ({rows.length})
+            </div>
+            <ul className="space-y-1">
+              {rows.map((task) => (
+                <TaskRow key={task.id} task={task} />
+              ))}
+            </ul>
+          </Fragment>
+        );
+      })}
+    </div>
+  );
+}
 
-      {/* ----- Cancel confirm dialog --------------------------------- */}
-      <Dialog
-        open={cancelOpen}
-        onOpenChange={(open) => {
-          if (!open && !busy) setCancelOpen(false);
-        }}
-      >
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Cancel mission?</DialogTitle>
-            <DialogDescription>
-              This terminates the mission and clears its evaluator loop.
-            </DialogDescription>
-          </DialogHeader>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={cancelCascade}
-              onChange={(e) => setCancelCascade(e.target.checked)}
-            />
-            <span>
-              Also cancel <strong>{runningWorkerCount}</strong> running worker
-              {runningWorkerCount === 1 ? "" : "s"} (sends an interrupt to each
-              worker session).
-            </span>
-          </label>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setCancelOpen(false)}
-              disabled={busy}
+
+function WorkersList({
+  workers,
+  onOpenTranscript,
+}: {
+  workers: AgentChatMissionWorker[];
+  onOpenTranscript?: (workerSessionId: string) => void;
+}) {
+  if (workers.length === 0) {
+    return (
+      <div className="py-8 text-center text-sm text-muted-foreground/60">
+        No workers attached to this mission right now.
+      </div>
+    );
+  }
+  return (
+    <ul className="space-y-1">
+      {workers.map((w) => {
+        const onTranscriptClick = (
+          e: React.MouseEvent<HTMLAnchorElement>,
+        ) => {
+          if (onOpenTranscript) {
+            e.preventDefault();
+            onOpenTranscript(w.workerSessionId);
+          }
+        };
+        return (
+          <li
+            key={w.workerSessionId}
+            className="flex flex-col gap-2 rounded border border-border/40 px-3 py-2 text-sm sm:flex-row sm:items-start sm:justify-between"
+          >
+            <div className="min-w-0 flex-1 space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge
+                  variant="outline"
+                  className={MISSION_WORKER_KIND_BADGE_CLASS[w.kind]}
+                  title={MISSION_WORKER_KIND_TOOLTIP[w.kind]}
+                >
+                  {w.kind}
+                </Badge>
+                <Badge className="text-foreground/70">
+                  {w.kind === "task" ? w.taskStatus ?? "—" : w.sessionStatus}
+                </Badge>
+                {w.agentDefName ? (
+                  <span className="text-[10px] text-muted-foreground/70">
+                    {w.agentDefName}
+                  </span>
+                ) : null}
+                {w.latestEventAt ? (
+                  <span className="ml-auto font-mono text-[10px] text-muted-foreground/60">
+                    {formatTimestamp(w.latestEventAt)}
+                  </span>
+                ) : null}
+              </div>
+              <div className="truncate text-sm text-foreground/80">
+                {deriveMissionWorkerActivityLabel(w)}
+              </div>
+            </div>
+            <a
+              href={w.transcriptUrl}
+              target="_blank"
+              rel="noreferrer"
+              onClick={onTranscriptClick}
+              className="self-start text-xs text-primary hover:underline"
             >
-              Keep mission
-            </Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={doCancel}
-              disabled={busy}
-            >
-              {busy ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <Ban className="size-4" />
-              )}
-              Cancel mission
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+              View session
+            </a>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+
+function MetadataPane({ mission }: { mission: AgentChatMissionSummary }) {
+  type Row = { label: string; value: React.ReactNode };
+  const rows: Row[] = [];
+  rows.push({
+    label: "Mission ID",
+    value: <code className="text-[11px]">{mission.id}</code>,
+  });
+  rows.push({
+    label: "Session ID",
+    value: <code className="text-[11px]">{mission.sessionId}</code>,
+  });
+  rows.push({
+    label: "Agent ID",
+    value: <code className="text-[11px]">{mission.agentId}</code>,
+  });
+  rows.push({ label: "Status", value: mission.status });
+  rows.push({
+    label: "Iteration",
+    value: `${mission.iteration} / ${mission.maxIterations}`,
+  });
+  rows.push({
+    label: "Owner",
+    value: mission.userId
+      ? <>user <code className="text-[11px]">{mission.userId}</code></>
+      : mission.serviceAccountId
+        ? <>service account <code className="text-[11px]">{mission.serviceAccountId}</code></>
+        : "—",
+  });
+  rows.push({
+    label: "Created",
+    value: (
+      <span className="font-mono text-[11px]">
+        {new Date(mission.createdAt).toLocaleString()}
+      </span>
+    ),
+  });
+  rows.push({
+    label: "Updated",
+    value: (
+      <span className="font-mono text-[11px]">
+        {new Date(mission.updatedAt).toLocaleString()}
+      </span>
+    ),
+  });
+  if (mission.pausedReason) {
+    rows.push({ label: "Paused reason", value: mission.pausedReason });
+  }
+  if (mission.cancelledReason) {
+    rows.push({ label: "Cancelled reason", value: mission.cancelledReason });
+  }
+
+  return (
+    <div className="space-y-6">
+      <section>
+        <div className="mb-1 font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
+          Description
+        </div>
+        <p className="whitespace-pre-wrap text-sm text-foreground/90">
+          {mission.description}
+        </p>
+      </section>
+      <section>
+        <div className="mb-1 font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
+          Rubric
+        </div>
+        <p className="whitespace-pre-wrap text-sm text-foreground/90">
+          {mission.rubric}
+        </p>
+      </section>
+      {mission.lastEvaluationResult ? (
+        <section className="space-y-2">
+          <div className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
+            Last verdict — {mission.lastEvaluationResult}
+          </div>
+          {mission.lastEvaluationFeedback ? (
+            <p className="whitespace-pre-wrap text-sm text-foreground/90">
+              {mission.lastEvaluationFeedback}
+            </p>
+          ) : null}
+          {mission.lastEvaluationExplanation ? (
+            <p className="whitespace-pre-wrap text-xs text-muted-foreground/70">
+              {mission.lastEvaluationExplanation}
+            </p>
+          ) : null}
+        </section>
+      ) : null}
+      <section>
+        <div className="mb-2 font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
+          Identifiers
+        </div>
+        <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-xs">
+          {rows.map((r) => (
+            <Fragment key={r.label}>
+              <dt className="text-muted-foreground/70">{r.label}</dt>
+              <dd className="break-all text-foreground/90">{r.value}</dd>
+            </Fragment>
+          ))}
+        </dl>
+      </section>
     </div>
   );
 }
