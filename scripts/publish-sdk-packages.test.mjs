@@ -71,7 +71,7 @@ test("publish command targets the package directory", () => {
       "npm",
       [
         "publish",
-        "sdk/agent-chat-react",
+        "./sdk/agent-chat-react",
         "--access",
         "public",
         "--dry-run",

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const DEFAULT_REGISTRY = "https://registry.npmjs.org";
@@ -90,9 +90,10 @@ export function preparePackageManifest({ dir, manifest, releaseVersion }) {
 }
 
 export function buildPublishCommand({ dir, access, dryRun }) {
+  const target = isAbsolute(dir) || dir.startsWith("./") ? dir : `./${dir}`;
   const args = [
     "publish",
-    dir,
+    target,
     "--access",
     access,
   ];
