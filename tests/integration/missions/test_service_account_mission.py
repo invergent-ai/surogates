@@ -14,7 +14,6 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -95,11 +94,6 @@ async def _create_sa_session(
     )
 
 
-def _redis_stub() -> AsyncMock:
-    """Minimal AsyncMock matching ``handle_mission_create``'s redis usage."""
-    return AsyncMock(zadd=AsyncMock())
-
-
 async def _insert_sa_mission(
     *, session_factory, session_store, sa_session: SaSession,
     description: str = "Audit failing CI jobs",
@@ -117,7 +111,6 @@ async def _insert_sa_mission(
         session_store=session_store,
         session_factory=session_factory,
         mission_store=store,
-        redis=_redis_stub(),
     )
     assert result.ok is True, result.error
     assert result.mission_id is not None

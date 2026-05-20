@@ -1775,9 +1775,11 @@ class AgentHarness:
                 self._propagate_runaway_flag(session, usage_data)
             except Exception as exc:
                 logger.exception(
-                    "LLM call failed for session %s (iteration %d)",
+                    "LLM call failed for session %s (iteration %d, model %s): %s",
                     session.id,
                     iteration,
+                    model_id,
+                    exc,
                 )
                 info = classify_harness_error(exc)
                 await self._store.emit_event(
@@ -4149,6 +4151,7 @@ class AgentHarness:
         """
         from surogates.missions.commands import (
             MissionCommandParseError,
+            MissionHandlerResult,
             handle_mission_cancel,
             handle_mission_create,
             handle_mission_pause,
@@ -4157,6 +4160,13 @@ class AgentHarness:
             parse_mission_command,
         )
         from surogates.missions.store import MissionStore
+
+        # ``result`` is the inner handler's return when a branch invokes
+        # one; the post-cursor kickoff emit reads ``result.kickoff_content``.
+        # Branches that short-circuit on a precondition (missing Redis,
+        # missing principal, unparseable command, invalid action) leave
+        # this None and skip the kickoff emit.
+        result: MissionHandlerResult | None = None
 
         args = content[len("/mission"):].strip()
         try:
@@ -4203,7 +4213,6 @@ class AgentHarness:
                             session_store=self._store,
                             session_factory=self._session_factory,
                             mission_store=mission_store,
-                            redis=redis_client,
                         )
                         message = result.message or result.error
                         if result.ok and result.mission_id is not None:
@@ -4298,6 +4307,34 @@ class AgentHarness:
             through_event_id=response_event_id,
             lease_token=lease.lease_token,
         )
+
+        # /mission create defers its synthetic kickoff message until after
+        # the slash response's cursor advance — otherwise the cursor races
+        # past the kickoff's event id and the next wake bails with
+        # "no actionable pending events".  Mirrors the /goal flow above.
+        if (
+            result is not None
+            and result.ok
+            and result.kickoff_content is not None
+        ):
+            await self._store.emit_event(
+                session.id, EventType.USER_MESSAGE,
+                {
+                    "content": result.kickoff_content,
+                    "synthetic": "mission_kickoff",
+                },
+            )
+            if redis_client is not None:
+                try:
+                    from surogates.config import enqueue_session
+
+                    await enqueue_session(
+                        redis_client, session.agent_id, session.id,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to enqueue mission kickoff", exc_info=True,
+                    )
 
     async def _handle_goal_command(
         self,

@@ -26,7 +26,7 @@ async def test_trigger_on_task_terminal_event(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
 
     async with session_factory() as db:
@@ -62,7 +62,7 @@ async def test_trigger_on_completion_marker(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
 
     decision = await should_evaluate(
@@ -89,7 +89,7 @@ async def test_no_trigger_on_plain_response_without_terminal_task(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     decision = await should_evaluate(
         mission_id=created.mission_id,
@@ -114,7 +114,7 @@ async def test_rate_limit_blocks_within_window(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     await store.record_evaluation(
         created.mission_id, result="needs_revision",
@@ -149,7 +149,7 @@ async def test_first_evaluation_ignores_tasks_predating_mission(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     # Backdate a terminal task's completed_at to BEFORE the mission's
     # created_at by an hour. The mission has never been evaluated yet
@@ -193,7 +193,7 @@ async def test_old_terminal_task_does_not_retrigger_after_evaluation(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     async with session_factory() as db:
         db.add(Task(
@@ -233,7 +233,7 @@ async def test_build_evaluator_prompt_includes_all_four_blocks(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     async with session_factory() as db:
         db.add_all([
@@ -287,7 +287,7 @@ async def test_apply_verdict_satisfied_marks_status_terminal(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     await apply_verdict(
         mission_id=created.mission_id,
@@ -316,7 +316,7 @@ async def test_apply_verdict_needs_revision_emits_continuation(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     await apply_verdict(
         mission_id=created.mission_id,
@@ -364,7 +364,7 @@ async def test_apply_verdict_max_iterations_reached(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     for _ in range(19):
         await store.increment_iteration(created.mission_id)
@@ -394,7 +394,7 @@ async def test_harness_runs_evaluator_when_mission_task_completed(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     async with session_factory() as db:
         db.add(Task(
@@ -440,7 +440,7 @@ async def test_harness_evaluator_records_parse_failure_on_bad_judge_output(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     async with session_factory() as db:
         db.add(Task(
@@ -490,7 +490,7 @@ async def test_harness_transport_failure_does_not_consume_iteration_budget(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     async with session_factory() as db:
         db.add(Task(

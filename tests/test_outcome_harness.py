@@ -237,6 +237,7 @@ async def test_handle_mission_create_propagates_config_to_in_memory_session(
     async def fake_create(**_kwargs: Any) -> MissionHandlerResult:
         return MissionHandlerResult(
             ok=True, mission_id=mission_id, message="started",
+            kickoff_content="[Mission kickoff]\nDescription: x\nRubric:\ny",
         )
 
     monkeypatch.setattr(
@@ -253,6 +254,90 @@ async def test_handle_mission_create_propagates_config_to_in_memory_session(
     assert session.config["strict_coordinator"] is True
     assert session.config["active_mission_id"] == str(mission_id)
     assert "subagent-task-orchestrator" in session.config["preloaded_skills"]
+
+
+@pytest.mark.asyncio
+async def test_handle_mission_create_emits_kickoff_after_cursor_advance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for PROD session 216e2577-…: the kickoff
+    ``user.message`` must be emitted AFTER ``advance_harness_cursor``
+    so its event id is strictly greater than the cursor.  Otherwise
+    the next wake sees ``no actionable pending events`` and bails —
+    the coordinator never starts on the mission.
+
+    Verifies the temporal sequence:
+
+        emit LLM_RESPONSE("Mission … started.")   # cursor → here
+        advance_harness_cursor(through=that_id)
+        emit USER_MESSAGE(kickoff content)         # id > cursor
+        enqueue session                            # next wake fires
+
+    and that the kickoff event id is strictly greater than the cursor
+    advance.
+    """
+    from uuid import uuid4
+
+    from surogates.missions.commands import MissionHandlerResult
+    from surogates.session.events import EventType
+
+    store = FakeStore()
+    redis = FakeRedis()
+    harness = _make_harness(
+        store, redis_client=redis, session_factory=MagicMock(),
+    )
+    session = _session()
+    lease = _lease(session.id)
+
+    async def fake_create(**_kwargs: Any) -> MissionHandlerResult:
+        return MissionHandlerResult(
+            ok=True, mission_id=uuid4(), message="Mission started.",
+            kickoff_content="[Mission kickoff]\nDescription: x\nRubric:\ny",
+        )
+
+    monkeypatch.setattr(
+        "surogates.missions.commands.handle_mission_create", fake_create,
+    )
+
+    await harness._handle_mission_command(
+        session,
+        "/mission do a thing\n\nRubric:\ndone",
+        lease,
+    )
+
+    # Pull out the emitted events in order.
+    emitted = [(t, data) for (_sid, t, data) in store.events]
+    response_idx = next(
+        i for i, (t, _) in enumerate(emitted) if t == EventType.LLM_RESPONSE
+    )
+    kickoff_idx = next(
+        i for i, (t, d) in enumerate(emitted)
+        if t == EventType.USER_MESSAGE
+        and d.get("synthetic") == "mission_kickoff"
+    )
+
+    # Kickoff must come AFTER the LLM_RESPONSE (which is what the cursor
+    # advances through).  Reversing the order is the PROD bug.
+    assert response_idx < kickoff_idx, (
+        "kickoff user.message must be emitted after the slash response; "
+        "otherwise advance_harness_cursor races past it"
+    )
+
+    # The cursor advance through the LLM_RESPONSE event must be strictly
+    # less than the kickoff event id, so the next wake sees the kickoff
+    # as pending.
+    assert len(store.cursor_advances) == 1
+    cursor_through = store.cursor_advances[0]["through_event_id"]
+    # FakeStore increments next_event_id by 1 per emit, so the kickoff
+    # id is exactly cursor_through + 1 in this fixture.
+    assert cursor_through + 1 == store.next_event_id - 1, (
+        "kickoff event id must be cursor + 1 (kickoff emitted post-cursor)"
+    )
+
+    # And the session must be enqueued for a fresh wake to process the kickoff.
+    assert len(redis.zadds) == 1, (
+        "/mission create must enqueue the session after emitting the kickoff"
+    )
 
 
 @pytest.mark.asyncio

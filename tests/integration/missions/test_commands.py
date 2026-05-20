@@ -12,18 +12,27 @@ from surogates.session.events import EventType
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_create_inserts_mission_emits_event_and_kickoff(
+async def test_create_inserts_mission_emits_event_and_returns_kickoff(
     session_factory, session_store, org_id, user_id, chat_session,
 ):
-    """A successful /mission create writes a Mission row, emits
-    mission.defined, emits a synthetic kickoff user.message, and updates
-    session.config with active_mission_id + coordinator=True + the
-    preloaded orchestrator skill."""
+    """A successful /mission create:
+
+    * writes a Mission row,
+    * emits ``mission.defined``,
+    * updates ``session.config`` with ``active_mission_id`` +
+      ``coordinator=True`` + ``strict_coordinator=True`` + the
+      preloaded orchestrator skill,
+    * returns the kickoff content via ``MissionHandlerResult.kickoff_content``
+      so the slash handler can emit it AFTER ``advance_harness_cursor``
+      runs (otherwise the cursor would race past the kickoff event id
+      and the next wake would bail with "no actionable pending events").
+
+    Specifically: ``handle_mission_create`` no longer emits the kickoff
+    ``user.message`` itself or enqueues the session for re-wake. That's
+    the caller's job, post-cursor-advance.
+    """
     from surogates.missions.commands import handle_mission_create
     from surogates.missions.store import MissionStore
-
-    redis = AsyncMock()
-    redis.zadd = AsyncMock()
 
     store = MissionStore(session_factory)
     result = await handle_mission_create(
@@ -36,11 +45,16 @@ async def test_create_inserts_mission_emits_event_and_kickoff(
         session_store=session_store,
         session_factory=session_factory,
         mission_store=store,
-        redis=redis,
     )
 
     assert result.ok is True
     mid = result.mission_id
+
+    # Kickoff content is returned, not emitted — caller (slash handler)
+    # emits it after cursor advance.
+    assert result.kickoff_content is not None
+    assert "Train 0.6B model" in result.kickoff_content
+    assert "gsm8k >= 0.8" in result.kickoff_content
 
     m = await store.get(mid)
     assert m.status == "active"
@@ -56,13 +70,15 @@ async def test_create_inserts_mission_emits_event_and_kickoff(
         assert len(defined) == 1
         assert defined[0].data["mission_id"] == str(mid)
 
+        # No kickoff user.message yet — that's the caller's job to emit
+        # after advancing the harness cursor.
         kickoffs = (await db.execute(
             select(Event).where(
                 Event.session_id == chat_session.id,
                 Event.type == EventType.USER_MESSAGE.value,
             )
         )).scalars().all()
-        assert any(
+        assert not any(
             ev.data.get("synthetic") == "mission_kickoff"
             for ev in kickoffs
         )
@@ -73,8 +89,6 @@ async def test_create_inserts_mission_emits_event_and_kickoff(
         assert sess.config["strict_coordinator"] is True
         preloaded = sess.config.get("preloaded_skills") or []
         assert "subagent-task-orchestrator" in preloaded
-
-    redis.zadd.assert_called_once()
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -103,7 +117,6 @@ async def test_create_rejects_when_active_goal_present(
         session_store=session_store,
         session_factory=session_factory,
         mission_store=MissionStore(session_factory),
-        redis=AsyncMock(zadd=AsyncMock()),
     )
     assert result.ok is False
     assert "goal" in result.error.lower()
@@ -125,7 +138,7 @@ async def test_create_rejects_when_active_mission_already_on_session(
         user_id=user_id, org_id=org_id, agent_id="orchestrator",
         session_store=session_store,
         session_factory=session_factory,
-        mission_store=store, redis=redis,
+        mission_store=store,
     )
     second = await handle_mission_create(
         description="second", rubric="r2",
@@ -133,7 +146,7 @@ async def test_create_rejects_when_active_mission_already_on_session(
         user_id=user_id, org_id=org_id, agent_id="orchestrator",
         session_store=session_store,
         session_factory=session_factory,
-        mission_store=store, redis=redis,
+        mission_store=store,
     )
     assert second.ok is False
     assert "mission" in second.error.lower()
@@ -154,7 +167,7 @@ async def test_status_returns_active_mission_summary(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     status = await handle_mission_status(
         session_id=chat_session.id, mission_store=store,
@@ -202,7 +215,7 @@ async def test_pause_transitions_status_and_emits_event(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=redis,
+        mission_store=store,
     )
     result = await handle_mission_pause(
         session_id=chat_session.id, reason="waiting on review",
@@ -239,7 +252,7 @@ async def test_resume_transitions_back_to_active(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=redis,
+        mission_store=store,
     )
     await handle_mission_pause(
         session_id=chat_session.id, reason="x",
@@ -270,7 +283,7 @@ async def test_cancel_without_cascade_marks_cancelled(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=redis,
+        mission_store=store,
     )
     res = await handle_mission_cancel(
         session_id=chat_session.id,
@@ -306,7 +319,7 @@ async def test_cancel_with_cascade_publishes_interrupt_per_running_worker(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=redis,
+        mission_store=store,
     )
 
     worker_session_id = uuid.uuid4()
@@ -388,7 +401,7 @@ async def test_create_with_service_account_principal(
         session_store=session_store,
         session_factory=session_factory,
         mission_store=store,
-        redis=redis,
+
     )
 
     assert result.ok is True, result.error
@@ -408,7 +421,9 @@ async def test_create_with_service_account_principal(
         # itself instead of spawning subagent tasks.
         assert sess.config["strict_coordinator"] is True
 
-    redis.zadd.assert_called_once()
+    # handle_mission_create no longer enqueues — the slash handler does
+    # that after advancing the harness cursor, so the kickoff message is
+    # visible on the next wake. Nothing to assert on redis here.
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -432,7 +447,7 @@ async def test_create_rejects_when_neither_principal_provided(
         session_store=session_store,
         session_factory=session_factory,
         mission_store=store,
-        redis=redis,
+
     )
     assert result.ok is False
     assert "principal" in (result.error or "").lower()
@@ -463,7 +478,7 @@ async def test_create_rejects_when_both_principals_provided(
         session_store=session_store,
         session_factory=session_factory,
         mission_store=store,
-        redis=redis,
+
     )
     assert result.ok is False
     assert "principal" in (result.error or "").lower()

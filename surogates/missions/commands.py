@@ -112,12 +112,22 @@ def parse_mission_command(raw: str) -> MissionCommand:
 
 @dataclass(slots=True)
 class MissionHandlerResult:
-    """Standard return shape for slash handlers."""
+    """Standard return shape for slash handlers.
+
+    ``kickoff_content`` carries the synthetic ``user.message`` body
+    that a successful ``handle_mission_create`` wants the caller to
+    emit AFTER it has advanced the harness cursor through its own
+    slash-reply.  Deferring the kickoff emit to the caller prevents
+    the bug where the slash handler's ``advance_harness_cursor``
+    races past the kickoff event id, leaving the harness with
+    "no actionable pending events" on the next wake.
+    """
 
     ok: bool
     mission_id: UUID | None = None
     message: str = ""
     error: str = ""
+    kickoff_content: str | None = None
 
 
 _KICKOFF_TEMPLATE = """\
@@ -157,7 +167,6 @@ async def handle_mission_create(
     session_store: Any,
     session_factory: Any,
     mission_store: MissionStore,
-    redis: Any,
     user_id: UUID | None = None,
     service_account_id: UUID | None = None,
 ) -> MissionHandlerResult:
@@ -174,10 +183,18 @@ async def handle_mission_create(
     * an active or paused mission (via :class:`MissionStore`).
 
     On success: inserts the Mission row, updates session.config with
-    ``active_mission_id``, ``coordinator=True``, and the
-    ``subagent-task-orchestrator`` preloaded skill; emits
-    ``mission.defined``; emits a synthetic ``user.message`` with the
-    kickoff prompt; enqueues the session for immediate processing.
+    ``active_mission_id``, ``coordinator=True``, ``strict_coordinator=True``,
+    and the ``subagent-task-orchestrator`` preloaded skill; emits
+    ``mission.defined``; returns the kickoff text via
+    :attr:`MissionHandlerResult.kickoff_content`.
+
+    The kickoff ``user.message`` and the agent enqueue are intentionally
+    NOT emitted here.  The caller (the harness ``/mission`` slash
+    handler) must emit the kickoff AFTER its own
+    ``advance_harness_cursor`` runs — otherwise the cursor advance can
+    race past the kickoff's event id and leave the next wake with
+    "no actionable pending events".  Same control-flow pattern as
+    ``/goal``'s outcome kickoff in ``harness/loop.py``.
     """
     if (user_id is None) == (service_account_id is None):
         return MissionHandlerResult(
@@ -244,17 +261,14 @@ async def handle_mission_create(
             "max_iterations": 20,
         },
     )
+
+    # Kickoff + enqueue are returned to the caller, NOT emitted here —
+    # see the docstring for the cursor-race rationale.
     kickoff = _KICKOFF_TEMPLATE.format(description=description, rubric=rubric)
-    await session_store.emit_event(
-        session_id, EventType.USER_MESSAGE,
-        {"content": kickoff, "synthetic": "mission_kickoff"},
-    )
-
-    await enqueue_session(redis, agent_id, session_id)
-
     return MissionHandlerResult(
         ok=True, mission_id=mission_id,
         message=f"Mission {mission_id} started.",
+        kickoff_content=kickoff,
     )
 
 

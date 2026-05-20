@@ -26,7 +26,7 @@ async def test_spawn_task_stamps_mission_id_when_active_mission(
         session_id=chat_session.id, user_id=user_id, org_id=org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     mission_id = created.mission_id
 

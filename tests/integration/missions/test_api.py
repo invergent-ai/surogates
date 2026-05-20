@@ -31,7 +31,7 @@ async def test_get_mission_detail(inbox_app, session_factory, session_store):
         user_id=user_session.user_id, org_id=user_session.org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
 
     async with AsyncClient(
@@ -61,7 +61,7 @@ async def test_get_mission_tasks(inbox_app, session_factory, session_store):
         user_id=user_session.user_id, org_id=user_session.org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     async with session_factory() as db:
         db.add_all([
@@ -107,7 +107,7 @@ async def test_get_missions_list_filters_by_user_and_status(
         user_id=user_session.user_id, org_id=user_session.org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     async with AsyncClient(
         transport=ASGITransport(app=inbox_app), base_url="http://test",
@@ -141,7 +141,7 @@ async def test_get_mission_rejects_cross_tenant_access(
         user_id=owner.user_id, org_id=owner.org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     async with AsyncClient(
         transport=ASGITransport(app=inbox_app), base_url="http://test",
@@ -167,7 +167,7 @@ async def test_post_pause_transitions_to_paused(
         user_id=user_session.user_id, org_id=user_session.org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     async with AsyncClient(
         transport=ASGITransport(app=inbox_app), base_url="http://test",
@@ -197,7 +197,7 @@ async def test_post_cancel_with_cascade_marks_tasks_cancelled(
         user_id=user_session.user_id, org_id=user_session.org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     async with session_factory() as db:
         db.add(Task(
@@ -241,7 +241,7 @@ async def test_post_resume_returns_active(
         user_id=user_session.user_id, org_id=user_session.org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
     await store.set_status(created.mission_id, "paused", paused_reason="x")
 
@@ -278,7 +278,7 @@ async def _setup_mission_with_children(session_factory, session_store):
         user_id=user_session.user_id, org_id=user_session.org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
 
     # Spawn a task-backed worker (the spawn_task path).
@@ -405,7 +405,7 @@ async def test_get_mission_workers_ignores_unrelated_child_channels(
         user_id=user_session.user_id, org_id=user_session.org_id,
         agent_id="orchestrator",
         session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=AsyncMock(zadd=AsyncMock()),
+        mission_store=store,
     )
 
     # A scheduled child — different channel, should NOT appear.
