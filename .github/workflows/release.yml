@@ -78,7 +78,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.dir }}
 
   npm:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
