@@ -79,6 +79,9 @@ jobs:
 
   npm:
     runs-on: self-hosted
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -95,6 +98,9 @@ jobs:
           scope: "@invergent"
           cache: pnpm
 
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@^11.5.1
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -107,8 +113,6 @@ jobs:
           pnpm -r --filter './sdk/*' --if-present run build
 
       - name: Publish SDK packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: node scripts/publish-sdk-packages.mjs --version="${GITHUB_REF_NAME#v}"
 
   release:

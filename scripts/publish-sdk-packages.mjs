@@ -93,7 +93,6 @@ export function buildPublishCommand({ dir, access, dryRun }) {
   const args = [
     "publish",
     dir,
-    "--no-git-checks",
     "--access",
     access,
   ];
@@ -102,7 +101,7 @@ export function buildPublishCommand({ dir, access, dryRun }) {
     args.push("--dry-run");
   }
 
-  return ["pnpm", args];
+  return ["npm", args];
 }
 
 function discoverSdkPackages(sdkRoot) {

@@ -68,11 +68,10 @@ test("publish command targets the package directory", () => {
       dryRun: true,
     }),
     [
-      "pnpm",
+      "npm",
       [
         "publish",
         "sdk/agent-chat-react",
-        "--no-git-checks",
         "--access",
         "public",
         "--dry-run",
