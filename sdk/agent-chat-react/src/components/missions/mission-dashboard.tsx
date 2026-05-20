@@ -623,36 +623,6 @@ export function MissionDashboard({
                 </Tooltip>
               </div>
 
-              {/* Stat strip — compact counts + auto-refresh meta. */}
-              <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-t border-border/40 pt-3 text-[11px]">
-                <div className="flex items-baseline gap-1">
-                  <span className="font-mono text-sm font-semibold tabular-nums text-foreground">
-                    {state.tasks.length}
-                  </span>
-                  <span className="text-muted-foreground/70">
-                    {state.tasks.length === 1 ? "task" : "tasks"}
-                  </span>
-                </div>
-                <div className="flex items-baseline gap-1">
-                  <span className="font-mono text-sm font-semibold tabular-nums text-foreground">
-                    {state.workers.length}
-                  </span>
-                  <span className="text-muted-foreground/70">
-                    {state.workers.length === 1 ? "worker" : "workers"}
-                  </span>
-                </div>
-                <div className="flex items-baseline gap-1">
-                  <span className="font-mono text-sm font-semibold tabular-nums text-foreground">
-                    {activity.length}
-                  </span>
-                  <span className="text-muted-foreground/70">
-                    {activity.length === 1 ? "event" : "events"}
-                  </span>
-                </div>
-                <span className="ml-auto text-[10px] text-muted-foreground/50">
-                  auto-refresh {pollIntervalMs / 1000}s
-                </span>
-              </div>
             </CardContent>
           </Card>
         </div>
@@ -1065,22 +1035,9 @@ function MetadataPane({ mission }: { mission: AgentChatMissionSummary }) {
 
   return (
     <div className="space-y-6">
-      <section>
-        <div className="mb-1 font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
-          Description
-        </div>
-        <p className="whitespace-pre-wrap text-sm text-foreground/90">
-          {mission.description}
-        </p>
-      </section>
-      <section>
-        <div className="mb-1 font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
-          Rubric
-        </div>
-        <p className="whitespace-pre-wrap text-sm text-foreground/90">
-          {mission.rubric}
-        </p>
-      </section>
+      {/* Description and Rubric live in the hero card — they don't
+          repeat here.  Metadata is reserved for the things the hero
+          doesn't show: evaluator detail + identifiers. */}
       {mission.lastEvaluationResult ? (
         <section className="space-y-2">
           <div className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
