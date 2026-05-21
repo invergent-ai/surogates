@@ -20,7 +20,7 @@
 - [x] Task 4 — `TurnFeedback` component (TDD)
 - [x] Task 5 — `chat-thread` integration
 - [x] Task 6 — Web adapter wire-up
-- [ ] Task 7 — End-to-end smoke verification
+- [~] Task 7 — End-to-end smoke verification (Steps 1-3 done; Step 4 needs a live backend)
 
 ---
 
@@ -1070,28 +1070,13 @@ cd /work/surogates && git add web/src/api/feedback.ts web/src/features/chat/suro
 
 Confirm the whole stack compiles and tests pass in both packages, and exercise the live UI once.
 
-- [ ] **Step 1: Full SDK test suite**
+- [x] **Step 1: Full SDK test suite** — 116/116 PASS
 
-```bash
-cd /work/surogates/sdk/agent-chat-react && npx vitest run
-```
-Expected: all tests PASS.
+- [x] **Step 2: Full SDK typecheck** — clean
 
-- [ ] **Step 2: Full SDK typecheck**
+- [x] **Step 3: Web typecheck + build** — both clean
 
-```bash
-cd /work/surogates/sdk/agent-chat-react && npx tsc --noEmit
-```
-Expected: exit 0.
-
-- [ ] **Step 3: Web typecheck + build**
-
-```bash
-cd /work/surogates/web && npm run typecheck && npm run build
-```
-Expected: both exit 0.
-
-- [ ] **Step 4: Run the web app locally and exercise the flow**
+- [ ] **Step 4: Run the web app locally and exercise the flow** — requires a live backend with a logged-in session; the unit suite covers rendering and click handling, but the SSE replay path needs a running deployment to confirm interactively. **Action item for the human partner.**
 
 ```bash
 cd /work/surogates/web && npm run dev
@@ -1105,9 +1090,7 @@ Open the app in a browser, log in, send a chat message, wait for a complete assi
 
 If any of these fail, debug before committing. No commit produced for this step.
 
-- [ ] **Step 5: Final summary commit (if any docs need touching up)**
-
-If no fixes were required, skip. Otherwise commit any minor follow-ups produced by Step 4 with a focused message.
+- [ ] **Step 5: Final summary commit (if any docs need touching up)** — skipped; no follow-ups required from Step 4 yet.
 
 ---
 
