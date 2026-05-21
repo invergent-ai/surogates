@@ -15,7 +15,7 @@
 ## Progress
 
 - [x] Task 1 — Message fields & adapter method
-- [ ] Task 2 — Reducer: track `llmResponseEventId` on assistant messages
+- [x] Task 2 — Reducer: track `llmResponseEventId` on assistant messages
 - [ ] Task 3 — Reducer: handle `user.feedback` events
 - [ ] Task 4 — `TurnFeedback` component (TDD)
 - [ ] Task 5 — `chat-thread` integration
@@ -92,7 +92,7 @@ cd /work/surogates && git add sdk/agent-chat-react/src/types.ts && git commit -m
 
 The four branches of `applyLlmResponse` create or update an assistant message. Each needs to set `llmResponseEventId = event.eventId` on the message it writes.
 
-- [ ] **Step 1: Write the failing test for fresh-message branch**
+- [x] **Step 1: Write the failing test for fresh-message branch**
 
 Append inside `describe("applyAgentChatEvent", …)` in `tests/reducer.test.ts`:
 
@@ -110,14 +110,14 @@ Append inside `describe("applyAgentChatEvent", …)` in `tests/reducer.test.ts`:
   });
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 ```bash
 cd /work/surogates/sdk/agent-chat-react && npx vitest run tests/reducer.test.ts -t "stores llmResponseEventId on a freshly created"
 ```
 Expected: FAIL — `llmResponseEventId` is `undefined`.
 
-- [ ] **Step 3: Write the failing test for the multi-response update branch**
+- [x] **Step 3: Write the failing test for the multi-response update branch**
 
 Append the second test:
 
@@ -144,14 +144,14 @@ Append the second test:
   });
 ```
 
-- [ ] **Step 4: Run both tests; both should fail**
+- [x] **Step 4: Run both tests; both should fail**
 
 ```bash
 cd /work/surogates/sdk/agent-chat-react && npx vitest run tests/reducer.test.ts -t "llmResponseEventId"
 ```
 Expected: both new tests FAIL.
 
-- [ ] **Step 5: Implement — set `llmResponseEventId` in every branch of `applyLlmResponse`**
+- [x] **Step 5: Implement — set `llmResponseEventId` in every branch of `applyLlmResponse`**
 
 In `src/runtime/reducer.ts`, modify `applyLlmResponse` (lines 418–510). Each of the four mutation sites currently builds a new message object — add `llmResponseEventId: event.eventId` to every one. The full updated function body's mutation section becomes:
 
@@ -213,14 +213,14 @@ In `src/runtime/reducer.ts`, modify `applyLlmResponse` (lines 418–510). Each o
   }
 ```
 
-- [ ] **Step 6: Run both tests; both should pass; full suite should still pass**
+- [x] **Step 6: Run both tests; both should pass; full suite should still pass**
 
 ```bash
 cd /work/surogates/sdk/agent-chat-react && npx vitest run tests/reducer.test.ts
 ```
 Expected: all reducer tests PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd /work/surogates && git add sdk/agent-chat-react/src/runtime/reducer.ts sdk/agent-chat-react/tests/reducer.test.ts && git commit -m "feat(chat-sdk): track llmResponseEventId per assistant turn"

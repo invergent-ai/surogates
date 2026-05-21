@@ -280,6 +280,39 @@ describe("applyAgentChatEvent", () => {
     });
     expect(destroyed.messages.at(-1)?.content).toMatch(/browser closed/i);
   });
+
+  it("stores llmResponseEventId on a freshly created assistant message", () => {
+    const next = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "llm.response",
+      eventId: 17,
+      data: { message: { content: "hi there" } },
+    });
+
+    expect(next.messages).toHaveLength(1);
+    expect(next.messages[0]?.role).toBe("assistant");
+    expect(next.messages[0]?.llmResponseEventId).toBe(17);
+  });
+
+  it("updates llmResponseEventId when a second llm.response lands on the same message", () => {
+    const afterDelta = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "llm.delta",
+      eventId: 10,
+      data: { content: "partial" },
+    });
+    const afterFirst = applyAgentChatEvent(afterDelta, {
+      type: "llm.response",
+      eventId: 11,
+      data: { message: { content: "partial", tool_calls: [{ id: "tc-1" }] } },
+    });
+    const afterSecond = applyAgentChatEvent(afterFirst, {
+      type: "llm.response",
+      eventId: 25,
+      data: { message: { content: "final answer" } },
+    });
+
+    expect(afterSecond.messages).toHaveLength(1);
+    expect(afterSecond.messages[0]?.llmResponseEventId).toBe(25);
+  });
 });
 
 describe("applyAgentChatEvent — user.message images and attachments", () => {

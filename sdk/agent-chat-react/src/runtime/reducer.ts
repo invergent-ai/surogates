@@ -450,9 +450,14 @@ function applyLlmResponse(
         reasoning: (current.reasoning ?? "") + current.content,
         content: "",
         status: "streaming",
+        llmResponseEventId: event.eventId,
       };
     } else {
-      messages[idx] = { ...current, status: "complete" };
+      messages[idx] = {
+        ...current,
+        status: "complete",
+        llmResponseEventId: event.eventId,
+      };
     }
   } else if (matchesExistingToolTurn && idx >= 0) {
     const current = messages[idx]!;
@@ -462,6 +467,7 @@ function applyLlmResponse(
         ? appendText(current.reasoning, responseContent)
         : current.reasoning,
       status: "streaming",
+      llmResponseEventId: event.eventId,
     };
   } else if (prevHasTools || !prevAssistant || hasUserAfter) {
     messages.push({
@@ -471,6 +477,7 @@ function applyLlmResponse(
       reasoning: hasToolCalls && responseContent ? responseContent : undefined,
       createdAt: new Date(),
       status: hasToolCalls ? "streaming" : "complete",
+      llmResponseEventId: event.eventId,
     });
   } else {
     const current = messages[idx]!;
@@ -479,12 +486,14 @@ function applyLlmResponse(
         ...current,
         reasoning: (current.reasoning ?? "") + responseContent,
         status: "streaming",
+        llmResponseEventId: event.eventId,
       };
     } else {
       messages[idx] = {
         ...current,
         content: responseContent || current.content,
         status: hasToolCalls ? "streaming" : "complete",
+        llmResponseEventId: event.eventId,
       };
     }
   }
