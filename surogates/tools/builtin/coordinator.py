@@ -66,10 +66,19 @@ WORKER_EXCLUDED_TOOLS: frozenset[str] = frozenset({
 # instructions ask for delegation.
 #
 # Coordination tools (``spawn_task``, ``delegate_task``, ``spawn_worker``,
-# ``cancel_task``, ``unblock_task``, ``task_show``, ``send_worker_message``,
-# ``stop_worker``, ``consult_expert``, ``clarify``, ``memory``, ``todo``,
-# ``session_search``, ``skills_list``, ``skill_view``, ``skill_manage``,
-# ``cron_*``, ``loop_wait``, ``loop_complete``) stay available.
+# ``cancel_task``, ``unblock_task``, ``send_worker_message``, ``stop_worker``,
+# ``consult_expert``, ``clarify``, ``memory``, ``todo``, ``session_search``,
+# ``skills_list``, ``skill_view``, ``skill_manage``, ``cron_*``, ``loop_wait``,
+# ``loop_complete``) stay available.
+#
+# ``task_block``, ``task_complete``, ``task_show`` are also stripped here
+# even though their schemas are nominally about coordination — they are
+# *self*-tools that operate on ``Session.task_id``, which is unset on the
+# coordinator (the coordinator IS the parent, not an attempt-of-task).
+# ``orchestrator.worker._filter_effective_tools`` strips them from the
+# prompt-fragment guidance via the same task_id check, but that path
+# only affects the system prompt, not the LLM's actual tool schemas —
+# so they have to live here too or strict coordinators still see them.
 COORDINATOR_IMPLEMENTATION_TOOLS: frozenset[str] = frozenset({
     # File I/O
     "read_file",
@@ -101,6 +110,11 @@ COORDINATOR_IMPLEMENTATION_TOOLS: frozenset[str] = frozenset({
     "kb_read_page",
     # Artifact materialisation (workers produce; coordinator orchestrates)
     "create_artifact",
+    # Self-tools that require Session.task_id — useless for a parent
+    # coordinator session (task_id is None).
+    "task_block",
+    "task_complete",
+    "task_show",
 })
 
 # ---------------------------------------------------------------------------
