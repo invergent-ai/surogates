@@ -17,7 +17,7 @@
 - [x] Task 1 — Message fields & adapter method
 - [x] Task 2 — Reducer: track `llmResponseEventId` on assistant messages
 - [x] Task 3 — Reducer: handle `user.feedback` events
-- [ ] Task 4 — `TurnFeedback` component (TDD)
+- [x] Task 4 — `TurnFeedback` component (TDD)
 - [ ] Task 5 — `chat-thread` integration
 - [ ] Task 6 — Web adapter wire-up
 - [ ] Task 7 — End-to-end smoke verification
@@ -422,7 +422,7 @@ cd /work/surogates && git add sdk/agent-chat-react/src/types.ts sdk/agent-chat-r
 
 Component mirrors `expert-tool.tsx`'s feedback affordance but is smaller — no tool-args parsing, no expanded/collapsed body, just the buttons + optional reason form. The `ReasonForm` is duplicated locally rather than extracted; the spec notes that a third caller would justify lifting it out.
 
-- [ ] **Step 1: Write the failing test scaffold**
+- [x] **Step 1: Write the failing test scaffold**
 
 Create `tests/turn-feedback.test.tsx`:
 
@@ -550,14 +550,14 @@ describe("TurnFeedback", () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests — every test should fail**
+- [x] **Step 2: Run the tests — every test should fail**
 
 ```bash
 cd /work/surogates/sdk/agent-chat-react && npx vitest run tests/turn-feedback.test.tsx
 ```
 Expected: 6 FAIL (module not found).
 
-- [ ] **Step 3: Implement `TurnFeedback`**
+- [x] **Step 3: Implement `TurnFeedback`**
 
 Create `src/components/chat/turn-feedback.tsx`:
 
@@ -779,14 +779,14 @@ function ReasonForm({
 }
 ```
 
-- [ ] **Step 4: Run the tests — all six should pass**
+- [x] **Step 4: Run the tests — all six should pass**
 
 ```bash
 cd /work/surogates/sdk/agent-chat-react && npx vitest run tests/turn-feedback.test.tsx
 ```
 Expected: 6 PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /work/surogates && git add sdk/agent-chat-react/src/components/chat/turn-feedback.tsx sdk/agent-chat-react/tests/turn-feedback.test.tsx && git commit -m "feat(chat-sdk): TurnFeedback component for assistant thumbs"
