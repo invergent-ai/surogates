@@ -37,6 +37,7 @@ import { parseTerminalResult } from "./tools/terminal-tool";
 import { statusColorClass, effectiveStatus, toolErrorSummary, parseArgs } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
 import { ChatComposer } from "./chat-composer";
+import { TurnFeedback } from "./turn-feedback";
 import { useSmoothStream } from "./use-smooth-stream";
 import { ArtifactBlock } from "./artifacts/artifact-block";
 import { ErrorMessage } from "./error-message";
@@ -97,7 +98,14 @@ type TimelineEntry =
   | { kind: "tool"; key: string; tc: ToolCallInfo; resolvedArtifactName?: string }
   | { kind: "browser_activity"; key: string; calls: ToolCallInfo[] }
   | { kind: "web_search_group"; key: string; calls: ToolCallInfo[] }
-  | { kind: "text"; key: string; content: string; isStreaming: boolean }
+  | {
+      kind: "text";
+      key: string;
+      content: string;
+      isStreaming: boolean;
+      msg: ChatMessageType;
+      isFinalTurnText?: boolean;
+    }
   | { kind: "thinking"; key: string }
   | { kind: "skill_invoked"; key: string; skill: string; stagedAt: string | null }
   | {
@@ -207,6 +215,7 @@ function messageToEntries(
       key: `${msg.id}-text`,
       content: msg.content,
       isStreaming,
+      msg,
     });
   }
 
@@ -658,6 +667,9 @@ function TextEntry({
       </TimelineHeader>
       <TimelineContent>
         <MessageResponse>{content}</MessageResponse>
+        {entry.isFinalTurnText && entry.msg.status === "complete" && (
+          <TurnFeedback msg={entry.msg} />
+        )}
       </TimelineContent>
     </TimelineItem>
   );
@@ -692,6 +704,19 @@ function AssistantGroup({
   }
   entries = groupBrowserActivityEntries(entries);
   entries = groupWebSearchEntries(entries);
+
+  // Mark only the last text entry in this assistant group as the
+  // final user-facing answer. Each constituent message can contribute
+  // at most one text entry (messageToEntries only pushes text when
+  // there are no tool calls), but a group can merge several messages;
+  // we only want a single thumbs control per visual turn.
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry?.kind === "text") {
+      entries[i] = { ...entry, isFinalTurnText: true };
+      break;
+    }
+  }
 
   // Whenever this is the tail assistant group and the session is still
   // running, append a "Working on it..." row unless something visible is

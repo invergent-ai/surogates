@@ -18,7 +18,7 @@
 - [x] Task 2 — Reducer: track `llmResponseEventId` on assistant messages
 - [x] Task 3 — Reducer: handle `user.feedback` events
 - [x] Task 4 — `TurnFeedback` component (TDD)
-- [ ] Task 5 — `chat-thread` integration
+- [x] Task 5 — `chat-thread` integration
 - [ ] Task 6 — Web adapter wire-up
 - [ ] Task 7 — End-to-end smoke verification
 
@@ -806,7 +806,7 @@ cd /work/surogates && git add sdk/agent-chat-react/src/components/chat/turn-feed
 
 Carry the message through to the text-entry render so it can render `<TurnFeedback />`. Keep the current preamble behavior: when a message has tool calls, its text content is folded into reasoning and receives no feedback controls. After the assistant group is flattened and grouped, mark only the last `text` entry in that assistant group as the final user-facing answer.
 
-- [ ] **Step 1: Add the `TurnFeedback` import**
+- [x] **Step 1: Add the `TurnFeedback` import**
 
 Near the top of `chat-thread.tsx`, alongside the other component imports, add:
 
@@ -814,7 +814,7 @@ Near the top of `chat-thread.tsx`, alongside the other component imports, add:
 import { TurnFeedback } from "./turn-feedback";
 ```
 
-- [ ] **Step 2: Extend the `text` variant of `TimelineEntry`**
+- [x] **Step 2: Extend the `text` variant of `TimelineEntry`**
 
 Replace the `text` entry in the union (around line 100) with:
 
@@ -829,7 +829,7 @@ Replace the `text` entry in the union (around line 100) with:
     }
 ```
 
-- [ ] **Step 3: Populate the new fields when pushing a text entry**
+- [x] **Step 3: Populate the new fields when pushing a text entry**
 
 In `messageToEntries`, find the existing block (around line 204):
 
@@ -858,7 +858,7 @@ Replace with:
   }
 ```
 
-- [ ] **Step 4: Mark only the final text entry in each assistant group**
+- [x] **Step 4: Mark only the final text entry in each assistant group**
 
 In `AssistantGroup`, after:
 
@@ -882,7 +882,7 @@ add:
 This prevents multiple thumbs controls when consecutive assistant
 messages are grouped into one visual turn.
 
-- [ ] **Step 5: Render `TurnFeedback` inside `TextEntry`**
+- [x] **Step 5: Render `TurnFeedback` inside `TextEntry`**
 
 Replace `TextEntry` (around line 645–664) with:
 
@@ -912,14 +912,14 @@ function TextEntry({
 }
 ```
 
-- [ ] **Step 6: Run typecheck and the full SDK suite**
+- [x] **Step 6: Run typecheck and the full SDK suite**
 
 ```bash
 cd /work/surogates/sdk/agent-chat-react && npx tsc --noEmit && npx vitest run
 ```
 Expected: typecheck clean, all tests PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd /work/surogates && git add sdk/agent-chat-react/src/components/chat/chat-thread.tsx && git commit -m "feat(chat-sdk): render TurnFeedback under final assistant text"
