@@ -12,6 +12,18 @@
 
 ---
 
+## Progress
+
+- [x] Task 1 — Message fields & adapter method
+- [ ] Task 2 — Reducer: track `llmResponseEventId` on assistant messages
+- [ ] Task 3 — Reducer: handle `user.feedback` events
+- [ ] Task 4 — `TurnFeedback` component (TDD)
+- [ ] Task 5 — `chat-thread` integration
+- [ ] Task 6 — Web adapter wire-up
+- [ ] Task 7 — End-to-end smoke verification
+
+---
+
 ## File Structure
 
 **SDK — `surogates/sdk/agent-chat-react/`:**
@@ -19,7 +31,7 @@
 - Modify `src/runtime/events.ts` — add `"user.feedback"` to `AGENT_CHAT_LISTENED_EVENTS`.
 - Modify `src/runtime/reducer.ts` — set `llmResponseEventId` in `applyLlmResponse`; add `applyUserFeedback`; dispatch the new case.
 - Create `src/components/chat/turn-feedback.tsx` — new component, ~130 lines, mirrors `expert-tool.tsx` but smaller (no expert-specific args/result parsing).
-- Modify `src/components/chat/chat-thread.tsx` — extend the `text` `TimelineEntry` variant with `msg` + `isFinalTurnText`; populate in `messageToEntries`; render `<TurnFeedback />` in `TextEntry`.
+- Modify `src/components/chat/chat-thread.tsx` — extend the `text` `TimelineEntry` variant with `msg` + optional `isFinalTurnText`; mark the final text entry after assistant-group flattening; render `<TurnFeedback />` in `TextEntry`.
 - Modify `tests/reducer.test.ts` — add tests for `llmResponseEventId` tracking and `user.feedback` reduction.
 - Create `tests/turn-feedback.test.tsx` — new component-level tests.
 
@@ -31,51 +43,20 @@ Each file has one responsibility; the SDK split (types ↔ runtime ↔ component
 
 ---
 
-## Task 1: Wire the data model — types & listened events
+## Task 1: Wire the data model — message fields & adapter method
 
 **Files:**
-- Modify: `surogates/sdk/agent-chat-react/src/types.ts:61-74` (AgentChatMessage), `:355-384` (AgentChatEventType union), `:637-642` (AgentChatAdapter — add `submitUserFeedback?`)
-- Modify: `surogates/sdk/agent-chat-react/src/runtime/events.ts:11-41` (AGENT_CHAT_LISTENED_EVENTS)
+- Modify: `surogates/sdk/agent-chat-react/src/types.ts` — `AgentChatMessage` interface (add two optional fields) and `AgentChatAdapter` interface (add optional `submitUserFeedback?`)
 
-Foundation task: no behavior changes yet, but downstream tasks reference these names. Verified by `tsc`.
+Foundation task: no behavior changes yet. The `AgentChatEventType` union and `AGENT_CHAT_LISTENED_EVENTS` array stay untouched here — they move to Task 3, paired with the reducer dispatch case, because adding `"user.feedback"` to the union would break the reducer's exhaustive switch until the case lands. Verified by `tsc`.
 
-- [ ] **Step 1: Add two optional fields to `AgentChatMessage`**
+- [x] **Step 1: Add two optional fields to `AgentChatMessage`**
 
-In `src/types.ts`, replace the `AgentChatMessage` interface (currently lines 61–74) with:
+In `src/types.ts`, add `llmResponseEventId?: number` and `userFeedback?: { rating: "up" | "down"; reason?: string }` to the `AgentChatMessage` interface.
 
-```ts
-export interface AgentChatMessage {
-  id: string;
-  role: AgentChatRole;
-  content: string;
-  createdAt: Date;
-  status: AgentChatMessageStatus;
-  toolCalls?: AgentChatToolCallInfo[];
-  reasoning?: string;
-  systemKind?: AgentChatSystemKind;
-  systemMeta?: Record<string, unknown>;
-  errorInfo?: AgentChatErrorInfo;
-  images?: AgentChatImageAttachment[];
-  attachments?: AgentChatDisplayAttachment[];
-  llmResponseEventId?: number;
-  userFeedback?: { rating: "up" | "down"; reason?: string };
-}
-```
+- [x] **Step 2: Add the optional `submitUserFeedback` adapter method**
 
-- [ ] **Step 2: Add `"user.feedback"` to the `AgentChatEventType` union**
-
-Locate the union (around line 355). Add `"user.feedback"` to the list, near the existing `"expert.endorse"` / `"expert.override"` entries. The relevant slice becomes:
-
-```ts
-  | "expert.result"
-  | "expert.endorse"
-  | "expert.override"
-  | "user.feedback"
-```
-
-- [ ] **Step 3: Add the optional `submitUserFeedback` adapter method**
-
-In the `AgentChatAdapter` interface (around line 637, immediately after `submitExpertFeedback?`), add:
+In the `AgentChatAdapter` interface, immediately after `submitExpertFeedback?`, add:
 
 ```ts
   submitUserFeedback?(input: {
@@ -88,31 +69,17 @@ In the `AgentChatAdapter` interface (around line 637, immediately after `submitE
 
 (The existing `AgentChatExpertFeedbackRating` alias is just `"up" | "down"` — reuse it.)
 
-- [ ] **Step 4: Add `"user.feedback"` to `AGENT_CHAT_LISTENED_EVENTS`**
+- [x] **Step 3: Run the typecheck**
 
-In `src/runtime/events.ts`, insert `"user.feedback",` immediately after `"expert.override",`:
-
-```ts
-  "expert.result",
-  "expert.endorse",
-  "expert.override",
-  "user.feedback",
-```
-
-The `satisfies readonly AgentChatEventType[]` line will fail to typecheck if Step 2 wasn't done first — this is the safety net.
-
-- [ ] **Step 5: Run the typecheck**
-
-Run from the repo root:
 ```bash
 cd /work/surogates/sdk/agent-chat-react && npx tsc --noEmit
 ```
 Expected: exit 0, no output.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
-cd /work/surogates && git add sdk/agent-chat-react/src/types.ts sdk/agent-chat-react/src/runtime/events.ts && git commit -m "feat(chat-sdk): add user-feedback types and SSE plumbing"
+cd /work/surogates && git add sdk/agent-chat-react/src/types.ts && git commit -m "feat(chat-sdk): add user-feedback fields and adapter method"
 ```
 
 ---
@@ -264,7 +231,9 @@ cd /work/surogates && git add sdk/agent-chat-react/src/runtime/reducer.ts sdk/ag
 ## Task 3: Reducer — handle `user.feedback` events
 
 **Files:**
-- Modify: `surogates/sdk/agent-chat-react/src/runtime/reducer.ts` (add `applyUserFeedback` helper near `applyExpertFeedback`; add `case "user.feedback":` in the main switch around line 197)
+- Modify: `surogates/sdk/agent-chat-react/src/types.ts` — add `"user.feedback"` to `AgentChatEventType` (moved here from Task 1 so it pairs with the dispatch case in one commit)
+- Modify: `surogates/sdk/agent-chat-react/src/runtime/events.ts` — add `"user.feedback"` to `AGENT_CHAT_LISTENED_EVENTS`
+- Modify: `surogates/sdk/agent-chat-react/src/runtime/reducer.ts` (add `applyUserFeedback` helper near `applyExpertFeedback`; add `case "user.feedback":` in the main switch)
 - Test: `surogates/sdk/agent-chat-react/tests/reducer.test.ts` (three more `it` blocks)
 
 `applyUserFeedback` is symmetric to `applyExpertFeedback` but matches on `msg.llmResponseEventId` instead of a tool call's `expertResultEventId`, and ignores non-interactive sources (judge feedback uses the same event type with `source: "judge"`).
@@ -348,14 +317,40 @@ Append:
   });
 ```
 
-- [ ] **Step 4: Run all three; all should fail**
+- [ ] **Step 4: Add `"user.feedback"` to the `AgentChatEventType` union**
+
+In `src/types.ts`, add `"user.feedback"` immediately after `"expert.override"`:
+
+```ts
+  | "expert.result"
+  | "expert.endorse"
+  | "expert.override"
+  | "user.feedback"
+```
+
+After this change the reducer's exhaustive switch will fail to typecheck until Step 6 lands the dispatch case. That's why the three steps (union, listened events, dispatch) are atomic.
+
+- [ ] **Step 5: Add `"user.feedback"` to `AGENT_CHAT_LISTENED_EVENTS`**
+
+In `src/runtime/events.ts`, insert `"user.feedback",` immediately after `"expert.override",`. The relevant slice becomes:
+
+```ts
+  "expert.result",
+  "expert.endorse",
+  "expert.override",
+  "user.feedback",
+```
+
+Without this the SSE stream drops the event before it reaches the reducer; the type union alone is not enough.
+
+- [ ] **Step 6: Run the failing tests to confirm typecheck blocks them**
 
 ```bash
 cd /work/surogates/sdk/agent-chat-react && npx vitest run tests/reducer.test.ts -t "user.feedback"
 ```
-Expected: 3 FAIL (no `case "user.feedback"` in dispatch).
+Expected: tests FAIL (vitest reports a typecheck or runtime mismatch because the reducer still lacks the `case "user.feedback"`).
 
-- [ ] **Step 5: Add `applyUserFeedback` to reducer**
+- [ ] **Step 7: Add `applyUserFeedback` to reducer**
 
 Insert the new function in `src/runtime/reducer.ts` immediately after `applyExpertFeedback` (around line 770):
 
@@ -392,9 +387,9 @@ function applyUserFeedback(
 }
 ```
 
-- [ ] **Step 6: Dispatch `user.feedback`**
+- [ ] **Step 8: Dispatch `user.feedback`**
 
-In the main switch (around line 186–197, immediately after the `expert.endorse` / `expert.override` case), insert:
+In the main switch (immediately after the `expert.endorse` / `expert.override` case), insert:
 
 ```ts
     case "user.feedback":
@@ -404,17 +399,17 @@ In the main switch (around line 186–197, immediately after the `expert.endorse
       );
 ```
 
-- [ ] **Step 7: Run the reducer suite**
+- [ ] **Step 9: Run the reducer suite and typecheck**
 
 ```bash
-cd /work/surogates/sdk/agent-chat-react && npx vitest run tests/reducer.test.ts
+cd /work/surogates/sdk/agent-chat-react && npx tsc --noEmit && npx vitest run tests/reducer.test.ts
 ```
-Expected: all reducer tests PASS.
+Expected: typecheck clean, all reducer tests PASS.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
-cd /work/surogates && git add sdk/agent-chat-react/src/runtime/reducer.ts sdk/agent-chat-react/tests/reducer.test.ts && git commit -m "feat(chat-sdk): reduce user.feedback SSE events into message state"
+cd /work/surogates && git add sdk/agent-chat-react/src/types.ts sdk/agent-chat-react/src/runtime/events.ts sdk/agent-chat-react/src/runtime/reducer.ts sdk/agent-chat-react/tests/reducer.test.ts && git commit -m "feat(chat-sdk): reduce user.feedback SSE events into message state"
 ```
 
 ---
@@ -653,7 +648,7 @@ export function TurnFeedback({ msg }: { msg: ChatMessageType }) {
           size="icon-xs"
           aria-label="Good response"
           title={alreadyRated && rating === "up" ? "Good response (recorded)" : "Good response"}
-          disabled={pending !== null || (alreadyRated && rating !== "up")}
+          disabled={pending !== null || alreadyRated}
           onClick={() => handleRate("up")}
           className={cn(
             rating === "up" ? "text-foreground" : "text-muted-foreground/60",
@@ -670,7 +665,7 @@ export function TurnFeedback({ msg }: { msg: ChatMessageType }) {
           disabled={
             pending !== null ||
             reasonDraft !== null ||
-            (alreadyRated && rating !== "down")
+            alreadyRated
           }
           onClick={() => handleRate("down")}
           className={cn(
@@ -805,10 +800,11 @@ cd /work/surogates && git add sdk/agent-chat-react/src/components/chat/turn-feed
 - Modify: `surogates/sdk/agent-chat-react/src/components/chat/chat-thread.tsx`
   - `TimelineEntry` `text` variant declaration (around line 100)
   - `messageToEntries` text-push site (around line 204–211)
+  - assistant-group flattening before timeline rendering (around line 690)
   - `TextEntry` body (around line 645–664)
   - Add `TurnFeedback` import
 
-Carry the message through to the text-entry render so it can render `<TurnFeedback />`. Every text entry pushed by `messageToEntries` is a final user-facing answer text (the function only pushes text when `hasContent && !hasToolCalls`); we still add `isFinalTurnText` to the variant for explicit semantics.
+Carry the message through to the text-entry render so it can render `<TurnFeedback />`. Keep the current preamble behavior: when a message has tool calls, its text content is folded into reasoning and receives no feedback controls. After the assistant group is flattened and grouped, mark only the last `text` entry in that assistant group as the final user-facing answer.
 
 - [ ] **Step 1: Add the `TurnFeedback` import**
 
@@ -829,7 +825,7 @@ Replace the `text` entry in the union (around line 100) with:
       content: string;
       isStreaming: boolean;
       msg: ChatMessageType;
-      isFinalTurnText: boolean;
+      isFinalTurnText?: boolean;
     }
 ```
 
@@ -858,12 +854,35 @@ Replace with:
       content: msg.content,
       isStreaming,
       msg,
-      isFinalTurnText: true,
     });
   }
 ```
 
-- [ ] **Step 4: Render `TurnFeedback` inside `TextEntry`**
+- [ ] **Step 4: Mark only the final text entry in each assistant group**
+
+In `AssistantGroup`, after:
+
+```ts
+  entries = groupBrowserActivityEntries(entries);
+  entries = groupWebSearchEntries(entries);
+```
+
+add:
+
+```ts
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.kind === "text") {
+      entries[i] = { ...entry, isFinalTurnText: true };
+      break;
+    }
+  }
+```
+
+This prevents multiple thumbs controls when consecutive assistant
+messages are grouped into one visual turn.
+
+- [ ] **Step 5: Render `TurnFeedback` inside `TextEntry`**
 
 Replace `TextEntry` (around line 645–664) with:
 
@@ -893,14 +912,14 @@ function TextEntry({
 }
 ```
 
-- [ ] **Step 5: Run typecheck and the full SDK suite**
+- [ ] **Step 6: Run typecheck and the full SDK suite**
 
 ```bash
 cd /work/surogates/sdk/agent-chat-react && npx tsc --noEmit && npx vitest run
 ```
 Expected: typecheck clean, all tests PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 cd /work/surogates && git add sdk/agent-chat-react/src/components/chat/chat-thread.tsx && git commit -m "feat(chat-sdk): render TurnFeedback under final assistant text"

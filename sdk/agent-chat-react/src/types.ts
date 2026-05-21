@@ -71,6 +71,8 @@ export interface AgentChatMessage {
   errorInfo?: AgentChatErrorInfo;
   images?: AgentChatImageAttachment[];
   attachments?: AgentChatDisplayAttachment[];
+  llmResponseEventId?: number;
+  userFeedback?: { rating: "up" | "down"; reason?: string };
 }
 
 export interface AgentChatToolCallInfo {
@@ -637,6 +639,12 @@ export interface AgentChatAdapter {
   submitExpertFeedback?(input: {
     sessionId: string;
     expertResultEventId: number;
+    rating: AgentChatExpertFeedbackRating;
+    reason?: string;
+  }): Promise<{ eventId?: number; eventType?: string }>;
+  submitUserFeedback?(input: {
+    sessionId: string;
+    llmResponseEventId: number;
     rating: AgentChatExpertFeedbackRating;
     reason?: string;
   }): Promise<{ eventId?: number; eventType?: string }>;
