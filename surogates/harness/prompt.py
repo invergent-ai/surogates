@@ -205,8 +205,6 @@ class PromptBuilder:
             parts.append(self._prompts.get("guidance/skills"))
         if "clarify" in self._available_tools:
             parts.append(self._prompts.get("guidance/clarify"))
-        if "consult_expert" in self._available_tools:
-            parts.append(self._prompts.get("guidance/expert"))
         if "create_artifact" in self._available_tools:
             parts.append(self._prompts.get("guidance/artifact"))
         if any(tool.startswith("browser_") for tool in self._available_tools):
@@ -407,13 +405,12 @@ class PromptBuilder:
         return "# Memory\n\n" + "\n\n".join(fragments)
 
     def _skills_section(self) -> str:
-        """Index available skills and experts with descriptions."""
+        """Index executor-visible skills with descriptions."""
         if not self.skills:
             return ""
 
         skills_by_category: dict[str, list[tuple[str, str]]] = {}
         category_descriptions: dict[str, str] = {}
-        expert_lines: list[str] = []
 
         from surogates.tools.loader import SkillDef
 
@@ -421,10 +418,7 @@ class PromptBuilder:
             if isinstance(skill, dict):
                 name = skill.get("name", "unnamed")
                 desc = skill.get("description", "")
-                trigger = skill.get("trigger", "")
                 skill_type = skill.get("type", "skill")
-                expert_tools = skill.get("expert_tools") or []
-                expert_stats = skill.get("expert_stats") or {}
                 category = skill.get("category") or "general"
                 category_description = skill.get("category_description") or ""
                 fallback_for_tools = self._as_string_list(
@@ -434,10 +428,7 @@ class PromptBuilder:
             elif isinstance(skill, SkillDef):
                 name = skill.name
                 desc = skill.description
-                trigger = skill.trigger or ""
                 skill_type = skill.type
-                expert_tools = skill.expert_tools or []
-                expert_stats = {}
                 category = skill.category or "general"
                 category_description = skill.category_description or ""
                 fallback_for_tools = self._as_string_list(skill.fallback_for_tools)
@@ -445,10 +436,7 @@ class PromptBuilder:
             else:
                 name = str(skill)
                 desc = ""
-                trigger = ""
                 skill_type = "skill"
-                expert_tools = []
-                expert_stats = {}
                 category = "general"
                 category_description = ""
                 fallback_for_tools = []
@@ -457,19 +445,7 @@ class PromptBuilder:
             safe_desc = self._sanitise(desc, f"skill:{name}")
 
             if skill_type == "expert":
-                entry = f"- **{name}**"
-                if safe_desc:
-                    entry += f" — {safe_desc}"
-                if trigger:
-                    entry += f"\n  Trigger: {trigger}"
-                total_uses = expert_stats.get("total_uses", 0)
-                total_successes = expert_stats.get("total_successes", 0)
-                if total_uses > 0:
-                    rate = (total_successes / total_uses) * 100
-                    entry += f"\n  Success rate: {rate:.0f}% ({total_uses} uses)."
-                if expert_tools:
-                    entry += f"\n  Tools: {', '.join(expert_tools)}"
-                expert_lines.append(entry)
+                continue
             else:
                 if not self._skill_visible(fallback_for_tools, requires_tools):
                     continue
@@ -487,14 +463,6 @@ class PromptBuilder:
                 skills_by_category,
                 category_descriptions,
             ))
-        if expert_lines:
-            sections.append(
-                "# Available Experts\n"
-                "Use `consult_expert` for voluntary delegation to these "
-                "task-specialized reasoning models. Harness-enforced expert "
-                "routing uses expert triggers automatically.\n"
-                + "\n".join(expert_lines)
-            )
 
         return "\n\n".join(sections)
 

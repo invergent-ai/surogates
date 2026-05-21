@@ -98,6 +98,50 @@ def build_vision_auxiliary_llm(
     return AuxiliaryLLM(client=AsyncOpenAI(**kwargs), model=str(model))
 
 
+def build_advisor_auxiliary_llm(
+    settings: Settings,
+    tenant: TenantContext | None = None,
+) -> AuxiliaryLLM | None:
+    """Build an auxiliary client for hidden strategic advisor calls."""
+    llm = settings.llm
+    org_llm = _mapping_get(getattr(tenant, "org_config", None), "llm")
+    user_llm = _mapping_get(getattr(tenant, "user_preferences", None), "llm")
+
+    enabled = (
+        _mapping_get(user_llm, "advisor_enabled")
+        if _mapping_get(user_llm, "advisor_enabled") is not None
+        else _mapping_get(org_llm, "advisor_enabled")
+    )
+    if enabled is None:
+        enabled = llm.advisor_enabled
+    if not bool(enabled):
+        return None
+
+    model = (
+        _mapping_get(user_llm, "advisor_model")
+        or _mapping_get(org_llm, "advisor_model")
+        or llm.advisor_model
+    )
+    if not model:
+        return None
+
+    base_url = (
+        _mapping_get(org_llm, "advisor_base_url")
+        or llm.advisor_base_url
+        or llm.base_url
+    )
+    api_key = (
+        _mapping_get(org_llm, "advisor_api_key")
+        or llm.advisor_api_key
+        or llm.api_key
+    )
+
+    kwargs: dict[str, Any] = {"api_key": api_key or "EMPTY"}
+    if base_url:
+        kwargs["base_url"] = base_url
+    return AuxiliaryLLM(client=AsyncOpenAI(**kwargs), model=str(model))
+
+
 def _mapping_get(value: Any, key: str) -> Any:
     if isinstance(value, dict):
         return value.get(key)

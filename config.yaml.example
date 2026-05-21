@@ -44,6 +44,15 @@ llm:
   #     label: "secondary"
   #     priority: 1
 
+  # Hidden harness advisor — optional stronger model for strategic guidance
+  # while the primary executor model continues to do the bulk of the work.
+  # advisor_enabled: false
+  # advisor_model: ""           # e.g. "anthropic/claude-opus-4.1"
+  # advisor_base_url: ""        # falls back to llm.base_url when empty
+  # advisor_api_key: ""         # falls back to llm.api_key when empty
+  # advisor_max_calls_per_turn: 2
+  # advisor_max_tokens: 700
+
 # ── Outcome Goals ───────────────────────────────────────────────────
 outcomes:
   max_iterations: 3        # Default revision loops for outcomes; hard-clamped to 20

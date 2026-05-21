@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from surogates.harness.budget import IterationBudget
 from surogates.harness.auxiliary_client import (
+    build_advisor_auxiliary_llm,
     build_summary_auxiliary_llm,
     build_vision_auxiliary_llm,
 )
@@ -656,6 +657,7 @@ async def run_worker(settings: Settings) -> None:
         budget = IterationBudget(max_total=90)
         summary_auxiliary = build_summary_auxiliary_llm(settings, tenant)
         vision_auxiliary = build_vision_auxiliary_llm(settings, tenant)
+        advisor_auxiliary = build_advisor_auxiliary_llm(settings, tenant)
         compressor = ContextCompressor(
             model_id,
             base_url=settings.llm.base_url,
@@ -683,9 +685,9 @@ async def run_worker(settings: Settings) -> None:
         memory_store = MemoryStore(memory_dir=memory_dir)
         memory_manager = MemoryManager(memory_store)
 
-        # Load prompt-visible catalogs.  Skills include expert
-        # definitions, which the prompt lists so the default LLM knows
-        # valid ``consult_expert`` names for voluntary delegation.
+        # Load prompt-visible catalogs.  Expert skill definitions may still
+        # exist in storage, but PromptBuilder hides them from executor prompts
+        # now that strategic advice is handled by the harness advisor.
         # Coordinator sessions also render sub-agents as an "Available
         # Sub-Agents" block and use their presence to gate delegation
         # tool schemas.
@@ -794,6 +796,14 @@ async def run_worker(settings: Settings) -> None:
             vision_model=(
                 vision_auxiliary.model if vision_auxiliary is not None else ""
             ),
+            advisor_client=(
+                advisor_auxiliary.client if advisor_auxiliary is not None else None
+            ),
+            advisor_model=(
+                advisor_auxiliary.model if advisor_auxiliary is not None else ""
+            ),
+            advisor_max_calls_per_turn=settings.llm.advisor_max_calls_per_turn,
+            advisor_max_tokens=settings.llm.advisor_max_tokens,
         )
 
     # 8. Orchestrator — consumes from this agent's dedicated work queue.
