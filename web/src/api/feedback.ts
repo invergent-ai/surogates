@@ -1,9 +1,11 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// Client for the expert-feedback endpoint. Lets the UI record a
-// thumbs-up (EXPERT_ENDORSE) or thumbs-down (EXPERT_OVERRIDE) on a
-// specific expert.result event.
+// Client for the turn-feedback endpoint. Lets the UI record a
+// thumbs-up or thumbs-down on any rate-able assistant turn event
+// (an expert.result, emitting EXPERT_ENDORSE/EXPERT_OVERRIDE, or an
+// llm.response, emitting USER_FEEDBACK).  The backend routes by the
+// target event's type, so this client is event-agnostic.
 
 import { authFetch } from "./auth";
 
@@ -14,14 +16,14 @@ export interface FeedbackResponse {
   event_type: string;
 }
 
-export async function submitExpertFeedback(
+export async function submitTurnFeedback(
   sessionId: string,
-  expertResultEventId: number,
+  targetEventId: number,
   rating: FeedbackRating,
   reason?: string,
 ): Promise<FeedbackResponse> {
   const response = await authFetch(
-    `/api/v1/sessions/${sessionId}/events/${expertResultEventId}/feedback`,
+    `/api/v1/sessions/${sessionId}/events/${targetEventId}/feedback`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

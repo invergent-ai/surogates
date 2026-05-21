@@ -1,7 +1,7 @@
 import { getArtifact } from "@/api/artifacts";
 import { refreshSession } from "@/api/auth";
 import { submitClarifyResponse as submitClarifyResponseApi } from "@/api/clarify";
-import { submitExpertFeedback as submitExpertFeedbackApi } from "@/api/feedback";
+import { submitTurnFeedback } from "@/api/feedback";
 import * as inboxApi from "@/api/inbox";
 import * as missionsApi from "@/api/missions";
 import * as sessionsApi from "@/api/sessions";
@@ -224,9 +224,19 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
   },
 
   async submitExpertFeedback(input) {
-    const response = await submitExpertFeedbackApi(
+    const response = await submitTurnFeedback(
       input.sessionId,
       input.expertResultEventId,
+      input.rating,
+      input.reason,
+    );
+    return { eventId: response.event_id, eventType: response.event_type };
+  },
+
+  async submitUserFeedback(input) {
+    const response = await submitTurnFeedback(
+      input.sessionId,
+      input.llmResponseEventId,
       input.rating,
       input.reason,
     );

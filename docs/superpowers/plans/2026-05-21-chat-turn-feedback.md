@@ -19,7 +19,7 @@
 - [x] Task 3 — Reducer: handle `user.feedback` events
 - [x] Task 4 — `TurnFeedback` component (TDD)
 - [x] Task 5 — `chat-thread` integration
-- [ ] Task 6 — Web adapter wire-up
+- [x] Task 6 — Web adapter wire-up
 - [ ] Task 7 — End-to-end smoke verification
 
 ---
@@ -935,7 +935,7 @@ cd /work/surogates && git add sdk/agent-chat-react/src/components/chat/chat-thre
 
 The HTTP helper is endpoint-generic (it just POSTs to `/feedback` against a target event id), so we rename it to remove the "expert" misnomer. The SDK adapter method `submitExpertFeedback` stays unchanged; only the helper inside the web adapter is renamed.
 
-- [ ] **Step 1: Rename the helper in `web/src/api/feedback.ts`**
+- [x] **Step 1: Rename the helper in `web/src/api/feedback.ts`**
 
 Replace `submitExpertFeedback` with `submitTurnFeedback`. The full file becomes:
 
@@ -982,7 +982,7 @@ export async function submitTurnFeedback(
 }
 ```
 
-- [ ] **Step 2: Update the import in `surogates-web-chat-adapter.ts`**
+- [x] **Step 2: Update the import in `surogates-web-chat-adapter.ts`**
 
 Change line 4 from:
 
@@ -996,7 +996,7 @@ to:
 import { submitTurnFeedback } from "@/api/feedback";
 ```
 
-- [ ] **Step 3: Update the existing `submitExpertFeedback` adapter method**
+- [x] **Step 3: Update the existing `submitExpertFeedback` adapter method**
 
 Around lines 226–234, change the body from:
 
@@ -1026,7 +1026,7 @@ to:
   },
 ```
 
-- [ ] **Step 4: Add the new `submitUserFeedback` method**
+- [x] **Step 4: Add the new `submitUserFeedback` method**
 
 Immediately after `submitExpertFeedback` (still in the adapter object), add:
 
@@ -1042,21 +1042,21 @@ Immediately after `submitExpertFeedback` (still in the adapter object), add:
   },
 ```
 
-- [ ] **Step 5: Run the web app typecheck**
+- [x] **Step 5: Run the web app typecheck**
 
 ```bash
 cd /work/surogates/web && npm run typecheck
 ```
 Expected: no errors. The TypeScript compiler verifies the adapter shape matches `AgentChatAdapter`.
 
-- [ ] **Step 6: Run the web build**
+- [x] **Step 6: Run the web build**
 
 ```bash
 cd /work/surogates/web && npm run build
 ```
 Expected: exit 0. Confirms no other call sites of `submitExpertFeedback` (the renamed helper) were missed.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd /work/surogates && git add web/src/api/feedback.ts web/src/features/chat/surogates-web-chat-adapter.ts && git commit -m "feat(web): wire submitUserFeedback to the renamed turn-feedback helper"
