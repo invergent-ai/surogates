@@ -245,6 +245,13 @@ class LLMSettings(BaseSettings):
     vision_base_url: str = ""  # optional auxiliary endpoint for vision model
     vision_api_key: str = ""  # optional auxiliary API key for vision model
 
+    advisor_enabled: bool = False  # hidden strategic advisor for hard agent turns
+    advisor_model: str = ""  # stronger model used for advisor guidance
+    advisor_base_url: str = ""  # optional auxiliary endpoint for advisor model
+    advisor_api_key: str = ""  # optional auxiliary API key for advisor model
+    advisor_max_calls_per_turn: int = 2  # hard cap for hidden advisor calls
+    advisor_max_tokens: int = 700  # requested advisor output budget
+
 
 class SandboxSettings(BaseSettings):
     """Sandbox execution environment configuration.

@@ -95,6 +95,12 @@ class EventType(str, Enum):
     EXPERT_ENDORSE = "expert.endorse"     # thumbs-up
     EXPERT_OVERRIDE = "expert.override"   # thumbs-down
 
+    # Hidden harness advisor. The executor never sees an advisor tool; these
+    # events audit the auxiliary guidance pass and provider usage.
+    ADVISOR_REQUEST = "advisor.request"
+    ADVISOR_RESULT = "advisor.result"
+    ADVISOR_FAILURE = "advisor.failure"
+
     # Worker coordination (coordinator mode)
     WORKER_SPAWNED = "worker.spawned"
     WORKER_COMPLETE = "worker.complete"

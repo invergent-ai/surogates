@@ -330,7 +330,7 @@ class TestDynamicLoopToolPolicy:
 
         reg = ToolRegistry()
         registered = {
-            "spawn_task", "delegate_task", "consult_expert", "memory",
+            "spawn_task", "delegate_task", "memory",
             "terminal", "read_file", "write_file", "browser_navigate",
             "web_search", "vision_analyze", "create_artifact",
         }
@@ -352,7 +352,6 @@ class TestDynamicLoopToolPolicy:
         # Coordination + reasoning tools survive.
         assert "spawn_task" in tool_names
         assert "delegate_task" in tool_names
-        assert "consult_expert" in tool_names
         assert "memory" in tool_names
         # Implementation tools are stripped.
         for stripped in COORDINATOR_IMPLEMENTATION_TOOLS & registered:
@@ -366,7 +365,7 @@ class TestDynamicLoopToolPolicy:
         from surogates.tools.registry import ToolRegistry, ToolSchema
 
         reg = ToolRegistry()
-        for name in ("spawn_task", "consult_expert", "todo", "terminal"):
+        for name in ("spawn_task", "delegate_task", "todo", "terminal"):
             reg.register(
                 name,
                 ToolSchema(name=name, description="test", parameters={}),
@@ -383,7 +382,7 @@ class TestDynamicLoopToolPolicy:
 
         assert tool_names is not None
         assert "spawn_task" in tool_names
-        assert "consult_expert" in tool_names
+        assert "delegate_task" in tool_names
         # Operator excluded 'todo', strict-coordinator excluded 'terminal'.
         assert "todo" not in tool_names
         assert "terminal" not in tool_names

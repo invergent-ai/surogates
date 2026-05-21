@@ -701,7 +701,7 @@ class TestTrainingDataCollector:
 
 
 class TestPromptBuilderExpertGuidance:
-    """PromptBuilder injects expert guidance and lists experts."""
+    """PromptBuilder keeps expert internals hidden from executor prompts."""
 
     @pytest.fixture
     def tenant(self):
@@ -713,29 +713,29 @@ class TestPromptBuilderExpertGuidance:
             asset_root="/tmp/test_assets",
         )
 
-    def test_expert_guidance_injected_when_tool_available(self, tenant):
+    def test_expert_guidance_not_injected_even_if_legacy_tool_name_present(self, tenant):
         from surogates.harness.prompt import PromptBuilder
-        from surogates.harness.prompt_library import default_library
 
         pb = PromptBuilder(
             tenant=tenant,
             available_tools={"consult_expert", "memory"},
         )
         section = pb._tool_guidance_section()
-        assert default_library().get("guidance/expert") in section
+        assert "consult_expert" not in section
+        assert "Available Experts" not in section
 
     def test_expert_guidance_not_injected_without_tool(self, tenant):
         from surogates.harness.prompt import PromptBuilder
-        from surogates.harness.prompt_library import default_library
 
         pb = PromptBuilder(
             tenant=tenant,
             available_tools={"memory"},
         )
         section = pb._tool_guidance_section()
-        assert default_library().get("guidance/expert") not in section
+        assert "consult_expert" not in section
+        assert "Available Experts" not in section
 
-    def test_skills_section_separates_experts_from_skills(self, tenant):
+    def test_skills_section_hides_experts_from_executor_catalog(self, tenant):
         from surogates.harness.prompt import PromptBuilder
 
         skills = [
@@ -758,17 +758,13 @@ class TestPromptBuilderExpertGuidance:
         section = pb._skills_section()
 
         assert "# Available Skills" in section
-        assert "# Available Experts" in section
         assert "code-review" in section
-        assert "sql_writer" in section
-        assert "consult_expert" in section
-        assert "voluntary delegation" in section
-        assert "Harness-enforced expert routing uses expert triggers automatically" in section
-        assert "Trigger: SQL queries, database schemas" in section
-        assert "94%" in section
-        assert "terminal" in section
+        assert "# Available Experts" not in section
+        assert "sql_writer" not in section
+        assert "consult_expert" not in section
+        assert "voluntary delegation" not in section
 
-    def test_skills_section_handles_skilldefs(self, tenant):
+    def test_skills_section_hides_expert_skilldefs(self, tenant):
         from surogates.harness.prompt import PromptBuilder
 
         skills = [
@@ -787,9 +783,9 @@ class TestPromptBuilderExpertGuidance:
         pb = PromptBuilder(tenant=tenant, skills=skills)
         section = pb._skills_section()
 
-        assert "# Available Experts" in section
-        assert "my-expert" in section
-        assert "Trigger: coding, debugging" in section
+        assert "# Available Experts" not in section
+        assert "my-expert" not in section
+        assert "Trigger: coding, debugging" not in section
 
 
 class TestWorkerExpertCatalogWiring:
@@ -863,13 +859,12 @@ class TestWorkerExpertCatalogWiring:
 
 
 class TestToolRouterExpertLocation:
-    """consult_expert is routed to HARNESS location."""
+    """consult_expert is not exposed through normal tool routing."""
 
-    def test_consult_expert_in_tool_locations(self):
-        from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
+    def test_consult_expert_not_in_tool_locations(self):
+        from surogates.tools.router import TOOL_LOCATIONS
 
-        assert "consult_expert" in TOOL_LOCATIONS
-        assert TOOL_LOCATIONS["consult_expert"] == ToolLocation.HARNESS
+        assert "consult_expert" not in TOOL_LOCATIONS
 
 
 # =========================================================================
@@ -878,16 +873,16 @@ class TestToolRouterExpertLocation:
 
 
 class TestToolRuntimeRegistersExpert:
-    """ToolRuntime.register_builtins() includes the expert module."""
+    """ToolRuntime.register_builtins() hides consult_expert from executors."""
 
-    def test_expert_registered(self):
+    def test_expert_not_registered(self):
         from surogates.tools.registry import ToolRegistry
         from surogates.tools.runtime import ToolRuntime
 
         reg = ToolRegistry()
         runtime = ToolRuntime(reg)
         runtime.register_builtins()
-        assert reg.has("consult_expert")
+        assert not reg.has("consult_expert")
 
 
 # =========================================================================

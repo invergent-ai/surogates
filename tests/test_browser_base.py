@@ -71,6 +71,49 @@ def test_llm_settings_do_not_expose_generation_defaults(monkeypatch) -> None:
     assert not hasattr(s, "max_tokens")
 
 
+def test_llm_settings_advisor_defaults(monkeypatch) -> None:
+    for key in list(os.environ):
+        if key.startswith("SUROGATES_LLM_ADVISOR_"):
+            monkeypatch.delenv(key, raising=False)
+
+    from surogates.config import LLMSettings
+
+    s = LLMSettings()
+    assert s.advisor_enabled is False
+    assert s.advisor_model == ""
+    assert s.advisor_base_url == ""
+    assert s.advisor_api_key == ""
+    assert s.advisor_max_calls_per_turn == 2
+    assert s.advisor_max_tokens == 700
+
+
+def test_llm_settings_advisor_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("SUROGATES_LLM_ADVISOR_ENABLED", "true")
+    monkeypatch.setenv("SUROGATES_LLM_ADVISOR_MODEL", "advisor-model")
+    monkeypatch.setenv("SUROGATES_LLM_ADVISOR_MAX_CALLS_PER_TURN", "3")
+
+    from surogates.config import LLMSettings
+
+    s = LLMSettings()
+    assert s.advisor_enabled is True
+    assert s.advisor_model == "advisor-model"
+    assert s.advisor_max_calls_per_turn == 3
+
+
+def test_build_advisor_auxiliary_llm_requires_enabled_and_model() -> None:
+    from surogates.config import Settings
+    from surogates.harness.auxiliary_client import build_advisor_auxiliary_llm
+
+    settings = Settings()
+    settings.llm.advisor_enabled = False
+    settings.llm.advisor_model = "advisor-model"
+    assert build_advisor_auxiliary_llm(settings) is None
+
+    settings.llm.advisor_enabled = True
+    settings.llm.advisor_model = ""
+    assert build_advisor_auxiliary_llm(settings) is None
+
+
 def test_browser_status_values() -> None:
     from surogates.browser.base import BrowserStatus
 

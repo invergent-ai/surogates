@@ -54,7 +54,6 @@ class ToolRuntime:
             coordinator,
             cron,
             delegate,
-            expert,
             file_ops,
             kb_tools,
             loop_control,
@@ -85,7 +84,6 @@ class ToolRuntime:
             todo,
             clarify,
             cron,
-            expert,
             coordinator,
             artifact,
             task_tools,  # spawn_task, unblock_task, cancel_task, task_block

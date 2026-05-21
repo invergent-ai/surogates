@@ -69,6 +69,8 @@ def _harness() -> AgentHarness:
         budget=IterationBudget(max_total=10),
         context_compressor=MagicMock(),
         prompt_builder=MagicMock(),
+        advisor_client=AsyncMock(),
+        advisor_model="advisor-model",
     )
 
 
@@ -173,50 +175,50 @@ class TestExpertSelection:
         assert selected is None
 
 
-class TestHarnessExpertPreflight:
+class TestHarnessAdvisorPreflight:
     @pytest.mark.asyncio
-    async def test_hard_task_injects_forced_expert_result(self):
-        from surogates.tools.builtin.expert_service import ExpertConsultationResult
-
+    async def test_hard_task_injects_advisor_guidance(self):
         harness = _harness()
         session = _session()
         messages = [{"role": "user", "content": "Write a Python function to parse CSV"}]
         events = [
             Event(id=1, session_id=session.id, type=EventType.USER_MESSAGE.value, data={"content": messages[0]["content"]}),
         ]
-
-        service = MagicMock()
-        service.consult = AsyncMock(
-            return_value=ExpertConsultationResult(
-                expert="code_expert",
-                success=True,
-                content="Use csv.DictReader.",
-                iterations_used=1,
+        harness._advisor_client.chat.completions.create = AsyncMock(
+            return_value=SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="Use csv.DictReader."),
+                    )
+                ],
+                usage=SimpleNamespace(prompt_tokens=11, completion_tokens=4),
+                model="advisor-model",
             )
         )
 
-        with (
-            patch(
-                "surogates.harness.loop.load_skills_for_expert_routing",
-                AsyncMock(return_value=[_expert("code_expert", "python, coding")]),
-            ),
-            patch(
-                "surogates.harness.loop.ExpertConsultationService",
-                return_value=service,
-            ),
-        ):
-            consulted = await harness._maybe_consult_required_expert(
-                session, messages, events,
-            )
+        consulted = await harness._maybe_consult_required_advisor(
+            session, messages, events, "system prompt",
+        )
 
         assert consulted is True
         assert messages[-1]["role"] == "user"
-        assert "[Expert consultation: coding via code_expert]" in messages[-1]["content"]
+        assert "[Advisor guidance: coding]" in messages[-1]["content"]
         assert "Use csv.DictReader." in messages[-1]["content"]
-        service.consult.assert_awaited_once()
+        harness._store.emit_event.assert_any_await(
+            session.id,
+            EventType.ADVISOR_RESULT,
+            {
+                "model": "advisor-model",
+                "reason": "early",
+                "category": "coding",
+                "content": "Use csv.DictReader.",
+                "input_tokens": 11,
+                "output_tokens": 4,
+            },
+        )
 
     @pytest.mark.asyncio
-    async def test_recovery_skips_duplicate_forced_consultation(self):
+    async def test_recovery_skips_duplicate_advisor_guidance(self):
         harness = _harness()
         session = _session()
         messages = [{"role": "user", "content": "Write a Python function"}]
@@ -225,24 +227,20 @@ class TestHarnessExpertPreflight:
             Event(
                 id=2,
                 session_id=session.id,
-                type=EventType.EXPERT_DELEGATION.value,
-                data={"expert": "code_expert", "forced": True, "category": "coding"},
+                type=EventType.ADVISOR_RESULT.value,
+                data={"model": "advisor-model", "reason": "early", "category": "coding"},
             ),
         ]
 
-        with patch(
-                "surogates.harness.loop.load_skills_for_expert_routing",
-                AsyncMock(return_value=[_expert("code_expert", "python, coding")]),
-        ) as load_skills:
-            consulted = await harness._maybe_consult_required_expert(
-                session, messages, events,
-            )
+        consulted = await harness._maybe_consult_required_advisor(
+            session, messages, events, "system prompt",
+        )
 
         assert consulted is False
-        load_skills.assert_not_awaited()
+        harness._advisor_client.chat.completions.create.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_recovery_skips_duplicate_forced_failure(self):
+    async def test_recovery_skips_duplicate_advisor_failure(self):
         harness = _harness()
         session = _session()
         messages = [{"role": "user", "content": "Solve 3x + 7 = 22"}]
@@ -251,90 +249,48 @@ class TestHarnessExpertPreflight:
             Event(
                 id=2,
                 session_id=session.id,
-                type=EventType.EXPERT_FAILURE.value,
-                data={"expert": "", "forced": True, "category": "math"},
+                type=EventType.ADVISOR_FAILURE.value,
+                data={"model": "advisor-model", "reason": "early", "category": "math"},
             ),
         ]
 
-        with patch(
-            "surogates.harness.loop.load_skills_for_expert_routing",
-            AsyncMock(return_value=[]),
-        ) as load_skills:
-            consulted = await harness._maybe_consult_required_expert(
-                session, messages, events,
-            )
+        consulted = await harness._maybe_consult_required_advisor(
+            session, messages, events, "system prompt",
+        )
 
         assert consulted is False
-        load_skills.assert_not_awaited()
+        harness._advisor_client.chat.completions.create.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_no_matching_expert_allows_default_model(self):
+    async def test_advisor_failure_allows_default_model(self):
         harness = _harness()
         session = _session()
         messages = [{"role": "user", "content": "Solve 3x + 7 = 22"}]
         events = [
             Event(id=1, session_id=session.id, type=EventType.USER_MESSAGE.value, data={"content": messages[0]["content"]}),
         ]
+        harness._advisor_client.chat.completions.create = AsyncMock(
+            side_effect=RuntimeError("advisor unavailable")
+        )
 
-        with patch(
-                "surogates.harness.loop.load_skills_for_expert_routing",
-                AsyncMock(return_value=[_expert("code_expert", "python, coding")]),
-        ):
-            consulted = await harness._maybe_consult_required_expert(
-                session, messages, events,
-            )
+        consulted = await harness._maybe_consult_required_advisor(
+            session, messages, events, "system prompt",
+        )
 
         assert consulted is False
         assert len(messages) == 1
-
-    @pytest.mark.asyncio
-    async def test_tool_call_intent_consults_expert_before_execution(self):
-        from surogates.tools.builtin.expert_service import ExpertConsultationResult
-
-        harness = _harness()
-        session = _session()
-        messages = [{"role": "user", "content": "Check whether the project is healthy"}]
-        events = [
-            Event(id=1, session_id=session.id, type=EventType.USER_MESSAGE.value, data={"content": messages[0]["content"]}),
-        ]
-        tool_calls = [
+        harness._store.emit_event.assert_any_await(
+            session.id,
+            EventType.ADVISOR_FAILURE,
             {
-                "id": "tc_1",
-                "function": {"name": "terminal", "arguments": '{"cmd": "pytest"}'},
+                "model": "advisor-model",
+                "reason": "early",
+                "category": "math",
+                "error": "advisor unavailable",
             },
-        ]
-
-        service = MagicMock()
-        service.consult = AsyncMock(
-            return_value=ExpertConsultationResult(
-                expert="terminal_expert",
-                success=True,
-                content="Run the targeted tests first.",
-                iterations_used=1,
-            )
         )
-        consulted_categories: set[str] = set()
 
-        with (
-            patch(
-                "surogates.harness.loop.load_skills_for_expert_routing",
-                AsyncMock(return_value=[_expert("terminal_expert", "terminal, shell, pytest")]),
-            ),
-            patch(
-                "surogates.harness.loop.ExpertConsultationService",
-                return_value=service,
-            ),
-        ):
-            intercepted = await harness._maybe_consult_for_tool_calls(
-                session,
-                messages,
-                events,
-                tool_calls,
-                consulted_categories,
-            )
+    def test_harness_has_no_hard_tool_advisor_hook(self):
+        from surogates.harness.loop import AgentHarness
 
-        assert intercepted is True
-        assert "terminal" in consulted_categories
-        assert "[Expert consultation: terminal via terminal_expert]" in messages[-1]["content"]
-        assert "Run the targeted tests first." in messages[-1]["content"]
-        service.consult.assert_awaited_once()
+        assert not hasattr(AgentHarness, "_maybe_consult_for_tool_calls")

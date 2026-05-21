@@ -40,13 +40,9 @@ from surogates.harness.credentials import CredentialPool
 from surogates.harness.error_classify import classify_harness_error
 from surogates.harness.expert_routing import (
     build_thinking_extra_body,
-    classify_hard_task,
     classify_hard_task_async,
-    classify_tool_calls,
-    load_skills_for_expert_routing,
     merge_extra_body,
     model_supports_thinking_toggle,
-    select_expert_for_task,
 )
 from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
 from surogates.harness.self_discover import (
@@ -100,7 +96,6 @@ from surogates.harness.tool_schemas import filter_schemas_for_tenant
 from surogates.harness.title_generator import maybe_generate_session_title
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import EventType
-from surogates.tools.builtin.expert_service import ExpertConsultationService
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
@@ -866,6 +861,10 @@ class AgentHarness:
         log_policy_allowed: bool = False,
         vision_client: AsyncOpenAI | None = None,
         vision_model: str = "",
+        advisor_client: AsyncOpenAI | None = None,
+        advisor_model: str = "",
+        advisor_max_calls_per_turn: int = 2,
+        advisor_max_tokens: int = 700,
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
@@ -892,6 +891,10 @@ class AgentHarness:
         # the helper just strips images.
         self._vision_client: AsyncOpenAI | None = vision_client
         self._vision_model: str = vision_model or ""
+        self._advisor_client: AsyncOpenAI | None = advisor_client
+        self._advisor_model: str = advisor_model or ""
+        self._advisor_max_calls_per_turn = max(0, int(advisor_max_calls_per_turn))
+        self._advisor_max_tokens = max(1, int(advisor_max_tokens))
 
         # Checkpoint flag — when enabled, the harness tells the sandbox
         # to take filesystem snapshots before file-mutating operations.
@@ -1480,7 +1483,7 @@ class AgentHarness:
         # --- Memory prefetch (one-shot before loop) ---
         memory_context = await self._prefetch_memory()
 
-        consulted_expert_categories = self._forced_expert_categories_after_latest_user(
+        consulted_advisor_categories = self._advisor_categories_after_latest_user(
             all_events or [],
         )
 
@@ -1501,12 +1504,13 @@ class AgentHarness:
         # position above it.
         attachments_note: str | None = _attachments_note(all_events or [])
 
-        # --- Forced expert consultation for hard tasks (one-shot before loop) ---
-        await self._maybe_consult_required_expert(
+        # --- Hidden advisor guidance for hard tasks (one-shot before loop) ---
+        await self._maybe_consult_required_advisor(
             session,
             messages,
             all_events or [],
-            consulted_expert_categories,
+            system_prompt,
+            consulted_advisor_categories,
         )
 
         # --- User turn tracking for memory nudge ---
@@ -1883,18 +1887,6 @@ class AgentHarness:
                 )
 
             tool_calls_raw = assistant_message.get("tool_calls")
-            if tool_calls_raw:
-                consulted_for_tools = await self._maybe_consult_for_tool_calls(
-                    session,
-                    messages,
-                    all_events or [],
-                    tool_calls_raw,
-                    consulted_expert_categories,
-                )
-                if consulted_for_tools:
-                    if streaming_executor is not None:
-                        streaming_executor.discard()
-                    continue
 
             # 4. Emit LLM_RESPONSE event with usage data.
             input_tokens = usage_data.get("input_tokens", 0)
@@ -3431,20 +3423,23 @@ class AgentHarness:
         )
 
     # ------------------------------------------------------------------
-    # Expert preflight routing
+    # Hidden advisor routing
     # ------------------------------------------------------------------
 
-    async def _maybe_consult_required_expert(
+    async def _maybe_consult_required_advisor(
         self,
         session: Session,
         messages: list[dict],
         all_events: list[Event],
+        system_prompt: str = "",
         consulted_categories: set[str] | None = None,
     ) -> bool:
-        """Consult a task-specific expert before the default model handles hard tasks."""
+        """Ask the hidden advisor for guidance before hard executor work."""
         consulted_categories = consulted_categories if consulted_categories is not None else set()
         last_user = self._last_user_message(messages)
         if last_user is None:
+            return False
+        if not self._advisor_available():
             return False
 
         user_content = str(last_user.get("content") or "")
@@ -3463,123 +3458,149 @@ class AgentHarness:
         ):
             return False
 
-        result = await self._consult_expert_for_category(
+        result = await self._consult_advisor_for_category(
             session=session,
             messages=messages,
+            system_prompt=system_prompt,
             category=classification.category,
             task=user_content,
+            reason="early",
             consulted_categories=consulted_categories,
         )
-        if not result.success:
+        if not result:
             return False
 
         messages.append({
             "role": "user",
-            "content": self._format_forced_expert_context(
+            "content": self._format_advisor_context(
                 category=classification.category,
-                expert=result.expert,
-                content=result.content,
+                content=result,
             ),
         })
         return True
 
-    async def _maybe_consult_for_tool_calls(
-        self,
-        session: Session,
-        messages: list[dict],
-        all_events: list[Event],
-        tool_calls: list[dict],
-        consulted_categories: set[str] | None = None,
-    ) -> bool:
-        """Consult an expert when the default model proposes hard tools mid-turn."""
-        consulted_categories = consulted_categories if consulted_categories is not None else set()
-        classification = classify_tool_calls(tool_calls)
-        if not classification.required or classification.category is None:
-            return False
-        if (
-            classification.category in consulted_categories
-            or classification.category in self._forced_expert_categories_after_latest_user(
-                all_events,
-            )
-        ):
-            return False
+    def _advisor_available(self) -> bool:
+        return self._advisor_client is not None and bool(self._advisor_model)
 
-        task = self._build_tool_intent_task(
-            messages=messages,
-            tool_calls=tool_calls,
-            category=classification.category,
-        )
-        result = await self._consult_expert_for_category(
-            session=session,
-            messages=messages,
-            category=classification.category,
-            task=task,
-            consulted_categories=consulted_categories,
-        )
-        if not result.success:
-            return False
-
-        messages.append({
-            "role": "user",
-            "content": self._format_forced_expert_context(
-                category=classification.category,
-                expert=result.expert,
-                content=result.content,
-            ),
-        })
-        return True
-
-    async def _consult_expert_for_category(
+    async def _consult_advisor_for_category(
         self,
         *,
         session: Session,
         messages: list[dict],
+        system_prompt: str,
         category: str,
         task: str,
+        reason: Literal["early", "final_check"],
         consulted_categories: set[str],
-    ) -> Any:
+    ) -> str | None:
+        if not self._advisor_available():
+            return None
+        if len(consulted_categories) >= self._advisor_max_calls_per_turn:
+            return None
+        if category in consulted_categories:
+            return None
+
+        consulted_categories.add(category)
+        await self._emit_advisor_request(session, reason, category)
+
         try:
-            skills = await load_skills_for_expert_routing(
-                self._tenant,
-                session_factory=self._session_factory,
+            assert self._advisor_client is not None
+            response = await self._advisor_client.chat.completions.create(
+                model=self._advisor_model,
+                messages=self._build_advisor_messages(
+                    messages=messages,
+                    system_prompt=system_prompt,
+                    category=category,
+                    task=task,
+                    reason=reason,
+                ),
+                temperature=0.2,
+                max_tokens=self._advisor_max_tokens,
+            )
+            content = _extract_response_text(response)
+            if not content:
+                raise RuntimeError("advisor returned empty guidance")
+            usage = getattr(response, "usage", None)
+            await self._store.emit_event(
+                session.id,
+                EventType.ADVISOR_RESULT,
+                {
+                    "model": self._advisor_model,
+                    "reason": reason,
+                    "category": category,
+                    "content": content,
+                    "input_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+                    "output_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+                },
+            )
+            return content
+        except Exception as exc:
+            await self._store.emit_event(
+                session.id,
+                EventType.ADVISOR_FAILURE,
+                {
+                    "model": self._advisor_model,
+                    "reason": reason,
+                    "category": category,
+                    "error": str(exc),
+                },
+            )
+            logger.debug(
+                "Session %s: advisor call failed for %s/%s",
+                session.id,
+                reason,
+                category,
+                exc_info=True,
+            )
+            return None
+
+    def _build_advisor_messages(
+        self,
+        *,
+        messages: list[dict],
+        system_prompt: str,
+        category: str,
+        task: str,
+        reason: str,
+    ) -> list[dict[str, str]]:
+        transcript = self._build_advisor_context(messages)
+        prompt = (
+            "You are a strategic advisor for an agent harness. The executor "
+            "model is cheaper and will continue the task after reading your "
+            "guidance. Give concise, high-leverage advice under "
+            f"{self._advisor_max_tokens} tokens. Do not solve by writing the "
+            "entire final answer unless that is the only useful guidance.\n\n"
+            f"Advisor reason: {reason}\n"
+            f"Hard-task category: {category}\n\n"
+            f"Current task or tool intent:\n{task}\n\n"
+            f"Recent transcript:\n{transcript}"
+        )
+        if system_prompt:
+            prompt = f"Executor system prompt:\n{system_prompt[-8000:]}\n\n{prompt}"
+        return [{"role": "user", "content": prompt}]
+
+    async def _emit_advisor_request(
+        self,
+        session: Session,
+        reason: str,
+        category: str,
+    ) -> None:
+        try:
+            await self._store.emit_event(
+                session.id,
+                EventType.ADVISOR_REQUEST,
+                {
+                    "model": self._advisor_model,
+                    "reason": reason,
+                    "category": category,
+                },
             )
         except Exception:
             logger.debug(
-                "Session %s: failed to load experts for forced routing",
+                "Session %s: failed to emit advisor request",
                 session.id,
                 exc_info=True,
             )
-            skills = []
-
-        expert = select_expert_for_task(skills, task)
-        if expert is None:
-            await self._emit_missing_forced_expert(session, category)
-            consulted_categories.add(category)
-            from surogates.tools.builtin.expert_service import ExpertConsultationResult
-
-            return ExpertConsultationResult(
-                expert="",
-                success=False,
-                content="",
-                error=f"No active expert configured for category '{category}'.",
-            )
-
-        service = ExpertConsultationService(
-            tenant=self._tenant,
-            session_id=session.id,
-            tool_registry=self._tools,
-            session_store=self._store,
-            sandbox_pool=self._sandbox_pool,
-        )
-        result = await service.consult(
-            expert=expert,
-            task=task,
-            context=self._build_expert_context(messages),
-            forced=True,
-            category=category,
-        )
-        consulted_categories.add(category)
-        return result
 
     @staticmethod
     def _last_user_message(messages: list[dict]) -> dict | None:
@@ -3589,11 +3610,53 @@ class AgentHarness:
         return None
 
     @staticmethod
+    def _advisor_categories_after_latest_user(events: list[Event]) -> set[str]:
+        latest_user_event_id = 0
+        for event in events:
+            if event.type == EventType.USER_MESSAGE.value and event.id is not None:
+                latest_user_event_id = max(latest_user_event_id, event.id)
+        categories: set[str] = set()
+        for event in events:
+            if event.id is None or event.id <= latest_user_event_id:
+                continue
+            if event.type in {
+                EventType.ADVISOR_RESULT.value,
+                EventType.ADVISOR_FAILURE.value,
+            }:
+                category = event.data.get("category")
+                if category:
+                    categories.add(str(category))
+        return categories
+
+    @staticmethod
+    def _build_advisor_context(messages: list[dict]) -> str:
+        fragments: list[str] = []
+        for msg in messages[-12:]:
+            role = msg.get("role", "unknown")
+            content = msg.get("content") or ""
+            if isinstance(content, list):
+                content = _collapse_text_parts([
+                    part
+                    for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                ])
+            if not isinstance(content, str) or not content.strip():
+                continue
+            fragments.append(f"{role}: {content}")
+        return "\n\n".join(fragments)[-16_000:]
+
+    @staticmethod
     def _has_forced_expert_after_latest_user(events: list[Event]) -> bool:
-        return bool(AgentHarness._forced_expert_categories_after_latest_user(events))
+        return bool(AgentHarness._advisor_categories_after_latest_user(events))
 
     @staticmethod
     def _forced_expert_categories_after_latest_user(events: list[Event]) -> set[str]:
+        # Compatibility shim for older tests/imports. Forced expert routing is
+        # now backed by hidden advisor events.
+        return AgentHarness._advisor_categories_after_latest_user(events)
+
+    @staticmethod
+    def _legacy_forced_expert_categories_after_latest_user(events: list[Event]) -> set[str]:
         latest_user_event_id = 0
         for event in events:
             if event.type == EventType.USER_MESSAGE.value and event.id is not None:
@@ -3615,71 +3678,17 @@ class AgentHarness:
                     categories.add(str(category))
         return categories
 
-    async def _emit_missing_forced_expert(
-        self,
-        session: Session,
-        category: str,
-    ) -> None:
-        try:
-            await self._store.emit_event(
-                session.id,
-                EventType.EXPERT_FAILURE,
-                {
-                    "expert": "",
-                    "success": False,
-                    "forced": True,
-                    "category": category,
-                    "error": f"No active expert configured for category '{category}'.",
-                },
-            )
-        except Exception:
-            logger.debug(
-                "Session %s: failed to emit missing forced expert event",
-                session.id,
-                exc_info=True,
-            )
-
     @staticmethod
-    def _build_expert_context(messages: list[dict]) -> str:
-        fragments: list[str] = []
-        for msg in messages[-8:]:
-            role = msg.get("role", "unknown")
-            content = msg.get("content") or ""
-            if not isinstance(content, str) or not content.strip():
-                continue
-            fragments.append(f"{role}: {content}")
-        return "\n\n".join(fragments)[-12_000:]
-
-    @staticmethod
-    def _build_tool_intent_task(
-        *,
-        messages: list[dict],
-        tool_calls: list[dict],
-        category: str,
-    ) -> str:
-        last_user = AgentHarness._last_user_message(messages)
-        user_content = str(last_user.get("content") or "") if last_user else ""
-        return (
-            "The default model determined that this turn needs a "
-            f"{category} expert before executing hard tools.\n\n"
-            f"Original user request:\n{user_content}\n\n"
-            f"Proposed tool calls:\n{tool_calls}\n\n"
-            "Complete the needed expert work using your available tools, "
-            "or return concise guidance if execution is not appropriate."
-        )
-
-    @staticmethod
-    def _format_forced_expert_context(
+    def _format_advisor_context(
         *,
         category: str,
-        expert: str,
         content: str,
     ) -> str:
         return (
-            f"[Expert consultation: {category} via {expert}]\n"
+            f"[Advisor guidance: {category}]\n"
             f"{content}\n\n"
-            "Review this expert result before answering the user's request. "
-            "You may accept, modify, or discard it."
+            "Use this as strategic guidance. Verify with tools where "
+            "appropriate and adapt if direct evidence contradicts it."
         )
 
     # ------------------------------------------------------------------
@@ -3783,17 +3792,11 @@ class AgentHarness:
                     "content": event.data.get("content", ""),
                 })
 
-            elif (
-                etype == EventType.EXPERT_RESULT.value
-                and event.data.get("forced")
-                and event.data.get("success")
-                and event.data.get("content") is not None
-            ):
+            elif etype == EventType.ADVISOR_RESULT.value and event.data.get("content"):
                 messages.append({
                     "role": "user",
-                    "content": self._format_forced_expert_context(
-                        category=event.data.get("category", "expert"),
-                        expert=event.data.get("expert", "expert"),
+                    "content": self._format_advisor_context(
+                        category=event.data.get("category", "advisor"),
                         content=str(event.data.get("content") or ""),
                     ),
                 })
