@@ -190,6 +190,12 @@ export function applyAgentChatEvent(
         applyExpertFeedback(nextState.messages, event.type, event.data),
       );
 
+    case "user.feedback":
+      return withMessages(
+        nextState,
+        applyUserFeedback(nextState.messages, event.data),
+      );
+
     case "clarify.response":
       return withMessages(
         nextState,
@@ -773,6 +779,42 @@ function applyExpertFeedback(
           : tc,
       ),
     };
+    return next;
+  }
+  return messages;
+}
+
+function applyUserFeedback(
+  messages: AgentChatMessage[],
+  data: Record<string, unknown>,
+): AgentChatMessage[] {
+  // The backend emits the same `user.feedback` event for interactive
+  // user ratings (source="user") and automated judges
+  // (source="judge"). The chat UI only reflects the human user's
+  // thumbs state; judge ratings flow into training-data selectors,
+  // not into this surface.
+  const source = typeof data.source === "string" ? data.source : "user";
+  if (source !== "user") return messages;
+
+  const targetEventId =
+    typeof data.target_event_id === "number" ? data.target_event_id : undefined;
+  if (targetEventId == null) return messages;
+
+  const rating = data.rating === "down" ? "down" : "up";
+  const reason = typeof data.reason === "string" ? data.reason : undefined;
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg?.role !== "assistant") continue;
+    if (msg.llmResponseEventId !== targetEventId) continue;
+    if (
+      msg.userFeedback?.rating === rating &&
+      msg.userFeedback?.reason === reason
+    ) {
+      return messages;
+    }
+    const next = [...messages];
+    next[i] = { ...msg, userFeedback: { rating, reason } };
     return next;
   }
   return messages;

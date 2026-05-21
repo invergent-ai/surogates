@@ -16,7 +16,7 @@
 
 - [x] Task 1 — Message fields & adapter method
 - [x] Task 2 — Reducer: track `llmResponseEventId` on assistant messages
-- [ ] Task 3 — Reducer: handle `user.feedback` events
+- [x] Task 3 — Reducer: handle `user.feedback` events
 - [ ] Task 4 — `TurnFeedback` component (TDD)
 - [ ] Task 5 — `chat-thread` integration
 - [ ] Task 6 — Web adapter wire-up
@@ -238,7 +238,7 @@ cd /work/surogates && git add sdk/agent-chat-react/src/runtime/reducer.ts sdk/ag
 
 `applyUserFeedback` is symmetric to `applyExpertFeedback` but matches on `msg.llmResponseEventId` instead of a tool call's `expertResultEventId`, and ignores non-interactive sources (judge feedback uses the same event type with `source: "judge"`).
 
-- [ ] **Step 1: Write the failing test — user-source feedback writes onto the right message**
+- [x] **Step 1: Write the failing test — user-source feedback writes onto the right message**
 
 Append:
 
@@ -269,7 +269,7 @@ Append:
   });
 ```
 
-- [ ] **Step 2: Write the failing test — judge-source feedback is ignored**
+- [x] **Step 2: Write the failing test — judge-source feedback is ignored**
 
 ```ts
   it("ignores user.feedback events emitted by judges (source != 'user')", () => {
@@ -293,7 +293,7 @@ Append:
   });
 ```
 
-- [ ] **Step 3: Write the failing test — replay is idempotent (same array reference)**
+- [x] **Step 3: Write the failing test — replay is idempotent (same array reference)**
 
 ```ts
   it("returns the same messages reference when user.feedback replays unchanged", () => {
@@ -317,7 +317,7 @@ Append:
   });
 ```
 
-- [ ] **Step 4: Add `"user.feedback"` to the `AgentChatEventType` union**
+- [x] **Step 4: Add `"user.feedback"` to the `AgentChatEventType` union**
 
 In `src/types.ts`, add `"user.feedback"` immediately after `"expert.override"`:
 
@@ -330,7 +330,7 @@ In `src/types.ts`, add `"user.feedback"` immediately after `"expert.override"`:
 
 After this change the reducer's exhaustive switch will fail to typecheck until Step 6 lands the dispatch case. That's why the three steps (union, listened events, dispatch) are atomic.
 
-- [ ] **Step 5: Add `"user.feedback"` to `AGENT_CHAT_LISTENED_EVENTS`**
+- [x] **Step 5: Add `"user.feedback"` to `AGENT_CHAT_LISTENED_EVENTS`**
 
 In `src/runtime/events.ts`, insert `"user.feedback",` immediately after `"expert.override",`. The relevant slice becomes:
 
@@ -343,14 +343,14 @@ In `src/runtime/events.ts`, insert `"user.feedback",` immediately after `"expert
 
 Without this the SSE stream drops the event before it reaches the reducer; the type union alone is not enough.
 
-- [ ] **Step 6: Run the failing tests to confirm typecheck blocks them**
+- [x] **Step 6: Run the failing tests to confirm typecheck blocks them**
 
 ```bash
 cd /work/surogates/sdk/agent-chat-react && npx vitest run tests/reducer.test.ts -t "user.feedback"
 ```
 Expected: tests FAIL (vitest reports a typecheck or runtime mismatch because the reducer still lacks the `case "user.feedback"`).
 
-- [ ] **Step 7: Add `applyUserFeedback` to reducer**
+- [x] **Step 7: Add `applyUserFeedback` to reducer**
 
 Insert the new function in `src/runtime/reducer.ts` immediately after `applyExpertFeedback` (around line 770):
 
@@ -387,7 +387,7 @@ function applyUserFeedback(
 }
 ```
 
-- [ ] **Step 8: Dispatch `user.feedback`**
+- [x] **Step 8: Dispatch `user.feedback`**
 
 In the main switch (immediately after the `expert.endorse` / `expert.override` case), insert:
 
@@ -399,14 +399,14 @@ In the main switch (immediately after the `expert.endorse` / `expert.override` c
       );
 ```
 
-- [ ] **Step 9: Run the reducer suite and typecheck**
+- [x] **Step 9: Run the reducer suite and typecheck**
 
 ```bash
 cd /work/surogates/sdk/agent-chat-react && npx tsc --noEmit && npx vitest run tests/reducer.test.ts
 ```
 Expected: typecheck clean, all reducer tests PASS.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 cd /work/surogates && git add sdk/agent-chat-react/src/types.ts sdk/agent-chat-react/src/runtime/events.ts sdk/agent-chat-react/src/runtime/reducer.ts sdk/agent-chat-react/tests/reducer.test.ts && git commit -m "feat(chat-sdk): reduce user.feedback SSE events into message state"

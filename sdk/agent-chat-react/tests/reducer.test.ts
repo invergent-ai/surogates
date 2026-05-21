@@ -313,6 +313,71 @@ describe("applyAgentChatEvent", () => {
     expect(afterSecond.messages).toHaveLength(1);
     expect(afterSecond.messages[0]?.llmResponseEventId).toBe(25);
   });
+
+  it("applies user.feedback (source=user) to the assistant message with matching llmResponseEventId", () => {
+    const seeded = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "llm.response",
+      eventId: 50,
+      data: { message: { content: "answer" } },
+    });
+
+    const next = applyAgentChatEvent(seeded, {
+      type: "user.feedback",
+      eventId: 51,
+      data: {
+        target_event_id: 50,
+        rating: "down",
+        source: "user",
+        reason: "missed a column",
+      },
+    });
+
+    expect(next.messages).toHaveLength(1);
+    expect(next.messages[0]?.userFeedback).toEqual({
+      rating: "down",
+      reason: "missed a column",
+    });
+  });
+
+  it("ignores user.feedback events emitted by judges (source != 'user')", () => {
+    const seeded = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "llm.response",
+      eventId: 60,
+      data: { message: { content: "answer" } },
+    });
+
+    const next = applyAgentChatEvent(seeded, {
+      type: "user.feedback",
+      eventId: 61,
+      data: {
+        target_event_id: 60,
+        rating: "up",
+        source: "judge",
+      },
+    });
+
+    expect(next.messages[0]?.userFeedback).toBeUndefined();
+  });
+
+  it("returns the same messages reference when user.feedback replays unchanged", () => {
+    const seeded = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "llm.response",
+      eventId: 70,
+      data: { message: { content: "answer" } },
+    });
+    const once = applyAgentChatEvent(seeded, {
+      type: "user.feedback",
+      eventId: 71,
+      data: { target_event_id: 70, rating: "up", source: "user" },
+    });
+    const twice = applyAgentChatEvent(once, {
+      type: "user.feedback",
+      eventId: 71,
+      data: { target_event_id: 70, rating: "up", source: "user" },
+    });
+
+    expect(twice.messages).toBe(once.messages);
+  });
 });
 
 describe("applyAgentChatEvent — user.message images and attachments", () => {

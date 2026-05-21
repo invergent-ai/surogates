@@ -377,6 +377,7 @@ export type AgentChatEventType =
   | "expert.result"
   | "expert.endorse"
   | "expert.override"
+  | "user.feedback"
   | "artifact.created"
   | "artifact.updated"
   | "browser.provisioned"

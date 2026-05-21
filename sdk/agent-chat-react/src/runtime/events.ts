@@ -31,6 +31,7 @@ export const AGENT_CHAT_LISTENED_EVENTS = [
   "expert.result",
   "expert.endorse",
   "expert.override",
+  "user.feedback",
   "artifact.created",
   "artifact.updated",
   "browser.provisioned",
