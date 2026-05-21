@@ -165,6 +165,41 @@ describe("MissionsPanel", () => {
     );
   });
 
+  it("requests all mission statuses by default and renders completed missions", async () => {
+    const listMissions = vi.fn(
+      async (input?: { agentId?: string; status?: string }) => {
+        expect(input?.agentId).toBe("agent-1");
+        expect(input?.status).toBeUndefined();
+        return {
+          missions: [
+            mission({
+              id: "m-satisfied",
+              description: "Ship final report",
+              status: "satisfied",
+              iteration: 4,
+              maxIterations: 4,
+              lastEvaluationResult: "satisfied",
+            }),
+          ],
+        };
+      },
+    );
+    const adapter = createAdapter([], { listMissions });
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<MissionsPanel adapter={adapter} agentId="agent-1" />);
+      await Promise.resolve();
+    });
+
+    expect(listMissions).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("Ship final report");
+    expect(container.textContent).toContain("satisfied");
+    expect(container.textContent).toContain("Verdict: satisfied");
+  });
+
   it("collapses and expands the missions list from the header", async () => {
     const adapter = createAdapter([
       mission({ id: "m-1", description: "Mission alpha" }),

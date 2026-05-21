@@ -1,12 +1,12 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// MissionsPanel — sidebar entry for the user's in-flight missions.
+// MissionsPanel — sidebar entry for the user's missions.
 //
 // Layout/behaviour mirrors ``ScheduledWorkPanel`` so the two sit
 // together in the sidebar with a consistent expand/collapse rhythm.
 // Polls ``adapter.listMissions`` on a 30s cadence; renders one row per
-// active/paused mission with a destination link the host wires to the
+// mission with a destination link the host wires to the
 // mission dashboard route.
 import {
   type KeyboardEvent,
@@ -50,7 +50,6 @@ export interface MissionsPanelProps {
 
 
 const DEFAULT_POLL_INTERVAL_MS = 30_000;
-const DEFAULT_STATUS = "active,paused";
 
 
 function fingerprint(items: AgentChatMissionSummary[]): string {
@@ -223,7 +222,7 @@ export function MissionsPanel({
   adapter,
   agentId,
   title = "Missions",
-  status = DEFAULT_STATUS,
+  status,
   hideHeader = false,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   onMissionSelect,
