@@ -1,6 +1,6 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserPane } from "../src/components/browser/browser-pane";
 import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
 
@@ -206,7 +206,11 @@ describe("BrowserPane", () => {
     ).toBe("about:blank#browser-live");
   });
 
-  it("releases browser control when the take-control dialog closes", async () => {
+  it("does NOT release browser control when the fullscreen dialog closes", async () => {
+    // Control and fullscreen are orthogonal: the inline live view also
+    // requires control, so closing the fullscreen dialog (Esc / click
+    // outside / close button) must not tear down the held lease.
+    // Releasing control is the user's job via "Return control".
     let releaseCount = 0;
     const controlledAdapter = {
       ...liveAdapter,
@@ -242,7 +246,57 @@ describe("BrowserPane", () => {
       closeButton?.click();
     });
 
-    expect(releaseCount).toBe(1);
+    // Inline live view must still be mounted (default testid).
+    expect(
+      node.querySelector<HTMLIFrameElement>(
+        '[data-testid="browser-iframe"]',
+      ),
+    ).not.toBeNull();
+    // And no release was issued.
+    expect(releaseCount).toBe(0);
+  });
+
+  it("refreshes browser control on a heartbeat while live view is open", async () => {
+    vi.useFakeTimers();
+    try {
+      let acquireCount = 0;
+      const controlledAdapter = {
+        ...liveAdapter,
+        async acquireBrowserControl() {
+          acquireCount += 1;
+          return { outcome: "granted" as const, ownerUserId: "u" };
+        },
+      };
+
+      const node = renderPane(
+        <BrowserPane
+          sessionId="s"
+          state={{ status: "live", controlOwner: null }}
+          adapter={controlledAdapter}
+        />,
+      );
+
+      const takeControlButton = Array.from(
+        node.querySelectorAll<HTMLButtonElement>("button"),
+      ).find((button) => button.textContent?.includes("Take control"));
+
+      await act(async () => {
+        takeControlButton?.click();
+      });
+
+      // After the initial "Take control" click, acquireCount === 1.
+      expect(acquireCount).toBe(1);
+
+      // Advance ~60s — heartbeat fires every 25s, so we expect two extra
+      // refreshes at 25s and 50s.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+
+      expect(acquireCount).toBeGreaterThanOrEqual(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not show Return control for replayed user control", async () => {

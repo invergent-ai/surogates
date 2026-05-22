@@ -101,18 +101,37 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
     setOpenFullscreenOnControl(false);
   }, [canUseLiveView, openFullscreenOnControl]);
 
+  // Closing the fullscreen dialog must NOT release browser control.
+  // Control is a separate, user-driven concern (toggled via
+  // BrowserControlBar's "Take/Return control" button). The inline live
+  // view also requires control, so blindly releasing here would tear
+  // down both iframes and trigger 4403 close codes on every subsequent
+  // reconnect inside the 60s TTL window.
   const handleFullscreenOpenChange = useCallback(
     (open: boolean) => {
       setFullscreenOpen(open);
-      if (open || !hasUserControl || !hasControlAdapter) return;
-
-      setLocalControlActive(false);
-      void adapter.releaseBrowserControl(sessionId).catch((error) => {
-        console.error("Failed to release browser control", error);
-      });
     },
-    [adapter, hasControlAdapter, hasUserControl, sessionId],
+    [],
   );
+
+  // Heartbeat: while the user holds control AND the live view is
+  // mounted, refresh the lease at ~25s so the harness's 60s control
+  // TTL never lapses under us. acquireBrowserControl for the same user
+  // returns `refreshed` and resets the TTL — no extra API surface
+  // needed. The interval is gated on canUseLiveView so it stops as
+  // soon as the iframe unmounts (e.g., session change).
+  useEffect(() => {
+    if (!canUseLiveView || !hasControlAdapter) return;
+    const handle = window.setInterval(() => {
+      void adapter.acquireBrowserControl(sessionId).catch((error) => {
+        // Treat refresh failures as terminal — the lease is gone and
+        // the iframe will close itself on the next backend check.
+        console.error("Failed to refresh browser control", error);
+        setLocalControlActive(false);
+      });
+    }, 25_000);
+    return () => window.clearInterval(handle);
+  }, [adapter, canUseLiveView, hasControlAdapter, sessionId]);
 
   useEffect(() => {
     if (!hasLiveView || canUseLiveView) {
