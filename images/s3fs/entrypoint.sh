@@ -27,17 +27,15 @@ if [ "${FLEET_MODE:-0}" = "1" ]; then
     READY_FILE="${FLEET_CONFIG_DIR}/ready"
     CREDS_FILE="${FLEET_CONFIG_DIR}/s3-creds.env"
     echo "[s3fs-entrypoint] fleet mode: waiting for ${READY_FILE}..."
-    # Bound the wait so a stuck warm pod surfaces as a pod-ready timeout
-    # at the manager (60s pod_ready_timeout by default) rather than a
-    # silent hang.
-    waited=0
+    # Unbounded wait — warm pods can sit idle in the pool for hours or
+    # days before a lease arrives. The pod-level activeDeadlineSeconds
+    # (set on the warm-pod manifest, default 3600s) is the outer
+    # circuit breaker; the manager's reaper independently destroys
+    # stuck pods past their deadline. A bounded wait here would cause
+    # the s3fs container to exit and the pod to enter Error/Failed,
+    # which the manager then has to clean up — extra churn for no win.
     while [ ! -f "${READY_FILE}" ]; do
-        sleep 0.2
-        waited=$((waited + 1))
-        if [ "${waited}" -ge 1500 ]; then
-            echo "[s3fs-entrypoint] timed out waiting for ${READY_FILE} (300s)" >&2
-            exit 1
-        fi
+        sleep 0.5
     done
     echo "[s3fs-entrypoint] config ready"
     # shellcheck disable=SC1090
