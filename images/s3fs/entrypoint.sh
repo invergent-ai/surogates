@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Required env vars:
+# Required env vars (legacy / non-fleet mode):
 #   AWS_ACCESS_KEY_ID     — S3 access key
 #   AWS_SECRET_ACCESS_KEY — S3 secret key
 #   S3_BUCKET_PATH        — bucket or bucket:/path to mount
@@ -10,8 +10,71 @@ set -euo pipefail
 # Optional:
 #   S3_MOUNT_POINT        — mount path (default: /workspace)
 #   S3_REGION             — S3 region (default: derived from endpoint)
+#
+# Fleet mode (warm-pool warm pods):
+#   FLEET_MODE=1          — block until /etc/fleet/ready exists, then
+#                            source /etc/fleet/s3-creds.env for the
+#                            session-scoped credentials. The sidecar
+#                            writes WORKSPACE_SOURCE_REF=s3://bucket/prefix/
+#                            and (optionally) AWS_S3_ENDPOINT into that file.
+#   FLEET_CONFIG_DIR      — defaults to /etc/fleet.
+#   WORKSPACE_PATH        — defaults to /workspace.
 
-MOUNT_POINT="${S3_MOUNT_POINT:-/workspace}"
+MOUNT_POINT="${S3_MOUNT_POINT:-${WORKSPACE_PATH:-/workspace}}"
+
+if [ "${FLEET_MODE:-0}" = "1" ]; then
+    FLEET_CONFIG_DIR="${FLEET_CONFIG_DIR:-/etc/fleet}"
+    READY_FILE="${FLEET_CONFIG_DIR}/ready"
+    CREDS_FILE="${FLEET_CONFIG_DIR}/s3-creds.env"
+    echo "[s3fs-entrypoint] fleet mode: waiting for ${READY_FILE}..."
+    # Unbounded wait — warm pods can sit idle in the pool for hours or
+    # days before a lease arrives. The pod-level activeDeadlineSeconds
+    # (set on the warm-pod manifest, default 3600s) is the outer
+    # circuit breaker; the manager's reaper independently destroys
+    # stuck pods past their deadline. A bounded wait here would cause
+    # the s3fs container to exit and the pod to enter Error/Failed,
+    # which the manager then has to clean up — extra churn for no win.
+    while [ ! -f "${READY_FILE}" ]; do
+        sleep 0.5
+    done
+    echo "[s3fs-entrypoint] config ready"
+    # shellcheck disable=SC1090
+    . "${CREDS_FILE}"
+
+    # The sidecar's config writer uses environment variable names that
+    # mirror the AWS SDK conventions (AWS_S3_ENDPOINT,
+    # AWS_DEFAULT_REGION). Translate them to the legacy
+    # S3_BUCKET_PATH / S3_ENDPOINT / S3_REGION inputs that the rest of
+    # this script consumes, so the goofys invocation below is reused.
+    if [ -z "${WORKSPACE_SOURCE_REF:-}" ]; then
+        echo "[s3fs-entrypoint] WORKSPACE_SOURCE_REF missing in creds file" >&2
+        exit 1
+    fi
+    case "${WORKSPACE_SOURCE_REF}" in
+        s3://*)
+            rest="${WORKSPACE_SOURCE_REF#s3://}"
+            BUCKET="${rest%%/*}"
+            PREFIX="${rest#*/}"
+            # Three cases:
+            #   s3://bucket          → rest=bucket,        PREFIX==rest    → whole bucket
+            #   s3://bucket/         → rest=bucket/,       PREFIX=""       → whole bucket
+            #   s3://bucket/prefix/  → rest=bucket/prefix/, PREFIX=prefix/ → bucket:/prefix
+            if [ -z "${PREFIX}" ] || [ "${PREFIX}" = "${rest}" ]; then
+                S3_BUCKET_PATH="${BUCKET}"
+            else
+                # Strip trailing slash so the bucket:/prefix form is uniform.
+                PREFIX="${PREFIX%/}"
+                S3_BUCKET_PATH="${BUCKET}:/${PREFIX}"
+            fi
+            ;;
+        *)
+            echo "[s3fs-entrypoint] WORKSPACE_SOURCE_REF must start with s3://: '${WORKSPACE_SOURCE_REF}'" >&2
+            exit 1
+            ;;
+    esac
+    S3_ENDPOINT="${AWS_S3_ENDPOINT:-${S3_ENDPOINT:-}}"
+    S3_REGION="${AWS_DEFAULT_REGION:-${S3_REGION:-}}"
+fi
 
 if [ -z "${S3_BUCKET_PATH:-}" ]; then
     echo "ERROR: S3_BUCKET_PATH is required"
@@ -42,9 +105,50 @@ BUCKET_SPEC="${S3_BUCKET_PATH/:\//:}"
 
 echo "Mounting s3://${S3_BUCKET_PATH} at ${MOUNT_POINT} (endpoint: ${S3_ENDPOINT}, region: ${S3_REGION})"
 
-# -f keeps goofys in the foreground so the container stays alive. goofys
-# reads AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY from the environment
-# (already set via envFrom in the pod spec).
+# In legacy mode we exec goofys so it owns PID 1 and Kubernetes signals
+# reach it directly. In fleet mode we need to write the .s3fs-mounted
+# sentinel into the mount point *after* the mount lands, which is only
+# possible if we keep our shell alive long enough to write the file —
+# so we run goofys in the background, write the sentinel, and trap
+# SIGTERM/SIGINT to forward them to goofys.
+if [ "${FLEET_MODE:-0}" = "1" ]; then
+    goofys \
+        --endpoint "${S3_ENDPOINT}" \
+        --region "${S3_REGION}" \
+        -o allow_other \
+        --uid 1000 \
+        --gid 1000 \
+        --file-mode 0644 \
+        --dir-mode 0755 \
+        -f \
+        "${BUCKET_SPEC}" "${MOUNT_POINT}" &
+    GOOFYS_PID=$!
+
+    # mountpoint(1) needs util-linux; the goofys image already includes
+    # it. Poll for up to 30 s — beyond that goofys has clearly failed
+    # and the manager's pod_ready_timeout will tear the pod down.
+    for _ in $(seq 1 150); do
+        if mountpoint -q "${MOUNT_POINT}"; then
+            touch "${MOUNT_POINT}/.s3fs-mounted"
+            echo "[s3fs-entrypoint] mount confirmed; sentinel written"
+            break
+        fi
+        if ! kill -0 "${GOOFYS_PID}" 2>/dev/null; then
+            echo "[s3fs-entrypoint] goofys exited before mount; aborting" >&2
+            wait "${GOOFYS_PID}" || true
+            exit 1
+        fi
+        sleep 0.2
+    done
+
+    # Forward signals so K8s teardown / sidecar /release shuts goofys
+    # down cleanly and unmounts the fuse layer.
+    trap 'kill -TERM "${GOOFYS_PID}" 2>/dev/null || true; wait "${GOOFYS_PID}" || true; exit 0' TERM INT
+    wait "${GOOFYS_PID}"
+    exit $?
+fi
+
+# Legacy mode: exec goofys directly.
 exec goofys \
     --endpoint "${S3_ENDPOINT}" \
     --region "${S3_REGION}" \
