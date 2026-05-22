@@ -299,6 +299,104 @@ describe("BrowserPane", () => {
     }
   });
 
+  it("renders the Close button only when onClose is provided", async () => {
+    const without = renderPane(
+      <BrowserPane
+        sessionId="s"
+        state={{ status: "live", controlOwner: null }}
+        adapter={liveAdapter}
+      />,
+    );
+    const closeButtons = Array.from(
+      without.querySelectorAll<HTMLButtonElement>("button"),
+    ).filter((button) => button.textContent?.trim() === "Close");
+    expect(closeButtons.length).toBe(0);
+
+    const onClose = vi.fn();
+    const withProp = renderPane(
+      <BrowserPane
+        sessionId="s"
+        state={{ status: "live", controlOwner: null }}
+        adapter={liveAdapter}
+        onClose={onClose}
+      />,
+    );
+    const closeButton = Array.from(
+      withProp.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.trim() === "Close");
+    expect(closeButton).not.toBeNull();
+  });
+
+  it("Close calls onClose and releases control when held", async () => {
+    const onClose = vi.fn();
+    let releaseCount = 0;
+    const controlledAdapter = {
+      ...liveAdapter,
+      async releaseBrowserControl() {
+        releaseCount += 1;
+      },
+    };
+
+    const node = renderPane(
+      <BrowserPane
+        sessionId="s"
+        state={{ status: "live", controlOwner: null }}
+        adapter={controlledAdapter}
+        onClose={onClose}
+      />,
+    );
+
+    // Acquire control first.
+    const takeControlButton = Array.from(
+      node.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.includes("Take control"));
+    await act(async () => {
+      takeControlButton?.click();
+    });
+
+    // Now click Close.
+    const closeButton = Array.from(
+      node.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.trim() === "Close");
+    expect(closeButton).not.toBeNull();
+    await act(async () => {
+      closeButton?.click();
+    });
+
+    expect(releaseCount).toBe(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("Close without held control still calls onClose without release", async () => {
+    const onClose = vi.fn();
+    let releaseCount = 0;
+    const controlledAdapter = {
+      ...liveAdapter,
+      async releaseBrowserControl() {
+        releaseCount += 1;
+      },
+    };
+
+    const node = renderPane(
+      <BrowserPane
+        sessionId="s"
+        state={{ status: "live", controlOwner: null }}
+        adapter={controlledAdapter}
+        onClose={onClose}
+      />,
+    );
+
+    const closeButton = Array.from(
+      node.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.trim() === "Close");
+    await act(async () => {
+      closeButton?.click();
+    });
+
+    expect(releaseCount).toBe(0);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("does not show Return control for replayed user control", async () => {
     const node = renderPane(
       <BrowserPane

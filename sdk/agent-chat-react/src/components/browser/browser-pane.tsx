@@ -33,9 +33,22 @@ interface BrowserPaneProps {
   sessionId: string;
   state: AgentChatBrowserState;
   adapter: BrowserPaneAdapter;
+  /**
+   * Optional close handler. When supplied, a "Close" button is
+   * rendered in the BrowserControlBar next to "Take control". The
+   * parent decides what closing means — typically hiding the pane.
+   * If the user holds browser control at close time, the bar releases
+   * it before invoking onClose so the agent can reclaim immediately.
+   */
+  onClose?: () => void;
 }
 
-export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
+export function BrowserPane({
+  sessionId,
+  state,
+  adapter,
+  onClose,
+}: BrowserPaneProps) {
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
   const [openFullscreenOnControl, setOpenFullscreenOnControl] = useState(false);
   const [localControlActive, setLocalControlActive] = useState(false);
@@ -234,6 +247,7 @@ export function BrowserPane({ sessionId, state, adapter }: BrowserPaneProps) {
               setOpenFullscreenOnControl(true);
             }}
             onControlReleased={() => setLocalControlActive(false)}
+            onClose={onClose}
           />
         )}
       </div>
