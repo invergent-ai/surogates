@@ -160,7 +160,11 @@ function pruneDeletedSessionNodes(
 }
 
 function formatSessionTime(value: string): string {
-  const date = new Date(value);
+  // Server emits naive ISO timestamps (UTC, no Z/offset). Without the
+  // suffix `new Date(...)` treats them as local time, shifting the
+  // relative distance by the browser's UTC offset.
+  const normalized = /[zZ]|[+-]\d{2}:?\d{2}$/.test(value) ? value : `${value}Z`;
+  const date = new Date(normalized);
   if (Number.isNaN(date.getTime())) return "";
   return formatDistanceToNow(date, { addSuffix: true });
 }
@@ -219,7 +223,6 @@ function TreeNodeRow({
   const title = entry.title ?? fallbackSessionTitle(entry);
   const subtitle = [
     formatRunKind(entry.runKind),
-    entry.model ?? entry.agentType,
     formatSessionTime(entry.updatedAt),
   ].filter(Boolean).join(" · ");
 
@@ -241,7 +244,7 @@ function TreeNodeRow({
           "min-h-11 md:min-h-0",
           isActive
             ? "bg-line text-foreground border-l-primary"
-            : "bg-transparent text-subtle hover:bg-input hover:text-foreground border-l-transparent",
+            : "bg-transparent text-muted-foreground hover:bg-input hover:text-foreground border-l-transparent",
         )}
         style={{ paddingLeft: `${depth * 12 + 12}px` }}
       >
