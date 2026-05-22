@@ -222,8 +222,21 @@ return {
             options["clickCount"] = num_clicks
         if click_type == "click":
             code = (
-                f"await page.mouse.click({int(x)}, {int(y)}, "
-                f"{json.dumps(options)});\nreturn true;"
+                "let __reqSeen = false;\n"
+                "const __reqHandler = () => { __reqSeen = true; };\n"
+                "page.on('request', __reqHandler);\n"
+                "try {\n"
+                f"  await page.mouse.click({int(x)}, {int(y)}, "
+                f"{json.dumps(options)});\n"
+                "  await page.waitForTimeout(150);\n"
+                "  if (__reqSeen) {\n"
+                "    await page.waitForLoadState('networkidle', "
+                "{timeout: 5000}).catch(() => null);\n"
+                "  }\n"
+                "} finally {\n"
+                "  page.off('request', __reqHandler);\n"
+                "}\n"
+                "return true;"
             )
         elif click_type == "down":
             code = (

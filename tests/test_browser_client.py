@@ -477,6 +477,56 @@ class TestClickType:
         with pytest.raises(KeyError, match="@e99"):
             await client.click_ref("@e99")
 
+    async def test_click_waits_for_network_after_request(
+        self, client_with_transport
+    ) -> None:
+        client, _ = client_with_transport
+        client._snapshot_cache["@e1"] = {
+            "x": 10,
+            "y": 20,
+            "role": "button",
+            "name": "Go",
+        }
+        captured: list[dict[str, Any]] = []
+
+        class CapturingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(
+                self, request: httpx.Request
+            ) -> httpx.Response:
+                captured.append({"body": json.loads(request.content)})
+                return httpx.Response(200, json={"success": True, "result": True})
+
+        client._http = httpx.AsyncClient(
+            base_url=client.rest_url, transport=CapturingTransport()
+        )
+        await client.click_ref("@e1")
+        code = captured[0]["body"]["code"]
+        assert "page.on('request'" in code
+        assert "page.mouse.click" in code
+        assert "waitForLoadState('networkidle'" in code
+        assert "page.off('request'" in code
+
+    async def test_click_down_does_not_wait_for_network(
+        self, client_with_transport
+    ) -> None:
+        client, _ = client_with_transport
+        captured: list[dict[str, Any]] = []
+
+        class CapturingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(
+                self, request: httpx.Request
+            ) -> httpx.Response:
+                captured.append({"body": json.loads(request.content)})
+                return httpx.Response(200, json={"success": True, "result": True})
+
+        client._http = httpx.AsyncClient(
+            base_url=client.rest_url, transport=CapturingTransport()
+        )
+        await client.click_at(5, 6, click_type="down")
+        code = captured[0]["body"]["code"]
+        assert "page.mouse.down" in code
+        assert "waitForLoadState" not in code
+
     async def test_type_text_invalidates_cache(self, client_with_transport) -> None:
         client, handlers = client_with_transport
         client._snapshot_cache["@e1"] = {
