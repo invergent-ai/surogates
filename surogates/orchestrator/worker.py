@@ -201,25 +201,83 @@ def _build_browser_backend(
 ) -> Any:
     """Build the configured browser backend without touching external services."""
     if settings.backend == "kubernetes":
-        from surogates.browser.kubernetes import K8sBrowserBackend
-
-        return K8sBrowserBackend(
-            namespace=settings.k8s_namespace,
-            service_account=settings.k8s_service_account,
-            cluster_domain=settings.k8s_cluster_domain,
-            pod_ready_timeout=settings.pod_ready_timeout,
-            endpoint_probe_timeout=settings.endpoint_probe_timeout,
-            image=settings.image,
-            storage_settings=storage_settings,
-            s3fs_image=settings.k8s_s3fs_image,
-            s3_endpoint=settings.k8s_s3_endpoint,
-        )
+        return _build_kubernetes_backend(settings, storage_settings=storage_settings)
+    if settings.backend == "fleet":
+        return _build_fleet_backend(settings, storage_settings=storage_settings)
     return ProcessBrowserBackend(
         image=settings.image,
         rest_port_base=settings.rest_port_base,
         cdp_port_base=settings.cdp_port_base,
         live_view_port_base=settings.live_view_port_base,
     )
+
+
+def _build_kubernetes_backend(
+    settings: "BrowserSettings",
+    *,
+    storage_settings: Any = None,
+) -> Any:
+    from surogates.browser.kubernetes import K8sBrowserBackend
+
+    return K8sBrowserBackend(
+        namespace=settings.k8s_namespace,
+        service_account=settings.k8s_service_account,
+        cluster_domain=settings.k8s_cluster_domain,
+        pod_ready_timeout=settings.pod_ready_timeout,
+        endpoint_probe_timeout=settings.endpoint_probe_timeout,
+        image=settings.image,
+        storage_settings=storage_settings,
+        s3fs_image=settings.k8s_s3fs_image,
+        s3_endpoint=settings.k8s_s3_endpoint,
+    )
+
+
+def _build_fleet_backend(
+    settings: "BrowserSettings",
+    *,
+    storage_settings: Any = None,
+) -> Any:
+    """Construct a FleetBackend, optionally wrapped in a fallback composite."""
+    import httpx
+
+    from surogates.browser.composite import CompositeFallbackBackend
+    from surogates.browser.fleet import FleetBackend
+
+    if not settings.fleet_worker_token:
+        raise RuntimeError(
+            "browser.backend=fleet requires browser.fleet_worker_token "
+            "(SUROGATES_BROWSER_FLEET_WORKER_TOKEN) — point it at the "
+            "K8s Secret-mounted env var holding the worker bearer token",
+        )
+
+    http = httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout=float(settings.fleet_timeout)),
+    )
+    primary = FleetBackend(
+        endpoint=settings.fleet_endpoint,
+        worker_token=settings.fleet_worker_token,
+        http=http,
+        timeout_seconds=float(settings.fleet_timeout),
+        storage_settings=storage_settings,
+    )
+    if settings.fleet_fallback_backend == "none":
+        return primary
+    if settings.fleet_fallback_backend == "kubernetes":
+        fallback = _build_kubernetes_backend(
+            settings, storage_settings=storage_settings,
+        )
+    elif settings.fleet_fallback_backend == "process":
+        fallback = ProcessBrowserBackend(
+            image=settings.image,
+            rest_port_base=settings.rest_port_base,
+            cdp_port_base=settings.cdp_port_base,
+            live_view_port_base=settings.live_view_port_base,
+        )
+    else:  # pragma: no cover — Literal restricts the surface
+        raise ValueError(
+            f"unknown browser.fleet_fallback_backend: {settings.fleet_fallback_backend}"
+        )
+    return CompositeFallbackBackend(primary=primary, fallback=fallback)
 
 
 async def _load_attached_kbs(

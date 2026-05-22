@@ -299,7 +299,7 @@ class BrowserSettings(BaseSettings):
 
     model_config = {"env_prefix": "SUROGATES_BROWSER_"}
 
-    backend: Literal["process", "kubernetes"] = "process"
+    backend: Literal["process", "kubernetes", "fleet"] = "process"
     image: str = "ghcr.io/invergent-ai/surogates-agent-browser:latest"
     rest_port_base: int = 30000
     cdp_port_base: int = 31000
@@ -317,6 +317,22 @@ class BrowserSettings(BaseSettings):
     memory: str = "2Gi"
     cpu_limit: str = "2"
     memory_limit: str = "4Gi"
+
+    # Fleet-backend settings (only used when backend == "fleet").
+    # ``fleet_endpoint`` is the surogate-ops /api/browser-fleet base URL
+    # reachable from the worker pod (typically an in-cluster Service
+    # DNS name). ``fleet_worker_token`` is the bearer token mounted from
+    # the surogate-ops fleet Secret. ``fleet_timeout`` covers the
+    # cold-spawn case (~60 s pod ready). ``fleet_fallback_backend`` is
+    # the backend used when the fleet is at capacity or unreachable;
+    # "none" disables fallback (and so propagates FleetAtCapacity to the
+    # session).
+    fleet_endpoint: str = (
+        "http://surogate-ops.surogate.svc.cluster.local/api/browser-fleet"
+    )
+    fleet_worker_token: str = ""
+    fleet_timeout: int = 75
+    fleet_fallback_backend: Literal["none", "kubernetes", "process"] = "kubernetes"
 
 
 class TransparencySettings(BaseSettings):
