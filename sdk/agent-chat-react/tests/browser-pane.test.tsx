@@ -327,14 +327,12 @@ describe("BrowserPane", () => {
     expect(closeButton).not.toBeNull();
   });
 
-  it("Close calls onClose and releases control when held", async () => {
+  it("Close shows a confirmation dialog and does nothing on Cancel", async () => {
     const onClose = vi.fn();
-    let releaseCount = 0;
+    const closeBrowserSession = vi.fn(async () => {});
     const controlledAdapter = {
       ...liveAdapter,
-      async releaseBrowserControl() {
-        releaseCount += 1;
-      },
+      closeBrowserSession,
     };
 
     const node = renderPane(
@@ -346,7 +344,54 @@ describe("BrowserPane", () => {
       />,
     );
 
-    // Acquire control first.
+    const closeButton = Array.from(
+      node.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.trim() === "Close");
+    await act(async () => {
+      closeButton?.click();
+    });
+
+    // Dialog appears.
+    const dialog = document.body.querySelector<HTMLElement>(
+      '[role="dialog"]',
+    );
+    expect(dialog).not.toBeNull();
+    expect(dialog?.textContent).toContain("Close browser session?");
+
+    // Click Cancel.
+    const cancelButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.trim() === "Cancel");
+    await act(async () => {
+      cancelButton?.click();
+    });
+
+    expect(closeBrowserSession).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("Close → Confirm calls closeBrowserSession, releases control, then onClose", async () => {
+    const onClose = vi.fn();
+    let releaseCount = 0;
+    const closeBrowserSession = vi.fn(async () => {});
+    const controlledAdapter = {
+      ...liveAdapter,
+      async releaseBrowserControl() {
+        releaseCount += 1;
+      },
+      closeBrowserSession,
+    };
+
+    const node = renderPane(
+      <BrowserPane
+        sessionId="s"
+        state={{ status: "live", controlOwner: null }}
+        adapter={controlledAdapter}
+        onClose={onClose}
+      />,
+    );
+
+    // Acquire control first so the release-before-close branch runs.
     const takeControlButton = Array.from(
       node.querySelectorAll<HTMLButtonElement>("button"),
     ).find((button) => button.textContent?.includes("Take control"));
@@ -354,20 +399,30 @@ describe("BrowserPane", () => {
       takeControlButton?.click();
     });
 
-    // Now click Close.
+    // Click Close → open confirm.
     const closeButton = Array.from(
       node.querySelectorAll<HTMLButtonElement>("button"),
     ).find((button) => button.textContent?.trim() === "Close");
-    expect(closeButton).not.toBeNull();
     await act(async () => {
       closeButton?.click();
     });
 
+    // Click the destructive confirm in the dialog.
+    const confirmButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.trim() === "Close browser");
+    expect(confirmButton).not.toBeNull();
+    await act(async () => {
+      confirmButton?.click();
+    });
+
     expect(releaseCount).toBe(1);
+    expect(closeBrowserSession).toHaveBeenCalledTimes(1);
+    expect(closeBrowserSession).toHaveBeenCalledWith("s");
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("Close without held control still calls onClose without release", async () => {
+  it("Close → Confirm without closeBrowserSession adapter only signals close", async () => {
     const onClose = vi.fn();
     let releaseCount = 0;
     const controlledAdapter = {
@@ -375,6 +430,7 @@ describe("BrowserPane", () => {
       async releaseBrowserControl() {
         releaseCount += 1;
       },
+      // intentionally no closeBrowserSession
     };
 
     const node = renderPane(
@@ -391,6 +447,17 @@ describe("BrowserPane", () => {
     ).find((button) => button.textContent?.trim() === "Close");
     await act(async () => {
       closeButton?.click();
+    });
+
+    // Dialog text reflects the no-backend-close flavor.
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]');
+    expect(dialog?.textContent).toContain("hides the browser panel");
+
+    const confirmButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.trim() === "Close browser");
+    await act(async () => {
+      confirmButton?.click();
     });
 
     expect(releaseCount).toBe(0);

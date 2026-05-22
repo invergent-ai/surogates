@@ -688,6 +688,13 @@ export interface AgentChatAdapter {
   acquireBrowserControl(sessionId: string): Promise<AgentChatBrowserControlResponse>;
   releaseBrowserControl(sessionId: string): Promise<void>;
   browserLiveViewUrl(sessionId: string): string;
+  /**
+   * Permanently terminate the session's browser sandbox (destroys the
+   * pod / container, drops the registry entry). Optional — when
+   * undefined, the BrowserPane's Close button skips this step and
+   * just hides the pane via the local onClose callback.
+   */
+  closeBrowserSession?(sessionId: string): Promise<void>;
 }
 
 export interface AgentChatRuntimeApi {

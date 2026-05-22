@@ -239,6 +239,7 @@ export function AgentChat({
                     sessionId={sessionId}
                     state={browserState}
                     adapter={adapter}
+                    onClose={() => setShowBrowser(false)}
                   />
                 </div>
               )}

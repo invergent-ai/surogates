@@ -1,11 +1,12 @@
 import { MousePointer2Icon, RotateCcwIcon, XIcon } from "lucide-react";
 import { useState } from "react";
 import { Button } from "../ui/button";
+import { ConfirmDialog } from "../ui/confirm-dialog";
 import type { AgentChatAdapter } from "../../types";
 
 type BrowserControlAdapter = Pick<
   AgentChatAdapter,
-  "acquireBrowserControl" | "releaseBrowserControl"
+  "acquireBrowserControl" | "releaseBrowserControl" | "closeBrowserSession"
 >;
 
 interface BrowserControlBarProps {
@@ -15,11 +16,13 @@ interface BrowserControlBarProps {
   onControlAcquired?: () => void;
   onControlReleased?: () => void;
   /**
-   * Optional handler invoked when the user clicks the "Close" button.
+   * Optional handler invoked AFTER the user has confirmed the close
+   * action AND the backend session-close call (if any) has succeeded.
    * The button is only rendered when this prop is supplied so existing
    * embedders that don't want a close affordance opt in explicitly.
-   * If control is held when the user closes, release is awaited first
-   * so the agent can reclaim the browser cleanly.
+   * If the adapter provides closeBrowserSession, it is awaited before
+   * onClose is called — failures abort the close and surface an error
+   * message on the bar.
    */
   onClose?: () => void;
 }
@@ -33,7 +36,7 @@ export function BrowserControlBar({
   onClose,
 }: BrowserControlBarProps) {
   const [pending, setPending] = useState(false);
-  const [closePending, setClosePending] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function toggleControl() {
@@ -55,30 +58,34 @@ export function BrowserControlBar({
     }
   }
 
-  async function handleClose() {
-    if (!sessionId || closePending) return;
-    setClosePending(true);
+  async function handleConfirmClose() {
     setError(null);
     try {
-      // Release-before-close lets the agent reclaim control immediately;
-      // failures here are non-fatal — we still signal close so the
-      // parent can hide the pane.
+      // Release-before-close lets the agent reclaim control immediately
+      // in the event that closeBrowserSession is not available (e.g.,
+      // older ops adapter). Release errors are non-fatal — the 60s TTL
+      // on the harness reaps the lease independently.
       if (hasControl) {
         try {
           await adapter.releaseBrowserControl(sessionId);
           onControlReleased?.();
         } catch (releaseError) {
-          // Log but don't block close; the harness's TTL reaps the
-          // lease independently within 60s.
           console.error(
             "Failed to release browser control before close",
             releaseError,
           );
         }
       }
+      if (adapter.closeBrowserSession) {
+        await adapter.closeBrowserSession(sessionId);
+      }
+      setConfirmOpen(false);
       onClose?.();
-    } finally {
-      setClosePending(false);
+    } catch (nextError) {
+      // Keep the dialog open so the user can see the error and retry
+      // or cancel.
+      setError((nextError as Error).message);
+      throw nextError;
     }
   }
 
@@ -103,8 +110,11 @@ export function BrowserControlBar({
           type="button"
           size="xs"
           variant="secondary"
-          disabled={!sessionId || closePending}
-          onClick={() => void handleClose()}
+          disabled={!sessionId}
+          onClick={() => {
+            setError(null);
+            setConfirmOpen(true);
+          }}
         >
           <XIcon className="size-3" aria-hidden="true" />
           Close
@@ -119,6 +129,20 @@ export function BrowserControlBar({
           {error}
         </span>
       )}
+      <ConfirmDialog
+        open={confirmOpen}
+        title="Close browser session?"
+        description={
+          adapter.closeBrowserSession
+            ? "This permanently shuts down the browser sandbox for this session. The agent will lose access to the page until it re-opens a browser. This cannot be undone."
+            : "This hides the browser panel. The sandbox stays running so the agent can keep using it."
+        }
+        confirmLabel="Close browser"
+        variant="destructive"
+        confirmIcon={<XIcon className="size-3.5" aria-hidden="true" />}
+        onConfirm={handleConfirmClose}
+        onCancel={() => setConfirmOpen(false)}
+      />
     </div>
   );
 }
