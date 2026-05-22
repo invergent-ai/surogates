@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from typing import Any
 from urllib.parse import urlencode
 from uuid import UUID
+
+logger = logging.getLogger(__name__)
 
 import httpx
 import websockets
@@ -269,6 +272,77 @@ async def post_browser_control(
     )
     await wake(str(session_id))
     return {"outcome": "released"}
+
+
+@router.delete("/api/sessions/{session_id}/browser")
+@router.delete("/sessions/{session_id}/browser")
+async def delete_session_browser(
+    session_id: UUID,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> Response:
+    """Destroy the browser sandbox for a session.
+
+    Idempotent: 204 whether or not a browser was attached. The pool,
+    backend (when it exposes ``destroy_for_session``), and registry
+    are all cleaned up — matching the cleanup performed when a session
+    is deleted (see ``_destroy_deleted_session_browser`` in
+    ``api.routes.sessions``).
+
+    Tenant scope is enforced by resolving the browser first: if a
+    registry entry exists, its ``org_id`` must match the caller's
+    tenant. A 404 is returned for sessions in a different org so the
+    endpoint never reveals foreign session ids.
+    """
+    resolver = request.app.state.browser_resolver
+    resolved = await resolver.resolve(
+        str(session_id),
+        expected_org_id=str(tenant.org_id),
+    )
+    if resolved is None:
+        # No browser to close, OR the browser belongs to a different
+        # org (resolver returns None in both cases). Either way, the
+        # appropriate response is "nothing here" — 204 keeps the
+        # idempotency contract intact.
+        return Response(status_code=204)
+
+    session_id_str = str(session_id)
+    browser_pool = getattr(request.app.state, "browser_pool", None)
+    if browser_pool is not None:
+        try:
+            await browser_pool.destroy_for_session(session_id_str)
+        except Exception:
+            logger.warning(
+                "Failed to destroy browser pool entry for session %s",
+                session_id,
+                exc_info=True,
+            )
+
+    browser_backend = getattr(request.app.state, "browser_backend", None)
+    if browser_backend is not None and hasattr(
+        browser_backend, "destroy_for_session",
+    ):
+        try:
+            await browser_backend.destroy_for_session(session_id_str)
+        except Exception:
+            logger.warning(
+                "Failed to destroy backend browser resources for session %s",
+                session_id,
+                exc_info=True,
+            )
+
+    browser_registry = getattr(request.app.state, "browser_registry", None)
+    if browser_registry is not None:
+        try:
+            await browser_registry.delete(session_id_str)
+        except Exception:
+            logger.warning(
+                "Failed to delete browser registry entry for session %s",
+                session_id,
+                exc_info=True,
+            )
+
+    return Response(status_code=204)
 
 
 @router.get("/api/sessions/{session_id}/browser/preview.png")

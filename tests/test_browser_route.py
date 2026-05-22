@@ -344,6 +344,127 @@ class TestControlEndpoint:
         assert response.status_code == 400
 
 
+class _StubBrowserPool:
+    def __init__(self) -> None:
+        self.destroyed: list[str] = []
+
+    async def destroy_for_session(self, session_id: str) -> None:
+        self.destroyed.append(session_id)
+
+
+class _StubBackend:
+    def __init__(self) -> None:
+        self.destroyed: list[str] = []
+
+    async def destroy_for_session(self, session_id: str) -> None:
+        self.destroyed.append(session_id)
+
+
+class _StubRegistry:
+    def __init__(self) -> None:
+        self.deleted: list[str] = []
+
+    async def delete(self, session_id: str) -> None:
+        self.deleted.append(session_id)
+
+
+class TestDeleteEndpoint:
+    async def test_destroys_pool_backend_and_registry(self, app_factory) -> None:
+        build, resolver, _control = app_factory
+        sid = str(uuid4())
+        resolver.entries[sid] = _resolved(sid)
+        pool = _StubBrowserPool()
+        backend = _StubBackend()
+        registry = _StubRegistry()
+        app = build()
+        app.state.browser_pool = pool
+        app.state.browser_backend = backend
+        app.state.browser_registry = registry
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.delete(f"/v1/sessions/{sid}/browser")
+
+        assert response.status_code == 204
+        assert pool.destroyed == [sid]
+        assert backend.destroyed == [sid]
+        assert registry.deleted == [sid]
+
+    async def test_idempotent_when_no_browser(self, app_factory) -> None:
+        build, _resolver, _control = app_factory
+        sid = str(uuid4())
+        pool = _StubBrowserPool()
+        registry = _StubRegistry()
+        app = build()
+        app.state.browser_pool = pool
+        app.state.browser_registry = registry
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.delete(f"/v1/sessions/{sid}/browser")
+
+        # 204 with no destroy / no delete calls — the session simply
+        # has no browser to close.
+        assert response.status_code == 204
+        assert pool.destroyed == []
+        assert registry.deleted == []
+
+    async def test_cross_tenant_browser_invisible(self, app_factory) -> None:
+        """A session in a different org must be unaddressable: the
+        resolver returns None, the response is 204, and no destruction
+        happens."""
+        build, resolver, _control = app_factory
+        sid = str(uuid4())
+        foreign_org = uuid4()
+        resolver.entries[sid] = _resolved(sid, org_id=foreign_org)
+        pool = _StubBrowserPool()
+        registry = _StubRegistry()
+        app = build()  # tenant defaults to ORG_1
+        app.state.browser_pool = pool
+        app.state.browser_registry = registry
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.delete(f"/v1/sessions/{sid}/browser")
+
+        assert response.status_code == 204
+        assert pool.destroyed == []
+        assert registry.deleted == []
+
+    async def test_swallows_destroy_errors(self, app_factory) -> None:
+        """Individual cleanup failures don't fail the request — the
+        client gets a 204 regardless so retries don't compound the
+        problem. Errors are logged for ops triage."""
+        build, resolver, _control = app_factory
+        sid = str(uuid4())
+        resolver.entries[sid] = _resolved(sid)
+
+        class _ExplodingPool:
+            async def destroy_for_session(self, _session_id: str) -> None:
+                raise RuntimeError("simulated pool failure")
+
+        registry = _StubRegistry()
+        app = build()
+        app.state.browser_pool = _ExplodingPool()
+        app.state.browser_registry = registry
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.delete(f"/v1/sessions/{sid}/browser")
+
+        # Pool errored, but registry still got cleaned and response is 204.
+        assert response.status_code == 204
+        assert registry.deleted == [sid]
+
+
 class TestPreviewEndpoint:
     async def test_preview_returns_screenshot_png(
         self,
