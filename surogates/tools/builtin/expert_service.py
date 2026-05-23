@@ -53,8 +53,6 @@ class ExpertConsultationService:
         expert: SkillDef,
         task: str,
         context: str | None = None,
-        forced: bool = False,
-        category: str | None = None,
     ) -> ExpertConsultationResult:
         """Consult *expert* and return a structured result.
 
@@ -63,18 +61,11 @@ class ExpertConsultationService:
         ``v_expert_outcomes`` (the SQL view LEFT JOINs each delegation
         against the nearest outcome event).
         """
-        await self._emit_delegation(
-            expert=expert,
-            task=task,
-            forced=forced,
-            category=category,
-        )
+        await self._emit_delegation(expert=expert, task=task)
 
         if not expert.expert_endpoint:
             error = f"Expert '{expert.name}' has no endpoint configured."
-            await self._record_failure(
-                expert, error, forced=forced, category=category,
-            )
+            await self._record_failure(expert, error)
             return ExpertConsultationResult(
                 expert=expert.name,
                 success=False,
@@ -100,8 +91,6 @@ class ExpertConsultationService:
                 success=True,
                 iterations_used=iterations_used,
                 content=result,
-                forced=forced,
-                category=category,
             )
             return ExpertConsultationResult(
                 expert=expert.name,
@@ -114,8 +103,6 @@ class ExpertConsultationService:
             await self._record_failure(
                 expert,
                 str(exc),
-                forced=forced,
-                category=category,
                 iterations_used=expert.expert_max_iterations,
             )
             return ExpertConsultationResult(
@@ -131,9 +118,7 @@ class ExpertConsultationService:
             )
         except Exception as exc:
             logger.exception("Expert %s failed with error", expert.name)
-            await self._record_failure(
-                expert, str(exc), forced=forced, category=category,
-            )
+            await self._record_failure(expert, str(exc))
             return ExpertConsultationResult(
                 expert=expert.name,
                 success=False,
@@ -148,8 +133,6 @@ class ExpertConsultationService:
         *,
         expert: SkillDef,
         task: str,
-        forced: bool,
-        category: str | None,
     ) -> None:
         if self._session_store is None:
             return
@@ -159,10 +142,6 @@ class ExpertConsultationService:
             "tools": expert.expert_tools or [],
             "max_iterations": expert.expert_max_iterations,
         }
-        if forced:
-            data["forced"] = True
-        if category:
-            data["category"] = category
         try:
             await self._session_store.emit_event(
                 self._session_id,
@@ -177,8 +156,6 @@ class ExpertConsultationService:
         expert: SkillDef,
         error: str,
         *,
-        forced: bool,
-        category: str | None,
         iterations_used: int = 0,
     ) -> None:
         await record_expert_outcome(
@@ -188,8 +165,6 @@ class ExpertConsultationService:
             success=False,
             iterations_used=iterations_used,
             error=error,
-            forced=forced,
-            category=category,
         )
 
     def _resolve_tool_router(self) -> Any:

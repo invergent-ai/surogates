@@ -714,6 +714,57 @@ class TestRecordExpertOutcomeSlim:
         assert not hasattr(expert_feedback, "MIN_USES_FOR_AUTO_DISABLE")
         assert not hasattr(expert_feedback, "_update_db_stats")
 
+    def test_signature_has_no_forced_or_category_kwargs(self):
+        """Vestiges of the dropped auto-route path — should not be in the API."""
+        import inspect
+        from surogates.tools.builtin.expert_feedback import record_expert_outcome
+        from surogates.tools.builtin.expert_service import ExpertConsultationService
+
+        outcome_params = inspect.signature(record_expert_outcome).parameters
+        assert "forced" not in outcome_params
+        assert "category" not in outcome_params
+
+        consult_params = inspect.signature(ExpertConsultationService.consult).parameters
+        assert "forced" not in consult_params
+        assert "category" not in consult_params
+
+    @pytest.mark.asyncio
+    async def test_delegation_event_has_no_forced_or_category_fields(self):
+        """The delegation event payload should not carry the dropped fields."""
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+
+        from surogates.session.events import EventType
+        from surogates.tools.builtin.expert_service import ExpertConsultationService
+
+        store = AsyncMock()
+        expert = SkillDef(
+            name="sql_writer",
+            description="Writes SQL",
+            content="body",
+            source="org",
+            type="expert",
+            expert_status="active",
+            expert_endpoint=None,
+        )
+        service = ExpertConsultationService(
+            tenant=SimpleNamespace(org_id=uuid4(), user_id=uuid4(), org_config={}),
+            session_id=uuid4(),
+            tool_registry=MagicMock(),
+            session_store=store,
+        )
+
+        await service.consult(expert=expert, task="write a query")
+
+        for call in store.emit_event.await_args_list:
+            _, event_type, data = call.args
+            if event_type is EventType.EXPERT_DELEGATION:
+                assert "forced" not in data
+                assert "category" not in data
+                break
+        else:  # pragma: no cover -- defensive
+            raise AssertionError("expected an EXPERT_DELEGATION event")
+
 
 class TestExpertServiceDelegationEvents:
     """ExpertConsultationService emits delegation before any outcome."""

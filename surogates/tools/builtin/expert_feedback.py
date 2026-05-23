@@ -28,8 +28,6 @@ async def record_expert_outcome(
     iterations_used: int = 0,
     error: str | None = None,
     content: str | None = None,
-    forced: bool = False,
-    category: str | None = None,
 ) -> None:
     """Emit the outcome event for an expert consultation.
 
@@ -50,10 +48,6 @@ async def record_expert_outcome(
         Error message when ``success`` is ``False``.
     content:
         The expert's deliverable text (only present on success).
-    forced, category:
-        Legacy kwargs preserved for the slash and auto-route paths;
-        unused today but retained on the event payload so consumers
-        that already key off them keep working.
     """
     if session_store is None:
         return
@@ -64,10 +58,6 @@ async def record_expert_outcome(
         "success": success,
         "iterations_used": iterations_used,
     }
-    if forced:
-        event_data["forced"] = True
-    if category:
-        event_data["category"] = category
     if content is not None:
         event_data["content"] = content
     if error:
