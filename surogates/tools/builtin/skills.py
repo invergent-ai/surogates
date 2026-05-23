@@ -58,7 +58,12 @@ def _parse_tags(tags_value: Any) -> list[str]:
 
 SKILLS_LIST_SCHEMA = ToolSchema(
     name="skills_list",
-    description="List available skills (name + description). Use skill_view(name) to load full content.",
+    description=(
+        "List available skills (name + description). Use skill_view(name) "
+        "to load full content. Entries with type: expert are specialist "
+        "models; consult active experts via consult_expert(expert, task) "
+        "rather than skill_view."
+    ),
     parameters={
         "type": "object",
         "properties": {
@@ -190,13 +195,21 @@ async def _skills_list_handler(
 
     skill_list: list[dict[str, Any]] = []
     for s in skills:
+        if category_filter and s.category != category_filter:
+            continue
         entry: dict[str, Any] = {
             "name": s.name,
             "description": s.description,
             "category": s.category,
+            "type": getattr(s, "type", "skill"),
         }
-        if category_filter and s.category != category_filter:
-            continue
+        trigger = getattr(s, "trigger", None)
+        if trigger:
+            entry["trigger"] = trigger
+        if getattr(s, "is_expert", False):
+            entry["expert_status"] = getattr(s, "expert_status", None)
+            entry["expert_model"] = getattr(s, "expert_model", None)
+            entry["expert_endpoint"] = getattr(s, "expert_endpoint", None)
         skill_list.append(entry)
 
     # Sort by category then name

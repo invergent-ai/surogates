@@ -368,6 +368,68 @@ class TestConsultExpertSchemaDescription:
         assert "specialty" in desc
 
 
+class TestSkillsListExpertMetadata:
+    """skills_list returns enough metadata to identify and address active experts."""
+
+    @pytest.mark.asyncio
+    async def test_handler_includes_expert_fields(self, monkeypatch):
+        import json
+        from types import SimpleNamespace
+        from uuid import uuid4
+
+        from surogates.tools.builtin.skills import _skills_list_handler
+        from surogates.tools.loader import SkillDef
+
+        active = SkillDef(
+            name="sql_writer",
+            description="Writes SQL",
+            content="body",
+            source="org",
+            type="expert",
+            expert_status="active",
+            expert_model="qwen2.5-coder-7b",
+            expert_endpoint="http://expert:8000/v1",
+            trigger="SQL queries, database schemas",
+        )
+        plain = SkillDef(
+            name="code_review",
+            description="Reviews code",
+            content="body",
+            source="org",
+            type="skill",
+            trigger="code review",
+        )
+
+        async def fake_loader(tenant, **kwargs):
+            return [active, plain]
+
+        monkeypatch.setattr(
+            "surogates.tools.builtin.skills._load_all_skills", fake_loader,
+        )
+
+        tenant = SimpleNamespace(org_id=uuid4())
+        out = await _skills_list_handler({}, tenant=tenant)
+        payload = json.loads(out)
+
+        by_name = {s["name"]: s for s in payload["skills"]}
+        assert by_name["sql_writer"]["type"] == "expert"
+        assert by_name["sql_writer"]["trigger"] == "SQL queries, database schemas"
+        assert by_name["sql_writer"]["expert_status"] == "active"
+        assert by_name["sql_writer"]["expert_model"] == "qwen2.5-coder-7b"
+        assert by_name["sql_writer"]["expert_endpoint"] == "http://expert:8000/v1"
+        assert by_name["code_review"]["type"] == "skill"
+        # Regular skills do not get expert_* keys.
+        assert "expert_status" not in by_name["code_review"]
+        assert "expert_model" not in by_name["code_review"]
+
+    def test_schema_description_directs_to_consult_expert(self):
+        from surogates.tools.builtin.skills import SKILLS_LIST_SCHEMA
+
+        desc = SKILLS_LIST_SCHEMA.description
+        assert "type: expert" in desc or "type=expert" in desc.replace(": ", "=")
+        assert "consult_expert" in desc
+
+
 # =========================================================================
 # consult_expert handler
 # =========================================================================
