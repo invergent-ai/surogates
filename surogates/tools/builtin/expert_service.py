@@ -56,7 +56,20 @@ class ExpertConsultationService:
         forced: bool = False,
         category: str | None = None,
     ) -> ExpertConsultationResult:
-        """Consult *expert* and return a structured result."""
+        """Consult *expert* and return a structured result.
+
+        ``expert.delegation`` is emitted first so missing-endpoint and
+        run-time failures still produce a joinable row in
+        ``v_expert_outcomes`` (the SQL view LEFT JOINs each delegation
+        against the nearest outcome event).
+        """
+        await self._emit_delegation(
+            expert=expert,
+            task=task,
+            forced=forced,
+            category=category,
+        )
+
         if not expert.expert_endpoint:
             error = f"Expert '{expert.name}' has no endpoint configured."
             await self._record_failure(
@@ -68,13 +81,6 @@ class ExpertConsultationService:
                 content=json.dumps({"error": error}),
                 error=error,
             )
-
-        await self._emit_delegation(
-            expert=expert,
-            task=task,
-            forced=forced,
-            category=category,
-        )
 
         try:
             result, iterations_used = await run_expert_loop(

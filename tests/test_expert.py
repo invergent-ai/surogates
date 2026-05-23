@@ -673,6 +673,82 @@ class TestExpertFeedback:
         )
 
 
+class TestRecordExpertOutcomeSlim:
+    """record_expert_outcome only emits events; no DB stat updates."""
+
+    @pytest.mark.asyncio
+    async def test_emits_result_event_with_content_on_success(self):
+        from surogates.tools.builtin.expert_feedback import record_expert_outcome
+
+        store = AsyncMock()
+        session_id = uuid4()
+        await record_expert_outcome(
+            session_store=store,
+            session_id=session_id,
+            expert_name="sql_writer",
+            success=True,
+            iterations_used=3,
+            content="SELECT 1",
+        )
+        store.emit_event.assert_awaited_once()
+        args, _ = store.emit_event.call_args
+        assert args[0] == session_id
+        assert args[1] is EventType.EXPERT_RESULT
+        assert args[2]["expert"] == "sql_writer"
+        assert args[2]["success"] is True
+        assert args[2]["iterations_used"] == 3
+        assert args[2]["content"] == "SELECT 1"
+
+    def test_signature_has_no_db_kwargs(self):
+        import inspect
+        from surogates.tools.builtin.expert_feedback import record_expert_outcome
+
+        params = inspect.signature(record_expert_outcome).parameters
+        assert "db_session" not in params
+        assert "skill_id" not in params
+
+    def test_auto_disable_constants_removed(self):
+        from surogates.tools.builtin import expert_feedback
+
+        assert not hasattr(expert_feedback, "AUTO_DISABLE_THRESHOLD")
+        assert not hasattr(expert_feedback, "MIN_USES_FOR_AUTO_DISABLE")
+        assert not hasattr(expert_feedback, "_update_db_stats")
+
+
+class TestExpertServiceDelegationEvents:
+    """ExpertConsultationService emits delegation before any outcome."""
+
+    @pytest.mark.asyncio
+    async def test_missing_endpoint_still_emits_delegation_then_failure(self):
+        from surogates.tools.builtin.expert_service import ExpertConsultationService
+
+        store = AsyncMock()
+        expert = SkillDef(
+            name="sql_writer",
+            description="Writes SQL",
+            content="body",
+            source="org",
+            type="expert",
+            expert_status="active",
+            expert_endpoint=None,
+        )
+        service = ExpertConsultationService(
+            tenant=SimpleNamespace(org_id=uuid4(), user_id=uuid4(), org_config={}),
+            session_id=uuid4(),
+            tool_registry=MagicMock(),
+            session_store=store,
+        )
+
+        result = await service.consult(expert=expert, task="write a query")
+
+        assert result.success is False
+        emitted_types = [call.args[1] for call in store.emit_event.await_args_list]
+        assert emitted_types == [
+            EventType.EXPERT_DELEGATION,
+            EventType.EXPERT_FAILURE,
+        ]
+
+
 # =========================================================================
 # Training data collector
 # =========================================================================
