@@ -507,6 +507,13 @@ export interface AgentChatSlashCommand {
   value: string;
   label: string;
   description: string;
+  /**
+   * True when this entry is backed by an active expert model (consulted
+   * via the harness mini-loop) rather than a prompt-based skill. The UI
+   * shows an "EXPERT" badge so the user can distinguish a multi-second
+   * specialist consultation from a body-inline skill.
+   */
+  isExpert?: boolean;
 }
 
 export interface AgentChatWorkspaceEntry {

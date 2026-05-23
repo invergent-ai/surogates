@@ -429,6 +429,76 @@ class TestSkillsListExpertMetadata:
         assert "type: expert" in desc or "type=expert" in desc.replace(": ", "=")
         assert "consult_expert" in desc
 
+    @pytest.mark.asyncio
+    async def test_handler_hides_inactive_experts(self, monkeypatch):
+        """draft / collecting / retired experts must not appear in the catalog.
+
+        The slash dispatcher only routes active experts to the
+        mini-loop; inactive ones would fall through to ``skill_view``
+        and inline their system prompt as a skill body, which is the
+        wrong UX.  The ``# Available Experts`` system-prompt section
+        and ``consult_expert``'s active-expert resolver already enforce
+        the same invariant; this test keeps the catalog tool aligned.
+        """
+        import json
+        from types import SimpleNamespace
+        from uuid import uuid4
+
+        from surogates.tools.builtin.skills import _skills_list_handler
+        from surogates.tools.loader import SkillDef
+
+        active = SkillDef(
+            name="sql_writer",
+            description="Writes SQL",
+            content="body",
+            source="org",
+            type="expert",
+            expert_status="active",
+            expert_endpoint="http://expert:8000/v1",
+        )
+        draft = SkillDef(
+            name="draft_specialist",
+            description="Not yet active",
+            content="body",
+            source="org",
+            type="expert",
+            expert_status="draft",
+        )
+        retired = SkillDef(
+            name="retired_specialist",
+            description="Decommissioned",
+            content="body",
+            source="org",
+            type="expert",
+            expert_status="retired",
+        )
+        regular = SkillDef(
+            name="code_review",
+            description="Reviews code",
+            content="body",
+            source="org",
+            type="skill",
+        )
+
+        async def fake_loader(tenant, **kwargs):
+            return [active, draft, retired, regular]
+
+        monkeypatch.setattr(
+            "surogates.tools.builtin.skills._load_all_skills", fake_loader,
+        )
+
+        tenant = SimpleNamespace(org_id=uuid4())
+        out = await _skills_list_handler({}, tenant=tenant)
+        payload = json.loads(out)
+
+        names = [s["name"] for s in payload["skills"]]
+        assert "sql_writer" in names
+        assert "code_review" in names
+        assert "draft_specialist" not in names
+        assert "retired_specialist" not in names
+        # `count` mirrors the visible list, not the underlying catalog.
+        assert payload["count"] == 2
+
 
 # =========================================================================
 # consult_expert handler

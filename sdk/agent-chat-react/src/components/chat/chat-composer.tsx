@@ -865,15 +865,31 @@ function ChatComposerInner({
                 <CommandItem
                   key={cmd.value}
                   value={cmd.value}
-                  keywords={[cmd.description]}
+                  // Including "expert" as a fuzzy-match keyword lets the
+                  // user type "/expert" to list every specialist at once.
+                  keywords={
+                    cmd.isExpert
+                      ? [cmd.description, "expert"]
+                      : [cmd.description]
+                  }
                   onSelect={() => handleCommandSelect(cmd.value)}
                   className="grid grid-cols-[12rem_1fr] items-baseline gap-3 [&_svg]:hidden"
                 >
                   <span
-                    className="font-mono font-semibold text-foreground truncate"
+                    className="inline-flex items-center gap-1.5 min-w-0 max-w-full"
                     title={cmd.label}
                   >
-                    {cmd.label}
+                    <span className="font-mono font-semibold text-foreground truncate">
+                      {cmd.label}
+                    </span>
+                    {cmd.isExpert && (
+                      <span
+                        className="shrink-0 rounded-sm bg-primary/10 px-1 text-[9px] font-semibold uppercase tracking-wider text-primary"
+                        aria-label="Expert specialist"
+                      >
+                        expert
+                      </span>
+                    )}
                   </span>
                   <span
                     className="min-w-0 truncate text-sm text-muted-foreground"
