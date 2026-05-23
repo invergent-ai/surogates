@@ -54,6 +54,7 @@ class ToolRuntime:
             coordinator,
             cron,
             delegate,
+            expert,
             file_ops,
             kb_tools,
             loop_control,
@@ -79,6 +80,7 @@ class ToolRuntime:
             kb_tools,
             loop_control,
             delegate,
+            expert,
             terminal,  # also registers the 'process' tool
             session_search,
             todo,

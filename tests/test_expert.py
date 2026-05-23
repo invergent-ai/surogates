@@ -859,12 +859,23 @@ class TestWorkerExpertCatalogWiring:
 
 
 class TestToolRouterExpertLocation:
-    """consult_expert is not exposed through normal tool routing."""
+    """consult_expert routes to the harness, not the sandbox."""
 
-    def test_consult_expert_not_in_tool_locations(self):
-        from surogates.tools.router import TOOL_LOCATIONS
+    def test_consult_expert_routes_to_harness(self):
+        from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
 
-        assert "consult_expert" not in TOOL_LOCATIONS
+        assert TOOL_LOCATIONS["consult_expert"] is ToolLocation.HARNESS
+
+    def test_consult_expert_resolves_to_harness_via_router(self):
+        from unittest.mock import MagicMock
+        from surogates.tools.router import ToolLocation, ToolRouter
+
+        router = ToolRouter(
+            registry=MagicMock(),
+            sandbox_pool=MagicMock(),
+            governance=MagicMock(),
+        )
+        assert router.resolve_location("consult_expert") is ToolLocation.HARNESS
 
 
 # =========================================================================
@@ -873,16 +884,19 @@ class TestToolRouterExpertLocation:
 
 
 class TestToolRuntimeRegistersExpert:
-    """ToolRuntime.register_builtins() hides consult_expert from executors."""
+    """ToolRuntime.register_builtins() exposes consult_expert to executors."""
 
-    def test_expert_not_registered(self):
+    def test_expert_registered(self):
         from surogates.tools.registry import ToolRegistry
         from surogates.tools.runtime import ToolRuntime
 
         reg = ToolRegistry()
         runtime = ToolRuntime(reg)
         runtime.register_builtins()
-        assert not reg.has("consult_expert")
+        assert reg.has("consult_expert")
+        entry = reg.get("consult_expert")
+        assert entry.schema.name == "consult_expert"
+        assert entry.toolset == "expert"
 
 
 # =========================================================================
