@@ -347,6 +347,27 @@ class TestExpertToolRegistration:
         assert params["required"] == ["expert", "task"]
 
 
+class TestConsultExpertSchemaDescription:
+    """consult_expert description must not collide with delegate_task vocabulary."""
+
+    def test_description_uses_consult_not_delegate(self):
+        from surogates.tools.builtin.expert import _EXPERT_SCHEMA
+
+        desc = _EXPERT_SCHEMA.description.lower()
+        assert "consult" in desc
+        # Must not use the words that belong to delegate_task.
+        assert "delegate" not in desc
+        assert "subtask" not in desc
+        assert "sub-task" not in desc
+
+    def test_description_mentions_specialist_and_specialty(self):
+        from surogates.tools.builtin.expert import _EXPERT_SCHEMA
+
+        desc = _EXPERT_SCHEMA.description.lower()
+        assert "specialist" in desc
+        assert "specialty" in desc
+
+
 # =========================================================================
 # consult_expert handler
 # =========================================================================

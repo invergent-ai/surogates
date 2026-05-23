@@ -1,9 +1,10 @@
-"""Built-in ``consult_expert`` tool -- delegate to an expert model.
+"""Built-in ``consult_expert`` tool -- voluntary consultation of a specialist model.
 
 The base LLM decides when to consult an expert and receives the
-expert's result back as a tool response.  The expert runs its own
-scoped mini agent loop with a restricted tool set and bounded
-iteration budget.
+expert's deliverable back as a tool response.  The expert runs its
+own scoped mini agent loop with a restricted tool set and bounded
+iteration budget.  This is distinct from ``delegate_task``, which
+spawns sub-agents in fresh sessions for multi-step work.
 
 The handler requires ``tenant``, ``session_id``, ``tool_router``,
 and ``tool_registry`` to be passed as keyword arguments by the
@@ -26,9 +27,9 @@ logger = logging.getLogger(__name__)
 _EXPERT_SCHEMA = ToolSchema(
     name="consult_expert",
     description=(
-        "Delegate a subtask to a task-specialized expert model. The "
-        "expert handles the subtask and returns its result. Use this "
-        "when a task falls within an available expert's specialty."
+        "Consult a specialist model for a single domain question. The "
+        "expert answers and returns its deliverable. Use this when a "
+        "request falls within an available expert's specialty."
     ),
     parameters={
         "type": "object",

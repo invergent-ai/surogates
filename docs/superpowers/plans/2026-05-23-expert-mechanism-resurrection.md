@@ -20,8 +20,8 @@ Updated before every commit so the plan is the single source of truth for progre
 |---|---|---|
 | 1 | Branch and orient | completed |
 | 2 | Register `consult_expert` in the tool runtime | completed |
-| 3 | Update the `consult_expert` schema description | in progress |
-| 4 | Surface expert metadata through `skills_list` | pending |
+| 3 | Update the `consult_expert` schema description | completed |
+| 4 | Surface expert metadata through `skills_list` | in progress |
 | 5 | Render `# Available Experts` in the system prompt | pending |
 | 6 | Simplify `record_expert_outcome` + reorder delegation emit | pending |
 | 7 | Expert branch in `expand_slash_skill` | pending |
