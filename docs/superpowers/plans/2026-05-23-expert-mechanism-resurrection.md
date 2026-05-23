@@ -12,6 +12,26 @@
 
 ---
 
+## Task Status
+
+Updated before every commit so the plan is the single source of truth for progress.
+
+| # | Task | Status |
+|---|---|---|
+| 1 | Branch and orient | in progress |
+| 2 | Register `consult_expert` in the tool runtime | pending |
+| 3 | Update the `consult_expert` schema description | pending |
+| 4 | Surface expert metadata through `skills_list` | pending |
+| 5 | Render `# Available Experts` in the system prompt | pending |
+| 6 | Simplify `record_expert_outcome` + reorder delegation emit | pending |
+| 7 | Expert branch in `expand_slash_skill` | pending |
+| 8 | Wire the new `expand_slash_skill` shape into the harness loop | pending |
+| 9 | Excise dead auto-router and forced-route shims | pending |
+| 10 | Documentation updates | pending |
+| 11 | Final verification | pending |
+
+---
+
 ## File map
 
 Each file below is touched by at least one task. Read this before starting Task 1 to internalize the surface area.
@@ -22,7 +42,7 @@ Each file below is touched by at least one task. Read this before starting Task 
 - `surogates/tools/builtin/expert.py` — change schema description; remove "delegate"/"subtask" wording.
 - `surogates/tools/builtin/skills.py` — extend `_skills_list_handler` entries to include `type`, `trigger`, `expert_status`, `expert_model`, `expert_endpoint`; append one sentence to `SKILLS_LIST_SCHEMA.description`.
 - `surogates/tools/builtin/expert_feedback.py` — gut `_update_db_stats`; drop `AUTO_DISABLE_THRESHOLD`, `MIN_USES_FOR_AUTO_DISABLE`; drop `db_session` / `skill_id` parameters from `record_expert_outcome`.
-- `surogates/tools/builtin/expert_service.py` — remove now-obsolete `db_session=None, skill_id=None` kwargs from the two `record_expert_outcome` call sites at lines 90 and 178.
+- `surogates/tools/builtin/expert_service.py` — emit `expert.delegation` before endpoint validation, so even missing-endpoint failures join correctly in `v_expert_outcomes`; verify the two `record_expert_outcome` call sites still pass no removed kwargs.
 - `surogates/harness/slash_skill.py` — add expert branch before `skill_view` dispatch; widen `expand_slash_skill` to accept `session_store` and `sandbox_pool`; widen return tuple with a `kind: Literal["skill", "expert"]` discriminator.
 - `surogates/harness/loop.py` — at the `expand_slash_skill` call site, pass `session_store=self._store` and `sandbox_pool=self._sandbox_pool`; consume the new 4-tuple; only emit `SKILL_INVOKED` when `kind == "skill"`; delete `_has_forced_expert_after_latest_user`, `_forced_expert_categories_after_latest_user`, `_legacy_forced_expert_categories_after_latest_user`.
 - `surogates/harness/expert_routing.py` — delete `select_expert_for_task`, `load_skills_for_expert_routing`, `classify_tool_calls`, `_TRIGGER_SPLIT_RE`, `_WORD_RE`, `_TRIGGER_STOPWORDS`, `_normalise_trigger_text`, `_trigger_match_score`.
@@ -37,7 +57,6 @@ Each file below is touched by at least one task. Read this before starting Task 
 
 **Create:**
 - `tests/test_slash_expert.py` — new file covering the slash-command expert branch.
-- `tests/test_prompt_experts_section.py` — new file covering the `# Available Experts` rendering.
 
 ---
 
@@ -52,7 +71,9 @@ Each file below is touched by at least one task. Read this before starting Task 
 cd /work/surogates && git status
 ```
 
-Expected: no uncommitted changes (the spec commit `3ca0664` is the most recent local commit, ahead of `origin/master`).
+Expected: no unrelated uncommitted changes. If the design spec or this plan
+is still modified locally, commit or stash those documentation changes before
+starting the implementation branch.
 
 - [ ] **Step 1.2: Create implementation branch**
 
@@ -540,7 +561,6 @@ consult_expert for those entries."
 **Files:**
 - Modify: `surogates/harness/prompt.py` (add `_available_experts_section`, call from `build()`)
 - Modify: `tests/test_expert.py` (flip the negative tests at lines 716-788)
-- Create: `tests/test_prompt_experts_section.py` (new positive coverage)
 
 - [ ] **Step 5.1: Flip the existing negative tests in `tests/test_expert.py`**
 
@@ -808,7 +828,7 @@ disambiguates from delegate_task to avoid vocabulary collision."
 **Files:**
 - Modify: `surogates/tools/builtin/expert_feedback.py`
 - Modify: `surogates/tools/builtin/expert_service.py:90, 178`
-- Test: `tests/test_expert.py` (add a regression test on the new signature)
+- Test: `tests/test_expert.py` (add regression tests for the slim signature and delegation-before-outcome ordering)
 
 - [ ] **Step 6.1: Write the regression test**
 
@@ -898,7 +918,7 @@ Emits ``EXPERT_RESULT`` or ``EXPERT_FAILURE`` events for each
 consultation so the SQL views, training collector, and feedback API
 have a complete trajectory. Auto-disable is intentionally not
 implemented — operators retire experts manually via
-``POST /skills/{name}/retire``. Quality signals come from
+``POST /v1/skills/{name}/retire``. Quality signals come from
 ``EXPERT_ENDORSE`` / ``EXPERT_OVERRIDE`` events the feedback API
 emits when a user or judge rates an ``expert.result``.
 """
@@ -977,7 +997,99 @@ async def record_expert_outcome(
         )
 ```
 
-- [ ] **Step 6.4: Drop the obsolete kwargs at the two call sites in `expert_service.py`**
+- [ ] **Step 6.4: Move delegation emission before endpoint validation**
+
+Add a regression test in `tests/test_expert.py` so missing-endpoint failures
+still produce a joinable `expert.delegation` row in `v_expert_outcomes`:
+
+```python
+class TestExpertServiceDelegationEvents:
+    """ExpertConsultationService emits delegation before any outcome."""
+
+    @pytest.mark.asyncio
+    async def test_missing_endpoint_still_emits_delegation_then_failure(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+
+        from surogates.session.events import EventType
+        from surogates.tools.builtin.expert_service import ExpertConsultationService
+        from surogates.tools.loader import SkillDef
+
+        store = AsyncMock()
+        expert = SkillDef(
+            name="sql_writer",
+            description="Writes SQL",
+            content="body",
+            source="org",
+            type="expert",
+            expert_status="active",
+            expert_endpoint=None,
+        )
+        service = ExpertConsultationService(
+            tenant=SimpleNamespace(org_id=uuid4(), user_id=uuid4(), org_config={}),
+            session_id=uuid4(),
+            tool_registry=MagicMock(),
+            session_store=store,
+        )
+
+        result = await service.consult(expert=expert, task="write a query")
+
+        assert result.success is False
+        emitted_types = [call.args[1] for call in store.emit_event.await_args_list]
+        assert emitted_types == [
+            EventType.EXPERT_DELEGATION,
+            EventType.EXPERT_FAILURE,
+        ]
+```
+
+Run just this regression and verify it fails before the implementation change:
+
+```bash
+cd /work/surogates && uv run pytest tests/test_expert.py::TestExpertServiceDelegationEvents -v
+```
+
+Expected: FAIL — current `ExpertConsultationService.consult()` validates
+`expert_endpoint` before `_emit_delegation()`.
+
+In `surogates/tools/builtin/expert_service.py:59-78`, move the `_emit_delegation`
+call above the missing-endpoint guard. The beginning of `consult()` becomes:
+
+```python
+    async def consult(
+        self,
+        *,
+        expert: SkillDef,
+        task: str,
+        context: str | None = None,
+        forced: bool = False,
+        category: str | None = None,
+    ) -> ExpertConsultationResult:
+        """Consult *expert* and return a structured result."""
+        await self._emit_delegation(
+            expert=expert,
+            task=task,
+            forced=forced,
+            category=category,
+        )
+
+        if not expert.expert_endpoint:
+            error = f"Expert '{expert.name}' has no endpoint configured."
+            await self._record_failure(
+                expert, error, forced=forced, category=category,
+            )
+            return ExpertConsultationResult(
+                expert=expert.name,
+                success=False,
+                content=json.dumps({"error": error}),
+                error=error,
+            )
+
+        try:
+            result, iterations_used = await run_expert_loop(
+```
+
+- [ ] **Step 6.5: Drop the obsolete kwargs at the two call sites in `expert_service.py`**
 
 In `surogates/tools/builtin/expert_service.py`, the calls to `record_expert_outcome` at lines 90 and 178 already do not pass `db_session` or `skill_id` (they were optional with default `None`), so the call sites compile against the new signature. Verify by inspection — if either call passes those kwargs, remove them.
 
@@ -987,15 +1099,18 @@ cd /work/surogates && grep -n "record_expert_outcome\|db_session\|skill_id" suro
 
 Expected: no `db_session=` or `skill_id=` arguments at the call sites.
 
-- [ ] **Step 6.5: Run the new tests; verify PASS**
+- [ ] **Step 6.6: Run the new tests; verify PASS**
 
 ```bash
-cd /work/surogates && uv run pytest tests/test_expert.py::TestRecordExpertOutcomeSlim -v
+cd /work/surogates && uv run pytest \
+  tests/test_expert.py::TestRecordExpertOutcomeSlim \
+  tests/test_expert.py::TestExpertServiceDelegationEvents \
+  -v
 ```
 
-Expected: all four pass.
+Expected: all five tests pass.
 
-- [ ] **Step 6.6: Run the full expert test file to surface any callers I missed**
+- [ ] **Step 6.7: Run the full expert test file to surface any callers I missed**
 
 ```bash
 cd /work/surogates && uv run pytest tests/test_expert.py -q
@@ -1003,17 +1118,19 @@ cd /work/surogates && uv run pytest tests/test_expert.py -q
 
 Expected: pass. If any pre-existing test mocked `_update_db_stats` or imported the removed constants, delete those tests — they covered the unreachable path.
 
-- [ ] **Step 6.7: Commit**
+- [ ] **Step 6.8: Commit**
 
 ```bash
 cd /work/surogates && git add \
   surogates/tools/builtin/expert_feedback.py \
+  surogates/tools/builtin/expert_service.py \
   tests/test_expert.py
 cd /work/surogates && git commit -m "refactor(experts): drop auto-disable, slim record_expert_outcome
 
 Removes _update_db_stats, AUTO_DISABLE_THRESHOLD, MIN_USES_FOR_AUTO_DISABLE
-and the db_session/skill_id parameters. The function now only emits
-the EXPERT_RESULT or EXPERT_FAILURE event."
+and the db_session/skill_id parameters. The outcome recorder now only
+emits EXPERT_RESULT or EXPERT_FAILURE, while ExpertConsultationService
+emits EXPERT_DELEGATION before any success or failure outcome."
 ```
 
 ---
@@ -1804,7 +1921,24 @@ Drop any import that has zero remaining references.
 
 - [ ] **Step 9.6: Delete the forced-route shims in `surogates/harness/loop.py`**
 
-Remove the three static methods at `surogates/harness/loop.py:3649-3679`:
+In `_maybe_consult_required_advisor` around `surogates/harness/loop.py:3453`,
+replace the forced-expert shim call:
+
+```python
+            or classification.category in self._forced_expert_categories_after_latest_user(
+                all_events,
+            )
+```
+
+with the real advisor helper:
+
+```python
+            or classification.category in self._advisor_categories_after_latest_user(
+                all_events,
+            )
+```
+
+Then remove the three static methods at `surogates/harness/loop.py:3649-3679`:
 
 - `_has_forced_expert_after_latest_user`
 - `_forced_expert_categories_after_latest_user`
@@ -1816,7 +1950,7 @@ If anything else in `loop.py` calls these methods (search before deleting):
 cd /work/surogates && grep -n "_forced_expert_categories_after_latest_user\|_has_forced_expert_after_latest_user\|_legacy_forced_expert_categories_after_latest_user" surogates/
 ```
 
-Expected: no callers remain.
+Expected: no references remain after the replacement and deletion.
 
 - [ ] **Step 9.7: Run the trimmed test file; verify PASS**
 
@@ -1897,7 +2031,7 @@ Replace with:
 
 Every consultation emits `expert.delegation` followed by `expert.result` (success) or `expert.failure`. When a user or judge submits feedback on an `expert.result` event via the feedback API, `expert.endorse` / `expert.override` is appended. Together these populate the `v_expert_outcomes` SQL view and feed the training collector and downstream quality dashboards.
 
-The platform does not auto-disable experts. Operators retire an expert manually via `POST /skills/{name}/retire` when its quality signals warrant it.
+The platform does not auto-disable experts. Operators retire an expert manually via `POST /v1/skills/{name}/retire` when its quality signals warrant it.
 ```
 
 - [ ] **Step 10.4: Add a "Slash invocation" subsection**
@@ -1907,7 +2041,8 @@ Locate the heading `## 5. Verify It Works` (around line 314) and find its closin
 ```markdown
 ### Slash invocation
 
-Users can invoke an expert directly without going through the base LLM:
+Users can invoke an expert directly; the base LLM still reviews and relays
+the deliverable:
 
 ```
 User: /sql_writer write me a query for the orders table
@@ -2023,7 +2158,7 @@ Expected: the per-task commits land in order (Task 2 through Task 10). Open a PR
   - Goal #1 (LLM tool call) → Task 2, Task 3
   - Goal #2 (slash command) → Task 7, Task 8
   - Goal #3 (discoverability) → Task 4 (`skills_list`), Task 5 (prompt section), Task 2 (registration)
-  - Goal #4 (event emission) → Task 6 (slim outcome recorder) + the existing `ExpertConsultationService.consult()` already emits `expert.delegation`, `expert.result`, `expert.failure`.
+  - Goal #4 (event emission) → Task 6 (slim outcome recorder + delegation-before-outcome ordering in `ExpertConsultationService.consult()`).
   - Goal #5 (excise dead code) → Task 9
   - Non-goal "no auto-disable" → Task 6
   - Non-goal "no auto-routing" → preserved by *not* re-wiring `select_expert_for_task`; Task 9 makes this explicit.
