@@ -1,4 +1,11 @@
-"""Tests for harness-enforced expert routing."""
+"""Tests for the hard-task classifier and advisor preflight.
+
+Auto-routing to experts was dropped (see
+``docs/superpowers/specs/2026-05-23-expert-mechanism-resurrection-design.md``);
+``TestDeadHelpersRemoved`` guards against the deleted helpers
+creeping back.  The classifier itself still drives the thinking
+gate, SELF-DISCOVER scaffold, and advisor preflight.
+"""
 
 from __future__ import annotations
 
@@ -13,27 +20,7 @@ from surogates.harness.budget import IterationBudget
 from surogates.harness.loop import AgentHarness
 from surogates.session.events import EventType
 from surogates.session.models import Event, Session
-from surogates.tools.loader import SkillDef
 from surogates.tools.registry import ToolRegistry
-
-
-def _expert(
-    name: str,
-    trigger: str,
-    *,
-    status: str = "active",
-) -> SkillDef:
-    return SkillDef(
-        name=name,
-        description=f"{name} expert",
-        content="Expert instructions.",
-        source="org",
-        type="expert",
-        expert_status=status,
-        expert_endpoint="http://expert:8000/v1",
-        expert_model="expert-model",
-        trigger=trigger,
-    )
 
 
 def _session() -> Session:
@@ -107,72 +94,34 @@ class TestHardTaskClassification:
         assert result.required is False
         assert result.category is None
 
-    def test_routes_terminal_tool_call(self):
-        from surogates.harness.expert_routing import classify_tool_calls
 
-        result = classify_tool_calls([
-            {"function": {"name": "terminal", "arguments": '{"cmd": "pytest"}'}},
-        ])
+class TestDeadHelpersRemoved:
+    """Auto-router helpers must be gone — the design dropped auto-routing.
 
-        assert result.required is True
-        assert result.category == "terminal"
+    See ``docs/superpowers/specs/2026-05-23-expert-mechanism-resurrection-design.md``.
+    These assertions prevent the helpers from creeping back via copy-paste.
+    """
 
-    def test_routes_patch_tool_call(self):
-        from surogates.harness.expert_routing import classify_tool_calls
+    def test_select_expert_for_task_removed(self):
+        from surogates.harness import expert_routing
 
-        result = classify_tool_calls([
-            {"function": {"name": "patch", "arguments": "{}"}},
-        ])
+        assert not hasattr(expert_routing, "select_expert_for_task")
 
-        assert result.required is True
-        assert result.category == "coding"
+    def test_load_skills_for_expert_routing_removed(self):
+        from surogates.harness import expert_routing
 
+        assert not hasattr(expert_routing, "load_skills_for_expert_routing")
 
-class TestExpertSelection:
-    def test_selects_active_expert_by_trigger(self):
-        from surogates.harness.expert_routing import select_expert_for_task
+    def test_classify_tool_calls_removed(self):
+        from surogates.harness import expert_routing
 
-        selected = select_expert_for_task(
-            [
-                _expert("math_expert", "math, equations"),
-                _expert("code_expert", "python, coding, debugging"),
-            ],
-            "Fix this Python traceback in app.py",
-        )
+        assert not hasattr(expert_routing, "classify_tool_calls")
 
-        assert selected is not None
-        assert selected.name == "code_expert"
+    def test_trigger_helpers_removed(self):
+        from surogates.harness import expert_routing
 
-    def test_tie_breaks_by_name(self):
-        from surogates.harness.expert_routing import select_expert_for_task
-
-        selected = select_expert_for_task(
-            [_expert("z_code", "python"), _expert("a_code", "python")],
-            "Write Python code",
-        )
-
-        assert selected is not None
-        assert selected.name == "a_code"
-
-    def test_ignores_inactive_experts(self):
-        from surogates.harness.expert_routing import select_expert_for_task
-
-        selected = select_expert_for_task(
-            [_expert("code_expert", "coding", status="draft")],
-            "Write Python code",
-        )
-
-        assert selected is None
-
-    def test_ignores_active_experts_without_matching_trigger(self):
-        from surogates.harness.expert_routing import select_expert_for_task
-
-        selected = select_expert_for_task(
-            [_expert("code_expert", "python, coding")],
-            "Solve 3x + 7 = 22",
-        )
-
-        assert selected is None
+        assert not hasattr(expert_routing, "_normalise_trigger_text")
+        assert not hasattr(expert_routing, "_trigger_match_score")
 
 
 class TestHarnessAdvisorPreflight:

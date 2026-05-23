@@ -3462,7 +3462,7 @@ class AgentHarness:
 
         if (
             classification.category in consulted_categories
-            or classification.category in self._forced_expert_categories_after_latest_user(
+            or classification.category in self._advisor_categories_after_latest_user(
                 all_events,
             )
         ):
@@ -3654,39 +3654,6 @@ class AgentHarness:
                 continue
             fragments.append(f"{role}: {content}")
         return "\n\n".join(fragments)[-16_000:]
-
-    @staticmethod
-    def _has_forced_expert_after_latest_user(events: list[Event]) -> bool:
-        return bool(AgentHarness._advisor_categories_after_latest_user(events))
-
-    @staticmethod
-    def _forced_expert_categories_after_latest_user(events: list[Event]) -> set[str]:
-        # Compatibility shim for older tests/imports. Forced expert routing is
-        # now backed by hidden advisor events.
-        return AgentHarness._advisor_categories_after_latest_user(events)
-
-    @staticmethod
-    def _legacy_forced_expert_categories_after_latest_user(events: list[Event]) -> set[str]:
-        latest_user_event_id = 0
-        for event in events:
-            if event.type == EventType.USER_MESSAGE.value and event.id is not None:
-                latest_user_event_id = max(latest_user_event_id, event.id)
-        categories: set[str] = set()
-        for event in events:
-            if event.id is None or event.id <= latest_user_event_id:
-                continue
-            if (
-                event.type in {
-                    EventType.EXPERT_DELEGATION.value,
-                    EventType.EXPERT_RESULT.value,
-                    EventType.EXPERT_FAILURE.value,
-                }
-                and event.data.get("forced")
-            ):
-                category = event.data.get("category")
-                if category:
-                    categories.add(str(category))
-        return categories
 
     @staticmethod
     def _format_advisor_context(

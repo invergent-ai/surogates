@@ -26,8 +26,8 @@ Updated before every commit so the plan is the single source of truth for progre
 | 6 | Simplify `record_expert_outcome` + reorder delegation emit | completed |
 | 7 | Expert branch in `expand_slash_skill` | completed |
 | 8 | Wire the new `expand_slash_skill` shape into the harness loop | completed |
-| 9 | Excise dead auto-router and forced-route shims | in progress |
-| 10 | Documentation updates | pending |
+| 9 | Excise dead auto-router and forced-route shims | completed |
+| 10 | Documentation updates | in progress |
 | 11 | Final verification | pending |
 
 ---

@@ -1,4 +1,19 @@
-"""Deterministic routing helpers for harness-enforced expert consultation."""
+"""Hard-task classification + thinking-toggle helpers.
+
+This module provides the deterministic regex classifier
+(``classify_hard_task``) and its LLM-based equivalent
+(``classify_hard_task_async``) plus the chat-template ``enable_thinking``
+toggle. The classifier drives the thinking gate, SELF-DISCOVER scaffold,
+and the hidden advisor preflight.
+
+Auto-routing to experts based on this classifier was removed when the
+expert mechanism was rebuilt as a voluntary-consultation feature
+(see ``docs/superpowers/specs/2026-05-23-expert-mechanism-resurrection-design.md``).
+The selection helpers that used to live here (``select_expert_for_task``,
+``classify_tool_calls``, ``load_skills_for_expert_routing``) are gone;
+``consult_expert`` and the ``/<expert>`` slash command are the only
+entry points to an expert.
+"""
 
 from __future__ import annotations
 
@@ -6,14 +21,13 @@ import logging
 import re
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Iterable, Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from surogates.config import load_settings
 from surogates.harness.auxiliary_client import build_summary_auxiliary_llm
 from surogates.harness.structured_output import generate_structured
-from surogates.tools.loader import SkillDef
 
 logger = logging.getLogger(__name__)
 
@@ -102,96 +116,6 @@ def classify_hard_task(text: str) -> HardTaskClassification:
         )
 
     return HardTaskClassification(False)
-
-
-def classify_tool_calls(tool_calls: list[dict]) -> HardTaskClassification:
-    """Classify explicit LLM tool intent into an expert routing category."""
-    names = [
-        str(tc.get("function", {}).get("name", ""))
-        for tc in tool_calls
-    ]
-    if any(name in {"terminal", "process"} for name in names):
-        return HardTaskClassification(True, "terminal", "terminal tool call")
-    if any(name in {"write_file", "patch"} for name in names):
-        return HardTaskClassification(True, "coding", "code mutation tool call")
-    return HardTaskClassification(False)
-
-
-_TRIGGER_SPLIT_RE = re.compile(r"[,;\n]+")
-_WORD_RE = re.compile(r"[a-z0-9_]+", re.IGNORECASE)
-_TRIGGER_STOPWORDS = frozenset({
-    "a", "an", "and", "are", "as", "by", "for", "in", "of", "on", "or",
-    "the", "to", "with",
-})
-
-
-def select_expert_for_task(
-    experts: Iterable[SkillDef],
-    task: str,
-) -> SkillDef | None:
-    """Select an active expert whose trigger matches *task*.
-
-    Trigger text is the expert's routing contract.  Matching is
-    deterministic: exact phrase matches score highest, token coverage
-    scores next, and ties are resolved by stable expert name order.
-    """
-    haystack = _normalise_trigger_text(task)
-    scored: list[tuple[int, str, SkillDef]] = []
-    for expert in experts:
-        if not expert.is_active_expert:
-            continue
-        score = _trigger_match_score(expert.trigger or "", haystack)
-        if score > 0:
-            scored.append((score, expert.name, expert))
-    if not scored:
-        return None
-    return sorted(scored, key=lambda item: (-item[0], item[1]))[0][2]
-
-
-def _normalise_trigger_text(text: str) -> str:
-    return " ".join(_WORD_RE.findall((text or "").lower()))
-
-
-def _trigger_match_score(trigger: str, haystack: str) -> int:
-    if not trigger.strip() or not haystack:
-        return 0
-
-    haystack_tokens = set(haystack.split())
-    best = 0
-    for raw_phrase in _TRIGGER_SPLIT_RE.split(trigger):
-        phrase = _normalise_trigger_text(raw_phrase)
-        if not phrase:
-            continue
-        if phrase in haystack:
-            best = max(best, 100 + len(phrase.split()))
-            continue
-        phrase_tokens = [
-            token for token in phrase.split()
-            if token not in _TRIGGER_STOPWORDS
-        ]
-        if not phrase_tokens:
-            continue
-        overlap = sum(1 for token in phrase_tokens if token in haystack_tokens)
-        if overlap == len(phrase_tokens):
-            best = max(best, 50 + overlap)
-        elif overlap > 0 and len(phrase_tokens) > 1:
-            best = max(best, overlap)
-    return best
-
-
-async def load_skills_for_expert_routing(
-    tenant: object,
-    *,
-    session_factory: object | None = None,
-) -> list[SkillDef]:
-    """Load tenant skills for forced expert routing."""
-    from surogates.tools.loader import ResourceLoader
-
-    loader = ResourceLoader()
-    if session_factory is not None:
-        async with session_factory() as db_session:  # type: ignore[misc]
-            return await loader.load_skills(tenant, db_session=db_session)
-    return await loader.load_skills(tenant)
 
 
 # ---------------------------------------------------------------------------
