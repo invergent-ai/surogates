@@ -181,3 +181,24 @@ async def test_inactive_expert_falls_through_to_skill_view(tenant, session_id):
     _, name, _, kind = result
     assert kind == "skill"
     assert name == "sql_writer"
+
+
+def test_loop_does_not_emit_skill_invoked_for_expert_kind():
+    """The harness's slash dispatch must not emit SKILL_INVOKED for kind='expert'.
+
+    Structural assertion on the call site — a behavioral test would
+    require materialising the full harness lifecycle, which the
+    integration suite already covers.  Here we just guard the gate
+    that keeps expert and skill invocations from double-logging.
+    """
+    import inspect
+
+    from surogates.harness import loop as loop_mod
+
+    src = inspect.getsource(loop_mod)
+    # The conditional must reference the `kind` field returned by
+    # expand_slash_skill and gate the SKILL_INVOKED emission on it.
+    assert 'kind == "skill"' in src or "kind == 'skill'" in src
+    # And it must pass session_store + sandbox_pool to expand_slash_skill.
+    assert "session_store=" in src
+    assert "sandbox_pool=" in src

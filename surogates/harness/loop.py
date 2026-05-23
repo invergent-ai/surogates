@@ -1296,7 +1296,10 @@ class AgentHarness:
                     )
                 return
 
-            # 10b. Eager /<skill> expansion -- see slash_skill.expand_slash_skill.
+            # 10b. Eager /<skill> or /<expert> expansion.
+            # See slash_skill.expand_slash_skill. ``kind`` distinguishes
+            # the two paths so we don't double-emit a skill.invoked when
+            # the service already emitted expert.delegation.
             if last_user_content.startswith("/"):
                 expansion = await expand_slash_skill(
                     text=last_user_content,
@@ -1305,36 +1308,43 @@ class AgentHarness:
                     session_id=str(session.id),
                     api_client=self._api_client,
                     session_factory=self._session_factory,
+                    session_store=self._store,
+                    sandbox_pool=self._sandbox_pool,
                 )
                 if expansion is not None:
-                    expanded_text, skill_name, staged_at = expansion
+                    expanded_text, skill_name, staged_at, kind = expansion
                     last_user["content"] = expanded_text
-                    # Suppress duplicate audit events on crash-recovery wakes.
-                    # skill_view itself is idempotent (staging short-circuits via
-                    # an exists() check), but the SKILL_INVOKED event log row is
-                    # not -- so guard it by scanning prior events.
-                    already_emitted = any(
-                        e.type == EventType.SKILL_INVOKED.value
-                        and e.data.get("raw_message") == last_user_content
-                        for e in all_events
-                    )
-                    if not already_emitted:
-                        try:
-                            await self._store.emit_event(
-                                session.id,
-                                EventType.SKILL_INVOKED,
-                                {
-                                    "skill": skill_name,
-                                    "raw_message": last_user_content,
-                                    "staged_at": staged_at,
-                                },
-                            )
-                        except Exception:
-                            logger.exception(
-                                "Failed to emit SKILL_INVOKED audit event "
-                                "for session %s skill=%s",
-                                session.id, skill_name,
-                            )
+                    if kind == "skill":
+                        # Suppress duplicate audit events on crash-recovery wakes.
+                        # skill_view itself is idempotent (staging short-circuits via
+                        # an exists() check), but the SKILL_INVOKED event log row is
+                        # not -- so guard it by scanning prior events.
+                        already_emitted = any(
+                            e.type == EventType.SKILL_INVOKED.value
+                            and e.data.get("raw_message") == last_user_content
+                            for e in all_events
+                        )
+                        if not already_emitted:
+                            try:
+                                await self._store.emit_event(
+                                    session.id,
+                                    EventType.SKILL_INVOKED,
+                                    {
+                                        "skill": skill_name,
+                                        "raw_message": last_user_content,
+                                        "staged_at": staged_at,
+                                    },
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "Failed to emit SKILL_INVOKED audit event "
+                                    "for session %s skill=%s",
+                                    session.id, skill_name,
+                                )
+                    # kind == "expert": the ExpertConsultationService has
+                    # already emitted expert.delegation and (later) expert.result
+                    # or expert.failure, so we intentionally skip the
+                    # SKILL_INVOKED row here.
 
             # 11. Run the core LLM loop.
             await self._run_loop(session, messages, system_prompt, lease, cost_tracker=cost_tracker, all_events=all_events)
