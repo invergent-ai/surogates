@@ -235,6 +235,70 @@ describe("AgentChat", () => {
     expect(document.body.textContent).toContain("Review the current work");
   });
 
+  it("renders an EXPERT badge for expert-typed slash entries", async () => {
+    const stream = new FakeEventStream();
+    const baseAdapter = createAdapter(stream);
+    const adapter: AgentChatAdapter = {
+      ...baseAdapter,
+      async listSlashCommands() {
+        return [
+          {
+            value: "/sql_writer",
+            label: "/sql_writer",
+            description: "Writes PostgreSQL queries",
+            isExpert: true,
+          },
+          {
+            value: "/docx",
+            label: "/docx",
+            description: "Edit DOCX files",
+            // isExpert intentionally omitted to verify the badge is
+            // gated on the boolean rather than rendered for every
+            // adapter-provided entry.
+          },
+        ];
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea");
+    if (!textarea) throw new Error("textarea not rendered");
+
+    await act(async () => {
+      setTextareaValue(textarea, "/");
+      // Two microtasks: one for the textarea controller to propagate,
+      // one for the listSlashCommands promise to resolve.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Both entries appear.
+    expect(document.body.textContent).toContain("/sql_writer");
+    expect(document.body.textContent).toContain("/docx");
+
+    // The badge sits next to the expert entry's label and carries an
+    // aria-label so screen readers announce it.
+    const badge = document.body.querySelector<HTMLElement>(
+      '[aria-label="Expert specialist"]',
+    );
+    if (badge === null) throw new Error("expert badge not rendered");
+    expect(badge.textContent?.toLowerCase()).toBe("expert");
+
+    // Only the expert entry gets a badge.
+    const badges = document.body.querySelectorAll(
+      '[aria-label="Expert specialist"]',
+    );
+    expect(badges.length).toBe(1);
+  });
+
   it("stops the active response before sending a submitted message while streaming", async () => {
     const stream = new FakeEventStream();
     const calls: string[] = [];

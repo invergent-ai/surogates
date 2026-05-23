@@ -197,6 +197,17 @@ async def _skills_list_handler(
     for s in skills:
         if category_filter and s.category != category_filter:
             continue
+        # Inactive experts (draft / collecting / retired) are hidden
+        # from this catalog.  The slash dispatcher would otherwise fall
+        # through to ``skill_view`` and inline the expert's system
+        # prompt as if it were a regular skill body — confusing UX.
+        # ``# Available Experts`` in the system prompt and the
+        # ``consult_expert`` tool already filter to active-only via
+        # ``get_active_experts``; this keeps the catalog tool aligned.
+        if getattr(s, "is_expert", False) and not getattr(
+            s, "is_active_expert", False,
+        ):
+            continue
         entry: dict[str, Any] = {
             "name": s.name,
             "description": s.description,
