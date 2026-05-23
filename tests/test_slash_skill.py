@@ -165,7 +165,8 @@ class TestExpandSlashSkill:
         )
 
         assert result is not None
-        expanded, skill_name, staged_at = result
+        expanded, skill_name, staged_at, kind = result
+        assert kind == "skill"
         assert skill_name == "arxiv"
         assert staged_at == "/workspace/.skills/arxiv"
         assert "# arxiv" in expanded
@@ -287,7 +288,8 @@ class TestExpandSlashSkill:
         )
 
         assert result is not None
-        expanded, skill_name, staged_at = result
+        expanded, skill_name, staged_at, kind = result
+        assert kind == "skill"
         assert skill_name == "wiki"
         assert staged_at is None
         assert "# Wiki" in expanded

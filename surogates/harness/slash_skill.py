@@ -1,22 +1,13 @@
-"""Eager expansion of ``/<skill> args...`` user messages into skill content.
+"""Eager expansion of ``/<skill> args...`` and ``/<expert> args...`` user messages.
 
-When a user message starts with ``/<name>`` (e.g. ``/arxiv cuda training``)
-and ``<name>`` matches an available skill, this module:
+Two paths converge here. Regular skills inline their SKILL.md body
+(staging supporting files if present). Active experts spawn a mini-loop
+via :class:`ExpertConsultationService`, and the deliverable is inlined
+into the user message so the base LLM reviews and relays.
 
-1. Calls ``skill_view(name)`` server-side via the harness's tool registry,
-   which fetches the skill body and (in production) auto-stages the skill's
-   supporting files (``scripts/``, ``assets/``, ``templates/``,
-   ``references/``) into the session sandbox bucket.
-2. Rewrites the user message in-memory so the LLM sees the SKILL.md body
-   inlined alongside the user's request, avoiding a round-trip and the
-   chance the model picks a generic tool instead.
-
-The original ``/<name> args...`` message remains in the event log untouched;
-only the rebuilt-in-memory message handed to the LLM is rewritten.
-
-The skill body returned by ``skill_view`` already includes a one-line
-``staged_at`` preamble (added by the API route's ``_staging_preamble``)
-when staging happened, so this module does not re-add staging guidance.
+The original ``/<name> args...`` message remains in the event log
+untouched; only the rebuilt-in-memory message handed to the LLM is
+rewritten.
 """
 
 from __future__ import annotations
@@ -24,13 +15,14 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Final
+from typing import Any, Final, Literal
+from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
 # ``/name`` (letters/digits/underscore/hyphen, must start with a letter),
-# optionally followed by whitespace + arbitrary text.  ``re.DOTALL`` lets the
-# trailing args span newlines (multi-line user messages).
+# optionally followed by whitespace + arbitrary text.  ``re.DOTALL`` lets
+# the trailing args span newlines (multi-line user messages).
 _SLASH_COMMAND_RE: Final = re.compile(
     r"^/([a-zA-Z][a-zA-Z0-9_-]*)(?:\s+(.*))?$",
     re.DOTALL,
@@ -85,6 +77,33 @@ def build_expanded_message(*, name: str, args: str, skill_body: str) -> str:
     return "\n".join(lines)
 
 
+def build_expert_expanded_message(
+    *, name: str, args: str, deliverable: str,
+) -> str:
+    """Build the rewritten user message with the expert deliverable inlined.
+
+    The deliverable is presented as the expert's reply; the base LLM
+    reviews and relays in the same turn.
+    """
+    return (
+        f"[Expert {name} delivered:]\n"
+        f"{deliverable}\n\n"
+        f"User request: {args}"
+    )
+
+
+async def _load_skills_for_slash(tenant: Any, **kwargs: Any) -> list:
+    """Load the tenant skill catalog for slash-command resolution.
+
+    Wraps ``surogates.tools.builtin.skills._load_all_skills`` so tests
+    can monkey-patch this single seam without going through the
+    underlying dispatch.
+    """
+    from surogates.tools.builtin.skills import _load_all_skills
+
+    return await _load_all_skills(tenant, **kwargs)
+
+
 async def expand_slash_skill(
     *,
     text: str,
@@ -93,12 +112,16 @@ async def expand_slash_skill(
     session_id: str,
     api_client: Any | None,
     session_factory: Any | None,
-) -> tuple[str, str, str | None] | None:
-    """Try to expand a ``/<skill> args...`` user message.
+    session_store: Any | None = None,
+    sandbox_pool: Any | None = None,
+) -> tuple[str, str, str | None, Literal["skill", "expert"]] | None:
+    """Try to expand a ``/<name> args...`` user message.
 
-    Returns ``(expanded_text, skill_name, staged_at)`` on success, or
-    ``None`` when *text* is not a slash command, names a builtin, names an
-    unknown skill, or the ``skill_view`` tool is unavailable.
+    Returns ``(expanded_text, name, staged_at, kind)`` on success, or
+    ``None`` when *text* is not a slash command, names a builtin, names
+    an unknown skill/expert, or expansion failed.  ``kind`` is
+    ``"expert"`` when an active expert handled the invocation,
+    otherwise ``"skill"``.
 
     The function never raises -- failures degrade to ``None`` so the
     original user message reaches the LLM unchanged.
@@ -108,6 +131,62 @@ async def expand_slash_skill(
         return None
     name, args = parsed
 
+    # Look up the named entry in the tenant catalog so we can branch
+    # on type before dispatching skill_view.  An active expert routes to
+    # the mini-loop; everything else (regular skill, draft/retired expert,
+    # unknown name) falls through to the legacy skill_view path.
+    try:
+        catalog = await _load_skills_for_slash(
+            tenant,
+            api_client=api_client,
+            session_factory=session_factory,
+        )
+    except Exception:
+        logger.debug(
+            "Slash catalog load failed for /%s; falling back to skill path",
+            name,
+            exc_info=True,
+        )
+        catalog = []
+
+    matched = next((s for s in catalog if s.name == name), None)
+    if matched is not None and getattr(matched, "is_active_expert", False):
+        return await _expand_expert(
+            expert=matched,
+            args=args,
+            tenant=tenant,
+            session_id=session_id,
+            tool_registry=tools,
+            session_store=session_store,
+            sandbox_pool=sandbox_pool,
+        )
+
+    return await _expand_skill(
+        name=name,
+        args=args,
+        tools=tools,
+        tenant=tenant,
+        session_id=session_id,
+        api_client=api_client,
+        session_factory=session_factory,
+    )
+
+
+async def _expand_skill(
+    *,
+    name: str,
+    args: str,
+    tools: Any,
+    tenant: Any,
+    session_id: str,
+    api_client: Any | None,
+    session_factory: Any | None,
+) -> tuple[str, str, str | None, Literal["skill", "expert"]] | None:
+    """Inline a regular skill's body via ``skill_view``.
+
+    Returns ``None`` when the skill is unknown or staging failed so the
+    caller falls through to the verbatim user message.
+    """
     try:
         result = await tools.dispatch(
             "skill_view",
@@ -142,4 +221,50 @@ async def expand_slash_skill(
     staged_at = payload.get("staged_at")
 
     expanded = build_expanded_message(name=name, args=args, skill_body=skill_body)
-    return expanded, name, staged_at
+    return expanded, name, staged_at, "skill"
+
+
+async def _expand_expert(
+    *,
+    expert: Any,
+    args: str,
+    tenant: Any,
+    session_id: str,
+    tool_registry: Any,
+    session_store: Any | None,
+    sandbox_pool: Any | None,
+) -> tuple[str, str, str | None, Literal["skill", "expert"]] | None:
+    """Run the expert mini-loop and inline the deliverable.
+
+    Returns ``None`` when the user supplied no task body so the caller
+    falls through to the verbatim user message (giving the LLM or user a
+    chance to clarify).  Errors during consultation are returned as an
+    expert-shaped expanded message so the base LLM can surface the
+    failure to the user instead of silently dropping the request.
+    """
+    if not args:
+        return None
+
+    try:
+        from surogates.tools.builtin.expert_service import ExpertConsultationService
+
+        service = ExpertConsultationService(
+            tenant=tenant,
+            session_id=UUID(session_id),
+            tool_registry=tool_registry,
+            session_store=session_store,
+            sandbox_pool=sandbox_pool,
+        )
+        outcome = await service.consult(expert=expert, task=args)
+    except Exception:
+        logger.exception(
+            "Expert consultation failed for /%s; passing through verbatim",
+            expert.name,
+        )
+        return None
+
+    deliverable = outcome.content if outcome.success else (outcome.content or "")
+    expanded = build_expert_expanded_message(
+        name=expert.name, args=args, deliverable=deliverable,
+    )
+    return expanded, expert.name, None, "expert"
