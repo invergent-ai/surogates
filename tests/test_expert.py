@@ -783,8 +783,8 @@ class TestTrainingDataCollector:
 # =========================================================================
 
 
-class TestPromptBuilderExpertGuidance:
-    """PromptBuilder keeps expert internals hidden from executor prompts."""
+class TestPromptBuilderExpertSection:
+    """PromptBuilder renders the # Available Experts section for active experts."""
 
     @pytest.fixture
     def tenant(self):
@@ -796,79 +796,122 @@ class TestPromptBuilderExpertGuidance:
             asset_root="/tmp/test_assets",
         )
 
-    def test_expert_guidance_not_injected_even_if_legacy_tool_name_present(self, tenant):
+    def test_section_empty_when_no_experts(self, tenant):
         from surogates.harness.prompt import PromptBuilder
 
-        pb = PromptBuilder(
-            tenant=tenant,
-            available_tools={"consult_expert", "memory"},
-        )
-        section = pb._tool_guidance_section()
-        assert "consult_expert" not in section
-        assert "Available Experts" not in section
+        pb = PromptBuilder(tenant=tenant, skills=[])
+        assert pb._available_experts_section() == ""
 
-    def test_expert_guidance_not_injected_without_tool(self, tenant):
-        from surogates.harness.prompt import PromptBuilder
-
-        pb = PromptBuilder(
-            tenant=tenant,
-            available_tools={"memory"},
-        )
-        section = pb._tool_guidance_section()
-        assert "consult_expert" not in section
-        assert "Available Experts" not in section
-
-    def test_skills_section_hides_experts_from_executor_catalog(self, tenant):
-        from surogates.harness.prompt import PromptBuilder
-
-        skills = [
-            {"name": "code-review", "description": "Reviews code", "type": "skill", "trigger": "/review"},
-            {
-                "name": "sql_writer",
-                "description": "Writes SQL",
-                "type": "expert",
-                "expert_tools": ["terminal"],
-                "trigger": "SQL queries, database schemas",
-                "expert_stats": {"total_uses": 100, "total_successes": 94},
-            },
-        ]
-
-        pb = PromptBuilder(
-            tenant=tenant,
-            skills=skills,
-            available_tools={"consult_expert"},
-        )
-        section = pb._skills_section()
-
-        assert "# Available Skills" in section
-        assert "code-review" in section
-        assert "# Available Experts" not in section
-        assert "sql_writer" not in section
-        assert "consult_expert" not in section
-        assert "voluntary delegation" not in section
-
-    def test_skills_section_hides_expert_skilldefs(self, tenant):
+    def test_section_lists_active_experts(self, tenant):
         from surogates.harness.prompt import PromptBuilder
 
         skills = [
             SkillDef(
-                name="my-expert",
-                description="An expert",
+                name="sql_writer",
+                description="Writes PostgreSQL queries from natural language descriptions",
                 content="body",
                 source="org",
                 type="expert",
-                expert_tools=["terminal"],
                 expert_status="active",
-                trigger="coding, debugging",
+                trigger="SQL queries, database schemas, PostgreSQL, data analysis",
+            ),
+            SkillDef(
+                name="draft_expert",
+                description="Not yet active",
+                content="body",
+                source="org",
+                type="expert",
+                expert_status="draft",
+                trigger="something",
+            ),
+            SkillDef(
+                name="regular_skill",
+                description="A normal skill",
+                content="body",
+                source="org",
+                type="skill",
             ),
         ]
 
         pb = PromptBuilder(tenant=tenant, skills=skills)
-        section = pb._skills_section()
+        section = pb._available_experts_section()
 
-        assert "# Available Experts" not in section
-        assert "my-expert" not in section
-        assert "Trigger: coding, debugging" not in section
+        assert "# Available Experts" in section
+        assert "sql_writer" in section
+        assert "Writes PostgreSQL queries" in section
+        assert "Specialty: SQL queries, database schemas" in section
+        # Only active experts are listed.
+        assert "draft_expert" not in section
+        # Regular skills do not appear here.
+        assert "regular_skill" not in section
+        # Section instructs the LLM how to invoke and disambiguates from delegate_task.
+        assert "consult_expert(expert, task)" in section
+        assert "delegate_task" in section
+        assert "Do NOT use" in section
+
+    def test_section_emitted_in_build_when_active_expert_exists(self, tenant):
+        from surogates.harness.prompt import PromptBuilder
+
+        skills = [
+            SkillDef(
+                name="sql_writer",
+                description="SQL specialist",
+                content="body",
+                source="org",
+                type="expert",
+                expert_status="active",
+                trigger="SQL queries",
+            ),
+        ]
+        pb = PromptBuilder(tenant=tenant, skills=skills)
+        prompt = pb.build()
+        assert "# Available Experts" in prompt
+        assert "sql_writer" in prompt
+
+    def test_section_omitted_in_build_when_no_active_expert(self, tenant):
+        from surogates.harness.prompt import PromptBuilder
+
+        skills = [
+            SkillDef(
+                name="regular_skill",
+                description="A normal skill",
+                content="body",
+                source="org",
+                type="skill",
+            ),
+        ]
+        pb = PromptBuilder(tenant=tenant, skills=skills)
+        prompt = pb.build()
+        assert "# Available Experts" not in prompt
+
+    def test_skills_section_still_excludes_experts(self, tenant):
+        """Regression: experts must not bleed into the regular skills catalog."""
+        from surogates.harness.prompt import PromptBuilder
+
+        skills = [
+            SkillDef(
+                name="sql_writer",
+                description="SQL specialist",
+                content="body",
+                source="org",
+                type="expert",
+                expert_status="active",
+                trigger="SQL queries",
+            ),
+            SkillDef(
+                name="code_review",
+                description="Reviews code",
+                content="body",
+                source="org",
+                type="skill",
+            ),
+        ]
+        pb = PromptBuilder(tenant=tenant, skills=skills)
+        skills_section = pb._skills_section()
+        # sql_writer must NOT appear in the regular skills index — that
+        # remains the contract of _skills_section.
+        assert "sql_writer" not in skills_section
+        assert "code_review" in skills_section
 
 
 class TestWorkerExpertCatalogWiring:
