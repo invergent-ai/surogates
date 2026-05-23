@@ -14,8 +14,9 @@ A code review (review session, 2026-05-22) found the runtime side dangling:
 - `consult_expert` builtin is defined but never registered in
   `surogates/tools/runtime.py` — the LLM never sees its schema.
 - The harness-forced auto-router (`select_expert_for_task`,
-  `load_skills_for_expert_routing`, `classify_tool_calls`) was deleted from
-  `harness/loop.py`. Its slot was taken over by the hidden advisor.
+  `load_skills_for_expert_routing`, `classify_tool_calls`) is no longer
+  called by `harness/loop.py`; its slot was taken over by the hidden advisor,
+  leaving the old helpers and forced-route compatibility shims unused.
 - No code path injects an `# Available Experts` section into the system
   prompt.
 - `EXPERT_DELEGATION`, `EXPERT_RESULT`, `EXPERT_FAILURE` events have no
@@ -34,7 +35,7 @@ mechanism — no auto-routing, no auto-disable.
 
 ## Goals
 
-1. The base LLM can call `consult_expert(name, task, context?)` and receive
+1. The base LLM can call `consult_expert(expert, task, context?)` and receive
    the expert's deliverable as a tool result.
 2. Users can invoke an expert via `/<expert-name> <task>`; the deliverable
    flows back through the base LLM for review and relay.
@@ -87,21 +88,27 @@ Two voluntary entry points. Both converge on the existing
 | Entry point | Trigger | Caller | Result handling |
 |---|---|---|---|
 | **A. Slash command** | User types `/sql_writer <task>` | `slash_skill.expand_slash_skill` detects `type=expert` and active status, calls the service. | Deliverable injected as a synthetic user message of shape `[Expert sql_writer delivered:]\n{deliverable}\n\nUser request: {args}`. Base LLM sees the synthetic message in the same turn and reviews/relays. |
-| **B. LLM tool call** | Base LLM emits `consult_expert(name, task, context?)` | Existing handler at `surogates/tools/builtin/expert.py:77` calls the service. | Deliverable returned as the tool result string. Base LLM continues normally. |
+| **B. LLM tool call** | Base LLM emits `consult_expert(expert, task, context?)` | Existing handler at `surogates/tools/builtin/expert.py:77` calls the service. | Deliverable returned as the tool result string. Base LLM continues normally. |
 
 ### Discoverability for the LLM
 
 Three reinforcing mechanisms:
 
-1. **Tool registered.** `surogates/tools/runtime.py:50-90` gets the `expert`
-   module added to the imports and to the `modules` list, so
-   `register(self.registry)` runs at startup and `consult_expert`'s schema
-   is in every chat completion request.
-2. **`skills_list` description updated.** One sentence appended to
+1. **Tool registered and routed.** `surogates/tools/runtime.py:50-90`
+   gets the `expert` module added to the imports and to the `modules` list,
+   so `register(self.registry)` runs at startup and `consult_expert`'s schema
+   is in every chat completion request. `surogates/tools/router.py` also
+   maps `"consult_expert"` to `ToolLocation.HARNESS`; otherwise the default
+   sandbox fallback would expose the schema but fail execution.
+2. **`skills_list` exposes expert metadata.** The local
+   `_skills_list_handler` response entries include `type`, `trigger`, and,
+   for experts, `expert_status`, `expert_model`, and `expert_endpoint`,
+   matching the `/v1/skills` API shape that `HarnessApiClient.list_skills`
+   already passes through. One sentence is also appended to
    `SKILLS_LIST_SCHEMA.description` in
    `surogates/tools/builtin/skills.py:59-72`: *"Entries with `type: expert`
-   are specialist models; consult them via `consult_expert(name, task)`
-   rather than `skill_view`."*
+   are specialist models; consult active experts via
+   `consult_expert(expert, task)` rather than `skill_view`."*
 3. **`# Available Experts` prompt section.** The harness `PromptBuilder`
    appends a section built from
    `get_active_experts(loaded_skills)`
@@ -113,7 +120,7 @@ Three reinforcing mechanisms:
    # Available Experts
 
    Specialist models you can consult for focused domain work. Call
-   `consult_expert(name, task)` when a request falls within an expert's
+   `consult_expert(expert, task)` when a request falls within an expert's
    specialty — for example, a SQL writer for query-shaped questions or
    a code reviewer for inspecting a file. Do NOT use `delegate_task`
    for this — that tool spawns sub-agents for multi-step work in a
@@ -143,12 +150,22 @@ This removes the `delegate` / `subtask` collision with `delegate_task`.
 
 ### Slash-command branching
 
-`surogates/harness/slash_skill.py` gains an expert branch. After
+`surogates/harness/slash_skill.py` gains an expert branch. Its
+`expand_slash_skill` signature grows service dependencies from the harness
+call site: `session_store`, `sandbox_pool`, and the existing tool registry
+passed as `tools`. The service can build its fallback `ToolRouter` from
+`sandbox_pool` when no router object is passed. After
 `parse_slash_command` returns `(name, args)`:
 
-1. Look up `name` in the loaded skill catalog for the tenant.
+1. Load the tenant skill catalog with the same loader path used by
+   `consult_expert` fallback loading, using `session_factory` when present.
+   This branch must happen before `skill_view` dispatch so experts are not
+   accidentally treated like prompt skills.
 2. If the skill exists and `skill.is_active_expert`:
-   - Call `ExpertConsultationService.consult(expert=skill, task=args)`.
+   - Call `ExpertConsultationService(
+     tenant=tenant, session_id=UUID(session_id), tool_registry=tools,
+     session_store=session_store, sandbox_pool=sandbox_pool
+     ).consult(expert=skill, task=args)`.
    - Build the expanded message as
      `[Expert {name} delivered:]\n{deliverable}\n\nUser request: {args}`.
    - Return it (plus a discriminator so the caller knows it was an expert
@@ -172,6 +189,9 @@ User /sql_writer <task> ──┐
                           ├──> ExpertConsultationService.consult()
 LLM consult_expert ───────┘     │
                                 ├── emit expert.delegation
+                                │     (before endpoint validation, so
+                                │      missing-endpoint failures still
+                                │      join in v_expert_outcomes)
                                 ├── run_expert_loop
                                 │     (tool calls emit tool.call / tool.result
                                 │      via the parent session's tool router)
@@ -205,12 +225,17 @@ Dead code excised (only kept because something used to call them):
 | `surogates/tools/builtin/expert_feedback.py` | `_update_db_stats`, `AUTO_DISABLE_THRESHOLD`, `MIN_USES_FOR_AUTO_DISABLE`, the `db_session`/`skill_id` params on `record_expert_outcome` |
 | `tests/test_expert_routing.py` (partial) | Tests covering the deleted helpers |
 
+Do not delete the hard-task classifier, thinking helpers, or advisor support
+that still live in `surogates/harness/expert_routing.py` and are imported by
+`harness/loop.py` (`classify_hard_task_async`, `model_supports_thinking_toggle`,
+`build_thinking_extra_body`, `merge_extra_body`).
+
 Kept (unwired but harmless):
 
 - `Skill.expert_stats` JSONB column (`surogates/db/models.py:702`) — never
   written; deferred to a follow-up migration if it bothers us.
 - `v_expert_outcomes` SQL view — becomes populated naturally once
-  `expert.delegation` and `expert.result` events flow.
+  `expert.delegation` and `expert.result` / `expert.failure` events flow.
 - `get_active_experts` helper (`expert.py:68`) — used by the new prompt
   section.
 
@@ -240,7 +265,7 @@ Kept (unwired but harmless):
    are emitted only when a user or judge calls the feedback API on the
    resulting event. Together these drive training-data quality signals
    via `v_expert_outcomes`. Operators retire experts manually via
-   `POST /skills/{name}/retire`.
+   `POST /v1/skills/{name}/retire`.
 
 4. **Add "Slash invocation" subsection** under "Verify It Works":
    ```
@@ -274,6 +299,10 @@ event types.
 - Unit tests for the slash-command expert branch in `expand_slash_skill`.
 - Unit test confirming `consult_expert` is registered after
   `ToolRuntime.register_builtins()` returns.
+- Unit test confirming `TOOL_LOCATIONS["consult_expert"]` is
+  `ToolLocation.HARNESS`.
+- Unit test confirming the local `skills_list` handler includes expert
+  metadata needed to identify active experts.
 - Integration test: load a skill with `type: expert, expert_status: active`,
   send a chat completion request, verify the system prompt contains the
   `# Available Experts` section with that expert listed.
@@ -281,9 +310,11 @@ event types.
   either `expert.result` or `expert.failure` for a contrived expert
   endpoint.
 - Integration test: the slash path produces the synthetic user message
-  with the expert's deliverable inlined.
+  with the expert's deliverable inlined and does not emit `skill.invoked`.
 - Regression test: `delegate_task` is unaffected by the prompt section
   and tool description changes.
+- Update the existing tests that currently assert `consult_expert` is hidden
+  from `ToolRuntime`, `TOOL_LOCATIONS`, and executor prompt guidance.
 
 ## Open questions
 

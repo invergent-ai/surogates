@@ -347,6 +347,89 @@ class TestExpertToolRegistration:
         assert params["required"] == ["expert", "task"]
 
 
+class TestConsultExpertSchemaDescription:
+    """consult_expert description must not collide with delegate_task vocabulary."""
+
+    def test_description_uses_consult_not_delegate(self):
+        from surogates.tools.builtin.expert import _EXPERT_SCHEMA
+
+        desc = _EXPERT_SCHEMA.description.lower()
+        assert "consult" in desc
+        # Must not use the words that belong to delegate_task.
+        assert "delegate" not in desc
+        assert "subtask" not in desc
+        assert "sub-task" not in desc
+
+    def test_description_mentions_specialist_and_specialty(self):
+        from surogates.tools.builtin.expert import _EXPERT_SCHEMA
+
+        desc = _EXPERT_SCHEMA.description.lower()
+        assert "specialist" in desc
+        assert "specialty" in desc
+
+
+class TestSkillsListExpertMetadata:
+    """skills_list returns enough metadata to identify and address active experts."""
+
+    @pytest.mark.asyncio
+    async def test_handler_includes_expert_fields(self, monkeypatch):
+        import json
+        from types import SimpleNamespace
+        from uuid import uuid4
+
+        from surogates.tools.builtin.skills import _skills_list_handler
+        from surogates.tools.loader import SkillDef
+
+        active = SkillDef(
+            name="sql_writer",
+            description="Writes SQL",
+            content="body",
+            source="org",
+            type="expert",
+            expert_status="active",
+            expert_model="qwen2.5-coder-7b",
+            expert_endpoint="http://expert:8000/v1",
+            trigger="SQL queries, database schemas",
+        )
+        plain = SkillDef(
+            name="code_review",
+            description="Reviews code",
+            content="body",
+            source="org",
+            type="skill",
+            trigger="code review",
+        )
+
+        async def fake_loader(tenant, **kwargs):
+            return [active, plain]
+
+        monkeypatch.setattr(
+            "surogates.tools.builtin.skills._load_all_skills", fake_loader,
+        )
+
+        tenant = SimpleNamespace(org_id=uuid4())
+        out = await _skills_list_handler({}, tenant=tenant)
+        payload = json.loads(out)
+
+        by_name = {s["name"]: s for s in payload["skills"]}
+        assert by_name["sql_writer"]["type"] == "expert"
+        assert by_name["sql_writer"]["trigger"] == "SQL queries, database schemas"
+        assert by_name["sql_writer"]["expert_status"] == "active"
+        assert by_name["sql_writer"]["expert_model"] == "qwen2.5-coder-7b"
+        assert by_name["sql_writer"]["expert_endpoint"] == "http://expert:8000/v1"
+        assert by_name["code_review"]["type"] == "skill"
+        # Regular skills do not get expert_* keys.
+        assert "expert_status" not in by_name["code_review"]
+        assert "expert_model" not in by_name["code_review"]
+
+    def test_schema_description_directs_to_consult_expert(self):
+        from surogates.tools.builtin.skills import SKILLS_LIST_SCHEMA
+
+        desc = SKILLS_LIST_SCHEMA.description
+        assert "type: expert" in desc or "type=expert" in desc.replace(": ", "=")
+        assert "consult_expert" in desc
+
+
 # =========================================================================
 # consult_expert handler
 # =========================================================================
@@ -590,6 +673,133 @@ class TestExpertFeedback:
         )
 
 
+class TestRecordExpertOutcomeSlim:
+    """record_expert_outcome only emits events; no DB stat updates."""
+
+    @pytest.mark.asyncio
+    async def test_emits_result_event_with_content_on_success(self):
+        from surogates.tools.builtin.expert_feedback import record_expert_outcome
+
+        store = AsyncMock()
+        session_id = uuid4()
+        await record_expert_outcome(
+            session_store=store,
+            session_id=session_id,
+            expert_name="sql_writer",
+            success=True,
+            iterations_used=3,
+            content="SELECT 1",
+        )
+        store.emit_event.assert_awaited_once()
+        args, _ = store.emit_event.call_args
+        assert args[0] == session_id
+        assert args[1] is EventType.EXPERT_RESULT
+        assert args[2]["expert"] == "sql_writer"
+        assert args[2]["success"] is True
+        assert args[2]["iterations_used"] == 3
+        assert args[2]["content"] == "SELECT 1"
+
+    def test_signature_has_no_db_kwargs(self):
+        import inspect
+        from surogates.tools.builtin.expert_feedback import record_expert_outcome
+
+        params = inspect.signature(record_expert_outcome).parameters
+        assert "db_session" not in params
+        assert "skill_id" not in params
+
+    def test_auto_disable_constants_removed(self):
+        from surogates.tools.builtin import expert_feedback
+
+        assert not hasattr(expert_feedback, "AUTO_DISABLE_THRESHOLD")
+        assert not hasattr(expert_feedback, "MIN_USES_FOR_AUTO_DISABLE")
+        assert not hasattr(expert_feedback, "_update_db_stats")
+
+    def test_signature_has_no_forced_or_category_kwargs(self):
+        """Vestiges of the dropped auto-route path — should not be in the API."""
+        import inspect
+        from surogates.tools.builtin.expert_feedback import record_expert_outcome
+        from surogates.tools.builtin.expert_service import ExpertConsultationService
+
+        outcome_params = inspect.signature(record_expert_outcome).parameters
+        assert "forced" not in outcome_params
+        assert "category" not in outcome_params
+
+        consult_params = inspect.signature(ExpertConsultationService.consult).parameters
+        assert "forced" not in consult_params
+        assert "category" not in consult_params
+
+    @pytest.mark.asyncio
+    async def test_delegation_event_has_no_forced_or_category_fields(self):
+        """The delegation event payload should not carry the dropped fields."""
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+
+        from surogates.session.events import EventType
+        from surogates.tools.builtin.expert_service import ExpertConsultationService
+
+        store = AsyncMock()
+        expert = SkillDef(
+            name="sql_writer",
+            description="Writes SQL",
+            content="body",
+            source="org",
+            type="expert",
+            expert_status="active",
+            expert_endpoint=None,
+        )
+        service = ExpertConsultationService(
+            tenant=SimpleNamespace(org_id=uuid4(), user_id=uuid4(), org_config={}),
+            session_id=uuid4(),
+            tool_registry=MagicMock(),
+            session_store=store,
+        )
+
+        await service.consult(expert=expert, task="write a query")
+
+        for call in store.emit_event.await_args_list:
+            _, event_type, data = call.args
+            if event_type is EventType.EXPERT_DELEGATION:
+                assert "forced" not in data
+                assert "category" not in data
+                break
+        else:  # pragma: no cover -- defensive
+            raise AssertionError("expected an EXPERT_DELEGATION event")
+
+
+class TestExpertServiceDelegationEvents:
+    """ExpertConsultationService emits delegation before any outcome."""
+
+    @pytest.mark.asyncio
+    async def test_missing_endpoint_still_emits_delegation_then_failure(self):
+        from surogates.tools.builtin.expert_service import ExpertConsultationService
+
+        store = AsyncMock()
+        expert = SkillDef(
+            name="sql_writer",
+            description="Writes SQL",
+            content="body",
+            source="org",
+            type="expert",
+            expert_status="active",
+            expert_endpoint=None,
+        )
+        service = ExpertConsultationService(
+            tenant=SimpleNamespace(org_id=uuid4(), user_id=uuid4(), org_config={}),
+            session_id=uuid4(),
+            tool_registry=MagicMock(),
+            session_store=store,
+        )
+
+        result = await service.consult(expert=expert, task="write a query")
+
+        assert result.success is False
+        emitted_types = [call.args[1] for call in store.emit_event.await_args_list]
+        assert emitted_types == [
+            EventType.EXPERT_DELEGATION,
+            EventType.EXPERT_FAILURE,
+        ]
+
+
 # =========================================================================
 # Training data collector
 # =========================================================================
@@ -700,8 +910,8 @@ class TestTrainingDataCollector:
 # =========================================================================
 
 
-class TestPromptBuilderExpertGuidance:
-    """PromptBuilder keeps expert internals hidden from executor prompts."""
+class TestPromptBuilderExpertSection:
+    """PromptBuilder renders the # Available Experts section for active experts."""
 
     @pytest.fixture
     def tenant(self):
@@ -713,79 +923,122 @@ class TestPromptBuilderExpertGuidance:
             asset_root="/tmp/test_assets",
         )
 
-    def test_expert_guidance_not_injected_even_if_legacy_tool_name_present(self, tenant):
+    def test_section_empty_when_no_experts(self, tenant):
         from surogates.harness.prompt import PromptBuilder
 
-        pb = PromptBuilder(
-            tenant=tenant,
-            available_tools={"consult_expert", "memory"},
-        )
-        section = pb._tool_guidance_section()
-        assert "consult_expert" not in section
-        assert "Available Experts" not in section
+        pb = PromptBuilder(tenant=tenant, skills=[])
+        assert pb._available_experts_section() == ""
 
-    def test_expert_guidance_not_injected_without_tool(self, tenant):
-        from surogates.harness.prompt import PromptBuilder
-
-        pb = PromptBuilder(
-            tenant=tenant,
-            available_tools={"memory"},
-        )
-        section = pb._tool_guidance_section()
-        assert "consult_expert" not in section
-        assert "Available Experts" not in section
-
-    def test_skills_section_hides_experts_from_executor_catalog(self, tenant):
-        from surogates.harness.prompt import PromptBuilder
-
-        skills = [
-            {"name": "code-review", "description": "Reviews code", "type": "skill", "trigger": "/review"},
-            {
-                "name": "sql_writer",
-                "description": "Writes SQL",
-                "type": "expert",
-                "expert_tools": ["terminal"],
-                "trigger": "SQL queries, database schemas",
-                "expert_stats": {"total_uses": 100, "total_successes": 94},
-            },
-        ]
-
-        pb = PromptBuilder(
-            tenant=tenant,
-            skills=skills,
-            available_tools={"consult_expert"},
-        )
-        section = pb._skills_section()
-
-        assert "# Available Skills" in section
-        assert "code-review" in section
-        assert "# Available Experts" not in section
-        assert "sql_writer" not in section
-        assert "consult_expert" not in section
-        assert "voluntary delegation" not in section
-
-    def test_skills_section_hides_expert_skilldefs(self, tenant):
+    def test_section_lists_active_experts(self, tenant):
         from surogates.harness.prompt import PromptBuilder
 
         skills = [
             SkillDef(
-                name="my-expert",
-                description="An expert",
+                name="sql_writer",
+                description="Writes PostgreSQL queries from natural language descriptions",
                 content="body",
                 source="org",
                 type="expert",
-                expert_tools=["terminal"],
                 expert_status="active",
-                trigger="coding, debugging",
+                trigger="SQL queries, database schemas, PostgreSQL, data analysis",
+            ),
+            SkillDef(
+                name="draft_expert",
+                description="Not yet active",
+                content="body",
+                source="org",
+                type="expert",
+                expert_status="draft",
+                trigger="something",
+            ),
+            SkillDef(
+                name="regular_skill",
+                description="A normal skill",
+                content="body",
+                source="org",
+                type="skill",
             ),
         ]
 
         pb = PromptBuilder(tenant=tenant, skills=skills)
-        section = pb._skills_section()
+        section = pb._available_experts_section()
 
-        assert "# Available Experts" not in section
-        assert "my-expert" not in section
-        assert "Trigger: coding, debugging" not in section
+        assert "# Available Experts" in section
+        assert "sql_writer" in section
+        assert "Writes PostgreSQL queries" in section
+        assert "Specialty: SQL queries, database schemas" in section
+        # Only active experts are listed.
+        assert "draft_expert" not in section
+        # Regular skills do not appear here.
+        assert "regular_skill" not in section
+        # Section instructs the LLM how to invoke and disambiguates from delegate_task.
+        assert "consult_expert(expert, task)" in section
+        assert "delegate_task" in section
+        assert "Do NOT use" in section
+
+    def test_section_emitted_in_build_when_active_expert_exists(self, tenant):
+        from surogates.harness.prompt import PromptBuilder
+
+        skills = [
+            SkillDef(
+                name="sql_writer",
+                description="SQL specialist",
+                content="body",
+                source="org",
+                type="expert",
+                expert_status="active",
+                trigger="SQL queries",
+            ),
+        ]
+        pb = PromptBuilder(tenant=tenant, skills=skills)
+        prompt = pb.build()
+        assert "# Available Experts" in prompt
+        assert "sql_writer" in prompt
+
+    def test_section_omitted_in_build_when_no_active_expert(self, tenant):
+        from surogates.harness.prompt import PromptBuilder
+
+        skills = [
+            SkillDef(
+                name="regular_skill",
+                description="A normal skill",
+                content="body",
+                source="org",
+                type="skill",
+            ),
+        ]
+        pb = PromptBuilder(tenant=tenant, skills=skills)
+        prompt = pb.build()
+        assert "# Available Experts" not in prompt
+
+    def test_skills_section_still_excludes_experts(self, tenant):
+        """Regression: experts must not bleed into the regular skills catalog."""
+        from surogates.harness.prompt import PromptBuilder
+
+        skills = [
+            SkillDef(
+                name="sql_writer",
+                description="SQL specialist",
+                content="body",
+                source="org",
+                type="expert",
+                expert_status="active",
+                trigger="SQL queries",
+            ),
+            SkillDef(
+                name="code_review",
+                description="Reviews code",
+                content="body",
+                source="org",
+                type="skill",
+            ),
+        ]
+        pb = PromptBuilder(tenant=tenant, skills=skills)
+        skills_section = pb._skills_section()
+        # sql_writer must NOT appear in the regular skills index — that
+        # remains the contract of _skills_section.
+        assert "sql_writer" not in skills_section
+        assert "code_review" in skills_section
 
 
 class TestWorkerExpertCatalogWiring:
@@ -859,12 +1112,23 @@ class TestWorkerExpertCatalogWiring:
 
 
 class TestToolRouterExpertLocation:
-    """consult_expert is not exposed through normal tool routing."""
+    """consult_expert routes to the harness, not the sandbox."""
 
-    def test_consult_expert_not_in_tool_locations(self):
-        from surogates.tools.router import TOOL_LOCATIONS
+    def test_consult_expert_routes_to_harness(self):
+        from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
 
-        assert "consult_expert" not in TOOL_LOCATIONS
+        assert TOOL_LOCATIONS["consult_expert"] is ToolLocation.HARNESS
+
+    def test_consult_expert_resolves_to_harness_via_router(self):
+        from unittest.mock import MagicMock
+        from surogates.tools.router import ToolLocation, ToolRouter
+
+        router = ToolRouter(
+            registry=MagicMock(),
+            sandbox_pool=MagicMock(),
+            governance=MagicMock(),
+        )
+        assert router.resolve_location("consult_expert") is ToolLocation.HARNESS
 
 
 # =========================================================================
@@ -873,16 +1137,19 @@ class TestToolRouterExpertLocation:
 
 
 class TestToolRuntimeRegistersExpert:
-    """ToolRuntime.register_builtins() hides consult_expert from executors."""
+    """ToolRuntime.register_builtins() exposes consult_expert to executors."""
 
-    def test_expert_not_registered(self):
+    def test_expert_registered(self):
         from surogates.tools.registry import ToolRegistry
         from surogates.tools.runtime import ToolRuntime
 
         reg = ToolRegistry()
         runtime = ToolRuntime(reg)
         runtime.register_builtins()
-        assert not reg.has("consult_expert")
+        assert reg.has("consult_expert")
+        entry = reg.get("consult_expert")
+        assert entry.schema.name == "consult_expert"
+        assert entry.toolset == "expert"
 
 
 # =========================================================================

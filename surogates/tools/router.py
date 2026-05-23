@@ -54,6 +54,7 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "vision_analyze": ToolLocation.HARNESS,
     "clarify": ToolLocation.HARNESS,
     "delegate_task": ToolLocation.HARNESS,
+    "consult_expert": ToolLocation.HARNESS,
     "todo": ToolLocation.HARNESS,
     "process": ToolLocation.HARNESS,
     "create_artifact": ToolLocation.HARNESS,

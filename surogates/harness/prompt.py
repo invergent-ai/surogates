@@ -156,9 +156,10 @@ class PromptBuilder:
         5. Memory (frozen snapshot)
         6. Skills index
         7. Available sub-agents (coordinator sessions only)
-        8. Context files (AGENTS.md, .cursorrules)
-        9. Timestamp, model info, platform hint
-        10. Model-specific execution guidance (OpenAI, Google)
+        8. Available experts (when any are active)
+        9. Context files (AGENTS.md, .cursorrules)
+        10. Timestamp, model info, platform hint
+        11. Model-specific execution guidance (OpenAI, Google)
         """
         sections: list[str] = []
         sections.append(self._identity_section())
@@ -171,6 +172,7 @@ class PromptBuilder:
         sections.append(self._skills_section())
         sections.append(self._preloaded_skills_section())
         sections.append(self._available_agents_section())
+        sections.append(self._available_experts_section())
         sections.append(self._kb_section())
         sections.append(self._context_files_section())
         sections.append(self._context_section())
@@ -360,6 +362,56 @@ class PromptBuilder:
         )
         self._available_agents_section_cache = rendered
         return rendered
+
+    def _available_experts_section(self) -> str:
+        """Render the ``# Available Experts`` system-prompt block.
+
+        Lists active experts (``type=expert`` and ``expert_status="active"``)
+        with their description and trigger phrases. The LLM uses
+        ``consult_expert(expert, task)`` to consult one; the block also
+        disambiguates from ``delegate_task`` which has a different
+        purpose (multi-step sub-agent work in a fresh session).
+
+        Returns an empty string when no active experts are loaded so the
+        section is omitted entirely from the prompt.
+        """
+        from surogates.tools.builtin.expert import get_active_experts
+        from surogates.tools.loader import SkillDef
+
+        # ``skills`` may carry dicts (test helpers) alongside SkillDef
+        # objects; filter to SkillDefs since get_active_experts inspects
+        # the ``is_active_expert`` property.
+        skill_defs = [s for s in self.skills if isinstance(s, SkillDef)]
+        active = get_active_experts(skill_defs)
+        if not active:
+            return ""
+
+        lines: list[str] = []
+        for expert in active:
+            safe_desc = self._sanitise(
+                expert.description or "", f"expert:{expert.name}",
+            )
+            entry = f"- **{expert.name}**"
+            if safe_desc:
+                entry += f" — {safe_desc}"
+            if expert.trigger:
+                safe_trigger = self._sanitise(
+                    expert.trigger, f"expert_trigger:{expert.name}",
+                )
+                entry += f"\n  Specialty: {safe_trigger}"
+            lines.append(entry)
+
+        return (
+            "# Available Experts\n"
+            "Specialist models you can consult for focused domain work. "
+            "Call `consult_expert(expert, task)` when a request falls "
+            "within an expert's specialty — for example, a SQL writer for "
+            "query-shaped questions or a code reviewer for inspecting a "
+            "file. Do NOT use `delegate_task` for this — that tool spawns "
+            "sub-agents for multi-step work in a fresh session; experts "
+            "are single-shot specialists.\n\n"
+            + "\n".join(lines)
+        )
 
     def _memory_section(self) -> str:
         """Load memory from MemoryManager frozen snapshot (if available) or fall back to file read."""
