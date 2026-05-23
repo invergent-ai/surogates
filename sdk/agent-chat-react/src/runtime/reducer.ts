@@ -177,10 +177,19 @@ export function applyAgentChatEvent(
       }
       return nextState;
 
+    case "expert.delegation":
+      return applyExpertDelegation(nextState, event);
+
     case "expert.result":
       return withMessages(
         nextState,
-        applyExpertResult(nextState.messages, event.eventId),
+        applyExpertResult(nextState.messages, event.eventId, event.data),
+      );
+
+    case "expert.failure":
+      return withMessages(
+        nextState,
+        applyExpertFailure(nextState.messages, event.eventId, event.data),
       );
 
     case "expert.endorse":
@@ -730,18 +739,120 @@ function buildErrorInfo(
 function applyExpertResult(
   messages: AgentChatMessage[],
   eventId: number,
+  data: Record<string, unknown>,
 ): AgentChatMessage[] {
   const match = findLatestConsultExpertCall(messages);
   if (!match) return messages;
+  // The slash path emits expert.result without a preceding tool.result
+  // event (the LLM did not issue the consult_expert call), so the
+  // existing tc.result is undefined.  Populate it from the event's
+  // ``content`` field so the renderer's "Response" section shows the
+  // deliverable for both the slash and LLM-tool-call paths.  When tc.result
+  // is already set (LLM path), keep it untouched -- it came from the
+  // tool.result event and is the authoritative copy.
+  const content = stringValue(data.content);
   const next = [...messages];
   const msg = next[match.msgIdx]!;
   next[match.msgIdx] = {
     ...msg,
-    toolCalls: msg.toolCalls?.map((tc) =>
-      tc.id === match.toolId
-        ? { ...tc, expertResultEventId: eventId }
-        : tc,
-    ),
+    toolCalls: msg.toolCalls?.map((tc) => {
+      if (tc.id !== match.toolId) return tc;
+      const updated: AgentChatToolCallInfo = {
+        ...tc,
+        expertResultEventId: eventId,
+        status: "complete",
+      };
+      if (tc.result === undefined && content) {
+        updated.result = JSON.stringify({ content });
+      }
+      return updated;
+    }),
+  };
+  return next;
+}
+
+function applyExpertDelegation(
+  state: AgentChatState,
+  event: AgentChatRuntimeEvent,
+): AgentChatState {
+  // The LLM-initiated path emits a tool.call(consult_expert) BEFORE the
+  // expert.delegation event, so a pending consult_expert tool call is
+  // already on the latest assistant message.  Skip — the existing frame
+  // is the canonical render target.  The slash path emits
+  // expert.delegation as the first signal that the consultation
+  // happened, so we synthesize the consult_expert frame here.
+  if (findLatestConsultExpertCall(state.messages) !== null) {
+    return state;
+  }
+
+  const expertName = stringValue(event.data.expert);
+  const task = stringValue(event.data.task);
+  if (!expertName) return state;
+
+  const messages = [...state.messages];
+  const assistantIdx = findLastAssistantIndex(messages);
+  let assistant = assistantIdx >= 0 ? messages[assistantIdx] : null;
+  const userAfterAssistant = assistantIdx >= 0 &&
+    hasUserAfterIndex(messages, assistantIdx);
+
+  if (!assistant || assistant.status === "complete" || userAfterAssistant) {
+    assistant = {
+      id: `evt-${event.eventId}-expert-delegation`,
+      role: "assistant",
+      content: "",
+      createdAt: new Date(),
+      status: "streaming",
+    };
+    messages.push(assistant);
+  } else {
+    assistant = { ...assistant };
+    messages[assistantIdx] = assistant;
+  }
+
+  const toolCall: AgentChatToolCallInfo = {
+    id: `expert-delegation-${event.eventId}`,
+    toolName: "consult_expert",
+    args: JSON.stringify({ expert: expertName, question: task }),
+    status: "running",
+  };
+  assistant.toolCalls = [...(assistant.toolCalls ?? []), toolCall];
+
+  return {
+    ...state,
+    messages,
+    isRunning: state.terminal ? state.isRunning : true,
+  };
+}
+
+function applyExpertFailure(
+  messages: AgentChatMessage[],
+  eventId: number,
+  data: Record<string, unknown>,
+): AgentChatMessage[] {
+  // Mirror applyExpertResult but mark the call as failed.  The
+  // ExpertToolBlock renderer derives its "failed" badge from
+  // ``parseExpertResult(tc.result)`` finding an ``error`` field, so we
+  // shape the result as a JSON error blob.  Attach expertResultEventId
+  // so it can still be addressed (for ordering / replay), though the
+  // feedback UI is gated to non-running tool calls and existence of
+  // adapter.submitExpertFeedback -- rating a failure is supported but
+  // optional.
+  const match = findLatestConsultExpertCall(messages);
+  if (!match) return messages;
+  const errorMsg = stringValue(data.error) || "Expert consultation failed.";
+  const next = [...messages];
+  const msg = next[match.msgIdx]!;
+  next[match.msgIdx] = {
+    ...msg,
+    toolCalls: msg.toolCalls?.map((tc) => {
+      if (tc.id !== match.toolId) return tc;
+      return {
+        ...tc,
+        expertResultEventId: eventId,
+        status: "error",
+        result: tc.result ?? JSON.stringify({ error: errorMsg }),
+      };
+    }),
   };
   return next;
 }
