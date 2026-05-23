@@ -4,7 +4,7 @@
 
 An expert is a **task-specialized model** configured for reasoning-intensive work such as coding, debugging, terminal commands, math, data reasoning, formal problem solving, or planning. It is declared as a skill backed by a model endpoint instead of a prompt template.
 
-The harness automatically consults a matching active expert for hard tasks before the default LLM answers or uses tools. The default LLM can also explicitly delegate to an expert via the `consult_expert` tool and receives the expert's result back for review.
+The base LLM consults an expert via the `consult_expert` tool when a task falls within its specialty. Users can also invoke an expert directly with `/<expert-name> <task>`; in both paths the deliverable flows back through the base LLM for review and relay.
 
 ```
 Base LLM                          Expert model
@@ -34,13 +34,13 @@ The platform does **not** handle:
 
 ## Design Principles
 
-1. **Hard tasks are expert-routed.** The harness detects reasoning-intensive hard tasks and consults a matching expert before the default LLM handles the turn. The default LLM still reviews the expert result and can accept, reject, or modify the output.
+1. **Experts are consulted voluntarily.** The base LLM uses `consult_expert` when a task falls within an active expert's specialty; users can invoke experts directly via `/<expert>` slash command. The harness does not auto-route — the advisor handles strategic guidance for hard tasks.
 
 2. **Expert = Skill + Model.** An expert is a `SKILL.md` with `type: expert` and additional model/endpoint frontmatter. Same file format, same registry, same 3-layer loading, same governance.
 
 3. **Experts run scoped mini-loops.** An expert gets its own bounded agent loop with a restricted tool set. It can call tools but only the tools declared in its `tools` field. The iteration budget is bounded.
 
-4. **Feedback-driven lifecycle.** Every invocation is logged. Success rate is tracked automatically. Experts that degrade are auto-disabled.
+4. **Feedback-driven lifecycle.** Every consultation emits `expert.delegation` and `expert.result` / `expert.failure` events. Users and judges can rate `expert.result` events through the feedback API, producing `expert.endorse` / `expert.override` events that the training collector and quality dashboards consume. Operators retire experts manually via `POST /skills/{name}/retire`.
 
 5. **Training is external.** Training is the umbrella term here. It can use fine-tuning, adapter training, eval-driven prompt/model changes, or another org-owned method. The platform collects and exports training data (JSONL from the event log) but does **not** train or host expert models. The platform consumes the result: an OpenAI-compatible endpoint URL.
 
@@ -312,12 +312,12 @@ Use `consult_expert` for voluntary delegation to these task-specialized reasonin
 
 ## 5. Verify It Works
 
-Send a message that falls within the expert's specialty. The base LLM should delegate:
+Send a message that falls within the expert's specialty. The base LLM should consult it:
 
 ```
 User: Write a query to find the top 10 customers by total order value last quarter
 
-Base LLM: I'll delegate this to the sql_writer expert.
+Base LLM: I'll consult the sql_writer expert for this.
 [calls consult_expert(expert="sql_writer", task="Write a query to find the top 10 customers by total order value last quarter")]
 
 Expert (mini-loop):
@@ -328,44 +328,57 @@ Expert (mini-loop):
 Base LLM: Here's the query the expert produced: ...
 ```
 
-Check the session events to confirm delegation:
+Check the session events to confirm the consultation:
 
 ```bash
 curl "http://localhost:8000/v1/sessions/$SESSION_ID/events?type=expert.delegation" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
+### Slash invocation
+
+Users can invoke an expert directly; the base LLM still reviews and relays
+the deliverable:
+
+```
+User: /sql_writer write me a query for the orders table
+
+Expert sql_writer (mini-loop):
+  -> terminal: psql -c "\d orders"
+  -> returns: "SELECT ... FROM orders ..."
+
+Base LLM (reviews and relays):
+  Here's the query the sql_writer expert produced: ...
+```
+
+The mini-loop's deliverable is injected as a synthetic user message that the base LLM sees in the same turn, so it can review, adjust, or relay the expert's output. Slash invocation emits the same `expert.delegation` / `expert.result` event sequence as the `consult_expert` tool path; the only difference is who initiates the call.
+
 ## 6. Monitor and Maintain
 
-### Check Expert Stats
+### Inspect outcomes
 
-View the expert's usage and success rate via the skill detail endpoint:
+Use the `v_expert_outcomes` SQL view to inspect every consultation for an expert. Each row joins an `expert.delegation` event to its outcome (`expert.result` or `expert.failure`) and any user/judge feedback (`expert.endorse` / `expert.override`):
+
+```sql
+SELECT expert_name, outcome_type, success, feedback_rating, completed_at
+FROM v_expert_outcomes
+WHERE expert_name = 'sql_writer'
+ORDER BY delegated_at DESC
+LIMIT 20;
+```
+
+The skill detail endpoint also exposes the persisted `expert_*` columns from the `skills` table (`expert_endpoint`, `expert_model`, `expert_status`) so the configuration is observable without database access:
 
 ```bash
 curl http://localhost:8000/v1/skills/sql_writer \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-The response includes `expert_stats`:
-```json
-{
-  "name": "sql_writer",
-  "type": "expert",
-  "expert_status": "active",
-  "expert_stats": {
-    "total_uses": 47,
-    "total_successes": 44
-  }
-}
-```
+### Telemetry and quality signals
 
-### Auto-Disable
+Every consultation emits `expert.delegation` followed by `expert.result` (success) or `expert.failure`. When a user or judge submits feedback on an `expert.result` event via the feedback API, `expert.endorse` / `expert.override` is appended. Together these populate the `v_expert_outcomes` SQL view and feed the training collector and downstream quality dashboards.
 
-Once an expert accumulates at least 20 invocations, the platform monitors its success rate. If the rate drops below the configured threshold (default: 60%), the expert is automatically disabled and its status is set to `retired`. The admin can retrain or reconfigure the expert externally and reactivate it.
-
-**Success** means the session completed normally after expert delegation and the user did not override or redo the expert's work.
-
-**Failure** means the expert hit its iteration limit, raised an error, or the user explicitly corrected the expert's output.
+The platform does not auto-disable experts. Operators retire an expert manually via `POST /v1/skills/{name}/retire` when its quality signals warrant it.
 
 ### Retire Manually
 
