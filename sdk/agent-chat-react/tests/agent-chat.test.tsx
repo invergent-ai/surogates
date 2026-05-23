@@ -665,6 +665,123 @@ describe("AgentChat", () => {
     expect(container.textContent).not.toContain('"question"');
   });
 
+  it("renders the slash-invoked expert path (delegation -> result) with no preceding consult_expert tool call", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    act(() => {
+      // Slash path: user types /sql_writer ... -> harness emits a raw
+      // user.message, then expert.delegation directly (no tool.call
+      // for consult_expert), then expert.result with the deliverable.
+      stream.emit("user.message", 1, {
+        content: "/sql_writer write a query for the orders table",
+      });
+      stream.emit("expert.delegation", 2, {
+        expert: "sql_writer",
+        task: "write a query for the orders table",
+        tools: ["terminal"],
+        max_iterations: 10,
+      });
+      stream.emit("expert.result", 3, {
+        expert: "sql_writer",
+        success: true,
+        content: "SELECT * FROM orders LIMIT 10;",
+        iterations_used: 2,
+      });
+    });
+
+    // The synthesized frame renders just like the LLM-initiated one.
+    expect(container.textContent).toContain("Consulted expert");
+    expect(container.textContent).toContain("sql_writer");
+    expect(container.textContent).toContain("SELECT * FROM orders LIMIT 10;");
+    // And the user's raw slash message is preserved in the thread.
+    expect(container.textContent).toContain("/sql_writer");
+  });
+
+  it("renders expert.failure with the error message", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    act(() => {
+      stream.emit("user.message", 1, {
+        content: "/sql_writer something",
+      });
+      stream.emit("expert.delegation", 2, {
+        expert: "sql_writer",
+        task: "something",
+      });
+      stream.emit("expert.failure", 3, {
+        expert: "sql_writer",
+        success: false,
+        error: "Expert 'sql_writer' has no endpoint configured.",
+      });
+    });
+
+    expect(container.textContent).toContain("Consulted expert");
+    expect(container.textContent).toContain("sql_writer");
+    expect(container.textContent).toContain("failed");
+  });
+
+  it("does not double-render when expert.delegation arrives after an LLM-issued consult_expert", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    act(() => {
+      stream.emit("tool.call", 1, {
+        tool_call_id: "expert-1",
+        name: "consult_expert",
+        arguments: {
+          expert: "sql_writer",
+          question: "write a query",
+        },
+      });
+      // The harness/service emits expert.delegation after the LLM
+      // issued its tool.call.  The reducer must NOT synthesize a
+      // second frame -- the LLM-issued one is the canonical render.
+      stream.emit("expert.delegation", 2, {
+        expert: "sql_writer",
+        task: "write a query",
+      });
+      stream.emit("tool.result", 3, {
+        tool_call_id: "expert-1",
+        content: "SELECT 1;",
+      });
+      stream.emit("expert.result", 4, {
+        expert: "sql_writer",
+        success: true,
+        content: "SELECT 1;",
+      });
+    });
+
+    // Exactly one "Consulted expert" frame in the DOM.
+    const matches = container.textContent?.match(/Consulted expert/g) ?? [];
+    expect(matches.length).toBe(1);
+  });
+
   it("shows a visible explanation for failed non-terminal tool dots and hides failed terminal calls", async () => {
     const stream = new FakeEventStream();
     const adapter = createAdapter(stream);
