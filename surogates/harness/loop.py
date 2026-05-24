@@ -1492,6 +1492,12 @@ class AgentHarness:
         # right assistant message.
         turn_id = str(uuid4())
 
+        # Reset per-turn summary tracking so a paused-and-resumed
+        # session can't reuse stale tasks from a previous wake().
+        self._pending_iteration_summary_tasks = {}
+        self._completed_iteration_summaries = {}
+        self._pending_turn_summary_task = None
+
         iteration = 0
         length_continuation_count = 0
         length_continuation_prefix = ""  # accumulated partial response across length retries
@@ -1568,6 +1574,10 @@ class AgentHarness:
 
         while self._budget.remaining > 0:
             iteration += 1
+            # Capture the iteration start so the per-iteration summary
+            # event carries a real wall-clock window for the row in the
+            # Simple chat view.
+            iteration_started_at = datetime.now(timezone.utc).isoformat()
 
             # Each LLM iteration gets its own span so tool calls and LLM
             # requests within this iteration share a parent.
@@ -2241,6 +2251,18 @@ class AgentHarness:
                     )
                     return
 
+                # Text-only iteration: kick off the iteration-summary
+                # task before _complete_session so the drain in A8 can
+                # await it.
+                await self._maybe_summarize_iteration(
+                    session_id=session.id,
+                    turn_id=turn_id,
+                    iteration_index=iteration - 1,
+                    reasoning_text=reasoning_text or "",
+                    tool_calls=[],
+                    started_at=iteration_started_at,
+                )
+
                 # A response without tool calls completes the current
                 # objective.  Follow-up messages revive the session into a
                 # new objective rather than keeping completed work "active".
@@ -2496,6 +2518,18 @@ class AgentHarness:
 
             # Lease renewal is handled by a background task started in
             # ``wake()``; no per-iteration renewal needed here.
+
+            # Tool batch resolved — kick off the iteration summary
+            # before the next iteration starts. Fire-and-forget so the
+            # next LLM call isn't blocked on the cheap summarizer.
+            await self._maybe_summarize_iteration(
+                session_id=session.id,
+                turn_id=turn_id,
+                iteration_index=iteration - 1,
+                reasoning_text=reasoning_text or "",
+                tool_calls=tool_calls_raw or [],
+                started_at=iteration_started_at,
+            )
 
         # --- Post-loop skill nudge check ---
         should_review_skills = False
@@ -3901,6 +3935,77 @@ class AgentHarness:
     # ------------------------------------------------------------------
     # Final summary on budget exhaustion
     # ------------------------------------------------------------------
+
+    async def _maybe_summarize_iteration(
+        self,
+        *,
+        session_id: UUID,
+        turn_id: str,
+        iteration_index: int,
+        reasoning_text: str,
+        tool_calls: list[dict[str, Any]],
+        started_at: str,
+    ) -> None:
+        """Fire-and-forget per-iteration summarization.
+
+        Spawns a background task that calls the summarizer and emits an
+        ``ITERATION_SUMMARY`` event when it resolves. Tracked in
+        ``_pending_iteration_summary_tasks`` so :meth:`_complete_session`
+        can drain it before emitting ``TURN_SUMMARY``. No-op when the
+        harness has no summarizer or the iteration produced nothing
+        worth summarizing.
+        """
+        if self._turn_summarizer is None:
+            return
+        if not reasoning_text and not tool_calls:
+            return
+
+        # Snapshot only summaries that have already resolved for earlier
+        # iterations of this turn. Later summaries may still be pending;
+        # awaiting them here would defeat the fire-and-forget design and
+        # could deadlock the loop.
+        prior_summaries = [
+            self._completed_iteration_summaries[idx]
+            for idx in sorted(self._completed_iteration_summaries)
+            if idx < iteration_index
+        ]
+        tool_call_ids = [
+            str(tc.get("id") or "") for tc in tool_calls
+        ]
+
+        async def _run() -> None:
+            summary = await self._turn_summarizer.summarize_iteration(
+                iteration_id=f"{turn_id}:{iteration_index}",
+                reasoning=reasoning_text,
+                tool_calls=tool_calls,
+                prior_iteration_summaries=prior_summaries,
+            )
+            if summary is None:
+                return
+            self._completed_iteration_summaries[iteration_index] = summary
+            try:
+                await self._store.emit_event(
+                    session_id,
+                    EventType.ITERATION_SUMMARY,
+                    {
+                        "turn_id": turn_id,
+                        "iteration_index": iteration_index,
+                        "summary": summary,
+                        "tool_call_ids": tool_call_ids,
+                        "started_at": started_at,
+                        "ended_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to emit ITERATION_SUMMARY for %s iter %d",
+                    session_id, iteration_index, exc_info=True,
+                )
+
+        task = asyncio.create_task(
+            _run(), name=f"iteration-summary-{turn_id}-{iteration_index}",
+        )
+        self._pending_iteration_summary_tasks[iteration_index] = task
 
     async def _request_final_summary(
         self,

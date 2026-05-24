@@ -22,7 +22,7 @@ Updated before each commit during inline execution.
 - [x] A4: generate turn_id in wake() and stamp LLM_THINKING/LLM_RESPONSE
 - [x] A5: TurnSummarizer module
 - [x] A6: wire TurnSummarizer into AgentHarness and worker.py
-- [ ] A7: emit iteration.summary per iteration
+- [x] A7: emit iteration.summary per iteration
 - [ ] A8: emit turn.summary and drain in _complete_session
 - [ ] A9: emit_turn_summaries gate integration test
 - [ ] B1: SDK event type union and AGENT_CHAT_LISTENED_EVENTS
