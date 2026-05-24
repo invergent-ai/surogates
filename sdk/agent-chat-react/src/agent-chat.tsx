@@ -203,6 +203,8 @@ export function AgentChat({
               onToggleWorkspace={handleToggleWorkspace}
               canShowBrowser={browserAvailable}
               canShowWorkspace={workspaceAvailable}
+              viewMode={runtime.viewMode}
+              onViewModeChange={runtime.setViewMode}
             />
           </div>
           {rightStackVisible && (

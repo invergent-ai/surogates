@@ -89,6 +89,11 @@ interface ChatThreadProps {
   onToggleWorkspace?: () => void;
   canShowBrowser?: boolean;
   canShowWorkspace?: boolean;
+  // Simple/Expert view-mode toggle — also threaded into AssistantGroup
+  // in B9 to gate the actual render path. When omitted, the composer
+  // hides the toggle and the thread defaults to Simple internally.
+  viewMode?: "simple" | "expert";
+  onViewModeChange?: (mode: "simple" | "expert") => void;
 }
 
 // ── Timeline item types ──────────────────────────────────────────────
@@ -980,6 +985,8 @@ export function ChatThread({
   onToggleWorkspace,
   canShowBrowser = false,
   canShowWorkspace = false,
+  viewMode = "simple",
+  onViewModeChange,
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
 
@@ -1142,6 +1149,8 @@ export function ChatThread({
             onToggleWorkspace={onToggleWorkspace}
             canShowBrowser={canShowBrowser}
             canShowWorkspace={canShowWorkspace}
+            viewMode={viewMode}
+            onViewModeChange={onViewModeChange}
           />
         )}
       </div>
