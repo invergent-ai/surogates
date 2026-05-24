@@ -179,6 +179,7 @@ _ALIASES: dict[str, str] = {
     "z-ai/glm-5.1": "glm-5.1",
     "zai-org/GLM-5.1": "glm-5.1",
     "@preset/glm-5-1": "glm-5.1",
+    "@preset/base": "glm-5.1",
 }
 
 
