@@ -91,7 +91,7 @@ function createFakeAdapter(calls: AdapterCalls) {
     async getArtifact() {
       throw new Error("not used by runtime tests");
     },
-    async submitClarifyResponse() {
+    async submitAskUserQuestionResponse() {
       return { eventId: 1 };
     },
     async getWorkspaceTree() {
@@ -749,7 +749,7 @@ describe("useAgentChatRuntime — attachment upload orchestration", () => {
       async getArtifact() {
         throw new Error("not used by runtime tests");
       },
-      async submitClarifyResponse() {
+      async submitAskUserQuestionResponse() {
         return { eventId: 1 };
       },
       async getWorkspaceTree() {

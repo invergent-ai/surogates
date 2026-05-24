@@ -203,9 +203,9 @@ def create_app() -> FastAPI:
         admin_service_accounts,
         agents,
         artifacts,
+        ask_user_question,
         auth,
         browser,
-        clarify,
         events,
         feedback,
         health,
@@ -250,7 +250,9 @@ def create_app() -> FastAPI:
     app.include_router(workspace.router, prefix="/v1", tags=["workspace"])
     app.include_router(artifacts.router, prefix="/v1", tags=["artifacts"])
     app.include_router(browser.router, prefix="/v1", tags=["browser"])
-    app.include_router(clarify.router, prefix="/v1", tags=["clarify"])
+    app.include_router(
+        ask_user_question.router, prefix="/v1", tags=["ask_user_question"],
+    )
     app.include_router(inbox.router, prefix="/v1", tags=["inbox"])
     app.include_router(missions.router, prefix="/v1", tags=["missions"])
     # Service-account callers (ops's Work-chat forwarding path mints

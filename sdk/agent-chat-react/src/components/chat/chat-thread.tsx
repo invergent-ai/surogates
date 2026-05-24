@@ -34,6 +34,7 @@ import { BrowserActivityGroup } from "../browser/browser-activity-group";
 import { ToolCallBlock } from "./tool-call-block";
 import { WebSearchGroupBlock } from "./tools/web-search-tool";
 import { TodoToolBlock } from "./tools/todo-tool";
+import { AskUserQuestionToolBlock } from "./tools/ask-user-question-tool";
 import { parseTerminalResult } from "./tools/terminal-tool";
 import { statusColorClass, effectiveStatus, toolErrorSummary, parseArgs } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
@@ -68,6 +69,7 @@ import { useState } from "react";
 import type {
   AgentChatImageAttachment,
   AgentChatPendingAttachment,
+  AgentChatTurnArtifactRef,
   ChatMessage as ChatMessageType,
   RetryIndicator,
   ToolCallInfo,
@@ -470,7 +472,7 @@ function cancelledToolLabel(toolName: string): string {
     skill_view: "Skill",
     consult_expert: "Expert",
     delegate_task: "Delegate",
-    clarify: "Clarify",
+    ask_user_question: "Ask User Question",
     process: "Process",
     create_artifact: "Artifact",
   };
@@ -1170,6 +1172,21 @@ export function IterationGroup({
   //    ends. Without this stricter check, completed iterations would
   //    stay in the shimmer state forever (user-reported bug).
   if (isIterationLive(message)) {
+    // An ask_user_question call is the one tool the user must
+    // interact with to make progress — a shimmer label alone gives
+    // them nothing to answer and the session stalls. Render the
+    // interactive block inline so they can respond without
+    // switching to Expert mode.
+    const askCall = (message.toolCalls ?? []).find(
+      (tc) => tc.toolName === "ask_user_question" && tc.status === "running",
+    );
+    if (askCall) {
+      return (
+        <div className="px-1 py-0.5">
+          <AskUserQuestionToolBlock tc={askCall} />
+        </div>
+      );
+    }
     const label = liveIterationLabel(message);
     return (
       <div className="px-1 py-0.5 text-sm">
@@ -1222,6 +1239,64 @@ export function IterationGroup({
   );
 }
 
+/**
+ * Synthetic file-artifact derivation for Simple mode.
+ *
+ * Scans an assistant turn's messages for tool calls that produced a
+ * named workspace file (``write_file`` / ``patch``) or a structured
+ * artifact (``create_artifact``) and turns each unique output path
+ * into an :type:`AgentChatTurnArtifactRef`. Used as a fallback when
+ * the harness's turn summarizer either isn't configured or omitted
+ * file deliverables from ``turn.summary``.
+ *
+ * Limitations: the candidate set is the same set the harness's
+ * candidate-artifact collector uses, so files written indirectly
+ * (e.g. via a terminal Python script) still won't surface here —
+ * that gap belongs upstream in the harness, not in the SDK.
+ */
+function deriveFileArtifactsFromMessages(
+  messages: ChatMessageType[],
+): AgentChatTurnArtifactRef[] {
+  const seen = new Set<string>();
+  const out: AgentChatTurnArtifactRef[] = [];
+  for (const msg of messages) {
+    if (msg.role !== "assistant" || !msg.toolCalls) continue;
+    for (const tc of msg.toolCalls) {
+      // Skip failed / cancelled — the agent already retried.
+      const status = effectiveStatus(tc);
+      if (status === "error" || status === "cancelled") continue;
+      const args = parseArgs<Record<string, unknown>>(tc.args);
+      if (!args) continue;
+      if (tc.toolName === "write_file" || tc.toolName === "patch") {
+        const path = typeof args.path === "string"
+          ? args.path
+          : typeof args.file_path === "string"
+            ? args.file_path
+            : "";
+        if (!path || seen.has(`file:${path}`)) continue;
+        seen.add(`file:${path}`);
+        out.push({
+          kind: "file",
+          label: path.split("/").pop() || path,
+          ref: path,
+        });
+        continue;
+      }
+      if (tc.toolName === "create_artifact") {
+        const name = typeof args.name === "string" ? args.name : "";
+        if (!name || seen.has(`artifact:${name}`)) continue;
+        seen.add(`artifact:${name}`);
+        out.push({
+          kind: "artifact",
+          label: name,
+          ref: name,
+        });
+      }
+    }
+  }
+  return out;
+}
+
 // ── Simple-mode AssistantGroup ───────────────────────────────────────
 //
 // Renders an assistant turn as: per-iteration IterationGroup rows (one
@@ -1259,24 +1334,48 @@ function SimpleAssistantGroup({
   // text-only). Streaming tail with no content yet shows the running
   // shimmer instead.
   const tailHasTools = !!(tail?.toolCalls && tail.toolCalls.length > 0);
-  const finalText = tail && !tailHasTools && tail.content
-    ? tail.content
-    : "";
+  const tailIsTextOnly = !!tail && !tailHasTools;
+  const finalText = tailIsTextOnly && tail!.content ? tail!.content : "";
 
   // A tail iteration that's mid-stream and has no IterationSummary yet
   // surfaces via the IterationGroup's own placeholders. But if the
   // group's tail is the user message (no assistant message at all yet),
   // we still need a Working-on-it shimmer — same defensive layer the
-  // Expert path appends.
+  // Expert path appends. We also need it when the tail is a text-only
+  // streaming iteration that hasn't emitted content yet: we skip that
+  // iteration from the loop below to avoid duplicating the finalText
+  // render, so without this we'd show nothing while reasoning streams.
   const isTailGroup = lastGlobalIndex === totalMessages - 1;
   const showThinkingShim =
     isTailGroup
     && isRunning
-    && !tail
-    && messages.some((m) => m.role !== "assistant");
+    && (
+      (!tail && messages.some((m) => m.role !== "assistant"))
+      || (tailIsTextOnly && tail!.status === "streaming" && !tail!.content)
+    );
 
   const showErrorInfo =
     !!tail && tail.status === "error" && !!tail.errorInfo;
+
+  // Synthetic-artifact fallback so file deliverables still surface
+  // even when the harness summarizer is missing or didn't include
+  // them in turn.summary. We scan every assistant message in the
+  // group for write_file / patch / create_artifact tool calls and
+  // promote each unique output path to a file artifact. The real
+  // turn.summary always wins when present and non-empty.
+  const effectiveTurnSummary = (() => {
+    const fromHarness = tail?.turnSummary;
+    if (fromHarness && fromHarness.artifacts.length > 0) {
+      return fromHarness;
+    }
+    const derived = deriveFileArtifactsFromMessages(messages);
+    if (derived.length === 0) return fromHarness;
+    return {
+      turnId: fromHarness?.turnId ?? "",
+      recap: fromHarness?.recap ?? "",
+      artifacts: derived,
+    };
+  })();
 
   return (
     <Message from="assistant">
@@ -1296,6 +1395,12 @@ function SimpleAssistantGroup({
                 />
               );
             }
+            // The tail text-only iteration is rendered as finalText
+            // below — don't also render an IterationGroup row for it,
+            // or its mid-stream "Thinking…" shimmer (and post-stream
+            // "Thought through the problem" label) will sit above the
+            // same text the user sees in finalText.
+            if (message === tail && tailIsTextOnly) return null;
             return (
               <IterationGroup
                 key={message.id}
@@ -1318,9 +1423,9 @@ function SimpleAssistantGroup({
             {tail?.status === "complete" && <TurnFeedback msg={tail} />}
           </div>
         )}
-        {tail?.turnSummary && (
+        {effectiveTurnSummary && (
           <TurnSummaryCard
-            summary={tail.turnSummary}
+            summary={effectiveTurnSummary}
             sessionId={sessionId}
             messages={messages}
             onFileSelect={onFileSelect}

@@ -52,7 +52,7 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "web_extract": ToolLocation.HARNESS,
     "web_crawl": ToolLocation.HARNESS,
     "vision_analyze": ToolLocation.HARNESS,
-    "clarify": ToolLocation.HARNESS,
+    "ask_user_question": ToolLocation.HARNESS,
     "delegate_task": ToolLocation.HARNESS,
     "consult_expert": ToolLocation.HARNESS,
     "todo": ToolLocation.HARNESS,

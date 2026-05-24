@@ -70,7 +70,7 @@ function createAdapter(items: AgentChatScheduledWorkItem[]): AgentChatAdapter {
     async getArtifact(): Promise<AgentChatArtifactPayload> {
       throw new Error("not used by scheduled work tests");
     },
-    async submitClarifyResponse() {
+    async submitAskUserQuestionResponse() {
       return { eventId: 1 };
     },
     async getWorkspaceTree(): Promise<AgentChatWorkspaceTree> {

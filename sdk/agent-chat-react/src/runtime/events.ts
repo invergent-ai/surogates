@@ -40,7 +40,7 @@ export const AGENT_CHAT_LISTENED_EVENTS = [
   "browser.destroyed",
   "browser.control_granted",
   "browser.control_returned",
-  "clarify.response",
+  "ask_user_question.response",
   "iteration.summary",
   "turn.summary",
 ] as const satisfies readonly AgentChatEventType[];

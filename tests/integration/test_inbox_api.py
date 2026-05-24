@@ -521,7 +521,7 @@ async def test_sse_stream_emits_snapshot_and_nudge_for_new_item(
     assert "task_complete" in response.text
 
 
-async def test_clarify_response_flips_inbox_to_responded(
+async def test_ask_user_question_response_flips_inbox_to_responded(
     client,
     session_factory,
     session_store,
@@ -543,7 +543,7 @@ async def test_clarify_response_flips_inbox_to_responded(
     assert item.status == "pending"
 
     response = await client.post(
-        f"/v1/sessions/{session.id}/clarify/tc-clr-1/respond",
+        f"/v1/sessions/{session.id}/ask_user_question/tc-clr-1/respond",
         json={"responses": [{"question": "Which color?", "answer": "blue"}]},
         headers={"Authorization": f"Bearer {token}"},
     )

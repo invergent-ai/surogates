@@ -735,13 +735,13 @@ class TestDelegationParallel:
         assert is_parallelizable("delegate_task") is False
         assert is_parallelizable("spawn_worker") is False
 
-    def test_mixed_delegate_and_clarify_serial(self) -> None:
-        """clarify still forces serial — it blocks on user input."""
+    def test_mixed_delegate_and_ask_user_question_serial(self) -> None:
+        """ask_user_question still forces serial — it blocks on user input."""
         from surogates.harness.tool_exec import should_parallelize
 
         tool_calls = [
             {"function": {"name": "delegate_task", "arguments": "{}"}, "id": "1"},
-            {"function": {"name": "clarify", "arguments": "{}"}, "id": "2"},
+            {"function": {"name": "ask_user_question", "arguments": "{}"}, "id": "2"},
         ]
         assert should_parallelize(tool_calls) is False
 

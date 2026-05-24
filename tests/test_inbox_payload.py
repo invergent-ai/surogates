@@ -24,7 +24,7 @@ def test_input_required_row_includes_tool_call_id_and_questions():
     assert "Which color?" in row.title
     assert row.payload["tool_call_id"] == "tc-1"
     assert row.action_ref is not None
-    assert row.action_ref["type"] == "clarify_response"
+    assert row.action_ref["type"] == "ask_user_question_response"
     assert row.action_ref["tool_call_id"] == "tc-1"
     assert row.action_ref["endpoint"].endswith("/respond")
 

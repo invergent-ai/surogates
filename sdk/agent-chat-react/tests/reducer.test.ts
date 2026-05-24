@@ -137,7 +137,7 @@ describe("applyAgentChatEvent", () => {
     });
   });
 
-  it("attaches clarify.response answers to the matching tool call", () => {
+  it("attaches ask_user_question.response answers to the matching tool call", () => {
     const state = withMessages([
       {
         id: "evt-1",
@@ -148,7 +148,7 @@ describe("applyAgentChatEvent", () => {
         toolCalls: [
           {
             id: "tc-1",
-            toolName: "clarify",
+            toolName: "ask_user_question",
             args: "{}",
             status: "running",
           },
@@ -157,7 +157,7 @@ describe("applyAgentChatEvent", () => {
     ]);
 
     const next = applyAgentChatEvent(state, {
-      type: "clarify.response",
+      type: "ask_user_question.response",
       eventId: 13,
       data: {
         tool_call_id: "tc-1",
@@ -167,7 +167,7 @@ describe("applyAgentChatEvent", () => {
       },
     });
 
-    expect(next.messages[0]?.toolCalls?.[0]?.clarifyAnswers).toEqual([
+    expect(next.messages[0]?.toolCalls?.[0]?.askUserQuestionAnswers).toEqual([
       { question: "Pick one", answer: "A", is_other: false },
     ]);
   });
@@ -182,8 +182,8 @@ describe("applyAgentChatEvent", () => {
       type: "tool.call",
       eventId: 2,
       data: {
-        tool_call_id: "tc-clarify",
-        name: "clarify",
+        tool_call_id: "tc-ask",
+        name: "ask_user_question",
         arguments: { questions: [{ prompt: "Pick one" }] },
       },
     });
@@ -197,10 +197,10 @@ describe("applyAgentChatEvent", () => {
           content: "I need one decision before continuing.",
           tool_calls: [
             {
-              id: "tc-clarify",
+              id: "tc-ask",
               type: "function",
               function: {
-                name: "clarify",
+                name: "ask_user_question",
                 arguments: "{\"questions\":[{\"prompt\":\"Pick one\"}]}",
               },
             },
@@ -211,7 +211,7 @@ describe("applyAgentChatEvent", () => {
 
     expect(next.messages).toHaveLength(1);
     expect(next.messages[0]?.toolCalls?.map((tc) => tc.id)).toEqual([
-      "tc-clarify",
+      "tc-ask",
     ]);
     expect(next.messages[0]?.reasoning).toContain("Need user input.");
     expect(next.messages[0]?.reasoning).toContain(
@@ -539,5 +539,30 @@ describe("applyAgentChatEvent — user.message images and attachments", () => {
     });
     expect(next.messages.at(-1)?.images).toBeUndefined();
     expect(next.messages.at(-1)?.attachments).toBeUndefined();
+  });
+
+  it("recovers from an out-of-order pause after resume + user message (mid-stream send)", () => {
+    // When the user sends a message mid-stream, the composer calls
+    // /pause then /messages. The /messages route emits SESSION_RESUME +
+    // USER_MESSAGE, but the harness's abort cleanup can emit a second
+    // SESSION_PAUSE that lands *after* the resume — leaving terminal
+    // sticky and suppressing the running indicator for the new turn.
+    const events: Array<Parameters<typeof applyAgentChatEvent>[1]> = [
+      { type: "session.pause", eventId: 1, data: {} },
+      { type: "session.resume", eventId: 2, data: {} },
+      { type: "session.pause", eventId: 3, data: {} },
+      { type: "user.message", eventId: 4, data: { content: "follow-up" } },
+      { type: "harness.wake", eventId: 5, data: {} },
+      { type: "llm.request", eventId: 6, data: {} },
+      { type: "llm.delta", eventId: 7, data: { content: "hi" } },
+    ];
+
+    let state = createInitialAgentChatState();
+    for (const event of events) {
+      state = applyAgentChatEvent(state, event);
+    }
+
+    expect(state.terminal).toBe(false);
+    expect(state.isRunning).toBe(true);
   });
 });

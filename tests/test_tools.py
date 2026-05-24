@@ -254,7 +254,7 @@ class TestToolRouterLocationResolution:
         for tool_name in (
             "memory", "skills_list", "skill_view", "skill_manage",
             "session_search", "web_search", "web_extract", "web_crawl",
-            "clarify", "delegate_task", "todo", "process", "cron_create",
+            "ask_user_question", "delegate_task", "todo", "process", "cron_create",
             "cron_delete", "cron_list", "loop_wait", "loop_complete",
         ):
             assert router.resolve_location(tool_name) == ToolLocation.HARNESS, (

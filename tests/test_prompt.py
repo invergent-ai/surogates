@@ -136,20 +136,20 @@ class TestPromptBuilderBuild:
         assert "language" in prompt
         assert "dark" in prompt
 
-    def test_build_instructs_clarify_tool_for_user_input_blocks(
+    def test_build_instructs_ask_user_question_tool_for_user_input_blocks(
         self,
         tmp_path: Path,
     ):
         tenant = _make_tenant(tmp_path)
         builder = PromptBuilder(
             tenant,
-            available_tools={"clarify", "browser_navigate"},
+            available_tools={"ask_user_question", "browser_navigate"},
         )
 
         prompt = builder.build()
 
-        assert "call `clarify`" in prompt
-        assert "Do not ask for missing user input in plain assistant text" in prompt
+        assert "`ask_user_question`" in prompt
+        assert "Do not ask for missing user input in plain" in prompt
         assert "login" in prompt
         assert "MFA" in prompt
         assert "CAPTCHA" in prompt

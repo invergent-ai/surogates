@@ -1,7 +1,7 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// Clarify tool widget -- tabs for each question, radio choices with
+// ask_user_question tool widget -- tabs for each question, radio choices with
 // labels + descriptions, an optional "Other" free-form row, and a single
 // Submit that batches every answer back to the worker.  Esc pauses the
 // session (= user chose to stop the chat instead of answering).
@@ -14,10 +14,10 @@ import { useAgentChatAdapterContext } from "../../../adapter-context";
 import { parseArgs } from "./shared";
 import type { ToolCallInfo } from "../../../types";
 import type {
-  ClarifyAnswer,
-  ClarifyArgs,
-  ClarifyChoice,
-  ClarifyQuestion,
+  AskUserQuestionAnswer,
+  AskUserQuestionArgs,
+  AskUserQuestionChoice,
+  AskUserQuestionQuestion,
 } from "../../../types";
 
 // Sentinel choice index for the "Other" option.  Indexes into `choices`
@@ -35,7 +35,7 @@ function emptySelection(): Selection {
   return { index: -1, other: "" };
 }
 
-function buildAnswer(q: ClarifyQuestion, sel: Selection): ClarifyAnswer | null {
+function buildAnswer(q: AskUserQuestionQuestion, sel: Selection): AskUserQuestionAnswer | null {
   if (sel.index < 0) return null;
   if (sel.index >= OTHER_INDEX_OFFSET) {
     const text = sel.other.trim();
@@ -47,9 +47,9 @@ function buildAnswer(q: ClarifyQuestion, sel: Selection): ClarifyAnswer | null {
   return { question: q.prompt, answer: choice.label, is_other: false };
 }
 
-export function ClarifyToolBlock({ tc }: { tc: ToolCallInfo }) {
+export function AskUserQuestionToolBlock({ tc }: { tc: ToolCallInfo }) {
   const { adapter, sessionId } = useAgentChatAdapterContext();
-  const args = useMemo(() => parseArgs<ClarifyArgs>(tc.args), [tc.args]);
+  const args = useMemo(() => parseArgs<AskUserQuestionArgs>(tc.args), [tc.args]);
   const questions = args?.questions ?? [];
 
   const [active, setActive] = useState(0);
@@ -59,7 +59,7 @@ export function ClarifyToolBlock({ tc }: { tc: ToolCallInfo }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const locked = tc.clarifyAnswers !== undefined || tc.status !== "running";
+  const locked = tc.askUserQuestionAnswers !== undefined || tc.status !== "running";
 
   // Clamp active tab when questions change (shouldn't, but defensive).
   useEffect(() => {
@@ -77,7 +77,7 @@ export function ClarifyToolBlock({ tc }: { tc: ToolCallInfo }) {
     [active],
   );
 
-  const answers: (ClarifyAnswer | null)[] = useMemo(
+  const answers: (AskUserQuestionAnswer | null)[] = useMemo(
     () => questions.map((q, i) => buildAnswer(q, selections[i] ?? emptySelection())),
     [questions, selections],
   );
@@ -92,10 +92,10 @@ export function ClarifyToolBlock({ tc }: { tc: ToolCallInfo }) {
     setError(null);
     setSubmitting(true);
     try {
-      await adapter.submitClarifyResponse({
+      await adapter.submitAskUserQuestionResponse({
         sessionId,
         toolCallId: tc.id,
-        responses: answers as ClarifyAnswer[],
+        responses: answers as AskUserQuestionAnswer[],
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Submit failed.");
@@ -106,7 +106,8 @@ export function ClarifyToolBlock({ tc }: { tc: ToolCallInfo }) {
 
   const handleCancel = useCallback(() => {
     if (!sessionId || locked) return;
-    // Cancel = stop chat: pause the session.  The worker's clarify handler
+    // Cancel = stop chat: pause the session.  The worker's
+    // ask_user_question handler
     // sees the session.pause event and returns with ``cancelled: true``.
     void adapter.pauseSession({ sessionId }).catch(() => {
       // Best-effort; the user may press Esc again.
@@ -136,13 +137,13 @@ export function ClarifyToolBlock({ tc }: { tc: ToolCallInfo }) {
   if (questions.length === 0) {
     return (
       <div className="rounded-md border border-destructive/50 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-        clarify: no questions provided
+        ask_user_question: no questions provided
       </div>
     );
   }
 
   if (locked) {
-    return <ClarifyLocked tc={tc} questions={questions} />;
+    return <AskUserQuestionLocked tc={tc} questions={questions} />;
   }
 
   const current = questions[active];
@@ -155,7 +156,7 @@ export function ClarifyToolBlock({ tc }: { tc: ToolCallInfo }) {
         "max-w-2xl",
       )}
       role="group"
-      aria-label="Clarifying questions"
+      aria-label="Questions for the user"
     >
       {/* Tab bar + close */}
       <div className="flex items-center justify-between border-b border-border px-3 pt-2">
@@ -264,7 +265,7 @@ function ChoiceRow({
   selected,
   onSelect,
 }: {
-  choice: ClarifyChoice;
+  choice: AskUserQuestionChoice;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -346,14 +347,14 @@ function Radio({ selected }: { selected: boolean }) {
 
 // ── Locked (after submit / during replay) ────────────────────────────
 
-function ClarifyLocked({
+function AskUserQuestionLocked({
   tc,
   questions,
 }: {
   tc: ToolCallInfo;
-  questions: ClarifyQuestion[];
+  questions: AskUserQuestionQuestion[];
 }) {
-  const answers = tc.clarifyAnswers;
+  const answers = tc.askUserQuestionAnswers;
   // Map answer question text back to the widget's question index so the
   // order matches the tabs (LLM-submitted order, not user navigation).
   const byPrompt = new Map(

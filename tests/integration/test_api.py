@@ -603,7 +603,7 @@ async def test_api_live_chat_routes_are_registered(app):
     assert "/v1/api/sessions/{session_id}/retry" in paths
     assert "/v1/api/sessions/{session_id}/events" in paths
     assert "/v1/api/sessions/{session_id}/artifacts/{artifact_id}" in paths
-    assert "/v1/api/sessions/{session_id}/clarify/{tool_call_id}/respond" in paths
+    assert "/v1/api/sessions/{session_id}/ask_user_question/{tool_call_id}/respond" in paths
     assert "/v1/api/sessions/{session_id}/workspace/tree" in paths
     assert "/v1/api/sessions/{session_id}/workspace/file" in paths
     assert "/v1/api/sessions/{session_id}/workspace/upload" in paths
@@ -1783,17 +1783,17 @@ async def test_scheduled_run_session_rejects_workspace_writes(
     assert "read-only" in delete_resp.json()["detail"]
 
 
-async def test_scheduled_run_session_rejects_clarify_response(
+async def test_scheduled_run_session_rejects_ask_user_question_response(
     app, client: AsyncClient, session_factory
 ):
-    """Clarify answers are also interactive user input and remain blocked."""
+    """Ask-user-question answers are also interactive user input and remain blocked."""
     org_id, user_id, token, _ = await _create_test_tenant(session_factory)
     session = await _create_scheduled_run_session(
         app, session_factory, org_id, user_id
     )
 
     resp = await client.post(
-        f"/v1/sessions/{session.id}/clarify/tool-1/respond",
+        f"/v1/sessions/{session.id}/ask_user_question/tool-1/respond",
         json={
             "responses": [
                 {"question": "Proceed?", "answer": "yes", "is_other": False},

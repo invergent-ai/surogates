@@ -41,6 +41,17 @@ function adapterStub(): AgentChatAdapter {
       close: vi.fn(),
       onerror: null,
     })),
+    getWorkspaceDownloadUrl: vi.fn(
+      ({ sessionId, path }: { sessionId: string; path: string }) =>
+        `/api/v1/sessions/${sessionId}/workspace/download?path=${encodeURIComponent(path)}`,
+    ),
+    getWorkspaceFile: vi.fn().mockResolvedValue({
+      path: "x",
+      content: "",
+      size: 0,
+      encoding: "utf-8" as const,
+      truncated: false,
+    }),
     getArtifact: vi.fn().mockResolvedValue({
       meta: {
         artifact_id: "a-1",
@@ -118,8 +129,10 @@ describe("TurnSummaryCard", () => {
     expect(dom.textContent).toMatch(/Reworked the hero/);
   });
 
-  it("dispatches onFileSelect when a file artifact is clicked", () => {
-    const onFileSelect = vi.fn();
+  it("renders file artifacts as WorkspaceFileCard with Download button", () => {
+    // File artifacts no longer route through onFileSelect — they
+    // render as the Claude-style WorkspaceFileCard. The download
+    // anchor carries the workspace download URL and the filename.
     const dom = mount(
       <TurnSummaryCard
         summary={summaryWith({
@@ -130,17 +143,14 @@ describe("TurnSummaryCard", () => {
         })}
         sessionId="s-1"
         messages={[]}
-        onFileSelect={onFileSelect}
       />,
     );
-    const link = Array.from(dom.querySelectorAll("button")).find(
-      (btn) => btn.textContent === "landing.html",
-    );
-    expect(link).toBeDefined();
-    act(() => {
-      link!.click();
-    });
-    expect(onFileSelect).toHaveBeenCalledWith("landing.html");
+    expect(dom.textContent).toContain("landing.html");
+    expect(dom.textContent).toContain("HTML");
+    const downloadAnchor = Array.from(dom.querySelectorAll("a"))
+      .find((a) => a.textContent?.includes("Download"));
+    expect(downloadAnchor).toBeDefined();
+    expect(downloadAnchor!.getAttribute("download")).toBe("landing.html");
   });
 
   it("renders url artifacts as external anchors with noopener", () => {

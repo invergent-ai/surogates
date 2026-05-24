@@ -316,6 +316,28 @@ def _last_assistant_message_excerpt(
     return ""
 
 
+def _coerce_modified_to_datetime(raw: Any) -> "datetime | None":
+    """Normalize a storage backend's ``modified`` field to ``datetime``.
+
+    LocalBackend returns a POSIX float (``st_mtime``); S3Backend
+    returns the boto3 ``LastModified`` ``datetime`` directly. Anything
+    else is treated as unparseable and yields ``None`` so the caller
+    skips the entry rather than crashing.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        if raw.tzinfo is None:
+            return raw.replace(tzinfo=timezone.utc)
+        return raw
+    if isinstance(raw, (int, float)):
+        try:
+            return datetime.fromtimestamp(raw, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    return None
+
+
 def _coerce_tool_args(raw: Any) -> dict[str, Any]:
     """Best-effort coercion of a TOOL_CALL ``arguments`` field to a dict.
 
@@ -428,7 +450,7 @@ _USER_ACTION_RESCUE_SYSTEM: str = (
     "action_kind='none' unless the assistant has clearly stopped a "
     "concrete in-progress task that cannot proceed without specific input "
     "from the user. When in doubt, choose 'none'. "
-    "Use action_kind='clarify' ONLY when the assistant has paused a "
+    "Use action_kind='ask_user_question' ONLY when the assistant has paused a "
     "specific in-progress task and is asking a specific question whose "
     "answer is required to continue. Set 'question' to that concise "
     "question. "
@@ -458,9 +480,9 @@ _DYNAMIC_LOOP_EXCLUDED_TOOLS: frozenset[str] = frozenset({
 class _UserActionRescueDecision(BaseModel):
     action_kind: str = Field(
         default="none",
-        description="One of none, clarify, or action_required.",
+        description="One of none, ask_user_question, or action_required.",
     )
-    needs_clarify: bool = Field(
+    needs_ask_user_question: bool = Field(
         default=False,
         description="Whether the assistant draft is blocked on user input.",
     )
@@ -469,7 +491,7 @@ class _UserActionRescueDecision(BaseModel):
     )
     question: str = Field(
         default="",
-        description="Concise question to ask via clarify when blocked.",
+        description="Concise question to ask via ask_user_question when blocked.",
     )
     context: str = Field(
         default="",
@@ -960,6 +982,11 @@ class AgentHarness:
         # iteration_index. Used to give later iteration summaries
         # context about earlier ones in the same turn.
         self._completed_iteration_summaries: dict[int, str] = {}
+        # Wall-clock timestamp captured at _run_loop start. Used by
+        # _scan_workspace_for_new_files to surface files modified
+        # during the current turn even when produced indirectly
+        # (terminal scripts, execute_code).
+        self._turn_started_at: datetime | None = None
 
         # Checkpoint flag — when enabled, the harness tells the sandbox
         # to take filesystem snapshots before file-mutating operations.
@@ -1137,15 +1164,25 @@ class AgentHarness:
                 logger.debug(
                     "Sandbox cleanup on interrupt failed", exc_info=True,
                 )
-        await self._store.emit_event(
-            session.id,
-            EventType.SESSION_PAUSE,
-            {
-                "reason": "interrupted",
-                "message": reason_msg,
-                "worker_id": self._worker_id,
-            },
-        )
+        # Only emit SESSION_PAUSE if the session is still in 'paused'
+        # status. The /pause endpoint already emitted SESSION_PAUSE and
+        # set status='paused' before signalling the interrupt; if a
+        # concurrent /messages call has since flipped status back to
+        # 'active' (emitting SESSION_RESUME + USER_MESSAGE), this
+        # cleanup pause would land *after* the resume in the event log
+        # and leave the client's terminal flag stuck on, suppressing
+        # the running indicator for the new turn's deltas.
+        current = await self._store.get_session(session.id)
+        if current.status == "paused":
+            await self._store.emit_event(
+                session.id,
+                EventType.SESSION_PAUSE,
+                {
+                    "reason": "interrupted",
+                    "message": reason_msg,
+                    "worker_id": self._worker_id,
+                },
+            )
         self._clear_interrupt()
 
     # ------------------------------------------------------------------
@@ -1537,6 +1574,11 @@ class AgentHarness:
         # chat view can correlate iteration.summary events back to the
         # right assistant message.
         turn_id = str(uuid4())
+        # Wall-clock turn start, used by _collect_candidate_artifacts to
+        # surface workspace files modified during this turn even when
+        # they were created indirectly (e.g. a python script written
+        # by the terminal tool).
+        self._turn_started_at = datetime.now(timezone.utc)
 
         # Reset per-turn summary tracking so a paused-and-resumed
         # session can't reuse stale tasks from a previous wake().
@@ -2041,12 +2083,12 @@ class AgentHarness:
                     )
                 )
             ):
-                if inbox_rescue_kind == "clarify":
+                if inbox_rescue_kind == "ask_user_question":
                     tool_calls_raw = assistant_message.get("tool_calls")
                     finish_reason = "tool_calls"
                     usage_data["finish_reason"] = finish_reason
                     response_data["finish_reason"] = finish_reason
-                    response_data["clarify_rescue"] = True
+                    response_data["ask_user_question_rescue"] = True
                 elif inbox_rescue_kind == "action_required":
                     response_data["action_required_rescue"] = True
 
@@ -2850,8 +2892,8 @@ class AgentHarness:
     ) -> str | None:
         """Route final plain-text user blocks into the appropriate inbox path.
 
-        Text answers become clarify tool calls. User actions such as login or
-        approval become first-class action_required inbox items.
+        Text answers become ask_user_question tool calls. User actions such
+        as login or approval become first-class action_required inbox items.
         """
         content = (assistant_message.get("content") or "").strip()
         if not content:
@@ -2870,7 +2912,11 @@ class AgentHarness:
         )
         action_kind = str(decision.get("action_kind") or "").strip()
         if not action_kind:
-            action_kind = "clarify" if decision.get("needs_clarify") else "none"
+            action_kind = (
+                "ask_user_question"
+                if decision.get("needs_ask_user_question")
+                else "none"
+            )
         if action_kind == "none":
             return None
 
@@ -2905,11 +2951,11 @@ class AgentHarness:
             )
             return "action_required"
 
-        if action_kind != "clarify":
+        if action_kind != "ask_user_question":
             return None
-        if "clarify" not in self._tools.tool_names:
+        if "ask_user_question" not in self._tools.tool_names:
             return None
-        if tool_filter is not None and "clarify" not in tool_filter:
+        if tool_filter is not None and "ask_user_question" not in tool_filter:
             return None
 
         question = str(decision.get("question") or "").strip()
@@ -2917,14 +2963,14 @@ class AgentHarness:
             return None
         context = str(decision.get("context") or content).strip()
 
-        tool_call_id = f"call_clarify_rescue_{uuid4().hex[:24]}"
+        tool_call_id = f"call_ask_user_question_rescue_{uuid4().hex[:24]}"
         assistant_message["content"] = None
         assistant_message["tool_calls"] = [
             {
                 "id": tool_call_id,
                 "type": "function",
                 "function": {
-                    "name": "clarify",
+                    "name": "ask_user_question",
                     "arguments": json.dumps(
                         {
                             "questions": [
@@ -2941,14 +2987,14 @@ class AgentHarness:
             },
         ]
         logger.info(
-            "Session %s: converted final response into clarify tool call "
+            "Session %s: converted final response into ask_user_question tool call "
             "(reason=%s)",
             session.id,
             decision.get("reason") or "user_input",
         )
-        return "clarify"
+        return "ask_user_question"
 
-    async def _maybe_convert_final_response_to_clarify(
+    async def _maybe_convert_final_response_to_ask_user_question(
         self,
         *,
         session: Session,
@@ -2957,7 +3003,8 @@ class AgentHarness:
         model: str,
         tool_filter: set[str] | None,
     ) -> bool:
-        """Compatibility wrapper for tests/callers that only need clarify."""
+        """Compatibility wrapper for tests/callers that only need
+        ask_user_question."""
         routed = await self._maybe_route_final_response_to_inbox(
             session=session,
             messages=messages,
@@ -2965,7 +3012,7 @@ class AgentHarness:
             model=model,
             tool_filter=tool_filter,
         )
-        return routed == "clarify"
+        return routed == "ask_user_question"
 
     async def _judge_final_response_user_action(
         self,
@@ -3033,18 +3080,22 @@ class AgentHarness:
                     "unchanged: %s",
                     exc,
                 )
-                return {"needs_clarify": False, "reason": "judge_error"}
+                return {
+                    "needs_ask_user_question": False,
+                    "reason": "judge_error",
+                }
 
         return self._normalize_user_action_decision(parsed)
 
-    async def _judge_final_response_needs_clarify(
+    async def _judge_final_response_needs_ask_user_question(
         self,
         *,
         messages: list[dict],
         assistant_content: str,
         model: str,
     ) -> dict[str, Any]:
-        """Compatibility wrapper for callers that only inspect clarify fields."""
+        """Compatibility wrapper for callers that only inspect the
+        ask_user_question fields."""
         return await self._judge_final_response_user_action(
             messages=messages,
             assistant_content=assistant_content,
@@ -3066,13 +3117,18 @@ class AgentHarness:
                 "target",
             )
         )
-        if action_kind not in {"", "none", "clarify", "action_required"}:
+        if action_kind not in {
+            "", "none", "ask_user_question", "action_required",
+        }:
             action_kind = ""
-        if action_kind in {"", "none"} and parsed.get("needs_clarify"):
+        if (
+            action_kind in {"", "none"}
+            and parsed.get("needs_ask_user_question")
+        ):
             action_kind = (
                 "action_required"
                 if AgentHarness._looks_like_user_action_requirement(decision_text)
-                else "clarify"
+                else "ask_user_question"
             )
         elif not action_kind:
             action_kind = "none"
@@ -3085,7 +3141,7 @@ class AgentHarness:
             target = target or ("browser" if action_type == "browser" else "session")
         return {
             "action_kind": action_kind,
-            "needs_clarify": action_kind == "clarify",
+            "needs_ask_user_question": action_kind == "ask_user_question",
             "reason": str(parsed.get("reason") or "user_input"),
             "question": parsed.get("question"),
             "title": parsed.get("title"),
@@ -3220,10 +3276,10 @@ class AgentHarness:
         """Keep platform control-plane tools available after filtering."""
         if tool_filter is None:
             return None
-        if "clarify" not in self._tools.tool_names:
+        if "ask_user_question" not in self._tools.tool_names:
             return tool_filter
         updated = set(tool_filter)
-        updated.add("clarify")
+        updated.add("ask_user_question")
         return updated
 
     def _tool_filter_for_session(self, session: Session) -> set[str] | None:
@@ -5574,6 +5630,88 @@ class AgentHarness:
                             kind="artifact", label=name, ref=artifact_id,
                         ),
                     )
+
+        # Workspace mtime scan — surfaces files created indirectly
+        # (terminal scripts, execute_code) that don't show up in the
+        # tool-call stream. Deduped against the paths already added
+        # via write_file/patch so the same file isn't listed twice.
+        try:
+            workspace_candidates = await self._scan_workspace_for_new_files(
+                session_id=session_id,
+                already_seen_paths={
+                    a.ref for a in out if a.kind == "file"
+                },
+            )
+        except Exception:
+            logger.debug(
+                "Workspace mtime scan failed for %s",
+                session_id, exc_info=True,
+            )
+            workspace_candidates = []
+        out.extend(workspace_candidates)
+        return out
+
+    async def _scan_workspace_for_new_files(
+        self,
+        *,
+        session_id: UUID,
+        already_seen_paths: set[str],
+    ) -> list[Any]:
+        """Return file candidates for workspace objects modified during
+        the current turn (mtime >= ``self._turn_started_at``).
+
+        Skips entries already surfaced via tool-call inspection
+        (``already_seen_paths``) to avoid duplicates. Cheap: the
+        ``stat`` call after ``list_keys`` is per-object, but workspace
+        sessions rarely exceed a few hundred files and the summarizer
+        only runs at turn end.
+        """
+        from surogates.harness.turn_summarizer import TurnArtifact
+        from surogates.storage.tenant import prefixed_session_workspace_prefix
+
+        storage = self._storage
+        if storage is None or self._turn_started_at is None:
+            return []
+
+        try:
+            session = await self._store.get_session(session_id)
+        except Exception:
+            return []
+        bucket = (session.config or {}).get("storage_bucket")
+        if not bucket:
+            return []
+        root_id = (
+            (session.config or {}).get("sandbox_root_session_id")
+            or str(session.id)
+        )
+        prefix = prefixed_session_workspace_prefix(session.config, str(root_id))
+
+        try:
+            keys = await storage.list_keys(bucket, prefix=prefix)
+        except Exception:
+            logger.debug(
+                "Workspace list_keys failed for bucket %r prefix %r",
+                bucket, prefix, exc_info=True,
+            )
+            return []
+
+        out: list[TurnArtifact] = []
+        turn_start = self._turn_started_at
+        for key in keys:
+            # Relative path the workspace viewer / file APIs use.
+            rel = key[len(prefix):] if key.startswith(prefix) else key
+            if not rel or rel in already_seen_paths:
+                continue
+            try:
+                meta = await storage.stat(bucket, key)
+            except Exception:
+                continue
+            modified = _coerce_modified_to_datetime(meta.get("modified"))
+            if modified is None or modified < turn_start:
+                continue
+            out.append(
+                TurnArtifact(kind="file", label=rel, ref=rel),
+            )
         return out
 
     async def _complete_session(

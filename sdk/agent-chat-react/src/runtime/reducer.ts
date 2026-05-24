@@ -60,11 +60,15 @@ export function applyAgentChatEvent(
 
   switch (event.type) {
     case "user.message":
-      return withMessages(nextState, applyUserMessage(
-        nextState.messages,
-        event.eventId,
-        event.data,
-      ));
+      // A new user message means the session is about to run a new turn.
+      // Clear ``terminal`` so any out-of-order ``session.pause`` that
+      // landed between the ``/messages`` route's RESUME and USER_MESSAGE
+      // emits (e.g. the harness's redundant abort-cleanup pause) doesn't
+      // suppress the running indicator for the new turn's deltas.
+      return withMessages(
+        { ...nextState, terminal: false, isRunning: true },
+        applyUserMessage(nextState.messages, event.eventId, event.data),
+      );
 
     case "skill.invoked":
       return withMessages(nextState, [
@@ -154,7 +158,12 @@ export function applyAgentChatEvent(
 
     case "harness.wake":
     case "llm.request":
-      return nextState.terminal ? nextState : { ...nextState, isRunning: true };
+      // Sign-of-life events: clear ``terminal`` too. A late
+      // ``session.pause`` from the harness's abort cleanup can land
+      // after the ``/messages`` route's RESUME + USER_MESSAGE; without
+      // re-clearing ``terminal`` here every subsequent gated event
+      // (deltas, thinking, tool calls) would leave ``isRunning`` false.
+      return { ...nextState, terminal: false, isRunning: true };
 
     case "harness.crash":
     case "stream.timeout":
@@ -211,10 +220,10 @@ export function applyAgentChatEvent(
         applyUserFeedback(nextState.messages, event.data),
       );
 
-    case "clarify.response":
+    case "ask_user_question.response":
       return withMessages(
         nextState,
-        applyClarifyResponse(nextState.messages, event.data),
+        applyAskUserQuestionResponse(nextState.messages, event.data),
       );
 
     case "policy.denied":
@@ -443,7 +452,8 @@ function applyLlmDelta(
     ...state,
     messages,
     hadDeltas: state.hadDeltas || Boolean(deltaContent),
-    isRunning: state.terminal ? state.isRunning : true,
+    terminal: false,
+    isRunning: true,
   };
 }
 
@@ -613,7 +623,8 @@ function applyLlmThinking(
   return {
     ...state,
     messages,
-    isRunning: state.terminal ? state.isRunning : true,
+    terminal: false,
+    isRunning: true,
   };
 }
 
@@ -752,7 +763,8 @@ function applyToolCall(
   return {
     ...state,
     messages,
-    isRunning: state.terminal ? state.isRunning : true,
+    terminal: false,
+    isRunning: true,
   };
 }
 
@@ -944,7 +956,8 @@ function applyExpertDelegation(
   return {
     ...state,
     messages,
-    isRunning: state.terminal ? state.isRunning : true,
+    terminal: false,
+    isRunning: true,
   };
 }
 
@@ -1055,7 +1068,7 @@ function applyUserFeedback(
   return messages;
 }
 
-function applyClarifyResponse(
+function applyAskUserQuestionResponse(
   messages: AgentChatMessage[],
   data: Record<string, unknown>,
 ): AgentChatMessage[] {
@@ -1072,7 +1085,7 @@ function applyClarifyResponse(
         tc.id === targetToolId
           ? {
               ...tc,
-              clarifyAnswers: responses.map((response) => {
+              askUserQuestionAnswers: responses.map((response) => {
                 const row = objectValue(response) ?? {};
                 return {
                   question: stringValue(row.question),

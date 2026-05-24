@@ -38,6 +38,15 @@ Output is truncated at 50,000 characters. ANSI escape codes are stripped. Backgr
 | `offset` | integer | Start line (optional) |
 | `limit` | integer | Max lines to read (optional) |
 
+Handles plain text plus `.pdf`, `.docx`, `.xlsx`, `.pptx` (parsed to
+markdown via `markitdown`) and image files (described by the worker's
+vision model, with the analysis reshaped into a `read_file` envelope).
+Document parses are cached on disk under `/tmp/surogates-read-cache/`
+so paginated reads of the same file are free; image analyses are
+cached in worker memory.  Agents should call `read_file(path)`
+directly for these formats rather than pre-extracting with subprocess
+tools.  Set `READ_IMAGE_CACHE_DISABLED=1` to bypass the image cache.
+
 ### `write_file` -- Write File Contents
 
 | Parameter | Type | Description |

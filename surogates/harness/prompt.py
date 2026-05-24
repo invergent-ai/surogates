@@ -205,8 +205,8 @@ class PromptBuilder:
             parts.append(self._prompts.get("guidance/session_search"))
         if "skill_manage" in self._available_tools:
             parts.append(self._prompts.get("guidance/skills"))
-        if "clarify" in self._available_tools:
-            parts.append(self._prompts.get("guidance/clarify"))
+        if "ask_user_question" in self._available_tools:
+            parts.append(self._prompts.get("guidance/ask_user_question"))
         if "create_artifact" in self._available_tools:
             parts.append(self._prompts.get("guidance/artifact"))
         if any(tool.startswith("browser_") for tool in self._available_tools):

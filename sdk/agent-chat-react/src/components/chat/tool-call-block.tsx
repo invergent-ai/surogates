@@ -15,7 +15,7 @@ import { ReadFileBlock, WriteFileBlock, PatchBlock, SearchFilesBlock, ListFilesB
 import { ProcessToolBlock } from "./tools/process-tool";
 import { ExpertToolBlock } from "./tools/expert-tool";
 import { SkillsListBlock, SkillViewBlock } from "./tools/skill-tools";
-import { ClarifyToolBlock } from "./tools/clarify-tool";
+import { AskUserQuestionToolBlock } from "./tools/ask-user-question-tool";
 import { ArtifactToolBlock } from "./tools/artifact-tool";
 import { DelegateToolBlock } from "./tools/delegate-tool";
 import { MemoryToolBlock } from "./tools/memory-tool";
@@ -89,8 +89,8 @@ export function ToolCallBlock({
     case "skill_manage":
       return <SkillManageToolBlock tc={tc} />;
 
-    case "clarify":
-      return <ClarifyToolBlock tc={tc} />;
+    case "ask_user_question":
+      return <AskUserQuestionToolBlock tc={tc} />;
 
     case "create_artifact":
       return <ArtifactToolBlock tc={tc} resolvedName={resolvedArtifactName} />;

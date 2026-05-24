@@ -72,7 +72,7 @@ function createAdapter(items: AgentChatInboxItem[]): AgentChatAdapter {
     async getArtifact(): Promise<AgentChatArtifactPayload> {
       throw new Error("not used by inbox tests");
     },
-    async submitClarifyResponse() {
+    async submitAskUserQuestionResponse() {
       return { eventId: 1 };
     },
     async getWorkspaceTree(): Promise<AgentChatWorkspaceTree> {
@@ -231,7 +231,7 @@ describe("InboxPanel", () => {
     ];
     const adapter: AgentChatAdapter = {
       ...createAdapter(items),
-      async submitClarifyResponse(input) {
+      async submitAskUserQuestionResponse(input) {
         submissions.push(...input.responses);
         items[0] = { ...items[0], status: "responded", respondedAt: "now" };
         return { eventId: 2 };

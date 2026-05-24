@@ -23,7 +23,6 @@ RUN uv venv /opt/venv \
     && uv pip install --python /opt/venv/bin/python \
         pandas \
         numpy \
-        openpyxl \
         xlsxwriter \
         xlrd \
         pyyaml \
@@ -35,14 +34,14 @@ RUN uv venv /opt/venv \
         pillow \
         matplotlib \
         tabulate \
-        pypdf \
-        python-docx \
-        python-pptx \
-        markitdown[pptx] \
         Pillow \
         pyfiglet \
         nano-pdf \
         pandoc
+# markitdown[pdf,docx,xlsx,pptx], pypdf, python-docx, python-pptx, openpyxl
+# are pulled in by the surogates package install above (project deps), so
+# they are not listed here.  Keep this list focused on agent-runtime
+# niceties (pandas/matplotlib/etc.) that aren't surogates dependencies.
 
 # ── Stage 2: Final image ─────────────────────────────────────────────
 FROM python:3.12-slim

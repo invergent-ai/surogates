@@ -152,12 +152,13 @@ class EventType(str, Enum):
     ARTIFACT_CREATED = "artifact.created"
     ARTIFACT_UPDATED = "artifact.updated"
 
-    # Clarify — user's response to a `clarify` tool call.  Emitted by the
-    # clarify response endpoint when the user submits answers through the
-    # web widget.  The worker's clarify handler polls the event log for a
-    # matching ``tool_call_id`` and returns the responses to the LLM.
-    # Session replay uses this to re-lock the widget after a page reload.
-    CLARIFY_RESPONSE = "clarify.response"
+    # ask_user_question — user's response to an `ask_user_question` tool
+    # call.  Emitted by the ask_user_question response endpoint when the
+    # user submits answers through the web widget.  The worker's
+    # ask_user_question handler polls the event log for a matching
+    # ``tool_call_id`` and returns the responses to the LLM.  Session
+    # replay uses this to re-lock the widget after a page reload.
+    ASK_USER_QUESTION_RESPONSE = "ask_user_question.response"
 
     # Saga orchestration
     SAGA_START = "saga.start"

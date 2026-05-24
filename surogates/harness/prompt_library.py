@@ -46,7 +46,7 @@ REQUIRED_KEYS: tuple[str, ...] = (
     "guidance/memory",
     "guidance/session_search",
     "guidance/skills",
-    "guidance/clarify",
+    "guidance/ask_user_question",
     "guidance/artifact",
     "guidance/browser",
     "guidance/loop_wait",

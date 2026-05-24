@@ -119,7 +119,7 @@ export interface AgentChatToolCallInfo {
   checkpointHash?: string;
   expertResultEventId?: number;
   expertFeedback?: { rating: "up" | "down"; reason?: string };
-  clarifyAnswers?: AgentChatClarifyAnswer[];
+  askUserQuestionAnswers?: AgentChatAskUserQuestionAnswer[];
   cancelled?: boolean;
 }
 
@@ -421,7 +421,7 @@ export type AgentChatEventType =
   | "browser.destroyed"
   | "browser.control_granted"
   | "browser.control_returned"
-  | "clarify.response"
+  | "ask_user_question.response"
   | "iteration.summary"
   | "turn.summary";
 
@@ -526,22 +526,22 @@ export type AgentChatArtifactPayload =
   | { meta: AgentChatArtifactMeta; kind: "html"; spec: AgentChatHtmlArtifactSpec }
   | { meta: AgentChatArtifactMeta; kind: "svg"; spec: AgentChatSvgArtifactSpec };
 
-export interface AgentChatClarifyChoice {
+export interface AgentChatAskUserQuestionChoice {
   label: string;
   description?: string;
 }
 
-export interface AgentChatClarifyQuestion {
+export interface AgentChatAskUserQuestionQuestion {
   prompt: string;
-  choices?: AgentChatClarifyChoice[];
+  choices?: AgentChatAskUserQuestionChoice[];
   allow_other?: boolean;
 }
 
-export interface AgentChatClarifyArgs {
-  questions: AgentChatClarifyQuestion[];
+export interface AgentChatAskUserQuestionArgs {
+  questions: AgentChatAskUserQuestionQuestion[];
 }
 
-export interface AgentChatClarifyAnswer {
+export interface AgentChatAskUserQuestionAnswer {
   question: string;
   answer: string;
   is_other: boolean;
@@ -685,10 +685,10 @@ export interface AgentChatAdapter {
     sessionId: string;
     artifactId: string;
   }): Promise<AgentChatArtifactPayload>;
-  submitClarifyResponse(input: {
+  submitAskUserQuestionResponse(input: {
     sessionId: string;
     toolCallId: string;
-    responses: AgentChatClarifyAnswer[];
+    responses: AgentChatAskUserQuestionAnswer[];
   }): Promise<{ eventId?: number }>;
   submitExpertFeedback?(input: {
     sessionId: string;
@@ -809,10 +809,10 @@ export type TableArtifactSpec = AgentChatTableArtifactSpec;
 export type ChartArtifactSpec = AgentChatChartArtifactSpec;
 export type HtmlArtifactSpec = AgentChatHtmlArtifactSpec;
 export type SvgArtifactSpec = AgentChatSvgArtifactSpec;
-export type ClarifyChoice = AgentChatClarifyChoice;
-export type ClarifyQuestion = AgentChatClarifyQuestion;
-export type ClarifyArgs = AgentChatClarifyArgs;
-export type ClarifyAnswer = AgentChatClarifyAnswer;
+export type AskUserQuestionChoice = AgentChatAskUserQuestionChoice;
+export type AskUserQuestionQuestion = AgentChatAskUserQuestionQuestion;
+export type AskUserQuestionArgs = AgentChatAskUserQuestionArgs;
+export type AskUserQuestionAnswer = AgentChatAskUserQuestionAnswer;
 export type WorkspaceEntry = AgentChatWorkspaceEntry;
 export type WorkspaceTree = AgentChatWorkspaceTree;
 export type WorkspaceFile = AgentChatWorkspaceFile;

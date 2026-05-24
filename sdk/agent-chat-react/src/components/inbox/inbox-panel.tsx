@@ -26,7 +26,7 @@ import { Button } from "../ui/button";
 import { cn } from "../../lib/utils";
 import type {
   AgentChatAdapter,
-  AgentChatClarifyAnswer,
+  AgentChatAskUserQuestionAnswer,
   AgentChatInboxEventStream,
   AgentChatInboxItem,
   AgentChatInboxKind,
@@ -262,12 +262,12 @@ function InputRequiredDetail({
     if (!toolCallId || !canSubmit) return;
     setSubmitting(true);
     try {
-      const responses: AgentChatClarifyAnswer[] = questions.map((question) => ({
+      const responses: AgentChatAskUserQuestionAnswer[] = questions.map((question) => ({
         question: question.prompt,
         answer: answers[question.prompt]?.trim() ?? "",
         is_other: false,
       }));
-      await adapter.submitClarifyResponse({
+      await adapter.submitAskUserQuestionResponse({
         sessionId: item.sessionId,
         toolCallId,
         responses,

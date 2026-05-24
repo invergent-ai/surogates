@@ -814,7 +814,7 @@ async def test_session_tool_allow_list_blocks_disallowed_tool(
         user_id=user_id, org_id=org_id, agent_id="test-agent",
         config={
             "workspace_path": "/workspace",
-            "tool_allow_list": ["clarify", "web_search"],
+            "tool_allow_list": ["ask_user_question", "web_search"],
         },
     )
     lease = await session_store.try_acquire_lease(
@@ -879,7 +879,7 @@ async def test_session_tool_allow_list_admits_listed_tool(
         user_id=user_id, org_id=org_id, agent_id="test-agent",
         config={
             "workspace_path": "/workspace",
-            "tool_allow_list": ["clarify"],
+            "tool_allow_list": ["ask_user_question"],
         },
     )
     lease = await session_store.try_acquire_lease(
@@ -890,7 +890,7 @@ async def test_session_tool_allow_list_admits_listed_tool(
     tc = {
         "id": "tc-allow-list-2",
         "function": {
-            "name": "clarify",
+            "name": "ask_user_question",
             "arguments": json.dumps({"question": "what?"}),
         },
     }

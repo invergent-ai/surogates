@@ -65,9 +65,12 @@ def _input_required(data: dict[str, Any], session_id: str) -> InboxRow:
             "context": data.get("context", ""),
         },
         action_ref={
-            "type": "clarify_response",
+            "type": "ask_user_question_response",
             "tool_call_id": tool_call_id,
-            "endpoint": f"/v1/sessions/{session_id}/clarify/{tool_call_id}/respond",
+            "endpoint": (
+                f"/v1/sessions/{session_id}/ask_user_question/"
+                f"{tool_call_id}/respond"
+            ),
         },
     )
 
