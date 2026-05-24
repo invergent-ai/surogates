@@ -23,8 +23,8 @@ Updated before every commit.
 - [x] Task 5 — Wire `_handle_document` to cache + parser
 - [x] Task 6 — Update the `read_file` tool description
 - [x] Task 7 — Worker-side image pre-dispatch branch
-- [ ] **Task 8 (in progress)** — Integration test for documents
-- [ ] Task 9 — Verify dependency lock and parser availability
+- [x] Task 8 — Integration test for documents
+- [ ] **Task 9 (in progress)** — Verify dependency lock and parser availability
 - [ ] Task 10 — Update `CLAUDE.md`
 - [ ] Task 11 — Smoke test the whole stack and verify
 
