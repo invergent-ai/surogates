@@ -59,37 +59,38 @@ export type EventType =
   | "worker.failed"
   | "artifact.created"
   | "artifact.updated"
-  | "clarify.response";
+  | "ask_user_question.response";
 
-// ── Clarify tool ─────────────────────────────────────────────────────
+// ── Ask-user-question tool ───────────────────────────────────────────
 //
-// Shape of the `clarify` tool's JSON arguments (from tool.call events)
-// and the response payload submitted back through the respond endpoint.
+// Shape of the `ask_user_question` tool's JSON arguments (from tool.call
+// events) and the response payload submitted back through the respond
+// endpoint.
 
-export interface ClarifyChoice {
+export interface AskUserQuestionChoice {
   label: string;
   description?: string;
 }
 
-export interface ClarifyQuestion {
+export interface AskUserQuestionQuestion {
   prompt: string;
-  choices?: ClarifyChoice[];
+  choices?: AskUserQuestionChoice[];
   allow_other?: boolean;
 }
 
-export interface ClarifyArgs {
-  questions: ClarifyQuestion[];
+export interface AskUserQuestionArgs {
+  questions: AskUserQuestionQuestion[];
 }
 
-export interface ClarifyAnswer {
+export interface AskUserQuestionAnswer {
   question: string;
   answer: string;
   is_other: boolean;
 }
 
-export interface ClarifyResponsePayload {
+export interface AskUserQuestionResponsePayload {
   tool_call_id: string;
-  responses: ClarifyAnswer[];
+  responses: AskUserQuestionAnswer[];
 }
 
 // ── Error classification ────────────────────────────────────────────

@@ -211,10 +211,10 @@ export function applyAgentChatEvent(
         applyUserFeedback(nextState.messages, event.data),
       );
 
-    case "clarify.response":
+    case "ask_user_question.response":
       return withMessages(
         nextState,
-        applyClarifyResponse(nextState.messages, event.data),
+        applyAskUserQuestionResponse(nextState.messages, event.data),
       );
 
     case "policy.denied":
@@ -1055,7 +1055,7 @@ function applyUserFeedback(
   return messages;
 }
 
-function applyClarifyResponse(
+function applyAskUserQuestionResponse(
   messages: AgentChatMessage[],
   data: Record<string, unknown>,
 ): AgentChatMessage[] {
@@ -1072,7 +1072,7 @@ function applyClarifyResponse(
         tc.id === targetToolId
           ? {
               ...tc,
-              clarifyAnswers: responses.map((response) => {
+              askUserQuestionAnswers: responses.map((response) => {
                 const row = objectValue(response) ?? {};
                 return {
                   question: stringValue(row.question),

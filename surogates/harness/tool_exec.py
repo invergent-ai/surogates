@@ -166,7 +166,7 @@ logger = logging.getLogger(__name__)
 # Tool parallelisation policy constants
 # ---------------------------------------------------------------------------
 
-NEVER_PARALLEL_TOOLS: frozenset[str] = frozenset({"clarify"})
+NEVER_PARALLEL_TOOLS: frozenset[str] = frozenset({"ask_user_question"})
 
 # Read-only tools that are safe to execute concurrently with each other
 # and with ongoing LLM streaming.  These tools have no side effects —
@@ -252,7 +252,7 @@ MAX_TOOL_WORKERS: int = 8
 # Read-only tools that never participate in saga tracking — they have no
 # side effects to compensate.
 SAGA_EXCLUDED_TOOLS: frozenset[str] = frozenset({
-    "clarify",
+    "ask_user_question",
     "list_files",
     "read_file",
     "file_read",

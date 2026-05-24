@@ -67,7 +67,7 @@ WORKER_EXCLUDED_TOOLS: frozenset[str] = frozenset({
 #
 # Coordination tools (``spawn_task``, ``delegate_task``, ``spawn_worker``,
 # ``cancel_task``, ``unblock_task``, ``send_worker_message``, ``stop_worker``,
-# ``consult_expert``, ``clarify``, ``memory``, ``todo``, ``session_search``,
+# ``consult_expert``, ``ask_user_question``, ``memory``, ``todo``, ``session_search``,
 # ``skills_list``, ``skill_view``, ``skill_manage``, ``cron_*``, ``loop_wait``,
 # ``loop_complete``) stay available.
 #

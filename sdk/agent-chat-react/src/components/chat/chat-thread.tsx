@@ -471,7 +471,7 @@ function cancelledToolLabel(toolName: string): string {
     skill_view: "Skill",
     consult_expert: "Expert",
     delegate_task: "Delegate",
-    clarify: "Clarify",
+    ask_user_question: "Ask User Question",
     process: "Process",
     create_artifact: "Artifact",
   };
@@ -1318,21 +1318,25 @@ function SimpleAssistantGroup({
   // text-only). Streaming tail with no content yet shows the running
   // shimmer instead.
   const tailHasTools = !!(tail?.toolCalls && tail.toolCalls.length > 0);
-  const finalText = tail && !tailHasTools && tail.content
-    ? tail.content
-    : "";
+  const tailIsTextOnly = !!tail && !tailHasTools;
+  const finalText = tailIsTextOnly && tail!.content ? tail!.content : "";
 
   // A tail iteration that's mid-stream and has no IterationSummary yet
   // surfaces via the IterationGroup's own placeholders. But if the
   // group's tail is the user message (no assistant message at all yet),
   // we still need a Working-on-it shimmer — same defensive layer the
-  // Expert path appends.
+  // Expert path appends. We also need it when the tail is a text-only
+  // streaming iteration that hasn't emitted content yet: we skip that
+  // iteration from the loop below to avoid duplicating the finalText
+  // render, so without this we'd show nothing while reasoning streams.
   const isTailGroup = lastGlobalIndex === totalMessages - 1;
   const showThinkingShim =
     isTailGroup
     && isRunning
-    && !tail
-    && messages.some((m) => m.role !== "assistant");
+    && (
+      (!tail && messages.some((m) => m.role !== "assistant"))
+      || (tailIsTextOnly && tail!.status === "streaming" && !tail!.content)
+    );
 
   const showErrorInfo =
     !!tail && tail.status === "error" && !!tail.errorInfo;
@@ -1375,6 +1379,12 @@ function SimpleAssistantGroup({
                 />
               );
             }
+            // The tail text-only iteration is rendered as finalText
+            // below — don't also render an IterationGroup row for it,
+            // or its mid-stream "Thinking…" shimmer (and post-stream
+            // "Thought through the problem" label) will sit above the
+            // same text the user sees in finalText.
+            if (message === tail && tailIsTextOnly) return null;
             return (
               <IterationGroup
                 key={message.id}

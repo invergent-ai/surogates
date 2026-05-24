@@ -80,7 +80,7 @@ function createAdapter(
         spec: { content: "Artifact body" },
       };
     },
-    async submitClarifyResponse() {
+    async submitAskUserQuestionResponse() {
       return { eventId: 1 };
     },
     async listSlashCommands() {

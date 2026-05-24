@@ -259,11 +259,11 @@ def _chat_response(content: str, *, model: str = "test-model") -> SimpleNamespac
 class TestDynamicLoopToolPolicy:
     """Dynamic loop sessions expose loop_wait but not scheduler creation tools."""
 
-    def test_explicit_allowed_tools_still_include_clarify(self) -> None:
+    def test_explicit_allowed_tools_still_include_ask_user_question(self) -> None:
         from surogates.tools.registry import ToolRegistry, ToolSchema
 
         reg = ToolRegistry()
-        for name in ("clarify", "web_search"):
+        for name in ("ask_user_question", "web_search"):
             reg.register(
                 name,
                 ToolSchema(name=name, description="test", parameters={}),
@@ -274,25 +274,25 @@ class TestDynamicLoopToolPolicy:
 
         tool_names = harness._tool_filter_for_session(session)
 
-        assert tool_names == {"clarify", "web_search"}
+        assert tool_names == {"ask_user_question", "web_search"}
 
-    def test_excluded_tools_cannot_remove_clarify(self) -> None:
+    def test_excluded_tools_cannot_remove_ask_user_question(self) -> None:
         from surogates.tools.registry import ToolRegistry, ToolSchema
 
         reg = ToolRegistry()
-        for name in ("clarify", "web_search"):
+        for name in ("ask_user_question", "web_search"):
             reg.register(
                 name,
                 ToolSchema(name=name, description="test", parameters={}),
                 lambda _: "{}",
             )
         harness = _make_harness(tool_registry=reg)
-        session = _session_with_config({"excluded_tools": ["clarify"]})
+        session = _session_with_config({"excluded_tools": ["ask_user_question"]})
 
         tool_names = harness._tool_filter_for_session(session)
 
         assert tool_names is not None
-        assert "clarify" in tool_names
+        assert "ask_user_question" in tool_names
         assert "web_search" in tool_names
 
     def test_coordinator_without_strict_flag_keeps_all_tools(self) -> None:
@@ -624,7 +624,7 @@ class TestSessionLifecycle:
 
         reg = ToolRegistry()
         for name in (
-            "clarify",
+            "ask_user_question",
             "cron_create",
             "cron_delete",
             "cron_list",
@@ -645,7 +645,7 @@ class TestSessionLifecycle:
         tool_names = harness._tool_filter_for_session(session)
 
         assert tool_names is not None
-        assert "clarify" in tool_names
+        assert "ask_user_question" in tool_names
         assert "loop_wait" in tool_names
         assert "web_search" in tool_names
         assert "cron_create" not in tool_names
@@ -663,7 +663,7 @@ class TestSessionLifecycle:
 
         reg = ToolRegistry()
         for name in (
-            "clarify",
+            "ask_user_question",
             "cron_create",
             "cron_delete",
             "cron_list",
@@ -686,7 +686,7 @@ class TestSessionLifecycle:
         tool_names = harness._tool_filter_for_session(session)
 
         assert tool_names is not None
-        assert "clarify" in tool_names
+        assert "ask_user_question" in tool_names
         assert "web_search" in tool_names
         assert "cron_create" not in tool_names
         assert "cron_delete" not in tool_names
@@ -701,7 +701,7 @@ class TestSessionLifecycle:
         from surogates.tools.registry import ToolRegistry, ToolSchema
 
         reg = ToolRegistry()
-        for name in ("clarify", "loop_complete", "loop_wait"):
+        for name in ("ask_user_question", "loop_complete", "loop_wait"):
             reg.register(
                 name,
                 ToolSchema(name=name, description="test", parameters={}),
@@ -725,7 +725,7 @@ class TestSessionLifecycle:
 
         reg = ToolRegistry()
         for name in (
-            "clarify",
+            "ask_user_question",
             "cron_create",
             "cron_delete",
             "cron_list",
@@ -751,13 +751,13 @@ class TestSessionLifecycle:
         assert "loop_wait" not in tool_names
         assert "loop_complete" not in tool_names
 
-    async def test_final_response_needing_user_input_becomes_clarify_call(self) -> None:
+    async def test_final_response_needing_user_input_becomes_ask_user_question_call(self) -> None:
         response = SimpleNamespace(
             choices=[
                 SimpleNamespace(
                     message=SimpleNamespace(
                         content=json.dumps({
-                            "needs_clarify": True,
+                            "needs_ask_user_question": True,
                             "reason": "user_decision",
                             "question": "Which account should I use?",
                             "context": "I need the user to choose an account.",
@@ -772,8 +772,8 @@ class TestSessionLifecycle:
 
         reg = ToolRegistry()
         reg.register(
-            "clarify",
-            ToolSchema(name="clarify", description="test", parameters={}),
+            "ask_user_question",
+            ToolSchema(name="ask_user_question", description="test", parameters={}),
             lambda _: "{}",
         )
         harness = _make_harness(llm_client=llm_client, tool_registry=reg)
@@ -784,18 +784,18 @@ class TestSessionLifecycle:
             "tool_calls": None,
         }
 
-        converted = await harness._maybe_convert_final_response_to_clarify(
+        converted = await harness._maybe_convert_final_response_to_ask_user_question(
             session=session,
             messages=[{"role": "user", "content": "Post a status update"}],
             assistant_message=assistant_message,
             model="surogate",
-            tool_filter={"clarify", "browser_navigate"},
+            tool_filter={"ask_user_question", "browser_navigate"},
         )
 
         assert converted is True
         tool_calls = assistant_message["tool_calls"]
         assert tool_calls is not None
-        assert tool_calls[0]["function"]["name"] == "clarify"
+        assert tool_calls[0]["function"]["name"] == "ask_user_question"
         arguments = json.loads(tool_calls[0]["function"]["arguments"])
         assert arguments["questions"][0]["prompt"] == "Which account should I use?"
         assert arguments["context"] == "I need the user to choose an account."
@@ -826,8 +826,8 @@ class TestSessionLifecycle:
 
         reg = ToolRegistry()
         reg.register(
-            "clarify",
-            ToolSchema(name="clarify", description="test", parameters={}),
+            "ask_user_question",
+            ToolSchema(name="ask_user_question", description="test", parameters={}),
             lambda _: "{}",
         )
         store = AsyncMock()
@@ -848,7 +848,7 @@ class TestSessionLifecycle:
             messages=[{"role": "user", "content": "Pay this invoice"}],
             assistant_message=assistant_message,
             model="surogate",
-            tool_filter={"clarify", "browser_navigate"},
+            tool_filter={"ask_user_question", "browser_navigate"},
         )
 
         assert routed == "action_required"
@@ -878,7 +878,7 @@ class TestSessionLifecycle:
                 "messages": messages,
             })
             return {
-                "needs_clarify": True,
+                "needs_ask_user_question": True,
                 "reason": "login_required",
                 "question": "Please sign in and tell me when to continue.",
                 "context": "The browser is asking the user to sign in.",
@@ -895,14 +895,14 @@ class TestSessionLifecycle:
         )
         harness = _make_harness(llm_client=llm_client)
 
-        decision = await harness._judge_final_response_needs_clarify(
+        decision = await harness._judge_final_response_needs_ask_user_question(
             messages=[{"role": "user", "content": "Pay the invoice"}],
             assistant_content="The page is asking you to sign in before I can continue.",
             model="surogate",
         )
 
         assert decision["action_kind"] == "action_required"
-        assert decision["needs_clarify"] is False
+        assert decision["needs_ask_user_question"] is False
         assert decision["reason"] == "login_required"
         assert decision["question"] == "Please sign in and tell me when to continue."
         assert decision["context"] == "The browser is asking the user to sign in."
@@ -911,7 +911,7 @@ class TestSessionLifecycle:
         assert calls
         assert calls[0]["model"] == "surogate"
 
-    async def test_clarify_judge_falls_back_when_outlines_unavailable(
+    async def test_ask_user_question_judge_falls_back_when_outlines_unavailable(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -933,7 +933,7 @@ class TestSessionLifecycle:
                 SimpleNamespace(
                     message=SimpleNamespace(
                         content=json.dumps({
-                            "needs_clarify": False,
+                            "needs_ask_user_question": False,
                             "reason": "none",
                             "question": None,
                             "context": None,
@@ -946,13 +946,13 @@ class TestSessionLifecycle:
         llm_client.chat.completions.create.return_value = response
         harness = _make_harness(llm_client=llm_client)
 
-        decision = await harness._judge_final_response_needs_clarify(
+        decision = await harness._judge_final_response_needs_ask_user_question(
             messages=[{"role": "user", "content": "Pay the invoice"}],
             assistant_content="Done. I paid the invoice.",
             model="surogate",
         )
 
-        assert decision["needs_clarify"] is False
+        assert decision["needs_ask_user_question"] is False
         llm_client.chat.completions.create.assert_awaited_once()
 
     async def test_final_response_without_user_input_is_left_alone(self) -> None:
@@ -961,7 +961,7 @@ class TestSessionLifecycle:
                 SimpleNamespace(
                     message=SimpleNamespace(
                         content=json.dumps({
-                            "needs_clarify": False,
+                            "needs_ask_user_question": False,
                             "reason": "none",
                             "question": None,
                             "context": None,
@@ -976,8 +976,8 @@ class TestSessionLifecycle:
 
         reg = ToolRegistry()
         reg.register(
-            "clarify",
-            ToolSchema(name="clarify", description="test", parameters={}),
+            "ask_user_question",
+            ToolSchema(name="ask_user_question", description="test", parameters={}),
             lambda _: "{}",
         )
         harness = _make_harness(llm_client=llm_client, tool_registry=reg)
@@ -988,18 +988,18 @@ class TestSessionLifecycle:
             "tool_calls": None,
         }
 
-        converted = await harness._maybe_convert_final_response_to_clarify(
+        converted = await harness._maybe_convert_final_response_to_ask_user_question(
             session=session,
             messages=[{"role": "user", "content": "Post a status update"}],
             assistant_message=assistant_message,
             model="surogate",
-            tool_filter={"clarify", "browser_navigate"},
+            tool_filter={"ask_user_question", "browser_navigate"},
         )
 
         assert converted is False
         assert assistant_message["tool_calls"] is None
 
-    async def test_final_response_clarify_judge_retries_after_empty_response(
+    async def test_final_response_ask_user_question_judge_retries_after_empty_response(
         self,
     ) -> None:
         empty_response = SimpleNamespace(
@@ -1010,7 +1010,7 @@ class TestSessionLifecycle:
                 SimpleNamespace(
                     message=SimpleNamespace(
                         content=json.dumps({
-                            "needs_clarify": True,
+                            "needs_ask_user_question": True,
                             "reason": "missing_information",
                             "question": "What account should I use?",
                             "context": "The task cannot continue without an account.",
@@ -1028,8 +1028,8 @@ class TestSessionLifecycle:
 
         reg = ToolRegistry()
         reg.register(
-            "clarify",
-            ToolSchema(name="clarify", description="test", parameters={}),
+            "ask_user_question",
+            ToolSchema(name="ask_user_question", description="test", parameters={}),
             lambda _: "{}",
         )
         harness = _make_harness(llm_client=llm_client, tool_registry=reg)
@@ -1040,12 +1040,12 @@ class TestSessionLifecycle:
             "tool_calls": None,
         }
 
-        converted = await harness._maybe_convert_final_response_to_clarify(
+        converted = await harness._maybe_convert_final_response_to_ask_user_question(
             session=session,
             messages=[{"role": "user", "content": "Post this update"}],
             assistant_message=assistant_message,
             model="surogate",
-            tool_filter={"clarify"},
+            tool_filter={"ask_user_question"},
         )
 
         assert converted is True
@@ -1055,7 +1055,7 @@ class TestSessionLifecycle:
         arguments = json.loads(tool_calls[0]["function"]["arguments"])
         assert arguments["questions"][0]["prompt"] == "What account should I use?"
 
-    async def test_final_response_clarify_judge_reads_reasoning_content(
+    async def test_final_response_ask_user_question_judge_reads_reasoning_content(
         self,
     ) -> None:
         response = SimpleNamespace(
@@ -1064,7 +1064,7 @@ class TestSessionLifecycle:
                     message=SimpleNamespace(
                         content="",
                         reasoning_content=json.dumps({
-                            "needs_clarify": True,
+                            "needs_ask_user_question": True,
                             "reason": "user_decision",
                             "question": "Should I continue?",
                             "context": "The assistant needs a decision.",
@@ -1079,8 +1079,8 @@ class TestSessionLifecycle:
 
         reg = ToolRegistry()
         reg.register(
-            "clarify",
-            ToolSchema(name="clarify", description="test", parameters={}),
+            "ask_user_question",
+            ToolSchema(name="ask_user_question", description="test", parameters={}),
             lambda _: "{}",
         )
         harness = _make_harness(llm_client=llm_client, tool_registry=reg)
@@ -1091,12 +1091,12 @@ class TestSessionLifecycle:
             "tool_calls": None,
         }
 
-        converted = await harness._maybe_convert_final_response_to_clarify(
+        converted = await harness._maybe_convert_final_response_to_ask_user_question(
             session=session,
             messages=[{"role": "user", "content": "Run the task"}],
             assistant_message=assistant_message,
             model="surogate",
-            tool_filter={"clarify"},
+            tool_filter={"ask_user_question"},
         )
 
         assert converted is True
@@ -1121,8 +1121,8 @@ class TestSessionLifecycle:
 
         reg = ToolRegistry()
         reg.register(
-            "clarify",
-            ToolSchema(name="clarify", description="test", parameters={}),
+            "ask_user_question",
+            ToolSchema(name="ask_user_question", description="test", parameters={}),
             lambda _: "{}",
         )
         harness = _make_harness(llm_client=llm_client, tool_registry=reg)
@@ -1133,12 +1133,12 @@ class TestSessionLifecycle:
             "tool_calls": None,
         }
 
-        converted = await harness._maybe_convert_final_response_to_clarify(
+        converted = await harness._maybe_convert_final_response_to_ask_user_question(
             session=session,
             messages=[{"role": "user", "content": "Post this update"}],
             assistant_message=assistant_message,
             model="surogate",
-            tool_filter={"clarify"},
+            tool_filter={"ask_user_question"},
         )
 
         assert converted is False
@@ -1159,8 +1159,8 @@ class TestSessionLifecycle:
 
         reg = ToolRegistry()
         reg.register(
-            "clarify",
-            ToolSchema(name="clarify", description="test", parameters={}),
+            "ask_user_question",
+            ToolSchema(name="ask_user_question", description="test", parameters={}),
             lambda _: "{}",
         )
         harness = _make_harness(llm_client=llm_client, tool_registry=reg)
@@ -1176,7 +1176,7 @@ class TestSessionLifecycle:
             "tool_calls": None,
         }
 
-        converted = await harness._maybe_convert_final_response_to_clarify(
+        converted = await harness._maybe_convert_final_response_to_ask_user_question(
             session=session,
             messages=[
                 {
@@ -1186,7 +1186,7 @@ class TestSessionLifecycle:
             ],
             assistant_message=assistant_message,
             model="surogate",
-            tool_filter={"clarify"},
+            tool_filter={"ask_user_question"},
         )
 
         assert converted is False

@@ -128,7 +128,7 @@ class TestConcurrencyClassification:
     def test_write_tools_are_not_parallelizable(self) -> None:
         non_parallel_tools = [
             "write_file", "patch",
-            "memory", "skill_manage", "delegate_task", "clarify",
+            "memory", "skill_manage", "delegate_task", "ask_user_question",
         ]
         for name in non_parallel_tools:
             assert not is_parallelizable(name), f"{name} should NOT be parallelizable"

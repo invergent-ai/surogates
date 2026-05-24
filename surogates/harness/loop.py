@@ -450,7 +450,7 @@ _USER_ACTION_RESCUE_SYSTEM: str = (
     "action_kind='none' unless the assistant has clearly stopped a "
     "concrete in-progress task that cannot proceed without specific input "
     "from the user. When in doubt, choose 'none'. "
-    "Use action_kind='clarify' ONLY when the assistant has paused a "
+    "Use action_kind='ask_user_question' ONLY when the assistant has paused a "
     "specific in-progress task and is asking a specific question whose "
     "answer is required to continue. Set 'question' to that concise "
     "question. "
@@ -480,9 +480,9 @@ _DYNAMIC_LOOP_EXCLUDED_TOOLS: frozenset[str] = frozenset({
 class _UserActionRescueDecision(BaseModel):
     action_kind: str = Field(
         default="none",
-        description="One of none, clarify, or action_required.",
+        description="One of none, ask_user_question, or action_required.",
     )
-    needs_clarify: bool = Field(
+    needs_ask_user_question: bool = Field(
         default=False,
         description="Whether the assistant draft is blocked on user input.",
     )
@@ -491,7 +491,7 @@ class _UserActionRescueDecision(BaseModel):
     )
     question: str = Field(
         default="",
-        description="Concise question to ask via clarify when blocked.",
+        description="Concise question to ask via ask_user_question when blocked.",
     )
     context: str = Field(
         default="",
@@ -2073,12 +2073,12 @@ class AgentHarness:
                     )
                 )
             ):
-                if inbox_rescue_kind == "clarify":
+                if inbox_rescue_kind == "ask_user_question":
                     tool_calls_raw = assistant_message.get("tool_calls")
                     finish_reason = "tool_calls"
                     usage_data["finish_reason"] = finish_reason
                     response_data["finish_reason"] = finish_reason
-                    response_data["clarify_rescue"] = True
+                    response_data["ask_user_question_rescue"] = True
                 elif inbox_rescue_kind == "action_required":
                     response_data["action_required_rescue"] = True
 
@@ -2882,8 +2882,8 @@ class AgentHarness:
     ) -> str | None:
         """Route final plain-text user blocks into the appropriate inbox path.
 
-        Text answers become clarify tool calls. User actions such as login or
-        approval become first-class action_required inbox items.
+        Text answers become ask_user_question tool calls. User actions such
+        as login or approval become first-class action_required inbox items.
         """
         content = (assistant_message.get("content") or "").strip()
         if not content:
@@ -2902,7 +2902,11 @@ class AgentHarness:
         )
         action_kind = str(decision.get("action_kind") or "").strip()
         if not action_kind:
-            action_kind = "clarify" if decision.get("needs_clarify") else "none"
+            action_kind = (
+                "ask_user_question"
+                if decision.get("needs_ask_user_question")
+                else "none"
+            )
         if action_kind == "none":
             return None
 
@@ -2937,11 +2941,11 @@ class AgentHarness:
             )
             return "action_required"
 
-        if action_kind != "clarify":
+        if action_kind != "ask_user_question":
             return None
-        if "clarify" not in self._tools.tool_names:
+        if "ask_user_question" not in self._tools.tool_names:
             return None
-        if tool_filter is not None and "clarify" not in tool_filter:
+        if tool_filter is not None and "ask_user_question" not in tool_filter:
             return None
 
         question = str(decision.get("question") or "").strip()
@@ -2949,14 +2953,14 @@ class AgentHarness:
             return None
         context = str(decision.get("context") or content).strip()
 
-        tool_call_id = f"call_clarify_rescue_{uuid4().hex[:24]}"
+        tool_call_id = f"call_ask_user_question_rescue_{uuid4().hex[:24]}"
         assistant_message["content"] = None
         assistant_message["tool_calls"] = [
             {
                 "id": tool_call_id,
                 "type": "function",
                 "function": {
-                    "name": "clarify",
+                    "name": "ask_user_question",
                     "arguments": json.dumps(
                         {
                             "questions": [
@@ -2973,14 +2977,14 @@ class AgentHarness:
             },
         ]
         logger.info(
-            "Session %s: converted final response into clarify tool call "
+            "Session %s: converted final response into ask_user_question tool call "
             "(reason=%s)",
             session.id,
             decision.get("reason") or "user_input",
         )
-        return "clarify"
+        return "ask_user_question"
 
-    async def _maybe_convert_final_response_to_clarify(
+    async def _maybe_convert_final_response_to_ask_user_question(
         self,
         *,
         session: Session,
@@ -2989,7 +2993,8 @@ class AgentHarness:
         model: str,
         tool_filter: set[str] | None,
     ) -> bool:
-        """Compatibility wrapper for tests/callers that only need clarify."""
+        """Compatibility wrapper for tests/callers that only need
+        ask_user_question."""
         routed = await self._maybe_route_final_response_to_inbox(
             session=session,
             messages=messages,
@@ -2997,7 +3002,7 @@ class AgentHarness:
             model=model,
             tool_filter=tool_filter,
         )
-        return routed == "clarify"
+        return routed == "ask_user_question"
 
     async def _judge_final_response_user_action(
         self,
@@ -3065,18 +3070,22 @@ class AgentHarness:
                     "unchanged: %s",
                     exc,
                 )
-                return {"needs_clarify": False, "reason": "judge_error"}
+                return {
+                    "needs_ask_user_question": False,
+                    "reason": "judge_error",
+                }
 
         return self._normalize_user_action_decision(parsed)
 
-    async def _judge_final_response_needs_clarify(
+    async def _judge_final_response_needs_ask_user_question(
         self,
         *,
         messages: list[dict],
         assistant_content: str,
         model: str,
     ) -> dict[str, Any]:
-        """Compatibility wrapper for callers that only inspect clarify fields."""
+        """Compatibility wrapper for callers that only inspect the
+        ask_user_question fields."""
         return await self._judge_final_response_user_action(
             messages=messages,
             assistant_content=assistant_content,
@@ -3098,13 +3107,18 @@ class AgentHarness:
                 "target",
             )
         )
-        if action_kind not in {"", "none", "clarify", "action_required"}:
+        if action_kind not in {
+            "", "none", "ask_user_question", "action_required",
+        }:
             action_kind = ""
-        if action_kind in {"", "none"} and parsed.get("needs_clarify"):
+        if (
+            action_kind in {"", "none"}
+            and parsed.get("needs_ask_user_question")
+        ):
             action_kind = (
                 "action_required"
                 if AgentHarness._looks_like_user_action_requirement(decision_text)
-                else "clarify"
+                else "ask_user_question"
             )
         elif not action_kind:
             action_kind = "none"
@@ -3117,7 +3131,7 @@ class AgentHarness:
             target = target or ("browser" if action_type == "browser" else "session")
         return {
             "action_kind": action_kind,
-            "needs_clarify": action_kind == "clarify",
+            "needs_ask_user_question": action_kind == "ask_user_question",
             "reason": str(parsed.get("reason") or "user_input"),
             "question": parsed.get("question"),
             "title": parsed.get("title"),
@@ -3252,10 +3266,10 @@ class AgentHarness:
         """Keep platform control-plane tools available after filtering."""
         if tool_filter is None:
             return None
-        if "clarify" not in self._tools.tool_names:
+        if "ask_user_question" not in self._tools.tool_names:
             return tool_filter
         updated = set(tool_filter)
-        updated.add("clarify")
+        updated.add("ask_user_question")
         return updated
 
     def _tool_filter_for_session(self, session: Session) -> set[str] | None:

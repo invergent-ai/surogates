@@ -1,4 +1,4 @@
-"""Clarify tool -- interactive multi-question prompts.
+"""ask_user_question tool -- interactive multi-question prompts.
 
 The tool lets the agent present a batch of clarifying questions to the user
 through the web chat widget.  Each question carries up to four labeled
@@ -9,11 +9,13 @@ batch, so the agent receives one structured response for the whole ask.
 Round-trip
 ==========
 
-1. The LLM invokes ``clarify`` with a ``questions`` array.
+1. The LLM invokes ``ask_user_question`` with a ``questions`` array.
 2. ``tool_exec`` emits ``TOOL_CALL`` with ``tool_call_id`` and the spec.
 3. The frontend renders the widget from the tool-call arguments.
-4. The user submits via ``POST /v1/sessions/{id}/clarify/{tool_call_id}/respond``.
-5. The endpoint emits :attr:`~surogates.session.events.EventType.CLARIFY_RESPONSE`.
+4. The user submits via
+   ``POST /v1/sessions/{id}/ask_user_question/{tool_call_id}/respond``.
+5. The endpoint emits
+   :attr:`~surogates.session.events.EventType.ASK_USER_QUESTION_RESPONSE`.
 6. This handler polls the event log for the matching response, renewing
    the session lease to prevent expiry, and returns the answers as JSON.
 7. If the user pauses the session instead of answering, the handler exits
@@ -44,16 +46,18 @@ MAX_DESCRIPTION_LENGTH = 500
 _POLL_INTERVAL_SECONDS = 1.0
 # Keep well under :data:`surogates.harness.loop._LEASE_TTL_SECONDS` (60s).
 _LEASE_RENEW_INTERVAL_SECONDS = 30.0
-# Hard cap on how long we keep the worker parked on a single clarify call.
+# Hard cap on how long we keep the worker parked on a single ask call.
 # Past this, we emit a timeout response so the LLM can move on.
 _MAX_WAIT_SECONDS = 30 * 60  # 30 minutes
 
 
-CLARIFY_DESCRIPTION = (
-    "Ask the user one or more clarifying questions before proceeding.  Each "
-    "question is rendered as a tab in the chat widget; the user picks an "
-    "answer per question (or types an 'Other' response) and submits the "
-    "batch at once.\n\n"
+ASK_USER_QUESTION_DESCRIPTION = (
+    "Ask the user one or more questions and wait for their answers before "
+    "continuing.  Use this whenever you need to gather user input — pick "
+    "between approaches, confirm requirements, collect missing facts, "
+    "resolve ambiguity.  Each question is rendered as a tab in the chat "
+    "widget; the user picks an answer per question (or types an 'Other' "
+    "response) and submits the batch at once.\n\n"
     "Each question has:\n"
     "- ``prompt`` (required) -- the question text.\n"
     "- ``choices`` (optional) -- up to 4 labeled options.  Each choice is "
@@ -64,6 +68,7 @@ CLARIFY_DESCRIPTION = (
     "Use when:\n"
     "- The task is ambiguous and the user must choose an approach.\n"
     "- A decision has meaningful trade-offs worth surfacing.\n"
+    "- You're missing information only the user can supply.\n"
     "- You need to collect multiple decisions in one round-trip.\n\n"
     "Do NOT use for simple yes/no confirmation of dangerous commands (the "
     "terminal tool handles that).  Prefer a reasonable default yourself "
@@ -73,7 +78,7 @@ CLARIFY_DESCRIPTION = (
 )
 
 
-CLARIFY_SCHEMA = {
+ASK_USER_QUESTION_SCHEMA = {
     "type": "object",
     "properties": {
         "questions": {
@@ -138,51 +143,51 @@ CLARIFY_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 
-class ClarifySchemaError(ValueError):
+class AskUserQuestionSchemaError(ValueError):
     """Raised when the LLM-supplied ``questions`` payload is invalid."""
 
 
 def _validate_questions(raw: Any) -> list[dict[str, Any]]:
-    """Return a normalised list of questions, or raise :class:`ClarifySchemaError`."""
+    """Return a normalised list of questions, or raise :class:`AskUserQuestionSchemaError`."""
     if not isinstance(raw, list):
-        raise ClarifySchemaError("`questions` must be an array of objects.")
+        raise AskUserQuestionSchemaError("`questions` must be an array of objects.")
     if not raw:
-        raise ClarifySchemaError("`questions` must not be empty.")
+        raise AskUserQuestionSchemaError("`questions` must not be empty.")
     if len(raw) > MAX_QUESTIONS:
-        raise ClarifySchemaError(
+        raise AskUserQuestionSchemaError(
             f"`questions` supports at most {MAX_QUESTIONS} entries.",
         )
 
     normalised: list[dict[str, Any]] = []
     for i, q in enumerate(raw):
         if not isinstance(q, dict):
-            raise ClarifySchemaError(f"questions[{i}] must be an object.")
+            raise AskUserQuestionSchemaError(f"questions[{i}] must be an object.")
 
         prompt = q.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
-            raise ClarifySchemaError(f"questions[{i}].prompt is required.")
+            raise AskUserQuestionSchemaError(f"questions[{i}].prompt is required.")
         prompt = prompt.strip()[:MAX_PROMPT_LENGTH]
 
         raw_choices = q.get("choices")
         choices: list[dict[str, str]] = []
         if raw_choices is not None:
             if not isinstance(raw_choices, list):
-                raise ClarifySchemaError(
+                raise AskUserQuestionSchemaError(
                     f"questions[{i}].choices must be an array.",
                 )
             if len(raw_choices) > MAX_CHOICES_PER_QUESTION:
-                raise ClarifySchemaError(
+                raise AskUserQuestionSchemaError(
                     f"questions[{i}].choices supports at most "
                     f"{MAX_CHOICES_PER_QUESTION} entries.",
                 )
             for j, c in enumerate(raw_choices):
                 if not isinstance(c, dict):
-                    raise ClarifySchemaError(
+                    raise AskUserQuestionSchemaError(
                         f"questions[{i}].choices[{j}] must be an object.",
                     )
                 label = c.get("label")
                 if not isinstance(label, str) or not label.strip():
-                    raise ClarifySchemaError(
+                    raise AskUserQuestionSchemaError(
                         f"questions[{i}].choices[{j}].label is required.",
                     )
                 entry: dict[str, str] = {
@@ -223,14 +228,16 @@ async def _wait_for_response(
     session_store: Any,
     lease_token: Any | None,
 ) -> dict[str, Any]:
-    """Poll for the matching ``CLARIFY_RESPONSE`` event or a session stop.
+    """Poll for the matching ``ASK_USER_QUESTION_RESPONSE`` event or a
+    session stop.
 
     Returns ``{"responses": [...], "cancelled": False}`` on success, or
     ``{"cancelled": True, "reason": <why>}`` when the user stopped the
     chat (session paused/completed/failed) or we hit the wait cap.
 
-    Only ``CLARIFY_RESPONSE`` events are read from the log -- filtering by
-    ``tool_call_id`` is enough because each id is unique per LLM call.
+    Only ``ASK_USER_QUESTION_RESPONSE`` events are read from the log --
+    filtering by ``tool_call_id`` is enough because each id is unique
+    per LLM call.
     Cancel detection uses the session's current status rather than an
     event-log scan so we never confuse a fresh pause with a historical one.
 
@@ -245,7 +252,7 @@ async def _wait_for_response(
         now = asyncio.get_running_loop().time()
         if now >= deadline:
             logger.warning(
-                "Clarify tool %s timed out after %ds", tool_call_id,
+                "ask_user_question tool %s timed out after %ds", tool_call_id,
                 _MAX_WAIT_SECONDS,
             )
             return {"cancelled": True, "reason": "timeout"}
@@ -258,7 +265,7 @@ async def _wait_for_response(
                 )
             except Exception:
                 logger.warning(
-                    "Failed to renew lease during clarify wait for %s",
+                    "Failed to renew lease during ask_user_question wait for %s",
                     session_id, exc_info=True,
                 )
             next_renew = now + _LEASE_RENEW_INTERVAL_SECONDS
@@ -267,7 +274,7 @@ async def _wait_for_response(
         events = await session_store.get_events(
             session_id,
             after=cursor,
-            types=[EventType.CLARIFY_RESPONSE],
+            types=[EventType.ASK_USER_QUESTION_RESPONSE],
         )
         for event in events:
             cursor = max(cursor, event.id)
@@ -286,7 +293,7 @@ async def _wait_for_response(
             session = await session_store.get_session(session_id)
         except Exception:
             logger.debug(
-                "Session lookup failed during clarify wait for %s",
+                "Session lookup failed during ask_user_question wait for %s",
                 session_id, exc_info=True,
             )
             session = None
@@ -301,8 +308,8 @@ async def _wait_for_response(
 # ---------------------------------------------------------------------------
 
 
-async def _clarify_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
-    """Async handler for the clarify tool.
+async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+    """Async handler for the ask_user_question tool.
 
     Required kwargs (injected by :mod:`surogates.harness.tool_exec`):
 
@@ -321,7 +328,7 @@ async def _clarify_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
 
     if session_store is None or not tool_call_id or raw_session_id is None:
         return json.dumps(
-            {"error": "Clarify tool requires a session context."},
+            {"error": "ask_user_question tool requires a session context."},
             ensure_ascii=False,
         )
     session_id = (
@@ -331,7 +338,7 @@ async def _clarify_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
 
     try:
         questions = _validate_questions(arguments.get("questions"))
-    except ClarifySchemaError as exc:
+    except AskUserQuestionSchemaError as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
     await session_store.emit_event(
@@ -372,14 +379,14 @@ async def _clarify_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
 
 
 def register(registry: ToolRegistry) -> None:
-    """Register the clarify tool."""
+    """Register the ask_user_question tool."""
     registry.register(
-        name="clarify",
+        name="ask_user_question",
         schema=ToolSchema(
-            name="clarify",
-            description=CLARIFY_DESCRIPTION,
-            parameters=CLARIFY_SCHEMA,
+            name="ask_user_question",
+            description=ASK_USER_QUESTION_DESCRIPTION,
+            parameters=ASK_USER_QUESTION_SCHEMA,
         ),
-        handler=_clarify_handler,
-        toolset="clarify",
+        handler=_ask_user_question_handler,
+        toolset="ask_user_question",
     )

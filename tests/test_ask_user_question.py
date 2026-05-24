@@ -1,11 +1,11 @@
-"""Tests for the clarify tool and its response endpoint.
+"""Tests for the ask_user_question tool and its response endpoint.
 
 Covers:
 - Schema validation (``_validate_questions``).
 - Handler round-trip with a fake session store (response arrives).
 - Handler cancellation via session status flip to ``paused``.
 - Handler ignores responses with a non-matching ``tool_call_id``.
-- The ``ClarifyAnswer`` / ``ClarifyResponseRequest`` API models.
+- The ``AskUserQuestionAnswer`` / ``AskUserQuestionResponseRequest`` API models.
 """
 
 from __future__ import annotations
@@ -19,16 +19,16 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from surogates.api.routes.clarify import (
-    ClarifyAnswer,
-    ClarifyResponseRequest,
+from surogates.api.routes.ask_user_question import (
+    AskUserQuestionAnswer,
+    AskUserQuestionResponseRequest,
 )
 from surogates.session.events import EventType
-from surogates.tools.builtin.clarify import (
-    ClarifySchemaError,
+from surogates.tools.builtin.ask_user_question import (
+    AskUserQuestionSchemaError,
     MAX_CHOICES_PER_QUESTION,
     MAX_QUESTIONS,
-    _clarify_handler,
+    _ask_user_question_handler,
     _validate_questions,
 )
 
@@ -39,7 +39,7 @@ from surogates.tools.builtin.clarify import (
 
 
 class FakeEvent:
-    """Minimal event shape the clarify handler touches."""
+    """Minimal event shape the ask_user_question handler touches."""
 
     __slots__ = ("id", "type", "data")
 
@@ -50,10 +50,10 @@ class FakeEvent:
 
 
 class FakeSessionStore:
-    """In-memory session store sufficient for the clarify handler.
+    """In-memory session store sufficient for the ask_user_question handler.
 
     Implements ``emit_event``, ``get_events``, ``get_session``, and
-    ``renew_lease`` -- every method the clarify handler reaches for.
+    ``renew_lease`` -- every method the ask_user_question handler reaches for.
     """
 
     def __init__(self, status: str = "active") -> None:
@@ -108,29 +108,29 @@ class FakeSessionStore:
 class TestValidateQuestions:
 
     def test_requires_array(self):
-        with pytest.raises(ClarifySchemaError):
+        with pytest.raises(AskUserQuestionSchemaError):
             _validate_questions("not an array")  # type: ignore[arg-type]
 
     def test_rejects_empty(self):
-        with pytest.raises(ClarifySchemaError):
+        with pytest.raises(AskUserQuestionSchemaError):
             _validate_questions([])
 
     def test_rejects_too_many(self):
-        with pytest.raises(ClarifySchemaError):
+        with pytest.raises(AskUserQuestionSchemaError):
             _validate_questions(
                 [{"prompt": f"q{i}"} for i in range(MAX_QUESTIONS + 1)],
             )
 
     def test_rejects_missing_prompt(self):
-        with pytest.raises(ClarifySchemaError):
+        with pytest.raises(AskUserQuestionSchemaError):
             _validate_questions([{"choices": []}])
 
     def test_rejects_blank_prompt(self):
-        with pytest.raises(ClarifySchemaError):
+        with pytest.raises(AskUserQuestionSchemaError):
             _validate_questions([{"prompt": "   "}])
 
     def test_rejects_too_many_choices(self):
-        with pytest.raises(ClarifySchemaError):
+        with pytest.raises(AskUserQuestionSchemaError):
             _validate_questions([{
                 "prompt": "pick",
                 "choices": [
@@ -139,7 +139,7 @@ class TestValidateQuestions:
             }])
 
     def test_rejects_missing_choice_label(self):
-        with pytest.raises(ClarifySchemaError):
+        with pytest.raises(AskUserQuestionSchemaError):
             _validate_questions([{
                 "prompt": "pick",
                 "choices": [{"description": "only desc"}],
@@ -208,7 +208,7 @@ async def test_handler_returns_responses_when_matching_event_arrives():
         await asyncio.sleep(0.05)
         await store.emit_event(
             session_id,
-            EventType.CLARIFY_RESPONSE,
+            EventType.ASK_USER_QUESTION_RESPONSE,
             {
                 "tool_call_id": tool_call_id,
                 "responses": [
@@ -218,7 +218,7 @@ async def test_handler_returns_responses_when_matching_event_arrives():
         )
 
     async def invoke() -> str:
-        return await _clarify_handler(
+        return await _ask_user_question_handler(
             args,
             session_id=session_id,
             session_store=store,
@@ -248,7 +248,7 @@ async def test_handler_returns_cancelled_when_session_is_paused():
         store.status = "paused"
 
     async def invoke() -> str:
-        return await _clarify_handler(
+        return await _ask_user_question_handler(
             {"questions": [{"prompt": "q"}]},
             session_id=session_id,
             session_store=store,
@@ -274,7 +274,7 @@ async def test_handler_ignores_response_for_other_tool_call():
         await asyncio.sleep(0.05)
         await store.emit_event(
             session_id,
-            EventType.CLARIFY_RESPONSE,
+            EventType.ASK_USER_QUESTION_RESPONSE,
             {
                 "tool_call_id": other_tool_id,
                 "responses": [
@@ -286,7 +286,7 @@ async def test_handler_ignores_response_for_other_tool_call():
         await asyncio.sleep(0.05)
         await store.emit_event(
             session_id,
-            EventType.CLARIFY_RESPONSE,
+            EventType.ASK_USER_QUESTION_RESPONSE,
             {
                 "tool_call_id": my_tool_id,
                 "responses": [
@@ -296,7 +296,7 @@ async def test_handler_ignores_response_for_other_tool_call():
         )
 
     async def invoke() -> str:
-        return await _clarify_handler(
+        return await _ask_user_question_handler(
             {"questions": [{"prompt": "q"}]},
             session_id=session_id,
             session_store=store,
@@ -313,7 +313,7 @@ async def test_handler_ignores_response_for_other_tool_call():
 @pytest.mark.asyncio
 async def test_handler_errors_without_session_context():
     # Missing store + session_id should produce an error payload, not a crash.
-    raw = await _clarify_handler(
+    raw = await _ask_user_question_handler(
         {"questions": [{"prompt": "q"}]},
     )
     payload = json.loads(raw)
@@ -322,7 +322,7 @@ async def test_handler_errors_without_session_context():
 
 @pytest.mark.asyncio
 async def test_handler_reports_schema_error_as_json():
-    raw = await _clarify_handler(
+    raw = await _ask_user_question_handler(
         {"questions": []},
         session_id=uuid4(),
         session_store=FakeSessionStore(),
@@ -334,14 +334,14 @@ async def test_handler_reports_schema_error_as_json():
 
 @pytest.mark.asyncio
 async def test_handler_exits_quickly_when_session_already_paused():
-    """A clarify call made on an already-paused session must not hang --
+    """An ask_user_question call made on an already-paused session must not hang --
     the first poll sees the paused status and returns ``cancelled``.
     """
     session_id = uuid4()
     store = FakeSessionStore(status="paused")
 
     raw = await asyncio.wait_for(
-        _clarify_handler(
+        _ask_user_question_handler(
             {"questions": [{"prompt": "q"}]},
             session_id=session_id,
             session_store=store,
@@ -360,35 +360,35 @@ async def test_handler_exits_quickly_when_session_already_paused():
 # =========================================================================
 
 
-class TestClarifyRequestModel:
+class TestAskUserQuestionRequestModel:
 
     def test_answer_requires_question_and_answer(self):
         with pytest.raises(ValidationError):
-            ClarifyAnswer(question="", answer="a")
+            AskUserQuestionAnswer(question="", answer="a")
         with pytest.raises(ValidationError):
-            ClarifyAnswer(question="q", answer="")
+            AskUserQuestionAnswer(question="q", answer="")
 
     def test_strips_whitespace(self):
-        a = ClarifyAnswer(question="  q  ", answer=" a ")
+        a = AskUserQuestionAnswer(question="  q  ", answer=" a ")
         assert a.question == "q"
         assert a.answer == "a"
 
     def test_is_other_defaults_false(self):
-        a = ClarifyAnswer(question="q", answer="a")
+        a = AskUserQuestionAnswer(question="q", answer="a")
         assert a.is_other is False
 
     def test_request_requires_at_least_one_response(self):
         with pytest.raises(ValidationError):
-            ClarifyResponseRequest(responses=[])
+            AskUserQuestionResponseRequest(responses=[])
 
     def test_request_caps_responses(self):
         too_many = [
-            ClarifyAnswer(question=f"q{i}", answer=f"a{i}")
+            AskUserQuestionAnswer(question=f"q{i}", answer=f"a{i}")
             for i in range(MAX_QUESTIONS + 1)
         ]
         with pytest.raises(ValidationError):
-            ClarifyResponseRequest(responses=too_many)
+            AskUserQuestionResponseRequest(responses=too_many)
 
     def test_answer_length_capped(self):
         with pytest.raises(ValidationError):
-            ClarifyAnswer(question="q", answer="a" * 5000)
+            AskUserQuestionAnswer(question="q", answer="a" * 5000)

@@ -83,7 +83,7 @@ function createAdapter(
     async getArtifact(): Promise<AgentChatArtifactPayload> {
       throw new Error("not used by missions tests");
     },
-    async submitClarifyResponse() {
+    async submitAskUserQuestionResponse() {
       return { eventId: 1 };
     },
     async getWorkspaceTree(): Promise<AgentChatWorkspaceTree> {

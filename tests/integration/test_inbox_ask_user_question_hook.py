@@ -1,4 +1,4 @@
-"""Inbox hook tests for the clarify tool."""
+"""Inbox hook tests for the ask_user_question tool."""
 
 from __future__ import annotations
 
@@ -8,14 +8,14 @@ import pytest
 from sqlalchemy import select
 
 from surogates.db.models import InboxItem
-from surogates.tools.builtin import clarify as clarify_module
+from surogates.tools.builtin import ask_user_question as ask_user_question_module
 
 from .conftest import create_org, create_user
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
-async def test_clarify_emits_inbox_input_required(
+async def test_ask_user_question_emits_inbox_input_required(
     session_store,
     session_factory,
     monkeypatch,
@@ -33,7 +33,7 @@ async def test_clarify_emits_inbox_input_required(
         }
 
     monkeypatch.setattr(
-        clarify_module,
+        ask_user_question_module,
         "_wait_for_response",
         _answered_immediately,
     )
@@ -46,7 +46,7 @@ async def test_clarify_emits_inbox_input_required(
         agent_id="test-agent",
     )
 
-    raw = await clarify_module._clarify_handler(
+    raw = await ask_user_question_module._ask_user_question_handler(
         {
             "questions": [
                 {
@@ -57,7 +57,7 @@ async def test_clarify_emits_inbox_input_required(
         },
         session_id=session.id,
         session_store=session_store,
-        tool_call_id="tc-clarify-1",
+        tool_call_id="tc-ask-1",
     )
 
     result = json.loads(raw)
@@ -72,6 +72,6 @@ async def test_clarify_emits_inbox_input_required(
 
     assert row.kind == "input_required"
     assert row.title == "Which color?"
-    assert row.payload["tool_call_id"] == "tc-clarify-1"
+    assert row.payload["tool_call_id"] == "tc-ask-1"
     assert row.payload["questions"][0]["prompt"] == "Which color?"
-    assert row.action_ref["tool_call_id"] == "tc-clarify-1"
+    assert row.action_ref["tool_call_id"] == "tc-ask-1"

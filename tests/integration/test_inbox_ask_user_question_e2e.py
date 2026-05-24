@@ -1,4 +1,4 @@
-"""End-to-end tests for clarify responses through the inbox surface."""
+"""End-to-end tests for ask_user_question responses through the inbox surface."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from .inbox_e2e_helpers import create_user_token_session
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
-async def test_clarify_through_inbox(
+async def test_ask_user_question_through_inbox(
     inbox_client,
     session_factory,
     session_store,
@@ -24,7 +24,7 @@ async def test_clarify_through_inbox(
         user_session.session.id,
         EventType.INBOX_INPUT_REQUIRED,
         {
-            "tool_call_id": "tc-e2e-clarify",
+            "tool_call_id": "tc-e2e-ask",
             "questions": [{"prompt": "Pick a color"}],
             "context": "",
         },
@@ -44,12 +44,12 @@ async def test_clarify_through_inbox(
     item = items[0]
     assert item["kind"] == "input_required"
     assert item["status"] == "pending"
-    assert item["action_ref"]["tool_call_id"] == "tc-e2e-clarify"
+    assert item["action_ref"]["tool_call_id"] == "tc-e2e-ask"
 
     response = await inbox_client.post(
         (
             f"/v1/sessions/{user_session.session.id}"
-            "/clarify/tc-e2e-clarify/respond"
+            "/ask_user_question/tc-e2e-ask/respond"
         ),
         json={"responses": [{"question": "Pick a color", "answer": "blue"}]},
         headers=user_session.auth_headers,
@@ -67,16 +67,16 @@ async def test_clarify_through_inbox(
     assert detail["responded_at"] is not None
 
     async with session_store._sf() as db:
-        clarify_event = (
+        ask_user_question_event = (
             await db.execute(
                 select(Event).where(
                     Event.session_id == user_session.session.id,
-                    Event.type == EventType.CLARIFY_RESPONSE.value,
+                    Event.type == EventType.ASK_USER_QUESTION_RESPONSE.value,
                 )
             )
         ).scalar_one()
 
-    assert clarify_event.data["tool_call_id"] == "tc-e2e-clarify"
-    assert clarify_event.data["responses"] == [
+    assert ask_user_question_event.data["tool_call_id"] == "tc-e2e-ask"
+    assert ask_user_question_event.data["responses"] == [
         {"question": "Pick a color", "answer": "blue", "is_other": False}
     ]

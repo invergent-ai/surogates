@@ -49,8 +49,8 @@ class ToolRuntime:
         #   tool when one fails (observed with sandbox-provisioning errors).
         from surogates.tools.builtin import (
             artifact,
+            ask_user_question,
             browser,
-            clarify,
             coordinator,
             cron,
             delegate,
@@ -84,7 +84,7 @@ class ToolRuntime:
             terminal,  # also registers the 'process' tool
             session_search,
             todo,
-            clarify,
+            ask_user_question,
             cron,
             coordinator,
             artifact,

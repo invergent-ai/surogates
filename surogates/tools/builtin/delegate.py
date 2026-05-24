@@ -60,11 +60,12 @@ _TRACE_SUMMARY_LIMIT: int = 10
 _VALID_ROLES = {"leaf", "orchestrator"}
 
 # Tools that should never run inside a delegated child, regardless of
-# agent_type preset or parent toolset. ``clarify`` would block waiting
-# for human input the child has no surface for; the coordinator-family
-# tools shouldn't let a child fork its own worker pool.
+# agent_type preset or parent toolset. ``ask_user_question`` would
+# block waiting for human input the child has no surface for; the
+# coordinator-family tools shouldn't let a child fork its own worker
+# pool.
 _DELEGATION_ALWAYS_BLOCKED_TOOLS: frozenset[str] = frozenset({
-    "clarify",
+    "ask_user_question",
     "spawn_worker",
     "send_worker_message",
     "stop_worker",

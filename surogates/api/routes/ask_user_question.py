@@ -1,8 +1,9 @@
-"""Clarify response endpoint -- receives the user's answers to a clarify
-tool call and emits :attr:`~surogates.session.events.EventType.CLARIFY_RESPONSE`.
+"""ask_user_question response endpoint -- receives the user's answers to
+an ``ask_user_question`` tool call and emits
+:attr:`~surogates.session.events.EventType.ASK_USER_QUESTION_RESPONSE`.
 
-The worker's clarify tool handler polls the event log for the matching
-``tool_call_id`` and returns the answers to the LLM.
+The worker's ask_user_question tool handler polls the event log for the
+matching ``tool_call_id`` and returns the answers to the LLM.
 """
 
 from __future__ import annotations
@@ -26,14 +27,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# Limits -- keep synced with the schema constants in clarify.py.
+# Limits -- keep synced with the schema constants in ask_user_question.py.
 _MAX_ANSWER_LENGTH = 2000
 _MAX_PROMPT_LENGTH = 1000
 _MAX_RESPONSES = 5
 
 
-class ClarifyAnswer(BaseModel):
-    """A single answer to one question in a clarify batch."""
+class AskUserQuestionAnswer(BaseModel):
+    """A single answer to one question in an ask_user_question batch."""
 
     question: str = Field(..., min_length=1, max_length=_MAX_PROMPT_LENGTH)
     answer: str = Field(..., min_length=1, max_length=_MAX_ANSWER_LENGTH)
@@ -48,15 +49,15 @@ class ClarifyAnswer(BaseModel):
         return v.strip()
 
 
-class ClarifyResponseRequest(BaseModel):
-    """Batch submission for one clarify tool call."""
+class AskUserQuestionResponseRequest(BaseModel):
+    """Batch submission for one ask_user_question tool call."""
 
-    responses: list[ClarifyAnswer] = Field(
+    responses: list[AskUserQuestionAnswer] = Field(
         ..., min_length=1, max_length=_MAX_RESPONSES,
     )
 
 
-class ClarifyResponseReply(BaseModel):
+class AskUserQuestionResponseReply(BaseModel):
     event_id: int
 
 
@@ -86,23 +87,24 @@ def _require_service_account_api_route(
 
 
 @router.post(
-    "/api/sessions/{session_id}/clarify/{tool_call_id}/respond",
-    response_model=ClarifyResponseReply,
+    "/api/sessions/{session_id}/ask_user_question/{tool_call_id}/respond",
+    response_model=AskUserQuestionResponseReply,
     status_code=status.HTTP_201_CREATED,
 )
 @router.post(
-    "/sessions/{session_id}/clarify/{tool_call_id}/respond",
-    response_model=ClarifyResponseReply,
+    "/sessions/{session_id}/ask_user_question/{tool_call_id}/respond",
+    response_model=AskUserQuestionResponseReply,
     status_code=status.HTTP_201_CREATED,
 )
-async def respond_to_clarify(
+async def respond_to_ask_user_question(
     session_id: UUID,
     tool_call_id: str,
-    body: ClarifyResponseRequest,
+    body: AskUserQuestionResponseRequest,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
-) -> ClarifyResponseReply:
-    """Record the user's answers and unblock the worker's clarify handler."""
+) -> AskUserQuestionResponseReply:
+    """Record the user's answers and unblock the worker's
+    ask_user_question handler."""
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
 
@@ -134,11 +136,11 @@ async def respond_to_clarify(
     }
     event_id = await store.emit_event(
         session_id,
-        EventType.CLARIFY_RESPONSE,
+        EventType.ASK_USER_QUESTION_RESPONSE,
         payload,
     )
     logger.info(
-        "Clarify response recorded for session=%s tool_call_id=%s event_id=%s",
+        "ask_user_question response recorded for session=%s tool_call_id=%s event_id=%s",
         session_id, tc_id, event_id,
     )
     try:
@@ -159,5 +161,5 @@ async def respond_to_clarify(
             )
             await db.commit()
     except Exception:
-        logger.exception("Failed to mark clarify inbox item responded.")
-    return ClarifyResponseReply(event_id=event_id)
+        logger.exception("Failed to mark ask_user_question inbox item responded.")
+    return AskUserQuestionResponseReply(event_id=event_id)

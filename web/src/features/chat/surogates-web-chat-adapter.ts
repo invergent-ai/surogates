@@ -1,6 +1,6 @@
 import { getArtifact } from "@/api/artifacts";
 import { refreshSession } from "@/api/auth";
-import { submitClarifyResponse as submitClarifyResponseApi } from "@/api/clarify";
+import { submitAskUserQuestionResponse as submitAskUserQuestionResponseApi } from "@/api/ask_user_question";
 import { submitTurnFeedback } from "@/api/feedback";
 import * as inboxApi from "@/api/inbox";
 import * as missionsApi from "@/api/missions";
@@ -214,8 +214,8 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     return await getArtifact(input.sessionId, input.artifactId);
   },
 
-  async submitClarifyResponse(input) {
-    const response = await submitClarifyResponseApi(
+  async submitAskUserQuestionResponse(input) {
+    const response = await submitAskUserQuestionResponseApi(
       input.sessionId,
       input.toolCallId,
       input.responses,

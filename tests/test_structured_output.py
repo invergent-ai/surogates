@@ -26,7 +26,7 @@ async def test_generate_structured_uses_vllm_guided_json_for_custom_base_url() -
                 SimpleNamespace(
                     message=SimpleNamespace(
                         content=json.dumps({
-                            "route": "clarify",
+                            "route": "ask_user_question",
                             "confidence": 0.95,
                         }),
                         refusal=None,
@@ -44,7 +44,7 @@ async def test_generate_structured_uses_vllm_guided_json_for_custom_base_url() -
         max_tokens=64,
     )
 
-    assert decision == RoutingDecision(route="clarify", confidence=0.95)
+    assert decision == RoutingDecision(route="ask_user_question", confidence=0.95)
     call_kwargs = llm_client.chat.completions.create.await_args.kwargs
     assert call_kwargs["model"] == "surogate"
     assert "response_format" not in call_kwargs
@@ -88,7 +88,7 @@ async def test_generate_structured_uses_openai_response_format_by_default() -> N
 async def test_generate_structured_strips_markdown_fences() -> None:
     llm_client = AsyncOpenAI(api_key="test-key")
     fenced = "```json\n" + json.dumps(
-        {"route": "clarify", "confidence": 0.42}
+        {"route": "ask_user_question", "confidence": 0.42}
     ) + "\n```"
     llm_client.chat.completions.create = AsyncMock(
         return_value=SimpleNamespace(
@@ -107,7 +107,7 @@ async def test_generate_structured_strips_markdown_fences() -> None:
         output_model=RoutingDecision,
     )
 
-    assert decision == RoutingDecision(route="clarify", confidence=0.42)
+    assert decision == RoutingDecision(route="ask_user_question", confidence=0.42)
 
 
 async def test_generate_structured_returns_none_when_outlines_fails() -> None:
@@ -137,7 +137,7 @@ async def test_falls_back_to_json_mode_when_outlines_returns_none() -> None:
             choices=[
                 SimpleNamespace(
                     message=SimpleNamespace(
-                        content=json.dumps({"route": "clarify", "confidence": 0.8}),
+                        content=json.dumps({"route": "ask_user_question", "confidence": 0.8}),
                         refusal=None,
                     )
                 )
@@ -159,7 +159,7 @@ async def test_falls_back_to_json_mode_when_outlines_returns_none() -> None:
             output_model=RoutingDecision,
         )
 
-    assert decision == RoutingDecision(route="clarify", confidence=0.8)
+    assert decision == RoutingDecision(route="ask_user_question", confidence=0.8)
     call_kwargs = llm_client.chat.completions.create.await_args.kwargs
     # Fallback uses the simpler json_object mode, not Outlines' json_schema.
     assert call_kwargs["response_format"] == {"type": "json_object"}

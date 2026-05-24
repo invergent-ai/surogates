@@ -49,7 +49,7 @@ function createAdapter(sessions: AgentChatSession[]) {
     async getArtifact(): Promise<AgentChatArtifactPayload> {
       throw new Error("not used by session tree tests");
     },
-    async submitClarifyResponse() {
+    async submitAskUserQuestionResponse() {
       return { eventId: 1 };
     },
     async getWorkspaceTree(): Promise<AgentChatWorkspaceTree> {
