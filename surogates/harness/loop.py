@@ -1164,15 +1164,25 @@ class AgentHarness:
                 logger.debug(
                     "Sandbox cleanup on interrupt failed", exc_info=True,
                 )
-        await self._store.emit_event(
-            session.id,
-            EventType.SESSION_PAUSE,
-            {
-                "reason": "interrupted",
-                "message": reason_msg,
-                "worker_id": self._worker_id,
-            },
-        )
+        # Only emit SESSION_PAUSE if the session is still in 'paused'
+        # status. The /pause endpoint already emitted SESSION_PAUSE and
+        # set status='paused' before signalling the interrupt; if a
+        # concurrent /messages call has since flipped status back to
+        # 'active' (emitting SESSION_RESUME + USER_MESSAGE), this
+        # cleanup pause would land *after* the resume in the event log
+        # and leave the client's terminal flag stuck on, suppressing
+        # the running indicator for the new turn's deltas.
+        current = await self._store.get_session(session.id)
+        if current.status == "paused":
+            await self._store.emit_event(
+                session.id,
+                EventType.SESSION_PAUSE,
+                {
+                    "reason": "interrupted",
+                    "message": reason_msg,
+                    "worker_id": self._worker_id,
+                },
+            )
         self._clear_interrupt()
 
     # ------------------------------------------------------------------

@@ -540,4 +540,29 @@ describe("applyAgentChatEvent — user.message images and attachments", () => {
     expect(next.messages.at(-1)?.images).toBeUndefined();
     expect(next.messages.at(-1)?.attachments).toBeUndefined();
   });
+
+  it("recovers from an out-of-order pause after resume + user message (mid-stream send)", () => {
+    // When the user sends a message mid-stream, the composer calls
+    // /pause then /messages. The /messages route emits SESSION_RESUME +
+    // USER_MESSAGE, but the harness's abort cleanup can emit a second
+    // SESSION_PAUSE that lands *after* the resume — leaving terminal
+    // sticky and suppressing the running indicator for the new turn.
+    const events: Array<Parameters<typeof applyAgentChatEvent>[1]> = [
+      { type: "session.pause", eventId: 1, data: {} },
+      { type: "session.resume", eventId: 2, data: {} },
+      { type: "session.pause", eventId: 3, data: {} },
+      { type: "user.message", eventId: 4, data: { content: "follow-up" } },
+      { type: "harness.wake", eventId: 5, data: {} },
+      { type: "llm.request", eventId: 6, data: {} },
+      { type: "llm.delta", eventId: 7, data: { content: "hi" } },
+    ];
+
+    let state = createInitialAgentChatState();
+    for (const event of events) {
+      state = applyAgentChatEvent(state, event);
+    }
+
+    expect(state.terminal).toBe(false);
+    expect(state.isRunning).toBe(true);
+  });
 });
