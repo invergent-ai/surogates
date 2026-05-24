@@ -316,6 +316,28 @@ def _last_assistant_message_excerpt(
     return ""
 
 
+def _coerce_modified_to_datetime(raw: Any) -> "datetime | None":
+    """Normalize a storage backend's ``modified`` field to ``datetime``.
+
+    LocalBackend returns a POSIX float (``st_mtime``); S3Backend
+    returns the boto3 ``LastModified`` ``datetime`` directly. Anything
+    else is treated as unparseable and yields ``None`` so the caller
+    skips the entry rather than crashing.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        if raw.tzinfo is None:
+            return raw.replace(tzinfo=timezone.utc)
+        return raw
+    if isinstance(raw, (int, float)):
+        try:
+            return datetime.fromtimestamp(raw, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    return None
+
+
 def _coerce_tool_args(raw: Any) -> dict[str, Any]:
     """Best-effort coercion of a TOOL_CALL ``arguments`` field to a dict.
 
@@ -960,6 +982,11 @@ class AgentHarness:
         # iteration_index. Used to give later iteration summaries
         # context about earlier ones in the same turn.
         self._completed_iteration_summaries: dict[int, str] = {}
+        # Wall-clock timestamp captured at _run_loop start. Used by
+        # _scan_workspace_for_new_files to surface files modified
+        # during the current turn even when produced indirectly
+        # (terminal scripts, execute_code).
+        self._turn_started_at: datetime | None = None
 
         # Checkpoint flag — when enabled, the harness tells the sandbox
         # to take filesystem snapshots before file-mutating operations.
@@ -1537,6 +1564,11 @@ class AgentHarness:
         # chat view can correlate iteration.summary events back to the
         # right assistant message.
         turn_id = str(uuid4())
+        # Wall-clock turn start, used by _collect_candidate_artifacts to
+        # surface workspace files modified during this turn even when
+        # they were created indirectly (e.g. a python script written
+        # by the terminal tool).
+        self._turn_started_at = datetime.now(timezone.utc)
 
         # Reset per-turn summary tracking so a paused-and-resumed
         # session can't reuse stale tasks from a previous wake().
@@ -5574,6 +5606,88 @@ class AgentHarness:
                             kind="artifact", label=name, ref=artifact_id,
                         ),
                     )
+
+        # Workspace mtime scan — surfaces files created indirectly
+        # (terminal scripts, execute_code) that don't show up in the
+        # tool-call stream. Deduped against the paths already added
+        # via write_file/patch so the same file isn't listed twice.
+        try:
+            workspace_candidates = await self._scan_workspace_for_new_files(
+                session_id=session_id,
+                already_seen_paths={
+                    a.ref for a in out if a.kind == "file"
+                },
+            )
+        except Exception:
+            logger.debug(
+                "Workspace mtime scan failed for %s",
+                session_id, exc_info=True,
+            )
+            workspace_candidates = []
+        out.extend(workspace_candidates)
+        return out
+
+    async def _scan_workspace_for_new_files(
+        self,
+        *,
+        session_id: UUID,
+        already_seen_paths: set[str],
+    ) -> list[Any]:
+        """Return file candidates for workspace objects modified during
+        the current turn (mtime >= ``self._turn_started_at``).
+
+        Skips entries already surfaced via tool-call inspection
+        (``already_seen_paths``) to avoid duplicates. Cheap: the
+        ``stat`` call after ``list_keys`` is per-object, but workspace
+        sessions rarely exceed a few hundred files and the summarizer
+        only runs at turn end.
+        """
+        from surogates.harness.turn_summarizer import TurnArtifact
+        from surogates.storage.tenant import prefixed_session_workspace_prefix
+
+        storage = self._storage
+        if storage is None or self._turn_started_at is None:
+            return []
+
+        try:
+            session = await self._store.get_session(session_id)
+        except Exception:
+            return []
+        bucket = (session.config or {}).get("storage_bucket")
+        if not bucket:
+            return []
+        root_id = (
+            (session.config or {}).get("sandbox_root_session_id")
+            or str(session.id)
+        )
+        prefix = prefixed_session_workspace_prefix(session.config, str(root_id))
+
+        try:
+            keys = await storage.list_keys(bucket, prefix=prefix)
+        except Exception:
+            logger.debug(
+                "Workspace list_keys failed for bucket %r prefix %r",
+                bucket, prefix, exc_info=True,
+            )
+            return []
+
+        out: list[TurnArtifact] = []
+        turn_start = self._turn_started_at
+        for key in keys:
+            # Relative path the workspace viewer / file APIs use.
+            rel = key[len(prefix):] if key.startswith(prefix) else key
+            if not rel or rel in already_seen_paths:
+                continue
+            try:
+                meta = await storage.stat(bucket, key)
+            except Exception:
+                continue
+            modified = _coerce_modified_to_datetime(meta.get("modified"))
+            if modified is None or modified < turn_start:
+                continue
+            out.append(
+                TurnArtifact(kind="file", label=rel, ref=rel),
+            )
         return out
 
     async def _complete_session(

@@ -327,6 +327,53 @@ async def test_complete_session_skips_drain_without_turn_id(
 
 
 @pytest.mark.asyncio
+async def test_collect_candidate_artifacts_includes_workspace_mtime_files() -> None:
+    """Files modified during the turn but produced without a write_file/
+    patch/create_artifact call still surface — e.g. a python script run
+    through the terminal that writes a .docx to the workspace."""
+    from datetime import datetime, timedelta, timezone
+
+    store = AsyncMock()
+    store.get_events = AsyncMock(return_value=[])
+    # Session config carries the bucket name and (optionally) the
+    # sandbox_root_session_id for shared workspaces.
+    fake_session = SimpleNamespace(
+        id=uuid4(),
+        config={"storage_bucket": "bucket-1"},
+    )
+    store.get_session = AsyncMock(return_value=fake_session)
+
+    turn_start = datetime.now(timezone.utc)
+    fresh_key = "sessions/abc/reports/Summary.docx"
+    stale_key = "sessions/abc/old.txt"
+
+    class _FakeStorage:
+        async def list_keys(self, _bucket: str, prefix: str = "") -> list[str]:
+            return [fresh_key, stale_key]
+
+        async def stat(self, _bucket: str, key: str) -> dict[str, Any]:
+            if key == fresh_key:
+                # 5 seconds after turn start.
+                return {"modified": turn_start + timedelta(seconds=5)}
+            # Stale file: 1 hour before turn start.
+            return {"modified": turn_start - timedelta(hours=1)}
+
+    harness = _make_loop_harness(session_store=store, turn_summarizer=None)
+    harness._storage = _FakeStorage()
+    harness._turn_started_at = turn_start
+
+    candidates = await harness._collect_candidate_artifacts(
+        session_id=fake_session.id, turn_id="turn-X",
+    )
+
+    files = [c for c in candidates if c.kind == "file"]
+    refs = [f.ref for f in files]
+    # The post-turn-start file appears; the pre-turn-start file doesn't.
+    assert any("Summary.docx" in r for r in refs)
+    assert all("old.txt" not in r for r in refs)
+
+
+@pytest.mark.asyncio
 async def test_complete_session_skips_drain_without_summarizer() -> None:
     store = AsyncMock()
     store.emit_event = AsyncMock()
