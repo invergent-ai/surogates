@@ -28,7 +28,7 @@ Updated before each commit during inline execution.
 - [x] B1: SDK event type union and AGENT_CHAT_LISTENED_EVENTS
 - [x] B2: summary types and AgentChatMessage/State extensions
 - [x] B3: reducer stamps turnId/iterationIndex
-- [ ] B4: reducer handlers for iteration.summary and turn.summary
+- [x] B4: reducer handlers for iteration.summary and turn.summary
 - [ ] B5: viewMode runtime state, adapter methods, localStorage fallback
 - [ ] B6: IterationGroup component (reuses existing timeline pieces)
 - [ ] B7: TurnSummaryCard (with ArtifactBlock resolution)

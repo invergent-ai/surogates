@@ -8,6 +8,7 @@ import type {
   AgentChatState,
   AgentChatTokenUsage,
   AgentChatToolCallInfo,
+  AgentChatTurnArtifactRef,
   AgentChatViewMode,
 } from "../types";
 import { WORKSPACE_MUTATING_TOOLS } from "./events";
@@ -223,10 +224,10 @@ export function applyAgentChatEvent(
       return nextState;
 
     case "iteration.summary":
+      return applyIterationSummary(nextState, event);
+
     case "turn.summary":
-      // Real handlers land in B4; for now keep the switch exhaustive so
-      // TypeScript stays happy without us silently dropping the events.
-      return nextState;
+      return applyTurnSummary(nextState, event);
   }
 }
 
@@ -614,6 +615,95 @@ function applyLlmThinking(
     messages,
     isRunning: state.terminal ? state.isRunning : true,
   };
+}
+
+function applyIterationSummary(
+  state: AgentChatState,
+  event: AgentChatRuntimeEvent,
+): AgentChatState {
+  const turnId = optionalStringValue(event.data.turn_id);
+  const iterationIndex = optionalNumberValue(event.data.iteration_index);
+  const summary = optionalStringValue(event.data.summary);
+  if (!turnId || iterationIndex === null || !summary) return state;
+
+  const idx = state.messages.findIndex(
+    (m) =>
+      m.role === "assistant" &&
+      m.turnId === turnId &&
+      m.iterationIndex === iterationIndex,
+  );
+  if (idx < 0) return state;
+
+  const toolCallIds = Array.isArray(event.data.tool_call_ids)
+    ? (event.data.tool_call_ids as unknown[]).map((x) => String(x))
+    : [];
+
+  const messages = [...state.messages];
+  messages[idx] = {
+    ...messages[idx]!,
+    iterationSummary: {
+      iterationIndex,
+      summary,
+      toolCallIds,
+      startedAt: stringValue(event.data.started_at),
+      endedAt: stringValue(event.data.ended_at),
+    },
+  };
+  return { ...state, messages };
+}
+
+function applyTurnSummary(
+  state: AgentChatState,
+  event: AgentChatRuntimeEvent,
+): AgentChatState {
+  const turnId = optionalStringValue(event.data.turn_id);
+  if (!turnId) return state;
+
+  const recap = stringValue(event.data.recap);
+  const artifacts = parseTurnArtifacts(event.data.artifacts);
+
+  // Attach to the LAST assistant message in this turn.  The last
+  // iteration of the turn is what the SDK renders the TurnSummaryCard
+  // under.
+  let idx = -1;
+  for (let i = state.messages.length - 1; i >= 0; i--) {
+    const message = state.messages[i]!;
+    if (message.role === "assistant" && message.turnId === turnId) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx < 0) return state;
+
+  const messages = [...state.messages];
+  messages[idx] = {
+    ...messages[idx]!,
+    turnSummary: { turnId, recap, artifacts },
+  };
+  return { ...state, messages };
+}
+
+function parseTurnArtifacts(raw: unknown): AgentChatTurnArtifactRef[] {
+  if (!Array.isArray(raw)) return [];
+  const out: AgentChatTurnArtifactRef[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const obj = item as Record<string, unknown>;
+    const kind = obj.kind;
+    if (
+      kind !== "file" &&
+      kind !== "artifact" &&
+      kind !== "url" &&
+      kind !== "command"
+    ) {
+      continue;
+    }
+    const label = typeof obj.label === "string" ? obj.label : "";
+    const ref = typeof obj.ref === "string" ? obj.ref : "";
+    if (!label || !ref) continue;
+    out.push({ kind, label, ref });
+  }
+  return out;
 }
 
 function applyToolCall(
