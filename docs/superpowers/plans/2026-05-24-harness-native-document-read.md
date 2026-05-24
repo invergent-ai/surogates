@@ -24,8 +24,8 @@ Updated before every commit.
 - [x] Task 6 — Update the `read_file` tool description
 - [x] Task 7 — Worker-side image pre-dispatch branch
 - [x] Task 8 — Integration test for documents
-- [ ] **Task 9 (in progress)** — Verify dependency lock and parser availability
-- [ ] Task 10 — Update `CLAUDE.md`
+- [x] Task 9 — Verify dependency lock and parser availability
+- [ ] **Task 10 (in progress)** — Update `CLAUDE.md`
 - [ ] Task 11 — Smoke test the whole stack and verify
 
 ---

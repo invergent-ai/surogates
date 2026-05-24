@@ -2173,6 +2173,15 @@ crypto = [
 ]
 
 [[package]]
+name = "pypdf"
+version = "6.12.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/54/4d/39e48f5294a5a6bb78313839aae820666c2d30daeadb652ed50bd46cafac/pypdf-6.12.1.tar.gz", hash = "sha256:3953a097b9f26d4e0ead5ff95943d9971377557662a91d8872186053cd71d30a", size = 6467595, upload-time = "2026-05-22T10:07:59.979Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5e/aa/4d17fe9ff165d1341878c570b14f5b7291106d63411adf640942a7e638aa/pypdf-6.12.1-py3-none-any.whl", hash = "sha256:8fa2a2321cf16247ed848bd7c97f193a60c08670d04abed5b0138327e51c43b0", size = 343787, upload-time = "2026-05-22T10:07:57.801Z" },
+]
+
+[[package]]
 name = "pypdfium2"
 version = "5.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2723,13 +2732,17 @@ dependencies = [
     { name = "markitdown", extra = ["docx", "pdf", "pptx", "xlsx"] },
     { name = "mcp" },
     { name = "openai" },
+    { name = "openpyxl" },
     { name = "outlines" },
     { name = "passlib", extra = ["bcrypt"] },
     { name = "pillow" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "pypdf" },
+    { name = "python-docx" },
     { name = "python-jose", extra = ["cryptography"] },
     { name = "python-multipart" },
+    { name = "python-pptx" },
     { name = "python-telegram-bot" },
     { name = "pyyaml" },
     { name = "redis", extra = ["hiredis"] },
@@ -2743,11 +2756,8 @@ dependencies = [
 dev = [
     { name = "httpx" },
     { name = "moto", extra = ["s3"] },
-    { name = "openpyxl" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
-    { name = "python-docx" },
-    { name = "python-pptx" },
     { name = "reportlab" },
     { name = "respx" },
     { name = "testcontainers", extra = ["redis"] },
@@ -2767,13 +2777,17 @@ requires-dist = [
     { name = "markitdown", extras = ["docx", "pdf", "pptx", "xlsx"], specifier = ">=0.1,<1.0" },
     { name = "mcp", specifier = ">=1.2,<2.0" },
     { name = "openai", specifier = ">=1.30,<3.0" },
+    { name = "openpyxl", specifier = ">=3.1" },
     { name = "outlines", specifier = ">=1.2,<2.0" },
     { name = "passlib", extras = ["bcrypt"], specifier = ">=1.7,<2.0" },
     { name = "pillow", specifier = ">=10,<13" },
     { name = "pydantic", specifier = ">=2.4,<3.0" },
     { name = "pydantic-settings", specifier = ">=2.0,<3.0" },
+    { name = "pypdf", specifier = ">=4.0" },
+    { name = "python-docx", specifier = ">=1.1" },
     { name = "python-jose", extras = ["cryptography"], specifier = ">=3.3,<4.0" },
     { name = "python-multipart", specifier = ">=0.0.7,<1.0" },
+    { name = "python-pptx", specifier = ">=1.0" },
     { name = "python-telegram-bot", specifier = ">=21.0,<22.0" },
     { name = "pyyaml", specifier = ">=6.0,<7.0" },
     { name = "redis", extras = ["hiredis"], specifier = ">=5.0,<6.0" },
@@ -2787,11 +2801,8 @@ requires-dist = [
 dev = [
     { name = "httpx", specifier = ">=0.27,<1.0" },
     { name = "moto", extras = ["s3"], specifier = ">=5.0,<6.0" },
-    { name = "openpyxl", specifier = ">=3.1" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", specifier = ">=1.4.0a0" },
-    { name = "python-docx", specifier = ">=1.1" },
-    { name = "python-pptx", specifier = ">=1.0" },
     { name = "reportlab", specifier = ">=4.0" },
     { name = "respx", specifier = ">=0.21" },
     { name = "testcontainers", extras = ["postgres", "redis"], specifier = ">=4.0,<5.0" },
