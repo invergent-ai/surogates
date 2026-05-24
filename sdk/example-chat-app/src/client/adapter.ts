@@ -40,9 +40,9 @@ export function createExampleChatAdapter(baseUrl = "/api"): AgentChatAdapter {
         `${baseUrl}/sessions/${encodeURIComponent(input.sessionId)}/artifacts/${encodeURIComponent(input.artifactId)}`,
       );
     },
-    async submitClarifyResponse(input) {
+    async submitAskUserQuestionResponse(input) {
       return postJson(
-        `${baseUrl}/sessions/${encodeURIComponent(input.sessionId)}/clarify/${encodeURIComponent(input.toolCallId)}`,
+        `${baseUrl}/sessions/${encodeURIComponent(input.sessionId)}/ask_user_question/${encodeURIComponent(input.toolCallId)}`,
         { responses: input.responses },
       );
     },

@@ -16,7 +16,7 @@ export const HARNESS_BUILTIN_TOOL_NAMES = [
   "web_search",
   "web_extract",
   "web_crawl",
-  "clarify",
+  "ask_user_question",
   "delegate_task",
   "todo",
   "process",
@@ -52,9 +52,9 @@ export const DEMO_SLASH_COMMANDS: ExampleSlashCommand[] = [
     description: "Create markdown, table, chart, HTML, and SVG artifacts.",
   },
   {
-    value: "/demo-clarify",
-    label: "/demo-clarify",
-    description: "Show an interactive clarify tool call.",
+    value: "/demo-ask-user-question",
+    label: "/demo-ask-user-question",
+    description: "Show an interactive ask_user_question tool call.",
   },
   {
     value: "/demo-expert",
@@ -85,8 +85,8 @@ export function runDemoCommand(
     case "/demo-artifacts":
       emitArtifactDemo(store, record);
       return true;
-    case "/demo-clarify":
-      emitClarifyDemo(record);
+    case "/demo-ask-user-question":
+      emitAskUserQuestionDemo(record);
       return true;
     case "/demo-expert":
       emitExpertDemo(record);
@@ -103,20 +103,20 @@ export function runDemoCommand(
   }
 }
 
-export function submitClarifyDemo(
+export function submitAskUserQuestionDemo(
   record: ExampleSessionRecord,
   toolCallId: string,
   responses: unknown[],
 ) {
-  record.events.append("clarify.response", {
+  record.events.append("ask_user_question.response", {
     tool_call_id: toolCallId,
     responses,
   });
   record.events.append("llm.delta", {
-    content: "Thanks, the clarify response was received by the example backend.",
+    content: "Thanks, the ask_user_question response was received by the example backend.",
   });
   record.events.append("llm.response", {
-    message: { content: "Thanks, the clarify response was received by the example backend." },
+    message: { content: "Thanks, the ask_user_question response was received by the example backend." },
     model: record.session.model,
   });
   record.events.append("session.done", {});
@@ -476,10 +476,10 @@ function emitScriptedTools(record: ExampleSessionRecord, tools: DemoToolCall[]) 
   }
 }
 
-function emitClarifyDemo(record: ExampleSessionRecord) {
+function emitAskUserQuestionDemo(record: ExampleSessionRecord) {
   record.events.append("tool.call", {
-    tool_call_id: "demo-clarify",
-    name: "clarify",
+    tool_call_id: "demo-ask-user-question",
+    name: "ask_user_question",
     arguments: {
       questions: [
         {

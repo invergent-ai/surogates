@@ -7,7 +7,7 @@ import multer from "multer";
 import {
   DEMO_SLASH_COMMANDS,
   runDemoCommand,
-  submitClarifyDemo,
+  submitAskUserQuestionDemo,
   submitExpertFeedbackDemo,
 } from "./demo-commands";
 import { resolveOpenAiConfig, streamChatCompletions } from "./openai";
@@ -121,9 +121,9 @@ export function createExampleApp({
     response.json(store.getArtifact(requireRecord(store, request), request.params.artifactId));
   });
 
-  app.post("/api/sessions/:sessionId/clarify/:toolCallId", (request, response) => {
+  app.post("/api/sessions/:sessionId/ask_user_question/:toolCallId", (request, response) => {
     const record = requireRecord(store, request);
-    submitClarifyDemo(record, request.params.toolCallId, arrayBody(request, "responses"));
+    submitAskUserQuestionDemo(record, request.params.toolCallId, arrayBody(request, "responses"));
     response.json({ eventId: record.events.replay().at(-1)?.eventId });
   });
 

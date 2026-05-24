@@ -1,6 +1,6 @@
 import type {
   AgentChatArtifactPayload,
-  AgentChatClarifyAnswer,
+  AgentChatAskUserQuestionAnswer,
   AgentChatEventType,
   AgentChatExpertFeedbackRating,
   AgentChatRuntimeEvent,
@@ -33,8 +33,8 @@ export interface ConfigResponse {
   hasApiKey: boolean;
 }
 
-export interface ClarifyResponseRequest {
-  responses: AgentChatClarifyAnswer[];
+export interface AskUserQuestionResponseRequest {
+  responses: AgentChatAskUserQuestionAnswer[];
 }
 
 export interface ExpertFeedbackRequest {

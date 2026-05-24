@@ -69,7 +69,7 @@ Open the slash command menu in the composer or type one of these commands:
 
 - `/demo-tools`: representative tool calls and results.
 - `/demo-artifacts`: markdown, table, chart, HTML, and SVG artifacts.
-- `/demo-clarify`: interactive clarify tool response flow.
+- `/demo-ask-user-question`: interactive ask_user_question tool response flow.
 - `/demo-expert`: `consult_expert` output with feedback controls.
 - `/demo-errors`: policy denied and provider-style error states.
 - `/demo-context`: clears the visible conversation with `context.compact`.

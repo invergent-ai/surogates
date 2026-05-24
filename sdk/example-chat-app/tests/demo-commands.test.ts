@@ -11,7 +11,7 @@ describe("demo commands", () => {
     expect(DEMO_SLASH_COMMANDS.map((command) => command.value)).toEqual([
       "/demo-tools",
       "/demo-artifacts",
-      "/demo-clarify",
+      "/demo-ask-user-question",
       "/demo-expert",
       "/demo-errors",
       "/demo-context",
@@ -130,11 +130,11 @@ describe("demo commands", () => {
     expect(store.getArtifact(record, artifactId).meta.artifact_id).toBe(artifactId);
   });
 
-  it("emits clarify, expert, error, and context events", () => {
+  it("emits ask_user_question, expert, error, and context events", () => {
     const store = new ExampleSessionStore();
     const record = store.create();
 
-    runDemoCommand(store, record, "/demo-clarify");
+    runDemoCommand(store, record, "/demo-ask-user-question");
     runDemoCommand(store, record, "/demo-expert");
     runDemoCommand(store, record, "/demo-errors");
     runDemoCommand(store, record, "/demo-context");
