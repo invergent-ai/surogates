@@ -8,6 +8,7 @@ import type {
   AgentChatState,
   AgentChatTokenUsage,
   AgentChatToolCallInfo,
+  AgentChatViewMode,
 } from "../types";
 import { WORKSPACE_MUTATING_TOOLS } from "./events";
 
@@ -22,7 +23,10 @@ export const EMPTY_TOKEN_USAGE: AgentChatTokenUsage = {
 };
 
 export function createInitialAgentChatState(
-  options: { isLoadingHistory?: boolean } = {},
+  options: {
+    isLoadingHistory?: boolean;
+    viewMode?: AgentChatViewMode;
+  } = {},
 ): AgentChatState {
   return {
     messages: [],
@@ -36,6 +40,7 @@ export function createInitialAgentChatState(
     terminal: false,
     workspaceRefreshKey: 0,
     browser: null,
+    viewMode: options.viewMode ?? "simple",
   };
 }
 

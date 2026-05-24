@@ -26,7 +26,7 @@ Updated before each commit during inline execution.
 - [x] A8: emit turn.summary and drain in _complete_session
 - [x] A9: emit_turn_summaries gate integration test
 - [x] B1: SDK event type union and AGENT_CHAT_LISTENED_EVENTS
-- [ ] B2: summary types and AgentChatMessage/State extensions
+- [x] B2: summary types and AgentChatMessage/State extensions
 - [ ] B3: reducer stamps turnId/iterationIndex
 - [ ] B4: reducer handlers for iteration.summary and turn.summary
 - [ ] B5: viewMode runtime state, adapter methods, localStorage fallback

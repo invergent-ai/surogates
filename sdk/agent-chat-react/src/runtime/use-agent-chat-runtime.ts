@@ -401,6 +401,13 @@ export function useAgentChatRuntime({
     }
   }, [adapter, sessionId]);
 
+  // viewMode (Simple/Expert) plumbing — minimal scaffold for B2 so
+  // existing call sites compile. B5 wires real adapter + localStorage
+  // persistence.
+  const setViewMode = useCallback((mode: "simple" | "expert") => {
+    setState((prev) => ({ ...prev, viewMode: mode }));
+  }, []);
+
   return {
     state,
     session,
@@ -415,6 +422,8 @@ export function useAgentChatRuntime({
     retry,
     markSending,
     markSendError,
+    viewMode: state.viewMode,
+    setViewMode,
   };
 }
 
