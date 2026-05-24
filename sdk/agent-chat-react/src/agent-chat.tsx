@@ -50,8 +50,13 @@ export function AgentChat({
   // segmented control at the top of the layout swaps between them. On md+
   // both are visible and the toggle is hidden.
   const [mobileView, setMobileView] = useState<"chat" | "workspace">("chat");
-  // User-controlled visibility for the desktop right-stack panes. Both
-  // default to visible; the composer renders toggle buttons that flip these.
+  // User-controlled visibility for the desktop right-stack panes.
+  // Expert mode defaults both visible (the long-standing behavior);
+  // Simple mode hides the workspace pane so the conversation stays
+  // the centerpiece. The composer's toggle buttons still flip both
+  // in either mode, and a manual toggle is preserved across renders
+  // (the mode-sync effect below only fires when viewMode actually
+  // changes).
   const [showBrowser, setShowBrowser] = useState(true);
   const [showWorkspace, setShowWorkspace] = useState(true);
 
@@ -61,6 +66,14 @@ export function AgentChat({
     sessionId,
     onSessionChange,
   });
+
+  // Reset right-stack pane defaults when the user flips view modes.
+  // Simple mode hides the workspace pane; Expert mode shows it.
+  // Only fires on viewMode transitions, so manual toggles within a
+  // mode aren't clobbered.
+  useEffect(() => {
+    setShowWorkspace(runtime.viewMode === "expert");
+  }, [runtime.viewMode]);
   const isReadOnlySession = isScheduledRunSession(runtime.session);
   const effectiveDisabled = disabled || isReadOnlySession;
   const disabledReason = isReadOnlySession
