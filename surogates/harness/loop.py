@@ -1464,6 +1464,15 @@ class AgentHarness:
                     saga_start_event(new_saga.saga_id, str(session.id)),
                 )
 
+        # One stable turn_id per user turn. The wake() body services
+        # exactly one user turn (returns on session.complete/pause/fail),
+        # so a single UUID covers every iteration in scope here. Threaded
+        # into call_llm_with_retry and stamped on LLM_THINKING /
+        # LLM_RESPONSE / LLM_REQUEST / LLM_DELTA payloads so the Simple
+        # chat view can correlate iteration.summary events back to the
+        # right assistant message.
+        turn_id = str(uuid4())
+
         iteration = 0
         length_continuation_count = 0
         length_continuation_prefix = ""  # accumulated partial response across length retries
@@ -1579,6 +1588,7 @@ class AgentHarness:
                 await self._request_final_summary(
                     session, messages, system_prompt, lease,
                     cost_tracker=cost_tracker,
+                    turn_id=turn_id,
                 )
                 return
 
@@ -1587,7 +1597,12 @@ class AgentHarness:
             llm_request_event_id = await self._store.emit_event(
                 session.id,
                 EventType.LLM_REQUEST,
-                {"model": model_id, "iteration": iteration},
+                {
+                    "model": model_id,
+                    "iteration": iteration,
+                    "turn_id": turn_id,
+                    "iteration_index": iteration - 1,
+                },
             )
 
             # 2. Call the LLM with retry (streaming or non-streaming).
@@ -1767,6 +1782,7 @@ class AgentHarness:
                     session=session,
                     create_kwargs=create_kwargs,
                     iteration=iteration,
+                    turn_id=turn_id,
                     llm_client=self._llm,
                     store=self._store,
                     streaming_enabled=self._streaming_enabled,
@@ -1820,7 +1836,11 @@ class AgentHarness:
                 await self._store.emit_event(
                     session.id,
                     EventType.LLM_THINKING,
-                    {"reasoning": reasoning_text},
+                    {
+                        "reasoning": reasoning_text,
+                        "turn_id": turn_id,
+                        "iteration_index": iteration - 1,
+                    },
                 )
                 # Strip thinking blocks from content before storing.
                 strip_think_blocks(assistant_message)
@@ -1968,6 +1988,8 @@ class AgentHarness:
                 await self._abort_iteration_with_pause(session, saga)
                 return
 
+            response_data["turn_id"] = turn_id
+            response_data["iteration_index"] = iteration - 1
             event_id = await self._store.emit_event(
                 session.id,
                 EventType.LLM_RESPONSE,
@@ -2485,7 +2507,9 @@ class AgentHarness:
         # Budget exhausted after the while loop.  Request one final
         # summary with no tools.
         await self._request_final_summary(
-            session, messages, system_prompt, lease, cost_tracker=cost_tracker,
+            session, messages, system_prompt, lease,
+            cost_tracker=cost_tracker,
+            turn_id=turn_id,
         )
 
         # --- Saga finalization ---
@@ -3867,6 +3891,7 @@ class AgentHarness:
         lease: SessionLease,
         *,
         cost_tracker: SessionCostTracker | None = None,
+        turn_id: str | None = None,
     ) -> None:
         """Request one final LLM response with no tools when the budget is exhausted.
 
@@ -3930,6 +3955,7 @@ class AgentHarness:
                 session=session,
                 create_kwargs=create_kwargs,
                 iteration=self._budget.used + 1,
+                turn_id=turn_id,
                 llm_client=self._llm,
                 store=self._store,
                 streaming_enabled=self._streaming_enabled,
@@ -3969,16 +3995,20 @@ class AgentHarness:
                     cost_usd=cost,
                 )
 
+            final_payload: dict[str, Any] = {
+                "message": assistant_message,
+                "model": usage_data.get("model", model_id),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "finish_reason": "budget_exhausted",
+            }
+            if turn_id is not None:
+                final_payload["turn_id"] = turn_id
+                final_payload["iteration_index"] = max(self._budget.used - 1, 0)
             await self._store.emit_event(
                 session.id,
                 EventType.LLM_RESPONSE,
-                {
-                    "message": assistant_message,
-                    "model": usage_data.get("model", model_id),
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "finish_reason": "budget_exhausted",
-                },
+                final_payload,
             )
 
             messages.append(assistant_message)
