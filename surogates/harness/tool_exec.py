@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from typing import TYPE_CHECKING, Any, Callable
@@ -1211,7 +1212,54 @@ async def execute_single_tool(
         else:
             location = TOOL_LOCATIONS.get(tool_name, ToolLocation.SANDBOX)
 
-        if location == ToolLocation.SANDBOX and sandbox_pool is not None:
+        # ── read_file image branch ─────────────────────────────────────
+        # Image analysis can't happen inside the sandbox because the
+        # sandbox process has no LLM clients or vision configuration.
+        # When read_file targets an image path, redirect to vision_analyze
+        # in-process and reshape the response as a read_file envelope so
+        # the LLM never sees vision_analyze unless it called it directly.
+        image_dispatched = False
+        if tool_name == "read_file" and isinstance(tool_args, dict):
+            from surogates.tools.builtin.file_ops import IMAGE_EXTENSIONS
+            image_path_arg = tool_args.get("path")
+            if isinstance(image_path_arg, str) and image_path_arg:
+                _ext = os.path.splitext(image_path_arg)[1].lower()
+                if _ext in IMAGE_EXTENSIONS:
+                    from surogates.harness.image_read import handle_image_read
+                    result_content = await handle_image_read(
+                        path=image_path_arg,
+                        arguments=tool_args,
+                        dispatch=tools.dispatch,
+                        kwargs={
+                            "session_id": str(session.id),
+                            "agent_id": session.agent_id,
+                            "tenant": tenant,
+                            "session_store": store,
+                            "redis": redis,
+                            "budget": budget,
+                            "memory_manager": memory_manager,
+                            "sandbox_pool": sandbox_pool,
+                            "browser_pool": browser_pool,
+                            "browser_control": browser_control,
+                            "storage": storage,
+                            "workspace_path": workspace_path,
+                            "api_client": api_client,
+                            "session_factory": session_factory,
+                            "llm_client": llm_client,
+                            "model": model or getattr(session, "model", None),
+                            "vision_llm_client": vision_llm_client,
+                            "vision_model": vision_model,
+                            "tools": tools,
+                            "tool_call_id": tool_call_id,
+                            "lease_token": lease.lease_token,
+                            "session_config": session.config,
+                        },
+                    )
+                    image_dispatched = True
+
+        if image_dispatched:
+            pass  # result_content already set by the image branch.
+        elif location == ToolLocation.SANDBOX and sandbox_pool is not None:
             from surogates.sandbox.pool import sandbox_session_key
             sandbox_owner = sandbox_session_key(session)
             sandbox_spec = _build_session_sandbox_spec(session, tenant, sandbox_owner)
