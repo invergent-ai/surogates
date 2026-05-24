@@ -281,7 +281,7 @@ _LARGE_FILE_HINT_BYTES = 512_000  # 512 KB
 # ---------------------------------------------------------------------------
 # Binary file extensions — imported from shared utils module.
 # ---------------------------------------------------------------------------
-from surogates.tools.utils.binary_extensions import BINARY_EXTENSIONS, has_binary_extension
+from surogates.tools.utils.binary_extensions import has_binary_extension
 from surogates.tools.utils.tool_output_limits import get_max_bytes, get_max_lines
 from surogates.tools.utils.workspace_sandbox import (
     WorkspaceSandboxError,

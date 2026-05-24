@@ -26,7 +26,7 @@ Updated before every commit.
 - [x] Task 8 — Integration test for documents
 - [x] Task 9 — Verify dependency lock and parser availability
 - [x] Task 10 — Update `CLAUDE.md`
-- [ ] **Task 11 (in progress)** — Smoke test the whole stack and verify
+- [x] Task 11 — Smoke test the whole stack and verify
 
 ---
 
