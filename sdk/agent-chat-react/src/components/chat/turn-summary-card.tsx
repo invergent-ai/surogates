@@ -8,6 +8,7 @@
 // detail dialog).
 
 import { ArtifactBlock } from "./artifacts/artifact-block";
+import { WorkspaceFileCard } from "./workspace-file-card";
 import type {
   AgentChatTurnArtifactRef,
   AgentChatTurnSummary,
@@ -63,6 +64,10 @@ export function TurnSummaryCard({
   const hasArtifacts = summary.artifacts.length > 0;
   if (!hasRecap && !hasArtifacts) return null;
 
+  // Split artifacts so file/artifact refs render as full-width rich
+  // cards (Claude-style download card + ArtifactBlock) while
+  // url/command refs stay in the bullet list. Mixed turns get both
+  // sections in source order.
   return (
     <div className="mt-3 rounded border border-border bg-muted/20 px-3 py-2 text-sm">
       {hasRecap && (
@@ -71,25 +76,55 @@ export function TurnSummaryCard({
         </p>
       )}
       {hasArtifacts && (
-        <ul className="space-y-1">
-          {summary.artifacts.map((artifact, i) => (
-            <li
-              key={`${artifact.kind}:${artifact.ref}:${i}`}
-              className="flex items-baseline gap-2 text-sm"
-            >
-              <span className="text-muted-foreground" aria-hidden>
-                •
-              </span>
-              <ArtifactRow
-                artifact={artifact}
-                sessionId={sessionId}
-                messages={messages}
-                onFileSelect={onFileSelect}
-                onCommandSelect={onCommandSelect}
-              />
-            </li>
-          ))}
-        </ul>
+        <div className="space-y-2">
+          {summary.artifacts.map((artifact, i) => {
+            const key = `${artifact.kind}:${artifact.ref}:${i}`;
+            if (artifact.kind === "file" && sessionId) {
+              return (
+                <WorkspaceFileCard
+                  key={key}
+                  sessionId={sessionId}
+                  path={artifact.ref}
+                  label={artifact.label}
+                />
+              );
+            }
+            if (artifact.kind === "artifact") {
+              const resolved = sessionId
+                ? resolveArtifactRef(artifact.ref, messages)
+                : null;
+              if (resolved && sessionId) {
+                return (
+                  <ArtifactBlock
+                    key={key}
+                    sessionId={sessionId}
+                    artifactId={resolved.artifactId}
+                    name={resolved.name || artifact.label}
+                    kind={resolved.kind}
+                    version={resolved.version}
+                  />
+                );
+              }
+            }
+            return (
+              <div
+                key={key}
+                className="flex items-baseline gap-2 text-sm"
+              >
+                <span className="text-muted-foreground" aria-hidden>
+                  •
+                </span>
+                <ArtifactRow
+                  artifact={artifact}
+                  sessionId={sessionId}
+                  messages={messages}
+                  onFileSelect={onFileSelect}
+                  onCommandSelect={onCommandSelect}
+                />
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );

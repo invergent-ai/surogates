@@ -68,6 +68,7 @@ import { useState } from "react";
 import type {
   AgentChatImageAttachment,
   AgentChatPendingAttachment,
+  AgentChatTurnArtifactRef,
   ChatMessage as ChatMessageType,
   RetryIndicator,
   ToolCallInfo,
@@ -1222,6 +1223,64 @@ export function IterationGroup({
   );
 }
 
+/**
+ * Synthetic file-artifact derivation for Simple mode.
+ *
+ * Scans an assistant turn's messages for tool calls that produced a
+ * named workspace file (``write_file`` / ``patch``) or a structured
+ * artifact (``create_artifact``) and turns each unique output path
+ * into an :type:`AgentChatTurnArtifactRef`. Used as a fallback when
+ * the harness's turn summarizer either isn't configured or omitted
+ * file deliverables from ``turn.summary``.
+ *
+ * Limitations: the candidate set is the same set the harness's
+ * candidate-artifact collector uses, so files written indirectly
+ * (e.g. via a terminal Python script) still won't surface here —
+ * that gap belongs upstream in the harness, not in the SDK.
+ */
+function deriveFileArtifactsFromMessages(
+  messages: ChatMessageType[],
+): AgentChatTurnArtifactRef[] {
+  const seen = new Set<string>();
+  const out: AgentChatTurnArtifactRef[] = [];
+  for (const msg of messages) {
+    if (msg.role !== "assistant" || !msg.toolCalls) continue;
+    for (const tc of msg.toolCalls) {
+      // Skip failed / cancelled — the agent already retried.
+      const status = effectiveStatus(tc);
+      if (status === "error" || status === "cancelled") continue;
+      const args = parseArgs<Record<string, unknown>>(tc.args);
+      if (!args) continue;
+      if (tc.toolName === "write_file" || tc.toolName === "patch") {
+        const path = typeof args.path === "string"
+          ? args.path
+          : typeof args.file_path === "string"
+            ? args.file_path
+            : "";
+        if (!path || seen.has(`file:${path}`)) continue;
+        seen.add(`file:${path}`);
+        out.push({
+          kind: "file",
+          label: path.split("/").pop() || path,
+          ref: path,
+        });
+        continue;
+      }
+      if (tc.toolName === "create_artifact") {
+        const name = typeof args.name === "string" ? args.name : "";
+        if (!name || seen.has(`artifact:${name}`)) continue;
+        seen.add(`artifact:${name}`);
+        out.push({
+          kind: "artifact",
+          label: name,
+          ref: name,
+        });
+      }
+    }
+  }
+  return out;
+}
+
 // ── Simple-mode AssistantGroup ───────────────────────────────────────
 //
 // Renders an assistant turn as: per-iteration IterationGroup rows (one
@@ -1278,6 +1337,26 @@ function SimpleAssistantGroup({
   const showErrorInfo =
     !!tail && tail.status === "error" && !!tail.errorInfo;
 
+  // Synthetic-artifact fallback so file deliverables still surface
+  // even when the harness summarizer is missing or didn't include
+  // them in turn.summary. We scan every assistant message in the
+  // group for write_file / patch / create_artifact tool calls and
+  // promote each unique output path to a file artifact. The real
+  // turn.summary always wins when present and non-empty.
+  const effectiveTurnSummary = (() => {
+    const fromHarness = tail?.turnSummary;
+    if (fromHarness && fromHarness.artifacts.length > 0) {
+      return fromHarness;
+    }
+    const derived = deriveFileArtifactsFromMessages(messages);
+    if (derived.length === 0) return fromHarness;
+    return {
+      turnId: fromHarness?.turnId ?? "",
+      recap: fromHarness?.recap ?? "",
+      artifacts: derived,
+    };
+  })();
+
   return (
     <Message from="assistant">
       <MessageContent>
@@ -1318,9 +1397,9 @@ function SimpleAssistantGroup({
             {tail?.status === "complete" && <TurnFeedback msg={tail} />}
           </div>
         )}
-        {tail?.turnSummary && (
+        {effectiveTurnSummary && (
           <TurnSummaryCard
-            summary={tail.turnSummary}
+            summary={effectiveTurnSummary}
             sessionId={sessionId}
             messages={messages}
             onFileSelect={onFileSelect}

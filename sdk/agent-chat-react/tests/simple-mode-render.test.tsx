@@ -31,6 +31,17 @@ function adapterStub(): AgentChatAdapter {
       close: vi.fn(),
       onerror: null,
     })),
+    getWorkspaceDownloadUrl: vi.fn(
+      ({ sessionId, path }: { sessionId: string; path: string }) =>
+        `/api/v1/sessions/${sessionId}/workspace/download?path=${encodeURIComponent(path)}`,
+    ),
+    getWorkspaceFile: vi.fn().mockResolvedValue({
+      path: "x",
+      content: "",
+      size: 0,
+      encoding: "utf-8" as const,
+      truncated: false,
+    }),
   } as unknown as AgentChatAdapter;
 }
 
@@ -182,6 +193,95 @@ describe("Simple mode ChatThread rendering", () => {
       />,
     );
     expect(dom.textContent).toContain("frontend-design");
+  });
+
+  it("renders synthetic file-artifact cards even when turn.summary is missing", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "iter-0",
+        role: "assistant",
+        content: "Done.",
+        createdAt: new Date(),
+        status: "complete",
+        turnId: "t-2",
+        iterationIndex: 0,
+        toolCalls: [
+          {
+            id: "c1",
+            toolName: "write_file",
+            args: JSON.stringify({ path: "reports/Summary.docx" }),
+            status: "complete",
+            result: "{}",
+          },
+        ],
+      },
+    ];
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={messages}
+        isRunning={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+    // No turn.summary on the tail message, but the synthetic
+    // derivation should still produce a download card.
+    expect(dom.textContent).toContain("Summary.docx");
+    expect(dom.textContent).toContain("Word document");
+    const downloadAnchor = Array.from(dom.querySelectorAll("a"))
+      .find((a) => a.textContent?.includes("Download"));
+    expect(downloadAnchor).toBeDefined();
+  });
+
+  it("prefers turn.summary artifacts over the synthetic derivation when both exist", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "iter-0",
+        role: "assistant",
+        content: "Done.",
+        createdAt: new Date(),
+        status: "complete",
+        turnId: "t-3",
+        iterationIndex: 0,
+        toolCalls: [
+          {
+            id: "c1",
+            toolName: "write_file",
+            args: JSON.stringify({ path: "fallback.docx" }),
+            status: "complete",
+            result: "{}",
+          },
+        ],
+        turnSummary: {
+          turnId: "t-3",
+          recap: "Crafted the deliverable.",
+          artifacts: [
+            { kind: "file", label: "Final.docx", ref: "final.docx" },
+          ],
+        },
+      },
+    ];
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={messages}
+        isRunning={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+    // Only the harness-summary file gets a WorkspaceFileCard
+    // (Download anchor). The synthetic candidate (fallback.docx) is
+    // dropped because the harness summary already named its picks;
+    // the IterationGroup header may still mention fallback.docx as
+    // a tool-derived label, but no download card is built for it.
+    const downloadNames = Array.from(dom.querySelectorAll("a"))
+      .filter((a) => a.textContent?.includes("Download"))
+      .map((a) => a.getAttribute("download"));
+    expect(downloadNames).toEqual(["final.docx"]);
   });
 
   it("Simple mode shows a tool-derived collapsed label when an iteration has no summary", () => {
