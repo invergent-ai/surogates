@@ -7,6 +7,7 @@ here serve as harness-local fallbacks for development and testing.
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 import errno
 import json
@@ -29,6 +30,67 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
+
+# Wall-clock cap for markitdown conversions.  Set high enough for large
+# PDFs but low enough that a misbehaving document doesn't stall the
+# tool loop.
+_DOCUMENT_PARSE_TIMEOUT_S: float = 30.0
+
+
+class DocumentParseError(Exception):
+    """Raised when markitdown fails to convert a document.
+
+    Carries the file path and the underlying error message so the
+    tool-error envelope can surface a useful fallback hint.
+    """
+
+    def __init__(self, path: Path, reason: str) -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(f"Could not parse {path}: {reason}")
+
+
+def _load_markitdown() -> Any:
+    """Lazy-import markitdown.  Indirected so tests can monkeypatch it.
+
+    Eager import would force every consumer of ``file_ops`` (including
+    the worker, which loads this module just to register tool schemas)
+    to pay the markitdown import cost on startup.
+    """
+    from markitdown import MarkItDown  # noqa: PLC0415
+
+    return MarkItDown()
+
+
+def _convert_to_markdown_sync(path: Path) -> str:
+    """Sync entry point for ``asyncio.to_thread``."""
+    md = _load_markitdown()
+    result = md.convert(str(path))
+    return result.text_content or ""
+
+
+async def _parse_document_to_markdown(path: Path) -> str:
+    """Convert a document to markdown via markitdown.
+
+    Wrapped in ``asyncio.to_thread`` because markitdown is synchronous
+    and PDF parsing can take seconds.  Bounded by
+    ``_DOCUMENT_PARSE_TIMEOUT_S`` wall-clock; any exception, including
+    timeout, is normalised to :class:`DocumentParseError`.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_convert_to_markdown_sync, path),
+            timeout=_DOCUMENT_PARSE_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError as exc:
+        raise DocumentParseError(
+            path,
+            f"parse timeout after {_DOCUMENT_PARSE_TIMEOUT_S}s",
+        ) from exc
+    except DocumentParseError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — markitdown raises ad-hoc types
+        raise DocumentParseError(path, str(exc)) from exc
 
 # ---------------------------------------------------------------------------
 # Write-path deny list — blocks writes to sensitive system/credential files

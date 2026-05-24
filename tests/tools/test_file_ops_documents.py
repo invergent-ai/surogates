@@ -15,6 +15,12 @@ from pathlib import Path
 import pytest
 
 from surogates.tools.builtin.file_ops import _read_file_handler
+from tests.tools.fixtures.build_documents import (
+    build_minimal_docx,
+    build_minimal_pdf,
+    build_minimal_pptx,
+    build_minimal_xlsx,
+)
 
 
 @pytest.mark.asyncio
@@ -101,3 +107,101 @@ async def test_legacy_ppt_still_blocked(tmp_path: Path) -> None:
     result_json = await _read_file_handler({"path": str(src)})
     result = json.loads(result_json)
     assert "Cannot read binary file" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — parser unit tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_parse_pdf_returns_markdown(tmp_path: Path) -> None:
+    """The parser must invoke markitdown and return non-empty markdown."""
+    from surogates.tools.builtin.file_ops import _parse_document_to_markdown
+
+    pdf = build_minimal_pdf(tmp_path / "tiny.pdf", heading="Hello PDF")
+    md = await _parse_document_to_markdown(pdf)
+    assert "Hello PDF" in md
+
+
+@pytest.mark.asyncio
+async def test_parse_docx_returns_markdown(tmp_path: Path) -> None:
+    from surogates.tools.builtin.file_ops import _parse_document_to_markdown
+
+    docx = build_minimal_docx(tmp_path / "tiny.docx")
+    md = await _parse_document_to_markdown(docx)
+    assert "Hello DOCX" in md
+
+
+@pytest.mark.asyncio
+async def test_parse_xlsx_includes_sheet_names(tmp_path: Path) -> None:
+    from surogates.tools.builtin.file_ops import _parse_document_to_markdown
+
+    xlsx = build_minimal_xlsx(tmp_path / "tiny.xlsx")
+    md = await _parse_document_to_markdown(xlsx)
+    assert "Alpha" in md
+    assert "Beta" in md
+
+
+@pytest.mark.asyncio
+async def test_parse_pptx_includes_slide_title(tmp_path: Path) -> None:
+    from surogates.tools.builtin.file_ops import _parse_document_to_markdown
+
+    pptx = build_minimal_pptx(tmp_path / "tiny.pptx")
+    md = await _parse_document_to_markdown(pptx)
+    assert "Hello PPTX" in md
+
+
+@pytest.mark.asyncio
+async def test_parser_wraps_markitdown_errors_as_DocumentParseError(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Any exception from markitdown must be normalised to DocumentParseError."""
+    from surogates.tools.builtin import file_ops
+    from surogates.tools.builtin.file_ops import (
+        DocumentParseError,
+        _parse_document_to_markdown,
+    )
+
+    class RaisingMarkItDown:
+        def convert(self, *args, **kwargs):
+            raise RuntimeError("markitdown said no")
+
+    monkeypatch.setattr(file_ops, "_load_markitdown", lambda: RaisingMarkItDown())
+
+    bad = tmp_path / "x.pdf"
+    bad.write_bytes(b"%PDF-1.4 placeholder")
+    with pytest.raises(DocumentParseError) as excinfo:
+        await _parse_document_to_markdown(bad)
+    assert "x.pdf" in str(excinfo.value)
+    assert "markitdown said no" in str(excinfo.value)
+    # Underlying cause is preserved for telemetry / debugging.
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_parser_times_out(tmp_path: Path, monkeypatch) -> None:
+    """A hung markitdown call must raise DocumentParseError with 'timeout'."""
+    from surogates.tools.builtin import file_ops
+
+    pdf = tmp_path / "slow.pdf"
+    pdf.write_bytes(b"%PDF-1.4 placeholder")
+
+    # The fake sleeps longer than the patched timeout but not so long
+    # that the orphan executor thread keeps pytest alive after wait_for
+    # fires.  asyncio.to_thread cannot cancel the worker thread, so we
+    # tune the sleep to ~1s and the timeout to 0.05s.
+    class FakeMarkItDown:
+        def convert(self, *args, **kwargs):  # noqa: D401
+            import time
+
+            time.sleep(1.0)
+
+    monkeypatch.setattr(file_ops, "_DOCUMENT_PARSE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(
+        file_ops, "_load_markitdown", lambda: FakeMarkItDown(),
+    )
+
+    with pytest.raises(file_ops.DocumentParseError) as excinfo:
+        await file_ops._parse_document_to_markdown(pdf)
+    assert "timeout" in str(excinfo.value).lower()

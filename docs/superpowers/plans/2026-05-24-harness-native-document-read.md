@@ -18,8 +18,8 @@ Updated before every commit.
 
 - [x] Task 1 — Extract `_handle_text` and `_apply_line_window` (mechanical refactor)
 - [x] Task 2 — Populate `_DOCUMENT_EXTENSIONS`; shrink `BINARY_EXTENSIONS`
-- [ ] **Task 3 (in progress)** — Add parser deps + `DocumentParseError` + `_parse_document_to_markdown`
-- [ ] Task 4 — File-backed `_document_cache` under `/tmp`
+- [x] Task 3 — Add parser deps + `DocumentParseError` + `_parse_document_to_markdown`
+- [ ] **Task 4 (in progress)** — File-backed `_document_cache` under `/tmp`
 - [ ] Task 5 — Wire `_handle_document` to cache + parser
 - [ ] Task 6 — Update the `read_file` tool description
 - [ ] Task 7 — Worker-side image pre-dispatch branch
