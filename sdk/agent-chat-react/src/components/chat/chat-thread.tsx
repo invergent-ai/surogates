@@ -675,6 +675,160 @@ function TextEntry({
   );
 }
 
+// ── Simple-mode iteration row ────────────────────────────────────────
+//
+// IterationGroup wraps a SINGLE assistant message in the Simple view.
+// It composes today's Expert-mode timeline pieces (messageToEntries +
+// TimelineEntryItem, plus the existing browser/web-search sub-grouping)
+// inside the collapsible body so we never duplicate per-tool renderers.
+// See docs/superpowers/specs/2026-05-24-simple-chat-mode-design.md.
+
+export interface IterationGroupProps {
+  message: ChatMessageType;
+  sessionId: string | null;
+  /** Same map AssistantGroup builds for the Expert path — see
+   *  ``ChatThread`` for the full derivation. */
+  artifactFallbacks: Record<string, string>;
+  onFileSelect?: (path: string) => void;
+}
+
+function iterationDotClass(message: ChatMessageType): string {
+  const calls = message.toolCalls ?? [];
+  if (calls.length === 0) {
+    if (message.status === "streaming") return "bg-primary animate-pulse";
+    if (message.status === "error") return "bg-red-500";
+    return "bg-emerald-500";
+  }
+  let anyError = false;
+  let anyRunning = false;
+  for (const tc of calls) {
+    const s = effectiveStatus(tc);
+    if (s === "error") anyError = true;
+    if (s === "running") anyRunning = true;
+  }
+  if (anyError) return "bg-red-500";
+  if (anyRunning) return "bg-primary animate-pulse";
+  return "bg-emerald-500";
+}
+
+function IterationExpanded({
+  message,
+  sessionId,
+  artifactFallbacks,
+  onFileSelect,
+}: IterationGroupProps) {
+  // Reuse the same flatten + sub-grouping pipeline the Expert view
+  // uses — `isLast=false` because the surrounding ChatThread already
+  // takes care of the tail-of-turn "thinking" placeholder.
+  let entries: TimelineEntry[] = messageToEntries(
+    message, false, artifactFallbacks,
+  );
+  entries = groupBrowserActivityEntries(entries);
+  entries = groupWebSearchEntries(entries);
+  if (entries.length === 0) return null;
+  return (
+    <div className="ml-4">
+      <Timeline defaultValue={999} className="gap-0">
+        {entries.map((entry, i) => (
+          <TimelineEntryItem
+            key={entry.key}
+            entry={entry}
+            step={i + 1}
+            sessionId={sessionId}
+            onFileSelect={onFileSelect}
+          />
+        ))}
+      </Timeline>
+    </div>
+  );
+}
+
+export function IterationGroup({
+  message,
+  sessionId,
+  artifactFallbacks,
+  onFileSelect,
+}: IterationGroupProps) {
+  const summary = message.iterationSummary?.summary;
+  const isStreaming = message.status === "streaming";
+  const runningToolCount = (message.toolCalls ?? []).filter(
+    (tc) => tc.status === "running",
+  ).length;
+  const [open, setOpen] = useState(false);
+  const dot = iterationDotClass(message);
+
+  if (summary) {
+    return (
+      <div className="space-y-1">
+        <button
+          type="button"
+          onClick={() => setOpen((prev) => !prev)}
+          aria-expanded={open}
+          className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-sm hover:bg-muted/40"
+        >
+          <span
+            className={cn("size-2 shrink-0 rounded-full", dot)}
+            aria-hidden
+          />
+          <span className="flex-1 truncate text-foreground">{summary}</span>
+          <ChevronRight
+            className={cn(
+              "size-3 shrink-0 text-muted-foreground transition-transform",
+              open && "rotate-90",
+            )}
+            aria-hidden
+          />
+        </button>
+        {open && (
+          <IterationExpanded
+            message={message}
+            sessionId={sessionId}
+            artifactFallbacks={artifactFallbacks}
+            onFileSelect={onFileSelect}
+          />
+        )}
+      </div>
+    );
+  }
+
+  if (isStreaming) {
+    const label = runningToolCount > 0
+      ? `Working… (${runningToolCount} tool${runningToolCount === 1 ? "" : "s"})`
+      : "Thinking…";
+    return (
+      <div className="space-y-1">
+        <div className="flex items-center gap-2 text-sm">
+          <span
+            className={cn("size-2 shrink-0 rounded-full", dot)}
+            aria-hidden
+          />
+          <Shimmer duration={3} spread={3} className="text-sm">
+            {label}
+          </Shimmer>
+        </div>
+        <IterationExpanded
+          message={message}
+          sessionId={sessionId}
+          artifactFallbacks={artifactFallbacks}
+          onFileSelect={onFileSelect}
+        />
+      </div>
+    );
+  }
+
+  // Permanently expanded fallback: no summary arrived (replay of
+  // pre-feature events, summarizer timeout). Drop straight to the
+  // Expert-mode timeline so the user still sees what happened.
+  return (
+    <IterationExpanded
+      message={message}
+      sessionId={sessionId}
+      artifactFallbacks={artifactFallbacks}
+      onFileSelect={onFileSelect}
+    />
+  );
+}
+
 // ── Assistant message group (single Timeline) ────────────────────────
 
 function AssistantGroup({
