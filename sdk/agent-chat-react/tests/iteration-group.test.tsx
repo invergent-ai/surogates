@@ -193,7 +193,7 @@ describe("IterationGroup", () => {
       iterationIndex: 0,
       status: "streaming",  // still tagged streaming!
       toolCalls: [
-        { id: "c1", toolName: "list_files", args: "{\"path\":\".\"}", status: "complete" },
+        { id: "c1", toolName: "read_file", args: "{\"path\":\"x.html\"}", status: "complete" },
       ],
     });
     const dom = mount(
@@ -206,7 +206,7 @@ describe("IterationGroup", () => {
     // Collapsed derived label, NOT the shimmer.
     expect(dom.textContent).not.toMatch(/Running/i);
     expect(dom.textContent).not.toMatch(/Thinking/i);
-    expect(dom.textContent).toContain("List Files");
+    expect(dom.textContent).toContain("Read");
     expect(dom.querySelector("button[aria-expanded='false']"))
       .not.toBeNull();
   });
@@ -216,7 +216,7 @@ describe("IterationGroup", () => {
       turnId: "t-1",
       iterationIndex: 0,
       toolCalls: [
-        { id: "c1", toolName: "list_files", args: "{\"path\":\".\"}", status: "complete" },
+        { id: "c1", toolName: "read_file", args: "{\"path\":\"x.html\"}", status: "complete" },
       ],
     });
     const dom = mount(
@@ -228,7 +228,7 @@ describe("IterationGroup", () => {
     );
     // Collapsed by default — derived label includes the human tool
     // name and the path detail.
-    expect(dom.textContent).toContain("List Files");
+    expect(dom.textContent).toContain("Read · x.html");
     // Collapsible trigger exists so users can drill into the Expert
     // timeline on demand.
     const trigger = dom.querySelector("button[aria-expanded='false']");
@@ -346,6 +346,151 @@ describe("IterationGroup", () => {
     expect(
       Array.from(dom.querySelectorAll("button")).map((b) => b.textContent),
     ).not.toContain("Show more");
+  });
+
+  it("hides internal tools (list_files, search_files, browser_*, etc.) in Simple mode", () => {
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+      toolCalls: [
+        { id: "c1", toolName: "list_files", args: "{\"path\":\".\"}", status: "complete" },
+        { id: "c2", toolName: "search_files", args: "{}", status: "complete" },
+        { id: "c3", toolName: "browser_click", args: "{}", status: "complete" },
+        { id: "c4", toolName: "session_search", args: "{}", status: "complete" },
+        { id: "c5", toolName: "process", args: "{}", status: "complete" },
+        { id: "c6", toolName: "todo", args: "{}", status: "complete" },
+        { id: "c7", toolName: "memory", args: "{}", status: "complete" },
+        // Plus one visible tool so the iteration still renders.
+        { id: "c8", toolName: "patch", args: "{\"path\":\"x.html\"}", status: "complete" },
+      ],
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    // Header counts only visible tools (1: the patch).
+    expect(dom.textContent).toContain("Patch · x.html");
+    expect(dom.textContent).not.toContain("List Files");
+    expect(dom.textContent).not.toContain("Search Files");
+    expect(dom.textContent).not.toContain("Browser");
+    expect(dom.textContent).not.toContain("Process");
+    expect(dom.textContent).not.toContain("Todo");
+    expect(dom.textContent).not.toContain("Memory");
+
+    // Expand — only the visible tool row plus Done show in the body.
+    const trigger = dom.querySelector("button[aria-expanded='false']");
+    act(() => { (trigger as HTMLButtonElement).click(); });
+    expect(dom.textContent).toContain("Edited x.html");
+    expect(dom.textContent).toContain("Done");
+    expect(dom.textContent).not.toContain("Listed");
+    expect(dom.textContent).not.toContain("Searched files");
+  });
+
+  it("hides failed tool calls in Simple mode", () => {
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+      toolCalls: [
+        // A successful retry alongside a failed first attempt.
+        {
+          id: "c1",
+          toolName: "patch",
+          args: "{\"path\":\"x.html\"}",
+          status: "complete",
+          result: JSON.stringify({ error: "patch did not apply" }),
+        },
+        { id: "c2", toolName: "patch", args: "{\"path\":\"x.html\"}", status: "complete" },
+      ],
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    // Failed first attempt is hidden, only the successful retry counts.
+    expect(dom.textContent).toContain("Patch · x.html");
+    expect(dom.textContent).not.toContain("× 2");
+  });
+
+  it("renders nothing when all tools are internal and reasoning is empty", () => {
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+      toolCalls: [
+        { id: "c1", toolName: "list_files", args: "{}", status: "complete" },
+        { id: "c2", toolName: "browser_click", args: "{}", status: "complete" },
+      ],
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    expect(dom.textContent ?? "").toBe("");
+  });
+
+  it("shows generic Thinking when only a hidden tool is running", () => {
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+      status: "streaming",
+      toolCalls: [
+        { id: "c1", toolName: "list_files", args: "{}", status: "running" },
+      ],
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    expect(dom.textContent).toMatch(/Thinking/);
+    expect(dom.textContent).not.toContain("List Files");
+  });
+
+  it("hides the actual shell command from the terminal body row", () => {
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+      iterationSummary: {
+        iterationIndex: 0,
+        summary: "Investigated the workspace",
+        toolCallIds: [],
+        startedAt: "",
+        endedAt: "",
+      },
+      toolCalls: [
+        {
+          id: "c1",
+          toolName: "terminal",
+          args: JSON.stringify({
+            command: "cd __WORKSPACE__ && python3 -c 'import pandas; print(pandas.__version__)'",
+          }),
+          status: "complete",
+        },
+      ],
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    // Expand the iteration so the body rows render.
+    const trigger = dom.querySelector("button[aria-expanded='false']");
+    act(() => { (trigger as HTMLButtonElement).click(); });
+    expect(dom.textContent).toContain("Ran a command");
+    expect(dom.textContent).not.toContain("python3");
+    expect(dom.textContent).not.toContain("__WORKSPACE__");
   });
 
   it("renders nothing when complete, no summary, no tools, no reasoning", () => {

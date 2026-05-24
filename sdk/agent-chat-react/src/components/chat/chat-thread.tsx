@@ -414,11 +414,11 @@ function OrphanSystemMarker({
   if (message.systemKind === "skill_invoked") {
     const skill = (message.systemMeta?.skill as string) ?? message.content;
     return (
-      <div className="my-2 flex items-center gap-2 px-4 text-xs text-muted-foreground ">
+      <div className="my-2 flex items-center gap-2 px-4 text-xs text-foreground/60 ">
         <span className="size-2 rounded-full bg-emerald-500" />
         <span>
           <span className="font-semibold text-foreground">Skill</span>
-          <span className="text-muted-foreground truncate">{skill}</span>
+          <span className="text-foreground/60 truncate">{skill}</span>
         </span>
       </div>
     );
@@ -479,10 +479,10 @@ function cancelledToolLabel(toolName: string): string {
 function CancelledToolRow({ tc }: { tc: ToolCallInfo }) {
   return (
     <div className="flex items-center gap-1.5 text-sm">
-      <span className="font-semibold text-muted-foreground">
+      <span className="font-semibold text-foreground/60">
         {cancelledToolLabel(tc.toolName)}
       </span>
-      <span className="text-muted-foreground/70">
+      <span className="text-foreground/60/70">
         Cancelled
       </span>
     </div>
@@ -600,11 +600,11 @@ function TimelineEntryItem({
         <TimelineContent>
           <div className="flex items-center gap-1.5 py-1 text-sm ">
             <span className="font-semibold text-foreground">Skill</span>
-            <span className="text-muted-foreground truncate">
+            <span className="text-foreground/60 truncate">
               {entry.skill}
             </span>
             {entry.stagedAt && (
-              <span className="text-xs text-muted-foreground/70 ">
+              <span className="text-xs text-foreground/60/70 ">
                 staged at {entry.stagedAt}
               </span>
             )}
@@ -726,7 +726,9 @@ export interface IterationGroupProps {
  * a generic "Iteration" pill or falls through to the shimmer.
  */
 function deriveIterationLabel(message: ChatMessageType): string | null {
-  const calls = message.toolCalls ?? [];
+  // Internal/exploration tools and failed calls collapse into
+  // background noise that Simple mode suppresses.
+  const calls = visibleToolCalls(message);
   if (calls.length === 0) {
     return message.reasoning ? "Thought through the problem" : null;
   }
@@ -833,6 +835,46 @@ function truncate(s: string, max: number): string {
 }
 
 /**
+ * Tools that are hidden from Simple mode. These are either pure
+ * exploration ("listed the directory"), internal infrastructure
+ * (browser_*, process), or scratchpad-style state changes (todo,
+ * memory) that don't help the user understand what the agent
+ * *did*. Users who care can switch to Expert mode to see them.
+ */
+const _SIMPLE_MODE_HIDDEN_TOOLS: ReadonlySet<string> = new Set([
+  "list_files",
+  "search_files",
+  "session_search",
+  "skills_list",
+  "process",
+  "todo",
+  "memory",
+]);
+
+function _isHiddenSimpleTool(tc: ToolCallInfo): boolean {
+  if (_SIMPLE_MODE_HIDDEN_TOOLS.has(tc.toolName)) return true;
+  // Browser tools are an internal sub-grouped activity in Expert
+  // mode; in Simple mode we hide them outright.
+  if (tc.toolName.startsWith("browser_")) return true;
+  return false;
+}
+
+/**
+ * The subset of an iteration's tool calls that should surface in
+ * Simple mode: skips internal/infrastructure tools and any call
+ * that errored or was cancelled. Used by every Simple-mode
+ * consumer so the filter has a single source of truth.
+ */
+function visibleToolCalls(message: ChatMessageType): ToolCallInfo[] {
+  return (message.toolCalls ?? []).filter((tc) => {
+    if (_isHiddenSimpleTool(tc)) return false;
+    const status = effectiveStatus(tc);
+    if (status === "error" || status === "cancelled") return false;
+    return true;
+  });
+}
+
+/**
  * Whether an iteration is genuinely in-flight right now.
  *
  * ``message.status === "streaming"`` is NOT sufficient: the reducer
@@ -860,8 +902,11 @@ function isIterationLive(message: ChatMessageType): boolean {
  * instead of a generic "Working…" when context is available.
  */
 function liveIterationLabel(message: ChatMessageType): string {
+  // Only running tools that aren't hidden from Simple mode get
+  // surfaced in the label — an internal list_files running on its
+  // own should read as a quiet "Thinking…", not "Running List Files…".
   const running = (message.toolCalls ?? []).filter(
-    (tc) => tc.status === "running",
+    (tc) => tc.status === "running" && !_isHiddenSimpleTool(tc),
   );
   if (running.length === 0) return "Thinking…";
   if (running.length === 1) {
@@ -930,9 +975,12 @@ function _toolRowLabel(tc: ToolCallInfo): string {
     case "search_files":
       return detail ? `Searched files for "${detail}"` : "Searched files";
     case "terminal":
-      return detail ? `Ran command: ${detail}` : "Ran a command";
+      // Raw shell commands carry too much noise (paths, escapes,
+      // chained pipes) to read well even as a body row. The Expert
+      // view has the full block with output if the user needs it.
+      return "Ran a command";
     case "execute_code":
-      return detail ? `Executed code: ${detail}` : "Executed code";
+      return "Executed code";
     case "web_search":
       return detail ? `Searched the web for "${detail}"` : "Searched the web";
     case "web_crawl":
@@ -971,10 +1019,10 @@ function SimpleDetailRow({ icon: Icon, children }: SimpleDetailRowProps) {
   return (
     <div className="flex items-start gap-3 text-sm">
       <Icon
-        className="mt-0.5 size-4 shrink-0 text-muted-foreground"
+        className="mt-0.5 size-4 shrink-0 text-foreground/60"
         aria-hidden
       />
-      <div className="min-w-0 flex-1 leading-relaxed text-muted-foreground">
+      <div className="min-w-0 flex-1 leading-relaxed text-foreground/60">
         {children}
       </div>
     </div>
@@ -1013,9 +1061,9 @@ function ClampedReasoning({
         <button
           type="button"
           onClick={() => setExpanded((prev) => !prev)}
-          className="text-xs font-medium text-muted-foreground hover:text-foreground"
+          className="text-xs font-medium text-foreground hover:text-foreground/70 cursor-pointer"
         >
-          {expanded ? "Show less" : "Show more"}
+          {expanded ? "Show less" : "Show more..."}
         </button>
       )}
     </div>
@@ -1050,12 +1098,17 @@ function splitReasoningParagraphs(text: string): string[] {
 function IterationExpanded({
   message,
 }: IterationGroupProps) {
-  const calls = message.toolCalls ?? [];
+  // Internal tools and failed calls are filtered out of the visible
+  // list — the row vanishes entirely instead of exposing infra noise
+  // ("Listed .", "Searched files", failed retries, browser_* steps).
+  const calls = visibleToolCalls(message);
   const reasoning = (message.reasoning ?? "").trim();
-  const hasError = calls.some((tc) => effectiveStatus(tc) === "error");
-  const anyRunning = calls.some((tc) => tc.status === "running");
+  // "Done" reflects the user-visible state. If only hidden tools are
+  // still running, the iteration looks complete to the user; we don't
+  // want a stuck spinner on rows that are silent from their POV.
+  const anyVisibleRunning = calls.some((tc) => tc.status === "running");
   const showDone =
-    !anyRunning && !hasError && (calls.length > 0 || !!reasoning);
+    !anyVisibleRunning && (calls.length > 0 || !!reasoning);
 
   if (!reasoning && calls.length === 0) return null;
 
@@ -1068,11 +1121,7 @@ function IterationExpanded({
       )}
       {calls.map((tc) => (
         <SimpleDetailRow key={tc.id} icon={_toolRowIcon(tc.toolName)}>
-          <span className={cn(
-            effectiveStatus(tc) === "error" && "text-destructive",
-          )}>
-            {_toolRowLabel(tc)}
-          </span>
+          <span>{_toolRowLabel(tc)}</span>
         </SimpleDetailRow>
       ))}
       {showDone && (
@@ -1122,8 +1171,8 @@ export function IterationGroup({
     return null;
   }
   const labelTone = summary
-    ? "text-foreground"
-    : "text-muted-foreground";
+    ? "text-foreground/80"
+    : "text-foreground/50";
   return (
     <div className="space-y-1">
       <button
@@ -1135,7 +1184,7 @@ export function IterationGroup({
         <span className={cn("flex-1 truncate", labelTone)}>{label}</span>
         <ChevronDown
           className={cn(
-            "size-3 shrink-0 text-muted-foreground transition-transform",
+            "size-3 shrink-0 text-foreground/60 transition-transform",
             open && "rotate-180",
           )}
           aria-hidden
@@ -1397,7 +1446,7 @@ function RetryBanner({ indicator }: { indicator: RetryIndicator }) {
       >
         <AlertTriangle className="size-3 shrink-0" />
         <span className="flex-1 truncate font-medium">{indicator.title}</span>
-        <span className="text-[10px] text-muted-foreground">
+        <span className="text-[10px] text-foreground/60">
           attempt {indicator.attempt}
         </span>
         {indicator.detail && (
@@ -1405,7 +1454,7 @@ function RetryBanner({ indicator }: { indicator: RetryIndicator }) {
         )}
       </button>
       {open && indicator.detail && (
-        <pre className="mt-1 overflow-x-auto rounded-none bg-background p-2 font-mono text-[11px] whitespace-pre-wrap wrap-break-word text-muted-foreground">
+        <pre className="mt-1 overflow-x-auto rounded-none bg-background p-2 font-mono text-[11px] whitespace-pre-wrap wrap-break-word text-foreground/60">
           {indicator.detail}
         </pre>
       )}
@@ -1580,7 +1629,7 @@ export function ChatThread({
         )}
         {disabled && disabledReason ? (
           <div
-            className="rounded border border-line bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
+            className="rounded border border-line bg-muted/40 px-3 py-2 text-sm text-foreground/60"
             role="status"
           >
             {disabledReason}
