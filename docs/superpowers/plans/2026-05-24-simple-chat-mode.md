@@ -31,7 +31,7 @@ Updated before each commit during inline execution.
 - [x] B4: reducer handlers for iteration.summary and turn.summary
 - [x] B5: viewMode runtime state, adapter methods, localStorage fallback
 - [x] B6: IterationGroup component (reuses existing timeline pieces)
-- [ ] B7: TurnSummaryCard (with ArtifactBlock resolution)
+- [x] B7: TurnSummaryCard (with ArtifactBlock resolution)
 - [ ] B8: Simple/Expert toggle in composer
 - [ ] B9: Render IterationGroup + TurnSummaryCard in Simple mode
 - [ ] B10: opt existing tests into Expert mode
