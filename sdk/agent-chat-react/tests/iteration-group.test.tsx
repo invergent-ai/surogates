@@ -359,10 +359,9 @@ describe("IterationGroup", () => {
         { id: "c3", toolName: "browser_click", args: "{}", status: "complete" },
         { id: "c4", toolName: "session_search", args: "{}", status: "complete" },
         { id: "c5", toolName: "process", args: "{}", status: "complete" },
-        { id: "c6", toolName: "todo", args: "{}", status: "complete" },
-        { id: "c7", toolName: "memory", args: "{}", status: "complete" },
+        { id: "c6", toolName: "memory", args: "{}", status: "complete" },
         // Plus one visible tool so the iteration still renders.
-        { id: "c8", toolName: "patch", args: "{\"path\":\"x.html\"}", status: "complete" },
+        { id: "c7", toolName: "patch", args: "{\"path\":\"x.html\"}", status: "complete" },
       ],
     });
     const dom = mount(
@@ -378,7 +377,6 @@ describe("IterationGroup", () => {
     expect(dom.textContent).not.toContain("Search Files");
     expect(dom.textContent).not.toContain("Browser");
     expect(dom.textContent).not.toContain("Process");
-    expect(dom.textContent).not.toContain("Todo");
     expect(dom.textContent).not.toContain("Memory");
 
     // Expand — only the visible tool row plus Done show in the body.
@@ -388,6 +386,28 @@ describe("IterationGroup", () => {
     expect(dom.textContent).toContain("Done");
     expect(dom.textContent).not.toContain("Listed");
     expect(dom.textContent).not.toContain("Searched files");
+  });
+
+  it("keeps the todo tool visible in Simple mode (user-facing task management)", () => {
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+      toolCalls: [
+        { id: "c1", toolName: "todo", args: "{\"action\":\"add\",\"item\":\"draft outline\"}", status: "complete" },
+      ],
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    expect(dom.textContent).toContain("Todo");
+    const trigger = dom.querySelector("button[aria-expanded='false']");
+    act(() => { (trigger as HTMLButtonElement).click(); });
+    expect(dom.textContent).toContain("Todo");
+    expect(dom.textContent).toContain("Done");
   });
 
   it("hides failed tool calls in Simple mode", () => {

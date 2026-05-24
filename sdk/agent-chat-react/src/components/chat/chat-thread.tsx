@@ -847,7 +847,6 @@ const _SIMPLE_MODE_HIDDEN_TOOLS: ReadonlySet<string> = new Set([
   "session_search",
   "skills_list",
   "process",
-  "todo",
   "memory",
   // Shell commands and code execution are infrastructure plumbing the
   // user doesn't need to see when the goal is to know *what* the
