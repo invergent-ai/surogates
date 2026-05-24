@@ -204,6 +204,11 @@ class WorkerSettings(BaseSettings):
     workspace_path: str = "/tmp/surogates/workspaces"
     api_base_url: str = "http://localhost:8000"
     use_api_for_harness_tools: bool = True
+    # Emit iteration.summary / turn.summary events from the harness so
+    # the Simple chat view can render one-line iteration summaries and
+    # per-turn artifact recaps. Off disables the summarizer entirely;
+    # older SDK versions ignore the events when this is on.
+    emit_turn_summaries: bool = True
 
 
 class LLMSettings(BaseSettings):

@@ -59,7 +59,7 @@ new summaries.
 │        │   + turn.summary       (NEW)             │             │
 │        └──────────────────────┬───────────────────┘             │
 └───────────────────────────────┼─────────────────────────────────┘
-                                │ WebSocket / replay
+                                │ SSE / replay
                                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │ SDK (@invergent/agent-chat-react)                               │
@@ -80,11 +80,13 @@ new summaries.
 Two coordinated changes:
 
 1. **Harness** — new `turn_summarizer.py` module plus two new event
-   types persisted in the existing events table. Summarization runs
-   concurrently with the next iteration; failures are silent.
-2. **SDK** — new view mode state, reducer handlers for the two new
-   events, an `IterationGroup` component, a `TurnSummaryCard`
-   component, and a toggle in the composer's tools row.
+   types in `surogates/session/events.py`, persisted in the existing
+   events table. Summarization runs concurrently with the next
+   iteration; failures are silent.
+2. **SDK** — new view mode state, event type/list entries for the two
+   new events, reducer handlers, an `IterationGroup` component, a
+   `TurnSummaryCard` component, and a toggle in the composer's tools
+   row.
 
 ## Harness changes
 
@@ -140,31 +142,39 @@ class TurnSummarizer:
 | `iteration.summary`| After each LLM iteration (reasoning + that iteration's tool batch) completes  | `turn_id`, `iteration_index`, `summary`, `tool_call_ids[]`, `started_at`, `ended_at`                              |
 | `turn.summary`     | After the final iteration of an assistant turn that completed without error   | `turn_id`, `recap`, `artifacts: [{kind, label, ref, meta?}]`                                                      |
 
-Both events are persisted in the events table alongside everything
-else. SSE/WebSocket delivery uses the existing notifier. No new
-database tables.
+Both events are added to the `EventType` enum in
+`surogates/session/events.py` and persisted in the events table
+alongside everything else. SSE delivery uses the existing notifier. No
+new database tables.
 
 ### Correlation: matching summary events to assistant messages
 
-The SDK reconstructs assistant messages on the fly from
-`llm.delta` / `llm.response` events; it currently has no `turn_id` or
-`iteration_index` on `AgentChatMessage`. To make the new summary
-events resolvable client-side without reverse-engineering turn
+The SDK reconstructs assistant messages on the fly from `llm.delta`,
+`llm.thinking`, and `llm.response` events; it currently has no
+`turn_id` or `iteration_index` on `AgentChatMessage`. To make the new
+summary events resolvable client-side without reverse-engineering turn
 boundaries, the harness threads two identifiers through the existing
 event stream:
 
-1. Every `llm.delta` and `llm.response` event in an assistant turn
-   gains two new fields in `event.data`:
+1. Every `llm.delta`, `llm.thinking`, and `llm.response` event in an
+   assistant turn gains two new fields in `event.data`:
    - `turn_id: str` — stable across all iterations in the turn.
    - `iteration_index: int` — 0-based, monotonically increasing within
      the turn.
-2. The SDK reducer (in `applyLlmDelta` / `applyLlmResponse`) reads
-   both fields and stamps them on the resulting `AgentChatMessage`
-   (new fields `turnId` and `iterationIndex` on
-   `AgentChatMessage`).
-3. `iteration.summary` matches the assistant message by
+2. Existing `iteration` payload fields are preserved for backwards
+   compatibility. The new `iteration_index` is derived as
+   `iteration - 1` inside `AgentHarness` and is the only field the SDK
+   uses for summary matching.
+3. `call_llm_with_retry` and streaming delta emission accept/pass the
+   new identifiers so streamed `llm.delta` events can be correlated
+   before the final `llm.response` lands.
+4. The SDK reducer (in `applyLlmDelta`, `applyLlmThinking`, and
+   `applyLlmResponse`) reads both fields and stamps them on the
+   resulting `AgentChatMessage` (new fields `turnId` and
+   `iterationIndex` on `AgentChatMessage`).
+5. `iteration.summary` matches the assistant message by
    `(turn_id, iteration_index)`.
-4. `turn.summary` matches by `turn_id` and attaches to the **last**
+6. `turn.summary` matches by `turn_id` and attaches to the **last**
    assistant message with that `turnId` (the tail iteration of the
    turn).
 
@@ -175,9 +185,23 @@ the first. That is fine: by the time `iteration.summary` arrives, the
 message's `iterationIndex` is the final value for that iteration's
 `llm.response`.
 
-### Hook points in the orchestrator
+### Hook points in the harness loop
 
-In the worker loop (`surogates/orchestrator/worker.py`):
+The worker currently builds the summary auxiliary client in
+`surogates/orchestrator/worker.py` for `ContextCompressor`. It should
+also pass that client/model into `AgentHarness`, which owns the
+per-turn LLM/tool loop in `surogates/harness/loop.py`.
+
+In `AgentHarness`:
+
+- At the start of each `wake()`/user turn, generate a fresh `turn_id`
+  and derive `iteration_index = iteration - 1` for each loop
+  iteration.
+- Pass `turn_id` and `iteration_index` into `call_llm_with_retry` so
+  streamed `llm.delta` events include the identifiers.
+- Add `turn_id` and `iteration_index` to the `llm.thinking` and
+  `llm.response` payloads emitted directly from
+  `surogates/harness/loop.py`.
 
 - After each LLM iteration completes (after all tool results for that
   iteration land, just before the next iteration starts — or before
@@ -185,13 +209,24 @@ In the worker loop (`surogates/orchestrator/worker.py`):
   `TurnSummarizer.summarize_iteration` as a background task. When it
   resolves, emit `iteration.summary`.
 - After the final iteration of an assistant turn completes
-  successfully: kick off `TurnSummarizer.summarize_turn` as a
-  background task. When it resolves, emit `turn.summary`.
+  successfully: drain any pending iteration-summary tasks with the
+  same 10s soft cap, then kick off `TurnSummarizer.summarize_turn`.
+  Successful iteration summaries are passed through; timed-out or
+  failed iteration summaries are omitted rather than retried. When the
+  turn summary resolves, emit `turn.summary`.
 
-Summarisation **never blocks the main loop**. The next iteration
-starts immediately. The summary event may arrive after the next
-iteration has already streamed its first tokens — the SDK reducer is
-keyed by `iteration_index`, so out-of-order arrival is fine.
+Summarisation **never blocks the next LLM iteration**. The next
+iteration starts immediately. The summary event may arrive after the
+next iteration has already streamed its first tokens — the SDK reducer
+is keyed by `iteration_index`, so out-of-order arrival is fine.
+
+For a final turn with no next iteration, `_complete_session` must not
+close the stream before a ready `turn.summary` can be delivered. Drain
+the final turn-summary task with the same 10s soft cap before marking
+the session terminal; if it times out or fails, complete the session
+without the event. This keeps live SSE clients from missing a
+successfully generated final summary because `session.done` closed the
+stream first.
 
 ### Failure handling
 
@@ -204,7 +239,8 @@ keyed by `iteration_index`, so out-of-order arrival is fine.
 ### Backwards compat
 
 - New behaviour gated behind a setting:
-  `surogates.config.harness.emit_turn_summaries: bool = True`.
+  `surogates.config.WorkerSettings.emit_turn_summaries: bool = True`
+  (`SUROGATES_WORKER_EMIT_TURN_SUMMARIES`).
 - Older SDK versions ignore unknown event types — no breakage.
 - Newer SDK gracefully degrades if `emit_turn_summaries` is off or if
   events fail to arrive.
@@ -240,7 +276,7 @@ nudge in the prompt:
 Persisted per user via two new optional adapter methods:
 
 ```ts
-// adapter-context.tsx
+// src/types.ts
 interface AgentChatAdapter {
   // ...existing...
   getChatViewMode?(): Promise<"simple" | "expert" | null>;
@@ -252,6 +288,19 @@ If the adapter doesn't implement them, the SDK falls back to
 `localStorage` under the key
 `@invergent/agent-chat-react:viewMode`. Toggle is the segmented
 control already used elsewhere in the composer's tools row.
+
+Implementation surfaces:
+
+- `src/types.ts`: add `viewMode` to `AgentChatState`, add
+  `setViewMode(mode)` to `AgentChatRuntimeApi`, add the adapter
+  methods to `AgentChatAdapter`, and add `"iteration.summary"` /
+  `"turn.summary"` to `AgentChatEventType`.
+- `src/runtime/events.ts`: add both new event names to
+  `AGENT_CHAT_LISTENED_EVENTS`; otherwise live SSE delivery will ignore
+  them even if the backend emits them.
+- `src/runtime/use-agent-chat-runtime.ts`: load persisted view mode on
+  startup/session change, expose `setViewMode`, and write through to
+  the adapter or `localStorage`.
 
 ### Toggle placement
 
@@ -298,17 +347,20 @@ export interface AgentChatMessage {
 
 ### Reducer (`src/runtime/reducer.ts`)
 
-Three changes:
+Four changes:
 
-- Extend `applyLlmDelta` and `applyLlmResponse` to read `turn_id` and
-  `iteration_index` from `event.data` and stamp them on the resulting
-  `AgentChatMessage`.
+- Extend `applyLlmDelta`, `applyLlmThinking`, and `applyLlmResponse` to
+  read `turn_id` and `iteration_index` from `event.data` and stamp
+  them on the resulting `AgentChatMessage`.
 - New handler for `iteration.summary`: find the assistant message
   whose `(turnId, iterationIndex)` matches the event and set
   `iterationSummary`. Out-of-order arrival is fine — the message
   already exists by the time the summary lands.
 - New handler for `turn.summary`: find the **last** assistant message
   with `turnId === event.data.turn_id` and set `turnSummary` on it.
+- Preserve any existing `iterationSummary` / `turnSummary` when later
+  LLM events merge into the same assistant message; response merging
+  must not accidentally erase previously attached summaries.
 
 ### `IterationGroup` (new — `components/chat/iteration-group.tsx`)
 
@@ -404,11 +456,11 @@ blocks are reused unchanged.
 
 ## Rollout
 
-Two independently shippable phases:
+Three rollout steps:
 
-1. **Harness side first**: ship `turn_summarizer.py` + the two new
-   events behind `emit_turn_summaries: bool = True`. Old SDKs ignore
-   unknown events. No user-visible change yet.
+1. **Harness side first**: ship `turn_summarizer.py`, the
+   `WorkerSettings.emit_turn_summaries` kill switch, and the two new
+   events. Old SDKs ignore unknown events. No user-visible change yet.
 2. **SDK side**: ship types, reducer handlers, view-mode toggle
    (defaulting to Simple), `IterationGroup`, `TurnSummaryCard`. The
    moment the SDK ships, Simple mode is the default view.
@@ -423,10 +475,10 @@ Two independently shippable phases:
   `summarize_iteration` and `summarize_turn` with a stubbed summary
   client. Cover normal output, empty reasoning, no notable tool
   calls, and the artifact filtering rules.
-- `tests/orchestrator/test_worker_summaries.py` — integration test
-  that runs a fake LLM turn through the worker and asserts the two
-  new events land in the events table with the expected shape.
-- Existing worker tests stay green; new events are additive.
+- `tests/harness/test_loop_summaries.py` — integration test that runs
+  a fake LLM turn through `AgentHarness` and asserts the two new events
+  land in the events table with the expected shape.
+- Existing harness/worker tests stay green; new events are additive.
 
 ### SDK
 
