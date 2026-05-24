@@ -33,6 +33,7 @@ import { Shimmer } from "../ai-elements/shimmer";
 import { BrowserActivityGroup } from "../browser/browser-activity-group";
 import { ToolCallBlock } from "./tool-call-block";
 import { WebSearchGroupBlock } from "./tools/web-search-tool";
+import { TodoToolBlock } from "./tools/todo-tool";
 import { parseTerminalResult } from "./tools/terminal-tool";
 import { statusColorClass, effectiveStatus, toolErrorSummary, parseArgs } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
@@ -1124,11 +1125,25 @@ function IterationExpanded({
           <ClampedReasoning text={reasoning} />
         </SimpleDetailRow>
       )}
-      {calls.map((tc) => (
-        <SimpleDetailRow key={tc.id} icon={_toolRowIcon(tc.toolName)}>
-          <span>{_toolRowLabel(tc)}</span>
-        </SimpleDetailRow>
-      ))}
+      {calls.map((tc) => {
+        // The todo tool's value is the visible task list itself —
+        // a generic "Updated todo list" row hides exactly what the
+        // user wants to see. Reuse the rich TodoToolBlock from the
+        // Expert renderer for this one case; everything else stays
+        // on the condensed icon + prose row.
+        if (tc.toolName === "todo") {
+          return (
+            <div key={tc.id} className="pr-1">
+              <TodoToolBlock tc={tc} />
+            </div>
+          );
+        }
+        return (
+          <SimpleDetailRow key={tc.id} icon={_toolRowIcon(tc.toolName)}>
+            <span>{_toolRowLabel(tc)}</span>
+          </SimpleDetailRow>
+        );
+      })}
       {showDone && (
         <SimpleDetailRow icon={CircleCheckIcon}>
           <span className="text-foreground">Done</span>
