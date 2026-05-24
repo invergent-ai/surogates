@@ -316,6 +316,54 @@ def _last_assistant_message_excerpt(
     return ""
 
 
+def _coerce_tool_args(raw: Any) -> dict[str, Any]:
+    """Best-effort coercion of a TOOL_CALL ``arguments`` field to a dict.
+
+    Different tool emitters store ``arguments`` either as a JSON string
+    (OpenAI convention) or as a pre-parsed dict.  Anything else is
+    treated as opaque and yields an empty dict so candidate-artifact
+    collection can keep going.
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return {}
+
+
+def _latest_user_message_text(
+    messages: list[dict[str, Any]],
+    limit: int = 1000,
+) -> str:
+    """Extract the latest user message's text content, capped at ``limit``.
+
+    Used by the turn-summary path so the summarizer sees what the user
+    was asking for.  Mirrors the content-coercion logic in
+    :func:`_last_assistant_message_excerpt` so multimodal user messages
+    yield their text parts.
+    """
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content") or ""
+        if isinstance(content, list):
+            content = " ".join(
+                str(part.get("text", ""))
+                for part in content
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") in {"text", "output_text"}
+                )
+            )
+        text = str(content).strip()
+        return text[:limit] if limit and len(text) > limit else text
+    return ""
+
+
 def _seconds_since(value: Any) -> int:
     if not isinstance(value, datetime):
         return 0
@@ -2064,6 +2112,7 @@ class AgentHarness:
                     session, messages, lease, reason="thinking_budget_exhausted",
                     through_event_id=event_id,
                     cost_tracker=cost_tracker,
+                    turn_id=turn_id,
                 )
                 return
 
@@ -2270,6 +2319,8 @@ class AgentHarness:
                     session, messages, lease, reason="completed",
                     through_event_id=event_id,
                     cost_tracker=cost_tracker,
+                    turn_id=turn_id,
+                    user_message=_latest_user_message_text(messages),
                 )
                 return
 
@@ -2328,6 +2379,7 @@ class AgentHarness:
                             session, messages, lease, reason="invalid_tool_calls",
                             through_event_id=event_id,
                             cost_tracker=cost_tracker,
+                            turn_id=turn_id,
                         )
                         return
 
@@ -2484,6 +2536,7 @@ class AgentHarness:
                     lease,
                     reason="loop_wait",
                     cost_tracker=cost_tracker,
+                    turn_id=turn_id,
                 )
                 return
 
@@ -4147,6 +4200,8 @@ class AgentHarness:
         await self._complete_session(
             session, messages, lease, reason="budget_exhausted",
             cost_tracker=cost_tracker,
+            turn_id=turn_id,
+            user_message=_latest_user_message_text(messages),
         )
 
     # ------------------------------------------------------------------
@@ -5301,6 +5356,202 @@ class AgentHarness:
             },
         )
 
+    async def _drain_and_emit_turn_summary(
+        self,
+        *,
+        session_id: UUID,
+        turn_id: str,
+        user_message: str,
+    ) -> None:
+        """Drain pending iteration summaries, then emit TURN_SUMMARY.
+
+        Soft 10s cap on the drain so a hung iteration-summary task
+        can't stall session completion. Same 10s cap on the turn
+        summary call. Any failure is logged and swallowed — the SDK
+        falls back to the per-iteration view when TURN_SUMMARY is
+        missing.
+        """
+        if self._turn_summarizer is None:
+            return
+
+        pending = list(self._pending_iteration_summary_tasks.values())
+        if pending:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=10.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "iteration summary drain timed out for turn %s", turn_id,
+                )
+
+        # Read back the resolved iteration summaries in order so the
+        # turn summarizer sees the same recap thread the SDK will
+        # render. We re-query the event log because some iteration
+        # tasks may have failed silently (returned None).
+        try:
+            iter_events = await self._store.get_events(
+                session_id,
+                types=[EventType.ITERATION_SUMMARY],
+            )
+        except Exception:
+            logger.warning(
+                "Failed to read iteration summaries for turn %s; "
+                "summarizing without them.",
+                turn_id,
+                exc_info=True,
+            )
+            iter_events = []
+        ordered = sorted(
+            (
+                e for e in iter_events
+                if (getattr(e, "data", None) or {}).get("turn_id") == turn_id
+            ),
+            key=lambda e: (getattr(e, "data", None) or {}).get(
+                "iteration_index", 0,
+            ),
+        )
+        iteration_summaries = [
+            str((getattr(e, "data", None) or {}).get("summary") or "")
+            for e in ordered
+        ]
+        candidate_artifacts = await self._collect_candidate_artifacts(
+            session_id=session_id, turn_id=turn_id,
+        )
+
+        try:
+            result = await asyncio.wait_for(
+                self._turn_summarizer.summarize_turn(
+                    turn_id=turn_id,
+                    user_message=user_message,
+                    iteration_summaries=iteration_summaries,
+                    candidate_artifacts=candidate_artifacts,
+                ),
+                timeout=10.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("turn summary call timed out for %s", turn_id)
+            return
+        except Exception:
+            logger.warning(
+                "turn summary call failed for %s", turn_id, exc_info=True,
+            )
+            return
+        if result is None:
+            return
+
+        try:
+            await self._store.emit_event(
+                session_id,
+                EventType.TURN_SUMMARY,
+                {
+                    "turn_id": turn_id,
+                    "recap": result.recap,
+                    "artifacts": [
+                        {"kind": a.kind, "label": a.label, "ref": a.ref}
+                        for a in result.artifacts
+                    ],
+                },
+            )
+        except Exception:
+            logger.warning(
+                "Failed to emit TURN_SUMMARY for %s", turn_id, exc_info=True,
+            )
+
+    async def _collect_candidate_artifacts(
+        self,
+        *,
+        session_id: UUID,
+        turn_id: str,
+    ) -> list[Any]:
+        """Pull notable tool calls and artifacts emitted during this turn.
+
+        Returns a list of ``TurnArtifact`` instances from
+        :mod:`surogates.harness.turn_summarizer`. The summarizer
+        curates this list further; this method's job is to surface
+        every plausibly-relevant event so the LLM can pick.
+        """
+        from surogates.harness.turn_summarizer import TurnArtifact
+
+        out: list[TurnArtifact] = []
+        try:
+            events = await self._store.get_events(session_id)
+        except Exception:
+            logger.debug(
+                "Failed to read events for candidate artifacts on %s",
+                session_id, exc_info=True,
+            )
+            return out
+
+        in_turn = False
+        for evt in events:
+            data = getattr(evt, "data", None) or {}
+            if data.get("turn_id") == turn_id:
+                in_turn = True
+            if not in_turn:
+                continue
+
+            etype = getattr(evt, "type", None)
+            etype_str = etype.value if hasattr(etype, "value") else etype
+
+            if etype_str == EventType.TOOL_CALL.value:
+                # Tool-call payloads carry ``name`` and ``arguments`` per
+                # the harness's TOOL_CALL emit contract; ``arguments``
+                # is JSON-encoded for some tools, a dict for others.
+                name = str(data.get("name") or "")
+                raw_args = data.get("arguments")
+                args = _coerce_tool_args(raw_args)
+                tc_id = str(data.get("tool_call_id") or data.get("id") or "")
+
+                if name in {"write_file", "patch"}:
+                    path = (
+                        args.get("path")
+                        or args.get("file_path")
+                        or args.get("name")
+                        or ""
+                    )
+                    if isinstance(path, str) and path:
+                        out.append(
+                            TurnArtifact(kind="file", label=path, ref=path),
+                        )
+                elif name == "create_artifact":
+                    label = args.get("name") or args.get("path") or ""
+                    if isinstance(label, str) and label:
+                        out.append(
+                            TurnArtifact(
+                                kind="artifact", label=label, ref=label,
+                            ),
+                        )
+                elif name in {"web_extract", "web_crawl"}:
+                    url = args.get("url") or ""
+                    if isinstance(url, str) and url:
+                        out.append(
+                            TurnArtifact(kind="url", label=url, ref=url),
+                        )
+                elif name == "terminal":
+                    cmd = args.get("command") or ""
+                    if isinstance(cmd, str) and cmd and tc_id:
+                        out.append(
+                            TurnArtifact(
+                                kind="command",
+                                label=cmd[:80],
+                                ref=tc_id,
+                            ),
+                        )
+            elif etype_str == EventType.ARTIFACT_CREATED.value:
+                artifact_id = str(
+                    data.get("artifact_id") or data.get("id") or "",
+                )
+                name = str(data.get("name") or artifact_id or "")
+                if artifact_id and name:
+                    out.append(
+                        TurnArtifact(
+                            kind="artifact", label=name, ref=artifact_id,
+                        ),
+                    )
+        return out
+
     async def _complete_session(
         self,
         session: Session,
@@ -5310,8 +5561,17 @@ class AgentHarness:
         reason: str,
         through_event_id: int | None = None,
         cost_tracker: SessionCostTracker | None = None,
+        turn_id: str | None = None,
+        user_message: str | None = None,
     ) -> None:
-        """Emit SESSION_COMPLETE and advance the cursor."""
+        """Emit SESSION_COMPLETE and advance the cursor.
+
+        When ``turn_id`` is supplied AND the completion reason represents
+        a successful turn end (``stop``/``done``/``complete``/``completed``),
+        drains any in-flight iteration-summary tasks and emits a
+        ``TURN_SUMMARY`` event before ``SESSION_COMPLETE`` so the SDK
+        sees the recap in the same event stream as the closing message.
+        """
         # Destroy the sandbox pod for this session.
         if self._sandbox_pool is not None:
             try:
@@ -5325,6 +5585,26 @@ class AgentHarness:
                 self._memory_manager.on_session_end(messages=[])
             except Exception:
                 logger.debug("Memory manager on_session_end failed", exc_info=True)
+
+        # Emit TURN_SUMMARY (if applicable) BEFORE SESSION_COMPLETE so
+        # late-arriving SSE subscribers see them in event-id order.
+        if (
+            turn_id is not None
+            and self._turn_summarizer is not None
+            and reason in {"stop", "done", "complete", "completed"}
+        ):
+            try:
+                await self._drain_and_emit_turn_summary(
+                    session_id=session.id,
+                    turn_id=turn_id,
+                    user_message=user_message
+                    if user_message is not None
+                    else _latest_user_message_text(messages),
+                )
+            except Exception:
+                logger.exception(
+                    "Turn summary drain failed for %s", session.id,
+                )
 
         complete_data: dict[str, Any] = {
             "reason": reason,
