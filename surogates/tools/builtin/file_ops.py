@@ -801,8 +801,13 @@ def register(registry: ToolRegistry) -> None:
 # ---------------------------------------------------------------------------
 
 
-# Document extensions handled by markitdown; populated in Task 2.
-_DOCUMENT_EXTENSIONS: frozenset[str] = frozenset()
+# Document extensions handled natively by markitdown (see _handle_document).
+_DOCUMENT_EXTENSIONS: frozenset[str] = frozenset({
+    ".pdf",
+    ".docx",
+    ".xlsx",
+    ".pptx",
+})
 
 
 def _apply_line_window(
