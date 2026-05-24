@@ -363,3 +363,22 @@ async def test_missing_document_returns_clean_error(
     result = json.loads(result_json)
     assert "error" in result
     assert "not found" in result["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Task 6 — tool description advertises native document + image handling
+# ---------------------------------------------------------------------------
+
+
+def test_read_file_description_mentions_native_document_handling() -> None:
+    from surogates.tools.builtin.file_ops import READ_FILE_SCHEMA
+
+    desc = READ_FILE_SCHEMA.description.lower()
+    assert ".pdf" in desc
+    assert ".docx" in desc
+    assert ".xlsx" in desc
+    assert ".pptx" in desc
+    assert "vision" in desc or "image" in desc
+    # Negative guard: the old "Cannot read images or binary files" wording
+    # would tell the LLM to avoid the tool for these inputs.
+    assert "cannot read images" not in desc

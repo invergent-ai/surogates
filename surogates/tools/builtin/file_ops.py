@@ -564,12 +564,15 @@ def _tool_error(message: str) -> str:
 READ_FILE_SCHEMA = ToolSchema(
     name="read_file",
     description=(
-        "Read a text file with line numbers and pagination. Use this instead of "
-        "cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Suggests "
-        "similar filenames if not found. Use offset and limit for large files. "
-        "Reads exceeding ~100K characters are rejected; use offset and limit to "
-        "read specific sections of large files. NOTE: Cannot read images or binary "
-        "files — use vision_analyze for images."
+        "Read a file with line numbers and pagination. Use this instead of "
+        "cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. "
+        "Handles plain text plus .pdf, .docx, .xlsx, .pptx (parsed to "
+        "markdown natively) and image files (described by a vision model) "
+        "— do NOT pre-extract documents with subprocess tools or pip-install "
+        "pypdf/python-docx/openpyxl yourself; just call read_file. "
+        "Suggests similar filenames if not found. Use offset and limit for "
+        "large files. Reads exceeding ~100K characters are rejected; use "
+        "offset and limit to read specific sections of large files."
     ),
     parameters={
         "type": "object",
