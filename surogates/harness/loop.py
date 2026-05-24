@@ -865,6 +865,7 @@ class AgentHarness:
         advisor_model: str = "",
         advisor_max_calls_per_turn: int = 2,
         advisor_max_tokens: int = 700,
+        turn_summarizer: Any | None = None,
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
@@ -895,6 +896,24 @@ class AgentHarness:
         self._advisor_model: str = advisor_model or ""
         self._advisor_max_calls_per_turn = max(0, int(advisor_max_calls_per_turn))
         self._advisor_max_tokens = max(1, int(advisor_max_tokens))
+
+        # Optional per-turn LLM summarizer for the Simple chat view.
+        # When ``None`` (no summary_model configured, or
+        # WorkerSettings.emit_turn_summaries=False), the harness emits no
+        # iteration.summary / turn.summary events and the SDK falls back
+        # to its expanded live-state rendering.
+        self._turn_summarizer: Any | None = turn_summarizer
+        # Per-iteration background summary tasks, keyed by
+        # iteration_index for the active turn. Reset at the top of each
+        # wake() so a paused-and-resumed session can't reuse stale
+        # tasks; drained at turn-end before emitting turn.summary.
+        self._pending_iteration_summary_tasks: dict[int, asyncio.Task[Any]] = {}
+        # Snapshot of resolved iteration summaries indexed by
+        # iteration_index. Used to give later iteration summaries
+        # context about earlier ones in the same turn.
+        self._completed_iteration_summaries: dict[int, str] = {}
+        # In-flight turn-summary task, awaited in _complete_session.
+        self._pending_turn_summary_task: asyncio.Task[Any] | None = None
 
         # Checkpoint flag — when enabled, the harness tells the sandbox
         # to take filesystem snapshots before file-mutating operations.
