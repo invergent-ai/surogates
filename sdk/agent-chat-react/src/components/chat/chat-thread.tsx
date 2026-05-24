@@ -786,6 +786,52 @@ function truncate(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
+/**
+ * Whether an iteration is genuinely in-flight right now.
+ *
+ * ``message.status === "streaming"`` is NOT sufficient: the reducer
+ * keeps tool-using assistant messages in the "streaming" state across
+ * the entire rest of the turn (it never flips back to "complete" once
+ * tool_calls are present). So a tool batch can finish — every tool
+ * call resolved — while the message is still tagged "streaming".
+ *
+ * Live means: at least one tool call is still running, OR a text-only
+ * iteration is mid-stream (no tools, status="streaming"). Everything
+ * else counts as "done" for the purpose of swapping shimmer →
+ * derived/summary label.
+ */
+function isIterationLive(message: ChatMessageType): boolean {
+  const calls = message.toolCalls ?? [];
+  if (calls.length > 0) {
+    return calls.some((tc) => tc.status === "running");
+  }
+  return message.status === "streaming";
+}
+
+/**
+ * Shimmer label for a live iteration. Derives a useful name from
+ * currently-running tools so the user sees "Running List Files…"
+ * instead of a generic "Working…" when context is available.
+ */
+function liveIterationLabel(message: ChatMessageType): string {
+  const running = (message.toolCalls ?? []).filter(
+    (tc) => tc.status === "running",
+  );
+  if (running.length === 0) return "Thinking…";
+  if (running.length === 1) {
+    const tc = running[0]!;
+    const name = cancelledToolLabel(tc.toolName);
+    const detail = extractToolDetail(tc);
+    return detail ? `Running ${name} · ${detail}…` : `Running ${name}…`;
+  }
+  const firstName = running[0]!.toolName;
+  const allSame = running.every((tc) => tc.toolName === firstName);
+  if (allSame) {
+    return `Running ${cancelledToolLabel(firstName)} × ${running.length}…`;
+  }
+  return `Running ${running.length} tools…`;
+}
+
 function iterationDotClass(message: ChatMessageType): string {
   const calls = message.toolCalls ?? [];
   if (calls.length === 0) {
@@ -802,6 +848,9 @@ function iterationDotClass(message: ChatMessageType): string {
   }
   if (anyError) return "bg-red-500";
   if (anyRunning) return "bg-primary animate-pulse";
+  // All tools resolved — the iteration is effectively complete even
+  // if message.status is still "streaming" (the reducer leaves
+  // tool-using messages in that state for the rest of the turn).
   return "bg-emerald-500";
 }
 
@@ -844,20 +893,18 @@ export function IterationGroup({
   onFileSelect,
 }: IterationGroupProps) {
   const summary = message.iterationSummary?.summary;
-  const isStreaming = message.status === "streaming";
-  const runningToolCount = (message.toolCalls ?? []).filter(
-    (tc) => tc.status === "running",
-  ).length;
   const [open, setOpen] = useState(false);
   const dot = iterationDotClass(message);
 
-  // 1. Streaming: shimmer label only. The expanded Expert timeline
-  //    would defeat the "Simple mode is quiet" goal; users who want
-  //    progress detail switch to Expert.
-  if (isStreaming) {
-    const label = runningToolCount > 0
-      ? `Working… (${runningToolCount} tool${runningToolCount === 1 ? "" : "s"})`
-      : "Thinking…";
+  // 1. Live iteration: shimmer label only. "Live" means a tool is
+  //    actively running, OR a text-only iteration is mid-stream.
+  //    message.status === "streaming" alone is NOT a reliable signal —
+  //    tool-using messages stay in "streaming" state across the entire
+  //    rest of the turn until the next llm.response lands or the turn
+  //    ends. Without this stricter check, completed iterations would
+  //    stay in the shimmer state forever (user-reported bug).
+  if (isIterationLive(message)) {
+    const label = liveIterationLabel(message);
     return (
       <div className="flex items-center gap-2 px-1 py-0.5 text-sm">
         <span

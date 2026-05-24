@@ -136,7 +136,7 @@ describe("IterationGroup", () => {
     expect(dom.textContent).toMatch(/Thinking/i);
   });
 
-  it("shows a Working placeholder with running-tool count", () => {
+  it("shows a derived live label collapsing same-tool runs while streaming", () => {
     const message = buildMessage({
       turnId: "t-1",
       iterationIndex: 0,
@@ -153,11 +153,10 @@ describe("IterationGroup", () => {
         artifactFallbacks={{}}
       />,
     );
-    expect(dom.textContent).toMatch(/Working/i);
-    expect(dom.textContent).toMatch(/2 tools/);
+    expect(dom.textContent).toMatch(/Running.+Patch.+×.+2/);
   });
 
-  it("renders nothing but the shimmer label during streaming", () => {
+  it("shows a derived single-tool live label including the path detail", () => {
     // Even when tools have started and reasoning text exists, the
     // streaming row stays collapsed — users who want progress detail
     // switch to Expert mode.
@@ -177,10 +176,37 @@ describe("IterationGroup", () => {
         artifactFallbacks={{}}
       />,
     );
-    expect(dom.textContent).toMatch(/Working/i);
-    // Reasoning content + per-tool detail hidden.
+    expect(dom.textContent).toMatch(/Running.+Patch.+x\.html/);
+    // Reasoning content stays hidden (no expanded view during stream).
     expect(dom.textContent).not.toContain("internal thought");
-    expect(dom.textContent).not.toContain("x.html");
+  });
+
+  it("swaps shimmer for derived label once all tools complete, even with status=streaming", () => {
+    // Regression for user-reported bug: tool-using assistant messages
+    // never transition out of status="streaming" — the reducer leaves
+    // them that way for the rest of the turn. The IterationGroup must
+    // detect "no running tools" as the iteration-done signal.
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+      status: "streaming",  // still tagged streaming!
+      toolCalls: [
+        { id: "c1", toolName: "list_files", args: "{\"path\":\".\"}", status: "complete" },
+      ],
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    // Collapsed derived label, NOT the shimmer.
+    expect(dom.textContent).not.toMatch(/Running/i);
+    expect(dom.textContent).not.toMatch(/Thinking/i);
+    expect(dom.textContent).toContain("List Files");
+    expect(dom.querySelector("button[aria-expanded='false']"))
+      .not.toBeNull();
   });
 
   it("derives a tool-name label when no summary is present (complete)", () => {
