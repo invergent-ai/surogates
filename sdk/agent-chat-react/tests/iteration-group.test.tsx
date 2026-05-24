@@ -308,7 +308,7 @@ describe("IterationGroup", () => {
     expect(dom.textContent).not.toContain("Third paragraph");
     expect(dom.textContent).not.toContain("Fourth paragraph");
     const showMore = Array.from(dom.querySelectorAll("button")).find(
-      (b) => b.textContent === "Show more",
+      (b) => (b.textContent ?? "").startsWith("Show more"),
     );
     expect(showMore).toBeDefined();
 
@@ -318,7 +318,7 @@ describe("IterationGroup", () => {
     expect(dom.textContent).toContain("Third paragraph");
     expect(dom.textContent).toContain("Fourth paragraph");
     const showLess = Array.from(dom.querySelectorAll("button")).find(
-      (b) => b.textContent === "Show less",
+      (b) => (b.textContent ?? "").startsWith("Show less"),
     );
     expect(showLess).toBeDefined();
   });
@@ -343,9 +343,10 @@ describe("IterationGroup", () => {
     const trigger = dom.querySelector("button[aria-expanded='false']");
     act(() => { (trigger as HTMLButtonElement).click(); });
     expect(dom.textContent).toContain("Just one short paragraph.");
-    expect(
-      Array.from(dom.querySelectorAll("button")).map((b) => b.textContent),
-    ).not.toContain("Show more");
+    const hasShowMore = Array.from(dom.querySelectorAll("button")).some(
+      (b) => (b.textContent ?? "").startsWith("Show more"),
+    );
+    expect(hasShowMore).toBe(false);
   });
 
   it("hides internal tools (list_files, search_files, browser_*, etc.) in Simple mode", () => {
@@ -456,7 +457,9 @@ describe("IterationGroup", () => {
     expect(dom.textContent).not.toContain("List Files");
   });
 
-  it("hides the actual shell command from the terminal body row", () => {
+  it("hides terminal and execute_code calls entirely in Simple mode", () => {
+    // Both header and body should drop these calls — the user wants
+    // 'what' the agent did, not 'how it shelled out to do it'.
     const message = buildMessage({
       turnId: "t-1",
       iterationIndex: 0,
@@ -472,8 +475,14 @@ describe("IterationGroup", () => {
           id: "c1",
           toolName: "terminal",
           args: JSON.stringify({
-            command: "cd __WORKSPACE__ && python3 -c 'import pandas; print(pandas.__version__)'",
+            command: "cd __WORKSPACE__ && python3 -c 'import pandas'",
           }),
+          status: "complete",
+        },
+        {
+          id: "c2",
+          toolName: "execute_code",
+          args: JSON.stringify({ code: "print(1 + 1)" }),
           status: "complete",
         },
       ],
@@ -485,12 +494,19 @@ describe("IterationGroup", () => {
         artifactFallbacks={{}}
       />,
     );
-    // Expand the iteration so the body rows render.
     const trigger = dom.querySelector("button[aria-expanded='false']");
     act(() => { (trigger as HTMLButtonElement).click(); });
-    expect(dom.textContent).toContain("Ran a command");
+    expect(dom.textContent).not.toContain("Ran a command");
+    expect(dom.textContent).not.toContain("Executed code");
     expect(dom.textContent).not.toContain("python3");
     expect(dom.textContent).not.toContain("__WORKSPACE__");
+    // The header summary still renders.
+    expect(dom.textContent).toContain("Investigated the workspace");
+    // Done footer appears because there's reasoning OR a summary even
+    // when all visible tool rows are filtered out... but only if
+    // there's something else to show. With just hidden tools + a
+    // summary, the body otherwise has no rows, so showDone is false.
+    expect(dom.textContent).not.toContain("Done");
   });
 
   it("renders nothing when complete, no summary, no tools, no reasoning", () => {

@@ -849,6 +849,12 @@ const _SIMPLE_MODE_HIDDEN_TOOLS: ReadonlySet<string> = new Set([
   "process",
   "todo",
   "memory",
+  // Shell commands and code execution are infrastructure plumbing the
+  // user doesn't need to see when the goal is to know *what* the
+  // agent accomplished, not *how*. Expert mode still has the full
+  // command + output block.
+  "terminal",
+  "execute_code",
 ]);
 
 function _isHiddenSimpleTool(tc: ToolCallInfo): boolean {
