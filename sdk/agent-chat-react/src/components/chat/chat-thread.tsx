@@ -982,6 +982,63 @@ function SimpleDetailRow({ icon: Icon, children }: SimpleDetailRowProps) {
 }
 
 /**
+ * Reasoning text rendered as paragraphs. By default we show the
+ * first ``previewParagraphs`` paragraphs (split on blank lines) plus
+ * a "Show more" link; clicking expands to the full text with a
+ * matching "Show less" link.
+ *
+ * Paragraph split: blank-line separated when present, otherwise one
+ * paragraph per source line (rare — most reasoning blocks already
+ * use blank-line paragraph breaks).
+ */
+function ClampedReasoning({
+  text,
+  previewParagraphs = 2,
+}: {
+  text: string;
+  previewParagraphs?: number;
+}) {
+  const paragraphs = splitReasoningParagraphs(text);
+  const [expanded, setExpanded] = useState(false);
+  const hasMore = paragraphs.length > previewParagraphs;
+  const visible = expanded || !hasMore
+    ? paragraphs
+    : paragraphs.slice(0, previewParagraphs);
+  return (
+    <div className="space-y-2">
+      {visible.map((paragraph, i) => (
+        <p key={i} className="whitespace-pre-wrap">{paragraph}</p>
+      ))}
+      {hasMore && (
+        <button
+          type="button"
+          onClick={() => setExpanded((prev) => !prev)}
+          className="text-xs font-medium text-muted-foreground hover:text-foreground"
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function splitReasoningParagraphs(text: string): string[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  const blankSplit = trimmed
+    .split(/\n\s*\n+/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  if (blankSplit.length > 1) return blankSplit;
+  // Fall back to one-paragraph-per-line so models that emit single
+  // newlines still get a clamp boundary.
+  return trimmed
+    .split(/\n+/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+}
+
+/**
  * Condensed Simple-mode expansion of an iteration: one icon + prose
  * row per tool call, plus the reasoning text and a "Done" footer
  * when the iteration completed successfully.
@@ -1006,7 +1063,7 @@ function IterationExpanded({
     <div className="ml-2 space-y-3 border-l border-border/40 pl-4 py-1">
       {reasoning && (
         <SimpleDetailRow icon={ClockIcon}>
-          <p className="whitespace-pre-wrap">{reasoning}</p>
+          <ClampedReasoning text={reasoning} />
         </SimpleDetailRow>
       )}
       {calls.map((tc) => (

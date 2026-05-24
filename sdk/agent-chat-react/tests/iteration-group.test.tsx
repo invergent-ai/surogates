@@ -274,6 +274,80 @@ describe("IterationGroup", () => {
     expect(dom.textContent).toContain("Used 2 tools");
   });
 
+  it("clamps long reasoning to 2 paragraphs with a Show more toggle", () => {
+    const reasoning = [
+      "First paragraph of reasoning explaining the overall approach.",
+      "Second paragraph diving into the details of the plan.",
+      "Third paragraph that should be hidden until the user clicks Show more.",
+      "Fourth paragraph that also stays hidden.",
+    ].join("\n\n");
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+      iterationSummary: {
+        iterationIndex: 0, summary: "Long thoughts",
+        toolCallIds: [], startedAt: "", endedAt: "",
+      },
+      reasoning,
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    // Expand the iteration to expose the reasoning row.
+    const trigger = dom.querySelector("button[aria-expanded='false']");
+    expect(trigger).not.toBeNull();
+    act(() => { (trigger as HTMLButtonElement).click(); });
+
+    // First two paragraphs visible, last two hidden, Show more present.
+    expect(dom.textContent).toContain("First paragraph");
+    expect(dom.textContent).toContain("Second paragraph");
+    expect(dom.textContent).not.toContain("Third paragraph");
+    expect(dom.textContent).not.toContain("Fourth paragraph");
+    const showMore = Array.from(dom.querySelectorAll("button")).find(
+      (b) => b.textContent === "Show more",
+    );
+    expect(showMore).toBeDefined();
+
+    // Clicking Show more reveals the remaining paragraphs and the
+    // toggle becomes "Show less".
+    act(() => { showMore!.click(); });
+    expect(dom.textContent).toContain("Third paragraph");
+    expect(dom.textContent).toContain("Fourth paragraph");
+    const showLess = Array.from(dom.querySelectorAll("button")).find(
+      (b) => b.textContent === "Show less",
+    );
+    expect(showLess).toBeDefined();
+  });
+
+  it("does not render a Show more link when reasoning is short", () => {
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+      iterationSummary: {
+        iterationIndex: 0, summary: "Brief thought",
+        toolCallIds: [], startedAt: "", endedAt: "",
+      },
+      reasoning: "Just one short paragraph.",
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    const trigger = dom.querySelector("button[aria-expanded='false']");
+    act(() => { (trigger as HTMLButtonElement).click(); });
+    expect(dom.textContent).toContain("Just one short paragraph.");
+    expect(
+      Array.from(dom.querySelectorAll("button")).map((b) => b.textContent),
+    ).not.toContain("Show more");
+  });
+
   it("renders nothing when complete, no summary, no tools, no reasoning", () => {
     // Empty iteration — nothing to derive. The surrounding
     // SimpleAssistantGroup still renders any final text + the
