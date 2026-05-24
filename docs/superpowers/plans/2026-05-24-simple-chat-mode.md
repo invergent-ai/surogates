@@ -24,7 +24,7 @@ Updated before each commit during inline execution.
 - [x] A6: wire TurnSummarizer into AgentHarness and worker.py
 - [x] A7: emit iteration.summary per iteration
 - [x] A8: emit turn.summary and drain in _complete_session
-- [ ] A9: emit_turn_summaries gate integration test
+- [x] A9: emit_turn_summaries gate integration test
 - [ ] B1: SDK event type union and AGENT_CHAT_LISTENED_EVENTS
 - [ ] B2: summary types and AgentChatMessage/State extensions
 - [ ] B3: reducer stamps turnId/iterationIndex
