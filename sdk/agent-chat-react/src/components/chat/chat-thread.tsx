@@ -34,6 +34,7 @@ import { BrowserActivityGroup } from "../browser/browser-activity-group";
 import { ToolCallBlock } from "./tool-call-block";
 import { WebSearchGroupBlock } from "./tools/web-search-tool";
 import { TodoToolBlock } from "./tools/todo-tool";
+import { AskUserQuestionToolBlock } from "./tools/ask-user-question-tool";
 import { parseTerminalResult } from "./tools/terminal-tool";
 import { statusColorClass, effectiveStatus, toolErrorSummary, parseArgs } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
@@ -1171,6 +1172,21 @@ export function IterationGroup({
   //    ends. Without this stricter check, completed iterations would
   //    stay in the shimmer state forever (user-reported bug).
   if (isIterationLive(message)) {
+    // An ask_user_question call is the one tool the user must
+    // interact with to make progress — a shimmer label alone gives
+    // them nothing to answer and the session stalls. Render the
+    // interactive block inline so they can respond without
+    // switching to Expert mode.
+    const askCall = (message.toolCalls ?? []).find(
+      (tc) => tc.toolName === "ask_user_question" && tc.status === "running",
+    );
+    if (askCall) {
+      return (
+        <div className="px-1 py-0.5">
+          <AskUserQuestionToolBlock tc={askCall} />
+        </div>
+      );
+    }
     const label = liveIterationLabel(message);
     return (
       <div className="px-1 py-0.5 text-sm">
