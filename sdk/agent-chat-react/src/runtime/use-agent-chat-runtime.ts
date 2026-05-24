@@ -16,6 +16,29 @@ import {
   createInitialAgentChatState,
 } from "./reducer";
 
+const VIEW_MODE_KEY = "@invergent/agent-chat-react:viewMode";
+
+function readPersistedViewMode(): "simple" | "expert" | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(VIEW_MODE_KEY);
+    if (raw === "simple" || raw === "expert") return raw;
+  } catch {
+    // localStorage can throw in restricted contexts (Safari private
+    // mode, sandboxed iframes). Treat as "no preference yet".
+  }
+  return null;
+}
+
+function writePersistedViewMode(mode: "simple" | "expert"): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(VIEW_MODE_KEY, mode);
+  } catch {
+    // Non-fatal: the adapter call still persists for next session.
+  }
+}
+
 export interface UseAgentChatRuntimeInput {
   adapter: AgentChatAdapter;
   agentId?: string;
@@ -30,7 +53,13 @@ export function useAgentChatRuntime({
   onSessionChange,
 }: UseAgentChatRuntimeInput): AgentChatRuntimeApi {
   const [state, setState] = useState<AgentChatState>(() =>
-    createInitialAgentChatState({ isLoadingHistory: Boolean(sessionId) }),
+    createInitialAgentChatState({
+      isLoadingHistory: Boolean(sessionId),
+      // Seed from localStorage so the first paint matches the user's
+      // last choice without flashing the default. The async adapter
+      // load can still upgrade this later.
+      viewMode: readPersistedViewMode() ?? "simple",
+    }),
   );
   const [session, setSession] = useState<AgentChatSession | null>(null);
   const stateRef = useRef(state);
@@ -401,12 +430,52 @@ export function useAgentChatRuntime({
     }
   }, [adapter, sessionId]);
 
-  // viewMode (Simple/Expert) plumbing — minimal scaffold for B2 so
-  // existing call sites compile. B5 wires real adapter + localStorage
-  // persistence.
-  const setViewMode = useCallback((mode: "simple" | "expert") => {
-    setState((prev) => ({ ...prev, viewMode: mode }));
-  }, []);
+  // viewMode (Simple/Expert) persistence: prefer the adapter's
+  // getChatViewMode / setChatViewMode when implemented, fall back to
+  // localStorage otherwise. The initial hydration runs once per
+  // adapter; setViewMode writes through to both stores so a later
+  // reload picks up the change even if the adapter call is in flight.
+  useEffect(() => {
+    if (!adapter.getChatViewMode) {
+      const cached = readPersistedViewMode();
+      if (cached !== null) {
+        setState((prev) =>
+          prev.viewMode === cached ? prev : { ...prev, viewMode: cached },
+        );
+      }
+      return;
+    }
+    let cancelled = false;
+    void adapter
+      .getChatViewMode()
+      .then((persisted) => {
+        if (cancelled) return;
+        if (persisted === "simple" || persisted === "expert") {
+          setState((prev) =>
+            prev.viewMode === persisted
+              ? prev
+              : { ...prev, viewMode: persisted },
+          );
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [adapter]);
+
+  const setViewMode = useCallback(
+    (mode: "simple" | "expert") => {
+      setState((prev) =>
+        prev.viewMode === mode ? prev : { ...prev, viewMode: mode },
+      );
+      writePersistedViewMode(mode);
+      if (adapter.setChatViewMode) {
+        void adapter.setChatViewMode(mode).catch(() => undefined);
+      }
+    },
+    [adapter],
+  );
 
   return {
     state,
