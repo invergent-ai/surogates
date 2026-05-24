@@ -138,6 +138,14 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         output_cost_per_1k=0.0,
         supports_vision=False,
     ),
+    "mimo-v2.5-pro": ModelInfo(
+        id="mimo-v2.5-pro",
+        context_window=1_048_576,
+        max_output_tokens=131_072,
+        input_cost_per_1k=0.0,
+        output_cost_per_1k=0.0,
+        supports_vision=False,
+    ),
     # --- Surogate -----------------------
     "surogate": ModelInfo(
         id="surogate",
@@ -179,7 +187,7 @@ _ALIASES: dict[str, str] = {
     "z-ai/glm-5.1": "glm-5.1",
     "zai-org/GLM-5.1": "glm-5.1",
     "@preset/glm-5-1": "glm-5.1",
-    "@preset/base": "glm-5.1",
+    "@preset/base": "moonshotai/Kimi-K2.6",
 }
 
 
