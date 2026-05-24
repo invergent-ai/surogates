@@ -960,8 +960,6 @@ class AgentHarness:
         # iteration_index. Used to give later iteration summaries
         # context about earlier ones in the same turn.
         self._completed_iteration_summaries: dict[int, str] = {}
-        # In-flight turn-summary task, awaited in _complete_session.
-        self._pending_turn_summary_task: asyncio.Task[Any] | None = None
 
         # Checkpoint flag — when enabled, the harness tells the sandbox
         # to take filesystem snapshots before file-mutating operations.
@@ -1544,7 +1542,6 @@ class AgentHarness:
         # session can't reuse stale tasks from a previous wake().
         self._pending_iteration_summary_tasks = {}
         self._completed_iteration_summaries = {}
-        self._pending_turn_summary_task = None
 
         iteration = 0
         length_continuation_count = 0
@@ -4058,7 +4055,19 @@ class AgentHarness:
         task = asyncio.create_task(
             _run(), name=f"iteration-summary-{turn_id}-{iteration_index}",
         )
+        # Track in two places: the per-turn dict keyed by
+        # iteration_index lets _drain_and_emit_turn_summary await the
+        # right tasks before generating the recap; _background_tasks
+        # lets wake()'s finally drain anything still in flight when the
+        # turn ends abnormally (cancellation, crash).
         self._pending_iteration_summary_tasks[iteration_index] = task
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        task.add_done_callback(
+            lambda _t: self._pending_iteration_summary_tasks.pop(
+                iteration_index, None,
+            ),
+        )
 
     async def _request_final_summary(
         self,
@@ -5471,12 +5480,28 @@ class AgentHarness:
         :mod:`surogates.harness.turn_summarizer`. The summarizer
         curates this list further; this method's job is to surface
         every plausibly-relevant event so the LLM can pick.
+
+        Invariant: this method MUST only be called at the end of the
+        queried turn (i.e. from ``_drain_and_emit_turn_summary`` inside
+        ``_complete_session``). Once we see the first event bearing
+        ``turn_id``, every following event is treated as "in this
+        turn" — TOOL_CALL events don't themselves carry ``turn_id``,
+        so we rely on chronological adjacency to LLM events that do.
+        Calling this method before the current turn ends, or for a
+        turn that's not the LAST in the log, would incorrectly
+        attribute later turns' tool calls to this one.
         """
         from surogates.harness.turn_summarizer import TurnArtifact
 
         out: list[TurnArtifact] = []
         try:
-            events = await self._store.get_events(session_id)
+            # Scoped to the event types we actually inspect — keeps the
+            # query cheap on long-running sessions with deep event logs.
+            events = await self._store.get_events(
+                session_id,
+                types=[EventType.TOOL_CALL, EventType.ARTIFACT_CREATED,
+                       EventType.LLM_REQUEST, EventType.LLM_RESPONSE],
+            )
         except Exception:
             logger.debug(
                 "Failed to read events for candidate artifacts on %s",
@@ -5486,14 +5511,13 @@ class AgentHarness:
 
         in_turn = False
         for evt in events:
-            data = getattr(evt, "data", None) or {}
+            data = evt.data or {}
             if data.get("turn_id") == turn_id:
                 in_turn = True
             if not in_turn:
                 continue
 
-            etype = getattr(evt, "type", None)
-            etype_str = etype.value if hasattr(etype, "value") else etype
+            etype_str = evt.type.value if hasattr(evt.type, "value") else evt.type
 
             if etype_str == EventType.TOOL_CALL.value:
                 # Tool-call payloads carry ``name`` and ``arguments`` per

@@ -80,7 +80,6 @@ def _make_loop_harness(
     harness._turn_summarizer = turn_summarizer
     harness._pending_iteration_summary_tasks = {}
     harness._completed_iteration_summaries = {}
-    harness._pending_turn_summary_task = None
     harness._interrupt_requested = False
     harness._system_prompt_cache = MagicMock()
     harness._system_prompt_cache.is_valid = MagicMock(return_value=False)

@@ -81,4 +81,3 @@ def test_agent_harness_initializes_pending_summary_trackers() -> None:
     harness = _make_minimal_harness()
     assert harness._pending_iteration_summary_tasks == {}
     assert harness._completed_iteration_summaries == {}
-    assert harness._pending_turn_summary_task is None

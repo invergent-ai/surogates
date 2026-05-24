@@ -62,6 +62,88 @@ describe("iteration.summary reducer handling", () => {
     expect(state.messages).toHaveLength(0);
   });
 
+  it("handles out-of-order arrival: summary lands after a later iteration's llm.response", () => {
+    // Real-world pattern: iteration 0's summarizer is slow, iteration
+    // 1's llm.response arrives first, then iteration 0's summary
+    // lands. The reducer must still attach iteration 0's summary to
+    // the right message.
+    let state = createInitialAgentChatState({ isLoadingHistory: false });
+    // Iteration 0 — tool-calling response (a new message at idx 0).
+    state = applyAgentChatEvent(state, {
+      type: "llm.response",
+      eventId: 1,
+      data: {
+        message: {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            { id: "c1", type: "function",
+              function: { name: "todo", arguments: "{}" } },
+          ],
+        },
+        turn_id: "t-1",
+        iteration_index: 0,
+      },
+    });
+    state = applyAgentChatEvent(state, {
+      type: "tool.call",
+      eventId: 2,
+      data: { tool_call_id: "c1", name: "todo", arguments: "{}" },
+    });
+    state = applyAgentChatEvent(state, {
+      type: "tool.result",
+      eventId: 3,
+      data: { tool_call_id: "c1", content: "{}" },
+    });
+    // Iteration 1's llm.response lands BEFORE iteration 0's summary.
+    state = applyAgentChatEvent(state, {
+      type: "llm.response",
+      eventId: 4,
+      data: {
+        message: { role: "assistant", content: "done", tool_calls: [] },
+        turn_id: "t-1",
+        iteration_index: 1,
+      },
+    });
+    expect(state.messages).toHaveLength(2);
+    // Now iteration 0's summary lands late.
+    state = applyAgentChatEvent(state, {
+      type: "iteration.summary",
+      eventId: 5,
+      data: {
+        turn_id: "t-1",
+        iteration_index: 0,
+        summary: "Outlined the plan",
+        tool_call_ids: ["c1"],
+        started_at: "2026-05-24T00:00:00Z",
+        ended_at: "2026-05-24T00:00:01Z",
+      },
+    });
+    // Attaches to message[0] (iteration 0), not message[1] (iteration 1).
+    expect(state.messages[0]?.iterationSummary?.summary).toBe(
+      "Outlined the plan",
+    );
+    expect(state.messages[1]?.iterationSummary).toBeUndefined();
+    // And iteration 1's summary, when it eventually arrives, finds
+    // the right message too.
+    state = applyAgentChatEvent(state, {
+      type: "iteration.summary",
+      eventId: 6,
+      data: {
+        turn_id: "t-1",
+        iteration_index: 1,
+        summary: "Wrapped up",
+        tool_call_ids: [],
+        started_at: "",
+        ended_at: "",
+      },
+    });
+    expect(state.messages[1]?.iterationSummary?.summary).toBe("Wrapped up");
+    expect(state.messages[0]?.iterationSummary?.summary).toBe(
+      "Outlined the plan",
+    );
+  });
+
   it("matches a message even when iteration_index is 0 (regression: numberValue would default to 0)", () => {
     let state = createInitialAgentChatState({ isLoadingHistory: false });
     state = applyAgentChatEvent(state, {
