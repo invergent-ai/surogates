@@ -73,6 +73,41 @@ export interface AgentChatMessage {
   attachments?: AgentChatDisplayAttachment[];
   llmResponseEventId?: number;
   userFeedback?: { rating: "up" | "down"; reason?: string };
+  // Simple chat-mode correlators. ``turnId`` and ``iterationIndex`` are
+  // stamped from the LLM event payloads emitted by the harness so the
+  // iteration.summary / turn.summary handlers can find the right
+  // assistant message later.
+  turnId?: string;
+  iterationIndex?: number;
+  iterationSummary?: AgentChatIterationSummary;
+  turnSummary?: AgentChatTurnSummary;
+}
+
+export interface AgentChatIterationSummary {
+  iterationIndex: number;
+  summary: string;
+  toolCallIds: string[];
+  startedAt: string;
+  endedAt: string;
+}
+
+export type AgentChatTurnArtifactKind =
+  | "file"
+  | "artifact"
+  | "url"
+  | "command";
+
+export interface AgentChatTurnArtifactRef {
+  kind: AgentChatTurnArtifactKind;
+  label: string;
+  ref: string;
+  meta?: Record<string, unknown>;
+}
+
+export interface AgentChatTurnSummary {
+  turnId: string;
+  recap: string;
+  artifacts: AgentChatTurnArtifactRef[];
 }
 
 export interface AgentChatToolCallInfo {
@@ -386,7 +421,9 @@ export type AgentChatEventType =
   | "browser.destroyed"
   | "browser.control_granted"
   | "browser.control_returned"
-  | "clarify.response";
+  | "clarify.response"
+  | "iteration.summary"
+  | "turn.summary";
 
 export interface AgentChatRuntimeEvent {
   type: AgentChatEventType;
@@ -427,7 +464,14 @@ export interface AgentChatState {
   terminal: boolean;
   workspaceRefreshKey: number;
   browser: AgentChatBrowserState | null;
+  // "simple" groups iteration content under one-liners + appends a
+  // TurnSummaryCard; "expert" renders today's per-tool timeline.
+  // Persisted per-user via AgentChatAdapter.getChatViewMode /
+  // setChatViewMode with a localStorage fallback.
+  viewMode: AgentChatViewMode;
 }
+
+export type AgentChatViewMode = "simple" | "expert";
 
 export type AgentChatArtifactKind =
   | "markdown"
@@ -704,6 +748,18 @@ export interface AgentChatAdapter {
    * just hides the pane via the local onClose callback.
    */
   closeBrowserSession?(sessionId: string): Promise<void>;
+  /**
+   * Read the user's persisted Simple/Expert chat view mode. Optional —
+   * when missing, the runtime falls back to a localStorage cache.
+   * Returning ``null`` is treated as "no preference yet" and leaves the
+   * default (``"simple"``) in place.
+   */
+  getChatViewMode?(): Promise<AgentChatViewMode | null>;
+  /**
+   * Persist the user's Simple/Expert chat view mode. Optional —
+   * when missing, the runtime writes to localStorage instead.
+   */
+  setChatViewMode?(mode: AgentChatViewMode): Promise<void>;
 }
 
 export interface AgentChatRuntimeApi {
@@ -724,8 +780,17 @@ export interface AgentChatRuntimeApi {
   retry(): Promise<void>;
   markSending(content: string): void;
   markSendError(errorText: string): void;
+  /** Current Simple/Expert chat view mode. */
+  viewMode: AgentChatViewMode;
+  /** Update the chat view mode + persist via adapter / localStorage. */
+  setViewMode(mode: AgentChatViewMode): void;
 }
 
+export type IterationSummary = AgentChatIterationSummary;
+export type TurnSummary = AgentChatTurnSummary;
+export type TurnArtifactRef = AgentChatTurnArtifactRef;
+export type TurnArtifactKind = AgentChatTurnArtifactKind;
+export type ViewMode = AgentChatViewMode;
 export type ChatMessage = AgentChatMessage;
 export type SessionTreeNode = AgentChatSessionTreeNode;
 export type SessionTree = AgentChatSessionTree;

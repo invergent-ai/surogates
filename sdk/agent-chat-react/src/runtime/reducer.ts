@@ -8,6 +8,8 @@ import type {
   AgentChatState,
   AgentChatTokenUsage,
   AgentChatToolCallInfo,
+  AgentChatTurnArtifactRef,
+  AgentChatViewMode,
 } from "../types";
 import { WORKSPACE_MUTATING_TOOLS } from "./events";
 
@@ -22,7 +24,10 @@ export const EMPTY_TOKEN_USAGE: AgentChatTokenUsage = {
 };
 
 export function createInitialAgentChatState(
-  options: { isLoadingHistory?: boolean } = {},
+  options: {
+    isLoadingHistory?: boolean;
+    viewMode?: AgentChatViewMode;
+  } = {},
 ): AgentChatState {
   return {
     messages: [],
@@ -36,6 +41,7 @@ export function createInitialAgentChatState(
     terminal: false,
     workspaceRefreshKey: 0,
     browser: null,
+    viewMode: options.viewMode ?? "simple",
   };
 }
 
@@ -216,6 +222,12 @@ export function applyAgentChatEvent(
 
     case "session.start":
       return nextState;
+
+    case "iteration.summary":
+      return applyIterationSummary(nextState, event);
+
+    case "turn.summary":
+      return applyTurnSummary(nextState, event);
   }
 }
 
@@ -388,6 +400,7 @@ function applyLlmDelta(
 ): AgentChatState {
   const deltaContent = stringValue(event.data.content);
   const deltaReasoning = stringValue(event.data.reasoning);
+  const { turnId, iterationIndex } = readTurnMeta(event.data);
   const messages = [...state.messages];
   const lastIdx = findLastAssistantIndex(messages);
   const lastMsg = lastIdx >= 0 ? messages[lastIdx] : null;
@@ -410,6 +423,8 @@ function applyLlmDelta(
       reasoning: deltaReasoning
         ? (lastMsg.reasoning ?? "") + deltaReasoning
         : lastMsg.reasoning,
+      turnId: turnId ?? lastMsg.turnId,
+      iterationIndex: iterationIndex ?? lastMsg.iterationIndex,
     };
   } else {
     messages.push({
@@ -419,6 +434,8 @@ function applyLlmDelta(
       reasoning: deltaReasoning || undefined,
       createdAt: new Date(),
       status: "streaming",
+      turnId,
+      iterationIndex,
     });
   }
 
@@ -443,6 +460,7 @@ function applyLlmResponse(
     : [];
   const hasToolCalls = toolCalls.length > 0;
   const responseToolCallIds = toolCallIdsFromResponse(toolCalls);
+  const { turnId, iterationIndex } = readTurnMeta(event.data);
   const idx = findLastAssistantIndex(messages);
   const prevAssistant = idx >= 0 ? messages[idx] : undefined;
   const prevHasTools = Boolean(prevAssistant?.toolCalls?.length);
@@ -466,12 +484,16 @@ function applyLlmResponse(
         content: "",
         status: "streaming",
         llmResponseEventId: event.eventId,
+        turnId: turnId ?? current.turnId,
+        iterationIndex: iterationIndex ?? current.iterationIndex,
       };
     } else {
       messages[idx] = {
         ...current,
         status: "complete",
         llmResponseEventId: event.eventId,
+        turnId: turnId ?? current.turnId,
+        iterationIndex: iterationIndex ?? current.iterationIndex,
       };
     }
   } else if (matchesExistingToolTurn && idx >= 0) {
@@ -483,6 +505,8 @@ function applyLlmResponse(
         : current.reasoning,
       status: "streaming",
       llmResponseEventId: event.eventId,
+      turnId: turnId ?? current.turnId,
+      iterationIndex: iterationIndex ?? current.iterationIndex,
     };
   } else if (prevHasTools || !prevAssistant || hasUserAfter) {
     messages.push({
@@ -493,6 +517,8 @@ function applyLlmResponse(
       createdAt: new Date(),
       status: hasToolCalls ? "streaming" : "complete",
       llmResponseEventId: event.eventId,
+      turnId,
+      iterationIndex,
     });
   } else {
     const current = messages[idx]!;
@@ -502,6 +528,8 @@ function applyLlmResponse(
         reasoning: (current.reasoning ?? "") + responseContent,
         status: "streaming",
         llmResponseEventId: event.eventId,
+        turnId: turnId ?? current.turnId,
+        iterationIndex: iterationIndex ?? current.iterationIndex,
       };
     } else {
       messages[idx] = {
@@ -509,6 +537,8 @@ function applyLlmResponse(
         content: responseContent || current.content,
         status: hasToolCalls ? "streaming" : "complete",
         llmResponseEventId: event.eventId,
+        turnId: turnId ?? current.turnId,
+        iterationIndex: iterationIndex ?? current.iterationIndex,
       };
     }
   }
@@ -550,6 +580,7 @@ function applyLlmThinking(
 ): AgentChatState {
   const reasoningText = stringValue(event.data.reasoning) ||
     stringValue(event.data.content);
+  const { turnId, iterationIndex } = readTurnMeta(event.data);
   const messages = [...state.messages];
   const idx = findLastAssistantIndex(messages);
   const prev = idx >= 0 ? messages[idx] : null;
@@ -567,11 +598,15 @@ function applyLlmThinking(
       reasoning: reasoningText,
       createdAt: new Date(),
       status: "streaming",
+      turnId,
+      iterationIndex,
     });
   } else {
     messages[idx] = {
       ...prev,
       reasoning: (prev.reasoning ?? "") + reasoningText,
+      turnId: turnId ?? prev.turnId,
+      iterationIndex: iterationIndex ?? prev.iterationIndex,
     };
   }
 
@@ -580,6 +615,95 @@ function applyLlmThinking(
     messages,
     isRunning: state.terminal ? state.isRunning : true,
   };
+}
+
+function applyIterationSummary(
+  state: AgentChatState,
+  event: AgentChatRuntimeEvent,
+): AgentChatState {
+  const turnId = optionalStringValue(event.data.turn_id);
+  const iterationIndex = optionalNumberValue(event.data.iteration_index);
+  const summary = optionalStringValue(event.data.summary);
+  if (!turnId || iterationIndex === null || !summary) return state;
+
+  const idx = state.messages.findIndex(
+    (m) =>
+      m.role === "assistant" &&
+      m.turnId === turnId &&
+      m.iterationIndex === iterationIndex,
+  );
+  if (idx < 0) return state;
+
+  const toolCallIds = Array.isArray(event.data.tool_call_ids)
+    ? (event.data.tool_call_ids as unknown[]).map((x) => String(x))
+    : [];
+
+  const messages = [...state.messages];
+  messages[idx] = {
+    ...messages[idx]!,
+    iterationSummary: {
+      iterationIndex,
+      summary,
+      toolCallIds,
+      startedAt: stringValue(event.data.started_at),
+      endedAt: stringValue(event.data.ended_at),
+    },
+  };
+  return { ...state, messages };
+}
+
+function applyTurnSummary(
+  state: AgentChatState,
+  event: AgentChatRuntimeEvent,
+): AgentChatState {
+  const turnId = optionalStringValue(event.data.turn_id);
+  if (!turnId) return state;
+
+  const recap = stringValue(event.data.recap);
+  const artifacts = parseTurnArtifacts(event.data.artifacts);
+
+  // Attach to the LAST assistant message in this turn.  The last
+  // iteration of the turn is what the SDK renders the TurnSummaryCard
+  // under.
+  let idx = -1;
+  for (let i = state.messages.length - 1; i >= 0; i--) {
+    const message = state.messages[i]!;
+    if (message.role === "assistant" && message.turnId === turnId) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx < 0) return state;
+
+  const messages = [...state.messages];
+  messages[idx] = {
+    ...messages[idx]!,
+    turnSummary: { turnId, recap, artifacts },
+  };
+  return { ...state, messages };
+}
+
+function parseTurnArtifacts(raw: unknown): AgentChatTurnArtifactRef[] {
+  if (!Array.isArray(raw)) return [];
+  const out: AgentChatTurnArtifactRef[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const obj = item as Record<string, unknown>;
+    const kind = obj.kind;
+    if (
+      kind !== "file" &&
+      kind !== "artifact" &&
+      kind !== "url" &&
+      kind !== "command"
+    ) {
+      continue;
+    }
+    const label = typeof obj.label === "string" ? obj.label : "";
+    const ref = typeof obj.ref === "string" ? obj.ref : "";
+    if (!label || !ref) continue;
+    out.push({ kind, label, ref });
+  }
+  return out;
 }
 
 function applyToolCall(
@@ -1053,4 +1177,33 @@ function stringValue(value: unknown): string {
 
 function numberValue(value: unknown): number {
   return typeof value === "number" ? value : 0;
+}
+
+/**
+ * Distinguishes "missing" from "zero" — `numberValue` collapses both to
+ * 0 which is fine for token counts but wrong for an event correlator
+ * like ``iteration_index`` where 0 is a valid first iteration.
+ */
+function optionalNumberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function optionalStringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Pull ``turn_id`` and ``iteration_index`` off an LLM event payload.
+ * Both fields are optional so older harnesses without the Simple
+ * chat-mode plumbing still produce parseable events.
+ */
+function readTurnMeta(
+  data: Record<string, unknown>,
+): { turnId?: string; iterationIndex?: number } {
+  const turnId = optionalStringValue(data.turn_id);
+  const iterationIndex = optionalNumberValue(data.iteration_index);
+  return {
+    turnId,
+    iterationIndex: iterationIndex === null ? undefined : iterationIndex,
+  };
 }

@@ -316,6 +316,54 @@ def _last_assistant_message_excerpt(
     return ""
 
 
+def _coerce_tool_args(raw: Any) -> dict[str, Any]:
+    """Best-effort coercion of a TOOL_CALL ``arguments`` field to a dict.
+
+    Different tool emitters store ``arguments`` either as a JSON string
+    (OpenAI convention) or as a pre-parsed dict.  Anything else is
+    treated as opaque and yields an empty dict so candidate-artifact
+    collection can keep going.
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return {}
+
+
+def _latest_user_message_text(
+    messages: list[dict[str, Any]],
+    limit: int = 1000,
+) -> str:
+    """Extract the latest user message's text content, capped at ``limit``.
+
+    Used by the turn-summary path so the summarizer sees what the user
+    was asking for.  Mirrors the content-coercion logic in
+    :func:`_last_assistant_message_excerpt` so multimodal user messages
+    yield their text parts.
+    """
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content") or ""
+        if isinstance(content, list):
+            content = " ".join(
+                str(part.get("text", ""))
+                for part in content
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") in {"text", "output_text"}
+                )
+            )
+        text = str(content).strip()
+        return text[:limit] if limit and len(text) > limit else text
+    return ""
+
+
 def _seconds_since(value: Any) -> int:
     if not isinstance(value, datetime):
         return 0
@@ -865,6 +913,7 @@ class AgentHarness:
         advisor_model: str = "",
         advisor_max_calls_per_turn: int = 2,
         advisor_max_tokens: int = 700,
+        turn_summarizer: Any | None = None,
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
@@ -895,6 +944,22 @@ class AgentHarness:
         self._advisor_model: str = advisor_model or ""
         self._advisor_max_calls_per_turn = max(0, int(advisor_max_calls_per_turn))
         self._advisor_max_tokens = max(1, int(advisor_max_tokens))
+
+        # Optional per-turn LLM summarizer for the Simple chat view.
+        # When ``None`` (no summary_model configured, or
+        # WorkerSettings.emit_turn_summaries=False), the harness emits no
+        # iteration.summary / turn.summary events and the SDK falls back
+        # to its expanded live-state rendering.
+        self._turn_summarizer: Any | None = turn_summarizer
+        # Per-iteration background summary tasks, keyed by
+        # iteration_index for the active turn. Reset at the top of each
+        # wake() so a paused-and-resumed session can't reuse stale
+        # tasks; drained at turn-end before emitting turn.summary.
+        self._pending_iteration_summary_tasks: dict[int, asyncio.Task[Any]] = {}
+        # Snapshot of resolved iteration summaries indexed by
+        # iteration_index. Used to give later iteration summaries
+        # context about earlier ones in the same turn.
+        self._completed_iteration_summaries: dict[int, str] = {}
 
         # Checkpoint flag — when enabled, the harness tells the sandbox
         # to take filesystem snapshots before file-mutating operations.
@@ -1464,6 +1529,20 @@ class AgentHarness:
                     saga_start_event(new_saga.saga_id, str(session.id)),
                 )
 
+        # One stable turn_id per user turn. The wake() body services
+        # exactly one user turn (returns on session.complete/pause/fail),
+        # so a single UUID covers every iteration in scope here. Threaded
+        # into call_llm_with_retry and stamped on LLM_THINKING /
+        # LLM_RESPONSE / LLM_REQUEST / LLM_DELTA payloads so the Simple
+        # chat view can correlate iteration.summary events back to the
+        # right assistant message.
+        turn_id = str(uuid4())
+
+        # Reset per-turn summary tracking so a paused-and-resumed
+        # session can't reuse stale tasks from a previous wake().
+        self._pending_iteration_summary_tasks = {}
+        self._completed_iteration_summaries = {}
+
         iteration = 0
         length_continuation_count = 0
         length_continuation_prefix = ""  # accumulated partial response across length retries
@@ -1540,6 +1619,10 @@ class AgentHarness:
 
         while self._budget.remaining > 0:
             iteration += 1
+            # Capture the iteration start so the per-iteration summary
+            # event carries a real wall-clock window for the row in the
+            # Simple chat view.
+            iteration_started_at = datetime.now(timezone.utc).isoformat()
 
             # Each LLM iteration gets its own span so tool calls and LLM
             # requests within this iteration share a parent.
@@ -1579,6 +1662,7 @@ class AgentHarness:
                 await self._request_final_summary(
                     session, messages, system_prompt, lease,
                     cost_tracker=cost_tracker,
+                    turn_id=turn_id,
                 )
                 return
 
@@ -1587,7 +1671,12 @@ class AgentHarness:
             llm_request_event_id = await self._store.emit_event(
                 session.id,
                 EventType.LLM_REQUEST,
-                {"model": model_id, "iteration": iteration},
+                {
+                    "model": model_id,
+                    "iteration": iteration,
+                    "turn_id": turn_id,
+                    "iteration_index": iteration - 1,
+                },
             )
 
             # 2. Call the LLM with retry (streaming or non-streaming).
@@ -1767,6 +1856,7 @@ class AgentHarness:
                     session=session,
                     create_kwargs=create_kwargs,
                     iteration=iteration,
+                    turn_id=turn_id,
                     llm_client=self._llm,
                     store=self._store,
                     streaming_enabled=self._streaming_enabled,
@@ -1820,7 +1910,11 @@ class AgentHarness:
                 await self._store.emit_event(
                     session.id,
                     EventType.LLM_THINKING,
-                    {"reasoning": reasoning_text},
+                    {
+                        "reasoning": reasoning_text,
+                        "turn_id": turn_id,
+                        "iteration_index": iteration - 1,
+                    },
                 )
                 # Strip thinking blocks from content before storing.
                 strip_think_blocks(assistant_message)
@@ -1968,6 +2062,8 @@ class AgentHarness:
                 await self._abort_iteration_with_pause(session, saga)
                 return
 
+            response_data["turn_id"] = turn_id
+            response_data["iteration_index"] = iteration - 1
             event_id = await self._store.emit_event(
                 session.id,
                 EventType.LLM_RESPONSE,
@@ -2013,6 +2109,7 @@ class AgentHarness:
                     session, messages, lease, reason="thinking_budget_exhausted",
                     through_event_id=event_id,
                     cost_tracker=cost_tracker,
+                    turn_id=turn_id,
                 )
                 return
 
@@ -2200,6 +2297,18 @@ class AgentHarness:
                     )
                     return
 
+                # Text-only iteration: kick off the iteration-summary
+                # task before _complete_session so the drain in A8 can
+                # await it.
+                await self._maybe_summarize_iteration(
+                    session_id=session.id,
+                    turn_id=turn_id,
+                    iteration_index=iteration - 1,
+                    reasoning_text=reasoning_text or "",
+                    tool_calls=[],
+                    started_at=iteration_started_at,
+                )
+
                 # A response without tool calls completes the current
                 # objective.  Follow-up messages revive the session into a
                 # new objective rather than keeping completed work "active".
@@ -2207,6 +2316,8 @@ class AgentHarness:
                     session, messages, lease, reason="completed",
                     through_event_id=event_id,
                     cost_tracker=cost_tracker,
+                    turn_id=turn_id,
+                    user_message=_latest_user_message_text(messages),
                 )
                 return
 
@@ -2265,6 +2376,7 @@ class AgentHarness:
                             session, messages, lease, reason="invalid_tool_calls",
                             through_event_id=event_id,
                             cost_tracker=cost_tracker,
+                            turn_id=turn_id,
                         )
                         return
 
@@ -2421,6 +2533,7 @@ class AgentHarness:
                     lease,
                     reason="loop_wait",
                     cost_tracker=cost_tracker,
+                    turn_id=turn_id,
                 )
                 return
 
@@ -2456,6 +2569,18 @@ class AgentHarness:
             # Lease renewal is handled by a background task started in
             # ``wake()``; no per-iteration renewal needed here.
 
+            # Tool batch resolved — kick off the iteration summary
+            # before the next iteration starts. Fire-and-forget so the
+            # next LLM call isn't blocked on the cheap summarizer.
+            await self._maybe_summarize_iteration(
+                session_id=session.id,
+                turn_id=turn_id,
+                iteration_index=iteration - 1,
+                reasoning_text=reasoning_text or "",
+                tool_calls=tool_calls_raw or [],
+                started_at=iteration_started_at,
+            )
+
         # --- Post-loop skill nudge check ---
         should_review_skills = False
         if (
@@ -2485,7 +2610,9 @@ class AgentHarness:
         # Budget exhausted after the while loop.  Request one final
         # summary with no tools.
         await self._request_final_summary(
-            session, messages, system_prompt, lease, cost_tracker=cost_tracker,
+            session, messages, system_prompt, lease,
+            cost_tracker=cost_tracker,
+            turn_id=turn_id,
         )
 
         # --- Saga finalization ---
@@ -3859,6 +3986,89 @@ class AgentHarness:
     # Final summary on budget exhaustion
     # ------------------------------------------------------------------
 
+    async def _maybe_summarize_iteration(
+        self,
+        *,
+        session_id: UUID,
+        turn_id: str,
+        iteration_index: int,
+        reasoning_text: str,
+        tool_calls: list[dict[str, Any]],
+        started_at: str,
+    ) -> None:
+        """Fire-and-forget per-iteration summarization.
+
+        Spawns a background task that calls the summarizer and emits an
+        ``ITERATION_SUMMARY`` event when it resolves. Tracked in
+        ``_pending_iteration_summary_tasks`` so :meth:`_complete_session`
+        can drain it before emitting ``TURN_SUMMARY``. No-op when the
+        harness has no summarizer or the iteration produced nothing
+        worth summarizing.
+        """
+        if self._turn_summarizer is None:
+            return
+        if not reasoning_text and not tool_calls:
+            return
+
+        # Snapshot only summaries that have already resolved for earlier
+        # iterations of this turn. Later summaries may still be pending;
+        # awaiting them here would defeat the fire-and-forget design and
+        # could deadlock the loop.
+        prior_summaries = [
+            self._completed_iteration_summaries[idx]
+            for idx in sorted(self._completed_iteration_summaries)
+            if idx < iteration_index
+        ]
+        tool_call_ids = [
+            str(tc.get("id") or "") for tc in tool_calls
+        ]
+
+        async def _run() -> None:
+            summary = await self._turn_summarizer.summarize_iteration(
+                iteration_id=f"{turn_id}:{iteration_index}",
+                reasoning=reasoning_text,
+                tool_calls=tool_calls,
+                prior_iteration_summaries=prior_summaries,
+            )
+            if summary is None:
+                return
+            self._completed_iteration_summaries[iteration_index] = summary
+            try:
+                await self._store.emit_event(
+                    session_id,
+                    EventType.ITERATION_SUMMARY,
+                    {
+                        "turn_id": turn_id,
+                        "iteration_index": iteration_index,
+                        "summary": summary,
+                        "tool_call_ids": tool_call_ids,
+                        "started_at": started_at,
+                        "ended_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to emit ITERATION_SUMMARY for %s iter %d",
+                    session_id, iteration_index, exc_info=True,
+                )
+
+        task = asyncio.create_task(
+            _run(), name=f"iteration-summary-{turn_id}-{iteration_index}",
+        )
+        # Track in two places: the per-turn dict keyed by
+        # iteration_index lets _drain_and_emit_turn_summary await the
+        # right tasks before generating the recap; _background_tasks
+        # lets wake()'s finally drain anything still in flight when the
+        # turn ends abnormally (cancellation, crash).
+        self._pending_iteration_summary_tasks[iteration_index] = task
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        task.add_done_callback(
+            lambda _t: self._pending_iteration_summary_tasks.pop(
+                iteration_index, None,
+            ),
+        )
+
     async def _request_final_summary(
         self,
         session: Session,
@@ -3867,6 +4077,7 @@ class AgentHarness:
         lease: SessionLease,
         *,
         cost_tracker: SessionCostTracker | None = None,
+        turn_id: str | None = None,
     ) -> None:
         """Request one final LLM response with no tools when the budget is exhausted.
 
@@ -3930,6 +4141,7 @@ class AgentHarness:
                 session=session,
                 create_kwargs=create_kwargs,
                 iteration=self._budget.used + 1,
+                turn_id=turn_id,
                 llm_client=self._llm,
                 store=self._store,
                 streaming_enabled=self._streaming_enabled,
@@ -3969,16 +4181,20 @@ class AgentHarness:
                     cost_usd=cost,
                 )
 
+            final_payload: dict[str, Any] = {
+                "message": assistant_message,
+                "model": usage_data.get("model", model_id),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "finish_reason": "budget_exhausted",
+            }
+            if turn_id is not None:
+                final_payload["turn_id"] = turn_id
+                final_payload["iteration_index"] = max(self._budget.used - 1, 0)
             await self._store.emit_event(
                 session.id,
                 EventType.LLM_RESPONSE,
-                {
-                    "message": assistant_message,
-                    "model": usage_data.get("model", model_id),
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "finish_reason": "budget_exhausted",
-                },
+                final_payload,
             )
 
             messages.append(assistant_message)
@@ -3993,6 +4209,8 @@ class AgentHarness:
         await self._complete_session(
             session, messages, lease, reason="budget_exhausted",
             cost_tracker=cost_tracker,
+            turn_id=turn_id,
+            user_message=_latest_user_message_text(messages),
         )
 
     # ------------------------------------------------------------------
@@ -5147,6 +5365,217 @@ class AgentHarness:
             },
         )
 
+    async def _drain_and_emit_turn_summary(
+        self,
+        *,
+        session_id: UUID,
+        turn_id: str,
+        user_message: str,
+    ) -> None:
+        """Drain pending iteration summaries, then emit TURN_SUMMARY.
+
+        Soft 10s cap on the drain so a hung iteration-summary task
+        can't stall session completion. Same 10s cap on the turn
+        summary call. Any failure is logged and swallowed — the SDK
+        falls back to the per-iteration view when TURN_SUMMARY is
+        missing.
+        """
+        if self._turn_summarizer is None:
+            return
+
+        pending = list(self._pending_iteration_summary_tasks.values())
+        if pending:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=10.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "iteration summary drain timed out for turn %s", turn_id,
+                )
+
+        # Read back the resolved iteration summaries in order so the
+        # turn summarizer sees the same recap thread the SDK will
+        # render. We re-query the event log because some iteration
+        # tasks may have failed silently (returned None).
+        try:
+            iter_events = await self._store.get_events(
+                session_id,
+                types=[EventType.ITERATION_SUMMARY],
+            )
+        except Exception:
+            logger.warning(
+                "Failed to read iteration summaries for turn %s; "
+                "summarizing without them.",
+                turn_id,
+                exc_info=True,
+            )
+            iter_events = []
+        ordered = sorted(
+            (
+                e for e in iter_events
+                if (getattr(e, "data", None) or {}).get("turn_id") == turn_id
+            ),
+            key=lambda e: (getattr(e, "data", None) or {}).get(
+                "iteration_index", 0,
+            ),
+        )
+        iteration_summaries = [
+            str((getattr(e, "data", None) or {}).get("summary") or "")
+            for e in ordered
+        ]
+        candidate_artifacts = await self._collect_candidate_artifacts(
+            session_id=session_id, turn_id=turn_id,
+        )
+
+        try:
+            result = await asyncio.wait_for(
+                self._turn_summarizer.summarize_turn(
+                    turn_id=turn_id,
+                    user_message=user_message,
+                    iteration_summaries=iteration_summaries,
+                    candidate_artifacts=candidate_artifacts,
+                ),
+                timeout=10.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("turn summary call timed out for %s", turn_id)
+            return
+        except Exception:
+            logger.warning(
+                "turn summary call failed for %s", turn_id, exc_info=True,
+            )
+            return
+        if result is None:
+            return
+
+        try:
+            await self._store.emit_event(
+                session_id,
+                EventType.TURN_SUMMARY,
+                {
+                    "turn_id": turn_id,
+                    "recap": result.recap,
+                    "artifacts": [
+                        {"kind": a.kind, "label": a.label, "ref": a.ref}
+                        for a in result.artifacts
+                    ],
+                },
+            )
+        except Exception:
+            logger.warning(
+                "Failed to emit TURN_SUMMARY for %s", turn_id, exc_info=True,
+            )
+
+    async def _collect_candidate_artifacts(
+        self,
+        *,
+        session_id: UUID,
+        turn_id: str,
+    ) -> list[Any]:
+        """Pull notable tool calls and artifacts emitted during this turn.
+
+        Returns a list of ``TurnArtifact`` instances from
+        :mod:`surogates.harness.turn_summarizer`. The summarizer
+        curates this list further; this method's job is to surface
+        every plausibly-relevant event so the LLM can pick.
+
+        Invariant: this method MUST only be called at the end of the
+        queried turn (i.e. from ``_drain_and_emit_turn_summary`` inside
+        ``_complete_session``). Once we see the first event bearing
+        ``turn_id``, every following event is treated as "in this
+        turn" — TOOL_CALL events don't themselves carry ``turn_id``,
+        so we rely on chronological adjacency to LLM events that do.
+        Calling this method before the current turn ends, or for a
+        turn that's not the LAST in the log, would incorrectly
+        attribute later turns' tool calls to this one.
+        """
+        from surogates.harness.turn_summarizer import TurnArtifact
+
+        out: list[TurnArtifact] = []
+        try:
+            # Scoped to the event types we actually inspect — keeps the
+            # query cheap on long-running sessions with deep event logs.
+            events = await self._store.get_events(
+                session_id,
+                types=[EventType.TOOL_CALL, EventType.ARTIFACT_CREATED,
+                       EventType.LLM_REQUEST, EventType.LLM_RESPONSE],
+            )
+        except Exception:
+            logger.debug(
+                "Failed to read events for candidate artifacts on %s",
+                session_id, exc_info=True,
+            )
+            return out
+
+        in_turn = False
+        for evt in events:
+            data = evt.data or {}
+            if data.get("turn_id") == turn_id:
+                in_turn = True
+            if not in_turn:
+                continue
+
+            etype_str = evt.type.value if hasattr(evt.type, "value") else evt.type
+
+            if etype_str == EventType.TOOL_CALL.value:
+                # Tool-call payloads carry ``name`` and ``arguments`` per
+                # the harness's TOOL_CALL emit contract; ``arguments``
+                # is JSON-encoded for some tools, a dict for others.
+                name = str(data.get("name") or "")
+                raw_args = data.get("arguments")
+                args = _coerce_tool_args(raw_args)
+                tc_id = str(data.get("tool_call_id") or data.get("id") or "")
+
+                if name in {"write_file", "patch"}:
+                    path = (
+                        args.get("path")
+                        or args.get("file_path")
+                        or args.get("name")
+                        or ""
+                    )
+                    if isinstance(path, str) and path:
+                        out.append(
+                            TurnArtifact(kind="file", label=path, ref=path),
+                        )
+                elif name == "create_artifact":
+                    label = args.get("name") or args.get("path") or ""
+                    if isinstance(label, str) and label:
+                        out.append(
+                            TurnArtifact(
+                                kind="artifact", label=label, ref=label,
+                            ),
+                        )
+                elif name in {"web_extract", "web_crawl"}:
+                    url = args.get("url") or ""
+                    if isinstance(url, str) and url:
+                        out.append(
+                            TurnArtifact(kind="url", label=url, ref=url),
+                        )
+                elif name == "terminal":
+                    cmd = args.get("command") or ""
+                    if isinstance(cmd, str) and cmd and tc_id:
+                        out.append(
+                            TurnArtifact(
+                                kind="command",
+                                label=cmd[:80],
+                                ref=tc_id,
+                            ),
+                        )
+            elif etype_str == EventType.ARTIFACT_CREATED.value:
+                artifact_id = str(
+                    data.get("artifact_id") or data.get("id") or "",
+                )
+                name = str(data.get("name") or artifact_id or "")
+                if artifact_id and name:
+                    out.append(
+                        TurnArtifact(
+                            kind="artifact", label=name, ref=artifact_id,
+                        ),
+                    )
+        return out
+
     async def _complete_session(
         self,
         session: Session,
@@ -5156,8 +5585,17 @@ class AgentHarness:
         reason: str,
         through_event_id: int | None = None,
         cost_tracker: SessionCostTracker | None = None,
+        turn_id: str | None = None,
+        user_message: str | None = None,
     ) -> None:
-        """Emit SESSION_COMPLETE and advance the cursor."""
+        """Emit SESSION_COMPLETE and advance the cursor.
+
+        When ``turn_id`` is supplied AND the completion reason represents
+        a successful turn end (``stop``/``done``/``complete``/``completed``),
+        drains any in-flight iteration-summary tasks and emits a
+        ``TURN_SUMMARY`` event before ``SESSION_COMPLETE`` so the SDK
+        sees the recap in the same event stream as the closing message.
+        """
         # Destroy the sandbox pod for this session.
         if self._sandbox_pool is not None:
             try:
@@ -5171,6 +5609,26 @@ class AgentHarness:
                 self._memory_manager.on_session_end(messages=[])
             except Exception:
                 logger.debug("Memory manager on_session_end failed", exc_info=True)
+
+        # Emit TURN_SUMMARY (if applicable) BEFORE SESSION_COMPLETE so
+        # late-arriving SSE subscribers see them in event-id order.
+        if (
+            turn_id is not None
+            and self._turn_summarizer is not None
+            and reason in {"stop", "done", "complete", "completed"}
+        ):
+            try:
+                await self._drain_and_emit_turn_summary(
+                    session_id=session.id,
+                    turn_id=turn_id,
+                    user_message=user_message
+                    if user_message is not None
+                    else _latest_user_message_text(messages),
+                )
+            except Exception:
+                logger.exception(
+                    "Turn summary drain failed for %s", session.id,
+                )
 
         complete_data: dict[str, Any] = {
             "reason": reason,

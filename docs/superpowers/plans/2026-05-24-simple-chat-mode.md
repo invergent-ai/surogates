@@ -12,6 +12,85 @@
 
 ---
 
+## Status
+
+Updated before each commit during inline execution.
+
+- [x] A1: WorkerSettings.emit_turn_summaries kill switch
+- [x] A2: ITERATION_SUMMARY and TURN_SUMMARY event types
+- [x] A3: thread turn_id through call_llm_with_retry and LLM_DELTA emissions
+- [x] A4: generate turn_id in wake() and stamp LLM_THINKING/LLM_RESPONSE
+- [x] A5: TurnSummarizer module
+- [x] A6: wire TurnSummarizer into AgentHarness and worker.py
+- [x] A7: emit iteration.summary per iteration
+- [x] A8: emit turn.summary and drain in _complete_session
+- [x] A9: emit_turn_summaries gate integration test
+- [x] B1: SDK event type union and AGENT_CHAT_LISTENED_EVENTS
+- [x] B2: summary types and AgentChatMessage/State extensions
+- [x] B3: reducer stamps turnId/iterationIndex
+- [x] B4: reducer handlers for iteration.summary and turn.summary
+- [x] B5: viewMode runtime state, adapter methods, localStorage fallback
+- [x] B6: IterationGroup component (reuses existing timeline pieces)
+- [x] B7: TurnSummaryCard (with ArtifactBlock resolution)
+- [x] B8: Simple/Expert toggle in composer
+- [x] B9: Render IterationGroup + TurnSummaryCard in Simple mode
+- [x] B10: opt existing tests into Expert mode (verified — none needed; IterationGroup no-summary fallback renders identically)
+- [ ] C1: end-to-end manual verification
+
+---
+
+## Review corrections
+
+These corrections were added during plan review and override conflicting
+details in the task bodies below.
+
+- Existing backend tests live under `tests/`, not `tests/harness/`.
+  Creating `tests/harness/` is acceptable, but do not rely on
+  non-existent fixtures such as `fake_harness_turn`,
+  `worker_harness_for_settings`, or `settings_with_summary_model`.
+  Before Tasks A4/A7/A8/A9, create explicit local test scaffolding or
+  shared fixtures by adapting the existing patterns in
+  `tests/test_harness_resilience.py` (`_make_harness`) and
+  `tests/test_outcome_harness.py` (`FakeStore`). The plan must not
+  leave "use whatever fixture exists" as an implementation decision.
+- Task A3 must test behavior, not only the
+  `call_llm_with_retry` signature. Add a test that drives a streaming
+  delta path with a fake store and asserts each emitted `llm.delta`
+  payload includes `turn_id` and `iteration_index`. Also use the
+  current helper name `call_llm_non_streaming`; the plan text currently
+  mentions `call_llm_nonstreaming`, which does not exist.
+- Tasks A7/A8 must either pass prior completed iteration summaries into
+  `summarize_iteration` or explicitly update the spec. The current
+  Task A7 note saying v1 passes no prior summaries contradicts the
+  design.
+- Task A8 candidate artifact extraction must read current tool-call
+  payload keys: `name` and `arguments`, not `tool_name` and `args`.
+- Task B4 must not redefine `numberValue`; `src/runtime/reducer.ts`
+  already has `numberValue(value): number` that returns `0` for
+  non-numeric input. Add a separate `optionalNumberValue(value):
+  number | null`, or use an inline `typeof value === "number"` check
+  in the summary handlers.
+- Task B6 must preserve the existing timeline behavior inside expanded
+  iterations. Do not create a separate reduced renderer that only shows
+  raw reasoning and `ToolCallBlock`; instead expose/reuse
+  `messageToEntries`, `TimelineEntryItem`, `groupBrowserActivityEntries`,
+  and `groupWebSearchEntries`, or keep `IterationGroup` in
+  `chat-thread.tsx` where those helpers are available. This is required
+  by the spec's non-goal of not reworking browser/web-search grouping
+  or per-tool renderers.
+- Task B7 does not yet satisfy artifact links for `kind: "artifact"`.
+  It must resolve the artifact id against the session's
+  `artifact.created` system message metadata and render the existing
+  `ArtifactBlock`, or the plan should narrow the spec. Plain text
+  fallback is only acceptable when the artifact cannot be resolved.
+- Task B9's Simple path must not drop system entries that are currently
+  threaded into assistant groups, especially `skill.invoked` and
+  `artifact.created`. If `SimpleAssistantGroup` filters to assistant
+  messages only, it needs an explicit path for system timeline entries
+  inside expanded iterations or adjacent to the group.
+
+---
+
 ## Phase A — Harness changes
 
 All paths in this phase are relative to `/work/surogates/`.
@@ -207,7 +286,7 @@ async def call_llm_with_retry(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
 ```
 
-b. Each downstream helper that `call_llm_with_retry` invokes (`call_llm_streaming`, `call_llm_nonstreaming`, the partial-tool-call retry, the reasoning-delta retry, etc.) also needs `turn_id` if it emits LLM_DELTA directly. The simplest pattern: thread `turn_id` through every helper that emits LLM_DELTA, and at each `store.emit_event(..., EventType.LLM_DELTA, payload)` site, inject `payload["turn_id"] = turn_id` and `payload["iteration_index"] = iteration - 1` (only when `turn_id is not None`).
+b. Each downstream helper that `call_llm_with_retry` invokes (`call_llm_streaming`, `call_llm_non_streaming`, the partial-tool-call retry, the reasoning-delta retry, etc.) also needs `turn_id` if it emits LLM_DELTA directly. The simplest pattern: thread `turn_id` through every helper that emits LLM_DELTA, and at each `store.emit_event(..., EventType.LLM_DELTA, payload)` site, inject `payload["turn_id"] = turn_id` and `payload["iteration_index"] = iteration - 1` (only when `turn_id is not None`).
 
 For each LLM_DELTA emit site identified in Step 1, mutate the payload dict immediately before the `emit_event` call. Example (the partial-tool-call retry at line 561):
 
@@ -232,7 +311,7 @@ For each LLM_DELTA emit site identified in Step 1, mutate the payload dict immed
 
 Apply the same pattern at lines 1247, 1261, 1376 (recheck the line numbers from Step 1 — they may shift as you edit). For helpers that build the payload elsewhere (e.g. `call_llm_streaming` constructs payloads internally), add `turn_id` to those helpers' signatures and pass it through from `call_llm_with_retry`'s call sites.
 
-c. Update the `call_llm_streaming` and `call_llm_nonstreaming` helper signatures (lines ~445 and ~456) so the kwarg passes through:
+c. Update the `call_llm_streaming` and `call_llm_non_streaming` helper signatures (lines ~445 and ~456) so the kwarg passes through:
 
 ```python
             if streaming_enabled:
@@ -245,7 +324,7 @@ c. Update the `call_llm_streaming` and `call_llm_nonstreaming` helper signatures
                     ...
                 )
             else:
-                result = await call_llm_nonstreaming(
+                result = await call_llm_non_streaming(
                     session=session,
                     create_kwargs=create_kwargs,
                     iteration=iteration,
@@ -850,6 +929,7 @@ b. Inside `__init__`, after the existing advisor field assignments around line 8
         # Background tasks for in-flight iteration summaries, keyed by
         # iteration_index for the current turn. Drained at turn end.
         self._pending_iteration_summary_tasks: dict[int, asyncio.Task[Any]] = {}
+        self._completed_iteration_summaries: dict[int, str] = {}
         self._pending_turn_summary_task: asyncio.Task[Any] | None = None
 ```
 
@@ -1043,12 +1123,15 @@ In `surogates/harness/loop.py`, immediately after the iteration's tool batch res
         """
         if self._turn_summarizer is None:
             return
-        # v1: iteration summaries do not see prior iterations' summaries.
-        # The summary tasks run concurrently and may resolve out of order,
-        # so a deterministic "prior summaries" snapshot is non-trivial.
-        # Some repetition across iterations is acceptable for v1; the turn
-        # recap consolidates them.
-        prior_summaries: list[str] = []
+        # Snapshot summaries that have already resolved for earlier
+        # iterations. Later summaries may still be pending; those are
+        # intentionally excluded so this call never blocks the next LLM
+        # iteration.
+        prior_summaries = [
+            self._completed_iteration_summaries[idx]
+            for idx in sorted(self._completed_iteration_summaries)
+            if idx < iteration_index
+        ]
 
         async def _run() -> None:
             summary = await self._turn_summarizer.summarize_iteration(
@@ -1059,6 +1142,7 @@ In `surogates/harness/loop.py`, immediately after the iteration's tool batch res
             )
             if summary is None:
                 return
+            self._completed_iteration_summaries[iteration_index] = summary
             from datetime import datetime, timezone
             await self._store.emit_event(
                 session_id,
@@ -1300,8 +1384,8 @@ In `surogates/harness/loop.py`, add a helper:
                 continue
             etype = e.type
             if etype == EventType.TOOL_CALL.value:
-                name = data.get("tool_name") or ""
-                args = data.get("args") or {}
+                name = data.get("name") or ""
+                args = data.get("arguments") or {}
                 if name in {"write_file", "patch", "create_artifact"}:
                     path = args.get("path") or args.get("file_path") or args.get("name") or ""
                     if path:
@@ -1362,6 +1446,7 @@ You'll also need to ensure `_pending_iteration_summary_tasks` is cleared at the 
 ```python
         # Inside wake(), just before the `iteration = 0` line:
         self._pending_iteration_summary_tasks = {}
+        self._completed_iteration_summaries = {}
 ```
 
 - [ ] **Step 4: Run the new tests to verify they pass**
@@ -1952,7 +2037,7 @@ function applyIterationSummary(
   event: AgentChatRuntimeEvent,
 ): AgentChatState {
   const turnId = stringValue(event.data.turn_id);
-  const iterationIndex = numberValue(event.data.iteration_index);
+  const iterationIndex = optionalNumberValue(event.data.iteration_index);
   const summary = stringValue(event.data.summary);
   if (!turnId || iterationIndex === null || !summary) return state;
   const idx = state.messages.findIndex(
@@ -2014,7 +2099,7 @@ function applyTurnSummary(
   return { ...state, messages };
 }
 
-function numberValue(v: unknown): number | null {
+function optionalNumberValue(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 ```

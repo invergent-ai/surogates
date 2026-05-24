@@ -41,8 +41,28 @@ import { TurnFeedback } from "./turn-feedback";
 import { useSmoothStream } from "./use-smooth-stream";
 import { ArtifactBlock } from "./artifacts/artifact-block";
 import { ErrorMessage } from "./error-message";
+import { TurnSummaryCard } from "./turn-summary-card";
 import { cn } from "../../lib/utils";
-import { AlertTriangle, ChevronDown, ChevronRight, MessageSquareIcon } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  BookOpenIcon,
+  ChevronDown,
+  ChevronRight,
+  CircleCheckIcon,
+  ClockIcon,
+  FileEditIcon,
+  FileTextIcon,
+  GlobeIcon,
+  ListIcon,
+  MessageSquareIcon,
+  PenLineIcon,
+  SearchIcon,
+  SparklesIcon,
+  TerminalIcon,
+  WrenchIcon,
+  type LucideIcon,
+} from "lucide-react";
 import { useState } from "react";
 import type {
   AgentChatImageAttachment,
@@ -89,6 +109,11 @@ interface ChatThreadProps {
   onToggleWorkspace?: () => void;
   canShowBrowser?: boolean;
   canShowWorkspace?: boolean;
+  // Simple/Expert view-mode toggle — also threaded into AssistantGroup
+  // in B9 to gate the actual render path. When omitted, the composer
+  // hides the toggle and the thread defaults to Simple internally.
+  viewMode?: "simple" | "expert";
+  onViewModeChange?: (mode: "simple" | "expert") => void;
 }
 
 // ── Timeline item types ──────────────────────────────────────────────
@@ -389,11 +414,11 @@ function OrphanSystemMarker({
   if (message.systemKind === "skill_invoked") {
     const skill = (message.systemMeta?.skill as string) ?? message.content;
     return (
-      <div className="my-2 flex items-center gap-2 px-4 text-xs text-muted-foreground ">
+      <div className="my-2 flex items-center gap-2 px-4 text-xs text-foreground/60 ">
         <span className="size-2 rounded-full bg-emerald-500" />
         <span>
           <span className="font-semibold text-foreground">Skill</span>
-          <span className="text-muted-foreground truncate">{skill}</span>
+          <span className="text-foreground/60 truncate">{skill}</span>
         </span>
       </div>
     );
@@ -454,10 +479,10 @@ function cancelledToolLabel(toolName: string): string {
 function CancelledToolRow({ tc }: { tc: ToolCallInfo }) {
   return (
     <div className="flex items-center gap-1.5 text-sm">
-      <span className="font-semibold text-muted-foreground">
+      <span className="font-semibold text-foreground/60">
         {cancelledToolLabel(tc.toolName)}
       </span>
-      <span className="text-muted-foreground/70">
+      <span className="text-foreground/60/70">
         Cancelled
       </span>
     </div>
@@ -575,11 +600,11 @@ function TimelineEntryItem({
         <TimelineContent>
           <div className="flex items-center gap-1.5 py-1 text-sm ">
             <span className="font-semibold text-foreground">Skill</span>
-            <span className="text-muted-foreground truncate">
+            <span className="text-foreground/60 truncate">
               {entry.skill}
             </span>
             {entry.stagedAt && (
-              <span className="text-xs text-muted-foreground/70 ">
+              <span className="text-xs text-foreground/60/70 ">
                 staged at {entry.stagedAt}
               </span>
             )}
@@ -675,9 +700,524 @@ function TextEntry({
   );
 }
 
-// ── Assistant message group (single Timeline) ────────────────────────
+// ── Simple-mode iteration row ────────────────────────────────────────
+//
+// IterationGroup wraps a SINGLE assistant message in the Simple view.
+// It composes today's Expert-mode timeline pieces (messageToEntries +
+// TimelineEntryItem, plus the existing browser/web-search sub-grouping)
+// inside the collapsible body so we never duplicate per-tool renderers.
+// See docs/superpowers/specs/2026-05-24-simple-chat-mode-design.md.
 
-function AssistantGroup({
+export interface IterationGroupProps {
+  message: ChatMessageType;
+  sessionId: string | null;
+  /** Same map AssistantGroup builds for the Expert path — see
+   *  ``ChatThread`` for the full derivation. */
+  artifactFallbacks: Record<string, string>;
+  onFileSelect?: (path: string) => void;
+}
+
+/**
+ * Short, human-ish label derived from an iteration's tool calls when
+ * no LLM-generated summary is available (summary_model unconfigured,
+ * summarizer timed out, replay of pre-feature history, etc.).
+ *
+ * Returns ``null`` when nothing useful can be derived — caller renders
+ * a generic "Iteration" pill or falls through to the shimmer.
+ */
+function deriveIterationLabel(message: ChatMessageType): string | null {
+  // Internal/exploration tools and failed calls collapse into
+  // background noise that Simple mode suppresses.
+  const calls = visibleToolCalls(message);
+  if (calls.length === 0) {
+    return message.reasoning ? "Thought through the problem" : null;
+  }
+  if (calls.length === 1) {
+    const tc = calls[0]!;
+    return deriveSingleToolLabel(tc);
+  }
+  // Multiple tool calls: collapse same-tool runs, summarize mixed.
+  const firstName = calls[0]!.toolName;
+  const allSame = calls.every((tc) => tc.toolName === firstName);
+  if (allSame) {
+    const human = cancelledToolLabel(firstName);
+    return `${human} × ${calls.length}`;
+  }
+  return `Used ${calls.length} tools`;
+}
+
+/**
+ * Header label for a single-tool iteration. Most tools surface a
+ * short detail (path basename, query, URL) so the header reads
+ * "Read · landing.html". Tools whose detail is structurally noisy —
+ * shell commands, arbitrary code blocks, raw memory keys — drop the
+ * detail entirely and use a generic verb instead; the full detail
+ * still appears in the expanded body via _toolRowLabel.
+ */
+function deriveSingleToolLabel(tc: ToolCallInfo): string {
+  const name = cancelledToolLabel(tc.toolName);
+  if (_HEADER_HIDES_DETAIL.has(tc.toolName)) {
+    return _HEADER_GENERIC_VERB[tc.toolName] ?? name;
+  }
+  const detail = extractToolDetail(tc);
+  return detail ? `${name} · ${detail}` : name;
+}
+
+const _HEADER_HIDES_DETAIL: ReadonlySet<string> = new Set([
+  "terminal",
+  "execute_code",
+  "memory",
+]);
+
+const _HEADER_GENERIC_VERB: Record<string, string> = {
+  terminal: "Ran a command",
+  execute_code: "Executed code",
+  memory: "Updated memory",
+};
+
+/**
+ * Pull a short, human-readable detail string from a tool call's
+ * arguments. Defensive against unparseable / partial JSON during
+ * streaming.
+ */
+function extractToolDetail(tc: ToolCallInfo): string | null {
+  const args = parseArgs<Record<string, unknown>>(tc.args);
+  if (!args) return null;
+  // Prefer the most-meaningful arg per tool family.
+  const stringArg = (key: string): string | null => {
+    const v = args[key];
+    return typeof v === "string" && v.length > 0 ? v : null;
+  };
+  switch (tc.toolName) {
+    case "read_file":
+    case "write_file":
+    case "patch":
+    case "list_files":
+    case "search_files": {
+      const path = stringArg("path") ?? stringArg("file_path");
+      return path ? lastPathSegment(path) : null;
+    }
+    case "terminal": {
+      const cmd = stringArg("command");
+      return cmd ? truncate(cmd, 40) : null;
+    }
+    case "execute_code": {
+      const code = stringArg("code");
+      return code ? truncate(code.split("\n")[0] ?? "", 40) : null;
+    }
+    case "web_search":
+    case "web_crawl":
+      return stringArg("query");
+    case "web_extract":
+      return stringArg("url");
+    case "skill_view":
+    case "skill_manage":
+      return stringArg("name") ?? stringArg("skill");
+    case "create_artifact":
+    case "consult_expert":
+    case "delegate_task":
+      return stringArg("name") ?? stringArg("task") ?? stringArg("title");
+    case "memory":
+      return stringArg("action") ?? stringArg("key");
+    default:
+      return null;
+  }
+}
+
+function lastPathSegment(path: string): string {
+  const cleaned = path.replace(/\/+$/, "");
+  const idx = cleaned.lastIndexOf("/");
+  return idx >= 0 ? cleaned.slice(idx + 1) : cleaned;
+}
+
+function truncate(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+/**
+ * Tools that are hidden from Simple mode. These are either pure
+ * exploration ("listed the directory"), internal infrastructure
+ * (browser_*, process), or scratchpad-style state changes (todo,
+ * memory) that don't help the user understand what the agent
+ * *did*. Users who care can switch to Expert mode to see them.
+ */
+const _SIMPLE_MODE_HIDDEN_TOOLS: ReadonlySet<string> = new Set([
+  "list_files",
+  "search_files",
+  "session_search",
+  "skills_list",
+  "process",
+  "todo",
+  "memory",
+  // Shell commands and code execution are infrastructure plumbing the
+  // user doesn't need to see when the goal is to know *what* the
+  // agent accomplished, not *how*. Expert mode still has the full
+  // command + output block.
+  "terminal",
+  "execute_code",
+]);
+
+function _isHiddenSimpleTool(tc: ToolCallInfo): boolean {
+  if (_SIMPLE_MODE_HIDDEN_TOOLS.has(tc.toolName)) return true;
+  // Browser tools are an internal sub-grouped activity in Expert
+  // mode; in Simple mode we hide them outright.
+  if (tc.toolName.startsWith("browser_")) return true;
+  return false;
+}
+
+/**
+ * The subset of an iteration's tool calls that should surface in
+ * Simple mode: skips internal/infrastructure tools and any call
+ * that errored or was cancelled. Used by every Simple-mode
+ * consumer so the filter has a single source of truth.
+ */
+function visibleToolCalls(message: ChatMessageType): ToolCallInfo[] {
+  return (message.toolCalls ?? []).filter((tc) => {
+    if (_isHiddenSimpleTool(tc)) return false;
+    const status = effectiveStatus(tc);
+    if (status === "error" || status === "cancelled") return false;
+    return true;
+  });
+}
+
+/**
+ * Whether an iteration is genuinely in-flight right now.
+ *
+ * ``message.status === "streaming"`` is NOT sufficient: the reducer
+ * keeps tool-using assistant messages in the "streaming" state across
+ * the entire rest of the turn (it never flips back to "complete" once
+ * tool_calls are present). So a tool batch can finish — every tool
+ * call resolved — while the message is still tagged "streaming".
+ *
+ * Live means: at least one tool call is still running, OR a text-only
+ * iteration is mid-stream (no tools, status="streaming"). Everything
+ * else counts as "done" for the purpose of swapping shimmer →
+ * derived/summary label.
+ */
+function isIterationLive(message: ChatMessageType): boolean {
+  const calls = message.toolCalls ?? [];
+  if (calls.length > 0) {
+    return calls.some((tc) => tc.status === "running");
+  }
+  return message.status === "streaming";
+}
+
+/**
+ * Shimmer label for a live iteration. Derives a useful name from
+ * currently-running tools so the user sees "Running List Files…"
+ * instead of a generic "Working…" when context is available.
+ */
+function liveIterationLabel(message: ChatMessageType): string {
+  // Only running tools that aren't hidden from Simple mode get
+  // surfaced in the label — an internal list_files running on its
+  // own should read as a quiet "Thinking…", not "Running List Files…".
+  const running = (message.toolCalls ?? []).filter(
+    (tc) => tc.status === "running" && !_isHiddenSimpleTool(tc),
+  );
+  if (running.length === 0) return "Thinking…";
+  if (running.length === 1) {
+    const tc = running[0]!;
+    const name = cancelledToolLabel(tc.toolName);
+    const detail = extractToolDetail(tc);
+    return detail ? `Running ${name} · ${detail}…` : `Running ${name}…`;
+  }
+  const firstName = running[0]!.toolName;
+  const allSame = running.every((tc) => tc.toolName === firstName);
+  if (allSame) {
+    return `Running ${cancelledToolLabel(firstName)} × ${running.length}…`;
+  }
+  return `Running ${running.length} tools…`;
+}
+
+/**
+ * Icon-per-tool-family mapping for Simple-mode condensed rows. Keeps
+ * the expanded view visually quiet — one icon + one prose line per
+ * tool call — instead of the heavy per-tool blocks the Expert view
+ * uses. Falls back to a generic wrench when a new tool name lands
+ * before we've added a custom row for it.
+ */
+const _TOOL_ROW_ICON: Record<string, LucideIcon> = {
+  read_file: FileTextIcon,
+  write_file: FileTextIcon,
+  patch: FileEditIcon,
+  list_files: ListIcon,
+  search_files: SearchIcon,
+  terminal: TerminalIcon,
+  execute_code: TerminalIcon,
+  web_search: GlobeIcon,
+  web_extract: GlobeIcon,
+  web_crawl: GlobeIcon,
+  session_search: SearchIcon,
+  skill_view: BookOpenIcon,
+  skills_list: BookOpenIcon,
+  skill_manage: PenLineIcon,
+  consult_expert: SparklesIcon,
+  delegate_task: ArrowRight,
+  create_artifact: FileTextIcon,
+  memory: PenLineIcon,
+  todo: ListIcon,
+};
+
+function _toolRowIcon(toolName: string): LucideIcon {
+  return _TOOL_ROW_ICON[toolName] ?? WrenchIcon;
+}
+
+/**
+ * Verb-first prose line for a tool call ("Edited landing.html",
+ * "Read the frontend-design skill"). Falls back to the human tool
+ * name when we can't extract a useful detail from the args.
+ */
+function _toolRowLabel(tc: ToolCallInfo): string {
+  const detail = extractToolDetail(tc);
+  switch (tc.toolName) {
+    case "read_file":
+      return detail ? `Read ${detail}` : "Read a file";
+    case "write_file":
+      return detail ? `Wrote ${detail}` : "Wrote a file";
+    case "patch":
+      return detail ? `Edited ${detail}` : "Edited a file";
+    case "list_files":
+      return detail ? `Listed ${detail}` : "Listed files";
+    case "search_files":
+      return detail ? `Searched files for "${detail}"` : "Searched files";
+    case "terminal":
+      // Raw shell commands carry too much noise (paths, escapes,
+      // chained pipes) to read well even as a body row. The Expert
+      // view has the full block with output if the user needs it.
+      return "Ran a command";
+    case "execute_code":
+      return "Executed code";
+    case "web_search":
+      return detail ? `Searched the web for "${detail}"` : "Searched the web";
+    case "web_crawl":
+      return detail ? `Crawled "${detail}"` : "Crawled the web";
+    case "web_extract":
+      return detail ? `Fetched ${detail}` : "Fetched a page";
+    case "session_search":
+      return detail ? `Searched session for "${detail}"` : "Searched session";
+    case "skill_view":
+      return detail ? `Read the ${detail} skill` : "Read a skill";
+    case "skills_list":
+      return "Listed available skills";
+    case "skill_manage":
+      return detail ? `Updated skill ${detail}` : "Managed skills";
+    case "consult_expert":
+      return detail ? `Consulted ${detail} expert` : "Consulted an expert";
+    case "delegate_task":
+      return detail ? `Delegated: ${detail}` : "Delegated a task";
+    case "create_artifact":
+      return detail ? `Created artifact "${detail}"` : "Created an artifact";
+    case "memory":
+      return detail ? `Memory ${detail}` : "Updated memory";
+    case "todo":
+      return detail ? `Todo ${detail}` : "Updated todo list";
+    default:
+      return cancelledToolLabel(tc.toolName);
+  }
+}
+
+interface SimpleDetailRowProps {
+  icon: LucideIcon;
+  children: React.ReactNode;
+}
+
+function SimpleDetailRow({ icon: Icon, children }: SimpleDetailRowProps) {
+  return (
+    <div className="flex items-start gap-3 text-sm">
+      <Icon
+        className="mt-0.5 size-4 shrink-0 text-foreground/60"
+        aria-hidden
+      />
+      <div className="min-w-0 flex-1 leading-relaxed text-foreground/60">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Reasoning text rendered as paragraphs. By default we show the
+ * first ``previewParagraphs`` paragraphs (split on blank lines) plus
+ * a "Show more" link; clicking expands to the full text with a
+ * matching "Show less" link.
+ *
+ * Paragraph split: blank-line separated when present, otherwise one
+ * paragraph per source line (rare — most reasoning blocks already
+ * use blank-line paragraph breaks).
+ */
+function ClampedReasoning({
+  text,
+  previewParagraphs = 2,
+}: {
+  text: string;
+  previewParagraphs?: number;
+}) {
+  const paragraphs = splitReasoningParagraphs(text);
+  const [expanded, setExpanded] = useState(false);
+  const hasMore = paragraphs.length > previewParagraphs;
+  const visible = expanded || !hasMore
+    ? paragraphs
+    : paragraphs.slice(0, previewParagraphs);
+  return (
+    <div className="space-y-2">
+      {visible.map((paragraph, i) => (
+        <p key={i} className="whitespace-pre-wrap">{paragraph}</p>
+      ))}
+      {hasMore && (
+        <button
+          type="button"
+          onClick={() => setExpanded((prev) => !prev)}
+          className="text-xs font-medium text-foreground hover:text-foreground/70 cursor-pointer"
+        >
+          {expanded ? "Show less" : "Show more..."}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function splitReasoningParagraphs(text: string): string[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  const blankSplit = trimmed
+    .split(/\n\s*\n+/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  if (blankSplit.length > 1) return blankSplit;
+  // Fall back to one-paragraph-per-line so models that emit single
+  // newlines still get a clamp boundary.
+  return trimmed
+    .split(/\n+/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+}
+
+/**
+ * Condensed Simple-mode expansion of an iteration: one icon + prose
+ * row per tool call, plus the reasoning text and a "Done" footer
+ * when the iteration completed successfully.
+ *
+ * Deliberately DOES NOT reuse the Expert per-tool blocks (Patch
+ * diffs, file viewers, tooltips) — Simple mode trades detail for
+ * quiet. Users who want the heavy blocks switch to Expert.
+ */
+function IterationExpanded({
+  message,
+}: IterationGroupProps) {
+  // Internal tools and failed calls are filtered out of the visible
+  // list — the row vanishes entirely instead of exposing infra noise
+  // ("Listed .", "Searched files", failed retries, browser_* steps).
+  const calls = visibleToolCalls(message);
+  const reasoning = (message.reasoning ?? "").trim();
+  // "Done" reflects the user-visible state. If only hidden tools are
+  // still running, the iteration looks complete to the user; we don't
+  // want a stuck spinner on rows that are silent from their POV.
+  const anyVisibleRunning = calls.some((tc) => tc.status === "running");
+  const showDone =
+    !anyVisibleRunning && (calls.length > 0 || !!reasoning);
+
+  if (!reasoning && calls.length === 0) return null;
+
+  return (
+    <div className="ml-2 space-y-3 border-l border-border/40 pl-4 py-1">
+      {reasoning && (
+        <SimpleDetailRow icon={ClockIcon}>
+          <ClampedReasoning text={reasoning} />
+        </SimpleDetailRow>
+      )}
+      {calls.map((tc) => (
+        <SimpleDetailRow key={tc.id} icon={_toolRowIcon(tc.toolName)}>
+          <span>{_toolRowLabel(tc)}</span>
+        </SimpleDetailRow>
+      ))}
+      {showDone && (
+        <SimpleDetailRow icon={CircleCheckIcon}>
+          <span className="text-foreground">Done</span>
+        </SimpleDetailRow>
+      )}
+    </div>
+  );
+}
+
+export function IterationGroup({
+  message,
+  sessionId,
+  artifactFallbacks,
+  onFileSelect,
+}: IterationGroupProps) {
+  const summary = message.iterationSummary?.summary;
+  const [open, setOpen] = useState(false);
+
+  // 1. Live iteration: shimmer label only. "Live" means a tool is
+  //    actively running, OR a text-only iteration is mid-stream.
+  //    message.status === "streaming" alone is NOT a reliable signal —
+  //    tool-using messages stay in "streaming" state across the entire
+  //    rest of the turn until the next llm.response lands or the turn
+  //    ends. Without this stricter check, completed iterations would
+  //    stay in the shimmer state forever (user-reported bug).
+  if (isIterationLive(message)) {
+    const label = liveIterationLabel(message);
+    return (
+      <div className="px-1 py-0.5 text-sm">
+        <Shimmer duration={3} spread={3} className="text-sm">
+          {label}
+        </Shimmer>
+      </div>
+    );
+  }
+
+  // 2. Complete: collapsible row. Use the LLM summary when present,
+  //    else derive a short label from the tool calls so the row stays
+  //    informative without the summary_model auxiliary.
+  const label = summary ?? deriveIterationLabel(message);
+  if (!label) {
+    // Nothing to summarize and nothing to derive. Skip the row
+    // entirely — the surrounding SimpleAssistantGroup will still
+    // render the final-answer text and TurnSummaryCard.
+    return null;
+  }
+  const labelTone = summary
+    ? "text-foreground/80"
+    : "text-foreground/50";
+  return (
+    <div className="space-y-1">
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-sm hover:bg-muted/40"
+      >
+        <span className={cn("flex-1 truncate", labelTone)}>{label}</span>
+        <ChevronDown
+          className={cn(
+            "size-3 shrink-0 text-foreground/60 transition-transform",
+            open && "rotate-180",
+          )}
+          aria-hidden
+        />
+      </button>
+      {open && (
+        <IterationExpanded
+          message={message}
+          sessionId={sessionId}
+          artifactFallbacks={artifactFallbacks}
+          onFileSelect={onFileSelect}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Simple-mode AssistantGroup ───────────────────────────────────────
+//
+// Renders an assistant turn as: per-iteration IterationGroup rows (one
+// per assistant message), the final-answer text, a TurnSummaryCard
+// when one is attached, and TurnFeedback on the final answer. System
+// messages threaded into the group (skill_invoked / artifact_created)
+// keep their existing markers so we don't lose their visibility in
+// Simple mode.
+
+function SimpleAssistantGroup({
   messages,
   lastGlobalIndex,
   totalMessages,
@@ -696,6 +1236,130 @@ function AssistantGroup({
   onFileSelect?: (path: string) => void;
   onRetry?: () => Promise<void>;
 }) {
+  const assistantMessages = messages.filter((m) => m.role === "assistant");
+  const tail = assistantMessages[assistantMessages.length - 1];
+
+  // The final assistant text is the tail message's content when that
+  // message has no tool calls (the harness emits tools and text in
+  // separate llm.response events, so the closing iteration is
+  // text-only). Streaming tail with no content yet shows the running
+  // shimmer instead.
+  const tailHasTools = !!(tail?.toolCalls && tail.toolCalls.length > 0);
+  const finalText = tail && !tailHasTools && tail.content
+    ? tail.content
+    : "";
+
+  // A tail iteration that's mid-stream and has no IterationSummary yet
+  // surfaces via the IterationGroup's own placeholders. But if the
+  // group's tail is the user message (no assistant message at all yet),
+  // we still need a Working-on-it shimmer — same defensive layer the
+  // Expert path appends.
+  const isTailGroup = lastGlobalIndex === totalMessages - 1;
+  const showThinkingShim =
+    isTailGroup
+    && isRunning
+    && !tail
+    && messages.some((m) => m.role !== "assistant");
+
+  const showErrorInfo =
+    !!tail && tail.status === "error" && !!tail.errorInfo;
+
+  return (
+    <Message from="assistant">
+      <MessageContent>
+        <div className="space-y-2">
+          {messages.map((message) => {
+            if (message.role === "system") {
+              // Reuse the existing OrphanSystemMarker — it renders the
+              // skill_invoked dot, artifact block, and error messages
+              // the same way the orphan path does.
+              return (
+                <OrphanSystemMarker
+                  key={message.id}
+                  message={message}
+                  sessionId={sessionId}
+                  onRetry={undefined}
+                />
+              );
+            }
+            return (
+              <IterationGroup
+                key={message.id}
+                message={message}
+                sessionId={sessionId}
+                artifactFallbacks={artifactFallbacks}
+                onFileSelect={onFileSelect}
+              />
+            );
+          })}
+          {showThinkingShim && (
+            <Shimmer duration={3} spread={3} className="text-sm">
+              Working on it...
+            </Shimmer>
+          )}
+        </div>
+        {finalText && (
+          <div className="mt-3">
+            <MessageResponse>{finalText}</MessageResponse>
+            {tail?.status === "complete" && <TurnFeedback msg={tail} />}
+          </div>
+        )}
+        {tail?.turnSummary && (
+          <TurnSummaryCard
+            summary={tail.turnSummary}
+            sessionId={sessionId}
+            messages={messages}
+            onFileSelect={onFileSelect}
+          />
+        )}
+        {showErrorInfo && (
+          <div className="mt-3">
+            <ErrorMessage errorInfo={tail!.errorInfo!} onRetry={onRetry} />
+          </div>
+        )}
+      </MessageContent>
+    </Message>
+  );
+}
+
+// ── Assistant message group (single Timeline) ────────────────────────
+
+function AssistantGroup({
+  messages,
+  lastGlobalIndex,
+  totalMessages,
+  isRunning,
+  sessionId,
+  artifactFallbacks,
+  onFileSelect,
+  onRetry,
+  viewMode = "simple",
+}: {
+  messages: ChatMessageType[];
+  lastGlobalIndex: number;
+  totalMessages: number;
+  isRunning: boolean;
+  sessionId: string | null;
+  artifactFallbacks: Record<string, string>;
+  onFileSelect?: (path: string) => void;
+  onRetry?: () => Promise<void>;
+  viewMode?: "simple" | "expert";
+}) {
+  if (viewMode === "simple") {
+    return (
+      <SimpleAssistantGroup
+        messages={messages}
+        lastGlobalIndex={lastGlobalIndex}
+        totalMessages={totalMessages}
+        isRunning={isRunning}
+        sessionId={sessionId}
+        artifactFallbacks={artifactFallbacks}
+        onFileSelect={onFileSelect}
+        onRetry={onRetry}
+      />
+    );
+  }
+
   let entries: TimelineEntry[] = [];
   for (let i = 0; i < messages.length; i++) {
     const isLast = i === messages.length - 1
@@ -788,7 +1452,7 @@ function RetryBanner({ indicator }: { indicator: RetryIndicator }) {
       >
         <AlertTriangle className="size-3 shrink-0" />
         <span className="flex-1 truncate font-medium">{indicator.title}</span>
-        <span className="text-[10px] text-muted-foreground">
+        <span className="text-[10px] text-foreground/60">
           attempt {indicator.attempt}
         </span>
         {indicator.detail && (
@@ -796,7 +1460,7 @@ function RetryBanner({ indicator }: { indicator: RetryIndicator }) {
         )}
       </button>
       {open && indicator.detail && (
-        <pre className="mt-1 overflow-x-auto rounded-none bg-background p-2 font-mono text-[11px] whitespace-pre-wrap wrap-break-word text-muted-foreground">
+        <pre className="mt-1 overflow-x-auto rounded-none bg-background p-2 font-mono text-[11px] whitespace-pre-wrap wrap-break-word text-foreground/60">
           {indicator.detail}
         </pre>
       )}
@@ -826,6 +1490,8 @@ export function ChatThread({
   onToggleWorkspace,
   canShowBrowser = false,
   canShowWorkspace = false,
+  viewMode = "simple",
+  onViewModeChange,
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
 
@@ -944,6 +1610,7 @@ export function ChatThread({
                     artifactFallbacks={artifactFallbacks}
                     onFileSelect={onFileSelect}
                     onRetry={groupRetry}
+                    viewMode={viewMode}
                   />
                 );
               })}
@@ -968,7 +1635,7 @@ export function ChatThread({
         )}
         {disabled && disabledReason ? (
           <div
-            className="rounded border border-line bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
+            className="rounded border border-line bg-muted/40 px-3 py-2 text-sm text-foreground/60"
             role="status"
           >
             {disabledReason}
@@ -988,6 +1655,8 @@ export function ChatThread({
             onToggleWorkspace={onToggleWorkspace}
             canShowBrowser={canShowBrowser}
             canShowWorkspace={canShowWorkspace}
+            viewMode={viewMode}
+            onViewModeChange={onViewModeChange}
           />
         )}
       </div>

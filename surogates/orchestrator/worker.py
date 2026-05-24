@@ -827,6 +827,23 @@ async def run_worker(settings: Settings) -> None:
                     session_id=str(session.id),
                 )
 
+        # Build a TurnSummarizer when both the summary auxiliary LLM is
+        # configured AND the kill-switch is on. Reuses the existing
+        # cheap-model client constructed for context compression so we
+        # avoid spinning up an extra AsyncOpenAI instance per turn.
+        from surogates.harness.turn_summarizer import TurnSummarizer
+
+        if (
+            settings.worker.emit_turn_summaries
+            and summary_auxiliary is not None
+        ):
+            turn_summarizer: TurnSummarizer | None = TurnSummarizer(
+                summary_client=summary_auxiliary.client,
+                summary_model=summary_auxiliary.model,
+            )
+        else:
+            turn_summarizer = None
+
         return AgentHarness(
             session_store=session_store,
             tool_registry=tool_registry,
@@ -862,6 +879,7 @@ async def run_worker(settings: Settings) -> None:
             ),
             advisor_max_calls_per_turn=settings.llm.advisor_max_calls_per_turn,
             advisor_max_tokens=settings.llm.advisor_max_tokens,
+            turn_summarizer=turn_summarizer,
         )
 
     # 8. Orchestrator — consumes from this agent's dedicated work queue.

@@ -130,6 +130,12 @@ interface ChatComposerProps {
   canShowBrowser?: boolean;
   /** When false (default), the workspace toggle button is omitted entirely. */
   canShowWorkspace?: boolean;
+
+  // ── Simple/Expert view-mode toggle ───────────────────────────────
+  // Optional. When ``onViewModeChange`` is provided, a two-segment
+  // Simple/Expert toggle is rendered in the tools row.
+  viewMode?: "simple" | "expert";
+  onViewModeChange?: (mode: "simple" | "expert") => void;
 }
 
 // ── Outer wrapper (provides controlled text state) ───────────────────
@@ -289,6 +295,8 @@ function ChatComposerInner({
   onToggleWorkspace,
   canShowBrowser = false,
   canShowWorkspace = false,
+  viewMode = "simple",
+  onViewModeChange,
 }: ChatComposerProps) {
   const { adapter } = useAgentChatAdapterContext();
   const { textInput, attachments } = usePromptInputController();
@@ -652,6 +660,38 @@ function ChatComposerInner({
                   </Command>
                 </PopoverContent>
               </Popover>
+              {onViewModeChange && (
+                <div
+                  role="group"
+                  aria-label="Chat view mode"
+                  className="inline-flex overflow-hidden rounded-md border border-border"
+                >
+                  <button
+                    type="button"
+                    aria-pressed={viewMode === "simple"}
+                    onClick={() => onViewModeChange("simple")}
+                    className={
+                      viewMode === "simple"
+                        ? "bg-accent px-2 py-1 text-xs text-foreground"
+                        : "px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+                    }
+                  >
+                    Simple
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={viewMode === "expert"}
+                    onClick={() => onViewModeChange("expert")}
+                    className={
+                      viewMode === "expert"
+                        ? "bg-accent px-2 py-1 text-xs text-foreground"
+                        : "px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+                    }
+                  >
+                    Expert
+                  </button>
+                </div>
+              )}
               {canShowBrowser && onToggleBrowser && (
                 <PromptInputButton
                   aria-label={

@@ -1,6 +1,6 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
 import { AgentChat } from "../src/agent-chat";
 import type {
@@ -148,6 +148,17 @@ function setTextareaValue(
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
+// These tests exercise per-tool / per-block rendering details that
+// live inside the Expert-mode timeline. The Simple-mode IterationGroup
+// collapses those into a one-line label, so we pin the runtime to
+// Expert mode via the localStorage cache used by the SDK runtime.
+beforeEach(() => {
+  window.localStorage.setItem(
+    "@invergent/agent-chat-react:viewMode",
+    "expert",
+  );
+});
+
 afterEach(() => {
   if (root) {
     act(() => root?.unmount());
@@ -155,6 +166,7 @@ afterEach(() => {
   root = null;
   container?.remove();
   container = null;
+  window.localStorage.removeItem("@invergent/agent-chat-react:viewMode");
 });
 
 describe("AgentChat", () => {

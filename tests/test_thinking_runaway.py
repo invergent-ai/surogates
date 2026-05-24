@@ -422,7 +422,7 @@ async def test_runaway_retry_disables_thinking(monkeypatch):
     async def fake_streaming(*, session, create_kwargs, iteration,
                               llm_client, store, interrupt_check,
                               set_streaming_enabled,
-                              on_tool_call_complete):
+                              on_tool_call_complete, **_extra):
         call_log.append({
             "extra_body": dict(create_kwargs.get("extra_body") or {}),
         })
@@ -538,7 +538,7 @@ async def test_runaway_retry_only_fires_once_per_call(monkeypatch):
     async def always_runaway(*, session, create_kwargs, iteration,
                               llm_client, store, interrupt_check,
                               set_streaming_enabled,
-                              on_tool_call_complete):
+                              on_tool_call_complete, **_extra):
         call_log.append({
             "extra_body": dict(create_kwargs.get("extra_body") or {}),
         })
