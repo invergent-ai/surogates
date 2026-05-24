@@ -25,8 +25,8 @@ Updated before every commit.
 - [x] Task 7 — Worker-side image pre-dispatch branch
 - [x] Task 8 — Integration test for documents
 - [x] Task 9 — Verify dependency lock and parser availability
-- [ ] **Task 10 (in progress)** — Update `CLAUDE.md`
-- [ ] Task 11 — Smoke test the whole stack and verify
+- [x] Task 10 — Update `CLAUDE.md`
+- [ ] **Task 11 (in progress)** — Smoke test the whole stack and verify
 
 ---
 
