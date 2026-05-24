@@ -27,7 +27,7 @@ Updated before each commit during inline execution.
 - [x] A9: emit_turn_summaries gate integration test
 - [x] B1: SDK event type union and AGENT_CHAT_LISTENED_EVENTS
 - [x] B2: summary types and AgentChatMessage/State extensions
-- [ ] B3: reducer stamps turnId/iterationIndex
+- [x] B3: reducer stamps turnId/iterationIndex
 - [ ] B4: reducer handlers for iteration.summary and turn.summary
 - [ ] B5: viewMode runtime state, adapter methods, localStorage fallback
 - [ ] B6: IterationGroup component (reuses existing timeline pieces)

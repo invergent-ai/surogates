@@ -399,6 +399,7 @@ function applyLlmDelta(
 ): AgentChatState {
   const deltaContent = stringValue(event.data.content);
   const deltaReasoning = stringValue(event.data.reasoning);
+  const { turnId, iterationIndex } = readTurnMeta(event.data);
   const messages = [...state.messages];
   const lastIdx = findLastAssistantIndex(messages);
   const lastMsg = lastIdx >= 0 ? messages[lastIdx] : null;
@@ -421,6 +422,8 @@ function applyLlmDelta(
       reasoning: deltaReasoning
         ? (lastMsg.reasoning ?? "") + deltaReasoning
         : lastMsg.reasoning,
+      turnId: turnId ?? lastMsg.turnId,
+      iterationIndex: iterationIndex ?? lastMsg.iterationIndex,
     };
   } else {
     messages.push({
@@ -430,6 +433,8 @@ function applyLlmDelta(
       reasoning: deltaReasoning || undefined,
       createdAt: new Date(),
       status: "streaming",
+      turnId,
+      iterationIndex,
     });
   }
 
@@ -454,6 +459,7 @@ function applyLlmResponse(
     : [];
   const hasToolCalls = toolCalls.length > 0;
   const responseToolCallIds = toolCallIdsFromResponse(toolCalls);
+  const { turnId, iterationIndex } = readTurnMeta(event.data);
   const idx = findLastAssistantIndex(messages);
   const prevAssistant = idx >= 0 ? messages[idx] : undefined;
   const prevHasTools = Boolean(prevAssistant?.toolCalls?.length);
@@ -477,12 +483,16 @@ function applyLlmResponse(
         content: "",
         status: "streaming",
         llmResponseEventId: event.eventId,
+        turnId: turnId ?? current.turnId,
+        iterationIndex: iterationIndex ?? current.iterationIndex,
       };
     } else {
       messages[idx] = {
         ...current,
         status: "complete",
         llmResponseEventId: event.eventId,
+        turnId: turnId ?? current.turnId,
+        iterationIndex: iterationIndex ?? current.iterationIndex,
       };
     }
   } else if (matchesExistingToolTurn && idx >= 0) {
@@ -494,6 +504,8 @@ function applyLlmResponse(
         : current.reasoning,
       status: "streaming",
       llmResponseEventId: event.eventId,
+      turnId: turnId ?? current.turnId,
+      iterationIndex: iterationIndex ?? current.iterationIndex,
     };
   } else if (prevHasTools || !prevAssistant || hasUserAfter) {
     messages.push({
@@ -504,6 +516,8 @@ function applyLlmResponse(
       createdAt: new Date(),
       status: hasToolCalls ? "streaming" : "complete",
       llmResponseEventId: event.eventId,
+      turnId,
+      iterationIndex,
     });
   } else {
     const current = messages[idx]!;
@@ -513,6 +527,8 @@ function applyLlmResponse(
         reasoning: (current.reasoning ?? "") + responseContent,
         status: "streaming",
         llmResponseEventId: event.eventId,
+        turnId: turnId ?? current.turnId,
+        iterationIndex: iterationIndex ?? current.iterationIndex,
       };
     } else {
       messages[idx] = {
@@ -520,6 +536,8 @@ function applyLlmResponse(
         content: responseContent || current.content,
         status: hasToolCalls ? "streaming" : "complete",
         llmResponseEventId: event.eventId,
+        turnId: turnId ?? current.turnId,
+        iterationIndex: iterationIndex ?? current.iterationIndex,
       };
     }
   }
@@ -561,6 +579,7 @@ function applyLlmThinking(
 ): AgentChatState {
   const reasoningText = stringValue(event.data.reasoning) ||
     stringValue(event.data.content);
+  const { turnId, iterationIndex } = readTurnMeta(event.data);
   const messages = [...state.messages];
   const idx = findLastAssistantIndex(messages);
   const prev = idx >= 0 ? messages[idx] : null;
@@ -578,11 +597,15 @@ function applyLlmThinking(
       reasoning: reasoningText,
       createdAt: new Date(),
       status: "streaming",
+      turnId,
+      iterationIndex,
     });
   } else {
     messages[idx] = {
       ...prev,
       reasoning: (prev.reasoning ?? "") + reasoningText,
+      turnId: turnId ?? prev.turnId,
+      iterationIndex: iterationIndex ?? prev.iterationIndex,
     };
   }
 
@@ -1064,4 +1087,33 @@ function stringValue(value: unknown): string {
 
 function numberValue(value: unknown): number {
   return typeof value === "number" ? value : 0;
+}
+
+/**
+ * Distinguishes "missing" from "zero" — `numberValue` collapses both to
+ * 0 which is fine for token counts but wrong for an event correlator
+ * like ``iteration_index`` where 0 is a valid first iteration.
+ */
+function optionalNumberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function optionalStringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Pull ``turn_id`` and ``iteration_index`` off an LLM event payload.
+ * Both fields are optional so older harnesses without the Simple
+ * chat-mode plumbing still produce parseable events.
+ */
+function readTurnMeta(
+  data: Record<string, unknown>,
+): { turnId?: string; iterationIndex?: number } {
+  const turnId = optionalStringValue(data.turn_id);
+  const iterationIndex = optionalNumberValue(data.iteration_index);
+  return {
+    turnId,
+    iterationIndex: iterationIndex === null ? undefined : iterationIndex,
+  };
 }
