@@ -20,7 +20,7 @@ Updated before each commit during inline execution.
 - [x] A2: ITERATION_SUMMARY and TURN_SUMMARY event types
 - [x] A3: thread turn_id through call_llm_with_retry and LLM_DELTA emissions
 - [x] A4: generate turn_id in wake() and stamp LLM_THINKING/LLM_RESPONSE
-- [ ] A5: TurnSummarizer module
+- [x] A5: TurnSummarizer module
 - [ ] A6: wire TurnSummarizer into AgentHarness and worker.py
 - [ ] A7: emit iteration.summary per iteration
 - [ ] A8: emit turn.summary and drain in _complete_session
