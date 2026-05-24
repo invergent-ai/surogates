@@ -698,6 +698,94 @@ export interface IterationGroupProps {
   onFileSelect?: (path: string) => void;
 }
 
+/**
+ * Short, human-ish label derived from an iteration's tool calls when
+ * no LLM-generated summary is available (summary_model unconfigured,
+ * summarizer timed out, replay of pre-feature history, etc.).
+ *
+ * Returns ``null`` when nothing useful can be derived — caller renders
+ * a generic "Iteration" pill or falls through to the shimmer.
+ */
+function deriveIterationLabel(message: ChatMessageType): string | null {
+  const calls = message.toolCalls ?? [];
+  if (calls.length === 0) {
+    return message.reasoning ? "Thought through the problem" : null;
+  }
+  if (calls.length === 1) {
+    const tc = calls[0]!;
+    const name = cancelledToolLabel(tc.toolName);
+    const detail = extractToolDetail(tc);
+    return detail ? `${name} · ${detail}` : name;
+  }
+  // Multiple tool calls: collapse same-tool runs, summarize mixed.
+  const firstName = calls[0]!.toolName;
+  const allSame = calls.every((tc) => tc.toolName === firstName);
+  if (allSame) {
+    const human = cancelledToolLabel(firstName);
+    return `${human} × ${calls.length}`;
+  }
+  return `Used ${calls.length} tools`;
+}
+
+/**
+ * Pull a short, human-readable detail string from a tool call's
+ * arguments. Defensive against unparseable / partial JSON during
+ * streaming.
+ */
+function extractToolDetail(tc: ToolCallInfo): string | null {
+  const args = parseArgs<Record<string, unknown>>(tc.args);
+  if (!args) return null;
+  // Prefer the most-meaningful arg per tool family.
+  const stringArg = (key: string): string | null => {
+    const v = args[key];
+    return typeof v === "string" && v.length > 0 ? v : null;
+  };
+  switch (tc.toolName) {
+    case "read_file":
+    case "write_file":
+    case "patch":
+    case "list_files":
+    case "search_files": {
+      const path = stringArg("path") ?? stringArg("file_path");
+      return path ? lastPathSegment(path) : null;
+    }
+    case "terminal": {
+      const cmd = stringArg("command");
+      return cmd ? truncate(cmd, 40) : null;
+    }
+    case "execute_code": {
+      const code = stringArg("code");
+      return code ? truncate(code.split("\n")[0] ?? "", 40) : null;
+    }
+    case "web_search":
+    case "web_crawl":
+      return stringArg("query");
+    case "web_extract":
+      return stringArg("url");
+    case "skill_view":
+    case "skill_manage":
+      return stringArg("name") ?? stringArg("skill");
+    case "create_artifact":
+    case "consult_expert":
+    case "delegate_task":
+      return stringArg("name") ?? stringArg("task") ?? stringArg("title");
+    case "memory":
+      return stringArg("action") ?? stringArg("key");
+    default:
+      return null;
+  }
+}
+
+function lastPathSegment(path: string): string {
+  const cleaned = path.replace(/\/+$/, "");
+  const idx = cleaned.lastIndexOf("/");
+  return idx >= 0 ? cleaned.slice(idx + 1) : cleaned;
+}
+
+function truncate(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
 function iterationDotClass(message: ChatMessageType): string {
   const calls = message.toolCalls ?? [];
   if (calls.length === 0) {
@@ -763,75 +851,69 @@ export function IterationGroup({
   const [open, setOpen] = useState(false);
   const dot = iterationDotClass(message);
 
-  if (summary) {
-    return (
-      <div className="space-y-1">
-        <button
-          type="button"
-          onClick={() => setOpen((prev) => !prev)}
-          aria-expanded={open}
-          className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-sm hover:bg-muted/40"
-        >
-          <span
-            className={cn("size-2 shrink-0 rounded-full", dot)}
-            aria-hidden
-          />
-          <span className="flex-1 truncate text-foreground">{summary}</span>
-          <ChevronRight
-            className={cn(
-              "size-3 shrink-0 text-muted-foreground transition-transform",
-              open && "rotate-90",
-            )}
-            aria-hidden
-          />
-        </button>
-        {open && (
-          <IterationExpanded
-            message={message}
-            sessionId={sessionId}
-            artifactFallbacks={artifactFallbacks}
-            onFileSelect={onFileSelect}
-          />
-        )}
-      </div>
-    );
-  }
-
+  // 1. Streaming: shimmer label only. The expanded Expert timeline
+  //    would defeat the "Simple mode is quiet" goal; users who want
+  //    progress detail switch to Expert.
   if (isStreaming) {
     const label = runningToolCount > 0
       ? `Working… (${runningToolCount} tool${runningToolCount === 1 ? "" : "s"})`
       : "Thinking…";
     return (
-      <div className="space-y-1">
-        <div className="flex items-center gap-2 text-sm">
-          <span
-            className={cn("size-2 shrink-0 rounded-full", dot)}
-            aria-hidden
-          />
-          <Shimmer duration={3} spread={3} className="text-sm">
-            {label}
-          </Shimmer>
-        </div>
+      <div className="flex items-center gap-2 px-1 py-0.5 text-sm">
+        <span
+          className={cn("size-2 shrink-0 rounded-full", dot)}
+          aria-hidden
+        />
+        <Shimmer duration={3} spread={3} className="text-sm">
+          {label}
+        </Shimmer>
+      </div>
+    );
+  }
+
+  // 2. Complete: collapsible row. Use the LLM summary when present,
+  //    else derive a short label from the tool calls so the row stays
+  //    informative without the summary_model auxiliary.
+  const label = summary ?? deriveIterationLabel(message);
+  if (!label) {
+    // Nothing to summarize and nothing to derive. Skip the row
+    // entirely — the surrounding SimpleAssistantGroup will still
+    // render the final-answer text and TurnSummaryCard.
+    return null;
+  }
+  const labelTone = summary
+    ? "text-foreground"
+    : "text-muted-foreground";
+  return (
+    <div className="space-y-1">
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-sm hover:bg-muted/40"
+      >
+        <span
+          className={cn("size-2 shrink-0 rounded-full", dot)}
+          aria-hidden
+        />
+        <span className={cn("flex-1 truncate", labelTone)}>{label}</span>
+        <ChevronRight
+          className={cn(
+            "size-3 shrink-0 text-muted-foreground transition-transform",
+            open && "rotate-90",
+          )}
+          aria-hidden
+        />
+      </button>
+      {open && (
         <IterationExpanded
           message={message}
           sessionId={sessionId}
           artifactFallbacks={artifactFallbacks}
           onFileSelect={onFileSelect}
         />
-      </div>
-    );
-  }
-
-  // Permanently expanded fallback: no summary arrived (replay of
-  // pre-feature events, summarizer timeout). Drop straight to the
-  // Expert-mode timeline so the user still sees what happened.
-  return (
-    <IterationExpanded
-      message={message}
-      sessionId={sessionId}
-      artifactFallbacks={artifactFallbacks}
-      onFileSelect={onFileSelect}
-    />
+      )}
+    </div>
   );
 }
 

@@ -157,13 +157,17 @@ describe("IterationGroup", () => {
     expect(dom.textContent).toMatch(/2 tools/);
   });
 
-  it("renders the underlying timeline permanently when no summary and not streaming", () => {
+  it("renders nothing but the shimmer label during streaming", () => {
+    // Even when tools have started and reasoning text exists, the
+    // streaming row stays collapsed — users who want progress detail
+    // switch to Expert mode.
     const message = buildMessage({
       turnId: "t-1",
       iterationIndex: 0,
-      reasoning: "post-hoc reasoning",
+      status: "streaming",
+      reasoning: "internal thought that should stay hidden",
       toolCalls: [
-        { id: "c1", toolName: "patch", args: "{}", status: "complete" },
+        { id: "c1", toolName: "patch", args: "{\"path\":\"x.html\"}", status: "running" },
       ],
     });
     const dom = mount(
@@ -173,11 +177,90 @@ describe("IterationGroup", () => {
         artifactFallbacks={{}}
       />,
     );
-    // Tool block visible without expansion of the IterationGroup
-    // itself. Note the inner Reasoning component owns its own
-    // collapsible, which is fine — the assertion below is just that
-    // the IterationGroup doesn't add yet another header row.
-    expect(dom.textContent).toContain("Patch");
-    expect(dom.textContent).not.toContain("(no summary)");
+    expect(dom.textContent).toMatch(/Working/i);
+    // Reasoning content + per-tool detail hidden.
+    expect(dom.textContent).not.toContain("internal thought");
+    expect(dom.textContent).not.toContain("x.html");
+  });
+
+  it("derives a tool-name label when no summary is present (complete)", () => {
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+      toolCalls: [
+        { id: "c1", toolName: "list_files", args: "{\"path\":\".\"}", status: "complete" },
+      ],
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    // Collapsed by default — derived label includes the human tool
+    // name and the path detail.
+    expect(dom.textContent).toContain("List Files");
+    // Collapsible trigger exists so users can drill into the Expert
+    // timeline on demand.
+    const trigger = dom.querySelector("button[aria-expanded='false']");
+    expect(trigger).not.toBeNull();
+  });
+
+  it("collapses multiple same-tool runs into a 'Tool × N' label", () => {
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+      toolCalls: [
+        { id: "c1", toolName: "patch", args: "{}", status: "complete" },
+        { id: "c2", toolName: "patch", args: "{}", status: "complete" },
+        { id: "c3", toolName: "patch", args: "{}", status: "complete" },
+      ],
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    expect(dom.textContent).toMatch(/Patch.+×.+3/);
+  });
+
+  it("falls back to 'Used N tools' for mixed tool batches without a summary", () => {
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+      toolCalls: [
+        { id: "c1", toolName: "patch", args: "{}", status: "complete" },
+        { id: "c2", toolName: "read_file", args: "{}", status: "complete" },
+      ],
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    expect(dom.textContent).toContain("Used 2 tools");
+  });
+
+  it("renders nothing when complete, no summary, no tools, no reasoning", () => {
+    // Empty iteration — nothing to derive. The surrounding
+    // SimpleAssistantGroup still renders any final text + the
+    // TurnSummaryCard, so dropping this row is the right move.
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    expect(dom.textContent ?? "").toBe("");
   });
 });

@@ -184,7 +184,7 @@ describe("Simple mode ChatThread rendering", () => {
     expect(dom.textContent).toContain("frontend-design");
   });
 
-  it("Simple mode falls back to the expanded timeline when an iteration has no summary", () => {
+  it("Simple mode shows a tool-derived collapsed label when an iteration has no summary", () => {
     const messages = [
       assistantMessage({
         id: "iter-0",
@@ -201,8 +201,13 @@ describe("Simple mode ChatThread rendering", () => {
         viewMode="simple"
       />,
     );
-    // Reverts to per-tool view because there's no summary.
+    // Shows a derived label (the human tool name) instead of the LLM
+    // summary; the underlying per-tool detail stays collapsed until
+    // the user clicks the row.
     expect(dom.textContent).toContain("Patch");
     expect(dom.textContent).not.toContain("Reworked the hero copy");
+    // The summary row is collapsed by default.
+    expect(dom.querySelector("button[aria-expanded='false']"))
+      .not.toBeNull();
   });
 });
