@@ -116,8 +116,10 @@ describe("IterationGroup", () => {
     act(() => {
       trigger!.click();
     });
-    // The Patch label from the existing per-tool renderer is now visible.
-    expect(dom.textContent).toContain("Patch");
+    // The condensed row label (verb + path) is now visible.
+    expect(dom.textContent).toContain("Edited x.html");
+    // The "Done" footer marks the iteration as complete.
+    expect(dom.textContent).toContain("Done");
   });
 
   it("shows a Thinking placeholder while streaming and no tools have started", () => {

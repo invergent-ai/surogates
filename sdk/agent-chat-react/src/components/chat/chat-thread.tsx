@@ -43,7 +43,26 @@ import { ArtifactBlock } from "./artifacts/artifact-block";
 import { ErrorMessage } from "./error-message";
 import { TurnSummaryCard } from "./turn-summary-card";
 import { cn } from "../../lib/utils";
-import { AlertTriangle, ChevronDown, ChevronRight, MessageSquareIcon } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  BookOpenIcon,
+  ChevronDown,
+  ChevronRight,
+  CircleCheckIcon,
+  ClockIcon,
+  FileEditIcon,
+  FileTextIcon,
+  GlobeIcon,
+  ListIcon,
+  MessageSquareIcon,
+  PenLineIcon,
+  SearchIcon,
+  SparklesIcon,
+  TerminalIcon,
+  WrenchIcon,
+  type LucideIcon,
+} from "lucide-react";
 import { useState } from "react";
 import type {
   AgentChatImageAttachment,
@@ -713,9 +732,7 @@ function deriveIterationLabel(message: ChatMessageType): string | null {
   }
   if (calls.length === 1) {
     const tc = calls[0]!;
-    const name = cancelledToolLabel(tc.toolName);
-    const detail = extractToolDetail(tc);
-    return detail ? `${name} · ${detail}` : name;
+    return deriveSingleToolLabel(tc);
   }
   // Multiple tool calls: collapse same-tool runs, summarize mixed.
   const firstName = calls[0]!.toolName;
@@ -726,6 +743,35 @@ function deriveIterationLabel(message: ChatMessageType): string | null {
   }
   return `Used ${calls.length} tools`;
 }
+
+/**
+ * Header label for a single-tool iteration. Most tools surface a
+ * short detail (path basename, query, URL) so the header reads
+ * "Read · landing.html". Tools whose detail is structurally noisy —
+ * shell commands, arbitrary code blocks, raw memory keys — drop the
+ * detail entirely and use a generic verb instead; the full detail
+ * still appears in the expanded body via _toolRowLabel.
+ */
+function deriveSingleToolLabel(tc: ToolCallInfo): string {
+  const name = cancelledToolLabel(tc.toolName);
+  if (_HEADER_HIDES_DETAIL.has(tc.toolName)) {
+    return _HEADER_GENERIC_VERB[tc.toolName] ?? name;
+  }
+  const detail = extractToolDetail(tc);
+  return detail ? `${name} · ${detail}` : name;
+}
+
+const _HEADER_HIDES_DETAIL: ReadonlySet<string> = new Set([
+  "terminal",
+  "execute_code",
+  "memory",
+]);
+
+const _HEADER_GENERIC_VERB: Record<string, string> = {
+  terminal: "Ran a command",
+  execute_code: "Executed code",
+  memory: "Updated memory",
+};
 
 /**
  * Pull a short, human-readable detail string from a tool call's
@@ -832,56 +878,151 @@ function liveIterationLabel(message: ChatMessageType): string {
   return `Running ${running.length} tools…`;
 }
 
-function iterationDotClass(message: ChatMessageType): string {
-  const calls = message.toolCalls ?? [];
-  if (calls.length === 0) {
-    if (message.status === "streaming") return "bg-primary animate-pulse";
-    if (message.status === "error") return "bg-red-500";
-    return "bg-emerald-500";
-  }
-  let anyError = false;
-  let anyRunning = false;
-  for (const tc of calls) {
-    const s = effectiveStatus(tc);
-    if (s === "error") anyError = true;
-    if (s === "running") anyRunning = true;
-  }
-  if (anyError) return "bg-red-500";
-  if (anyRunning) return "bg-primary animate-pulse";
-  // All tools resolved — the iteration is effectively complete even
-  // if message.status is still "streaming" (the reducer leaves
-  // tool-using messages in that state for the rest of the turn).
-  return "bg-emerald-500";
+/**
+ * Icon-per-tool-family mapping for Simple-mode condensed rows. Keeps
+ * the expanded view visually quiet — one icon + one prose line per
+ * tool call — instead of the heavy per-tool blocks the Expert view
+ * uses. Falls back to a generic wrench when a new tool name lands
+ * before we've added a custom row for it.
+ */
+const _TOOL_ROW_ICON: Record<string, LucideIcon> = {
+  read_file: FileTextIcon,
+  write_file: FileTextIcon,
+  patch: FileEditIcon,
+  list_files: ListIcon,
+  search_files: SearchIcon,
+  terminal: TerminalIcon,
+  execute_code: TerminalIcon,
+  web_search: GlobeIcon,
+  web_extract: GlobeIcon,
+  web_crawl: GlobeIcon,
+  session_search: SearchIcon,
+  skill_view: BookOpenIcon,
+  skills_list: BookOpenIcon,
+  skill_manage: PenLineIcon,
+  consult_expert: SparklesIcon,
+  delegate_task: ArrowRight,
+  create_artifact: FileTextIcon,
+  memory: PenLineIcon,
+  todo: ListIcon,
+};
+
+function _toolRowIcon(toolName: string): LucideIcon {
+  return _TOOL_ROW_ICON[toolName] ?? WrenchIcon;
 }
 
+/**
+ * Verb-first prose line for a tool call ("Edited landing.html",
+ * "Read the frontend-design skill"). Falls back to the human tool
+ * name when we can't extract a useful detail from the args.
+ */
+function _toolRowLabel(tc: ToolCallInfo): string {
+  const detail = extractToolDetail(tc);
+  switch (tc.toolName) {
+    case "read_file":
+      return detail ? `Read ${detail}` : "Read a file";
+    case "write_file":
+      return detail ? `Wrote ${detail}` : "Wrote a file";
+    case "patch":
+      return detail ? `Edited ${detail}` : "Edited a file";
+    case "list_files":
+      return detail ? `Listed ${detail}` : "Listed files";
+    case "search_files":
+      return detail ? `Searched files for "${detail}"` : "Searched files";
+    case "terminal":
+      return detail ? `Ran command: ${detail}` : "Ran a command";
+    case "execute_code":
+      return detail ? `Executed code: ${detail}` : "Executed code";
+    case "web_search":
+      return detail ? `Searched the web for "${detail}"` : "Searched the web";
+    case "web_crawl":
+      return detail ? `Crawled "${detail}"` : "Crawled the web";
+    case "web_extract":
+      return detail ? `Fetched ${detail}` : "Fetched a page";
+    case "session_search":
+      return detail ? `Searched session for "${detail}"` : "Searched session";
+    case "skill_view":
+      return detail ? `Read the ${detail} skill` : "Read a skill";
+    case "skills_list":
+      return "Listed available skills";
+    case "skill_manage":
+      return detail ? `Updated skill ${detail}` : "Managed skills";
+    case "consult_expert":
+      return detail ? `Consulted ${detail} expert` : "Consulted an expert";
+    case "delegate_task":
+      return detail ? `Delegated: ${detail}` : "Delegated a task";
+    case "create_artifact":
+      return detail ? `Created artifact "${detail}"` : "Created an artifact";
+    case "memory":
+      return detail ? `Memory ${detail}` : "Updated memory";
+    case "todo":
+      return detail ? `Todo ${detail}` : "Updated todo list";
+    default:
+      return cancelledToolLabel(tc.toolName);
+  }
+}
+
+interface SimpleDetailRowProps {
+  icon: LucideIcon;
+  children: React.ReactNode;
+}
+
+function SimpleDetailRow({ icon: Icon, children }: SimpleDetailRowProps) {
+  return (
+    <div className="flex items-start gap-3 text-sm">
+      <Icon
+        className="mt-0.5 size-4 shrink-0 text-muted-foreground"
+        aria-hidden
+      />
+      <div className="min-w-0 flex-1 leading-relaxed text-muted-foreground">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Condensed Simple-mode expansion of an iteration: one icon + prose
+ * row per tool call, plus the reasoning text and a "Done" footer
+ * when the iteration completed successfully.
+ *
+ * Deliberately DOES NOT reuse the Expert per-tool blocks (Patch
+ * diffs, file viewers, tooltips) — Simple mode trades detail for
+ * quiet. Users who want the heavy blocks switch to Expert.
+ */
 function IterationExpanded({
   message,
-  sessionId,
-  artifactFallbacks,
-  onFileSelect,
 }: IterationGroupProps) {
-  // Reuse the same flatten + sub-grouping pipeline the Expert view
-  // uses — `isLast=false` because the surrounding ChatThread already
-  // takes care of the tail-of-turn "thinking" placeholder.
-  let entries: TimelineEntry[] = messageToEntries(
-    message, false, artifactFallbacks,
-  );
-  entries = groupBrowserActivityEntries(entries);
-  entries = groupWebSearchEntries(entries);
-  if (entries.length === 0) return null;
+  const calls = message.toolCalls ?? [];
+  const reasoning = (message.reasoning ?? "").trim();
+  const hasError = calls.some((tc) => effectiveStatus(tc) === "error");
+  const anyRunning = calls.some((tc) => tc.status === "running");
+  const showDone =
+    !anyRunning && !hasError && (calls.length > 0 || !!reasoning);
+
+  if (!reasoning && calls.length === 0) return null;
+
   return (
-    <div className="ml-4">
-      <Timeline defaultValue={999} className="gap-0">
-        {entries.map((entry, i) => (
-          <TimelineEntryItem
-            key={entry.key}
-            entry={entry}
-            step={i + 1}
-            sessionId={sessionId}
-            onFileSelect={onFileSelect}
-          />
-        ))}
-      </Timeline>
+    <div className="ml-2 space-y-3 border-l border-border/40 pl-4 py-1">
+      {reasoning && (
+        <SimpleDetailRow icon={ClockIcon}>
+          <p className="whitespace-pre-wrap">{reasoning}</p>
+        </SimpleDetailRow>
+      )}
+      {calls.map((tc) => (
+        <SimpleDetailRow key={tc.id} icon={_toolRowIcon(tc.toolName)}>
+          <span className={cn(
+            effectiveStatus(tc) === "error" && "text-destructive",
+          )}>
+            {_toolRowLabel(tc)}
+          </span>
+        </SimpleDetailRow>
+      ))}
+      {showDone && (
+        <SimpleDetailRow icon={CircleCheckIcon}>
+          <span className="text-foreground">Done</span>
+        </SimpleDetailRow>
+      )}
     </div>
   );
 }
@@ -894,7 +1035,6 @@ export function IterationGroup({
 }: IterationGroupProps) {
   const summary = message.iterationSummary?.summary;
   const [open, setOpen] = useState(false);
-  const dot = iterationDotClass(message);
 
   // 1. Live iteration: shimmer label only. "Live" means a tool is
   //    actively running, OR a text-only iteration is mid-stream.
@@ -906,11 +1046,7 @@ export function IterationGroup({
   if (isIterationLive(message)) {
     const label = liveIterationLabel(message);
     return (
-      <div className="flex items-center gap-2 px-1 py-0.5 text-sm">
-        <span
-          className={cn("size-2 shrink-0 rounded-full", dot)}
-          aria-hidden
-        />
+      <div className="px-1 py-0.5 text-sm">
         <Shimmer duration={3} spread={3} className="text-sm">
           {label}
         </Shimmer>
@@ -939,15 +1075,11 @@ export function IterationGroup({
         aria-expanded={open}
         className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-sm hover:bg-muted/40"
       >
-        <span
-          className={cn("size-2 shrink-0 rounded-full", dot)}
-          aria-hidden
-        />
         <span className={cn("flex-1 truncate", labelTone)}>{label}</span>
-        <ChevronRight
+        <ChevronDown
           className={cn(
             "size-3 shrink-0 text-muted-foreground transition-transform",
-            open && "rotate-90",
+            open && "rotate-180",
           )}
           aria-hidden
         />
