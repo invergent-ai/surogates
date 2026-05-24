@@ -18,7 +18,7 @@ Updated before each commit during inline execution.
 
 - [x] A1: WorkerSettings.emit_turn_summaries kill switch
 - [x] A2: ITERATION_SUMMARY and TURN_SUMMARY event types
-- [ ] A3: thread turn_id through call_llm_with_retry and LLM_DELTA emissions
+- [x] A3: thread turn_id through call_llm_with_retry and LLM_DELTA emissions
 - [ ] A4: generate turn_id in wake() and stamp LLM_THINKING/LLM_RESPONSE
 - [ ] A5: TurnSummarizer module
 - [ ] A6: wire TurnSummarizer into AgentHarness and worker.py
