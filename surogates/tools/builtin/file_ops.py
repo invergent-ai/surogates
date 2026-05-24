@@ -801,6 +801,29 @@ def register(registry: ToolRegistry) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Document extensions handled by markitdown; populated in Task 2.
+_DOCUMENT_EXTENSIONS: frozenset[str] = frozenset()
+
+
+def _apply_line_window(
+    lines: list[str],
+    offset: int,
+    limit: int,
+) -> tuple[list[str], int, int, int, bool]:
+    """Slice ``lines`` into a 1-indexed window.
+
+    Returns ``(selected, total_lines, start_idx, end_idx, truncated)``.
+    Shared by ``_handle_text`` and ``_handle_document`` so both paths
+    paginate identically.
+    """
+    total_lines = len(lines)
+    start_idx = offset - 1  # 1-indexed → 0-indexed
+    end_idx = min(start_idx + limit, total_lines)
+    selected = lines[start_idx:end_idx]
+    truncated = end_idx < total_lines
+    return selected, total_lines, start_idx, end_idx, truncated
+
+
 async def _read_file_handler(
     arguments: dict[str, Any],
     **kwargs: Any,
@@ -808,14 +831,16 @@ async def _read_file_handler(
     """Harness-local fallback: read a file with line numbers and pagination.
 
     In production, the ToolRouter sends read_file to the sandbox runtime
-    instead of invoking this handler.  Implements the read_file
-    logic: device path guard, binary file guard, character-count guard,
-    large-file hint, dedup check, and consecutive-loop detection.
+    instead of invoking this handler.  Dispatches by extension:
+
+      * image extensions — handled by the worker pre-dispatch branch in
+        ``surogates.harness.tool_exec``; this handler returns a defensive
+        redirect error if the worker branch was bypassed.
+      * document extensions (.pdf/.docx/.xlsx/.pptx) — parsed via
+        markitdown by ``_handle_document``.
+      * everything else — treated as text by ``_handle_text``.
     """
     path = arguments.get("path", "")
-    offset = max(arguments.get("offset", 1), 1)
-    limit = min(arguments.get("limit", 500), get_max_lines())
-    task_id = kwargs.get("task_id", "default")
     workspace_path = kwargs.get("workspace_path")
 
     if not path:
@@ -833,11 +858,14 @@ async def _read_file_handler(
                 ),
             })
 
-        _resolved = Path(_resolve_user_path(path, workspace_path))
+        resolved = Path(_resolve_user_path(path, workspace_path))
+        ext = resolved.suffix.lower()
 
         # ── Image file guard ─────────────────────────────────────────
-        # Images are never inlined — redirect to the vision tool.
-        if _is_image(str(_resolved)):
+        # Defensive fallback only.  Production routes images through the
+        # worker pre-dispatch branch in ``tool_exec`` because the sandbox
+        # has no vision LLM client.
+        if _is_image(str(resolved)):
             return json.dumps({
                 "error": (
                     f"Image file detected: '{path}'. "
@@ -845,191 +873,220 @@ async def _read_file_handler(
                 ),
             })
 
+        # ── Document branch ──────────────────────────────────────────
+        if ext in _DOCUMENT_EXTENSIONS:
+            return await _handle_document(path, resolved, arguments, **kwargs)
+
         # ── Binary file guard ─────────────────────────────────────────
-        # Block binary files by extension (no I/O).
-        if has_binary_extension(str(_resolved)):
-            _ext = _resolved.suffix.lower()
+        # Block remaining binary files by extension (no I/O).
+        if has_binary_extension(str(resolved)):
             return json.dumps({
                 "error": (
-                    f"Cannot read binary file '{path}' ({_ext}). "
+                    f"Cannot read binary file '{path}' ({ext}). "
                     "Use vision_analyze for images, or terminal to inspect binary files."
                 ),
             })
 
-        resolved_str = str(_resolved)
-
-        # ── Dedup check ───────────────────────────────────────────────
-        # If we already read this exact (path, offset, limit) and the
-        # file hasn't been modified since, return a lightweight stub
-        # instead of re-sending the same content.  Saves context tokens.
-        dedup_key = (resolved_str, offset, limit)
-        task_data = _init_task_data(task_id)
-        with _read_tracker_lock:
-            cached_mtime = task_data.get("dedup", {}).get(dedup_key)
-
-        if cached_mtime is not None:
-            try:
-                current_mtime = os.path.getmtime(resolved_str)
-                if current_mtime == cached_mtime:
-                    return json.dumps({
-                        "content": (
-                            "File unchanged since last read. The content from "
-                            "the earlier read_file result in this conversation is "
-                            "still current — refer to that instead of re-reading."
-                        ),
-                        "path": path,
-                        "dedup": True,
-                    }, ensure_ascii=False)
-            except OSError:
-                pass  # stat failed — fall through to full read
-
-        # ── Perform the read ──────────────────────────────────────────
-        if not os.path.exists(resolved_str):
-            result_dict: dict[str, Any] = {"error": f"File not found: {path}"}
-            similar = _suggest_similar_files(path)
-            if similar:
-                result_dict["similar_files"] = similar
-                result_dict["hint"] = (
-                    "Did you mean one of these files? "
-                    + ", ".join(similar)
-                )
-            return json.dumps(result_dict, ensure_ascii=False)
-
-        file_size = os.path.getsize(resolved_str)
-
-        # Try to detect encoding; fall back to utf-8
-        encoding = "utf-8"
-        try:
-            with open(resolved_str, "rb") as fb:
-                raw_head = fb.read(8192)
-            # Check for UTF-16/UTF-32 BOM
-            if raw_head.startswith(b"\xff\xfe\x00\x00"):
-                encoding = "utf-32-le"
-            elif raw_head.startswith(b"\x00\x00\xfe\xff"):
-                encoding = "utf-32-be"
-            elif raw_head.startswith(b"\xff\xfe"):
-                encoding = "utf-16-le"
-            elif raw_head.startswith(b"\xfe\xff"):
-                encoding = "utf-16-be"
-            elif raw_head.startswith(b"\xef\xbb\xbf"):
-                encoding = "utf-8-sig"
-            else:
-                # Check for NUL bytes indicating binary content
-                if b"\x00" in raw_head:
-                    return json.dumps({
-                        "error": (
-                            f"Cannot read binary file '{path}'. "
-                            "Use vision_analyze for images, or terminal to inspect binary files."
-                        ),
-                    })
-        except OSError:
-            pass  # Proceed with utf-8
-
-        try:
-            with open(resolved_str, encoding=encoding, errors="replace") as fh:
-                lines = fh.readlines()
-        except (OSError, UnicodeDecodeError) as exc:
-            return _tool_error(f"Failed to read file: {exc}")
-
-        total_lines = len(lines)
-        start_idx = offset - 1  # Convert 1-indexed to 0-indexed
-        end_idx = min(start_idx + limit, total_lines)
-        selected = lines[start_idx:end_idx]
-
-        # Format with line numbers
-        content = ""
-        for i, line in enumerate(selected, start=offset):
-            content += f"{i}|{line}"
-
-        # ── Character-count guard ─────────────────────────────────────
-        # We're model-agnostic so we can't count tokens; characters are
-        # the best proxy we have.  If the read produced an unreasonable
-        # amount of content, reject it and tell the model to narrow down.
-        # Note: we check the formatted content (with line-number prefixes),
-        # not the raw file size, because that's what actually enters context.
-        content_len = len(content)
-        max_chars = get_max_bytes()
-        if content_len > max_chars:
-            return json.dumps({
-                "error": (
-                    f"Read produced {content_len:,} characters which exceeds "
-                    f"the safety limit ({max_chars:,} chars). "
-                    "Use offset and limit to read a smaller range. "
-                    f"The file has {total_lines} lines total."
-                ),
-                "path": path,
-                "total_lines": total_lines,
-                "file_size": file_size,
-            }, ensure_ascii=False)
-
-        truncated = end_idx < total_lines
-
-        result_dict: dict[str, Any] = {
-            "content": content,
-            "path": path,
-            "total_lines": total_lines,
-            "lines_shown": len(selected),
-            "offset": offset,
-            "limit": limit,
-            "truncated": truncated,
-            "file_size": file_size,
-        }
-
-        # Large-file hint: if the file is big and the caller didn't ask
-        # for a narrow window, nudge toward targeted reads.
-        if (file_size and file_size > _LARGE_FILE_HINT_BYTES
-                and limit > 200
-                and truncated):
-            result_dict["_hint"] = (
-                f"This file is large ({file_size:,} bytes). "
-                "Consider reading only the section you need with offset and limit "
-                "to keep context usage efficient."
-            )
-
-        # ── Track for consecutive-loop detection ──────────────────────
-        read_key = ("read", path, offset, limit)
-        with _read_tracker_lock:
-            task_data["read_history"].add((path, offset, limit))
-            if task_data["last_key"] == read_key:
-                task_data["consecutive"] += 1
-            else:
-                task_data["last_key"] = read_key
-                task_data["consecutive"] = 1
-            count = task_data["consecutive"]
-
-            # Store mtime at read time for two purposes:
-            # 1. Dedup: skip identical re-reads of unchanged files.
-            # 2. Staleness: warn on write/patch if the file changed since
-            #    the agent last read it (external edit, concurrent agent, etc.).
-            try:
-                _mtime_now = os.path.getmtime(resolved_str)
-                task_data["dedup"][dedup_key] = _mtime_now
-                task_data.setdefault("read_timestamps", {})[resolved_str] = _mtime_now
-                _cap_read_tracker_data(task_data)
-            except OSError:
-                pass  # Can't stat — skip tracking for this entry
-
-        if count >= 4:
-            # Hard block: stop returning content to break the loop
-            return json.dumps({
-                "error": (
-                    f"BLOCKED: You have read this exact file region {count} times in a row. "
-                    "The content has NOT changed. You already have this information. "
-                    "STOP re-reading and proceed with your task."
-                ),
-                "path": path,
-                "already_read": count,
-            }, ensure_ascii=False)
-        elif count >= 3:
-            result_dict["_warning"] = (
-                f"You have read this exact file region {count} times consecutively. "
-                "The content has not changed since your last read. Use the information you already have. "
-                "If you are stuck in a loop, stop reading and proceed with writing or responding."
-            )
-
-        return json.dumps(result_dict, ensure_ascii=False)
+        return await _handle_text(path, resolved, arguments, **kwargs)
     except Exception as exc:
         return _tool_error(str(exc))
+
+
+async def _handle_document(
+    path: str,
+    resolved: Path,
+    arguments: dict[str, Any],
+    **kwargs: Any,
+) -> str:
+    """Stub — wired to markitdown + the file-backed cache in Task 5."""
+    raise NotImplementedError("_handle_document is implemented in Task 5")
+
+
+async def _handle_text(
+    path: str,
+    resolved: Path,
+    arguments: dict[str, Any],
+    **kwargs: Any,
+) -> str:
+    """Text reader with BOM detection, dedup tracking and consecutive-loop guards.
+
+    Lifted verbatim from the pre-refactor ``_read_file_handler`` body so
+    behavior on ``.py``/``.md``/``.json``/UTF-16 files is identical.  The
+    only structural change is that line-windowing goes through
+    ``_apply_line_window``.
+    """
+    offset = max(arguments.get("offset", 1), 1)
+    limit = min(arguments.get("limit", 500), get_max_lines())
+    task_id = kwargs.get("task_id", "default")
+    resolved_str = str(resolved)
+
+    # ── Dedup check ───────────────────────────────────────────────
+    # If we already read this exact (path, offset, limit) and the
+    # file hasn't been modified since, return a lightweight stub
+    # instead of re-sending the same content.  Saves context tokens.
+    dedup_key = (resolved_str, offset, limit)
+    task_data = _init_task_data(task_id)
+    with _read_tracker_lock:
+        cached_mtime = task_data.get("dedup", {}).get(dedup_key)
+
+    if cached_mtime is not None:
+        try:
+            current_mtime = os.path.getmtime(resolved_str)
+            if current_mtime == cached_mtime:
+                return json.dumps({
+                    "content": (
+                        "File unchanged since last read. The content from "
+                        "the earlier read_file result in this conversation is "
+                        "still current — refer to that instead of re-reading."
+                    ),
+                    "path": path,
+                    "dedup": True,
+                }, ensure_ascii=False)
+        except OSError:
+            pass  # stat failed — fall through to full read
+
+    # ── Perform the read ──────────────────────────────────────────
+    if not os.path.exists(resolved_str):
+        result_dict: dict[str, Any] = {"error": f"File not found: {path}"}
+        similar = _suggest_similar_files(path)
+        if similar:
+            result_dict["similar_files"] = similar
+            result_dict["hint"] = (
+                "Did you mean one of these files? "
+                + ", ".join(similar)
+            )
+        return json.dumps(result_dict, ensure_ascii=False)
+
+    file_size = os.path.getsize(resolved_str)
+
+    # Try to detect encoding; fall back to utf-8
+    encoding = "utf-8"
+    try:
+        with open(resolved_str, "rb") as fb:
+            raw_head = fb.read(8192)
+        # Check for UTF-16/UTF-32 BOM
+        if raw_head.startswith(b"\xff\xfe\x00\x00"):
+            encoding = "utf-32-le"
+        elif raw_head.startswith(b"\x00\x00\xfe\xff"):
+            encoding = "utf-32-be"
+        elif raw_head.startswith(b"\xff\xfe"):
+            encoding = "utf-16-le"
+        elif raw_head.startswith(b"\xfe\xff"):
+            encoding = "utf-16-be"
+        elif raw_head.startswith(b"\xef\xbb\xbf"):
+            encoding = "utf-8-sig"
+        else:
+            # Check for NUL bytes indicating binary content
+            if b"\x00" in raw_head:
+                return json.dumps({
+                    "error": (
+                        f"Cannot read binary file '{path}'. "
+                        "Use vision_analyze for images, or terminal to inspect binary files."
+                    ),
+                })
+    except OSError:
+        pass  # Proceed with utf-8
+
+    try:
+        with open(resolved_str, encoding=encoding, errors="replace") as fh:
+            lines = fh.readlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        return _tool_error(f"Failed to read file: {exc}")
+
+    selected, total_lines, _start_idx, _end_idx, truncated = _apply_line_window(
+        lines, offset, limit,
+    )
+
+    # Format with line numbers
+    content = ""
+    for i, line in enumerate(selected, start=offset):
+        content += f"{i}|{line}"
+
+    # ── Character-count guard ─────────────────────────────────────
+    # We're model-agnostic so we can't count tokens; characters are
+    # the best proxy we have.  If the read produced an unreasonable
+    # amount of content, reject it and tell the model to narrow down.
+    # Note: we check the formatted content (with line-number prefixes),
+    # not the raw file size, because that's what actually enters context.
+    content_len = len(content)
+    max_chars = get_max_bytes()
+    if content_len > max_chars:
+        return json.dumps({
+            "error": (
+                f"Read produced {content_len:,} characters which exceeds "
+                f"the safety limit ({max_chars:,} chars). "
+                "Use offset and limit to read a smaller range. "
+                f"The file has {total_lines} lines total."
+            ),
+            "path": path,
+            "total_lines": total_lines,
+            "file_size": file_size,
+        }, ensure_ascii=False)
+
+    result_dict = {
+        "content": content,
+        "path": path,
+        "total_lines": total_lines,
+        "lines_shown": len(selected),
+        "offset": offset,
+        "limit": limit,
+        "truncated": truncated,
+        "file_size": file_size,
+    }
+
+    # Large-file hint: if the file is big and the caller didn't ask
+    # for a narrow window, nudge toward targeted reads.
+    if (file_size and file_size > _LARGE_FILE_HINT_BYTES
+            and limit > 200
+            and truncated):
+        result_dict["_hint"] = (
+            f"This file is large ({file_size:,} bytes). "
+            "Consider reading only the section you need with offset and limit "
+            "to keep context usage efficient."
+        )
+
+    # ── Track for consecutive-loop detection ──────────────────────
+    read_key = ("read", path, offset, limit)
+    with _read_tracker_lock:
+        task_data["read_history"].add((path, offset, limit))
+        if task_data["last_key"] == read_key:
+            task_data["consecutive"] += 1
+        else:
+            task_data["last_key"] = read_key
+            task_data["consecutive"] = 1
+        count = task_data["consecutive"]
+
+        # Store mtime at read time for two purposes:
+        # 1. Dedup: skip identical re-reads of unchanged files.
+        # 2. Staleness: warn on write/patch if the file changed since
+        #    the agent last read it (external edit, concurrent agent, etc.).
+        try:
+            _mtime_now = os.path.getmtime(resolved_str)
+            task_data["dedup"][dedup_key] = _mtime_now
+            task_data.setdefault("read_timestamps", {})[resolved_str] = _mtime_now
+            _cap_read_tracker_data(task_data)
+        except OSError:
+            pass  # Can't stat — skip tracking for this entry
+
+    if count >= 4:
+        # Hard block: stop returning content to break the loop
+        return json.dumps({
+            "error": (
+                f"BLOCKED: You have read this exact file region {count} times in a row. "
+                "The content has NOT changed. You already have this information. "
+                "STOP re-reading and proceed with your task."
+            ),
+            "path": path,
+            "already_read": count,
+        }, ensure_ascii=False)
+    elif count >= 3:
+        result_dict["_warning"] = (
+            f"You have read this exact file region {count} times consecutively. "
+            "The content has not changed since your last read. Use the information you already have. "
+            "If you are stuck in a loop, stop reading and proceed with writing or responding."
+        )
+
+    return json.dumps(result_dict, ensure_ascii=False)
 
 
 async def _write_file_handler(
