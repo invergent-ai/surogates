@@ -41,6 +41,7 @@ import { TurnFeedback } from "./turn-feedback";
 import { useSmoothStream } from "./use-smooth-stream";
 import { ArtifactBlock } from "./artifacts/artifact-block";
 import { ErrorMessage } from "./error-message";
+import { TurnSummaryCard } from "./turn-summary-card";
 import { cn } from "../../lib/utils";
 import { AlertTriangle, ChevronDown, ChevronRight, MessageSquareIcon } from "lucide-react";
 import { useState } from "react";
@@ -834,9 +835,16 @@ export function IterationGroup({
   );
 }
 
-// ── Assistant message group (single Timeline) ────────────────────────
+// ── Simple-mode AssistantGroup ───────────────────────────────────────
+//
+// Renders an assistant turn as: per-iteration IterationGroup rows (one
+// per assistant message), the final-answer text, a TurnSummaryCard
+// when one is attached, and TurnFeedback on the final answer. System
+// messages threaded into the group (skill_invoked / artifact_created)
+// keep their existing markers so we don't lose their visibility in
+// Simple mode.
 
-function AssistantGroup({
+function SimpleAssistantGroup({
   messages,
   lastGlobalIndex,
   totalMessages,
@@ -855,6 +863,130 @@ function AssistantGroup({
   onFileSelect?: (path: string) => void;
   onRetry?: () => Promise<void>;
 }) {
+  const assistantMessages = messages.filter((m) => m.role === "assistant");
+  const tail = assistantMessages[assistantMessages.length - 1];
+
+  // The final assistant text is the tail message's content when that
+  // message has no tool calls (the harness emits tools and text in
+  // separate llm.response events, so the closing iteration is
+  // text-only). Streaming tail with no content yet shows the running
+  // shimmer instead.
+  const tailHasTools = !!(tail?.toolCalls && tail.toolCalls.length > 0);
+  const finalText = tail && !tailHasTools && tail.content
+    ? tail.content
+    : "";
+
+  // A tail iteration that's mid-stream and has no IterationSummary yet
+  // surfaces via the IterationGroup's own placeholders. But if the
+  // group's tail is the user message (no assistant message at all yet),
+  // we still need a Working-on-it shimmer — same defensive layer the
+  // Expert path appends.
+  const isTailGroup = lastGlobalIndex === totalMessages - 1;
+  const showThinkingShim =
+    isTailGroup
+    && isRunning
+    && !tail
+    && messages.some((m) => m.role !== "assistant");
+
+  const showErrorInfo =
+    !!tail && tail.status === "error" && !!tail.errorInfo;
+
+  return (
+    <Message from="assistant">
+      <MessageContent>
+        <div className="space-y-2">
+          {messages.map((message) => {
+            if (message.role === "system") {
+              // Reuse the existing OrphanSystemMarker — it renders the
+              // skill_invoked dot, artifact block, and error messages
+              // the same way the orphan path does.
+              return (
+                <OrphanSystemMarker
+                  key={message.id}
+                  message={message}
+                  sessionId={sessionId}
+                  onRetry={undefined}
+                />
+              );
+            }
+            return (
+              <IterationGroup
+                key={message.id}
+                message={message}
+                sessionId={sessionId}
+                artifactFallbacks={artifactFallbacks}
+                onFileSelect={onFileSelect}
+              />
+            );
+          })}
+          {showThinkingShim && (
+            <Shimmer duration={3} spread={3} className="text-sm">
+              Working on it...
+            </Shimmer>
+          )}
+        </div>
+        {finalText && (
+          <div className="mt-3">
+            <MessageResponse>{finalText}</MessageResponse>
+            {tail?.status === "complete" && <TurnFeedback msg={tail} />}
+          </div>
+        )}
+        {tail?.turnSummary && (
+          <TurnSummaryCard
+            summary={tail.turnSummary}
+            sessionId={sessionId}
+            messages={messages}
+            onFileSelect={onFileSelect}
+          />
+        )}
+        {showErrorInfo && (
+          <div className="mt-3">
+            <ErrorMessage errorInfo={tail!.errorInfo!} onRetry={onRetry} />
+          </div>
+        )}
+      </MessageContent>
+    </Message>
+  );
+}
+
+// ── Assistant message group (single Timeline) ────────────────────────
+
+function AssistantGroup({
+  messages,
+  lastGlobalIndex,
+  totalMessages,
+  isRunning,
+  sessionId,
+  artifactFallbacks,
+  onFileSelect,
+  onRetry,
+  viewMode = "simple",
+}: {
+  messages: ChatMessageType[];
+  lastGlobalIndex: number;
+  totalMessages: number;
+  isRunning: boolean;
+  sessionId: string | null;
+  artifactFallbacks: Record<string, string>;
+  onFileSelect?: (path: string) => void;
+  onRetry?: () => Promise<void>;
+  viewMode?: "simple" | "expert";
+}) {
+  if (viewMode === "simple") {
+    return (
+      <SimpleAssistantGroup
+        messages={messages}
+        lastGlobalIndex={lastGlobalIndex}
+        totalMessages={totalMessages}
+        isRunning={isRunning}
+        sessionId={sessionId}
+        artifactFallbacks={artifactFallbacks}
+        onFileSelect={onFileSelect}
+        onRetry={onRetry}
+      />
+    );
+  }
+
   let entries: TimelineEntry[] = [];
   for (let i = 0; i < messages.length; i++) {
     const isLast = i === messages.length - 1
@@ -1105,6 +1237,7 @@ export function ChatThread({
                     artifactFallbacks={artifactFallbacks}
                     onFileSelect={onFileSelect}
                     onRetry={groupRetry}
+                    viewMode={viewMode}
                   />
                 );
               })}

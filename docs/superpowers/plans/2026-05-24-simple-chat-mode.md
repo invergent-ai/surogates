@@ -33,7 +33,7 @@ Updated before each commit during inline execution.
 - [x] B6: IterationGroup component (reuses existing timeline pieces)
 - [x] B7: TurnSummaryCard (with ArtifactBlock resolution)
 - [x] B8: Simple/Expert toggle in composer
-- [ ] B9: Render IterationGroup + TurnSummaryCard in Simple mode
+- [x] B9: Render IterationGroup + TurnSummaryCard in Simple mode
 - [ ] B10: opt existing tests into Expert mode
 - [ ] C1: end-to-end manual verification
 
