@@ -28,6 +28,16 @@ class EventType(str, Enum):
     # reasoning" from "stream is dead".
     LLM_HEARTBEAT = "llm.heartbeat"
 
+    # Per-LLM-iteration summary, one-line imperative
+    # ("Rework hero paragraph"). Emitted after each iteration completes;
+    # rendered by Simple chat mode in agent-chat-react.
+    ITERATION_SUMMARY = "iteration.summary"
+
+    # Per-assistant-turn recap + curated artifact list. Emitted after the
+    # final iteration of a turn completes; rendered as the
+    # TurnSummaryCard at the bottom of each turn in Simple mode.
+    TURN_SUMMARY = "turn.summary"
+
     # Tool execution
     TOOL_CALL = "tool.call"
     TOOL_RESULT = "tool.result"
