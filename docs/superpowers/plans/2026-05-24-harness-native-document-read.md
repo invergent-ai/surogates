@@ -20,8 +20,8 @@ Updated before every commit.
 - [x] Task 2 — Populate `_DOCUMENT_EXTENSIONS`; shrink `BINARY_EXTENSIONS`
 - [x] Task 3 — Add parser deps + `DocumentParseError` + `_parse_document_to_markdown`
 - [x] Task 4 — File-backed `_document_cache` under `/tmp`
-- [ ] **Task 5 (in progress)** — Wire `_handle_document` to cache + parser
-- [ ] Task 6 — Update the `read_file` tool description
+- [x] Task 5 — Wire `_handle_document` to cache + parser
+- [ ] **Task 6 (in progress)** — Update the `read_file` tool description
 - [ ] Task 7 — Worker-side image pre-dispatch branch
 - [ ] Task 8 — Integration test for documents
 - [ ] Task 9 — Verify dependency lock and parser availability

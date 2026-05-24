@@ -963,10 +963,80 @@ async def _handle_document(
     path: str,
     resolved: Path,
     arguments: dict[str, Any],
-    **kwargs: Any,
+    **kwargs: Any,  # noqa: ARG001 — kwargs accepted for signature parity with _handle_text
 ) -> str:
-    """Stub — wired to markitdown + the file-backed cache in Task 5."""
-    raise NotImplementedError("_handle_document is implemented in Task 5")
+    """Parse a PDF/docx/xlsx/pptx via markitdown and return markdown.
+
+    Pagination matches ``_handle_text``: ``offset`` is 1-indexed,
+    ``limit`` caps the line count, and lines are emitted with
+    ``"{lineno}|{content}"`` prefixes.
+    """
+    from surogates.tools.utils.document_cache import default_cache
+
+    offset = max(arguments.get("offset", 1), 1)
+    limit = min(arguments.get("limit", 500), get_max_lines())
+
+    if not resolved.exists():
+        return json.dumps(
+            {"error": f"File not found: {path}"},
+            ensure_ascii=False,
+        )
+
+    try:
+        markdown = await default_cache().get_or_parse(
+            resolved, _parse_document_to_markdown,
+        )
+    except DocumentParseError as exc:
+        ext = resolved.suffix.lower().lstrip(".")
+        return _tool_error(
+            f"Could not parse {path} as a {ext} document: {exc.reason}. "
+            "You can retry with a subprocess fallback: try running "
+            "`pdftotext`, `pandoc`, or a Python script using "
+            "pypdf/python-docx/openpyxl (all pre-installed)."
+        )
+
+    if not markdown.endswith("\n"):
+        markdown += "\n"
+    lines = markdown.splitlines(keepends=True)
+
+    selected, total_lines, _start, _end, truncated = _apply_line_window(
+        lines, offset, limit,
+    )
+
+    content = ""
+    for i, line in enumerate(selected, start=offset):
+        content += f"{i}|{line}"
+
+    content_len = len(content)
+    max_chars = get_max_bytes()
+    if content_len > max_chars:
+        return json.dumps({
+            "error": (
+                f"Read produced {content_len:,} characters which exceeds "
+                f"the safety limit ({max_chars:,} chars). "
+                "Use offset and limit to read a smaller range. "
+                f"The document has {total_lines} lines total."
+            ),
+            "path": path,
+            "total_lines": total_lines,
+        }, ensure_ascii=False)
+
+    logger.info(
+        "event=document.parse path=%s ext=%s bytes_md=%d total_lines=%d "
+        "lines_shown=%d truncated=%s",
+        path, resolved.suffix.lower(), len(markdown), total_lines,
+        len(selected), truncated,
+    )
+
+    return json.dumps({
+        "content": content,
+        "path": path,
+        "total_lines": total_lines,
+        "lines_shown": len(selected),
+        "offset": offset,
+        "limit": limit,
+        "truncated": truncated,
+    }, ensure_ascii=False)
 
 
 async def _handle_text(
