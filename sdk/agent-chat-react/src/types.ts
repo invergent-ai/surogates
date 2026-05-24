@@ -386,7 +386,9 @@ export type AgentChatEventType =
   | "browser.destroyed"
   | "browser.control_granted"
   | "browser.control_returned"
-  | "clarify.response";
+  | "clarify.response"
+  | "iteration.summary"
+  | "turn.summary";
 
 export interface AgentChatRuntimeEvent {
   type: AgentChatEventType;

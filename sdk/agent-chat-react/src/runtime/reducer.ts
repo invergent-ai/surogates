@@ -216,6 +216,12 @@ export function applyAgentChatEvent(
 
     case "session.start":
       return nextState;
+
+    case "iteration.summary":
+    case "turn.summary":
+      // Real handlers land in B4; for now keep the switch exhaustive so
+      // TypeScript stays happy without us silently dropping the events.
+      return nextState;
   }
 }
 
