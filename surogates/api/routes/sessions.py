@@ -729,12 +729,75 @@ async def send_message(
                         " limit per message"
                     ),
                 )
-            resolved.append({
+
+            # ── Inline-attachment branch ─────────────────────────────
+            # For files small enough and of a supported type, parse or
+            # decode the content server-side and persist it on the event
+            # so the LLM sees it directly without calling read_file.
+            attachment.size = real_size  # populate for the helper
+            inlined_text: str | None = None
+            inlined_kind: str | None = None
+            skip_reason: str | None = None
+            inline_kind = _inline_extension_kind(attachment.filename)
+            if (
+                real_size <= _INLINE_MAX_BYTES
+                and inline_kind is not None
+            ):
+                try:
+                    raw_bytes = await storage.read(bucket, storage_key)
+                except KeyError:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=(
+                            "Attachment path not found in workspace: "
+                            f"{attachment.path}"
+                        ),
+                    )
+                document_path: Path | None = None
+                if inline_kind == "document":
+                    local_candidate = (
+                        Path(storage.resolve_bucket_path(bucket))
+                        / storage_key
+                    )
+                    if local_candidate.is_file():
+                        document_path = local_candidate
+                    else:
+                        suffix = (
+                            os.path.splitext(attachment.filename)[1].lower()
+                        )
+                        modified = str(stat.get("modified") or "")
+                        document_path = _materialize_for_cache(
+                            raw_bytes=raw_bytes,
+                            bucket=bucket,
+                            storage_key=storage_key,
+                            size=real_size,
+                            modified=modified,
+                            suffix=suffix,
+                        )
+                inlined_text, inlined_kind, skip_reason = (
+                    await _try_inline_attachment(
+                        attachment, raw_bytes, document_path,
+                    )
+                )
+
+            entry: dict[str, Any] = {
                 "path": attachment.path,
                 "filename": attachment.filename,
                 "mime_type": attachment.mime_type,
                 "size": real_size,
-            })
+            }
+            if inlined_text is not None:
+                entry["inlined_text"] = inlined_text
+                entry["inlined_render_kind"] = inlined_kind
+                logger.info(
+                    "event=attachment.inline result=ok kind=%s "
+                    "filename=%s bytes=%d rendered_chars=%d",
+                    inlined_kind, attachment.filename, real_size,
+                    len(inlined_text),
+                )
+            elif skip_reason is not None:
+                entry["inline_skip_reason"] = skip_reason
+            resolved.append(entry)
         attachments_payload = resolved
 
     # Emit the user message event.
