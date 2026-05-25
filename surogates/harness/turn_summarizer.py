@@ -258,5 +258,16 @@ class TurnSummarizer:
                 continue
             if not label or not ref:
                 continue
+            # The summary LLM occasionally misclassifies workspace files
+            # as URLs (e.g. an uploaded PDF whose label sounds like a
+            # paper title). The frontend renders kind=url via <a href>,
+            # so a relative path resolves against the current page and
+            # 404s. Coerce based on whether ref looks like an absolute
+            # URL, regardless of what the model said.
+            is_absolute_url = ref.startswith(("http://", "https://"))
+            if kind == "url" and not is_absolute_url:
+                kind = "file"
+            elif kind == "file" and is_absolute_url:
+                kind = "url"
             out.append(TurnArtifact(kind=kind, label=label, ref=ref))
         return out

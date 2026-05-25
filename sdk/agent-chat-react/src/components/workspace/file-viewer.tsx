@@ -43,6 +43,9 @@ interface FileViewerProps {
   downloadUrl: string | null;
   onDelete: (() => void) | null;
   onClose: () => void;
+  /** Hide the built-in filename/download/close header. Use when the
+   *  parent (e.g. a Dialog) already renders its own title bar. */
+  hideHeader?: boolean;
 }
 
 export function FileViewer({
@@ -52,6 +55,7 @@ export function FileViewer({
   downloadUrl,
   onDelete,
   onClose,
+  hideHeader = false,
 }: FileViewerProps) {
   const visible = loading || file !== null || error !== null;
   if (!visible) return null;
@@ -67,98 +71,103 @@ export function FileViewer({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col border-t border-line">
-      <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
-        <HeaderIcon className="size-3.5 shrink-0 text-muted-foreground" />
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-xs font-medium">{fileName}</div>
-          <div className="truncate text-[10px] text-muted-foreground">
-            {file?.path ?? "Loading..."}
-            {file && (
-              <span className="ml-1.5">
-                {formatFileSize(file.size)}
-                {file.truncated && " (truncated)"}
-              </span>
-            )}
+      {!hideHeader && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
+          <HeaderIcon className="size-3.5 shrink-0 text-muted-foreground" />
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-xs font-medium">{fileName}</div>
+            <div className="truncate text-[10px] text-muted-foreground">
+              {file?.path ?? "Loading..."}
+              {file && (
+                <span className="ml-1.5">
+                  {formatFileSize(file.size)}
+                  {file.truncated && " (truncated)"}
+                </span>
+              )}
+            </div>
           </div>
-        </div>
-        {downloadUrl && (
-          <a
-            href={downloadUrl}
-            download={fileName}
-            className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            aria-label={`Download ${fileName}`}
-            title="Download"
-          >
-            <DownloadIcon className="size-3.5" />
-          </a>
-        )}
-        {onDelete && (
+          {downloadUrl && (
+            <a
+              href={downloadUrl}
+              download={fileName}
+              className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              aria-label={`Download ${fileName}`}
+              title="Download"
+            >
+              <DownloadIcon className="size-3.5" />
+            </a>
+          )}
+          {onDelete && (
+            <button
+              type="button"
+              onClick={onDelete}
+              className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+              aria-label={`Delete ${fileName}`}
+              title="Delete"
+            >
+              <TrashIcon className="size-3.5" />
+            </button>
+          )}
           <button
             type="button"
-            onClick={onDelete}
-            className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
-            aria-label={`Delete ${fileName}`}
-            title="Delete"
+            onClick={onClose}
+            className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            aria-label="Close file"
           >
-            <TrashIcon className="size-3.5" />
+            <XIcon className="size-3.5" />
           </button>
-        )}
-        <button
-          type="button"
-          onClick={onClose}
-          className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          aria-label="Close file"
-        >
-          <XIcon className="size-3.5" />
-        </button>
-      </div>
+        </div>
+      )}
 
-      <ScrollArea className="min-h-0 flex-1">
-        {loading && (
-          <div className="space-y-1.5 p-3">
-            {Array.from({ length: 10 }).map((_, index) => (
-              <Skeleton
-                key={index}
-                className="h-3.5 rounded"
-                style={{
-                  width: `${SKELETON_WIDTHS[index % SKELETON_WIDTHS.length]}%`,
-                }}
+      {file && isPdf && file.encoding === "base64" ? (
+        // PDF has its own scrollable container — bypass ScrollArea so
+        // it can grow with the parent's flex height (Radix Viewport's
+        // internal table wrapper sizes to content and breaks h-full).
+        <PdfPreview file={file} fileName={fileName} />
+      ) : (
+        <ScrollArea className="min-h-0 flex-1">
+          {loading && (
+            <div className="space-y-1.5 p-3">
+              {Array.from({ length: 10 }).map((_, index) => (
+                <Skeleton
+                  key={index}
+                  className="h-3.5 rounded"
+                  style={{
+                    width: `${SKELETON_WIDTHS[index % SKELETON_WIDTHS.length]}%`,
+                  }}
+                />
+              ))}
+            </div>
+          )}
+
+          {error && (
+            <div className="flex items-start gap-2 p-3 text-xs text-destructive">
+              <AlertCircleIcon className="mt-0.5 size-3.5 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          {file && isPdf && file.encoding !== "base64" && (
+            <FileViewerError message="PDF preview requires base64 file content." />
+          )}
+
+          {file && isImage && (
+            <div className="flex items-center justify-center p-4">
+              <img
+                src={`data:${file.mime_type ?? "image/png"};base64,${file.content}`}
+                alt={fileName}
+                className="max-h-[60vh] max-w-full rounded object-contain"
               />
-            ))}
-          </div>
-        )}
+            </div>
+          )}
 
-        {error && (
-          <div className="flex items-start gap-2 p-3 text-xs text-destructive">
-            <AlertCircleIcon className="mt-0.5 size-3.5 shrink-0" />
-            <span>{error}</span>
-          </div>
-        )}
-
-        {file && isPdf && file.encoding !== "base64" && (
-          <FileViewerError message="PDF preview requires base64 file content." />
-        )}
-
-        {file && isPdf && file.encoding === "base64" && (
-          <PdfPreview file={file} fileName={fileName} />
-        )}
-
-        {file && isImage && (
-          <div className="flex items-center justify-center p-4">
-            <img
-              src={`data:${file.mime_type ?? "image/png"};base64,${file.content}`}
-              alt={fileName}
-              className="max-h-[60vh] max-w-full rounded object-contain"
-            />
-          </div>
-        )}
-
-        {file && !isImage && !isPdf && (
-          <pre className="wrap-break-word whitespace-pre-wrap p-3 text-[11px] leading-relaxed text-foreground">
-            <code data-language={lang}>{file.content}</code>
-          </pre>
-        )}
-      </ScrollArea>
+          {file && !isImage && !isPdf && (
+            <pre className="wrap-break-word whitespace-pre-wrap p-3 text-[11px] leading-relaxed text-foreground">
+              <code data-language={lang}>{file.content}</code>
+            </pre>
+          )}
+        </ScrollArea>
+      )}
     </div>
   );
 }
@@ -426,7 +435,7 @@ function PdfPreview({
         </div>
       )}
       {!error && (
-        <div className="relative h-[70vh] min-h-[420px] flex-1 bg-muted/20">
+        <div className="relative min-h-105 flex-1 bg-muted/20">
           <div
             ref={containerRef}
             aria-label={`PDF viewer for ${fileName}`}

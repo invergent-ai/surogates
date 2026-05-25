@@ -247,11 +247,20 @@ function WorkspaceFilePreviewDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[80vh] w-full max-w-5xl flex-col gap-0 overflow-hidden p-0">
-        <DialogHeader className="border-b border-line px-4 py-3">
-          <DialogTitle className="truncate text-sm">
+      <DialogContent className="flex h-[85vh] w-[95vw] max-w-350! flex-col gap-0 overflow-hidden p-0">
+        <DialogHeader className="flex flex-row items-center gap-2 border-b border-line px-4 py-3">
+          <DialogTitle className="min-w-0 flex-1 truncate text-sm">
             {_basename(path)}
           </DialogTitle>
+          <a
+            href={downloadUrl}
+            download={_basename(path)}
+            className="mr-8 inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+            aria-label={`Download ${_basename(path)}`}
+          >
+            <DownloadIcon className="size-3.5" aria-hidden />
+            Download
+          </a>
         </DialogHeader>
         <div className="flex min-h-0 flex-1 flex-col">
           <FileViewer
@@ -261,6 +270,7 @@ function WorkspaceFilePreviewDialog({
             downloadUrl={downloadUrl}
             onDelete={null}
             onClose={() => onOpenChange(false)}
+            hideHeader
           />
         </div>
       </DialogContent>

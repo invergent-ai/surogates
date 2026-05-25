@@ -69,7 +69,10 @@ export function TurnSummaryCard({
   // url/command refs stay in the bullet list. Mixed turns get both
   // sections in source order.
   return (
-    <div className="mt-3 rounded border border-border bg-muted/20 px-3 py-2 text-sm">
+    <div className="mt-3 rounded border border-border bg-muted/50 px-3 py-2 text-sm">
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide">
+        Summary
+      </div>
       {hasRecap && (
         <p className="mb-2 whitespace-pre-wrap text-foreground">
           {summary.recap}
