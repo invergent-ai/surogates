@@ -19,6 +19,11 @@ from surogates.audit import (
 )
 from surogates.db.models import ChannelIdentity, User
 from surogates.tenant.auth.database import DatabaseAuthProvider
+from surogates.tenant.auth.firebase import (
+    FirebaseTokenError,
+    firebase_auth_provider_name,
+    verify_firebase_id_token,
+)
 from surogates.tenant.auth.jwt import (
     InvalidTokenError,
     create_access_token,
@@ -60,9 +65,229 @@ class AccessTokenResponse(BaseModel):
     token_type: str = "bearer"
 
 
+class FirebaseWebConfig(BaseModel):
+    """Public Firebase web config returned to the agent web app."""
+
+    api_key: str
+    auth_domain: str
+    project_id: str
+    app_id: str | None = None
+    messaging_sender_id: str | None = None
+    measurement_id: str | None = None
+    enabled_providers: list[str]
+
+
+class AuthConfigResponse(BaseModel):
+    """Runtime auth shape exposed by ``GET /v1/auth/config``."""
+
+    self_registration_enabled: bool
+    firebase: FirebaseWebConfig | None = None
+
+
+class FirebaseExchangeRequest(BaseModel):
+    id_token: str
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+
+@router.get("/auth/config", response_model=AuthConfigResponse)
+async def auth_config(request: Request) -> AuthConfigResponse:
+    """Public runtime auth config consumed by the agent web app.
+
+    Returns the Firebase web config only when (a) self-registration is
+    enabled for this agent AND (b) the project shipped a usable Firebase
+    config. Otherwise advertises self-registration as disabled and omits
+    Firebase entirely so the web app falls back to local login.
+    """
+    auth = request.app.state.settings.auth
+    if not (auth.self_registration_enabled and auth.firebase_configured):
+        return AuthConfigResponse(self_registration_enabled=False, firebase=None)
+    return AuthConfigResponse(
+        self_registration_enabled=True,
+        firebase=FirebaseWebConfig(
+            api_key=auth.firebase_api_key,
+            auth_domain=auth.firebase_auth_domain,
+            project_id=auth.firebase_project_id,
+            app_id=auth.firebase_app_id or None,
+            messaging_sender_id=auth.firebase_messaging_sender_id or None,
+            measurement_id=auth.firebase_measurement_id or None,
+            enabled_providers=list(auth.providers),
+        ),
+    )
+
+
+def _email_from_firebase_claims(claims: dict) -> tuple[str | None, bool]:
+    """Return ``(email, verified)`` extracted from Firebase token claims."""
+    email = claims.get("email")
+    if not isinstance(email, str) or not email.strip():
+        return None, False
+    return email.strip().lower(), claims.get("email_verified") is True
+
+
+def _display_name_from_firebase_claims(
+    claims: dict, email: str | None,
+) -> str:
+    name = claims.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()[:256]
+    if email:
+        return email.split("@", 1)[0]
+    return "Agent User"
+
+
+@router.post("/auth/firebase/exchange", response_model=TokenResponse)
+async def firebase_exchange(
+    body: FirebaseExchangeRequest, request: Request,
+) -> TokenResponse:
+    """Exchange a verified Firebase ID token for Surogates tokens.
+
+    Behaviour depends on the runtime auth settings:
+
+    * If Firebase is not configured at all, returns 404 — the endpoint
+      simply isn't usable.
+    * If self-registration is enabled, an unknown ``(auth_provider,
+      external_id)`` is auto-provisioned as a new user. A matching email
+      on an existing row is upgraded to the namespaced Firebase
+      ``auth_provider`` only when the Firebase email is verified.
+    * If self-registration is disabled, the request succeeds only when a
+      pre-linked Firebase user already exists. No new rows are created;
+      no manual ``database`` user is silently linked.
+    """
+    settings = request.app.state.settings
+    auth = settings.auth
+    audit_store: AuditStore | None = getattr(
+        request.app.state, "audit_store", None,
+    )
+    source_ip = client_ip(request)
+
+    if not auth.firebase_configured:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Firebase auth is not configured.",
+        )
+    if not settings.org_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="org_id is required (server has no default org configured).",
+        )
+    org_id = UUID(settings.org_id)
+
+    try:
+        claims = await verify_firebase_id_token(
+            body.id_token, auth.firebase_project_id,
+        )
+    except FirebaseTokenError as exc:
+        if audit_store is not None:
+            await audit_store.emit(
+                org_id=org_id,
+                type=AuditType.AUTH_FAILED,
+                data=auth_failed_event(
+                    "firebase", str(exc), source_ip=source_ip,
+                ),
+            )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc),
+        ) from exc
+
+    subject = claims.get("sub")
+    if not isinstance(subject, str) or not subject:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Firebase token subject is missing.",
+        )
+    email, email_verified = _email_from_firebase_claims(claims)
+    provider = firebase_auth_provider_name(auth.firebase_project_id)
+
+    session_factory = request.app.state.session_factory
+    async with session_factory() as session:
+        user = await session.scalar(
+            select(User).where(
+                User.org_id == org_id,
+                User.auth_provider == provider,
+                User.external_id == subject,
+            )
+        )
+        if (
+            user is None
+            and auth.self_registration_enabled
+            and email
+            and email_verified
+        ):
+            # Email-based link upgrade: only happens during self-
+            # registration, never as a silent backdoor when registration
+            # is disabled. We only upgrade rows that have no external_id
+            # yet — never a manual ``database`` row with a password.
+            candidate = await session.scalar(
+                select(User).where(
+                    User.org_id == org_id, User.email == email,
+                )
+            )
+            if (
+                candidate is not None
+                and candidate.external_id is None
+                and candidate.auth_provider != "database"
+            ):
+                candidate.auth_provider = provider
+                candidate.external_id = subject
+                await session.commit()
+                await session.refresh(candidate)
+                user = candidate
+
+        if user is None:
+            if not auth.self_registration_enabled:
+                if audit_store is not None:
+                    await audit_store.emit(
+                        org_id=org_id,
+                        type=AuditType.AUTH_FAILED,
+                        data=auth_failed_event(
+                            "firebase",
+                            "self-registration disabled",
+                            source_ip=source_ip,
+                        ),
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        "Self-registration is not enabled for this agent."
+                    ),
+                )
+            if email is None or not email_verified:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="A verified Firebase email is required.",
+                )
+            user = User(
+                id=uuid.uuid4(),
+                org_id=org_id,
+                email=email,
+                display_name=_display_name_from_firebase_claims(claims, email),
+                auth_provider=provider,
+                external_id=subject,
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+
+    permissions: set[str] = {"sessions:read", "sessions:write", "tools:read"}
+    access_token = create_access_token(
+        org_id=org_id, user_id=user.id, permissions=permissions,
+    )
+    refresh_token = create_refresh_token(
+        org_id=org_id, user_id=user.id,
+    )
+    if audit_store is not None:
+        await audit_store.emit(
+            org_id=org_id,
+            user_id=user.id,
+            type=AuditType.AUTH_LOGIN,
+            data=auth_login_event("firebase", source_ip=source_ip),
+        )
+    return TokenResponse(
+        access_token=access_token, refresh_token=refresh_token,
+    )
 
 
 @router.post("/auth/login", response_model=TokenResponse)

@@ -105,6 +105,14 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_lock
     ON scheduled_sessions (locked_until);
 
 
+-- BYO Firebase self-registration: namespaced ``auth_provider`` plus
+-- partial unique index guarantees that two BYO Firebase projects can
+-- mint the same UID without colliding inside the users table.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_org_auth_external
+    ON users (org_id, auth_provider, external_id)
+    WHERE external_id IS NOT NULL;
+
+
 -- ----------------------------------------------------------------------------
 -- Tenant denormalization trigger
 --
