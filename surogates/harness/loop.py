@@ -276,6 +276,46 @@ def _attachments_note(events: list[Any]) -> str | None:
     return "\n".join(lines)
 
 
+def _render_inlined_attachments(
+    content: str,
+    attachments: list[Any] | None,
+) -> str:
+    """Append one fenced block per inlined attachment to ``content``.
+
+    ``attachments`` is the persisted ``data["attachments"]`` payload
+    from a ``user.message`` event.  Each item with a non-empty
+    ``inlined_text`` field becomes a fenced block at the end of the
+    returned string.  Items without ``inlined_text`` (path-only,
+    inline-skipped, or unsupported) are ignored here -- the system
+    ``_attachments_note`` surface covers them.
+    """
+    if not attachments:
+        return content
+    blocks: list[str] = []
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        inlined = item.get("inlined_text")
+        if not inlined:
+            continue
+        kind = item.get("inlined_render_kind") or "text"
+        path = item.get("path") or ""
+        filename = item.get("filename") or path
+        header = f"**Attachment: {filename}**"
+        if kind == "markdown":
+            subtitle = (
+                "*(parsed via markitdown/pymupdf4llm — to re-read or "
+                f"paginate, use `read_file(\"{path}\")`)*"
+            )
+            block = f"---\n{header}\n{subtitle}\n\n{inlined}\n---"
+        else:
+            block = f"---\n{header}\n\n{inlined}\n---"
+        blocks.append(block)
+    if not blocks:
+        return content
+    return content + "\n\n" + "\n\n".join(blocks)
+
+
 def _format_loop_list(rows: list[Any]) -> str:
     if not rows:
         return "No active loops."

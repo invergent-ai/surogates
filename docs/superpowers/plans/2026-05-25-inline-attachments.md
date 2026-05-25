@@ -21,8 +21,8 @@ Updated before every commit.
 - [x] Task 3 — `_materialize_for_cache` helper (S3 → deterministic temp source path)
 - [x] Task 4 — `_try_inline_attachment` helper
 - [x] Task 5 — Wire the helpers into the send-message route
-- [ ] **Task 6 (in progress)** — `_render_inlined_attachments` renderer
-- [ ] Task 7 — Call the renderer in `_rebuild_messages`
+- [x] Task 6 — `_render_inlined_attachments` renderer
+- [ ] **Task 7 (in progress)** — Call the renderer in `_rebuild_messages`
 - [ ] Task 8 — Revise `_attachments_note` (skip inlined, annotate skip-reason)
 - [ ] Task 9 — Integration test for end-to-end round trip
 - [ ] Task 10 — History-replay regression test
