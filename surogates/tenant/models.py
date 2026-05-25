@@ -55,6 +55,13 @@ class UserCreate(BaseModel):
     display_name: str = Field(..., min_length=1, max_length=256)
     password: str | None = None
     auth_provider: str = "database"
+    # Opt-in override for the Firebase-collision guard. When False
+    # (default), admin attempts to create a user whose email is already
+    # linked to a BYO Firebase user are rejected with 409. Setting
+    # ``force=True`` deliberately creates a duplicate row so an admin
+    # can re-issue local credentials to a self-registered user (e.g.
+    # after the project's Firebase config is removed).
+    force: bool = False
 
 
 class UserResponse(BaseModel):
