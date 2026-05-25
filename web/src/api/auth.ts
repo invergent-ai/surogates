@@ -145,6 +145,63 @@ export async function unlinkChannel(identityId: string): Promise<void> {
   }
 }
 
+// ── BYO Firebase self-registration ──────────────────────────────────────
+
+export type FirebaseProvider = "google" | "github" | "password";
+
+export interface FirebaseRuntimeConfig {
+  api_key: string;
+  auth_domain: string;
+  project_id: string;
+  app_id: string | null;
+  messaging_sender_id: string | null;
+  measurement_id: string | null;
+  enabled_providers: FirebaseProvider[];
+}
+
+export interface AuthConfigResponse {
+  self_registration_enabled: boolean;
+  firebase: FirebaseRuntimeConfig | null;
+}
+
+/** Fetch the runtime auth config. Falls back to "disabled" on any error
+ * so the login page degrades gracefully to local-only login. */
+export async function fetchAuthConfig(): Promise<AuthConfigResponse> {
+  try {
+    const response = await fetch("/api/v1/auth/config");
+    if (!response.ok) {
+      return { self_registration_enabled: false, firebase: null };
+    }
+    return (await response.json()) as AuthConfigResponse;
+  } catch {
+    return { self_registration_enabled: false, firebase: null };
+  }
+}
+
+/** Exchange a Firebase ID token for Surogates access + refresh tokens. */
+export async function exchangeFirebaseToken(idToken: string): Promise<{
+  access_token: string;
+  refresh_token: string;
+  token_type: string;
+}> {
+  const response = await fetch("/api/v1/auth/firebase/exchange", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id_token: idToken }),
+  });
+  if (!response.ok) {
+    const data = (await response.json().catch(() => null)) as
+      | { detail?: string }
+      | null;
+    throw new Error(data?.detail ?? "Firebase sign-in failed.");
+  }
+  return (await response.json()) as {
+    access_token: string;
+    refresh_token: string;
+    token_type: string;
+  };
+}
+
 export function logout(): void {
   clearAuthTokens();
 }

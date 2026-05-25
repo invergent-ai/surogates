@@ -12,6 +12,17 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  exchangeFirebaseToken,
+  fetchAuthConfig,
+  type AuthConfigResponse,
+} from "@/api/auth";
+import {
+  createFirebaseEmailAccount,
+  signInWithFirebaseEmail,
+  signInWithGithub,
+  signInWithGoogle,
+} from "./firebase";
 import { storeAuthTokens, getPostAuthRoute } from "./session";
 
 const TAGS = [
@@ -31,6 +42,60 @@ export function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [authConfig, setAuthConfig] = useState<AuthConfigResponse>({
+    self_registration_enabled: false,
+    firebase: null,
+  });
+  const [firebaseMode, setFirebaseMode] = useState<"sign-in" | "create">(
+    "sign-in",
+  );
+
+  /* ── load runtime auth config once on mount ── */
+  useEffect(() => {
+    let cancelled = false;
+    fetchAuthConfig()
+      .then((config) => {
+        if (!cancelled) setAuthConfig(config);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAuthConfig({ self_registration_enabled: false, firebase: null });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const finishFirebaseUser = async (user: {
+    getIdToken: () => Promise<string>;
+  }) => {
+    const idToken = await user.getIdToken();
+    const tokens = await exchangeFirebaseToken(idToken);
+    storeAuthTokens(tokens.access_token, tokens.refresh_token);
+    void navigate({ to: getPostAuthRoute() });
+  };
+
+  const runFirebaseAction = async (
+    name: string,
+    action: () => Promise<{ getIdToken: () => Promise<string> }>,
+  ) => {
+    setLoginError(null);
+    setIsLoading(true);
+    try {
+      await finishFirebaseUser(await action());
+    } catch (err) {
+      setLoginError(
+        err instanceof Error ? err.message : `${name} sign-in failed.`,
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const showFirebase =
+    authConfig.self_registration_enabled && authConfig.firebase !== null;
+  const firebaseProviders = authConfig.firebase?.enabled_providers ?? [];
 
   /* ── animated grid background ── */
   useEffect(() => {
@@ -314,6 +379,98 @@ export function LoginPage() {
             )}
           </Button>
         </form>
+
+        {/* ── Firebase self-registration ── */}
+        {showFirebase && authConfig.firebase && (
+          <div className="mt-6 border-t border-line pt-5">
+            <p className="mb-3 text-[11px] uppercase tracking-widest text-faint">
+              Or continue with
+            </p>
+
+            {firebaseProviders.includes("google") && (
+              <Button
+                type="button"
+                variant="outline"
+                size="lg"
+                className="mb-2 w-full"
+                disabled={isLoading}
+                onClick={() =>
+                  runFirebaseAction(
+                    "Google",
+                    () => signInWithGoogle(authConfig.firebase!),
+                  )
+                }
+              >
+                Continue with Google
+              </Button>
+            )}
+
+            {firebaseProviders.includes("github") && (
+              <Button
+                type="button"
+                variant="outline"
+                size="lg"
+                className="mb-2 w-full"
+                disabled={isLoading}
+                onClick={() =>
+                  runFirebaseAction(
+                    "GitHub",
+                    () => signInWithGithub(authConfig.firebase!),
+                  )
+                }
+              >
+                Continue with GitHub
+              </Button>
+            )}
+
+            {firebaseProviders.includes("password") && (
+              <div className="mt-3 flex flex-col gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="lg"
+                  disabled={isLoading || !email || !password}
+                  onClick={() =>
+                    runFirebaseAction(
+                      firebaseMode === "create"
+                        ? "Firebase email account"
+                        : "Firebase email",
+                      () =>
+                        firebaseMode === "create"
+                          ? createFirebaseEmailAccount(
+                              authConfig.firebase!,
+                              email,
+                              password,
+                            )
+                          : signInWithFirebaseEmail(
+                              authConfig.firebase!,
+                              email,
+                              password,
+                            ),
+                    )
+                  }
+                >
+                  {firebaseMode === "create"
+                    ? "Create Firebase account"
+                    : "Sign in with Firebase email"}
+                </Button>
+                <button
+                  type="button"
+                  className="text-[11px] text-faint hover:text-foreground transition-colors"
+                  onClick={() =>
+                    setFirebaseMode((m) =>
+                      m === "create" ? "sign-in" : "create",
+                    )
+                  }
+                >
+                  {firebaseMode === "create"
+                    ? "Already have an account? Sign in with Firebase email."
+                    : "New here? Create a Firebase account."}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </Card>
 
       {/* tags strip below card */}
