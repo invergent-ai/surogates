@@ -16,6 +16,7 @@ them via bucket files.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -313,7 +314,12 @@ class ResourceLoader:
         user_id = tenant.user_id
 
         # Layer 1: platform filesystem
-        platform = self._load_skills_from_dir(
+        # `_load_skills_from_dir` does sync `os.walk` + `read_text` per
+        # SKILL.md; offload to a thread so we don't stall the event loop
+        # (which would starve the FastAPI health probes and get the pod
+        # killed by kubelet liveness checks).
+        platform = await asyncio.to_thread(
+            self._load_skills_from_dir,
             self._platform_skills_dir, SKILL_SOURCE_PLATFORM,
         )
 
@@ -322,7 +328,8 @@ class ResourceLoader:
             user_skills_dir = str(
                 asset_root / org_id / "users" / str(user_id) / "skills"
             )
-            user_files = self._load_skills_from_dir(
+            user_files = await asyncio.to_thread(
+                self._load_skills_from_dir,
                 user_skills_dir, SKILL_SOURCE_USER,
             )
         else:
@@ -345,7 +352,9 @@ class ResourceLoader:
 
         # Fallback: legacy 3-layer filesystem merge (no DB).
         org_skills_dir = str(asset_root / org_id / "shared" / "skills")
-        org_files = self._load_skills_from_dir(org_skills_dir, SKILL_SOURCE_ORG)
+        org_files = await asyncio.to_thread(
+            self._load_skills_from_dir, org_skills_dir, SKILL_SOURCE_ORG,
+        )
         return self._merge(platform, org_files, user_files)
 
     # ------------------------------------------------------------------

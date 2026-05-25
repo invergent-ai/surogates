@@ -62,6 +62,13 @@ _LOCK_TIMEOUT_SECONDS: Final[int] = 60
 #: staging and return an unstaged path, which would confuse the LLM.
 _LOCK_BLOCKING_TIMEOUT_SECONDS: Final[int] = 60
 
+#: Maximum concurrent backend writes/reads during a single stage operation.
+#: Bounds memory (each task may hold one file in RAM) and protects the
+#: backend from being hammered by a 100-file skill.  Tuned empirically:
+#: serial copies blocked the event loop long enough for kubelet liveness
+#: probes to kill the api pod mid-stage.
+_STAGE_CONCURRENCY: Final[int] = 16
+
 
 class SkillStager:
     """Stages skill trees into a session's agent bucket.
@@ -231,18 +238,28 @@ class SkillStager:
 
             dest_prefix = self.staged_key_prefix(skill_name)
 
-            copied = 0
-            for src_file in sorted(source_dir.rglob("*")):
-                if not src_file.is_file():
-                    continue
+            # Enumerate files in a thread — `rglob` walks the filesystem.
+            src_files = await asyncio.to_thread(
+                lambda: [
+                    p for p in sorted(source_dir.rglob("*")) if p.is_file()
+                ],
+            )
+
+            sem = asyncio.Semaphore(_STAGE_CONCURRENCY)
+
+            async def _copy_one(src_file: Path) -> None:
                 rel = src_file.relative_to(source_dir).as_posix()
-                data = src_file.read_bytes()
-                await self._backend.write(
-                    self._storage_bucket,
-                    self._physical_key(session_id, f"{dest_prefix}/{rel}"),
-                    data,
-                )
-                copied += 1
+                async with sem:
+                    data = await asyncio.to_thread(src_file.read_bytes)
+                    await self._backend.write(
+                        self._storage_bucket,
+                        self._physical_key(
+                            session_id, f"{dest_prefix}/{rel}",
+                        ),
+                        data,
+                    )
+
+            await asyncio.gather(*(_copy_one(f) for f in src_files))
 
             await self._backend.write(
                 self._storage_bucket,
@@ -251,7 +268,7 @@ class SkillStager:
             )
             logger.info(
                 "Staged platform skill '%s' (%d files) for session %s",
-                skill_name, copied, session_id,
+                skill_name, len(src_files), session_id,
             )
             return self.workspace_path_for(session_id, skill_name)
 
@@ -294,20 +311,27 @@ class SkillStager:
                 tenant_bucket_name, prefix=f"{normalized_src}/",
             )
 
-            copied = 0
-            for key in src_keys:
+            sem = asyncio.Semaphore(_STAGE_CONCURRENCY)
+
+            async def _copy_one(key: str) -> bool:
                 if len(key) < strip_len:
-                    continue
+                    return False
                 rel = key[strip_len:]
                 if not rel:
-                    continue
-                data = await self._backend.read(tenant_bucket_name, key)
-                await self._backend.write(
-                    self._storage_bucket,
-                    self._physical_key(session_id, f"{dest_prefix}/{rel}"),
-                    data,
-                )
-                copied += 1
+                    return False
+                async with sem:
+                    data = await self._backend.read(tenant_bucket_name, key)
+                    await self._backend.write(
+                        self._storage_bucket,
+                        self._physical_key(
+                            session_id, f"{dest_prefix}/{rel}",
+                        ),
+                        data,
+                    )
+                return True
+
+            results = await asyncio.gather(*(_copy_one(k) for k in src_keys))
+            copied = sum(1 for r in results if r)
 
             await self._backend.write(
                 self._storage_bucket,
