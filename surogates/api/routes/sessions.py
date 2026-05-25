@@ -148,6 +148,74 @@ def _materialize_for_cache(
     return target
 
 
+async def _try_inline_attachment(
+    attachment: AttachmentRef,
+    raw_bytes: bytes,
+    document_path: Path | None,
+) -> tuple[str | None, str | None, str | None]:
+    """Decide whether to inline ``attachment`` and return the result.
+
+    Returns ``(inlined_text, inlined_render_kind, inline_skip_reason)``.
+    The first two are populated on success; the third is populated when
+    a *supported* attachment was considered but skipped, so the prompt
+    note can explain the fallback to the agent.  All three are ``None``
+    when the file is silently out of scope (over the raw cap or
+    unsupported extension) -- there is nothing useful to tell the LLM.
+    """
+    if attachment.size is not None and attachment.size > _INLINE_MAX_BYTES:
+        return None, None, None
+    kind = _inline_extension_kind(attachment.filename)
+    if kind is None:
+        return None, None, None
+
+    if kind == "document":
+        if document_path is None:
+            return None, None, "parse_error"
+        from surogates.tools.builtin.file_ops import (  # noqa: PLC0415
+            DocumentParseError,
+            _parse_document_to_markdown,
+        )
+        from surogates.tools.utils.document_cache import (  # noqa: PLC0415
+            default_cache,
+        )
+
+        try:
+            md = await default_cache().get_or_parse(
+                document_path, _parse_document_to_markdown,
+            )
+        except DocumentParseError as exc:
+            reason = (
+                "parse_timeout"
+                if "timeout" in exc.reason.lower()
+                else "parse_error"
+            )
+            logger.info(
+                "event=attachment.inline result=skip reason=%s "
+                "filename=%s err=%s",
+                reason, attachment.filename, exc.reason,
+            )
+            return None, None, reason
+        if not md.strip():
+            return None, None, "empty_output"
+        if len(md) > _INLINE_RENDERED_CAP_CHARS:
+            logger.info(
+                "event=attachment.inline result=skip reason=oversize_output "
+                "filename=%s chars=%d",
+                attachment.filename, len(md),
+            )
+            return None, None, "oversize_output"
+        return md, "markdown", None
+
+    # kind == "text"
+    try:
+        text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, None, "decode_error"
+    if len(text) > _INLINE_RENDERED_CAP_CHARS:
+        return None, None, "oversize_output"
+    return text, "text", None
+
+
 class ImageBlock(BaseModel):
     """A single image attachment on a user message."""
 
