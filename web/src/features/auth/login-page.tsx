@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTheme } from "next-themes";
 import { useNavigate } from "@tanstack/react-router";
 import { SunIcon, MoonIcon } from "lucide-react";
+import type { User as FirebaseUser } from "firebase/auth";
 import { cn } from "@/lib/utils";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -20,6 +21,7 @@ import {
 import {
   createFirebaseEmailAccount,
   friendlyAuthError,
+  resendFirebaseEmailVerification,
   signInWithFirebaseEmail,
   signInWithGithub,
   signInWithGoogle,
@@ -47,6 +49,13 @@ export function LoginPage() {
   // — separate from loginError so the user sees a neutral message
   // instead of a red destructive alert during the happy path.
   const [loginNotice, setLoginNotice] = useState<string | null>(null);
+  // The Firebase user we last created/signed-in but who hasn't yet
+  // verified their email. We keep the reference so the "Resend
+  // verification email" button can call ``sendEmailVerification`` on
+  // the same user without forcing them to type their password again.
+  const [pendingVerificationUser, setPendingVerificationUser] =
+    useState<FirebaseUser | null>(null);
+  const [resendingVerification, setResendingVerification] = useState(false);
   const [authConfig, setAuthConfig] = useState<AuthConfigResponse>({
     self_registration_enabled: false,
     firebase: null,
@@ -91,25 +100,41 @@ export function LoginPage() {
    * sends (we trigger it in ``createFirebaseEmailAccount``). Gating the
    * exchange here means a brand-new account can't slip into a Surogates
    * session without proving inbox ownership — matching the ops shell. */
-  const finishIfVerified = async (user: {
-    emailVerified: boolean;
-    getIdToken: (forceRefresh?: boolean) => Promise<string>;
-  }) => {
+  const finishIfVerified = async (user: FirebaseUser) => {
     if (!user.emailVerified) {
+      // Stash the user so the resend button can act on the same
+      // session without prompting for credentials again.
+      setPendingVerificationUser(user);
       setLoginNotice(
-        "Check your inbox and click the verification link, then sign in again.",
+        "Check your inbox (and spam folder) for a verification email, then sign in again.",
       );
       return;
     }
+    setPendingVerificationUser(null);
     await finishFirebaseUser(user);
+  };
+
+  const handleResendVerification = async () => {
+    if (!pendingVerificationUser || resendingVerification) return;
+    setResendingVerification(true);
+    setLoginError(null);
+    try {
+      await resendFirebaseEmailVerification(pendingVerificationUser);
+      setLoginNotice(
+        "Verification email re-sent. Check your inbox (and spam folder).",
+      );
+    } catch (err) {
+      setLoginError(
+        friendlyAuthError(err, "Failed to resend verification email."),
+      );
+    } finally {
+      setResendingVerification(false);
+    }
   };
 
   const runFirebaseAction = async (
     name: string,
-    action: () => Promise<{
-      emailVerified: boolean;
-      getIdToken: (forceRefresh?: boolean) => Promise<string>;
-    }>,
+    action: () => Promise<FirebaseUser>,
   ) => {
     setLoginError(null);
     setLoginNotice(null);
@@ -233,9 +258,23 @@ export function LoginPage() {
     const firebaseConfig = authConfig.firebase;
     if (firebaseMode === "create" && firebasePasswordEnabled && firebaseConfig) {
       try {
-        await finishIfVerified(
-          await createFirebaseEmailAccount(firebaseConfig, email, password),
-        );
+        const { user, verificationSent, verificationError } =
+          await createFirebaseEmailAccount(firebaseConfig, email, password);
+        if (!verificationSent) {
+          // Account exists at Firebase but the verification email
+          // didn't go out — surface the cause and let the user use the
+          // Resend button rather than leaving them confused about why
+          // no email arrived.
+          setPendingVerificationUser(user);
+          setLoginError(
+            friendlyAuthError(
+              verificationError,
+              "Account created, but the verification email couldn't be sent. Try Resend below.",
+            ),
+          );
+          return;
+        }
+        await finishIfVerified(user);
       } catch (err) {
         setLoginError(friendlyAuthError(err, "Sign-up failed."));
       } finally {
@@ -447,6 +486,18 @@ export function LoginPage() {
             <Alert className="mb-4 rounded-lg border-primary/20 bg-primary/5 px-3.5 py-2.5 text-sm animate-[fade-in_0.2s_ease] after:hidden">
               <AlertDescription className="text-sm text-foreground">
                 {loginNotice}
+                {pendingVerificationUser && (
+                  <button
+                    type="button"
+                    disabled={resendingVerification}
+                    onClick={handleResendVerification}
+                    className="ml-1 inline text-primary hover:underline disabled:opacity-50 disabled:hover:no-underline"
+                  >
+                    {resendingVerification
+                      ? "Resending…"
+                      : "Resend verification email"}
+                  </button>
+                )}
               </AlertDescription>
             </Alert>
           )}

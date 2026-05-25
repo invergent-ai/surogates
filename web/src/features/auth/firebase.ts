@@ -134,21 +134,27 @@ export async function createFirebaseEmailAccount(
   config: FirebaseRuntimeConfig,
   email: string,
   password: string,
-): Promise<User> {
+): Promise<{ user: User; verificationSent: boolean; verificationError?: unknown }> {
   const { user } = await createUserWithEmailAndPassword(
     getRuntimeFirebaseAuth(config),
     email.trim(),
     password,
   );
   // Firebase doesn't auto-send verification emails — trigger it now so
-  // the user receives one. Best-effort: a transient failure here must
-  // not block the sign-up (the account already exists at Firebase and
-  // verification can be retried later from a profile screen).
+  // the user receives one. If this fails we still return the (now-
+  // existing) Firebase user; callers surface the error and offer a
+  // resend button so the user isn't stuck with no path forward.
   try {
     await sendEmailVerification(user);
+    return { user, verificationSent: true };
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn("sendEmailVerification failed:", err);
+    return { user, verificationSent: false, verificationError: err };
   }
-  return user;
+}
+
+/** Re-send the Firebase verification email for an already-signed-in user. */
+export async function resendFirebaseEmailVerification(
+  user: User,
+): Promise<void> {
+  await sendEmailVerification(user);
 }
