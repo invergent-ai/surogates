@@ -40,3 +40,32 @@ def test_send_message_request_strips_client_supplied_inline_fields() -> None:
     assert req.attachments[0].inlined_text is None
     assert req.attachments[0].inlined_render_kind is None
     assert req.attachments[0].inline_skip_reason is None
+
+
+@pytest.mark.parametrize(
+    "filename, expected",
+    [
+        ("report.pdf", "document"),
+        ("contract.docx", "document"),
+        ("model.xlsx", "document"),
+        ("deck.pptx", "document"),
+        ("notes.txt", "text"),
+        ("README.md", "text"),
+        ("data.json", "text"),
+        ("rows.csv", "text"),
+        ("rows.tsv", "text"),
+        ("config.yaml", "text"),
+        ("config.yml", "text"),
+        ("server.log", "text"),
+        ("uppercase.PDF", "document"),  # case-insensitive
+        ("UPPERCASE.MD", "text"),
+        ("img.png", None),
+        ("bundle.zip", None),
+        ("noext", None),
+        ("trailing-dot.", None),
+    ],
+)
+def test_inline_extension_kind(filename: str, expected: str | None) -> None:
+    from surogates.api.routes.sessions import _inline_extension_kind
+
+    assert _inline_extension_kind(filename) == expected

@@ -70,6 +70,34 @@ _MAX_ATTACHMENTS_PER_MESSAGE = 10
 _MAX_ATTACHMENT_BYTES = 50_000_000  # 50 MB per file
 _MAX_ATTACHMENTS_TOTAL_BYTES = 200_000_000  # 200 MB total per message
 
+# Inline-attachment parameters (see docs/superpowers/specs/
+# 2026-05-25-inline-attachments-design.md).  Files under
+# ``_INLINE_MAX_BYTES`` and matching a supported extension are parsed at
+# send time; the rendered output is rejected if it exceeds
+# ``_INLINE_RENDERED_CAP_CHARS``.
+_INLINE_MAX_BYTES = 2 * 1024 * 1024  # 2 MB raw cap for inline parsing
+_INLINE_RENDERED_CAP_CHARS = 200_000  # 200 KB of rendered text/markdown
+
+_INLINE_DOC_EXTS = frozenset({".pdf", ".docx", ".xlsx", ".pptx"})
+_INLINE_TEXT_EXTS = frozenset({
+    ".txt", ".md", ".json", ".csv", ".tsv",
+    ".yaml", ".yml", ".log",
+})
+
+
+def _inline_extension_kind(filename: str) -> Literal["document", "text"] | None:
+    """Map a filename to its inline-parsing kind, or None if unsupported."""
+    import os.path as _ospath  # noqa: PLC0415
+
+    ext = _ospath.splitext(filename)[1].lower()
+    if not ext:
+        return None
+    if ext in _INLINE_DOC_EXTS:
+        return "document"
+    if ext in _INLINE_TEXT_EXTS:
+        return "text"
+    return None
+
 
 class ImageBlock(BaseModel):
     """A single image attachment on a user message."""
