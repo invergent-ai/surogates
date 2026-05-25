@@ -47,6 +47,14 @@ cached in worker memory.  Agents should call `read_file(path)`
 directly for these formats rather than pre-extracting with subprocess
 tools.  Set `READ_IMAGE_CACHE_DISABLED=1` to bypass the image cache.
 
+For attachments uploaded with the user message itself (via the chat UI),
+the harness now parses files under 2 MB at send time and inlines the
+parsed markdown directly into the user message — the agent receives
+the content without making an extra `read_file` call. Files larger
+than 2 MB, files in unsupported formats, and files that fail to parse
+fall back to the previous behaviour: a system note tells the agent
+the file is in the workspace and `read_file` is the way to access it.
+
 ### `write_file` -- Write File Contents
 
 | Parameter | Type | Description |

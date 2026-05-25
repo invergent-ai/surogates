@@ -218,20 +218,41 @@ def _format_bytes(n: int) -> str:
     return f"{n} B"
 
 
+_ATTACHMENT_SKIP_HINTS: dict[str, str] = {
+    "parse_error": (
+        "try read_file with pdftotext/pandoc fallbacks"
+    ),
+    "parse_timeout": (
+        "the parser hit the 30 s cap; try read_file with a narrower offset/limit"
+    ),
+    "decode_error": (
+        "the file is not UTF-8; try read_file which has full BOM detection"
+    ),
+    "oversize_output": (
+        "the parsed content exceeded the inline cap; use read_file with"
+        " offset/limit to paginate"
+    ),
+    "empty_output": (
+        "the parser produced no text; the file may be a scan — try the"
+        " ocr-and-documents skill"
+    ),
+}
+
+
 def _attachments_note(events: list[Any]) -> str | None:
-    """Return a per-turn system note describing user-attached files.
+    """Return a per-turn system note describing path-only attachments.
 
-    Mirrors :func:`_view_context_note`: looks at the most recent
-    ``user.message`` event in *events* and reads ``data.attachments``.
-    Returns ``None`` when no user message has been recorded yet, when
-    its payload carries no attachments, when the list is empty, or when
-    every entry is malformed.
+    Reads ``data.attachments`` on the most recent ``user.message``
+    event.  Any attachment whose ``inlined_text`` is already populated
+    is omitted from this note (the content lives in the user message
+    text via :func:`_render_inlined_attachments`).  Attachments that
+    were candidates for inline but skipped get an annotated entry that
+    names the ``inline_skip_reason`` so the agent knows why it needs to
+    fall back to ``read_file``.
 
-    The returned string is meant to be passed verbatim as the
-    ``content`` of a ``role="system"`` message inserted just before the
-    latest user turn.  The lookup is read-only and never raises --
-    malformed payloads (e.g. ``attachments`` not a list, items not
-    dicts) yield ``None`` so the LLM call proceeds unchanged.
+    The lookup is read-only and never raises — malformed payloads
+    (e.g. ``attachments`` not a list, items not dicts) yield ``None``
+    so the LLM call proceeds unchanged.
     """
     latest_attachments: list[Any] | None = None
     for event in reversed(events):
@@ -258,6 +279,10 @@ def _attachments_note(events: list[Any]) -> str | None:
     for item in latest_attachments:
         if not isinstance(item, dict):
             continue
+        if item.get("inlined_text"):
+            # Content already in the user message text via
+            # _render_inlined_attachments — don't double-list it here.
+            continue
         path = item.get("path")
         filename = item.get("filename")
         if not path or not filename:
@@ -268,12 +293,57 @@ def _attachments_note(events: list[Any]) -> str | None:
             size_str = _format_bytes(int(raw_size))
         else:
             size_str = "unknown size"
-        lines.append(f"- {path} ({mime}, {size_str}) — \"{filename}\"")
+        line = f"- {path} ({mime}, {size_str}) — \"{filename}\""
+        skip_reason = item.get("inline_skip_reason")
+        if skip_reason:
+            hint = _ATTACHMENT_SKIP_HINTS.get(skip_reason, "use read_file")
+            line += f" (inline skipped: {skip_reason} — {hint})"
+        lines.append(line)
 
     if len(lines) == 1:
-        # All items malformed.
+        # All items malformed or all inlined.
         return None
     return "\n".join(lines)
+
+
+def _render_inlined_attachments(
+    content: str,
+    attachments: list[Any] | None,
+) -> str:
+    """Append one fenced block per inlined attachment to ``content``.
+
+    ``attachments`` is the persisted ``data["attachments"]`` payload
+    from a ``user.message`` event.  Each item with a non-empty
+    ``inlined_text`` field becomes a fenced block at the end of the
+    returned string.  Items without ``inlined_text`` (path-only,
+    inline-skipped, or unsupported) are ignored here -- the system
+    ``_attachments_note`` surface covers them.
+    """
+    if not attachments:
+        return content
+    blocks: list[str] = []
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        inlined = item.get("inlined_text")
+        if not inlined:
+            continue
+        kind = item.get("inlined_render_kind") or "text"
+        path = item.get("path") or ""
+        filename = item.get("filename") or path
+        header = f"**Attachment: {filename}**"
+        if kind == "markdown":
+            subtitle = (
+                "*(parsed via markitdown/pymupdf4llm — to re-read or "
+                f"paginate, use `read_file(\"{path}\")`)*"
+            )
+            block = f"---\n{header}\n{subtitle}\n\n{inlined}\n---"
+        else:
+            block = f"---\n{header}\n\n{inlined}\n---"
+        blocks.append(block)
+    if not blocks:
+        return content
+    return content + "\n\n" + "\n\n".join(blocks)
 
 
 def _format_loop_list(rows: list[Any]) -> str:
@@ -3915,6 +3985,9 @@ class AgentHarness:
 
             if etype == EventType.USER_MESSAGE.value:
                 content = event.data.get("content", "")
+                content = _render_inlined_attachments(
+                    content, event.data.get("attachments"),
+                )
                 images = event.data.get("images")
                 if images:
                     logger.info(

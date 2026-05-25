@@ -215,6 +215,21 @@ class _FakeStorage:
             raise KeyError(key)
         return {"size": self._files[key], "modified": 0.0}
 
+    async def read(self, _bucket: str, key: str) -> bytes:
+        # Inline-attachment branch in the route calls this for small,
+        # supported attachments.  Tests don't ship real document bytes,
+        # so we return zero-filled bytes of the declared size and let
+        # the route's parse-failure path mark the attachment with
+        # ``inline_skip_reason="parse_error"``.
+        if key not in self._files:
+            raise KeyError(key)
+        return b"\x00" * self._files[key]
+
+    def resolve_bucket_path(self, _bucket: str) -> str:
+        # No real local backing store — force the route to fall back to
+        # ``_materialize_for_cache``.
+        return "/nonexistent-fake-storage-root"
+
 
 @pytest.fixture
 def patched_send_message(monkeypatch):
@@ -337,12 +352,16 @@ async def test_send_message_persists_attachments_with_real_storage_size(
     args, _ = store.emit_event.call_args
     _sid, event_type, event_data = args
     assert event_type == EventType.USER_MESSAGE
+    # Zero-filled fake bytes can't parse as a PDF, so the route marks
+    # the attachment with inline_skip_reason="parse_error".  The
+    # metadata fields (path/filename/mime/size) are still authoritative.
     assert event_data["attachments"] == [
         {
             "path": "uploads/1715600000-report.pdf",
             "filename": "report.pdf",
             "mime_type": "application/pdf",
             "size": 12345,
+            "inline_skip_reason": "parse_error",
         },
     ]
 

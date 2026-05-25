@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
-from typing import Any
+import os
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Literal
 from uuid import UUID
 
-from datetime import datetime
-
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import text as _sql_text
 
 from surogates.api.routes.workspace import (
@@ -70,6 +73,148 @@ _MAX_ATTACHMENTS_PER_MESSAGE = 10
 _MAX_ATTACHMENT_BYTES = 50_000_000  # 50 MB per file
 _MAX_ATTACHMENTS_TOTAL_BYTES = 200_000_000  # 200 MB total per message
 
+# Inline-attachment parameters (see docs/superpowers/specs/
+# 2026-05-25-inline-attachments-design.md).  Files under
+# ``_INLINE_MAX_BYTES`` and matching a supported extension are parsed at
+# send time; the rendered output is rejected if it exceeds
+# ``_INLINE_RENDERED_CAP_CHARS``.
+_INLINE_MAX_BYTES = 2 * 1024 * 1024  # 2 MB raw cap for inline parsing
+_INLINE_RENDERED_CAP_CHARS = 200_000  # 200 KB of rendered text/markdown
+
+_INLINE_DOC_EXTS = frozenset({".pdf", ".docx", ".xlsx", ".pptx"})
+_INLINE_TEXT_EXTS = frozenset({
+    ".txt", ".md", ".json", ".csv", ".tsv",
+    ".yaml", ".yml", ".log",
+})
+
+
+def _inline_extension_kind(filename: str) -> Literal["document", "text"] | None:
+    """Map a filename to its inline-parsing kind, or None if unsupported."""
+    ext = os.path.splitext(filename)[1].lower()
+    if not ext:
+        return None
+    if ext in _INLINE_DOC_EXTS:
+        return "document"
+    if ext in _INLINE_TEXT_EXTS:
+        return "text"
+    return None
+
+
+_INLINE_MATERIALIZE_ROOT = Path("/tmp/surogates-attachment-inline")
+
+
+def _materialize_for_cache(
+    raw_bytes: bytes,
+    *,
+    bucket: str,
+    storage_key: str,
+    size: int,
+    modified: str,
+    suffix: str,
+    cache_root: Path = _INLINE_MATERIALIZE_ROOT,
+) -> Path:
+    """Write ``raw_bytes`` to a deterministic temp file keyed on identity.
+
+    The document cache hashes the source path's
+    ``(absolute_path, mtime_ns, size, ext)`` tuple.  By materialising
+    the bytes once into a deterministic location, re-sending the same
+    attachment within a pod's lifetime hits the cache instead of
+    re-parsing.
+
+    The filename embeds a SHA-256 of (bucket, storage_key, size,
+    modified) so distinct uploads never collide and re-uploads with
+    different bytes get a fresh entry.
+    """
+    cache_root.mkdir(parents=True, exist_ok=True)
+    fingerprint = hashlib.sha256(
+        f"{bucket}|{storage_key}|{size}|{modified}".encode("utf-8"),
+    ).hexdigest()
+    target = cache_root / f"{fingerprint}{suffix.lower()}"
+    if not target.exists():
+        tmp_file = tempfile.NamedTemporaryFile(
+            dir=cache_root,
+            prefix=f"{fingerprint}.",
+            suffix=".part",
+            delete=False,
+        )
+        tmp = Path(tmp_file.name)
+        try:
+            with tmp_file:
+                tmp_file.write(raw_bytes)
+            os.replace(tmp, target)
+        finally:
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
+    return target
+
+
+async def _try_inline_attachment(
+    attachment: AttachmentRef,
+    raw_bytes: bytes,
+    document_path: Path | None,
+) -> tuple[str | None, str | None, str | None]:
+    """Decide whether to inline ``attachment`` and return the result.
+
+    Returns ``(inlined_text, inlined_render_kind, inline_skip_reason)``.
+    The first two are populated on success; the third is populated when
+    a *supported* attachment was considered but skipped, so the prompt
+    note can explain the fallback to the agent.  All three are ``None``
+    when the file is silently out of scope (over the raw cap or
+    unsupported extension) -- there is nothing useful to tell the LLM.
+    """
+    if attachment.size is not None and attachment.size > _INLINE_MAX_BYTES:
+        return None, None, None
+    kind = _inline_extension_kind(attachment.filename)
+    if kind is None:
+        return None, None, None
+
+    if kind == "document":
+        if document_path is None:
+            return None, None, "parse_error"
+        from surogates.tools.builtin.file_ops import (  # noqa: PLC0415
+            DocumentParseError,
+            _parse_document_to_markdown,
+        )
+        from surogates.tools.utils.document_cache import (  # noqa: PLC0415
+            default_cache,
+        )
+
+        try:
+            md = await default_cache().get_or_parse(
+                document_path, _parse_document_to_markdown,
+            )
+        except DocumentParseError as exc:
+            reason = (
+                "parse_timeout"
+                if "timeout" in exc.reason.lower()
+                else "parse_error"
+            )
+            logger.info(
+                "event=attachment.inline result=skip reason=%s "
+                "filename=%s err=%s",
+                reason, attachment.filename, exc.reason,
+            )
+            return None, None, reason
+        if not md.strip():
+            return None, None, "empty_output"
+        if len(md) > _INLINE_RENDERED_CAP_CHARS:
+            logger.info(
+                "event=attachment.inline result=skip reason=oversize_output "
+                "filename=%s chars=%d",
+                attachment.filename, len(md),
+            )
+            return None, None, "oversize_output"
+        return md, "markdown", None
+
+    # kind == "text"
+    try:
+        text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, None, "decode_error"
+    if len(text) > _INLINE_RENDERED_CAP_CHARS:
+        return None, None, "oversize_output"
+    return text, "text", None
+
 
 class ImageBlock(BaseModel):
     """A single image attachment on a user message."""
@@ -92,12 +237,28 @@ class AttachmentRef(BaseModel):
     session's workspace bucket before persisting it on the user.message event.
     ``size`` is a client-provided hint; the harness overwrites it with the
     real storage size during validation.
+
+    ``inlined_text``, ``inlined_render_kind``, and ``inline_skip_reason``
+    are server-set: the send-message route attempts to parse small
+    documents (<2 MB) and embed the result so the LLM sees the content
+    directly without calling ``read_file``.  Clients must not set these
+    fields -- :class:`SendMessageRequest` strips them defensively before
+    they reach this model.
     """
 
     path: str
     filename: str
     mime_type: str | None = None
     size: int | None = None
+    inlined_text: str | None = None
+    inlined_render_kind: Literal["markdown", "text"] | None = None
+    inline_skip_reason: Literal[
+        "parse_error",
+        "parse_timeout",
+        "decode_error",
+        "oversize_output",
+        "empty_output",
+    ] | None = None
 
     @field_validator("path")
     @classmethod
@@ -144,6 +305,22 @@ class SendMessageRequest(BaseModel):
     # injection detector, and persists the resolved refs onto the
     # user.message event.
     attachments: list[AttachmentRef] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_server_set_attachment_fields(cls, values: Any) -> Any:
+        """Drop any server-set inline fields a client tried to spoof."""
+        if not isinstance(values, dict):
+            return values
+        atts = values.get("attachments")
+        if not isinstance(atts, list):
+            return values
+        for item in atts:
+            if isinstance(item, dict):
+                item.pop("inlined_text", None)
+                item.pop("inlined_render_kind", None)
+                item.pop("inline_skip_reason", None)
+        return values
 
     @field_validator("images")
     @classmethod
@@ -552,12 +729,75 @@ async def send_message(
                         " limit per message"
                     ),
                 )
-            resolved.append({
+
+            # ── Inline-attachment branch ─────────────────────────────
+            # For files small enough and of a supported type, parse or
+            # decode the content server-side and persist it on the event
+            # so the LLM sees it directly without calling read_file.
+            attachment.size = real_size  # populate for the helper
+            inlined_text: str | None = None
+            inlined_kind: str | None = None
+            skip_reason: str | None = None
+            inline_kind = _inline_extension_kind(attachment.filename)
+            if (
+                real_size <= _INLINE_MAX_BYTES
+                and inline_kind is not None
+            ):
+                try:
+                    raw_bytes = await storage.read(bucket, storage_key)
+                except KeyError:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=(
+                            "Attachment path not found in workspace: "
+                            f"{attachment.path}"
+                        ),
+                    )
+                document_path: Path | None = None
+                if inline_kind == "document":
+                    local_candidate = (
+                        Path(storage.resolve_bucket_path(bucket))
+                        / storage_key
+                    )
+                    if local_candidate.is_file():
+                        document_path = local_candidate
+                    else:
+                        suffix = (
+                            os.path.splitext(attachment.filename)[1].lower()
+                        )
+                        modified = str(stat.get("modified") or "")
+                        document_path = _materialize_for_cache(
+                            raw_bytes=raw_bytes,
+                            bucket=bucket,
+                            storage_key=storage_key,
+                            size=real_size,
+                            modified=modified,
+                            suffix=suffix,
+                        )
+                inlined_text, inlined_kind, skip_reason = (
+                    await _try_inline_attachment(
+                        attachment, raw_bytes, document_path,
+                    )
+                )
+
+            entry: dict[str, Any] = {
                 "path": attachment.path,
                 "filename": attachment.filename,
                 "mime_type": attachment.mime_type,
                 "size": real_size,
-            })
+            }
+            if inlined_text is not None:
+                entry["inlined_text"] = inlined_text
+                entry["inlined_render_kind"] = inlined_kind
+                logger.info(
+                    "event=attachment.inline result=ok kind=%s "
+                    "filename=%s bytes=%d rendered_chars=%d",
+                    inlined_kind, attachment.filename, real_size,
+                    len(inlined_text),
+                )
+            elif skip_reason is not None:
+                entry["inline_skip_reason"] = skip_reason
+            resolved.append(entry)
         attachments_payload = resolved
 
     # Emit the user message event.
