@@ -1216,7 +1216,7 @@ export function IterationGroup({
         type="button"
         onClick={() => setOpen((prev) => !prev)}
         aria-expanded={open}
-        className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-sm hover:bg-muted/40"
+        className="flex w-full items-center gap-2 rounded py-0.5 text-left text-sm hover:bg-muted/40"
       >
         <span className={cn("flex-1 truncate", labelTone)}>{label}</span>
         <ChevronDown

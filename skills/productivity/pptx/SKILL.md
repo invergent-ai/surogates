@@ -6,6 +6,8 @@ license: Proprietary. LICENSE.txt has complete terms
 
 # PPTX Skill
 
+**All dependencies referenced in this skill are pre-installed in the sandbox image** — Python `python-pptx`, `markitdown[pptx]`, `Pillow`, plus the JavaScript `pptxgenjs` library and the command-line tools `soffice` (LibreOffice) and `pdftoppm` (poppler-utils). **Do NOT `pip install` or `npm install` anything** — just import or invoke directly.
+
 ## Reading PPTX text — use `read_file`
 
 For **any** request to read, summarise, analyse, or extract text from a
@@ -243,10 +245,12 @@ pdftoppm -jpeg -r 150 -f N -l N output.pdf slide-fixed
 
 ---
 
-## Dependencies
+## Dependencies (all pre-installed)
 
-- `pip install "markitdown[pptx]"` - text extraction
-- `pip install Pillow` - thumbnail grids
-- `npm install -g pptxgenjs` - creating from scratch
-- LibreOffice (`soffice`) - PDF conversion (auto-configured for sandboxed environments via `scripts/office/soffice.py`)
-- Poppler (`pdftoppm`) - PDF to images
+- `markitdown[pptx]` — text extraction (Python; just import).
+- `Pillow` — thumbnail grids (Python; just import).
+- `pptxgenjs` — creating from scratch (npm, installed globally; just `require('pptxgenjs')`).
+- LibreOffice (`soffice`) — PDF conversion (auto-configured for sandboxed environments via `scripts/office/soffice.py`).
+- Poppler (`pdftoppm`) — PDF to images (apt-installed binary).
+
+Do NOT `pip install` or `npm install` any of these — they are already on PATH in every sandbox.

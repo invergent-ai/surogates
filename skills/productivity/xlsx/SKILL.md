@@ -6,6 +6,8 @@ license: Proprietary. LICENSE.txt has complete terms
 
 # XLSX / Spreadsheet Skill
 
+**All dependencies referenced in this skill are pre-installed in the sandbox image** — `openpyxl`, `xlsxwriter`, `xlrd`, `pandas`, and `numpy` are ready to import. **Do NOT `pip install` anything** — just import directly.
+
 ## Reading XLSX content — use `read_file`
 
 For **any** request to read, summarise, analyse, or aggregate the

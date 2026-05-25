@@ -10,6 +10,8 @@ license: Proprietary. LICENSE.txt has complete terms
 
 This guide covers PDF **transformations** — merging, splitting, rotating, watermarking, encrypting, filling forms, extracting images, and OCRing scanned PDFs. **Reading text/tables is handled by `read_file` directly; do NOT use this skill for plain reading.** See REFERENCE.md for advanced library usage and FORMS.md for form filling.
 
+**All dependencies referenced in this skill are pre-installed in the sandbox image** — `pypdf`, `pdfplumber`, `pypdfium2`, `reportlab`, `pytesseract`, `pdf2image`, `Pillow`, `pandas`, `numpy`, and the JavaScript libs `pdf-lib` + `pdfjs-dist`, plus the command-line tools `pdftotext` / `pdftoppm` / `pdfimages` (poppler-utils), `qpdf`, `pdftk`, `pandoc`, and `tesseract`. **Do NOT `pip install` or `npm install` anything** — just import or invoke directly.
+
 ## Reading PDF text — use `read_file`
 
 For **any** request to read, summarise, analyse, extract data from, or aggregate the contents of a PDF, call `read_file` directly:
@@ -244,7 +246,8 @@ pdftk input.pdf rotate 1east output rotated.pdf
 
 ### Extract Text from Scanned PDFs
 ```python
-# Requires: pip install pytesseract pdf2image
+# pytesseract + pdf2image are pre-installed; tesseract-ocr is in the
+# sandbox image's apt layer.  Just import and run.
 import pytesseract
 from pdf2image import convert_from_path
 

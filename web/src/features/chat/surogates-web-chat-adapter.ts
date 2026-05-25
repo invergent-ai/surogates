@@ -63,10 +63,19 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
           mime_type: img.mimeType ?? "image/png",
         }))
       : undefined;
+    const attachments = input.attachments?.length
+      ? input.attachments.map((a) => ({
+          path: a.path,
+          filename: a.filename,
+          mime_type: a.mimeType,
+          size: a.size,
+        }))
+      : undefined;
     const response = await sessionsApi.sendMessage(
       input.sessionId,
       input.content,
       images,
+      attachments,
     );
     return { eventId: response.event_id, status: response.status };
   },

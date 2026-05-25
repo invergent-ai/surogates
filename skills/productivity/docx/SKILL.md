@@ -10,6 +10,8 @@ license: Proprietary. LICENSE.txt has complete terms
 
 A .docx file is a ZIP archive containing XML files.
 
+**All dependencies referenced in this skill are pre-installed in the sandbox image** — the JavaScript `docx` library, Python `python-docx`, plus the command-line tools `pandoc`, `soffice` (LibreOffice), and `pdftoppm`/`pdftotext` (poppler-utils). **Do NOT `pip install` or `npm install` anything** — just import or invoke directly.
+
 ## Reading DOCX text — use `read_file`
 
 For **any** request to read, summarise, analyse, extract data from, or aggregate the contents of a Word document, call `read_file` directly:
@@ -82,7 +84,7 @@ python scripts/accept_changes.py input.docx output.docx
 
 ## Creating New Documents
 
-Generate .docx files with JavaScript, then validate. Install: `npm install -g docx`
+Generate .docx files with JavaScript, then validate. The `docx` package is pre-installed globally; just `require('docx')` directly.
 
 ### Setup
 ```javascript
@@ -609,9 +611,11 @@ After running `comment.py` (see Step 2), add markers to document.xml. For replie
 
 ---
 
-## Dependencies
+## Dependencies (all pre-installed)
 
-- **pandoc**: Text extraction
-- **docx**: `npm install -g docx` (new documents)
-- **LibreOffice**: PDF conversion (auto-configured for sandboxed environments via `scripts/office/soffice.py`)
-- **Poppler**: `pdftoppm` for images
+- **pandoc**: text extraction (apt-installed binary; just run `pandoc …`).
+- **`docx` (npm)**: new-document generation (installed globally; just `require('docx')`).
+- **LibreOffice**: PDF conversion (auto-configured for sandboxed environments via `scripts/office/soffice.py`; just call the helper).
+- **Poppler**: `pdftoppm` for image rendering (apt-installed binary).
+
+Do NOT `pip install` or `npm install` any of these — they are already on PATH in every sandbox.

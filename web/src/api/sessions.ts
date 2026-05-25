@@ -66,10 +66,19 @@ export async function sendMessage(
   sessionId: string,
   content: string,
   images?: { data: string; mime_type: string }[],
+  attachments?: {
+    path: string;
+    filename: string;
+    mime_type?: string;
+    size?: number;
+  }[],
 ): Promise<{ event_id: number; status: string }> {
   const payload: Record<string, unknown> = { content };
   if (images?.length) {
     payload.images = images;
+  }
+  if (attachments?.length) {
+    payload.attachments = attachments;
   }
   const response = await authFetch(
     `/api/v1/sessions/${sessionId}/messages`,

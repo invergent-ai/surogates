@@ -235,7 +235,7 @@ slide.addImage({
 
 ### Icon Libraries
 
-Install: `npm install -g react-icons react react-dom sharp`
+`react-icons`, `react`, `react-dom`, and `sharp` are pre-installed globally in the sandbox — just `require('react-icons/fa')` etc. directly. Do NOT `npm install` them.
 
 Popular icon sets in react-icons:
 - `react-icons/fa` - Font Awesome

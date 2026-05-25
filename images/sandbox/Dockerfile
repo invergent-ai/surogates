@@ -34,15 +34,22 @@ RUN uv venv /opt/venv \
         pillow \
         matplotlib \
         tabulate \
-        Pillow \
         pyfiglet \
         nano-pdf \
-        pandoc
-# markitdown[docx,xlsx,pptx], pymupdf4llm, pypdf, python-docx, python-pptx,
-# openpyxl are pulled in by the surogates package install above (project
-# deps), so they are not listed here.  Keep this list focused on
-# agent-runtime niceties (pandas/matplotlib/etc.) that aren't surogates
-# dependencies.
+        reportlab \
+        pdfplumber \
+        pypdfium2 \
+        pytesseract \
+        pdf2image
+# markitdown[docx,xlsx,pptx], pymupdf4llm, pypdf, python-docx,
+# python-pptx, openpyxl are pulled in by the surogates package install
+# above (project deps), so they are not listed here.
+#
+# The extra libraries above (reportlab, pdfplumber, pypdfium2,
+# pytesseract, pdf2image) are referenced by the bundled productivity
+# skills (pdf/docx/xlsx/pptx); preinstalling them lets the skills run
+# without any `pip install` step.  Pandoc the binary comes from the
+# apt layer below (the `pandoc` PyPI package is just a wrapper).
 
 # ── Stage 2: Final image ─────────────────────────────────────────────
 FROM python:3.12-slim
@@ -53,6 +60,14 @@ LABEL org.opencontainers.image.title="surogates-agent-sandbox" \
       org.opencontainers.image.source="https://github.com/invergent-ai/surogates"
 
 # ── OS packages ──────────────────────────────────────────────────────
+# poppler-utils ships pdftotext/pdftoppm/pdfimages used by the pdf skill.
+# qpdf + pdftk-java are command-line PDF manipulation tools the skill
+# documents as alternatives.  pandoc is the actual binary referenced by
+# the docx skill's "Reading Content (advanced)" recipe.  libreoffice is
+# required by scripts/office/soffice.py (.doc → .docx conversion and
+# docx → pdf rendering for the docx/pptx skills).  tesseract-ocr is the
+# OCR engine the pytesseract Python wrapper drives.  pdfgrep is a nice
+# CLI for full-text PDF search.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         ripgrep \
@@ -62,6 +77,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         gnupg \
         ffmpeg \
+        poppler-utils \
+        qpdf \
+        pdftk-java \
+        pandoc \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+        libreoffice-core \
+        libreoffice-writer \
+        libreoffice-calc \
+        libreoffice-impress \
+        pdfgrep \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
     && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
@@ -69,7 +95,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Global npm packages ─────────────────────────────────────────────
-RUN npm install -g docx puppeteer react-icons react react-dom sharp pptxgenjs @anthropic-ai/claude-code opencode-ai@latest pnpm hyperframes \
+# pdf-lib and pdfjs-dist back the JavaScript snippets in the pdf skill;
+# preinstalling them lets the skill examples run without `npm install`.
+RUN npm install -g \
+        docx \
+        react-icons \
+        react \
+        react-dom \
+        sharp \
+        pptxgenjs \
+        pdf-lib \
+        pdfjs-dist \
+        @anthropic-ai/claude-code \
+        opencode-ai@latest \
+        pnpm \
     && npm cache clean --force
 
 # ── Python virtualenv ────────────────────────────────────────────────
