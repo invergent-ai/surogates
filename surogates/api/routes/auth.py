@@ -254,10 +254,18 @@ async def firebase_exchange(
                         "Self-registration is not enabled for this agent."
                     ),
                 )
-            if email is None or not email_verified:
+            if email is None:
+                # Firebase tokens MUST carry an email so we have something
+                # to put on the User row. Verification is enforced
+                # separately on the link-to-existing-user path above —
+                # for a fresh account we don't gate on email_verified
+                # because Firebase's createUserWithEmailAndPassword always
+                # mints an unverified-email token (verification only flips
+                # the claim after the user clicks the verification email
+                # AND refreshes the ID token).
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="A verified Firebase email is required.",
+                    detail="Firebase token must include an email.",
                 )
             user = User(
                 id=uuid.uuid4(),

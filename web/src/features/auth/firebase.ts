@@ -15,6 +15,7 @@ import {
   GoogleAuthProvider,
   createUserWithEmailAndPassword,
   getAuth,
+  sendEmailVerification,
   signInWithEmailAndPassword,
   signInWithPopup,
   type Auth,
@@ -28,7 +29,7 @@ let auth: Auth | null = null;
 let activeProjectId: string | null = null;
 
 export function getRuntimeFirebaseAuth(config: FirebaseRuntimeConfig): Auth {
-  if (!app || activeProjectId !== config.project_id) {
+  if (!app || !auth || activeProjectId !== config.project_id) {
     app = initializeApp(
       {
         apiKey: config.api_key,
@@ -46,7 +47,7 @@ export function getRuntimeFirebaseAuth(config: FirebaseRuntimeConfig): Auth {
     auth = getAuth(app);
     activeProjectId = config.project_id;
   }
-  return auth!;
+  return auth;
 }
 
 export async function signInWithGoogle(
@@ -84,11 +85,20 @@ export async function createFirebaseEmailAccount(
   email: string,
   password: string,
 ): Promise<User> {
-  return (
-    await createUserWithEmailAndPassword(
-      getRuntimeFirebaseAuth(config),
-      email.trim(),
-      password,
-    )
-  ).user;
+  const { user } = await createUserWithEmailAndPassword(
+    getRuntimeFirebaseAuth(config),
+    email.trim(),
+    password,
+  );
+  // Firebase doesn't auto-send verification emails — trigger it now so
+  // the user receives one. Best-effort: a transient failure here must
+  // not block the sign-up (the account already exists at Firebase and
+  // verification can be retried later from a profile screen).
+  try {
+    await sendEmailVerification(user);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("sendEmailVerification failed:", err);
+  }
+  return user;
 }
