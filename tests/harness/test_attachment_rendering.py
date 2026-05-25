@@ -139,3 +139,97 @@ def test_rebuild_messages_leaves_user_message_unchanged_when_no_attachments() ->
     )
     messages = AgentHarness._rebuild_messages(SimpleNamespace(), [user_event])
     assert messages == [{"role": "user", "content": "just text"}]
+
+
+# ---------------------------------------------------------------------------
+# Task 8 — revised _attachments_note
+# ---------------------------------------------------------------------------
+
+
+def test_attachments_note_returns_none_when_all_inlined() -> None:
+    from types import SimpleNamespace
+    from surogates.harness.loop import _attachments_note
+    from surogates.session.events import EventType
+
+    events = [
+        SimpleNamespace(
+            type=EventType.USER_MESSAGE.value,
+            data={
+                "content": "x",
+                "attachments": [
+                    {
+                        "path": "uploads/a.pdf", "filename": "a.pdf",
+                        "mime_type": "application/pdf", "size": 1000,
+                        "inlined_text": "BODY", "inlined_render_kind": "markdown",
+                    }
+                ],
+            },
+            id=1,
+        ),
+    ]
+    assert _attachments_note(events) is None
+
+
+def test_attachments_note_lists_only_path_only_attachments() -> None:
+    from types import SimpleNamespace
+    from surogates.harness.loop import _attachments_note
+    from surogates.session.events import EventType
+
+    events = [
+        SimpleNamespace(
+            type=EventType.USER_MESSAGE.value,
+            data={
+                "content": "x",
+                "attachments": [
+                    {
+                        "path": "uploads/inlined.pdf",
+                        "filename": "inlined.pdf",
+                        "mime_type": "application/pdf", "size": 1000,
+                        "inlined_text": "BODY",
+                        "inlined_render_kind": "markdown",
+                    },
+                    {
+                        "path": "uploads/big.pdf",
+                        "filename": "big.pdf",
+                        "mime_type": "application/pdf",
+                        "size": 9_000_000,
+                    },
+                ],
+            },
+            id=1,
+        ),
+    ]
+    note = _attachments_note(events)
+    assert note is not None
+    assert "big.pdf" in note
+    assert "inlined.pdf" not in note
+
+
+def test_attachments_note_includes_skip_reason_diagnostic() -> None:
+    from types import SimpleNamespace
+    from surogates.harness.loop import _attachments_note
+    from surogates.session.events import EventType
+
+    events = [
+        SimpleNamespace(
+            type=EventType.USER_MESSAGE.value,
+            data={
+                "content": "x",
+                "attachments": [
+                    {
+                        "path": "uploads/corrupt.pdf",
+                        "filename": "corrupt.pdf",
+                        "mime_type": "application/pdf",
+                        "size": 1000,
+                        "inline_skip_reason": "parse_error",
+                    },
+                ],
+            },
+            id=1,
+        ),
+    ]
+    note = _attachments_note(events)
+    assert note is not None
+    assert "corrupt.pdf" in note
+    assert "parse_error" in note
+    assert "read_file" in note.lower()

@@ -23,8 +23,8 @@ Updated before every commit.
 - [x] Task 5 — Wire the helpers into the send-message route
 - [x] Task 6 — `_render_inlined_attachments` renderer
 - [x] Task 7 — Call the renderer in `_rebuild_messages`
-- [ ] **Task 8 (in progress)** — Revise `_attachments_note` (skip inlined, annotate skip-reason)
-- [ ] Task 9 — Integration test for end-to-end round trip
+- [x] Task 8 — Revise `_attachments_note` (skip inlined, annotate skip-reason)
+- [ ] **Task 9 (in progress)** — Integration test for end-to-end round trip
 - [ ] Task 10 — History-replay regression test
 - [ ] Task 11 — Update `docs/tools/index.md`
 - [ ] Task 12 — Smoke test and verify
