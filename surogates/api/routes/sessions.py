@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import base64
 import logging
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import text as _sql_text
 
 from surogates.api.routes.workspace import (
@@ -92,12 +92,28 @@ class AttachmentRef(BaseModel):
     session's workspace bucket before persisting it on the user.message event.
     ``size`` is a client-provided hint; the harness overwrites it with the
     real storage size during validation.
+
+    ``inlined_text``, ``inlined_render_kind``, and ``inline_skip_reason``
+    are server-set: the send-message route attempts to parse small
+    documents (<2 MB) and embed the result so the LLM sees the content
+    directly without calling ``read_file``.  Clients must not set these
+    fields -- :class:`SendMessageRequest` strips them defensively before
+    they reach this model.
     """
 
     path: str
     filename: str
     mime_type: str | None = None
     size: int | None = None
+    inlined_text: str | None = None
+    inlined_render_kind: Literal["markdown", "text"] | None = None
+    inline_skip_reason: Literal[
+        "parse_error",
+        "parse_timeout",
+        "decode_error",
+        "oversize_output",
+        "empty_output",
+    ] | None = None
 
     @field_validator("path")
     @classmethod
@@ -144,6 +160,22 @@ class SendMessageRequest(BaseModel):
     # injection detector, and persists the resolved refs onto the
     # user.message event.
     attachments: list[AttachmentRef] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_server_set_attachment_fields(cls, values: Any) -> Any:
+        """Drop any server-set inline fields a client tried to spoof."""
+        if not isinstance(values, dict):
+            return values
+        atts = values.get("attachments")
+        if not isinstance(atts, list):
+            return values
+        for item in atts:
+            if isinstance(item, dict):
+                item.pop("inlined_text", None)
+                item.pop("inlined_render_kind", None)
+                item.pop("inline_skip_reason", None)
+        return values
 
     @field_validator("images")
     @classmethod
