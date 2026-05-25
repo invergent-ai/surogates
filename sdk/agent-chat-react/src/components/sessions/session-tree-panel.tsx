@@ -223,7 +223,6 @@ function TreeNodeRow({
   const title = entry.title ?? fallbackSessionTitle(entry);
   const subtitle = [
     formatRunKind(entry.runKind),
-    entry.model,
     formatSessionTime(entry.updatedAt),
   ].filter(Boolean).join(" · ");
 
@@ -245,7 +244,7 @@ function TreeNodeRow({
           "min-h-11 md:min-h-0",
           isActive
             ? "bg-line text-foreground border-l-primary"
-            : "bg-transparent text-muted-foreground hover:bg-input hover:text-foreground border-l-transparent",
+            : "bg-transparent text-foreground/80 hover:bg-input hover:text-foreground border-l-transparent",
         )}
         style={{ paddingLeft: `${depth * 12 + 12}px` }}
       >

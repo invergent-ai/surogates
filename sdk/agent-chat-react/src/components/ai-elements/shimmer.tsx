@@ -26,7 +26,7 @@ const ShimmerComponent = ({
 
   return (
     <Component
-      className={cn("shimmer text-muted-foreground", className)}
+      className={cn("shimmer text-foreground/70", className)}
       style={
         {
           "--shimmer-duration": duration * 1000,

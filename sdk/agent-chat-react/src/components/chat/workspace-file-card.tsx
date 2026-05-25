@@ -247,7 +247,7 @@ function WorkspaceFilePreviewDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[80vh] w-full max-w-3xl flex-col gap-0 overflow-hidden p-0">
+      <DialogContent className="flex h-[80vh] w-full max-w-5xl flex-col gap-0 overflow-hidden p-0">
         <DialogHeader className="border-b border-line px-4 py-3">
           <DialogTitle className="truncate text-sm">
             {_basename(path)}
