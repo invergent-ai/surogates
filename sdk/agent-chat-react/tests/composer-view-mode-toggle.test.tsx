@@ -73,7 +73,7 @@ describe("Composer view-mode toggle", () => {
       .toBeNull();
   });
 
-  it("renders both Simple and Expert segments when onViewModeChange is supplied", () => {
+  it("renders both Simple and Advanced segments when onViewModeChange is supplied", () => {
     const dom = mount(
       <ChatComposer
         onSend={sendFn}
@@ -89,7 +89,7 @@ describe("Composer view-mode toggle", () => {
     expect(buttons.length).toBe(2);
     expect(Array.from(buttons).map((b) => b.textContent)).toEqual([
       "Simple",
-      "Expert",
+      "Advanced",
     ]);
   });
 
@@ -122,7 +122,7 @@ describe("Composer view-mode toggle", () => {
     );
     const group = dom.querySelector("[role='group'][aria-label='Chat view mode']")!;
     const expert = Array.from(group.querySelectorAll("button")).find(
-      (b) => b.textContent === "Expert",
+      (b) => b.textContent === "Advanced",
     )!;
     act(() => expert.click());
     expect(onViewModeChange).toHaveBeenCalledWith("expert");
