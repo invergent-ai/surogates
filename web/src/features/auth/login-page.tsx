@@ -429,7 +429,7 @@ export function LoginPage() {
           {firebasePasswordEnabled && (
             <button
               type="button"
-              className="mt-3 w-full text-center text-[11px] text-faint hover:text-foreground transition-colors"
+              className="mt-3 block text-center text-[11px] text-faint hover:text-foreground transition-colors"
               onClick={() =>
                 setFirebaseMode((m) => (m === "create" ? "sign-in" : "create"))
               }
@@ -462,7 +462,7 @@ export function LoginPage() {
                   )
                 }
               >
-                Continue with Google
+                Google
               </Button>
             )}
 
@@ -480,7 +480,7 @@ export function LoginPage() {
                   )
                 }
               >
-                Continue with GitHub
+                GitHub
               </Button>
             )}
 
