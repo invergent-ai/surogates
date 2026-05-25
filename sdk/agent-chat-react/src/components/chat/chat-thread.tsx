@@ -43,7 +43,7 @@ import { TurnFeedback } from "./turn-feedback";
 import { useSmoothStream } from "./use-smooth-stream";
 import { ArtifactBlock } from "./artifacts/artifact-block";
 import { ErrorMessage } from "./error-message";
-import { TurnSummaryCard } from "./turn-summary-card";
+import { TurnSummaryCard, TurnSummaryPending } from "./turn-summary-card";
 import { cn } from "../../lib/utils";
 import {
   AlertTriangle,
@@ -1452,13 +1452,25 @@ function SimpleAssistantGroup({
             {tail?.status === "complete" && <TurnFeedback msg={tail} />}
           </div>
         )}
-        {effectiveTurnSummary && (
+        {effectiveTurnSummary ? (
           <TurnSummaryCard
             summary={effectiveTurnSummary}
             sessionId={sessionId}
             messages={messages}
             onFileSelect={onFileSelect}
           />
+        ) : (
+          // The harness summarizer runs after the last assistant
+          // response and before ``session.complete``. Show a pending
+          // placeholder during that window so users aren't surprised
+          // when the Summary card pops in. Gated on the tail group +
+          // a complete final answer + still-running session so the
+          // placeholder doesn't show on historic turns or mid-stream.
+          isTailGroup
+          && isRunning
+          && !!finalText
+          && tail?.status === "complete"
+          && <TurnSummaryPending />
         )}
         {showErrorInfo && (
           <div className="mt-3">
