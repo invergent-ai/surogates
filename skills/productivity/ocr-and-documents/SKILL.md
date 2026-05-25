@@ -1,16 +1,39 @@
 ---
 name: ocr-and-documents
-description: "Extract text from PDFs/scans (pymupdf, marker-pdf)."
-version: 2.3.0
+description: "OCR for scanned/image-only PDFs and complex documents (pymupdf, marker-pdf). For text-based PDFs use read_file."
+version: 2.4.0
 author: Surogate Agent
 license: MIT
 ---
 
-# PDF & Document Extraction
+# OCR for scanned PDFs and complex documents
 
-For DOCX: use `python-docx` (parses actual document structure, far better than OCR).
-For PPTX: see the `powerpoint` skill (uses `python-pptx` with full slide/notes support).
-This skill covers **PDFs and scanned documents**.
+**This skill is for scanned / image-only PDFs and complex layouts only.**
+For text-based PDFs, DOCX, XLSX, or PPTX, the harness has native
+parsing built in — see Step 0.
+
+## Step 0: Is this actually OCR territory?
+
+For **text-based PDFs / DOCX / XLSX / PPTX**, call `read_file` directly
+— don't OCR them:
+
+```
+read_file(path="path/to/document.pdf")
+```
+
+The harness parses text-based formats natively via `markitdown` and
+returns markdown.  Only continue with this skill if **all** of these
+are true:
+
+1. The file is a PDF.
+2. `read_file` returned empty content, a parse error, or output that
+   is clearly missing the visible text (i.e. the PDF is a scan / image
+   wrapper with no text layer).
+3. OR the user explicitly asked for OCR / handwriting recognition / a
+   richer layout-aware extraction than markitdown provides.
+
+For DOCX use `read_file` (or `python-docx` / the `docx` skill for
+editing).  For PPTX use `read_file` (or the `pptx` skill for editing).
 
 ## Step 1: Remote URL Available?
 

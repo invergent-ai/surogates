@@ -8,22 +8,28 @@ license: Proprietary. LICENSE.txt has complete terms
 
 ## Overview
 
-This guide covers essential PDF processing operations using Python libraries and command-line tools. For advanced features, JavaScript libraries, and detailed examples, see REFERENCE.md. If you need to fill out a PDF form, read FORMS.md and follow its instructions.
+This guide covers PDF **transformations** — merging, splitting, rotating, watermarking, encrypting, filling forms, extracting images, and OCRing scanned PDFs. **Reading text/tables is handled by `read_file` directly; do NOT use this skill for plain reading.** See REFERENCE.md for advanced library usage and FORMS.md for form filling.
 
-## Quick Start
+## Reading PDF text — use `read_file`
 
-```python
-from pypdf import PdfReader, PdfWriter
+For **any** request to read, summarise, analyse, extract data from, or aggregate the contents of a PDF, call `read_file` directly:
 
-# Read a PDF
-reader = PdfReader("document.pdf")
-print(f"Pages: {len(reader.pages)}")
-
-# Extract text
-text = ""
-for page in reader.pages:
-    text += page.extract_text()
 ```
+read_file(path="path/to/document.pdf")
+```
+
+The harness parses PDFs natively via `markitdown` and returns markdown.
+Pagination via `offset`/`limit` is free (cached). Do **NOT** `pip install
+pypdf`/`pdfplumber`/`pymupdf` or write subprocess extraction scripts for
+reading — that bootstrap is exactly what `read_file` eliminates.
+
+If `read_file` fails on a specific PDF (encrypted, corrupt, or a scanned
+image-only PDF with no text layer), it returns a fallback hint pointing
+to `pdftotext`/`pandoc` or — for scanned PDFs — the `ocr-and-documents`
+skill. Only then drop down to the library recipes below.
+
+The Python libraries on this page are for **transformations** (the next
+sections), not for reading.
 
 ## Python Libraries
 
@@ -76,7 +82,13 @@ with open("rotated.pdf", "wb") as output:
     writer.write(output)
 ```
 
-### pdfplumber - Text and Table Extraction
+### pdfplumber - Layout-aware text + tables (fallback only)
+
+For plain text/markdown, `read_file(path)` is the right call (see top of
+this skill).  Use `pdfplumber` only when you need precise layout
+preservation or per-table structured extraction that `read_file` does
+not give you — e.g., multi-line cells, merged headers, or extracting a
+specific table on a specific page.
 
 #### Extract Text with Layout
 ```python
@@ -297,13 +309,13 @@ with open("encrypted.pdf", "wb") as output:
 
 | Task | Best Tool | Command/Code |
 |------|-----------|--------------|
+| **Read text / tables / aggregate data** | **`read_file`** | `read_file(path="document.pdf")` |
 | Merge PDFs | pypdf | `writer.add_page(page)` |
 | Split PDFs | pypdf | One page per file |
-| Extract text | pdfplumber | `page.extract_text()` |
-| Extract tables | pdfplumber | `page.extract_tables()` |
+| Layout-precise text / structured tables (fallback) | pdfplumber | `page.extract_text()` / `page.extract_tables()` |
 | Create PDFs | reportlab | Canvas or Platypus |
 | Command line merge | qpdf | `qpdf --empty --pages ...` |
-| OCR scanned PDFs | pytesseract | Convert to image first |
+| OCR scanned PDFs | `ocr-and-documents` skill or pytesseract | Convert to image first |
 | Fill PDF forms | pdf-lib or pypdf (see FORMS.md) | See FORMS.md |
 
 ## Next Steps

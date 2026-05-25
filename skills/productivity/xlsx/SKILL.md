@@ -4,6 +4,34 @@ description: "Use this skill any time a spreadsheet file is the primary input or
 license: Proprietary. LICENSE.txt has complete terms
 ---
 
+# XLSX / Spreadsheet Skill
+
+## Reading XLSX content — use `read_file`
+
+For **any** request to read, summarise, analyse, or aggregate the
+contents of a spreadsheet, call `read_file` directly:
+
+```
+read_file(path="path/to/workbook.xlsx")
+```
+
+The harness parses `.xlsx` natively via `markitdown` and returns each
+sheet as a markdown pipe table (with the sheet name as a heading).
+Pagination via `offset`/`limit` is free (cached).  Do **NOT** `pip
+install pandas`/`openpyxl` and write extraction scripts just to inspect
+the data — that bootstrap is exactly what `read_file` eliminates.
+
+Use `pandas`/`openpyxl` (the rest of this skill) when you need to:
+
+- **Mutate or create** spreadsheet files (write formulas, format cells,
+  add charts, build financial models).
+- **Compute** over data programmatically before producing an output.
+- **Apply formula-error checks**, color coding, or layout requirements
+  specified below.
+
+`.csv` / `.tsv` are plain text — `read_file` reads them too.  Don't
+shell out to a Python script just to look at a CSV.
+
 # Requirements for Outputs
 
 ## All Excel files

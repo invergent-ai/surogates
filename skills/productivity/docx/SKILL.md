@@ -10,29 +10,56 @@ license: Proprietary. LICENSE.txt has complete terms
 
 A .docx file is a ZIP archive containing XML files.
 
+## Reading DOCX text — use `read_file`
+
+For **any** request to read, summarise, analyse, extract data from, or aggregate the contents of a Word document, call `read_file` directly:
+
+```
+read_file(path="path/to/document.docx")
+```
+
+The harness parses .docx natively via `markitdown` and returns markdown
+(headings, paragraphs, bullets, pipe tables).  Pagination via
+`offset`/`limit` is free (cached). Do **NOT** `pip install python-docx`
+or shell out to `pandoc` for plain reading — that bootstrap is exactly
+what `read_file` eliminates.
+
+Use the recipes below only when `read_file` is not enough:
+
+- **Tracked changes / comments / revisions** preserved → `pandoc --track-changes=all` (markitdown collapses them).
+- **Raw XML access** → unpack with the `scripts/office/unpack.py` helper.
+- **Conversion** of legacy `.doc` files → soffice (markitdown can't parse `.doc`).
+- **Creating** or **editing** documents → see the sections below.
+
 ## Quick Reference
 
 | Task | Approach |
 |------|----------|
-| Read/analyze content | `pandoc` or unpack for raw XML |
+| **Read / analyze content** | **`read_file(path="document.docx")`** |
+| Read with tracked changes | `pandoc --track-changes=all` (see below) |
 | Create new document | Use `docx-js` - see Creating New Documents below |
 | Edit existing document | Unpack → edit XML → repack - see Editing Existing Documents below |
 
 ### Converting .doc to .docx
 
-Legacy `.doc` files must be converted before editing:
+Legacy `.doc` files must be converted before editing.  `read_file` does
+not support legacy `.doc` either — convert first, then use `read_file`
+on the resulting `.docx`:
 
 ```bash
 python scripts/office/soffice.py --headless --convert-to docx document.doc
 ```
 
-### Reading Content
+### Reading Content (advanced cases only)
+
+For plain reading use `read_file` (see top of skill).  The recipes here
+are for cases where `read_file` is insufficient:
 
 ```bash
-# Text extraction with tracked changes
+# Text extraction with tracked changes preserved
 pandoc --track-changes=all document.docx -o output.md
 
-# Raw XML access
+# Raw XML access (when you need to inspect or surgically edit structure)
 python scripts/office/unpack.py document.docx unpacked/
 ```
 

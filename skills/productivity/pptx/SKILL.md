@@ -6,26 +6,46 @@ license: Proprietary. LICENSE.txt has complete terms
 
 # PPTX Skill
 
+## Reading PPTX text — use `read_file`
+
+For **any** request to read, summarise, analyse, or extract text from a
+deck, call `read_file` directly:
+
+```
+read_file(path="path/to/presentation.pptx")
+```
+
+The harness parses `.pptx` natively via `markitdown` and returns slide
+text as markdown.  Pagination via `offset`/`limit` is free (cached).
+Do **NOT** shell out to `python -m markitdown` or `pip install
+python-pptx` for plain reading — that subprocess hop is exactly what
+`read_file` eliminates.
+
+Use the helpers below only when `read_file` is not enough (visual
+overview of slides, raw XML access, editing, or creating from scratch).
+
 ## Quick Reference
 
 | Task | Guide |
 |------|-------|
-| Read/analyze content | `python -m markitdown presentation.pptx` |
+| **Read / analyze content** | **`read_file(path="presentation.pptx")`** |
+| Visual overview of slides | `python scripts/thumbnail.py presentation.pptx` |
 | Edit or create from template | Read [editing.md](editing.md) |
 | Create from scratch | Read [pptxgenjs.md](pptxgenjs.md) |
 
 ---
 
-## Reading Content
+## Reading Content (advanced cases only)
+
+For plain text reading use `read_file` (see top of skill).  Use the
+recipes here when you need a visual layout (thumbnails) or surgical
+XML access:
 
 ```bash
-# Text extraction
-python -m markitdown presentation.pptx
-
-# Visual overview
+# Visual overview of every slide
 python scripts/thumbnail.py presentation.pptx
 
-# Raw XML
+# Raw XML access (rare — for surgical edits, not for reading)
 python scripts/office/unpack.py presentation.pptx unpacked/
 ```
 
