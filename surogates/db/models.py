@@ -125,6 +125,23 @@ class User(Base):
         back_populates="user", lazy="raise"
     )
 
+    # Partial unique index — keeps Firebase-linked users uniquely
+    # identifiable by (org, auth_provider, external_id) while leaving
+    # database users (where external_id is NULL) unconstrained. Combined
+    # with the project-scoped ``auth_provider = "firebase:{project_id}"``
+    # namespacing, this is the only structural guard against
+    # cross-BYO-project UID collisions.
+    __table_args__ = (
+        Index(
+            "uq_users_org_auth_external",
+            "org_id",
+            "auth_provider",
+            "external_id",
+            unique=True,
+            postgresql_where=text("external_id IS NOT NULL"),
+        ),
+    )
+
 
 # ---------------------------------------------------------------------------
 # Channel Identities

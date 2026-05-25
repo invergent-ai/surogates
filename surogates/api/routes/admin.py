@@ -185,6 +185,31 @@ async def create_user(
                 detail=f"Organisation {org_id} not found.",
             )
 
+    # BYO Firebase collision guard. Without ``force=True``, refuse to
+    # create a row whose email matches an existing Firebase-linked user
+    # in the same org — silently shadowing such a user would be a
+    # security footgun (the admin loses the audit trail on which row a
+    # subsequent password reset applied to). Admins who explicitly want
+    # both rows (e.g. re-issuing local creds after Firebase removal) can
+    # pass ``force=True``.
+    if not body.force and body.email:
+        async with session_factory() as session:
+            existing = await session.scalar(
+                select(User).where(
+                    User.org_id == org_id,
+                    User.email == body.email,
+                    User.auth_provider.like("firebase:%"),
+                )
+            )
+        if existing is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Email {body.email} is already linked to a Firebase user "
+                    f"(id={existing.id}). Pass force=true to create a duplicate."
+                ),
+            )
+
     # Hash password if using database auth.
     password_hash: str | None = None
     if body.auth_provider == "database" and body.password:

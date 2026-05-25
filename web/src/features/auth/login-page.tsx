@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTheme } from "next-themes";
 import { useNavigate } from "@tanstack/react-router";
 import { SunIcon, MoonIcon } from "lucide-react";
+import type { User as FirebaseUser } from "firebase/auth";
 import { cn } from "@/lib/utils";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -12,6 +13,19 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  exchangeFirebaseToken,
+  fetchAuthConfig,
+  type AuthConfigResponse,
+} from "@/api/auth";
+import {
+  createFirebaseEmailAccount,
+  friendlyAuthError,
+  resendFirebaseEmailVerification,
+  signInWithFirebaseEmail,
+  signInWithGithub,
+  signInWithGoogle,
+} from "./firebase";
 import { storeAuthTokens, getPostAuthRoute } from "./session";
 
 const TAGS = [
@@ -31,6 +45,116 @@ export function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
+  // Informational notice (e.g. "Check your inbox to verify your email")
+  // — separate from loginError so the user sees a neutral message
+  // instead of a red destructive alert during the happy path.
+  const [loginNotice, setLoginNotice] = useState<string | null>(null);
+  // The Firebase user we last created/signed-in but who hasn't yet
+  // verified their email. We keep the reference so the "Resend
+  // verification email" button can call ``sendEmailVerification`` on
+  // the same user without forcing them to type their password again.
+  const [pendingVerificationUser, setPendingVerificationUser] =
+    useState<FirebaseUser | null>(null);
+  const [resendingVerification, setResendingVerification] = useState(false);
+  const [authConfig, setAuthConfig] = useState<AuthConfigResponse>({
+    self_registration_enabled: false,
+    firebase: null,
+  });
+  const [firebaseMode, setFirebaseMode] = useState<"sign-in" | "create">(
+    "sign-in",
+  );
+
+  /* ── load runtime auth config once on mount ── */
+  useEffect(() => {
+    let cancelled = false;
+    fetchAuthConfig()
+      .then((config) => {
+        if (!cancelled) setAuthConfig(config);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAuthConfig({ self_registration_enabled: false, firebase: null });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const finishFirebaseUser = async (user: {
+    getIdToken: (forceRefresh?: boolean) => Promise<string>;
+  }) => {
+    // Force-refresh the ID token so claims reflect the current
+    // server-side state (notably ``email_verified`` after the user
+    // returns from clicking the verification link).
+    const idToken = await user.getIdToken(true);
+    const tokens = await exchangeFirebaseToken(idToken);
+    storeAuthTokens(tokens.access_token, tokens.refresh_token);
+    void navigate({ to: getPostAuthRoute() });
+  };
+
+  /** Exchange the token only when the user's email is verified.
+   *
+   * Firebase email/password sign-up always returns ``emailVerified=false``
+   * until the user clicks the link in the verification mail Firebase
+   * sends (we trigger it in ``createFirebaseEmailAccount``). Gating the
+   * exchange here means a brand-new account can't slip into a Surogates
+   * session without proving inbox ownership — matching the ops shell. */
+  const finishIfVerified = async (user: FirebaseUser) => {
+    if (!user.emailVerified) {
+      // Stash the user so the resend button can act on the same
+      // session without prompting for credentials again.
+      setPendingVerificationUser(user);
+      setLoginNotice(
+        "Check your inbox (and spam folder) for a verification email, then sign in again.",
+      );
+      return;
+    }
+    setPendingVerificationUser(null);
+    await finishFirebaseUser(user);
+  };
+
+  const handleResendVerification = async () => {
+    if (!pendingVerificationUser || resendingVerification) return;
+    setResendingVerification(true);
+    setLoginError(null);
+    try {
+      await resendFirebaseEmailVerification(pendingVerificationUser);
+      setLoginNotice(
+        "Verification email re-sent. Check your inbox (and spam folder).",
+      );
+    } catch (err) {
+      setLoginError(
+        friendlyAuthError(err, "Failed to resend verification email."),
+      );
+    } finally {
+      setResendingVerification(false);
+    }
+  };
+
+  const runFirebaseAction = async (
+    name: string,
+    action: () => Promise<FirebaseUser>,
+  ) => {
+    setLoginError(null);
+    setLoginNotice(null);
+    setIsLoading(true);
+    try {
+      // Google / GitHub providers already return verified emails so
+      // ``finishIfVerified`` is a no-op gate for them; routing through
+      // it keeps a single sign-in path and protects against future
+      // providers that may return ``emailVerified=false``.
+      await finishIfVerified(await action());
+    } catch (err) {
+      setLoginError(friendlyAuthError(err, `${name} sign-in failed.`));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const showFirebase =
+    authConfig.self_registration_enabled && authConfig.firebase !== null;
+  const firebaseProviders = authConfig.firebase?.enabled_providers ?? [];
 
   /* ── animated grid background ── */
   useEffect(() => {
@@ -115,6 +239,11 @@ export function LoginPage() {
     };
   }, []);
 
+  const firebasePasswordEnabled =
+    showFirebase &&
+    authConfig.firebase !== null &&
+    firebaseProviders.includes("password");
+
   const handleLogin = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!email || !password) {
@@ -122,8 +251,41 @@ export function LoginPage() {
       return;
     }
     setLoginError(null);
+    setLoginNotice(null);
     setIsLoading(true);
 
+    // ── Create-account mode: sign up via Firebase email/password. ──
+    const firebaseConfig = authConfig.firebase;
+    if (firebaseMode === "create" && firebasePasswordEnabled && firebaseConfig) {
+      try {
+        const { user, verificationSent, verificationError } =
+          await createFirebaseEmailAccount(firebaseConfig, email, password);
+        if (!verificationSent) {
+          // Account exists at Firebase but the verification email
+          // didn't go out — surface the cause and let the user use the
+          // Resend button rather than leaving them confused about why
+          // no email arrived.
+          setPendingVerificationUser(user);
+          setLoginError(
+            friendlyAuthError(
+              verificationError,
+              "Account created, but the verification email couldn't be sent. Try Resend below.",
+            ),
+          );
+          return;
+        }
+        await finishIfVerified(user);
+      } catch (err) {
+        setLoginError(friendlyAuthError(err, "Sign-up failed."));
+      } finally {
+        setIsLoading(false);
+      }
+      return;
+    }
+
+    // ── Sign-in mode: try local DB auth first so manually-created
+    //    users keep working, then fall back to Firebase email sign-in
+    //    when the password provider is enabled for this agent. ──
     try {
       const response = await fetch("/api/v1/auth/login", {
         method: "POST",
@@ -131,28 +293,49 @@ export function LoginPage() {
         body: JSON.stringify({ email, password }),
       });
 
-      if (!response.ok) {
-        const payload = (await response.json().catch(() => null)) as {
-          detail?: string;
-        } | null;
-        throw new Error(payload?.detail ?? "Invalid credentials.");
+      if (response.ok) {
+        const payload = (await response.json()) as {
+          access_token: string;
+          refresh_token: string;
+          token_type: string;
+        };
+        storeAuthTokens(payload.access_token, payload.refresh_token);
+        void navigate({ to: getPostAuthRoute() });
+        return;
       }
 
-      const payload = (await response.json()) as {
-        access_token: string;
-        refresh_token: string;
-        token_type: string;
-      };
-      storeAuthTokens(payload.access_token, payload.refresh_token);
-      void navigate({ to: getPostAuthRoute() });
+      if (response.status === 401 && firebasePasswordEnabled && firebaseConfig) {
+        // Local credentials don't match — try Firebase email next.
+        try {
+          await finishIfVerified(
+            await signInWithFirebaseEmail(firebaseConfig, email, password),
+          );
+          return;
+        } catch (firebaseErr) {
+          setLoginError(
+            friendlyAuthError(firebaseErr, "Incorrect email or password."),
+          );
+          return;
+        }
+      }
+
+      // Backend rejected the login. Conflate detail messages into a
+      // single neutral string so the form doesn't leak whether the
+      // email is registered.
+      setLoginError("Incorrect email or password.");
     } catch (err) {
-      setLoginError(err instanceof Error ? err.message : "Auth failed.");
+      setLoginError(
+        friendlyAuthError(err, "Sign-in failed. Please try again."),
+      );
     } finally {
       setIsLoading(false);
     }
   };
 
-  const clearError = () => setLoginError(null);
+  const clearError = () => {
+    setLoginError(null);
+    setLoginNotice(null);
+  };
 
   return (
     <div className="bg-background text-foreground min-h-dvh flex flex-col items-center justify-center overflow-hidden text-sm leading-normal antialiased relative px-4 py-6">
@@ -231,8 +414,8 @@ export function LoginPage() {
             <div className="font-extrabold text-lg text-foreground tracking-tight">
               Surogates
             </div>
-            <div className="text-[10px] text-muted-foreground tracking-[0.14em] uppercase">
-              Managed Agent Platform
+            <div className="text-xs text-muted-foreground tracking-[0.14em] uppercase">
+              Managed Agent
             </div>
           </div>
         </div>
@@ -299,6 +482,26 @@ export function LoginPage() {
             </Alert>
           )}
 
+          {loginNotice && (
+            <Alert className="mb-4 rounded-lg border-primary/20 bg-primary/5 px-3.5 py-2.5 text-sm animate-[fade-in_0.2s_ease] after:hidden">
+              <AlertDescription className="text-sm text-foreground">
+                {loginNotice}
+                {pendingVerificationUser && (
+                  <button
+                    type="button"
+                    disabled={resendingVerification}
+                    onClick={handleResendVerification}
+                    className="ml-1 inline text-primary hover:underline disabled:opacity-50 disabled:hover:no-underline"
+                  >
+                    {resendingVerification
+                      ? "Resending…"
+                      : "Resend verification email"}
+                  </button>
+                )}
+              </AlertDescription>
+            </Alert>
+          )}
+
           <Button
             type="submit"
             disabled={isLoading}
@@ -307,13 +510,84 @@ export function LoginPage() {
             {isLoading ? (
               <>
                 <Spinner className="size-4 text-primary-foreground" />
-                Signing in...
+                {firebaseMode === "create"
+                  ? "Creating account..."
+                  : "Signing in..."}
               </>
+            ) : firebaseMode === "create" ? (
+              "Create account"
             ) : (
               "Sign in"
             )}
           </Button>
+
+          {firebasePasswordEnabled && (
+            <button
+              type="button"
+              className="mt-3 block text-center text-[11px] text-faint hover:text-foreground transition-colors"
+              onClick={() => {
+                clearError();
+                setFirebaseMode((m) => (m === "create" ? "sign-in" : "create"));
+              }}
+            >
+              {firebaseMode === "create"
+                ? "Already have an account? Sign in"
+                : "New here? Create an account"}
+            </button>
+          )}
         </form>
+
+        {/* ── Firebase self-registration ── */}
+        {showFirebase && authConfig.firebase && (() => {
+          // Capture the narrowed reference so the button onClicks don't
+          // need to re-check ``authConfig.firebase`` (and don't reach for
+          // a non-null assertion that the lint rule forbids).
+          const firebase = authConfig.firebase;
+          return (
+            <div className="mt-6 border-t border-line pt-5">
+              <p className="mb-3 text-[11px] uppercase tracking-widest text-faint">
+                Or continue with
+              </p>
+
+              {firebaseProviders.includes("google") && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="lg"
+                  className="mb-2 w-full"
+                  disabled={isLoading}
+                  onClick={() =>
+                    runFirebaseAction(
+                      "Google",
+                      () => signInWithGoogle(firebase),
+                    )
+                  }
+                >
+                  Google
+                </Button>
+              )}
+
+              {firebaseProviders.includes("github") && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="lg"
+                  className="mb-2 w-full"
+                  disabled={isLoading}
+                  onClick={() =>
+                    runFirebaseAction(
+                      "GitHub",
+                      () => signInWithGithub(firebase),
+                    )
+                  }
+                >
+                  GitHub
+                </Button>
+              )}
+
+            </div>
+          );
+        })()}
       </Card>
 
       {/* tags strip below card */}
