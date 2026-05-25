@@ -1,5 +1,27 @@
 # PptxGenJS Tutorial
 
+## Running your script
+
+`pptxgenjs`, `react`, `react-dom`, `react-icons`, and `sharp` are
+installed **globally** in the sandbox at `/usr/lib/node_modules` —
+**not** in the workspace's `node_modules/`. Node's default module
+resolution does not look there, so `node my_script.js` from inside the
+workspace will fail with:
+
+```
+Error: Cannot find module 'pptxgenjs'
+```
+
+Always invoke node with `NODE_PATH` pointing at the global directory:
+
+```bash
+NODE_PATH=/usr/lib/node_modules node my_script.js
+```
+
+Do **NOT** `npm install pptxgenjs` (or the other listed packages) into
+the workspace as a workaround — they're already on disk; the only
+thing missing is the path hint.
+
 ## Setup & Basic Structure
 
 ```javascript

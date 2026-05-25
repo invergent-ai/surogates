@@ -6,7 +6,11 @@ license: Proprietary. LICENSE.txt has complete terms
 
 # PPTX Skill
 
-**All dependencies referenced in this skill are pre-installed in the sandbox image** — Python `python-pptx`, `markitdown[pptx]`, `Pillow`, plus the JavaScript `pptxgenjs` library and the command-line tools `soffice` (LibreOffice) and `pdftoppm` (poppler-utils). **Do NOT `pip install` or `npm install` anything** — just import or invoke directly.
+**Dependencies are pre-installed in the sandbox — do NOT `pip install`, `npm install`, or `apt-get install` anything.** Just import or invoke directly. The sandbox runs as a non-root user without `sudo`, so `apt-get install ...` will fail with a permission error and `sudo apt-get ...` will fail with `sudo: not found`. If a CLI tool returns `not found`, fall back to the equivalent Python library on this page rather than attempting to install it.
+
+- **Python libraries (always present):** `python-pptx`, `markitdown[pptx]`, `Pillow`.
+- **JavaScript libraries (always present, in `/usr/lib/node_modules`):** `pptxgenjs`, `react`, `react-dom`, `react-icons`, `sharp`. See [pptxgenjs.md](pptxgenjs.md) for the `NODE_PATH` invocation — without it, `node my_script.js` will fail with `Cannot find module 'pptxgenjs'`.
+- **CLI tools (present on current sandbox images):** `soffice` (LibreOffice, used by `scripts/office/soffice.py` for pptx → pdf conversion), `pdftoppm` (poppler-utils). Older sandbox images may be missing these — if `which soffice` returns nothing, the conversion isn't available and you should not attempt to install LibreOffice.
 
 ## Reading PPTX text — use `read_file`
 

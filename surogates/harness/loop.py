@@ -2684,6 +2684,10 @@ class AgentHarness:
             # Tool batch resolved — kick off the iteration summary
             # before the next iteration starts. Fire-and-forget so the
             # next LLM call isn't blocked on the cheap summarizer.
+            # Pass tool_results so the summarizer can distinguish
+            # identical-looking calls by their outcome (e.g. four
+            # `python3 -c \"...\"` calls that inspect different
+            # things should get four different labels).
             await self._maybe_summarize_iteration(
                 session_id=session.id,
                 turn_id=turn_id,
@@ -2691,6 +2695,7 @@ class AgentHarness:
                 reasoning_text=reasoning_text or "",
                 tool_calls=tool_calls_raw or [],
                 started_at=iteration_started_at,
+                tool_results=tool_results or [],
             )
 
         # --- Post-loop skill nudge check ---
@@ -3673,14 +3678,45 @@ class AgentHarness:
         if scaffold is None:
             return
 
-        injected = {
-            "role": "user",
-            "content": format_scaffold_for_injection(scaffold),
-            "_surogate_synthetic": "self_discover_scaffold",
-        }
-        create_kwargs["messages"] = list(create_kwargs["messages"]) + [injected]
+        # Merge the scaffold into the latest user message in-place
+        # rather than appending it as a separate synthetic user
+        # message. With a separate trailing message, every iteration's
+        # last user-role content was the scaffold's imperative; the
+        # model kept narrating "The user is asking me to continue..."
+        # because that's literally what its most recent user message
+        # said. Bundling the scaffold into the original request keeps
+        # the planning context visible without re-prompting the model
+        # on every iteration.
+        body = format_scaffold_for_injection(scaffold)
+        working = list(create_kwargs["messages"])
+        target_idx = -1
+        for i in range(len(working) - 1, -1, -1):
+            if working[i].get("role") == "user":
+                target_idx = i
+                break
+        if target_idx < 0:
+            return
+        target = dict(working[target_idx])
+        original_content = target.get("content")
+        if isinstance(original_content, str):
+            target["content"] = f"{original_content}\n\n{body}"
+        elif isinstance(original_content, list):
+            # Multimodal user message (text blocks + images). Append
+            # the scaffold as an extra text block so we don't
+            # stringify and lose the image parts.
+            target["content"] = list(original_content) + [
+                {"type": "text", "text": body},
+            ]
+        else:
+            # Unknown content shape — leave the message alone rather
+            # than corrupt it.
+            return
+        target["_surogate_scaffold_merged"] = True
+        working[target_idx] = target
+        create_kwargs["messages"] = working
         logger.debug(
-            "SELF-DISCOVER: injected scaffold (category=%s, modules=%s).",
+            "SELF-DISCOVER: merged scaffold into user msg "
+            "(category=%s, modules=%s).",
             classification.category,
             scaffold.relevant_modules,
         )
@@ -4124,6 +4160,7 @@ class AgentHarness:
         reasoning_text: str,
         tool_calls: list[dict[str, Any]],
         started_at: str,
+        tool_results: list[dict[str, Any]] | None = None,
     ) -> None:
         """Fire-and-forget per-iteration summarization.
 
@@ -4158,6 +4195,7 @@ class AgentHarness:
                 reasoning=reasoning_text,
                 tool_calls=tool_calls,
                 prior_iteration_summaries=prior_summaries,
+                tool_results=tool_results,
             )
             if summary is None:
                 return
@@ -5639,6 +5677,7 @@ class AgentHarness:
             return out
 
         in_turn = False
+        terminal_commands: list[str] = []
         for evt in events:
             data = evt.data or {}
             if data.get("turn_id") == turn_id:
@@ -5685,6 +5724,7 @@ class AgentHarness:
                 elif name == "terminal":
                     cmd = args.get("command") or ""
                     if isinstance(cmd, str) and cmd and tc_id:
+                        terminal_commands.append(cmd)
                         out.append(
                             TurnArtifact(
                                 kind="command",
@@ -5722,7 +5762,32 @@ class AgentHarness:
             )
             workspace_candidates = []
         out.extend(workspace_candidates)
-        return out
+
+        # Flag intermediate scripts: a file the agent wrote and then
+        # ran via terminal is almost always scaffolding (e.g. a python
+        # script used to generate the real deliverable), not a final
+        # artifact the user wanted. Annotate so the summarizer LLM can
+        # filter them out — we don't drop here because the user
+        # occasionally does ask for code, and the LLM gets to make
+        # that call against the user message.
+        annotated: list[TurnArtifact] = []
+        for art in out:
+            if art.kind != "file":
+                annotated.append(art)
+                continue
+            executed = any(art.ref in cmd for cmd in terminal_commands)
+            if executed:
+                meta = dict(art.meta or {})
+                meta["executed_by_terminal"] = True
+                annotated.append(TurnArtifact(
+                    kind=art.kind,
+                    label=art.label,
+                    ref=art.ref,
+                    meta=meta,
+                ))
+            else:
+                annotated.append(art)
+        return annotated
 
     async def _scan_workspace_for_new_files(
         self,

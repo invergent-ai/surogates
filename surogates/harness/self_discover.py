@@ -211,11 +211,17 @@ async def build_scaffold(
 
 
 def format_scaffold_for_injection(scaffold: ReasoningScaffold) -> str:
-    """Render a scaffold as the body of a synthetic user message.
+    """Render a scaffold block for in-place merge into the user message.
 
-    The ``<reasoning_scaffold>`` marker lets the assistant recognise
-    this as its own scratch (not user-authored text) and lets us
-    detect double-injection if the message somehow leaks back.
+    Wrapped in ``<reasoning_scaffold>...</reasoning_scaffold>`` so the
+    assistant can recognise it as harness-supplied planning context
+    (not user-authored prose) and so we can detect double-injection if
+    the block ever leaks back into the persisted log.
+
+    No trailing imperative: the user's request already states what to
+    do. Stacking "Now produce the answer..." at the end of every
+    iteration's last user-role message caused the model to narrate
+    "The user is asking me to continue..." on every iteration.
     """
     modules_line = ", ".join(scaffold.relevant_modules) or "(none)"
     structure_json = json.dumps(scaffold.structure, indent=2)
@@ -226,12 +232,10 @@ def format_scaffold_for_injection(scaffold: ReasoningScaffold) -> str:
     )
     return (
         "<reasoning_scaffold>\n"
-        "Before answering, I built a scaffold for this task.  Following it gives "
-        "more reliable answers on this kind of work.\n\n"
+        "Planning context for this task. Following the structure below "
+        "tends to produce more reliable answers on this kind of work.\n\n"
         f"**Heuristics in play:** {modules_line}\n\n"
         f"**Structure:**\n```json\n{structure_json}\n```\n\n"
         f"**Pitfalls to avoid:**\n{pitfalls_lines}\n"
-        "</reasoning_scaffold>\n\n"
-        "Now produce the answer, following the structure top-to-bottom.  Watch "
-        "for the pitfalls."
+        "</reasoning_scaffold>"
     )

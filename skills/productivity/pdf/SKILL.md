@@ -10,7 +10,11 @@ license: Proprietary. LICENSE.txt has complete terms
 
 This guide covers PDF **transformations** — merging, splitting, rotating, watermarking, encrypting, filling forms, extracting images, and OCRing scanned PDFs. **Reading text/tables is handled by `read_file` directly; do NOT use this skill for plain reading.** See REFERENCE.md for advanced library usage and FORMS.md for form filling.
 
-**All dependencies referenced in this skill are pre-installed in the sandbox image** — `pypdf`, `pdfplumber`, `pypdfium2`, `reportlab`, `pytesseract`, `pdf2image`, `Pillow`, `pandas`, `numpy`, and the JavaScript libs `pdf-lib` + `pdfjs-dist`, plus the command-line tools `pdftotext` / `pdftoppm` / `pdfimages` (poppler-utils), `qpdf`, `pdftk`, `pandoc`, and `tesseract`. **Do NOT `pip install` or `npm install` anything** — just import or invoke directly.
+**Dependencies are pre-installed in the sandbox image — do NOT `pip install` or `npm install` anything.** Just import or invoke directly.
+
+- **Python libraries (always present):** `pypdf`, `pdfplumber`, `pypdfium2`, `reportlab`, `pytesseract`, `pdf2image`, `Pillow`, `pandas`, `numpy`.
+- **JavaScript libraries (always present):** `pdf-lib`, `pdfjs-dist`.
+- **CLI tools (present on current sandbox images):** `pdftotext` / `pdftoppm` / `pdfimages` (poppler-utils), `qpdf`, `pdftk`, `pandoc`, `tesseract`. Older sandbox images may be missing some of these — if a CLI tool returns `not found`, fall back to the equivalent Python library on this page rather than trying to install it.
 
 ## Reading PDF text — use `read_file`
 
@@ -25,13 +29,32 @@ Pagination via `offset`/`limit` is free (cached). Do **NOT** `pip install
 pypdf`/`pdfplumber`/`pymupdf` or write subprocess extraction scripts for
 reading — that bootstrap is exactly what `read_file` eliminates.
 
-If `read_file` fails on a specific PDF (encrypted, corrupt, or a scanned
-image-only PDF with no text layer), it returns a fallback hint pointing
-to `pdftotext`/`pandoc` or — for scanned PDFs — the `ocr-and-documents`
-skill. Only then drop down to the library recipes below.
+If `read_file` fails or **times out** on a specific PDF (large papers,
+encrypted, corrupt, or a scanned image-only PDF with no text layer),
+fall back in this order:
 
-The Python libraries on this page are for **transformations** (the next
-sections), not for reading.
+1. **`pypdf` first.** It's a pure-Python library that's always
+   importable in the sandbox and doesn't depend on apt packages. Use
+   it to read pages directly — see the snippet below.
+2. **`pdftotext` / `pandoc`** (poppler-utils) when `pypdf` can't
+   handle the specific PDF (e.g. tricky encoding). These are CLI
+   tools and may be missing on older sandbox images; if `which
+   pdftotext` errors, stay on `pypdf`.
+3. **`ocr-and-documents` skill** for scanned image-only PDFs.
+
+```python
+# Reliable fallback when read_file times out — chunk by page range
+# so a single call doesn't run past the tool timeout on long papers.
+from pypdf import PdfReader
+reader = PdfReader("path/to/document.pdf")
+print(f"Total pages: {len(reader.pages)}")
+for i in range(0, len(reader.pages)):
+    print(f"--- Page {i + 1} ---")
+    print(reader.pages[i].extract_text())
+```
+
+The other Python libraries on this page are for **transformations**
+(the next sections), not for plain reading.
 
 ## Python Libraries
 

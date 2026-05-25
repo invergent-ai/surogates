@@ -1257,12 +1257,27 @@ export function IterationGroup({
 function deriveFileArtifactsFromMessages(
   messages: ChatMessageType[],
 ): AgentChatTurnArtifactRef[] {
+  // First pass: gather every terminal command issued in this turn so
+  // we can detect files the agent ran itself (intermediate scripts).
+  // Mirrors the harness-side executed_by_terminal heuristic.
+  const terminalCommands: string[] = [];
+  for (const msg of messages) {
+    if (msg.role !== "assistant" || !msg.toolCalls) continue;
+    for (const tc of msg.toolCalls) {
+      if (tc.toolName !== "terminal") continue;
+      const status = effectiveStatus(tc);
+      if (status === "error" || status === "cancelled") continue;
+      const args = parseArgs<Record<string, unknown>>(tc.args);
+      const cmd = typeof args?.command === "string" ? args.command : "";
+      if (cmd) terminalCommands.push(cmd);
+    }
+  }
+
   const seen = new Set<string>();
   const out: AgentChatTurnArtifactRef[] = [];
   for (const msg of messages) {
     if (msg.role !== "assistant" || !msg.toolCalls) continue;
     for (const tc of msg.toolCalls) {
-      // Skip failed / cancelled — the agent already retried.
       const status = effectiveStatus(tc);
       if (status === "error" || status === "cancelled") continue;
       const args = parseArgs<Record<string, unknown>>(tc.args);
@@ -1274,6 +1289,12 @@ function deriveFileArtifactsFromMessages(
             ? args.file_path
             : "";
         if (!path || seen.has(`file:${path}`)) continue;
+        // Skip files the agent later ran as a script — these are
+        // almost always scaffolding (chart generators, etc.), not
+        // deliverables. The LLM-driven harness summarizer applies
+        // the same rule via the executed_by_terminal annotation.
+        const executed = terminalCommands.some((cmd) => cmd.includes(path));
+        if (executed) continue;
         seen.add(`file:${path}`);
         out.push({
           kind: "file",
@@ -1363,11 +1384,19 @@ function SimpleAssistantGroup({
   // group for write_file / patch / create_artifact tool calls and
   // promote each unique output path to a file artifact. The real
   // turn.summary always wins when present and non-empty.
+  //
+  // Gated on turn completion: the fallback would otherwise pop into
+  // view as soon as the agent's first write_file lands, well before
+  // the user-facing turn is done. We only synthesize once the tail
+  // iteration has stopped streaming so the summary card matches what
+  // the harness would have emitted at turn end.
+  const turnComplete = !isRunning && tail?.status === "complete";
   const effectiveTurnSummary = (() => {
     const fromHarness = tail?.turnSummary;
     if (fromHarness && fromHarness.artifacts.length > 0) {
       return fromHarness;
     }
+    if (!turnComplete) return fromHarness;
     const derived = deriveFileArtifactsFromMessages(messages);
     if (derived.length === 0) return fromHarness;
     return {

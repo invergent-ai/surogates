@@ -84,6 +84,38 @@ function findEntry(
   return null;
 }
 
+const FILENAME_MAX_CHARS = 42;
+
+function truncateFilename(name: string, max: number): string {
+  if (name.length <= max) return name;
+  // Keep the extension visible — useful for telling files apart when
+  // only the prefix differs (e.g. timestamped uploads).
+  const dot = name.lastIndexOf(".");
+  if (dot > 0 && name.length - dot <= 12) {
+    const ext = name.slice(dot);
+    const head = name.slice(0, Math.max(1, max - ext.length - 1));
+    return `${head}…${ext}`;
+  }
+  return `${name.slice(0, max - 1)}…`;
+}
+
+function TruncatedFileName({ name }: { name: string }) {
+  const truncated = truncateFilename(name, FILENAME_MAX_CHARS);
+  const isTruncated = truncated !== name;
+  const node = (
+    <span className="min-w-0 flex-1 truncate">{truncated}</span>
+  );
+  if (!isTruncated) return node;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{node}</TooltipTrigger>
+      <TooltipContent side="top" className="max-w-md break-all">
+        {name}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 function RenderEntries({
   entries,
   onDelete,
@@ -115,7 +147,7 @@ function RenderEntries({
         return (
           <FileTreeFile key={entry.path} name={entry.name} path={entry.path}>
             <span className="size-4 shrink-0" />
-            <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+            <TruncatedFileName name={entry.name} />
             {entry.size != null && (
               <span className="ml-1 shrink-0 text-xs text-muted-foreground/60">
                 {formatFileSize(entry.size)}
@@ -163,7 +195,6 @@ export function WorkspacePanel({
 }: WorkspacePanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [entries, setEntries] = useState<AgentChatWorkspaceEntry[]>([]);
-  const [rootName, setRootName] = useState("workspace");
   const [treeLoading, setTreeLoading] = useState(false);
   const [treeError, setTreeError] = useState<string | null>(null);
   const [file, setFile] = useState<AgentChatWorkspaceFile | null>(null);
@@ -184,7 +215,6 @@ export function WorkspacePanel({
   const fetchTree = useCallback(async () => {
     if (!sessionId) {
       setEntries([]);
-      setRootName("workspace");
       setExpandedPaths(new Set());
       setTreeLoading(false);
       setTreeError(null);
@@ -199,12 +229,10 @@ export function WorkspacePanel({
       });
       if (sessionIdRef.current !== requestedSessionId) return;
       setEntries(tree.entries);
-      setRootName(tree.root || "workspace");
       setExpandedPaths(new Set(collectExpandedPaths(tree.entries)));
     } catch (error) {
       if (sessionIdRef.current !== requestedSessionId) return;
       setEntries([]);
-      setRootName("workspace");
       setTreeError((error as Error).message);
     } finally {
       if (sessionIdRef.current === requestedSessionId) {
@@ -410,9 +438,6 @@ export function WorkspacePanel({
         <FolderOpenIcon className="size-4 shrink-0 text-amber-500" />
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-medium text-foreground">
-            {rootName}
-          </div>
-          <div className="truncate text-xs text-faint">
             {disabled ? "Workspace - Read-only" : "Workspace"}
           </div>
         </div>

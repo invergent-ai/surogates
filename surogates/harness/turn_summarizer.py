@@ -59,20 +59,38 @@ class TurnSummary:
 
 
 _ITERATION_PROMPT = (
-    "You write one short imperative sentence describing what an agent "
-    "just did in this iteration. Be specific and concrete. No quotes, "
-    "no period at the end, no leading 'The agent', max 12 words."
+    "You write one short sentence describing what the agent learned or "
+    "accomplished in this iteration. Each tool call is paired with a "
+    "short snippet of its result — use the result, not just the call, "
+    "to decide the label. Two consecutive calls that look identical "
+    "(e.g. several `python3 -c \"...Presentation...\"` commands) often "
+    "do different things; distinguish them by their result. If a call "
+    "failed, say so (e.g. 'Find pdftotext fails — falling back to "
+    "pypdf'). Be specific and concrete. No quotes, no period at the "
+    "end, no leading 'The agent', max 12 words."
 )
 
 _TURN_PROMPT = (
     "Summarize what an agent accomplished in this turn for the user. "
     "Return ONLY a JSON object with two fields:\n"
     "  recap: 1-3 short sentences in plain prose, no markdown\n"
-    "  artifacts: a curated subset of the candidate artifacts the user "
-    "would want quick access to. Drop noisy read-only lookups; keep "
-    "files written/edited, created artifacts, fetched URLs, and "
-    "notable commands. Each artifact is "
-    '{"kind": "file|artifact|url|command", "label": str, "ref": str}.'
+    "  artifacts: ONLY the final deliverables the user actually asked "
+    "for. Be strict — this is what gets surfaced as the user-visible "
+    "summary card, so noise here is worse than missing items.\n"
+    "    DROP: intermediate scripts the agent wrote and ran itself "
+    "(any candidate with executed_by_terminal=true is almost always "
+    "scaffolding — e.g. a python script used to render a chart that "
+    "the user wanted), read-only lookups, scratch files, and "
+    "debugging output. Source-code files (.py, .sh, .js, .ts) are "
+    "intermediate unless the user explicitly asked for code.\n"
+    "    KEEP: documents (.pdf, .docx, .pptx, .xlsx, .csv, .md), "
+    "media files (images, audio, video), datasets, archives, "
+    "created artifacts, and URLs/commands ONLY when they're the "
+    "actual point of the turn (not steps along the way).\n"
+    "  Each artifact is "
+    '{"kind": "file|artifact|url|command", "label": str, "ref": str}. '
+    "Return an empty artifacts list when no candidate is a real "
+    "deliverable for this user request."
 )
 
 
@@ -93,6 +111,7 @@ class TurnSummarizer:
         reasoning: str,
         tool_calls: list[dict[str, Any]],
         prior_iteration_summaries: list[str],
+        tool_results: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Summarize a single LLM iteration as a one-line imperative.
 
@@ -102,7 +121,7 @@ class TurnSummarizer:
         if not reasoning and not tool_calls:
             return None
 
-        tool_lines = self._format_tool_calls(tool_calls)
+        tool_lines = self._format_tool_calls(tool_calls, tool_results or [])
         user_block_parts: list[str] = []
         if prior_iteration_summaries:
             prior = "\n".join(f"- {s}" for s in prior_iteration_summaries)
@@ -110,7 +129,10 @@ class TurnSummarizer:
         if reasoning:
             user_block_parts.append(f"Reasoning:\n{reasoning[:2000]}")
         if tool_lines:
-            user_block_parts.append("Tools called:\n" + "\n".join(tool_lines))
+            user_block_parts.append(
+                "Tools called (with result snippets):\n"
+                + "\n".join(tool_lines)
+            )
         user_block = "\n\n".join(user_block_parts)
 
         kwargs: dict[str, Any] = {
@@ -151,6 +173,11 @@ class TurnSummarizer:
 
         cand_lines = "\n".join(
             f"- kind={a.kind} label={a.label!r} ref={a.ref!r}"
+            + (
+                " executed_by_terminal=true"
+                if (a.meta or {}).get("executed_by_terminal")
+                else ""
+            )
             for a in candidate_artifacts
         )
         user_block_parts: list[str] = [f"User asked: {user_message[:1000]}"]
@@ -231,14 +258,42 @@ class TurnSummarizer:
             return None
 
     @staticmethod
-    def _format_tool_calls(tool_calls: list[dict[str, Any]]) -> list[str]:
+    def _format_tool_calls(
+        tool_calls: list[dict[str, Any]],
+        tool_results: list[dict[str, Any]],
+    ) -> list[str]:
+        # Index results by tool_call_id so each call is paired with the
+        # right result regardless of execution order. Two parallel
+        # calls in the same iteration can return in either order.
+        results_by_id: dict[str, str] = {}
+        for tr in tool_results:
+            call_id = str(tr.get("tool_call_id") or "")
+            if not call_id:
+                continue
+            content = tr.get("content")
+            if isinstance(content, str):
+                results_by_id[call_id] = content
+            elif isinstance(content, list):
+                # Multipart content: concatenate text parts only.
+                parts: list[str] = []
+                for p in content:
+                    if isinstance(p, dict) and isinstance(p.get("text"), str):
+                        parts.append(p["text"])
+                results_by_id[call_id] = "\n".join(parts)
         out: list[str] = []
         for tc in tool_calls:
             fn = tc.get("function") or {}
             name = fn.get("name") or tc.get("name") or "?"
             args = fn.get("arguments") or tc.get("arguments") or ""
             args_snippet = (args or "")[:200]
-            out.append(f"{name}({args_snippet})")
+            call_id = str(tc.get("id") or "")
+            result = results_by_id.get(call_id, "")
+            # Keep result snippets short — the summarizer only needs
+            # enough to tell two calls apart, not the full output.
+            result_snippet = result[:300] if result else "(no result captured)"
+            out.append(
+                f"call: {name}({args_snippet})\n  result: {result_snippet}"
+            )
         return out
 
     @staticmethod

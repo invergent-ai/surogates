@@ -660,38 +660,6 @@ function ChatComposerInner({
                   </Command>
                 </PopoverContent>
               </Popover>
-              {onViewModeChange && (
-                <div
-                  role="group"
-                  aria-label="Chat view mode"
-                  className="inline-flex overflow-hidden rounded-md border border-border"
-                >
-                  <button
-                    type="button"
-                    aria-pressed={viewMode === "simple"}
-                    onClick={() => onViewModeChange("simple")}
-                    className={
-                      viewMode === "simple"
-                        ? "bg-accent px-2 py-1 text-xs text-foreground"
-                        : "px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
-                    }
-                  >
-                    Simple
-                  </button>
-                  <button
-                    type="button"
-                    aria-pressed={viewMode === "expert"}
-                    onClick={() => onViewModeChange("expert")}
-                    className={
-                      viewMode === "expert"
-                        ? "bg-accent px-2 py-1 text-xs text-foreground"
-                        : "px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
-                    }
-                  >
-                    Expert
-                  </button>
-                </div>
-              )}
               {canShowBrowser && onToggleBrowser && (
                 <PromptInputButton
                   aria-label={
@@ -806,7 +774,45 @@ function ChatComposerInner({
                 </Context>
               )}
             </PromptInputTools>
-            <PromptInputSubmit status={status} onStop={onStop} />
+            <div className="flex items-center gap-2">
+              {onViewModeChange && (
+                <div
+                  role="group"
+                  aria-label="Chat view mode"
+                  className="inline-flex overflow-hidden rounded-md border border-border"
+                >
+                  <button
+                    type="button"
+                    aria-pressed={viewMode === "simple"}
+                    onClick={() => onViewModeChange("simple")}
+                    className={
+                      viewMode === "simple"
+                        ? "bg-accent px-2 py-1 text-xs text-foreground"
+                        : "px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+                    }
+                  >
+                    Simple
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={viewMode === "expert"}
+                    onClick={() => onViewModeChange("expert")}
+                    className={
+                      viewMode === "expert"
+                        ? "bg-accent px-2 py-1 text-xs text-foreground"
+                        : "px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+                    }
+                  >
+                    Advanced
+                  </button>
+                </div>
+              )}
+              <PromptInputSubmit
+                status={status}
+                onStop={onStop}
+                className="md:size-8"
+              />
+            </div>
           </PromptInputFooter>
         </PromptInput>
       </PopoverAnchor>

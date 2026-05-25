@@ -86,7 +86,7 @@ export function TurnFeedback({ msg }: { msg: ChatMessageType }) {
         <Button
           type="button"
           variant="ghost"
-          size="icon-xs"
+          size="icon-sm"
           aria-label="Good response"
           title={
             alreadyRated && rating === "up"
@@ -99,12 +99,12 @@ export function TurnFeedback({ msg }: { msg: ChatMessageType }) {
             rating === "up" ? "text-foreground" : "text-muted-foreground/60",
           )}
         >
-          <ThumbsUpIcon className="size-3.5" />
+          <ThumbsUpIcon className="size-4.5" />
         </Button>
         <Button
           type="button"
           variant="ghost"
-          size="icon-xs"
+          size="icon-sm"
           aria-label="Poor response"
           title={
             alreadyRated && rating === "down"
@@ -117,7 +117,7 @@ export function TurnFeedback({ msg }: { msg: ChatMessageType }) {
             rating === "down" ? "text-foreground" : "text-muted-foreground/60",
           )}
         >
-          <ThumbsDownIcon className="size-3.5" />
+          <ThumbsDownIcon className="size-4.5" />
         </Button>
         {alreadyRated && msg.userFeedback?.reason && (
           <span

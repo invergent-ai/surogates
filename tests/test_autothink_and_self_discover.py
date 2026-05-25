@@ -194,15 +194,21 @@ class TestSelfDiscover:
 
         # Original api_messages is untouched -- mutation is on the copy.
         assert len(api_messages) == 1
+        assert "<reasoning_scaffold>" not in api_messages[0]["content"]
 
-        # create_kwargs got an appended synthetic message.
-        assert len(create_kwargs["messages"]) == 2
-        appended = create_kwargs["messages"][-1]
-        assert appended["role"] == "user"
-        assert appended["_surogate_synthetic"] == "self_discover_scaffold"
-        assert "<reasoning_scaffold>" in appended["content"]
-        assert "draft_implementation" in appended["content"]
-        assert "Accidentally flattening strings" in appended["content"]
+        # The scaffold is merged into the existing user message rather
+        # than appended as a separate synthetic message.
+        assert len(create_kwargs["messages"]) == 1
+        merged = create_kwargs["messages"][0]
+        assert merged["role"] == "user"
+        assert merged["_surogate_scaffold_merged"] is True
+        assert merged["content"].startswith("Write a flatten function.")
+        assert "<reasoning_scaffold>" in merged["content"]
+        assert "draft_implementation" in merged["content"]
+        assert "Accidentally flattening strings" in merged["content"]
+        # Trailing imperative is gone — that was the source of the
+        # per-iteration "The user is asking me to continue" loop.
+        assert "Now produce the answer" not in merged["content"]
 
     @pytest.mark.asyncio
     async def test_excluded_category_terminal_skips_scaffold(self):
