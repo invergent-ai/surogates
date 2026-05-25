@@ -27,7 +27,7 @@ Updated before every commit.
 - [x] Task 9 — Integration test for end-to-end round trip
 - [x] Task 10 — History-replay regression test
 - [x] Task 11 — Update `docs/tools/index.md`
-- [ ] **Task 12 (in progress)** — Smoke test and verify
+- [x] Task 12 — Smoke test and verify
 
 ---
 
