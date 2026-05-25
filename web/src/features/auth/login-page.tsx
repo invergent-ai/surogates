@@ -180,6 +180,11 @@ export function LoginPage() {
     };
   }, []);
 
+  const firebasePasswordEnabled =
+    showFirebase &&
+    authConfig.firebase !== null &&
+    firebaseProviders.includes("password");
+
   const handleLogin = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!email || !password) {
@@ -189,6 +194,26 @@ export function LoginPage() {
     setLoginError(null);
     setIsLoading(true);
 
+    // ── Create-account mode: sign up via Firebase email/password. ──
+    const firebaseConfig = authConfig.firebase;
+    if (firebaseMode === "create" && firebasePasswordEnabled && firebaseConfig) {
+      try {
+        await finishFirebaseUser(
+          await createFirebaseEmailAccount(firebaseConfig, email, password),
+        );
+      } catch (err) {
+        setLoginError(
+          err instanceof Error ? err.message : "Sign-up failed.",
+        );
+      } finally {
+        setIsLoading(false);
+      }
+      return;
+    }
+
+    // ── Sign-in mode: try local DB auth first so manually-created
+    //    users keep working, then fall back to Firebase email sign-in
+    //    when the password provider is enabled for this agent. ──
     try {
       const response = await fetch("/api/v1/auth/login", {
         method: "POST",
@@ -196,20 +221,38 @@ export function LoginPage() {
         body: JSON.stringify({ email, password }),
       });
 
-      if (!response.ok) {
-        const payload = (await response.json().catch(() => null)) as {
-          detail?: string;
-        } | null;
-        throw new Error(payload?.detail ?? "Invalid credentials.");
+      if (response.ok) {
+        const payload = (await response.json()) as {
+          access_token: string;
+          refresh_token: string;
+          token_type: string;
+        };
+        storeAuthTokens(payload.access_token, payload.refresh_token);
+        void navigate({ to: getPostAuthRoute() });
+        return;
       }
 
-      const payload = (await response.json()) as {
-        access_token: string;
-        refresh_token: string;
-        token_type: string;
-      };
-      storeAuthTokens(payload.access_token, payload.refresh_token);
-      void navigate({ to: getPostAuthRoute() });
+      if (response.status === 401 && firebasePasswordEnabled && firebaseConfig) {
+        // Local credentials don't match — try Firebase email next.
+        try {
+          await finishFirebaseUser(
+            await signInWithFirebaseEmail(firebaseConfig, email, password),
+          );
+          return;
+        } catch (firebaseErr) {
+          setLoginError(
+            firebaseErr instanceof Error
+              ? firebaseErr.message
+              : "Invalid credentials.",
+          );
+          return;
+        }
+      }
+
+      const payload = (await response.json().catch(() => null)) as {
+        detail?: string;
+      } | null;
+      setLoginError(payload?.detail ?? "Invalid credentials.");
     } catch (err) {
       setLoginError(err instanceof Error ? err.message : "Auth failed.");
     } finally {
@@ -296,8 +339,8 @@ export function LoginPage() {
             <div className="font-extrabold text-lg text-foreground tracking-tight">
               Surogates
             </div>
-            <div className="text-[10px] text-muted-foreground tracking-[0.14em] uppercase">
-              Managed Agent Platform
+            <div className="text-xs text-muted-foreground tracking-[0.14em] uppercase">
+              Managed Agent
             </div>
           </div>
         </div>
@@ -372,12 +415,30 @@ export function LoginPage() {
             {isLoading ? (
               <>
                 <Spinner className="size-4 text-primary-foreground" />
-                Signing in...
+                {firebaseMode === "create"
+                  ? "Creating account..."
+                  : "Signing in..."}
               </>
+            ) : firebaseMode === "create" ? (
+              "Create account"
             ) : (
               "Sign in"
             )}
           </Button>
+
+          {firebasePasswordEnabled && (
+            <button
+              type="button"
+              className="mt-3 w-full text-center text-[11px] text-faint hover:text-foreground transition-colors"
+              onClick={() =>
+                setFirebaseMode((m) => (m === "create" ? "sign-in" : "create"))
+              }
+            >
+              {firebaseMode === "create"
+                ? "Already have an account? Sign in"
+                : "New here? Create an account"}
+            </button>
+          )}
         </form>
 
         {/* ── Firebase self-registration ── */}
@@ -423,52 +484,6 @@ export function LoginPage() {
               </Button>
             )}
 
-            {firebaseProviders.includes("password") && (
-              <div className="mt-3 flex flex-col gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="lg"
-                  disabled={isLoading || !email || !password}
-                  onClick={() =>
-                    runFirebaseAction(
-                      firebaseMode === "create"
-                        ? "Firebase email account"
-                        : "Firebase email",
-                      () =>
-                        firebaseMode === "create"
-                          ? createFirebaseEmailAccount(
-                              authConfig.firebase!,
-                              email,
-                              password,
-                            )
-                          : signInWithFirebaseEmail(
-                              authConfig.firebase!,
-                              email,
-                              password,
-                            ),
-                    )
-                  }
-                >
-                  {firebaseMode === "create"
-                    ? "Create Firebase account"
-                    : "Sign in with Firebase email"}
-                </Button>
-                <button
-                  type="button"
-                  className="text-[11px] text-faint hover:text-foreground transition-colors"
-                  onClick={() =>
-                    setFirebaseMode((m) =>
-                      m === "create" ? "sign-in" : "create",
-                    )
-                  }
-                >
-                  {firebaseMode === "create"
-                    ? "Already have an account? Sign in with Firebase email."
-                    : "New here? Create a Firebase account."}
-                </button>
-              </div>
-            )}
           </div>
         )}
       </Card>
