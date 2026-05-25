@@ -65,7 +65,7 @@ export const ConversationEmptyState = ({
         <div className="space-y-1.5">
           <h3 className="font-semibold text-base text-foreground/80">{title}</h3>
           {description && (
-            <p className="text-muted-foreground/60 text-sm max-w-sm">{description}</p>
+            <p className="text-foreground/60 text-sm max-w-sm">{description}</p>
           )}
         </div>
       </>
