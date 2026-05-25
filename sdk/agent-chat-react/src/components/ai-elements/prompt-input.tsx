@@ -873,11 +873,23 @@ export const PromptInput = ({
             return (formData.get("message") as string) || "";
           })();
 
-      // Reset form immediately after capturing text to avoid race condition
-      // where user input during async blob conversion would be lost
+      // Snapshot attachments before clearing — `files` is a React state
+      // value captured by closure, so clearing the UI doesn't mutate it.
+      const submittedFiles = files;
+
+      // Clear the composer immediately so the user gets prompt visual
+      // feedback that their message was accepted. Consumers are
+      // expected to surface in-flight progress and failures via their
+      // own UI (e.g. an optimistic message bubble with retry on
+      // error); restoring composer state on failure would fight that
+      // pattern and force users to re-attach files they already
+      // picked.
       if (!usingProvider) {
         form.reset();
+      } else {
+        controller.textInput.clear();
       }
+      clear();
 
       try {
         // Convert blob URLs to data URLs asynchronously for image-like
@@ -887,7 +899,7 @@ export const PromptInput = ({
         // a data URL.  For 50 MB attachments this avoids ~67 MB of
         // pointless base64 expansion per submit.
         const convertedFiles: PromptInputFileUIPart[] = await Promise.all(
-          files.map(async (entry) => {
+          submittedFiles.map(async (entry) => {
             const isBlob = entry.url?.startsWith("blob:");
             const isImage = entry.mediaType?.startsWith("image/");
             if (isBlob && isImage && entry.url) {
@@ -901,28 +913,9 @@ export const PromptInput = ({
           })
         );
 
-        const result = onSubmit({ files: convertedFiles, text }, event);
-
-        // Handle both sync and async onSubmit
-        if (result instanceof Promise) {
-          try {
-            await result;
-            clear();
-            if (usingProvider) {
-              controller.textInput.clear();
-            }
-          } catch {
-            // Don't clear on error - user may want to retry
-          }
-        } else {
-          // Sync function completed without throwing, clear inputs
-          clear();
-          if (usingProvider) {
-            controller.textInput.clear();
-          }
-        }
+        await onSubmit({ files: convertedFiles, text }, event);
       } catch {
-        // Don't clear on error - user may want to retry
+        // Swallow — consumer surfaces failures via its own UI.
       }
     },
     [usingProvider, controller, files, onSubmit, clear]
