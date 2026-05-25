@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
+import os
+import tempfile
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID
-
-from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -87,9 +90,7 @@ _INLINE_TEXT_EXTS = frozenset({
 
 def _inline_extension_kind(filename: str) -> Literal["document", "text"] | None:
     """Map a filename to its inline-parsing kind, or None if unsupported."""
-    import os.path as _ospath  # noqa: PLC0415
-
-    ext = _ospath.splitext(filename)[1].lower()
+    ext = os.path.splitext(filename)[1].lower()
     if not ext:
         return None
     if ext in _INLINE_DOC_EXTS:
@@ -97,6 +98,54 @@ def _inline_extension_kind(filename: str) -> Literal["document", "text"] | None:
     if ext in _INLINE_TEXT_EXTS:
         return "text"
     return None
+
+
+_INLINE_MATERIALIZE_ROOT = Path("/tmp/surogates-attachment-inline")
+
+
+def _materialize_for_cache(
+    raw_bytes: bytes,
+    *,
+    bucket: str,
+    storage_key: str,
+    size: int,
+    modified: str,
+    suffix: str,
+    cache_root: Path = _INLINE_MATERIALIZE_ROOT,
+) -> Path:
+    """Write ``raw_bytes`` to a deterministic temp file keyed on identity.
+
+    The document cache hashes the source path's
+    ``(absolute_path, mtime_ns, size, ext)`` tuple.  By materialising
+    the bytes once into a deterministic location, re-sending the same
+    attachment within a pod's lifetime hits the cache instead of
+    re-parsing.
+
+    The filename embeds a SHA-256 of (bucket, storage_key, size,
+    modified) so distinct uploads never collide and re-uploads with
+    different bytes get a fresh entry.
+    """
+    cache_root.mkdir(parents=True, exist_ok=True)
+    fingerprint = hashlib.sha256(
+        f"{bucket}|{storage_key}|{size}|{modified}".encode("utf-8"),
+    ).hexdigest()
+    target = cache_root / f"{fingerprint}{suffix.lower()}"
+    if not target.exists():
+        tmp_file = tempfile.NamedTemporaryFile(
+            dir=cache_root,
+            prefix=f"{fingerprint}.",
+            suffix=".part",
+            delete=False,
+        )
+        tmp = Path(tmp_file.name)
+        try:
+            with tmp_file:
+                tmp_file.write(raw_bytes)
+            os.replace(tmp, target)
+        finally:
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
+    return target
 
 
 class ImageBlock(BaseModel):

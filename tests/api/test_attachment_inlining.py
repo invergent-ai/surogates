@@ -69,3 +69,52 @@ def test_inline_extension_kind(filename: str, expected: str | None) -> None:
     from surogates.api.routes.sessions import _inline_extension_kind
 
     assert _inline_extension_kind(filename) == expected
+
+
+def test_materialize_for_cache_writes_and_returns_deterministic_path(
+    tmp_path,
+) -> None:
+    from surogates.api.routes.sessions import _materialize_for_cache
+
+    raw = b"hello pdf bytes"
+    path1 = _materialize_for_cache(
+        raw_bytes=raw,
+        bucket="b1",
+        storage_key="proj/agent/sess/uploads/file.pdf",
+        size=len(raw),
+        modified="2026-05-25T05:00:00Z",
+        suffix=".pdf",
+        cache_root=tmp_path,
+    )
+    assert path1.exists()
+    assert path1.read_bytes() == raw
+    assert path1.suffix == ".pdf"
+
+    # Same key → same path
+    path2 = _materialize_for_cache(
+        raw_bytes=raw,
+        bucket="b1",
+        storage_key="proj/agent/sess/uploads/file.pdf",
+        size=len(raw),
+        modified="2026-05-25T05:00:00Z",
+        suffix=".pdf",
+        cache_root=tmp_path,
+    )
+    assert path2 == path1
+
+
+def test_materialize_for_cache_different_modified_produces_different_path(
+    tmp_path,
+) -> None:
+    from surogates.api.routes.sessions import _materialize_for_cache
+
+    raw = b"hello"
+    a = _materialize_for_cache(
+        raw_bytes=raw, bucket="b", storage_key="k",
+        size=5, modified="t1", suffix=".txt", cache_root=tmp_path,
+    )
+    b = _materialize_for_cache(
+        raw_bytes=raw, bucket="b", storage_key="k",
+        size=5, modified="t2", suffix=".txt", cache_root=tmp_path,
+    )
+    assert a != b
