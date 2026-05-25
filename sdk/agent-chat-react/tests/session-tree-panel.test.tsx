@@ -120,7 +120,6 @@ describe("SessionTreePanel", () => {
 
     expect(container.textContent).toContain("Sessions");
     expect(container.textContent).toContain("First session");
-    expect(container.textContent).toContain("surogate");
     expect(container.textContent).toContain("ago");
     expect(container.textContent).not.toContain("completed");
   });
@@ -282,7 +281,10 @@ describe("SessionTreePanel", () => {
 
     expect(container.textContent).toContain("Bitcoin monitor");
     expect(container.textContent).toContain("Loop run");
-    expect(container.textContent).toContain("Loop · surogate");
+    // Loop run-kind label appears in the subtitle, joined with the timestamp
+    // ("Loop · {relative time}"). The model used to follow but was removed
+    // from the subtitle; assert just the "Loop ·" prefix here.
+    expect(container.textContent).toContain("Loop ·");
     expect(container.textContent).not.toContain("New session");
     expect(
       container.querySelector('[title="Stop child session"]'),
