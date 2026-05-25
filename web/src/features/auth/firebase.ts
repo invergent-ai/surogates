@@ -24,6 +24,56 @@ import {
 
 import type { FirebaseRuntimeConfig } from "@/api/auth";
 
+// ── Friendly error messages ─────────────────────────────────────────
+//
+// Firebase surfaces errors like ``Firebase: Error (auth/invalid-credential).``
+// which are useless (and slightly intimidating) to end users. We map the
+// codes we expect to surface to neutral, action-oriented strings and
+// deliberately conflate "user not found / wrong password / bad
+// credential" into a single message so the form doesn't leak whether
+// an email is registered.
+const FRIENDLY_AUTH_ERRORS: Record<string, string> = {
+  "auth/invalid-credential": "Incorrect email or password.",
+  "auth/invalid-email": "Please enter a valid email address.",
+  "auth/wrong-password": "Incorrect email or password.",
+  "auth/user-not-found": "Incorrect email or password.",
+  "auth/user-disabled": "This account has been disabled.",
+  "auth/email-already-in-use":
+    "An account with this email already exists. Try signing in instead.",
+  "auth/weak-password": "Password must be at least 6 characters.",
+  "auth/too-many-requests":
+    "Too many attempts. Please wait a moment and try again.",
+  "auth/network-request-failed":
+    "Network error. Please check your connection and try again.",
+  "auth/popup-closed-by-user": "Sign-in was cancelled.",
+  "auth/cancelled-popup-request": "Sign-in was cancelled.",
+  "auth/popup-blocked":
+    "Sign-in popup was blocked. Please allow popups for this site and try again.",
+  "auth/account-exists-with-different-credential":
+    "An account with this email already exists using a different sign-in method.",
+  "auth/operation-not-allowed":
+    "This sign-in method is not enabled. Please contact the administrator.",
+  "auth/requires-recent-login":
+    "Please sign in again to perform this action.",
+};
+
+/** Translate a thrown error into a user-safe string.
+ *
+ * Recognised Firebase error codes are mapped to the table above; other
+ * errors fall back to the provided ``fallback`` so we never surface
+ * internal SDK text like ``Firebase: Error (auth/...).`` to end users.
+ */
+export function friendlyAuthError(err: unknown, fallback: string): string {
+  const code =
+    typeof err === "object" && err !== null && "code" in err
+      ? String((err as { code: unknown }).code)
+      : "";
+  if (code && FRIENDLY_AUTH_ERRORS[code]) {
+    return FRIENDLY_AUTH_ERRORS[code];
+  }
+  return fallback;
+}
+
 let app: FirebaseApp | null = null;
 let auth: Auth | null = null;
 let activeProjectId: string | null = null;

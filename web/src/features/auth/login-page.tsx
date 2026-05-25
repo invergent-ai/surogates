@@ -19,6 +19,7 @@ import {
 } from "@/api/auth";
 import {
   createFirebaseEmailAccount,
+  friendlyAuthError,
   signInWithFirebaseEmail,
   signInWithGithub,
   signInWithGoogle,
@@ -42,6 +43,10 @@ export function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
+  // Informational notice (e.g. "Check your inbox to verify your email")
+  // — separate from loginError so the user sees a neutral message
+  // instead of a red destructive alert during the happy path.
+  const [loginNotice, setLoginNotice] = useState<string | null>(null);
   const [authConfig, setAuthConfig] = useState<AuthConfigResponse>({
     self_registration_enabled: false,
     firebase: null,
@@ -68,26 +73,55 @@ export function LoginPage() {
   }, []);
 
   const finishFirebaseUser = async (user: {
-    getIdToken: () => Promise<string>;
+    getIdToken: (forceRefresh?: boolean) => Promise<string>;
   }) => {
-    const idToken = await user.getIdToken();
+    // Force-refresh the ID token so claims reflect the current
+    // server-side state (notably ``email_verified`` after the user
+    // returns from clicking the verification link).
+    const idToken = await user.getIdToken(true);
     const tokens = await exchangeFirebaseToken(idToken);
     storeAuthTokens(tokens.access_token, tokens.refresh_token);
     void navigate({ to: getPostAuthRoute() });
   };
 
+  /** Exchange the token only when the user's email is verified.
+   *
+   * Firebase email/password sign-up always returns ``emailVerified=false``
+   * until the user clicks the link in the verification mail Firebase
+   * sends (we trigger it in ``createFirebaseEmailAccount``). Gating the
+   * exchange here means a brand-new account can't slip into a Surogates
+   * session without proving inbox ownership — matching the ops shell. */
+  const finishIfVerified = async (user: {
+    emailVerified: boolean;
+    getIdToken: (forceRefresh?: boolean) => Promise<string>;
+  }) => {
+    if (!user.emailVerified) {
+      setLoginNotice(
+        "Check your inbox and click the verification link, then sign in again.",
+      );
+      return;
+    }
+    await finishFirebaseUser(user);
+  };
+
   const runFirebaseAction = async (
     name: string,
-    action: () => Promise<{ getIdToken: () => Promise<string> }>,
+    action: () => Promise<{
+      emailVerified: boolean;
+      getIdToken: (forceRefresh?: boolean) => Promise<string>;
+    }>,
   ) => {
     setLoginError(null);
+    setLoginNotice(null);
     setIsLoading(true);
     try {
-      await finishFirebaseUser(await action());
+      // Google / GitHub providers already return verified emails so
+      // ``finishIfVerified`` is a no-op gate for them; routing through
+      // it keeps a single sign-in path and protects against future
+      // providers that may return ``emailVerified=false``.
+      await finishIfVerified(await action());
     } catch (err) {
-      setLoginError(
-        err instanceof Error ? err.message : `${name} sign-in failed.`,
-      );
+      setLoginError(friendlyAuthError(err, `${name} sign-in failed.`));
     } finally {
       setIsLoading(false);
     }
@@ -192,19 +226,18 @@ export function LoginPage() {
       return;
     }
     setLoginError(null);
+    setLoginNotice(null);
     setIsLoading(true);
 
     // ── Create-account mode: sign up via Firebase email/password. ──
     const firebaseConfig = authConfig.firebase;
     if (firebaseMode === "create" && firebasePasswordEnabled && firebaseConfig) {
       try {
-        await finishFirebaseUser(
+        await finishIfVerified(
           await createFirebaseEmailAccount(firebaseConfig, email, password),
         );
       } catch (err) {
-        setLoginError(
-          err instanceof Error ? err.message : "Sign-up failed.",
-        );
+        setLoginError(friendlyAuthError(err, "Sign-up failed."));
       } finally {
         setIsLoading(false);
       }
@@ -235,32 +268,35 @@ export function LoginPage() {
       if (response.status === 401 && firebasePasswordEnabled && firebaseConfig) {
         // Local credentials don't match — try Firebase email next.
         try {
-          await finishFirebaseUser(
+          await finishIfVerified(
             await signInWithFirebaseEmail(firebaseConfig, email, password),
           );
           return;
         } catch (firebaseErr) {
           setLoginError(
-            firebaseErr instanceof Error
-              ? firebaseErr.message
-              : "Invalid credentials.",
+            friendlyAuthError(firebaseErr, "Incorrect email or password."),
           );
           return;
         }
       }
 
-      const payload = (await response.json().catch(() => null)) as {
-        detail?: string;
-      } | null;
-      setLoginError(payload?.detail ?? "Invalid credentials.");
+      // Backend rejected the login. Conflate detail messages into a
+      // single neutral string so the form doesn't leak whether the
+      // email is registered.
+      setLoginError("Incorrect email or password.");
     } catch (err) {
-      setLoginError(err instanceof Error ? err.message : "Auth failed.");
+      setLoginError(
+        friendlyAuthError(err, "Sign-in failed. Please try again."),
+      );
     } finally {
       setIsLoading(false);
     }
   };
 
-  const clearError = () => setLoginError(null);
+  const clearError = () => {
+    setLoginError(null);
+    setLoginNotice(null);
+  };
 
   return (
     <div className="bg-background text-foreground min-h-dvh flex flex-col items-center justify-center overflow-hidden text-sm leading-normal antialiased relative px-4 py-6">
@@ -407,6 +443,14 @@ export function LoginPage() {
             </Alert>
           )}
 
+          {loginNotice && (
+            <Alert className="mb-4 rounded-lg border-primary/20 bg-primary/5 px-3.5 py-2.5 text-sm animate-[fade-in_0.2s_ease] after:hidden">
+              <AlertDescription className="text-sm text-foreground">
+                {loginNotice}
+              </AlertDescription>
+            </Alert>
+          )}
+
           <Button
             type="submit"
             disabled={isLoading}
@@ -430,9 +474,10 @@ export function LoginPage() {
             <button
               type="button"
               className="mt-3 block text-center text-[11px] text-faint hover:text-foreground transition-colors"
-              onClick={() =>
-                setFirebaseMode((m) => (m === "create" ? "sign-in" : "create"))
-              }
+              onClick={() => {
+                clearError();
+                setFirebaseMode((m) => (m === "create" ? "sign-in" : "create"));
+              }}
             >
               {firebaseMode === "create"
                 ? "Already have an account? Sign in"
@@ -442,50 +487,56 @@ export function LoginPage() {
         </form>
 
         {/* ── Firebase self-registration ── */}
-        {showFirebase && authConfig.firebase && (
-          <div className="mt-6 border-t border-line pt-5">
-            <p className="mb-3 text-[11px] uppercase tracking-widest text-faint">
-              Or continue with
-            </p>
+        {showFirebase && authConfig.firebase && (() => {
+          // Capture the narrowed reference so the button onClicks don't
+          // need to re-check ``authConfig.firebase`` (and don't reach for
+          // a non-null assertion that the lint rule forbids).
+          const firebase = authConfig.firebase;
+          return (
+            <div className="mt-6 border-t border-line pt-5">
+              <p className="mb-3 text-[11px] uppercase tracking-widest text-faint">
+                Or continue with
+              </p>
 
-            {firebaseProviders.includes("google") && (
-              <Button
-                type="button"
-                variant="outline"
-                size="lg"
-                className="mb-2 w-full"
-                disabled={isLoading}
-                onClick={() =>
-                  runFirebaseAction(
-                    "Google",
-                    () => signInWithGoogle(authConfig.firebase!),
-                  )
-                }
-              >
-                Google
-              </Button>
-            )}
+              {firebaseProviders.includes("google") && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="lg"
+                  className="mb-2 w-full"
+                  disabled={isLoading}
+                  onClick={() =>
+                    runFirebaseAction(
+                      "Google",
+                      () => signInWithGoogle(firebase),
+                    )
+                  }
+                >
+                  Google
+                </Button>
+              )}
 
-            {firebaseProviders.includes("github") && (
-              <Button
-                type="button"
-                variant="outline"
-                size="lg"
-                className="mb-2 w-full"
-                disabled={isLoading}
-                onClick={() =>
-                  runFirebaseAction(
-                    "GitHub",
-                    () => signInWithGithub(authConfig.firebase!),
-                  )
-                }
-              >
-                GitHub
-              </Button>
-            )}
+              {firebaseProviders.includes("github") && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="lg"
+                  className="mb-2 w-full"
+                  disabled={isLoading}
+                  onClick={() =>
+                    runFirebaseAction(
+                      "GitHub",
+                      () => signInWithGithub(firebase),
+                    )
+                  }
+                >
+                  GitHub
+                </Button>
+              )}
 
-          </div>
-        )}
+            </div>
+          );
+        })()}
       </Card>
 
       {/* tags strip below card */}
