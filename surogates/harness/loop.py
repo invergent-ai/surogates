@@ -3955,6 +3955,9 @@ class AgentHarness:
 
             if etype == EventType.USER_MESSAGE.value:
                 content = event.data.get("content", "")
+                content = _render_inlined_attachments(
+                    content, event.data.get("attachments"),
+                )
                 images = event.data.get("images")
                 if images:
                     logger.info(
