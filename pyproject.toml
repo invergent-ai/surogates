@@ -48,7 +48,12 @@ dependencies = [
     "croniter>=3.0,<7.0",
     "outlines>=1.2,<2.0",
     "mcp>=1.2,<2.0",
-    "markitdown[pdf,docx,xlsx,pptx]>=0.1,<1.0",
+    # markitdown handles docx/xlsx/pptx well; PDFs use pymupdf4llm
+    # directly (markitdown's PDF backend produces a flat text stream
+    # that loses table and heading structure; pymupdf4llm emits real
+    # markdown tables/headings).
+    "markitdown[docx,xlsx,pptx]>=0.1,<1.0",
+    "pymupdf4llm>=0.0.17",
     "pypdf>=4.0",
     "python-docx>=1.1",
     "openpyxl>=3.1",

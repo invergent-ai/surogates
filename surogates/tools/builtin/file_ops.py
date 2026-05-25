@@ -62,8 +62,33 @@ def _load_markitdown() -> Any:
     return MarkItDown()
 
 
+def _load_pymupdf4llm() -> Any:
+    """Lazy-import pymupdf4llm.  Same rationale as ``_load_markitdown``."""
+    import pymupdf4llm  # noqa: PLC0415
+
+    return pymupdf4llm
+
+
+def _convert_pdf_to_markdown_sync(path: Path) -> str:
+    """PDF → markdown via pymupdf4llm.
+
+    pymupdf4llm preserves table structure (emitting real pipe tables) and
+    heading hierarchy, which markitdown's pdfminer backend flattens.
+    """
+    pymupdf4llm = _load_pymupdf4llm()
+    return pymupdf4llm.to_markdown(str(path)) or ""
+
+
 def _convert_to_markdown_sync(path: Path) -> str:
-    """Sync entry point for ``asyncio.to_thread``."""
+    """Sync entry point for ``asyncio.to_thread``.
+
+    Dispatches PDFs to pymupdf4llm and routes everything else through
+    markitdown.  pymupdf4llm produces much higher-quality markdown for
+    table-heavy PDFs (financial reports, registers) where markitdown's
+    flat text stream loses cell boundaries.
+    """
+    if path.suffix.lower() == ".pdf":
+        return _convert_pdf_to_markdown_sync(path)
     md = _load_markitdown()
     result = md.convert(str(path))
     return result.text_content or ""

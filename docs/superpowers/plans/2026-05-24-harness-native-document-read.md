@@ -27,6 +27,7 @@ Updated before every commit.
 - [x] Task 9 — Verify dependency lock and parser availability
 - [x] Task 10 — Update `CLAUDE.md`
 - [x] Task 11 — Smoke test the whole stack and verify
+- [x] Task 12 — Swap PDF backend to pymupdf4llm (markitdown linearises tables; pymupdf4llm emits real markdown tables)
 
 ---
 

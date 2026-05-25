@@ -156,7 +156,11 @@ async def test_parse_pptx_includes_slide_title(tmp_path: Path) -> None:
 async def test_parser_wraps_markitdown_errors_as_DocumentParseError(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """Any exception from markitdown must be normalised to DocumentParseError."""
+    """Any exception from markitdown must be normalised to DocumentParseError.
+
+    Uses a .docx path because markitdown is the docx backend; PDFs go
+    through pymupdf4llm and are exercised by the test below.
+    """
     from surogates.tools.builtin import file_ops
     from surogates.tools.builtin.file_ops import (
         DocumentParseError,
@@ -169,19 +173,51 @@ async def test_parser_wraps_markitdown_errors_as_DocumentParseError(
 
     monkeypatch.setattr(file_ops, "_load_markitdown", lambda: RaisingMarkItDown())
 
-    bad = tmp_path / "x.pdf"
-    bad.write_bytes(b"%PDF-1.4 placeholder")
+    bad = tmp_path / "x.docx"
+    bad.write_bytes(b"PK\x03\x04 placeholder")
     with pytest.raises(DocumentParseError) as excinfo:
         await _parse_document_to_markdown(bad)
-    assert "x.pdf" in str(excinfo.value)
+    assert "x.docx" in str(excinfo.value)
     assert "markitdown said no" in str(excinfo.value)
     # Underlying cause is preserved for telemetry / debugging.
     assert isinstance(excinfo.value.__cause__, RuntimeError)
 
 
 @pytest.mark.asyncio
+async def test_parser_wraps_pymupdf4llm_errors_as_DocumentParseError(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Any exception from pymupdf4llm must be normalised to DocumentParseError."""
+    from surogates.tools.builtin import file_ops
+    from surogates.tools.builtin.file_ops import (
+        DocumentParseError,
+        _parse_document_to_markdown,
+    )
+
+    class RaisingPyMuPDF4LLM:
+        def to_markdown(self, *args, **kwargs):
+            raise RuntimeError("pymupdf4llm said no")
+
+    monkeypatch.setattr(
+        file_ops, "_load_pymupdf4llm", lambda: RaisingPyMuPDF4LLM(),
+    )
+
+    bad = tmp_path / "x.pdf"
+    bad.write_bytes(b"%PDF-1.4 placeholder")
+    with pytest.raises(DocumentParseError) as excinfo:
+        await _parse_document_to_markdown(bad)
+    assert "x.pdf" in str(excinfo.value)
+    assert "pymupdf4llm said no" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+@pytest.mark.asyncio
 async def test_parser_times_out(tmp_path: Path, monkeypatch) -> None:
-    """A hung markitdown call must raise DocumentParseError with 'timeout'."""
+    """A hung parser call must raise DocumentParseError with 'timeout'.
+
+    Uses pymupdf4llm (PDF path) because that's the slow backend in
+    practice -- markitdown is fast for office files.
+    """
     from surogates.tools.builtin import file_ops
 
     pdf = tmp_path / "slow.pdf"
@@ -191,15 +227,15 @@ async def test_parser_times_out(tmp_path: Path, monkeypatch) -> None:
     # that the orphan executor thread keeps pytest alive after wait_for
     # fires.  asyncio.to_thread cannot cancel the worker thread, so we
     # tune the sleep to ~1s and the timeout to 0.05s.
-    class FakeMarkItDown:
-        def convert(self, *args, **kwargs):  # noqa: D401
+    class FakePyMuPDF4LLM:
+        def to_markdown(self, *args, **kwargs):  # noqa: D401
             import time
 
             time.sleep(1.0)
 
     monkeypatch.setattr(file_ops, "_DOCUMENT_PARSE_TIMEOUT_S", 0.05)
     monkeypatch.setattr(
-        file_ops, "_load_markitdown", lambda: FakeMarkItDown(),
+        file_ops, "_load_pymupdf4llm", lambda: FakePyMuPDF4LLM(),
     )
 
     with pytest.raises(file_ops.DocumentParseError) as excinfo:
@@ -314,11 +350,13 @@ async def test_corrupt_document_returns_fallback_hint(
 ) -> None:
     from surogates.tools.builtin import file_ops
 
-    class RaisingMarkItDown:
-        def convert(self, *args, **kwargs):
+    class RaisingPyMuPDF4LLM:
+        def to_markdown(self, *args, **kwargs):
             raise RuntimeError("not a pdf")
 
-    monkeypatch.setattr(file_ops, "_load_markitdown", lambda: RaisingMarkItDown())
+    monkeypatch.setattr(
+        file_ops, "_load_pymupdf4llm", lambda: RaisingPyMuPDF4LLM(),
+    )
 
     bad = tmp_path / "corrupt.pdf"
     bad.write_bytes(b"%PDF-1.4 placeholder")
