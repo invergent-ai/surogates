@@ -3,7 +3,10 @@ export {
   AgentChatAdapterProvider,
   useAgentChatAdapterContext,
 } from "./adapter-context";
-export { useAgentChatRuntime } from "./runtime/use-agent-chat-runtime";
+export {
+  useAgentChatRuntime,
+  useChatViewMode,
+} from "./runtime/use-agent-chat-runtime";
 export { MessageResponse } from "./components/ai-elements/message";
 export { InboxPanel } from "./components/inbox/inbox-panel";
 export { useInboxUnreadCount } from "./components/inbox/use-inbox-unread-count";

@@ -5,6 +5,7 @@ import {
   MissionsPanel,
   ScheduledWorkPanel,
   SessionTreePanel,
+  useChatViewMode,
   useInboxUnreadCount,
 } from "@invergent/agent-chat-react";
 import { useNavigate } from "@tanstack/react-router";
@@ -53,6 +54,8 @@ export function SessionSidebar() {
   const user = useAppStore((s) => s.user);
   const { theme, setTheme } = useTheme();
   const { unreadCount } = useInboxUnreadCount(surogatesWebChatAdapter);
+  const viewMode = useChatViewMode();
+  const isSimpleMode = viewMode === "simple";
 
   function handleNewSession() {
     setActiveSession(null);
@@ -127,30 +130,34 @@ export function SessionSidebar() {
           <PlusIcon className="w-4 h-4" />
           <span className={showExpandedInline}>New chat</span>
         </Button>
-        <Button
-          variant="ghost"
-          onClick={() => void navigate({ to: "/skills" })}
-          className={cn(
-            "w-full gap-2 mt-1 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-11",
-            "justify-center px-0 lg:justify-start lg:px-3",
-            "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
-          )}
-        >
-          <BookOpenIcon className="w-4 h-4" />
-          <span className={showExpandedInline}>Skills</span>
-        </Button>
-        <Button
-          variant="ghost"
-          onClick={() => void navigate({ to: "/agents" })}
-          className={cn(
-            "w-full gap-2 mt-1 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-11",
-            "justify-center px-0 lg:justify-start lg:px-3",
-            "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
-          )}
-        >
-          <UsersIcon className="w-4 h-4" />
-          <span className={showExpandedInline}>Sub-agents</span>
-        </Button>
+        {!isSimpleMode && (
+          <Button
+            variant="ghost"
+            onClick={() => void navigate({ to: "/skills" })}
+            className={cn(
+              "w-full gap-2 mt-1 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-11",
+              "justify-center px-0 lg:justify-start lg:px-3",
+              "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
+            )}
+          >
+            <BookOpenIcon className="w-4 h-4" />
+            <span className={showExpandedInline}>Skills</span>
+          </Button>
+        )}
+        {!isSimpleMode && (
+          <Button
+            variant="ghost"
+            onClick={() => void navigate({ to: "/agents" })}
+            className={cn(
+              "w-full gap-2 mt-1 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-11",
+              "justify-center px-0 lg:justify-start lg:px-3",
+              "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
+            )}
+          >
+            <UsersIcon className="w-4 h-4" />
+            <span className={showExpandedInline}>Sub-agents</span>
+          </Button>
+        )}
         <Button
           variant="ghost"
           onClick={() => void navigate({ to: "/inbox" })}

@@ -17,6 +17,7 @@ import {
 } from "./reducer";
 
 const VIEW_MODE_KEY = "@invergent/agent-chat-react:viewMode";
+const VIEW_MODE_EVENT = "@invergent/agent-chat-react:viewMode:change";
 
 function readPersistedViewMode(): "simple" | "expert" | null {
   if (typeof window === "undefined") return null;
@@ -37,6 +38,41 @@ function writePersistedViewMode(mode: "simple" | "expert"): void {
   } catch {
     // Non-fatal: the adapter call still persists for next session.
   }
+  // Same-tab broadcast: the browser's "storage" event only fires in
+  // *other* tabs, so sibling components (e.g. the sidebar) need a
+  // separate signal to re-read the value.
+  try {
+    window.dispatchEvent(
+      new CustomEvent(VIEW_MODE_EVENT, { detail: mode }),
+    );
+  } catch {
+    // CustomEvent constructor missing in very old runtimes; ignore.
+  }
+}
+
+export function useChatViewMode(): "simple" | "expert" {
+  const [mode, setMode] = useState<"simple" | "expert">(
+    () => readPersistedViewMode() ?? "simple",
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onSameTab = (event: Event) => {
+      const detail = (event as CustomEvent<unknown>).detail;
+      if (detail === "simple" || detail === "expert") setMode(detail);
+    };
+    const onCrossTab = (event: StorageEvent) => {
+      if (event.key !== VIEW_MODE_KEY) return;
+      const next = event.newValue;
+      if (next === "simple" || next === "expert") setMode(next);
+    };
+    window.addEventListener(VIEW_MODE_EVENT, onSameTab);
+    window.addEventListener("storage", onCrossTab);
+    return () => {
+      window.removeEventListener(VIEW_MODE_EVENT, onSameTab);
+      window.removeEventListener("storage", onCrossTab);
+    };
+  }, []);
+  return mode;
 }
 
 export interface UseAgentChatRuntimeInput {
