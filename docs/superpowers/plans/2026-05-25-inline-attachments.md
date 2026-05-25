@@ -24,8 +24,8 @@ Updated before every commit.
 - [x] Task 6 — `_render_inlined_attachments` renderer
 - [x] Task 7 — Call the renderer in `_rebuild_messages`
 - [x] Task 8 — Revise `_attachments_note` (skip inlined, annotate skip-reason)
-- [ ] **Task 9 (in progress)** — Integration test for end-to-end round trip
-- [ ] Task 10 — History-replay regression test
+- [x] Task 9 — Integration test for end-to-end round trip
+- [ ] **Task 10 (in progress)** — History-replay regression test
 - [ ] Task 11 — Update `docs/tools/index.md`
 - [ ] Task 12 — Smoke test and verify
 
