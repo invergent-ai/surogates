@@ -20,6 +20,7 @@ directly at ``{workspace_path}/.skills/{name}/``.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -494,7 +495,16 @@ async def read_skill_file(
     Platform skills (filesystem-backed) are supported in addition to
     tenant-bucket-backed user/org skills.
     """
-    raise_validation(validate_file_path(path))
+    # Reads aren't constrained to references/templates/scripts/assets —
+    # the listing endpoint advertises any non-SKILL.md file (including
+    # root-level docs like editing.md, LICENSE.txt). Only block path
+    # traversal here; tenant-bucket reads concatenate prefix + path, and
+    # the platform branch additionally re-checks via _is_within below.
+    if ".." in Path(path).parts:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Path traversal ('..') is not allowed.",
+        )
 
     from surogates.tools.loader import SKILL_SOURCE_PLATFORM
 

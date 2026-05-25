@@ -10,7 +10,6 @@ license: Proprietary. LICENSE.txt has complete terms
 
 - **Python libraries (always present):** `python-pptx`, `markitdown[pptx]`, `Pillow`.
 - **JavaScript libraries (always present, in `/usr/lib/node_modules`):** `pptxgenjs`, `react`, `react-dom`, `react-icons`, `sharp`. See [pptxgenjs.md](pptxgenjs.md) for the `NODE_PATH` invocation — without it, `node my_script.js` will fail with `Cannot find module 'pptxgenjs'`.
-- **CLI tools (present on current sandbox images):** `soffice` (LibreOffice, used by `scripts/office/soffice.py` for pptx → pdf conversion), `pdftoppm` (poppler-utils). Older sandbox images may be missing these — if `which soffice` returns nothing, the conversion isn't available and you should not attempt to install LibreOffice.
 
 ## Reading PPTX text — use `read_file`
 
@@ -186,66 +185,15 @@ python -m markitdown output.pptx | grep -iE "xxxx|lorem|ipsum|this.*(page|slide)
 
 If grep returns results, fix them before declaring success.
 
-### Visual QA
-
-**⚠️ USE SUBAGENTS** — even for 2-3 slides. You've been staring at the code and will see what you expect, not what's there. Subagents have fresh eyes.
-
-Convert slides to images (see [Converting to Images](#converting-to-images)), then use this prompt:
-
-```
-Visually inspect these slides. Assume there are issues — find them.
-
-Look for:
-- Overlapping elements (text through shapes, lines through words, stacked elements)
-- Text overflow or cut off at edges/box boundaries
-- Decorative lines positioned for single-line text but title wrapped to two lines
-- Source citations or footers colliding with content above
-- Elements too close (< 0.3" gaps) or cards/sections nearly touching
-- Uneven gaps (large empty area in one place, cramped in another)
-- Insufficient margin from slide edges (< 0.5")
-- Columns or similar elements not aligned consistently
-- Low-contrast text (e.g., light gray text on cream-colored background)
-- Low-contrast icons (e.g., dark icons on dark backgrounds without a contrasting circle)
-- Text boxes too narrow causing excessive wrapping
-- Leftover placeholder content
-
-For each slide, list issues or areas of concern, even if minor.
-
-Read and analyze these images:
-1. /path/to/slide-01.jpg (Expected: [brief description])
-2. /path/to/slide-02.jpg (Expected: [brief description])
-
-Report ALL issues found, including minor ones.
-```
-
 ### Verification Loop
 
-1. Generate slides → Convert to images → Inspect
-2. **List issues found** (if none found, look again more critically)
+1. Generate slides → run `python -m markitdown output.pptx` to inspect content
+2. **List issues found** (typos, missing content, wrong order, leftover placeholders)
 3. Fix issues
-4. **Re-verify affected slides** — one fix often creates another problem
+4. Re-run markitdown on affected slides
 5. Repeat until a full pass reveals no new issues
 
 **Do not declare success until you've completed at least one fix-and-verify cycle.**
-
----
-
-## Converting to Images
-
-Convert presentations to individual slide images for visual inspection:
-
-```bash
-python scripts/office/soffice.py --headless --convert-to pdf output.pptx
-pdftoppm -jpeg -r 150 output.pdf slide
-```
-
-This creates `slide-01.jpg`, `slide-02.jpg`, etc.
-
-To re-render specific slides after fixes:
-
-```bash
-pdftoppm -jpeg -r 150 -f N -l N output.pdf slide-fixed
-```
 
 ---
 
@@ -254,7 +202,5 @@ pdftoppm -jpeg -r 150 -f N -l N output.pdf slide-fixed
 - `markitdown[pptx]` — text extraction (Python; just import).
 - `Pillow` — thumbnail grids (Python; just import).
 - `pptxgenjs` — creating from scratch (npm, installed globally; just `require('pptxgenjs')`).
-- LibreOffice (`soffice`) — PDF conversion (auto-configured for sandboxed environments via `scripts/office/soffice.py`).
-- Poppler (`pdftoppm`) — PDF to images (apt-installed binary).
 
 Do NOT `pip install` or `npm install` any of these — they are already on PATH in every sandbox.

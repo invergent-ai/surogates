@@ -38,6 +38,22 @@ def _write_builtin(platform_dir: Path) -> None:
     )
 
 
+def _write_builtin_with_root_file(platform_dir: Path) -> None:
+    """Platform skill with a top-level linked doc next to SKILL.md.
+
+    Mirrors the real ``productivity/pptx`` layout where ``editing.md``
+    and ``pptxgenjs.md`` sit at the skill root rather than inside one
+    of ``references/templates/scripts/assets``.
+    """
+    skill_dir = platform_dir / "demo-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: Built-in demo\n---\nBody\n",
+        encoding="utf-8",
+    )
+    (skill_dir / "editing.md").write_text("root-level doc body", encoding="utf-8")
+
+
 @pytest_asyncio.fixture(loop_scope="session")
 async def app(
     session_factory,
@@ -128,6 +144,60 @@ async def test_sa_token_cannot_create_skill_at_v1_api(
     # way the SA token cannot create skills via this prefix — which is
     # what we care about.
     assert response.status_code == 405
+
+
+async def test_read_root_level_skill_file_returns_content(
+    app, client: AsyncClient, session_factory,
+):
+    """Root-level linked files (e.g. ``editing.md``) must be readable.
+
+    Regression for a 422 caused by applying the write-time
+    ``validate_file_path`` validator (which requires the path to start
+    with ``references/templates/scripts/assets``) to the read route,
+    even though the listing endpoint advertises root-level files in
+    ``linked_files``.
+    """
+    platform_dir: Path = app.state._test_platform_dir
+    _write_builtin_with_root_file(platform_dir)
+
+    org_id = await create_org(session_factory)
+    sa = await issue_service_account_token(
+        session_factory, org_id, name="ops-chat-sa-file-read",
+    )
+
+    response = await client.get(
+        "/v1/api/skills/demo-skill/file",
+        params={"path": "editing.md"},
+        headers={"Authorization": f"Bearer {sa.token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["file_path"] == "editing.md"
+    assert body["content"] == "root-level doc body"
+    assert body["binary"] is False
+
+
+async def test_read_skill_file_rejects_path_traversal(
+    app, client: AsyncClient, session_factory,
+):
+    """``..`` in the path must still be refused with 422."""
+    platform_dir: Path = app.state._test_platform_dir
+    _write_builtin_with_root_file(platform_dir)
+
+    org_id = await create_org(session_factory)
+    sa = await issue_service_account_token(
+        session_factory, org_id, name="ops-chat-sa-file-traversal",
+    )
+
+    response = await client.get(
+        "/v1/api/skills/demo-skill/file",
+        params={"path": "../etc/passwd"},
+        headers={"Authorization": f"Bearer {sa.token}"},
+    )
+
+    assert response.status_code == 422, response.text
+    assert "traversal" in response.json()["detail"].lower()
 
 
 async def test_sa_token_rejected_on_v1_skills_without_api_prefix(

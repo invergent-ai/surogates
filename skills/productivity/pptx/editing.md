@@ -92,9 +92,7 @@ Validates, repairs, condenses XML, re-encodes smart quotes.
 python scripts/thumbnail.py input.pptx [output_prefix] [--cols N]
 ```
 
-Creates `thumbnails.jpg` with slide filenames as labels. Default 3 columns, max 12 per grid.
-
-**Use for template analysis only** (choosing layouts). For visual QA, use `soffice` + `pdftoppm` to create full-resolution individual slide images—see SKILL.md.
+Creates `thumbnails.jpg` with slide filenames as labels. Default 3 columns, max 12 per grid. Use for template analysis (choosing layouts).
 
 ---
 
@@ -142,12 +140,10 @@ For each slide:
 When source content has fewer items than the template:
 - **Remove excess elements entirely** (images, shapes, text boxes), don't just clear text
 - Check for orphaned visuals after clearing text content
-- Run visual QA to catch mismatched counts
 
 When replacing text with different length content:
 - **Shorter replacements**: Usually safe
 - **Longer replacements**: May overflow or wrap unexpectedly
-- Test with visual QA after text changes
 - Consider truncating or splitting content to fit the template's design constraints
 
 **Template slots ≠ Source items**: If template has 4 team members but source has 3 users, delete the 4th member's entire group (image + text boxes), not just the text.
