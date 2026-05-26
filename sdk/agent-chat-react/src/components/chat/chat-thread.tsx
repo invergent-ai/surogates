@@ -708,6 +708,32 @@ function TextEntry({
   );
 }
 
+// Simple-mode counterpart to TextEntry. Routes the final-answer text
+// through ``useSmoothStream`` so character reveal pace stays even when
+// the underlying delta cadence is bursty (one of the harness's larger
+// chunks would otherwise pop in all at once). TurnFeedback only shows
+// once the smoothed reveal has caught up to the complete message.
+function SimpleFinalAnswer({
+  text,
+  isStreaming,
+  tail,
+}: {
+  text: string;
+  isStreaming: boolean;
+  tail: ChatMessageType | undefined;
+}) {
+  const content = useSmoothStream(text, isStreaming);
+  const revealComplete = content.length >= text.length;
+  return (
+    <div className="mt-3">
+      <MessageResponse>{content}</MessageResponse>
+      {tail?.status === "complete" && revealComplete && (
+        <TurnFeedback msg={tail} />
+      )}
+    </div>
+  );
+}
+
 // ── Simple-mode iteration row ────────────────────────────────────────
 //
 // IterationGroup wraps a SINGLE assistant message in the Simple view.
@@ -1454,10 +1480,11 @@ function SimpleAssistantGroup({
           )}
         </div>
         {finalText && (
-          <div className="mt-3">
-            <MessageResponse>{finalText}</MessageResponse>
-            {tail?.status === "complete" && <TurnFeedback msg={tail} />}
-          </div>
+          <SimpleFinalAnswer
+            text={finalText}
+            isStreaming={tail?.status === "streaming"}
+            tail={tail}
+          />
         )}
         {effectiveTurnSummary ? (
           <TurnSummaryCard
