@@ -82,6 +82,11 @@ interface ChatThreadProps {
   sessionId: string | null;
   messages: ChatMessageType[];
   isRunning: boolean;
+  /** True once the session has ended terminally. Skeleton placeholders
+   *  for the post-answer summarizer window gate on ``!terminal`` because
+   *  ``isRunning`` already flipped false on the final text-only
+   *  ``llm.response``, before the harness summarizer runs. */
+  terminal: boolean;
   isLoadingHistory?: boolean;
   onSend: (
     text: string,
@@ -1332,6 +1337,7 @@ function SimpleAssistantGroup({
   lastGlobalIndex,
   totalMessages,
   isRunning,
+  terminal,
   sessionId,
   artifactFallbacks,
   onFileSelect,
@@ -1341,6 +1347,7 @@ function SimpleAssistantGroup({
   lastGlobalIndex: number;
   totalMessages: number;
   isRunning: boolean;
+  terminal: boolean;
   sessionId: string | null;
   artifactFallbacks: Record<string, string>;
   onFileSelect?: (path: string) => void;
@@ -1463,11 +1470,13 @@ function SimpleAssistantGroup({
           // The harness summarizer runs after the last assistant
           // response and before ``session.complete``. Show a pending
           // placeholder during that window so users aren't surprised
-          // when the Summary card pops in. Gated on the tail group +
-          // a complete final answer + still-running session so the
-          // placeholder doesn't show on historic turns or mid-stream.
+          // when the Summary card pops in. Gated on ``!terminal``
+          // rather than ``isRunning`` because the text-only final
+          // ``llm.response`` already flips ``isRunning`` to false —
+          // the summarizer then runs in the gap before
+          // ``session.complete`` (which is what sets ``terminal``).
           isTailGroup
-          && isRunning
+          && !terminal
           && !!finalText
           && tail?.status === "complete"
           && <TurnSummaryPending />
@@ -1489,6 +1498,7 @@ function AssistantGroup({
   lastGlobalIndex,
   totalMessages,
   isRunning,
+  terminal,
   sessionId,
   artifactFallbacks,
   onFileSelect,
@@ -1499,6 +1509,7 @@ function AssistantGroup({
   lastGlobalIndex: number;
   totalMessages: number;
   isRunning: boolean;
+  terminal: boolean;
   sessionId: string | null;
   artifactFallbacks: Record<string, string>;
   onFileSelect?: (path: string) => void;
@@ -1512,6 +1523,7 @@ function AssistantGroup({
         lastGlobalIndex={lastGlobalIndex}
         totalMessages={totalMessages}
         isRunning={isRunning}
+        terminal={terminal}
         sessionId={sessionId}
         artifactFallbacks={artifactFallbacks}
         onFileSelect={onFileSelect}
@@ -1634,6 +1646,7 @@ export function ChatThread({
   sessionId,
   messages,
   isRunning,
+  terminal,
   isLoadingHistory = false,
   onSend,
   onStop,
@@ -1766,6 +1779,7 @@ export function ChatThread({
                     lastGlobalIndex={group.lastGlobalIndex}
                     totalMessages={messages.length}
                     isRunning={isRunning}
+                    terminal={terminal}
                     sessionId={sessionId}
                     artifactFallbacks={artifactFallbacks}
                     onFileSelect={onFileSelect}

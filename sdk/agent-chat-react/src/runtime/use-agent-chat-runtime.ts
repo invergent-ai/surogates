@@ -518,6 +518,7 @@ export function useAgentChatRuntime({
     session,
     messages: state.messages,
     isRunning: state.isRunning,
+    terminal: state.terminal,
     isLoadingHistory: state.isLoadingHistory,
     tokenUsage: state.tokenUsage,
     retryIndicator: state.retryIndicator,

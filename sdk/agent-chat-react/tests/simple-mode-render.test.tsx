@@ -136,6 +136,7 @@ describe("Simple mode ChatThread rendering", () => {
         sessionId="s-1"
         messages={messages}
         isRunning={false}
+        terminal={true}
         onSend={noop}
         onStop={noop}
         viewMode="simple"
@@ -157,6 +158,7 @@ describe("Simple mode ChatThread rendering", () => {
         sessionId="s-1"
         messages={messages}
         isRunning={false}
+        terminal={true}
         onSend={noop}
         onStop={noop}
         viewMode="expert"
@@ -187,6 +189,7 @@ describe("Simple mode ChatThread rendering", () => {
         sessionId="s-1"
         messages={messages}
         isRunning={false}
+        terminal={true}
         onSend={noop}
         onStop={noop}
         viewMode="simple"
@@ -221,6 +224,7 @@ describe("Simple mode ChatThread rendering", () => {
         sessionId="s-1"
         messages={messages}
         isRunning={false}
+        terminal={true}
         onSend={noop}
         onStop={noop}
         viewMode="simple"
@@ -268,6 +272,7 @@ describe("Simple mode ChatThread rendering", () => {
         sessionId="s-1"
         messages={messages}
         isRunning={false}
+        terminal={true}
         onSend={noop}
         onStop={noop}
         viewMode="simple"
@@ -284,6 +289,68 @@ describe("Simple mode ChatThread rendering", () => {
     expect(downloadNames).toEqual(["final.docx"]);
   });
 
+  it("shows the TurnSummaryPending skeleton between the final answer and the harness summarizer landing", () => {
+    // Reproduces the post-text-only-response window: the harness has
+    // emitted ``llm.response`` (tail.status = complete, finalText set,
+    // no tool calls → reducer flipped isRunning to false) but has not
+    // yet emitted ``turn.summary`` or ``session.complete`` (terminal
+    // still false). The skeleton must show in this window so users
+    // know the Summary card is on its way.
+    const messages: ChatMessage[] = [
+      {
+        id: "final",
+        role: "assistant",
+        content: "Here's the answer.",
+        createdAt: new Date(),
+        status: "complete",
+        turnId: "t-1",
+        iterationIndex: 0,
+      },
+    ];
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={messages}
+        isRunning={false}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+    expect(dom.textContent).toContain("Summarizing conversation");
+  });
+
+  it("hides the TurnSummaryPending skeleton once the session is terminal", () => {
+    // Same shape as above but with terminal=true (session.complete /
+    // done / fail arrived without a turn.summary). The skeleton must
+    // disappear so historic sessions don't display a perpetual
+    // placeholder.
+    const messages: ChatMessage[] = [
+      {
+        id: "final",
+        role: "assistant",
+        content: "Here's the answer.",
+        createdAt: new Date(),
+        status: "complete",
+        turnId: "t-1",
+        iterationIndex: 0,
+      },
+    ];
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={messages}
+        isRunning={false}
+        terminal={true}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+    expect(dom.textContent).not.toContain("Summarizing conversation");
+  });
+
   it("Simple mode shows a tool-derived collapsed label when an iteration has no summary", () => {
     const messages = [
       assistantMessage({
@@ -296,6 +363,7 @@ describe("Simple mode ChatThread rendering", () => {
         sessionId="s-1"
         messages={messages}
         isRunning={false}
+        terminal={true}
         onSend={noop}
         onStop={noop}
         viewMode="simple"

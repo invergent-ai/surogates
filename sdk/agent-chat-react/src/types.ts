@@ -767,6 +767,13 @@ export interface AgentChatRuntimeApi {
   session: AgentChatSession | null;
   messages: AgentChatMessage[];
   isRunning: boolean;
+  /** True once the session has ended terminally (complete/done/fail/paused).
+   *  Distinct from ``isRunning``, which flips false the moment the agent
+   *  emits its final text-only response — before the harness summarizer
+   *  has had a chance to run. Skeleton placeholders for the post-answer
+   *  summarizer window gate on ``!terminal`` to remain visible across
+   *  that gap. */
+  terminal: boolean;
   isLoadingHistory: boolean;
   tokenUsage: AgentChatTokenUsage;
   retryIndicator: AgentChatRetryIndicator | null;

@@ -198,6 +198,7 @@ export function AgentChat({
               sessionId={sessionId}
               messages={runtime.messages}
               isRunning={runtime.isRunning}
+              terminal={runtime.terminal}
               isLoadingHistory={runtime.isLoadingHistory}
               onSend={(content, images, attachments) =>
                 runtime.send(content, images, attachments)
