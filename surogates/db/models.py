@@ -642,6 +642,18 @@ class ServiceAccount(Base):
 
 class Credential(Base):
     __tablename__ = "credentials"
+    __table_args__ = (
+        # NULLS NOT DISTINCT (PG 15+) makes org-scoped rows (user_id IS NULL)
+        # collide with each other, which the upsert in CredentialVault.store
+        # relies on to be race-safe.
+        UniqueConstraint(
+            "org_id",
+            "user_id",
+            "name",
+            name="uq_credentials_org_user_name",
+            postgresql_nulls_not_distinct=True,
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4

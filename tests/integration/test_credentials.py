@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
+from sqlalchemy import func, select
 
+from surogates.db.models import Credential
 from surogates.tenant.credentials import CredentialVault
 
 from .conftest import create_org, create_user
@@ -121,3 +124,36 @@ async def test_user_scoped_credentials(vault, session_factory):
     # They are independent
     assert await vault.retrieve(org_id, "api-key") == "org-level-value"
     assert await vault.retrieve(org_id, "api-key", user_id=user_id) == "user-level-value"
+
+
+async def test_concurrent_store_does_not_duplicate(vault, session_factory):
+    """Parallel stores for the same (org, name) converge on a single row.
+
+    Regression for the race that produced MultipleResultsFound at
+    ``retrieve`` time: when ``store`` used check-then-insert without a
+    unique index, N concurrent callers all observed "no row" and all
+    inserted, leaving N rows behind.
+    """
+    org_id = await create_org(session_factory)
+
+    n = 16
+    results = await asyncio.gather(
+        *(vault.store(org_id, "racey-key", f"value-{i}") for i in range(n))
+    )
+
+    # Exactly one row survives in the table.
+    async with session_factory() as session:
+        count = await session.scalar(
+            select(func.count())
+            .select_from(Credential)
+            .where(Credential.org_id == org_id, Credential.name == "racey-key")
+        )
+    assert count == 1
+
+    # Every winner returned the same credential id (the row everyone upserted onto).
+    ids = {cred_id for cred_id, _ in results}
+    assert len(ids) == 1
+
+    # ``retrieve`` decrypts the last-written value without exploding.
+    value = await vault.retrieve(org_id, "racey-key")
+    assert value is not None and value.startswith("value-")

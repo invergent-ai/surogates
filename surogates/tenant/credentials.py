@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, literal_column, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from surogates.db.models import Credential
 
@@ -58,27 +59,39 @@ class CredentialVault:
         ``True`` for a fresh insert and ``False`` when an existing row
         was replaced.  Callers use the flag to distinguish 201 vs 200
         responses without a second round trip.
+
+        Uses Postgres ``INSERT ... ON CONFLICT DO UPDATE`` keyed on the
+        ``uq_credentials_org_user_name`` unique index so concurrent
+        callers can't race past each other into duplicate rows.  ``xmax``
+        is zero on inserted tuples and non-zero on updates — the canonical
+        Postgres trick for detecting which branch fired.
         """
         encrypted = self._fernet.encrypt(value.encode("utf-8"))
 
+        stmt = (
+            pg_insert(Credential)
+            .values(
+                org_id=org_id,
+                user_id=user_id,
+                name=name,
+                value_enc=encrypted,
+            )
+            .on_conflict_do_update(
+                index_elements=["org_id", "user_id", "name"],
+                set_={"value_enc": encrypted},
+            )
+            .returning(
+                Credential.id,
+                literal_column("(xmax = 0)").label("inserted"),
+            )
+        )
+
         async with self._session_factory() as session:
             async with session.begin():
-                existing = await self._get_credential(
-                    session, org_id, name, user_id
-                )
-                if existing is not None:
-                    existing.value_enc = encrypted
-                    return existing.id, False
+                result = await session.execute(stmt)
+                row = result.one()
 
-                credential = Credential(
-                    org_id=org_id,
-                    user_id=user_id,
-                    name=name,
-                    value_enc=encrypted,
-                )
-                session.add(credential)
-                await session.flush()
-                return credential.id, True
+        return row.id, bool(row.inserted)
 
     async def retrieve(
         self,

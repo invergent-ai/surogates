@@ -114,6 +114,35 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_users_org_auth_external
 
 
 -- ----------------------------------------------------------------------------
+-- Credentials uniqueness retrofit.
+--
+-- ``CredentialVault.store`` is an upsert keyed on (org_id, user_id, name).
+-- Without a unique index, concurrent stores raced and produced duplicate
+-- rows, after which every ``retrieve`` raised MultipleResultsFound.  The
+-- ORM ``UniqueConstraint`` on ``Credential`` carries this to fresh
+-- databases; the dedupe + ``CREATE UNIQUE INDEX IF NOT EXISTS`` below is
+-- the retrofit for already-deployed databases.
+--
+-- ``NULLS NOT DISTINCT`` (PG 15+) makes ``user_id IS NULL`` rows collide
+-- with each other, which is what the upsert needs for org-scoped
+-- credentials (the dominant case).
+-- ----------------------------------------------------------------------------
+
+DELETE FROM credentials a
+USING credentials b
+WHERE a.created_at < b.created_at
+  AND a.org_id = b.org_id
+  AND a.name   = b.name
+  AND (
+      (a.user_id IS NULL AND b.user_id IS NULL)
+      OR a.user_id = b.user_id
+  );
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_credentials_org_user_name
+    ON credentials (org_id, user_id, name) NULLS NOT DISTINCT;
+
+
+-- ----------------------------------------------------------------------------
 -- Tenant denormalization trigger
 --
 -- The ``events`` table carries ``org_id`` and ``user_id`` copied from the
