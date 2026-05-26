@@ -458,17 +458,41 @@ def model_supports_thinking_toggle(model_id: str | None) -> bool:
 
 def build_thinking_extra_body(
     *,
-    enable_thinking: bool,
+    enable_thinking: bool | None = None,
+    thinking_budget: int | None = None,
+    preserve_thinking: bool | None = None,
 ) -> dict[str, Any]:
-    """Return ``extra_body`` payload that gates the chat-template thinking knob.
+    """Return ``extra_body`` payload for reasoning-control knobs.
 
-    Only the disable side is meaningful: thinking is on by default for
-    every model we care about, so we emit the field only when we want
-    to suppress reasoning (e.g. classifier says easy task).  Callers
-    that want to leave the default behavior should simply not call
-    this builder.
+    Emits, all at the top level of ``extra_body`` so DashScope-compatible
+    providers (Qwen3-Max) see them, plus a duplicate
+    ``chat_template_kwargs.enable_thinking`` for vLLM-style providers
+    (GLM via DeepInfra) that read the chat-template form.  Unknown
+    fields are silently dropped by providers that don't recognise them,
+    so dual emission costs nothing.
+
+    Parameters
+    ----------
+    enable_thinking:
+        ``False`` suppresses reasoning; ``True`` forces it on; ``None``
+        leaves the provider default in place (no field emitted).
+    thinking_budget:
+        Hard cap on reasoning tokens.  ``None`` to leave the provider
+        default.
+    preserve_thinking:
+        Pass prior ``reasoning_content`` from the message history back
+        into the model's input on subsequent turns.  ``None`` to leave
+        the provider default.
     """
-    return {"chat_template_kwargs": {"enable_thinking": bool(enable_thinking)}}
+    body: dict[str, Any] = {}
+    if enable_thinking is not None:
+        body["enable_thinking"] = bool(enable_thinking)
+        body["chat_template_kwargs"] = {"enable_thinking": bool(enable_thinking)}
+    if thinking_budget is not None:
+        body["thinking_budget"] = int(thinking_budget)
+    if preserve_thinking is not None:
+        body["preserve_thinking"] = bool(preserve_thinking)
+    return body
 
 
 def merge_extra_body(

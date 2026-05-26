@@ -116,6 +116,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Default reasoning-control knobs applied to every main-loop call when the
+# model supports the thinking toggle.  Sessions can override via
+# ``session.config["thinking_budget"]`` / ``session.config["preserve_thinking"]``.
+# ``4096`` keeps reasoning roomy enough for hard tasks while staying well
+# under the 16 KB-char runaway threshold in ``llm_call.py``.
+# ``preserve_thinking=True`` matches the existing behaviour of replaying
+# ``reasoning_content`` across turns for OpenRouter/Moonshot.
+DEFAULT_THINKING_BUDGET: int = 4096
+DEFAULT_PRESERVE_THINKING: bool = True
+
+
 async def maybe_inject_browser_pause(
     *,
     session: Any,
@@ -157,53 +168,47 @@ def _initial_system_message(system_prompt: str, browser_pause_notice: str | None
     }
 
 
-def _view_context_note(events: list[Any]) -> str | None:
-    """Return a per-turn system note describing the user's current UI view.
+def _view_context_note_from_metadata(metadata: Any) -> str | None:
+    """Pure helper: render the view-context note from a metadata dict.
 
-    Looks at the most recent ``user.message`` event in *events* and reads
-    ``data.metadata.view_context``.  Returns ``None`` when no user message
-    has been recorded yet, when its payload carries no metadata, or when
-    ``view_context`` is missing/empty.  The lookup is read-only and never
-    raises -- malformed payloads (e.g. ``view_context`` not a dict, or
-    missing ``kind``/``id``) yield ``None`` so the LLM call proceeds
-    unchanged.
-
-    The returned string is meant to be passed verbatim as the ``content``
-    of a ``role="system"`` message inserted just before the latest user
-    turn.  Construction is deterministic and idempotent within a turn
-    (same input -> same string), so re-invocations during retry loops
-    cannot drift.
+    Returns ``None`` when *metadata* is missing, not a dict, lacks
+    ``view_context``, or the inner ``view_context`` payload is malformed
+    (not a dict, missing ``kind``/``id``).
     """
-    latest_user_metadata: dict[str, Any] | None = None
-    for event in reversed(events):
-        event_type = event.type
-        type_value = event_type.value if hasattr(event_type, "value") else event_type
-        if type_value != EventType.USER_MESSAGE.value:
-            continue
-        data = event.data if isinstance(event.data, dict) else {}
-        metadata = data.get("metadata")
-        if isinstance(metadata, dict):
-            latest_user_metadata = metadata
-        break
-
-    if not latest_user_metadata:
+    if not isinstance(metadata, dict):
         return None
-
-    view_context = latest_user_metadata.get("view_context")
+    view_context = metadata.get("view_context")
     if not isinstance(view_context, dict):
         return None
-
     kind = view_context.get("kind")
     target_id = view_context.get("id")
     if not kind or not target_id:
         return None
-
     note = f"The user is currently viewing **{kind}** {target_id}"
     name = view_context.get("name")
     if name:
         note += f" ({name})"
     note += "."
     return note
+
+
+def _view_context_note(events: list[Any]) -> str | None:
+    """Return the view-context note for the most recent user.message event.
+
+    Kept for tests and external callers; the main loop folds the note
+    into each user message's content via
+    :func:`_view_context_note_from_metadata` during
+    :meth:`AgentHarness._rebuild_messages`, so this helper is no longer
+    used for ephemeral mid-array insertion.
+    """
+    for event in reversed(events):
+        event_type = event.type
+        type_value = event_type.value if hasattr(event_type, "value") else event_type
+        if type_value != EventType.USER_MESSAGE.value:
+            continue
+        data = event.data if isinstance(event.data, dict) else {}
+        return _view_context_note_from_metadata(data.get("metadata"))
+    return None
 
 
 def _format_bytes(n: int) -> str:
@@ -254,7 +259,6 @@ def _attachments_note(events: list[Any]) -> str | None:
     (e.g. ``attachments`` not a list, items not dicts) yield ``None``
     so the LLM call proceeds unchanged.
     """
-    latest_attachments: list[Any] | None = None
     for event in reversed(events):
         event_type = event.type
         type_value = (
@@ -263,12 +267,16 @@ def _attachments_note(events: list[Any]) -> str | None:
         if type_value != EventType.USER_MESSAGE.value:
             continue
         data = event.data if isinstance(event.data, dict) else {}
-        candidate = data.get("attachments")
-        if isinstance(candidate, list):
-            latest_attachments = candidate
-        break
+        return _attachments_note_from_data(data)
+    return None
 
-    if not latest_attachments:
+
+def _attachments_note_from_data(data: Any) -> str | None:
+    """Pure helper: render the attachments note from a user.message data dict."""
+    if not isinstance(data, dict):
+        return None
+    attachments = data.get("attachments")
+    if not isinstance(attachments, list) or not attachments:
         return None
 
     lines = [
@@ -276,7 +284,7 @@ def _attachments_note(events: list[Any]) -> str | None:
         " available in the workspace and you can read them with your file"
         " tools:",
     ]
-    for item in latest_attachments:
+    for item in attachments:
         if not isinstance(item, dict):
             continue
         if item.get("inlined_text"):
@@ -1080,6 +1088,13 @@ class AgentHarness:
             system_prompt_cache if system_prompt_cache is not None else SystemPromptCache()
         )
 
+        # Per-session memory snapshot.  Memory is prefetched once on the
+        # first wake() of a session and reused byte-identically on every
+        # subsequent wake(), so the memory_context message stays in the
+        # provider's prefix cache.  Invalidated alongside the system
+        # prompt cache (compression / context overflow / explicit reset).
+        self._memory_snapshot_cache: dict[UUID, str | None] = {}
+
         # Streaming can be disabled via session config or env var.
         self._streaming_enabled: bool = True
 
@@ -1681,29 +1696,20 @@ class AgentHarness:
         # for few-shot examples or planning context. API-call-time only.
         prefill_messages: list[dict] = session.config.get("prefill_messages") or []
 
-        # --- Memory prefetch (one-shot before loop) ---
-        memory_context = await self._prefetch_memory()
+        # --- Memory prefetch (one-shot before loop; snapshotted per session) ---
+        memory_context = await self._prefetch_memory(session.id)
 
         consulted_advisor_categories = self._advisor_categories_after_latest_user(
             all_events or [],
         )
 
-        # Per-turn view-context note (Platform Copilot).  Derived from the
-        # latest user.message event's metadata; injected right before the
-        # latest user message in api_messages so the LLM knows what the
-        # user is currently viewing without polluting the durable event
-        # log or system prompt.
-        view_context_note: str | None = _view_context_note(all_events or [])
-
-        # Per-turn attachments note.  Same idempotent placement: a system
-        # message inserted just above the latest user message that lists
-        # every file the user attached to this message (path, MIME, size,
-        # display filename).  Recomputed each iteration from the durable
-        # event log so retries are deterministic.  When both this and
-        # view_context_note are present, attachments_note ends up
-        # adjacent to the user message and view_context_note sits one
-        # position above it.
-        attachments_note: str | None = _attachments_note(all_events or [])
+        # NOTE: view-context and attachments notes are folded into each
+        # user message's content during :meth:`_rebuild_messages`, so the
+        # message bytes are determined by the durable event payload.
+        # That keeps the provider's implicit prefix cache stable across
+        # turns -- earlier versions inserted both notes ephemerally
+        # before the latest user message, which broke the cache the
+        # moment a new user turn shifted the insertion point.
 
         # --- Hidden advisor guidance for hard tasks (one-shot before loop) ---
         await self._maybe_consult_required_advisor(
@@ -1849,49 +1855,6 @@ class AgentHarness:
                 # reasoning context with signature fields.
                 api_messages.append(api_msg)
 
-            # Per-turn view-context note: insert as a system message right
-            # before the latest user message so the LLM sees what page the
-            # user is on when interpreting the prompt.  The note lives
-            # only in this api_messages list -- it is not persisted in
-            # the event log and is recomputed each iteration from the
-            # latest user.message metadata, so a retry yields the same
-            # placement.
-            if view_context_note is not None:
-                latest_user_idx = next(
-                    (
-                        idx
-                        for idx in range(len(api_messages) - 1, -1, -1)
-                        if api_messages[idx].get("role") == "user"
-                    ),
-                    None,
-                )
-                if latest_user_idx is not None:
-                    api_messages.insert(
-                        latest_user_idx,
-                        {"role": "system", "content": view_context_note},
-                    )
-
-            # Per-turn attachments note: same idempotent placement.
-            # Inserted AFTER view_context_note so it ends up adjacent to
-            # the latest user message (view_context_note above, the
-            # attachments note immediately above the user message).
-            # Re-finds the user index because the previous insert may
-            # have shifted it.
-            if attachments_note is not None:
-                latest_user_idx = next(
-                    (
-                        idx
-                        for idx in range(len(api_messages) - 1, -1, -1)
-                        if api_messages[idx].get("role") == "user"
-                    ),
-                    None,
-                )
-                if latest_user_idx is not None:
-                    api_messages.insert(
-                        latest_user_idx,
-                        {"role": "system", "content": attachments_note},
-                    )
-
             await _prepare_messages_for_model_vision_support(
                 api_messages,
                 model_id=model_id,
@@ -1912,7 +1875,9 @@ class AgentHarness:
             if tool_schemas:
                 create_kwargs["tools"] = tool_schemas
 
-            await self._maybe_apply_thinking_gate(create_kwargs, api_messages)
+            await self._maybe_apply_thinking_gate(
+                create_kwargs, api_messages, session,
+            )
             await self._maybe_apply_self_discover(create_kwargs, api_messages)
 
             # Create a streaming tool executor when eligible.  The executor
@@ -2677,6 +2642,7 @@ class AgentHarness:
                 messages = compressed
                 # Invalidate system prompt cache -- conversation shape changed.
                 self._system_prompt_cache.invalidate(session.id)
+                self._memory_snapshot_cache.pop(session.id, None)
 
             # Lease renewal is handled by a background task started in
             # ``wake()``; no per-iteration renewal needed here.
@@ -3502,6 +3468,7 @@ class AgentHarness:
                     },
                 )
                 self._system_prompt_cache.invalidate(session.id)
+                self._memory_snapshot_cache.pop(session.id, None)
             except Exception:
                 logger.debug("Failed to emit CONTEXT_COMPACT event", exc_info=True)
             return compressed
@@ -3557,25 +3524,32 @@ class AgentHarness:
         self,
         create_kwargs: dict[str, Any],
         messages: list[dict[str, Any]],
+        session: Session | None = None,
     ) -> None:
-        """Disable upstream reasoning on easy turns when the model supports it.
+        """Inject reasoning-control knobs into ``create_kwargs["extra_body"]``.
 
-        Two paths can disable thinking:
+        Three knobs feed in:
 
-        1. ``self._thinking_disabled_for_turn`` is True -- a prior
-           runaway in this user turn already proved that thinking is
-           failing here.  Force it off and skip the classifier entirely.
-        2. The cached LLM classifier returns ``required=False`` for
-           this turn.
+        1. ``enable_thinking`` -- disabled when ``_thinking_disabled_for_turn``
+           is set (runaway recovery within the current user turn) or when
+           the cached LLM classifier returns ``required=False`` for an
+           easy turn.  Otherwise left at the provider default.
+        2. ``thinking_budget`` -- read from ``session.config["thinking_budget"]``
+           if set; caps reasoning tokens on providers that honor it
+           (Qwen3 via DashScope).  Left at the provider default otherwise.
+        3. ``preserve_thinking`` -- read from
+           ``session.config["preserve_thinking"]``; tells the provider to
+           feed prior assistant ``reasoning_content`` back into the input
+           on subsequent turns.  Left at the provider default otherwise.
 
-        The flag in (1) clears on the next user turn (see the user-turn
-        bookkeeping where ``_user_turn_count`` is incremented), so
-        future turns get thinking back automatically.
+        The runaway flag in (1) clears on the next user turn (see the
+        user-turn bookkeeping where ``_user_turn_count`` is incremented),
+        so future turns get thinking back automatically.
 
-        Failures (aux unavailable, network error, structured-output
-        parse miss) fall through silently -- the request just keeps
-        the model default (thinking on), matching the previous
-        behavior.
+        Classifier failures (aux unavailable, network error,
+        structured-output parse miss) fall through silently -- the
+        request just keeps the model default for ``enable_thinking``,
+        while ``thinking_budget`` / ``preserve_thinking`` still apply.
         """
         model_id = str(create_kwargs.get("model") or "")
         if not model_supports_thinking_toggle(model_id):
@@ -3583,44 +3557,63 @@ class AgentHarness:
         if not messages:
             return
 
+        session_cfg = session.config if session is not None else {}
+        raw_budget = session_cfg.get("thinking_budget", DEFAULT_THINKING_BUDGET)
+        thinking_budget: int | None
+        if isinstance(raw_budget, (int, float)) and not isinstance(raw_budget, bool):
+            thinking_budget = int(raw_budget)
+        else:
+            thinking_budget = None
+        raw_preserve = session_cfg.get(
+            "preserve_thinking", DEFAULT_PRESERVE_THINKING,
+        )
+        preserve_thinking: bool | None = (
+            bool(raw_preserve) if isinstance(raw_preserve, bool) else None
+        )
+
+        enable_thinking: bool | None = None
+        reason: str | None = None
         if self._thinking_disabled_for_turn:
-            thinking_extra = build_thinking_extra_body(enable_thinking=False)
-            create_kwargs["extra_body"] = merge_extra_body(
-                create_kwargs.get("extra_body"),
-                thinking_extra,
-            )
-            logger.debug(
-                "Thinking-gate: forcing reasoning off "
-                "(runaway flag set for current user turn).",
-            )
+            enable_thinking = False
+            reason = "runaway flag set for current user turn"
+        else:
+            try:
+                classification = await classify_hard_task_async(
+                    messages,
+                    tenant=self._tenant,
+                )
+            except Exception:
+                logger.debug(
+                    "Thinking-gate classification failed; leaving model default.",
+                    exc_info=True,
+                )
+                classification = None
+
+            if classification is not None and not classification.required:
+                enable_thinking = False
+                reason = (
+                    f"easy turn (category={classification.category}, "
+                    f"reason={classification.reason})"
+                )
+
+        if (
+            enable_thinking is None
+            and thinking_budget is None
+            and preserve_thinking is None
+        ):
             return
 
-        try:
-            classification = await classify_hard_task_async(
-                messages,
-                tenant=self._tenant,
-            )
-        except Exception:
-            logger.debug(
-                "Thinking-gate classification failed; leaving model default.",
-                exc_info=True,
-            )
-            return
-
-        if classification.required:
-            return
-
-        thinking_extra = build_thinking_extra_body(enable_thinking=False)
+        thinking_extra = build_thinking_extra_body(
+            enable_thinking=enable_thinking,
+            thinking_budget=thinking_budget,
+            preserve_thinking=preserve_thinking,
+        )
         create_kwargs["extra_body"] = merge_extra_body(
             create_kwargs.get("extra_body"),
             thinking_extra,
         )
-        logger.debug(
-            "Auto-think gate: disabling reasoning for easy turn "
-            "(category=%s, reason=%s).",
-            classification.category,
-            classification.reason,
-        )
+        if reason is not None:
+            logger.debug("Thinking-gate: disabling reasoning (%s).", reason)
 
     # ------------------------------------------------------------------
     # SELF-DISCOVER planning preamble
@@ -3961,13 +3954,28 @@ class AgentHarness:
     # Message reconstruction from event log
     # ------------------------------------------------------------------
 
-    async def _prefetch_memory(self) -> str | None:
-        """Prefetch user memory once before the loop.
+    async def _prefetch_memory(self, session_id: UUID) -> str | None:
+        """Prefetch user memory and snapshot it for the session.
+
+        The first wake() of a session reads memory from disk; every
+        subsequent wake() reuses the cached snapshot byte-identically so
+        the memory_context message stays in the provider's prefix cache.
+        The snapshot is invalidated alongside the system prompt cache
+        (compression / context overflow / explicit reset).
 
         If a MemoryManager is available, delegates to it and wraps the
         result in a ``<memory-context>`` fence.  Otherwise falls back to
         direct file I/O.
         """
+        if session_id in self._memory_snapshot_cache:
+            return self._memory_snapshot_cache[session_id]
+
+        snapshot = await self._load_memory_snapshot()
+        self._memory_snapshot_cache[session_id] = snapshot
+        return snapshot
+
+    async def _load_memory_snapshot(self) -> str | None:
+        """Read the current memory context from disk (no caching)."""
         # Use memory manager if available.
         if self._memory_manager is not None:
             try:
@@ -4024,6 +4032,27 @@ class AgentHarness:
                 content = _render_inlined_attachments(
                     content, event.data.get("attachments"),
                 )
+                # Fold per-user ephemeral notes (view-context, non-inlined
+                # attachments) into the user content here so the bytes are
+                # determined entirely by the durable event payload.  This
+                # keeps the provider's implicit prefix cache stable across
+                # turns -- the previous design inserted the notes mid-array
+                # before the latest user message, which left them present
+                # in turn T's request but absent in turn T+1's prefix.
+                note_parts: list[str] = []
+                view_note = _view_context_note_from_metadata(
+                    event.data.get("metadata"),
+                )
+                if view_note:
+                    note_parts.append(view_note)
+                attachments_note = _attachments_note_from_data(event.data)
+                if attachments_note:
+                    note_parts.append(attachments_note)
+                if note_parts:
+                    notes_block = "\n\n".join(note_parts)
+                    content = (
+                        f"{notes_block}\n\n{content}" if content else notes_block
+                    )
                 images = event.data.get("images")
                 if images:
                     logger.info(
@@ -4130,6 +4159,7 @@ class AgentHarness:
 
         # Invalidate system prompt cache -- conversation shape changed.
         self._system_prompt_cache.invalidate(session.id)
+        self._memory_snapshot_cache.pop(session.id, None)
 
         return compressed
 
@@ -4301,7 +4331,9 @@ class AgentHarness:
                 # No tools -- force a text-only response.
             }
 
-            await self._maybe_apply_thinking_gate(create_kwargs, api_messages)
+            await self._maybe_apply_thinking_gate(
+                create_kwargs, api_messages, session,
+            )
             await self._maybe_apply_self_discover(create_kwargs, api_messages)
 
             assistant_message, usage_data = await call_llm_with_retry(

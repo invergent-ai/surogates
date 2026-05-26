@@ -148,7 +148,7 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
     ),
     "qwen-3-7-max": ModelInfo(
         id="qwen-3-7-max",
-        context_window=1_048_576,
+        context_window=900000,
         max_output_tokens=65_536,
         input_cost_per_1k=0.0,
         output_cost_per_1k=0.0,
@@ -196,7 +196,7 @@ _ALIASES: dict[str, str] = {
     "zai-org/GLM-5.1": "glm-5.1",
     "@preset/glm-5-1": "glm-5.1",
     "@preset/qwen-3-7-max": "qwen-3-7-max",
-    "@preset/base": "qwen-3-7-max",
+    "qwen3.7-max": "qwen-3-7-max",
 }
 
 
