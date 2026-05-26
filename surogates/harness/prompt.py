@@ -645,12 +645,15 @@ class PromptBuilder:
         return []
 
     def _context_section(self) -> str:
-        """Timestamp, model info, platform hints."""
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        """Date, model info, platform hints."""
+        # Date-only (not date+time) so the system prompt stays byte-stable
+        # across the day -- minute-grain timestamps would invalidate every
+        # provider's implicit prefix cache on each new build.
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d UTC")
 
         parts = [
             "# Context",
-            f"- **Current date/time**: {now}",
+            f"- **Current date**: {today}",
             f"- **Organisation**: {self.tenant.org_id}",
         ]
 

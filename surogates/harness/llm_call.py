@@ -256,6 +256,36 @@ def apply_developer_role(messages: list[dict], model_id: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+def _extract_cached_tokens(usage: Any) -> int:
+    """Pull ``cached_tokens`` out of a chat-completion usage object.
+
+    Handles all the shapes upstream providers actually return:
+    - OpenAI / Qwen-DashScope: ``usage.prompt_tokens_details.cached_tokens``
+    - Anthropic via OpenAI shim: ``usage.cache_read_input_tokens``
+    - Legacy / flat:             ``usage.cached_tokens``
+
+    Returns ``0`` when no cache field is present (no hit, or provider
+    doesn't report).  Never raises on unfamiliar shapes -- worst case
+    we under-report a cache hit, which is fine.
+    """
+    if usage is None:
+        return 0
+    details = getattr(usage, "prompt_tokens_details", None)
+    if details is not None:
+        cached = getattr(details, "cached_tokens", None)
+        if isinstance(cached, (int, float)):
+            return int(cached)
+        if isinstance(details, dict):
+            cached = details.get("cached_tokens")
+            if isinstance(cached, (int, float)):
+                return int(cached)
+    for attr in ("cache_read_input_tokens", "cached_tokens"):
+        value = getattr(usage, attr, None)
+        if isinstance(value, (int, float)):
+            return int(value)
+    return 0
+
+
 def extract_status_code(exc: Exception) -> int | None:
     """Extract HTTP status code from OpenAI/httpx exceptions."""
     # Check for openai.APIStatusError.status_code
@@ -1105,6 +1135,7 @@ async def call_llm_streaming_inner(
     # final chunk via ``stream_options``).
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
 
     # Stale stream detection: wall-clock timestamp of the last real
     # streaming chunk.  If no real chunk arrives within the timeout,
@@ -1238,6 +1269,7 @@ async def call_llm_streaming_inner(
                 if hasattr(chunk, "usage") and chunk.usage:
                     input_tokens = getattr(chunk.usage, "prompt_tokens", 0) or 0
                     output_tokens = getattr(chunk.usage, "completion_tokens", 0) or 0
+                    cache_read_tokens = _extract_cached_tokens(chunk.usage)
                 if hasattr(chunk, "model") and chunk.model:
                     model = chunk.model
                 continue
@@ -1255,6 +1287,7 @@ async def call_llm_streaming_inner(
             if hasattr(chunk, "usage") and chunk.usage:
                 input_tokens = getattr(chunk.usage, "prompt_tokens", 0) or 0
                 output_tokens = getattr(chunk.usage, "completion_tokens", 0) or 0
+                cache_read_tokens = _extract_cached_tokens(chunk.usage)
 
             if delta is None:
                 continue
@@ -1450,6 +1483,7 @@ async def call_llm_streaming_inner(
         "model": model,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
         "finish_reason": "interrupted" if interrupted else (finish_reason or "stop"),
     }
     if interrupted and stop_reason is not None:
@@ -1502,11 +1536,13 @@ async def call_llm_non_streaming(
     usage = response.usage
     input_tokens = usage.prompt_tokens if usage else 0
     output_tokens = usage.completion_tokens if usage else 0
+    cache_read_tokens = _extract_cached_tokens(usage) if usage else 0
 
     usage_data: dict[str, Any] = {
         "model": response.model,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
         "finish_reason": choice.finish_reason,
     }
 

@@ -70,7 +70,10 @@ class TestThinkingGate:
             await harness._maybe_apply_thinking_gate(create_kwargs, messages)
 
         assert create_kwargs["extra_body"] == {
-            "chat_template_kwargs": {"enable_thinking": False}
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "thinking_budget": 4096,
+            "preserve_thinking": True,
         }
 
     @pytest.mark.asyncio
@@ -85,7 +88,13 @@ class TestThinkingGate:
         ):
             await harness._maybe_apply_thinking_gate(create_kwargs, messages)
 
-        assert "extra_body" not in create_kwargs
+        # enable_thinking is left at the provider default on hard turns,
+        # but the harness defaults for thinking_budget / preserve_thinking
+        # still land.
+        assert create_kwargs["extra_body"] == {
+            "thinking_budget": 4096,
+            "preserve_thinking": True,
+        }
 
     @pytest.mark.asyncio
     async def test_unsupported_model_skips_gate(self):
@@ -123,10 +132,13 @@ class TestThinkingGate:
 
         assert create_kwargs["extra_body"] == {
             "extra_headers": {"X-Trace": "abc"},
+            "enable_thinking": False,
             "chat_template_kwargs": {
                 "other_flag": True,
                 "enable_thinking": False,
             },
+            "thinking_budget": 4096,
+            "preserve_thinking": True,
         }
 
     @pytest.mark.asyncio
@@ -141,7 +153,12 @@ class TestThinkingGate:
         ):
             await harness._maybe_apply_thinking_gate(create_kwargs, messages)
 
-        assert "extra_body" not in create_kwargs
+        # Classifier failure leaves enable_thinking at the provider default,
+        # but harness budget / preserve defaults still apply.
+        assert create_kwargs["extra_body"] == {
+            "thinking_budget": 4096,
+            "preserve_thinking": True,
+        }
 
     @pytest.mark.asyncio
     async def test_empty_messages_skips_gate(self):
