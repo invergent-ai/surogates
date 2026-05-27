@@ -117,14 +117,14 @@ class TestModelGuidance:
         prompt = builder.build()
         assert "Execution discipline" in prompt or "tool_persistence" in prompt
 
-    def test_gemini_model_gets_operational(self, tmp_path: Path):
+    def test_gemini_model_gets_discipline(self, tmp_path: Path):
         tenant = _make_tenant(
             tmp_path,
             org_config={"agent_name": "Bot", "default_model": "gemini-pro"},
         )
         builder = PromptBuilder(tenant)
         prompt = builder.build()
-        assert "operational directives" in prompt.lower() or "Absolute paths" in prompt
+        assert "Execution discipline" in prompt or "tool_persistence" in prompt
 
     def test_claude_model_no_enforcement(self, tmp_path: Path):
         tenant = _make_tenant(
@@ -144,7 +144,7 @@ class TestModelGuidance:
         )
         builder = PromptBuilder(tenant, available_tools={"terminal", "web_search"})
         prompt = builder.build()
-        assert "Tool-use enforcement" in prompt
+        assert "execute_dont_narrate" in prompt
 
     def test_kimi_gets_enforcement(self, tmp_path: Path):
         # Added after session cbf414ac…e1362a1 where Kimi promised to
@@ -155,7 +155,7 @@ class TestModelGuidance:
         )
         builder = PromptBuilder(tenant, available_tools={"terminal", "create_artifact"})
         prompt = builder.build()
-        assert "Tool-use enforcement" in prompt
+        assert "execute_dont_narrate" in prompt
 
 
 # ---------------------------------------------------------------------------

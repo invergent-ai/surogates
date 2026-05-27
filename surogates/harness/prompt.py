@@ -150,16 +150,15 @@ class PromptBuilder:
 
         Layers:
         1. Agent identity (sub-agent body if active, otherwise org config or default)
-        2. Working principles + heavy-thinking pattern (always loaded)
+        2. Working principles (always loaded)
         3. Tool-aware behavioral guidance (memory, session_search, skills)
-        4. Tool-use enforcement (model-specific)
+        4. Execution discipline (model-specific)
         5. Memory (frozen snapshot)
         6. Skills index
         7. Available sub-agents (coordinator sessions only)
         8. Available experts (when any are active)
         9. Context files (AGENTS.md, .cursorrules)
         10. Timestamp, model info, platform hint
-        11. Model-specific execution guidance (OpenAI, Google)
         """
         sections: list[str] = []
         sections.append(self._identity_section())
@@ -176,10 +175,6 @@ class PromptBuilder:
         sections.append(self._kb_section())
         sections.append(self._context_files_section())
         sections.append(self._context_section())
-
-        # Model-specific guidance.
-        model_id = self._get_model_id()
-        sections.append(self._model_guidance_section(model_id))
 
         return "\n\n".join(s for s in sections if s)
 
@@ -203,8 +198,21 @@ class PromptBuilder:
             parts.append(self._prompts.get("guidance/memory"))
         if "session_search" in self._available_tools:
             parts.append(self._prompts.get("guidance/session_search"))
-        if "skill_manage" in self._available_tools:
+        # Skills guidance loads whenever the agent can either view or manage
+        # skills. The body covers both invocation (skill_view) and maintenance
+        # (skill_manage); the few maintenance sentences are cheap enough that
+        # gating on either tool is simpler than splitting the fragment.
+        if (
+            "skill_view" in self._available_tools
+            or "skill_manage" in self._available_tools
+        ):
             parts.append(self._prompts.get("guidance/skills"))
+            # The brainstorming gate is a separate fragment so it carries its
+            # own emphasis and can be disabled independently of the broader
+            # skills guidance. It only matters when skill_view is available
+            # because the gate tells the agent to load the brainstorming skill.
+            if "skill_view" in self._available_tools:
+                parts.append(self._prompts.get("guidance/brainstorming_gate"))
         if "ask_user_question" in self._available_tools:
             parts.append(self._prompts.get("guidance/ask_user_question"))
         if "create_artifact" in self._available_tools:
@@ -239,44 +247,32 @@ class PromptBuilder:
         ):
             parts.append(self._prompts.get("guidance/coordinator"))
 
-        # Execution discipline (verification, missing_context, etc.)
-        # applies to any response from a discipline-required model — not
-        # only ones that issue tool calls — so it loads on the model
-        # match alone.  Tool-use enforcement is specifically about
-        # narrate-vs-act on tool calls, so it additionally requires that
-        # at least one tool be loaded.
+        # Execution discipline (verification, missing_context,
+        # execute-don't-narrate, etc.) applies to any response from a
+        # discipline-required model, regardless of whether tools are
+        # registered — the act-don't-narrate guidance is a no-op for
+        # tool-less sessions and not worth the extra gate.
         model_lower = self._get_model_id().lower()
         needs_discipline = any(
             p in model_lower for p in MODELS_REQUIRING_DISCIPLINE
         )
         if needs_discipline:
             parts.append(self._prompts.get("guidance/execution_discipline"))
-            if self._available_tools:
-                parts.append(self._prompts.get("guidance/tool_use_enforcement"))
 
         if not parts:
             return ""
         return "\n\n".join(parts)
 
     def _working_principles_section(self) -> str:
-        """Always-loaded working principles plus the heavy-thinking pattern.
+        """Always-loaded working principles fragment.
 
-        Two fragments rendered back-to-back: ``guidance/working_principles``
-        (the 12-rule project charter — caution on non-trivial work, surface
-        uncertainty over hiding it, conform to the codebase) and
-        ``guidance/heavyskill`` (parallel-reason-then-synthesize pattern for
-        hard reasoning problems, dispatched via ``delegate_task``).
-
-        Both fragments are loaded unconditionally.  ``delegate_task`` is a
-        built-in harness tool that is always registered, so gating
-        heavyskill on tool availability adds noise without buying anything.
-        Sub-agents inherit the same principles -- they are general behavior,
-        not coordinator-specific.
+        Renders ``guidance/working_principles`` -- the project charter
+        applied to every task (caution on non-trivial work, surface
+        uncertainty over hiding it, conform to the codebase). Sub-agents
+        inherit the same principles -- they are general behavior, not
+        coordinator-specific.
         """
-        return "\n\n".join((
-            self._prompts.get("guidance/working_principles"),
-            self._prompts.get("guidance/heavyskill"),
-        ))
+        return self._prompts.get("guidance/working_principles")
 
     def _identity_section(self) -> str:
         """Agent identity.
@@ -742,28 +738,6 @@ class PromptBuilder:
         if not parts:
             return ""
         return "# Context Files\n\n" + "\n\n".join(parts)
-
-    def _model_guidance_section(self, model_id: str) -> str:
-        """Model-specific execution guidance based on model ID pattern matching.
-
-        Note: model-agnostic execution discipline (verification, missing
-        context, mandatory tool use) is injected by
-        ``_tool_guidance_section`` via ``guidance/execution_discipline``.
-        This method adds *provider-specific* addenda only — currently
-        just Google's operational quirks (absolute paths, parallel tool
-        calls, non-interactive flags).
-        """
-        if not model_id:
-            return ""
-
-        model_lower = model_id.lower()
-        parts: list[str] = []
-
-        # Google-specific operational guidance.
-        if any(p in model_lower for p in ("gemini", "gemma")):
-            parts.append(self._prompts.get("models/google"))
-
-        return "\n\n".join(parts)
 
     def _get_channel(self) -> str | None:
         """Extract channel from session or return None."""

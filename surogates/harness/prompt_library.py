@@ -46,6 +46,7 @@ REQUIRED_KEYS: tuple[str, ...] = (
     "guidance/memory",
     "guidance/session_search",
     "guidance/skills",
+    "guidance/brainstorming_gate",
     "guidance/ask_user_question",
     "guidance/artifact",
     "guidance/browser",
@@ -53,10 +54,7 @@ REQUIRED_KEYS: tuple[str, ...] = (
     "guidance/cron_loop",
     "guidance/coordinator",
     "guidance/execution_discipline",
-    "guidance/tool_use_enforcement",
     "guidance/working_principles",
-    "guidance/heavyskill",
-    "models/google",
     "identity/default_personality",
     "identity/workspace_rules",
 )

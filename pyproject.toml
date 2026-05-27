@@ -87,10 +87,11 @@ cache-keys = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-addopts = "-m 'not browser_e2e and not browser_e2e_k8s'"
+addopts = "-m 'not browser_e2e and not browser_e2e_k8s and not live'"
 markers = [
     "browser_e2e: end-to-end agent browser tests requiring Docker and the kernel-images image (opt-in)",
     "browser_e2e_k8s: end-to-end agent browser tests requiring kind/minikube and a K8s cluster (opt-in)",
+    "live: tests that hit a live LLM endpoint configured in config.dev.yaml (opt-in; small OpenRouter credit cost per run)",
 ]
 
 [dependency-groups]
