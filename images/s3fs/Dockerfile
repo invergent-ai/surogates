@@ -1,13 +1,16 @@
-# goofys sidecar for Surogates sandbox pods.
+# geesefs sidecar for Surogates sandbox pods.
 #
 # FUSE-mounts an S3 bucket as a POSIX filesystem at /workspace.
 # Runs as a sidecar container alongside the sandbox main container,
 # sharing an emptyDir volume with Bidirectional mount propagation.
 #
-# Uses goofys (https://github.com/kahing/goofys) instead of s3fs because
-# s3fs makes ~1 S3 request per small file, which turned `git clone` of a
-# 26 MB / 1000-file repo into a 3+ minute operation. Goofys batches and
-# parallelises aggressively.
+# Uses geesefs (https://github.com/yandex-cloud/geesefs), an actively
+# maintained Yandex fork of goofys. Compared to goofys v0.24.0 (which we
+# used previously) it adds: partial-write support (no download→modify→
+# re-upload for in-place edits), faster cold readdir/stat, a configurable
+# memory limit, and continued upstream maintenance. Local R2 benchmarks
+# showed ~1.8× faster cold reads / directory listings and ~8.8× faster
+# in-place overwrites with no regression on streaming or small-file PUT.
 #
 # Image name (surogates-s3fs) is retained for compatibility with the
 # helm charts and surogates config defaults.
@@ -19,7 +22,7 @@
 
 FROM debian:bookworm-slim
 
-ARG GOOFYS_VERSION=v0.24.0
+ARG GEESEFS_VERSION=v0.43.7
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -29,9 +32,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && echo "user_allow_other" >> /etc/fuse.conf
 
-RUN curl -fsSL -o /usr/local/bin/goofys \
-        "https://github.com/kahing/goofys/releases/download/${GOOFYS_VERSION}/goofys" \
-    && chmod +x /usr/local/bin/goofys
+RUN curl -fsSL -o /usr/local/bin/geesefs \
+        "https://github.com/yandex-cloud/geesefs/releases/download/${GEESEFS_VERSION}/geesefs-linux-amd64" \
+    && chmod +x /usr/local/bin/geesefs
 
 RUN mkdir -p /workspace
 

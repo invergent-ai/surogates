@@ -98,6 +98,27 @@ class SandboxSpec:
     env: dict[str, str] = field(default_factory=dict)
 
 
+def default_sandbox_spec() -> SandboxSpec:
+    """Return a :class:`SandboxSpec` seeded from ``SUROGATES_SANDBOX_DEFAULT_*``.
+
+    Worker callsites that have no per-tenant baseline use this so the
+    helm chart's ``sandbox.resources`` values flow into the pod manifest
+    without code changes.  Without env overrides this yields the same
+    values as ``SandboxSpec()`` (the two default sets are aligned in
+    :class:`surogates.config.SandboxSettings`).
+    """
+    from surogates.config import SandboxSettings
+
+    s = SandboxSettings()
+    return SandboxSpec(
+        cpu=s.default_cpu,
+        memory=s.default_memory,
+        cpu_limit=s.default_cpu_limit,
+        memory_limit=s.default_memory_limit,
+        timeout=s.default_timeout,
+    )
+
+
 class Sandbox(Protocol):
     """Backend-agnostic sandbox lifecycle protocol.
 

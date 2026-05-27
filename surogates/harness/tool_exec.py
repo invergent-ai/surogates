@@ -76,12 +76,12 @@ def _build_session_sandbox_spec(
     appending the workspace mount or env passthrough never bleeds
     across sessions sharing the same tenant context.
     """
-    from surogates.sandbox.base import Resource, SandboxSpec
+    from surogates.sandbox.base import Resource, SandboxSpec, default_sandbox_spec
     from surogates.tools.utils.env_passthrough import get_sandbox_env
 
     baseline = getattr(tenant, "sandbox_spec", None)
     if baseline is None:
-        sandbox_spec = SandboxSpec()
+        sandbox_spec = default_sandbox_spec()
     else:
         # Copy fields explicitly so the caller's baseline spec stays
         # immutable across sessions sharing the same tenant context.

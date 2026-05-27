@@ -189,3 +189,41 @@ def test_env_passthrough_baseline_is_not_mutated():
     # Baseline env stays clean — second session would otherwise skip
     # passthrough entirely because the sentinel was permanently set.
     assert "_passthrough_done" not in baseline.env
+
+
+def test_no_tenant_baseline_reads_sandbox_settings_env(monkeypatch):
+    """Without a tenant baseline, SUROGATES_SANDBOX_DEFAULT_* env wins.
+
+    Regression: previously fell through to ``SandboxSpec()`` dataclass
+    defaults, ignoring the helm chart's
+    ``SUROGATES_SANDBOX_DEFAULT_CPU_LIMIT`` (and friends).  Bumping the
+    chart's ``sandbox.resources`` had no effect on the running pod.
+    """
+    monkeypatch.setenv("SUROGATES_SANDBOX_DEFAULT_CPU", "3")
+    monkeypatch.setenv("SUROGATES_SANDBOX_DEFAULT_CPU_LIMIT", "11")
+    monkeypatch.setenv("SUROGATES_SANDBOX_DEFAULT_MEMORY", "5Gi")
+    monkeypatch.setenv("SUROGATES_SANDBOX_DEFAULT_MEMORY_LIMIT", "13Gi")
+
+    session = _session(config={"storage_bucket": "agent-a-bucket"})
+    spec = _build_session_sandbox_spec(
+        session, tenant=SimpleNamespace(), sandbox_owner=sandbox_session_key(session),
+    )
+    assert spec.cpu == "3"
+    assert spec.cpu_limit == "11"
+    assert spec.memory == "5Gi"
+    assert spec.memory_limit == "13Gi"
+
+
+def test_no_tenant_baseline_no_env_uses_aligned_defaults():
+    """Without env overrides, fallback matches the documented spec defaults."""
+    from surogates.sandbox.base import SandboxSpec
+
+    session = _session(config={})
+    spec = _build_session_sandbox_spec(
+        session, tenant=SimpleNamespace(), sandbox_owner=sandbox_session_key(session),
+    )
+    fresh = SandboxSpec()
+    assert spec.cpu == fresh.cpu
+    assert spec.cpu_limit == fresh.cpu_limit
+    assert spec.memory == fresh.memory
+    assert spec.memory_limit == fresh.memory_limit
