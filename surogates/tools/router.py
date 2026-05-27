@@ -24,7 +24,7 @@ from uuid import UUID
 
 from surogates.governance.policy import GovernanceGate, PolicyDecision
 from surogates.sandbox.pool import SandboxPool
-from surogates.sandbox.base import SandboxSpec
+from surogates.sandbox.base import default_sandbox_spec
 from surogates.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -236,7 +236,7 @@ class ToolRouter:
                 # Lazily provision or reuse the session's sandbox.
                 sandbox_spec = (
                     getattr(tenant, "sandbox_spec", None)
-                    or SandboxSpec()
+                    or default_sandbox_spec()
                 )
                 await self.sandbox_pool.ensure(
                     str(session_id), sandbox_spec,

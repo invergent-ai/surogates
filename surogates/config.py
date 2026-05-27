@@ -276,10 +276,13 @@ class SandboxSettings(BaseSettings):
     backend: Literal["process", "kubernetes"] = "process"
     runtime_url: str = "http://sandbox-runtime:8080"
     default_timeout: int = 300
-    default_cpu: str = "1"
-    default_memory: str = "1Gi"
-    default_cpu_limit: str = "2"
-    default_memory_limit: str = "2Gi"
+    # Defaults match :class:`surogates.sandbox.base.SandboxSpec` so the
+    # ``default_sandbox_spec`` factory yields identical values when no
+    # ``SUROGATES_SANDBOX_DEFAULT_*`` env override is supplied.
+    default_cpu: str = "2"
+    default_memory: str = "4Gi"
+    default_cpu_limit: str = "4"
+    default_memory_limit: str = "8Gi"
     srt_enabled: bool = False
     srt_settings_dir: str = "/tmp/surogates/srt"
 
