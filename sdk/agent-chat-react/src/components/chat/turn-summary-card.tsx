@@ -64,7 +64,7 @@ export function TurnSummaryCard({
 }: TurnSummaryCardProps) {
   const hasRecap = summary.recap.trim().length > 0;
   const hasArtifacts = summary.artifacts.length > 0;
-  if (!hasRecap && !hasArtifacts) return null;
+  if (!hasArtifacts) return null;
 
   // Split artifacts so file/artifact refs render as full-width rich
   // cards (Claude-style download card + ArtifactBlock) while

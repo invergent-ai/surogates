@@ -880,6 +880,8 @@ const _SIMPLE_MODE_HIDDEN_TOOLS: ReadonlySet<string> = new Set([
   "search_files",
   "session_search",
   "skills_list",
+  "skill_view",
+  "skill_manage",
   "process",
   "memory",
   // Shell commands and code execution are infrastructure plumbing the
@@ -889,6 +891,23 @@ const _SIMPLE_MODE_HIDDEN_TOOLS: ReadonlySet<string> = new Set([
   "terminal",
   "execute_code",
 ]);
+
+// Skill-discovery / skill-management tools. Iterations whose only
+// tool calls are in this set get hidden outright in Simple mode —
+// otherwise the harness's iteration summary ("Loaded pptx skill")
+// still labels the row even though every constituent tool call is
+// suppressed by ``visibleToolCalls``.
+const _SKILL_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "skills_list",
+  "skill_view",
+  "skill_manage",
+]);
+
+function _isSkillOnlyIteration(message: ChatMessageType): boolean {
+  const calls = message.toolCalls ?? [];
+  if (calls.length === 0) return false;
+  return calls.every((tc) => _SKILL_TOOL_NAMES.has(tc.toolName));
+}
 
 function _isHiddenSimpleTool(tc: ToolCallInfo): boolean {
   if (_SIMPLE_MODE_HIDDEN_TOOLS.has(tc.toolName)) return true;
@@ -1195,6 +1214,12 @@ export function IterationGroup({
   const summary = message.iterationSummary?.summary;
   const [open, setOpen] = useState(false);
 
+  // Hide iterations whose only tool calls are skill-discovery /
+  // skill-management calls — Simple mode treats skill plumbing as
+  // invisible, and otherwise the harness's iteration summary still
+  // labels the row even when every constituent tool is hidden.
+  if (_isSkillOnlyIteration(message)) return null;
+
   // 1. Live iteration: shimmer label only. "Live" means a tool is
   //    actively running, OR a text-only iteration is mid-stream.
   //    message.status === "streaming" alone is NOT a reliable signal —
@@ -1445,9 +1470,9 @@ function SimpleAssistantGroup({
         <div className="space-y-2">
           {messages.map((message) => {
             if (message.role === "system") {
-              // Reuse the existing OrphanSystemMarker — it renders the
-              // skill_invoked dot, artifact block, and error messages
-              // the same way the orphan path does.
+              // Simple mode hides skill_invoked markers; artifact and
+              // error markers still render via OrphanSystemMarker.
+              if (message.systemKind === "skill_invoked") return null;
               return (
                 <OrphanSystemMarker
                   key={message.id}
@@ -1781,6 +1806,13 @@ export function ChatThread({
 
                 if (group.role === "system") {
                   const msg = group.messages[0];
+                  // Simple mode hides skill_invoked markers entirely.
+                  if (
+                    viewMode === "simple"
+                    && msg.systemKind === "skill_invoked"
+                  ) {
+                    return null;
+                  }
                   const groupRetry =
                     msg.id === activeFailureId ? onRetry : undefined;
                   return (

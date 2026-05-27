@@ -171,7 +171,7 @@ describe("Simple mode ChatThread rendering", () => {
     );
   });
 
-  it("Simple mode preserves skill.invoked system markers", () => {
+  it("Simple mode hides skill.invoked system markers", () => {
     const messages: ChatMessage[] = [
       {
         id: "sys-1",
@@ -195,7 +195,10 @@ describe("Simple mode ChatThread rendering", () => {
         viewMode="simple"
       />,
     );
-    expect(dom.textContent).toContain("frontend-design");
+    expect(dom.textContent).not.toContain("frontend-design");
+    // Skill markers render as the OrphanSystemMarker green dot — that
+    // wrapper must not be present either.
+    expect(dom.querySelector(".bg-emerald-500")).toBeNull();
   });
 
   it("renders synthetic file-artifact cards even when turn.summary is missing", () => {

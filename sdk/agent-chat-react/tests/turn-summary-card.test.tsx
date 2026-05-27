@@ -107,10 +107,10 @@ function mount(node: ReactElement): HTMLDivElement {
 
 
 describe("TurnSummaryCard", () => {
-  it("renders nothing when recap is empty and artifacts is empty", () => {
+  it("renders nothing when artifacts is empty (even if recap has text)", () => {
     const dom = mount(
       <TurnSummaryCard
-        summary={summaryWith({ recap: "" })}
+        summary={summaryWith()}
         sessionId="s-1"
         messages={[]}
       />,
@@ -118,10 +118,14 @@ describe("TurnSummaryCard", () => {
     expect(dom.textContent ?? "").toBe("");
   });
 
-  it("renders the recap text", () => {
+  it("renders the recap text when at least one artifact is present", () => {
     const dom = mount(
       <TurnSummaryCard
-        summary={summaryWith()}
+        summary={summaryWith({
+          artifacts: [
+            { kind: "url", label: "example.com", ref: "https://example.com" },
+          ],
+        })}
         sessionId="s-1"
         messages={[]}
       />,

@@ -553,50 +553,52 @@ function ChatComposerInner({
       }}
     >
       <AttachmentPreviewStrip />
-      <div className="flex flex-wrap items-center justify-end gap-2 px-1 pb-2">
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent"
-          onClick={() => {
-            setMenuMode("commands");
-            setMenuDismissed(false);
-            setButtonMenuOpen(true);
-          }}
-        >
-          <TerminalIcon />
-          Commands
-        </Button>
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent"
-          onClick={() => {
-            setMenuMode("skills");
-            setMenuDismissed(false);
-            setButtonMenuOpen(true);
-          }}
-        >
-          <SparklesIcon />
-          Skills
-        </Button>
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent"
-          onClick={() => {
-            setMenuMode("scheduled");
-            setMenuDismissed(false);
-            setButtonMenuOpen(true);
-          }}
-        >
-          <ClockIcon />
-          Scheduled Tasks
-        </Button>
-      </div>
+      {viewMode === "expert" && (
+        <div className="flex flex-wrap items-center justify-end gap-2 px-1 pb-2">
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent"
+            onClick={() => {
+              setMenuMode("commands");
+              setMenuDismissed(false);
+              setButtonMenuOpen(true);
+            }}
+          >
+            <TerminalIcon />
+            Commands
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent"
+            onClick={() => {
+              setMenuMode("skills");
+              setMenuDismissed(false);
+              setButtonMenuOpen(true);
+            }}
+          >
+            <SparklesIcon />
+            Skills
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent"
+            onClick={() => {
+              setMenuMode("scheduled");
+              setMenuDismissed(false);
+              setButtonMenuOpen(true);
+            }}
+          >
+            <ClockIcon />
+            Scheduled Tasks
+          </Button>
+        </div>
+      )}
       <PopoverAnchor asChild>
         <PromptInput
           onSubmit={handleSubmit}
