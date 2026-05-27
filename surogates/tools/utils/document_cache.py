@@ -10,7 +10,6 @@ executors from racing on the same entry.
 
 from __future__ import annotations
 
-import asyncio
 import fcntl
 import hashlib
 import logging
@@ -45,7 +44,6 @@ class DocumentCache:
         self._max_entries = max_entries
         self._max_entry_bytes = max_entry_bytes
         self._root.mkdir(parents=True, exist_ok=True)
-        self._inflight_lock = asyncio.Lock()
 
     def _key(self, source: Path) -> str:
         st = source.stat()
@@ -87,21 +85,19 @@ class DocumentCache:
             except OSError as exc:
                 logger.debug("cache read failed for %s: %s", entry, exc)
 
-        # Miss — parse, then persist if small enough.  The in-process
-        # lock prevents two coroutines in the same process from parsing
-        # the same file in parallel.
-        async with self._inflight_lock:
-            # Double-check after acquiring the lock; another coroutine
-            # may have populated the file while we waited.
-            if entry.exists():
-                try:
-                    return entry.read_text(encoding="utf-8")
-                except OSError:
-                    pass
-
-            markdown = await parse(source)
-            self._maybe_store(key, markdown)
-            return markdown
+        # Miss — parse and persist if small enough.  We deliberately do
+        # NOT take a global lock here: an earlier version held an
+        # asyncio.Lock around the parse to deduplicate concurrent
+        # requests for the same file, but that lock also serialised
+        # parses of *different* files, which starved the API event
+        # loop when a user sent multiple attachments at once.  Same-key
+        # races are rare in practice (the cache file appears the
+        # moment the first parse finishes) and harmless when they do
+        # happen — the second parse just overwrites the first via the
+        # fcntl-locked rename in ``_maybe_store``.
+        markdown = await parse(source)
+        self._maybe_store(key, markdown)
+        return markdown
 
     def _maybe_store(self, key: str, markdown: str) -> None:
         encoded = markdown.encode("utf-8")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import logging
@@ -685,7 +686,15 @@ async def send_message(
         )
         storage = _get_storage(request)
 
+        # First pass (serial): validate each attachment, accumulate the
+        # cumulative byte budget, and materialise inline-parse inputs.
+        # We keep this serial because each step needs to fail fast with
+        # a precise per-attachment 422 and because ``total_bytes`` is
+        # an accumulator.
         resolved: list[dict] = []
+        # Parallel parse tasks indexed by their position in ``resolved``
+        # so we can stitch results back in order after gather.
+        inline_tasks: list[tuple[int, AttachmentRef, asyncio.Task]] = []
         total_bytes = 0
         for attachment in body.attachments:
             storage_key = prefixed_session_workspace_key(
@@ -730,14 +739,26 @@ async def send_message(
                     ),
                 )
 
+            attachment.size = real_size  # populate for the helper
+            entry: dict[str, Any] = {
+                "path": attachment.path,
+                "filename": attachment.filename,
+                "mime_type": attachment.mime_type,
+                "size": real_size,
+            }
+            resolved.append(entry)
+
             # ── Inline-attachment branch ─────────────────────────────
             # For files small enough and of a supported type, parse or
             # decode the content server-side and persist it on the event
             # so the LLM sees it directly without calling read_file.
-            attachment.size = real_size  # populate for the helper
-            inlined_text: str | None = None
-            inlined_kind: str | None = None
-            skip_reason: str | None = None
+            # The expensive parse step (markitdown / python-docx /
+            # pymupdf4llm) runs as an asyncio.Task here and is awaited
+            # in parallel below via asyncio.gather, so an N-attachment
+            # message takes roughly max(parse_i) wall-clock instead of
+            # sum(parse_i) — and the per-parse work itself runs in a
+            # subprocess pool (see file_ops._parse_document_to_markdown)
+            # so the API event loop is never GIL-blocked.
             inline_kind = _inline_extension_kind(attachment.filename)
             if (
                 real_size <= _INLINE_MAX_BYTES
@@ -774,30 +795,44 @@ async def send_message(
                             modified=modified,
                             suffix=suffix,
                         )
-                inlined_text, inlined_kind, skip_reason = (
-                    await _try_inline_attachment(
+                task = asyncio.create_task(
+                    _try_inline_attachment(
                         attachment, raw_bytes, document_path,
                     )
                 )
+                inline_tasks.append((len(resolved) - 1, attachment, task))
 
-            entry: dict[str, Any] = {
-                "path": attachment.path,
-                "filename": attachment.filename,
-                "mime_type": attachment.mime_type,
-                "size": real_size,
-            }
-            if inlined_text is not None:
-                entry["inlined_text"] = inlined_text
-                entry["inlined_render_kind"] = inlined_kind
-                logger.info(
-                    "event=attachment.inline result=ok kind=%s "
-                    "filename=%s bytes=%d rendered_chars=%d",
-                    inlined_kind, attachment.filename, real_size,
-                    len(inlined_text),
-                )
-            elif skip_reason is not None:
-                entry["inline_skip_reason"] = skip_reason
-            resolved.append(entry)
+        # Drive all inline parses in parallel.  ``return_exceptions``
+        # keeps a single bad attachment from cancelling its siblings —
+        # we surface the failure on that attachment's entry rather than
+        # failing the whole message.
+        if inline_tasks:
+            results = await asyncio.gather(
+                *(t for _, _, t in inline_tasks), return_exceptions=True,
+            )
+            for (idx, attachment, _task), result in zip(
+                inline_tasks, results, strict=True,
+            ):
+                if isinstance(result, BaseException):
+                    logger.warning(
+                        "event=attachment.inline result=error "
+                        "filename=%s err=%s",
+                        attachment.filename, result,
+                    )
+                    resolved[idx]["inline_skip_reason"] = "parse_error"
+                    continue
+                inlined_text, inlined_kind, skip_reason = result
+                if inlined_text is not None:
+                    resolved[idx]["inlined_text"] = inlined_text
+                    resolved[idx]["inlined_render_kind"] = inlined_kind
+                    logger.info(
+                        "event=attachment.inline result=ok kind=%s "
+                        "filename=%s bytes=%d rendered_chars=%d",
+                        inlined_kind, attachment.filename,
+                        resolved[idx]["size"], len(inlined_text),
+                    )
+                elif skip_reason is not None:
+                    resolved[idx]["inline_skip_reason"] = skip_reason
         attachments_payload = resolved
 
     # Emit the user message event.
