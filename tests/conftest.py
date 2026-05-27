@@ -16,6 +16,14 @@ from surogates.tenant.context import TenantContext
 # ---------------------------------------------------------------------------
 os.environ.setdefault("SUROGATES_JWT_SECRET", "test-secret-key-for-unit-tests")
 
+# ---------------------------------------------------------------------------
+# Run document parsing in-thread for tests so that monkeypatched
+# ``_load_markitdown`` / ``_load_pymupdf4llm`` symbols are visible.
+# Production defaults to the subprocess pool (see
+# ``surogates.tools.builtin.file_ops``).
+# ---------------------------------------------------------------------------
+os.environ.setdefault("SUROGATES_DOCUMENT_PARSE_USE_SUBPROCESS", "0")
+
 
 # ---------------------------------------------------------------------------
 # Fixtures

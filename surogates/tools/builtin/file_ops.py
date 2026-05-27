@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import threading
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -33,8 +34,51 @@ _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
 
 # Wall-clock cap for markitdown conversions.  Set high enough for large
 # PDFs but low enough that a misbehaving document doesn't stall the
-# tool loop.
-_DOCUMENT_PARSE_TIMEOUT_S: float = 30.0
+# tool loop.  Tunable via env so PROD can shorten it without a release
+# when health probes are tight.
+_DOCUMENT_PARSE_TIMEOUT_S: float = float(
+    os.environ.get("SUROGATES_DOCUMENT_PARSE_TIMEOUT_S", "10.0")
+)
+
+# Subprocess pool used for ``_convert_to_markdown_sync``.  markitdown
+# and python-docx do pure-Python text processing that holds the GIL,
+# so running the conversion via ``asyncio.to_thread`` starves the
+# event loop on a CPU-limited container.  Running it in a separate
+# process gives the conversion its own GIL.  Pool size is bounded
+# (default 2) so a burst of attachments can't fork-bomb the API
+# container.
+#
+# Disable via ``SUROGATES_DOCUMENT_PARSE_USE_SUBPROCESS=0`` to fall
+# back to a thread (useful for tests that monkeypatch internal
+# loader symbols — subprocess workers re-import this module fresh and
+# can't see the patches).
+_PARSE_POOL_MAX_WORKERS: int = int(
+    os.environ.get("SUROGATES_DOCUMENT_PARSE_WORKERS", "2")
+)
+_USE_SUBPROCESS_PARSE: bool = (
+    os.environ.get("SUROGATES_DOCUMENT_PARSE_USE_SUBPROCESS", "1") == "1"
+)
+_parse_pool: ProcessPoolExecutor | None = None
+_parse_pool_lock = threading.Lock()
+
+
+def _get_parse_pool() -> ProcessPoolExecutor:
+    """Lazy-initialise the parse subprocess pool.
+
+    The pool is shared process-wide; workers are reused across
+    conversions to amortise interpreter startup.  Initialised lazily so
+    importing :mod:`file_ops` (which the harness does eagerly for tool
+    schema registration) does not fork off Python subprocesses at
+    import time.
+    """
+    global _parse_pool
+    if _parse_pool is None:
+        with _parse_pool_lock:
+            if _parse_pool is None:
+                _parse_pool = ProcessPoolExecutor(
+                    max_workers=_PARSE_POOL_MAX_WORKERS,
+                )
+    return _parse_pool
 
 
 class DocumentParseError(Exception):
@@ -97,17 +141,46 @@ def _convert_to_markdown_sync(path: Path) -> str:
 async def _parse_document_to_markdown(path: Path) -> str:
     """Convert a document to markdown via markitdown.
 
-    Wrapped in ``asyncio.to_thread`` because markitdown is synchronous
-    and PDF parsing can take seconds.  Bounded by
-    ``_DOCUMENT_PARSE_TIMEOUT_S`` wall-clock; any exception, including
-    timeout, is normalised to :class:`DocumentParseError`.
+    Runs in a :class:`ProcessPoolExecutor` rather than a thread because
+    markitdown / python-docx / openpyxl are pure-Python text processing
+    that holds the GIL.  In the API process (FastAPI on a 1-2 vCPU
+    container with aggressive liveness probes) a thread-based parse
+    starves the asyncio event loop and trips the kubelet's health
+    checks.  A subprocess has its own GIL, so the event loop keeps
+    scheduling.
+
+    Bounded by ``_DOCUMENT_PARSE_TIMEOUT_S`` wall-clock; any exception,
+    including timeout, is normalised to :class:`DocumentParseError`.
+    Note: we cancel the future on timeout but the subprocess worker
+    may still complete the parse in the background — that's fine, the
+    result is just discarded.
     """
+    if _USE_SUBPROCESS_PARSE:
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(
+            _get_parse_pool(), _convert_to_markdown_sync, path,
+        )
+        awaitable: asyncio.Future | asyncio.Task = asyncio.shield(future)
+        on_timeout_cancel = future
+    else:
+        # Thread-based fallback (tests, or explicit opt-out).  GIL
+        # contention is acceptable here because the test environment
+        # isn't on the critical liveness-probe path.
+        awaitable = asyncio.create_task(
+            asyncio.to_thread(_convert_to_markdown_sync, path),
+        )
+        on_timeout_cancel = awaitable
+
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_convert_to_markdown_sync, path),
-            timeout=_DOCUMENT_PARSE_TIMEOUT_S,
+            awaitable, timeout=_DOCUMENT_PARSE_TIMEOUT_S,
         )
     except asyncio.TimeoutError as exc:
+        # Explicitly cancel so the executor slot / thread is released.
+        # ProcessPoolExecutor.cancel() succeeds only if the job hasn't
+        # started yet — a started job will finish on its own and its
+        # result is dropped.
+        on_timeout_cancel.cancel()
         raise DocumentParseError(
             path,
             f"parse timeout after {_DOCUMENT_PARSE_TIMEOUT_S}s",
