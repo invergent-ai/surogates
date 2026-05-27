@@ -45,7 +45,7 @@ if [ "${FLEET_MODE:-0}" = "1" ]; then
     # mirror the AWS SDK conventions (AWS_S3_ENDPOINT,
     # AWS_DEFAULT_REGION). Translate them to the legacy
     # S3_BUCKET_PATH / S3_ENDPOINT / S3_REGION inputs that the rest of
-    # this script consumes, so the goofys invocation below is reused.
+    # this script consumes, so the geesefs invocation below is reused.
     if [ -z "${WORKSPACE_SOURCE_REF:-}" ]; then
         echo "[s3fs-entrypoint] WORKSPACE_SOURCE_REF missing in creds file" >&2
         exit 1
@@ -99,20 +99,25 @@ if [ -z "${S3_REGION:-}" ]; then
     esac
 fi
 
-# Callers (historically targeting s3fs) pass BUCKET:/PREFIX. goofys expects
-# BUCKET:PREFIX (no leading slash on the prefix), so strip it.
+# Callers (historically targeting s3fs) pass BUCKET:/PREFIX. geesefs (like
+# goofys before it) expects BUCKET:PREFIX with no leading slash on the
+# prefix, so strip it.
 BUCKET_SPEC="${S3_BUCKET_PATH/:\//:}"
+
+# Sidecar containers typically have a ~256MB RAM budget; geesefs's default
+# memory limit of 1000MB is unrealistic for our deployment shape.
+GEESEFS_MEMORY_LIMIT_MB="${GEESEFS_MEMORY_LIMIT_MB:-256}"
 
 echo "Mounting s3://${S3_BUCKET_PATH} at ${MOUNT_POINT} (endpoint: ${S3_ENDPOINT}, region: ${S3_REGION})"
 
-# In legacy mode we exec goofys so it owns PID 1 and Kubernetes signals
+# In legacy mode we exec geesefs so it owns PID 1 and Kubernetes signals
 # reach it directly. In fleet mode we need to write the .s3fs-mounted
 # sentinel into the mount point *after* the mount lands, which is only
 # possible if we keep our shell alive long enough to write the file —
-# so we run goofys in the background, write the sentinel, and trap
-# SIGTERM/SIGINT to forward them to goofys.
+# so we run geesefs in the background, write the sentinel, and trap
+# SIGTERM/SIGINT to forward them to it.
 if [ "${FLEET_MODE:-0}" = "1" ]; then
-    goofys \
+    geesefs \
         --endpoint "${S3_ENDPOINT}" \
         --region "${S3_REGION}" \
         -o allow_other \
@@ -120,36 +125,37 @@ if [ "${FLEET_MODE:-0}" = "1" ]; then
         --gid 1000 \
         --file-mode 0644 \
         --dir-mode 0755 \
+        --memory-limit "${GEESEFS_MEMORY_LIMIT_MB}" \
         -f \
         "${BUCKET_SPEC}" "${MOUNT_POINT}" &
-    GOOFYS_PID=$!
+    GEESEFS_PID=$!
 
-    # mountpoint(1) needs util-linux; the goofys image already includes
-    # it. Poll for up to 30 s — beyond that goofys has clearly failed
-    # and the manager's pod_ready_timeout will tear the pod down.
+    # mountpoint(1) needs util-linux; the base image already includes it.
+    # Poll for up to 30 s — beyond that geesefs has clearly failed and the
+    # manager's pod_ready_timeout will tear the pod down.
     for _ in $(seq 1 150); do
         if mountpoint -q "${MOUNT_POINT}"; then
             touch "${MOUNT_POINT}/.s3fs-mounted"
             echo "[s3fs-entrypoint] mount confirmed; sentinel written"
             break
         fi
-        if ! kill -0 "${GOOFYS_PID}" 2>/dev/null; then
-            echo "[s3fs-entrypoint] goofys exited before mount; aborting" >&2
-            wait "${GOOFYS_PID}" || true
+        if ! kill -0 "${GEESEFS_PID}" 2>/dev/null; then
+            echo "[s3fs-entrypoint] geesefs exited before mount; aborting" >&2
+            wait "${GEESEFS_PID}" || true
             exit 1
         fi
         sleep 0.2
     done
 
-    # Forward signals so K8s teardown / sidecar /release shuts goofys
+    # Forward signals so K8s teardown / sidecar /release shuts geesefs
     # down cleanly and unmounts the fuse layer.
-    trap 'kill -TERM "${GOOFYS_PID}" 2>/dev/null || true; wait "${GOOFYS_PID}" || true; exit 0' TERM INT
-    wait "${GOOFYS_PID}"
+    trap 'kill -TERM "${GEESEFS_PID}" 2>/dev/null || true; wait "${GEESEFS_PID}" || true; exit 0' TERM INT
+    wait "${GEESEFS_PID}"
     exit $?
 fi
 
-# Legacy mode: exec goofys directly.
-exec goofys \
+# Legacy mode: exec geesefs directly.
+exec geesefs \
     --endpoint "${S3_ENDPOINT}" \
     --region "${S3_REGION}" \
     -o allow_other \
@@ -157,5 +163,6 @@ exec goofys \
     --gid 1000 \
     --file-mode 0644 \
     --dir-mode 0755 \
+    --memory-limit "${GEESEFS_MEMORY_LIMIT_MB}" \
     -f \
     "${BUCKET_SPEC}" "${MOUNT_POINT}"
