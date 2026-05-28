@@ -14,9 +14,11 @@ This module bridges two layers:
 
 from __future__ import annotations
 
+from fastapi import HTTPException, Request
+
 from surogates.runtime.context import AgentRuntimeContext, LLMEndpoint
 
-__all__ = ["build_agent_runtime_context"]
+__all__ = ["agent_runtime_context_dep", "build_agent_runtime_context"]
 
 
 def _opt_llm(blob: dict | None) -> LLMEndpoint | None:
@@ -57,3 +59,76 @@ def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
         mcp_server_ids=tuple(payload.get("mcp_server_ids") or ()),
         governance=dict(payload.get("governance") or {}),
     )
+
+
+async def _resolve_slug_to_agent_id(
+    _request: Request, _slug: str,
+) -> str | None:
+    """Look up an agent by its DNS-safe slug.
+
+    Stub for Plan 1.  Plan 1b will wire the slug → agent_id mapping
+    against the management plane and cache the result.  Returning
+    ``None`` here makes the Host-header resolution branch a no-op
+    so existing tests + helm-mode callers keep working.
+    """
+    return None
+
+
+async def agent_runtime_context_dep(request: Request) -> AgentRuntimeContext:
+    """Resolve the per-request :class:`AgentRuntimeContext`.
+
+    Resolution order (highest precedence first):
+
+    1. ``?agent_id=<id>`` query parameter — explicit, used by Studio
+       and admin tools.  Wins even when ``runtime_mode=helm``.
+    2. ``Host`` header subdomain (stub in Plan 1).  Plan 1b will
+       implement ``slug.example.com`` → ``agent_id`` lookup.
+    3. ``request.app.state.settings.agent_id`` fallback when
+       ``runtime_mode == "helm"`` — keeps legacy single-agent api
+       pods working unchanged.  Intentionally NOT consulted in
+       shared mode: a misconfigured shared pod with a stale
+       ``settings.agent_id`` would silently route to the wrong
+       tenant otherwise.
+
+    Failure responses:
+
+    * ``400`` when no ``agent_id`` can be resolved.
+    * ``404`` when surogate-ops refuses the agent (404 from the
+      platform = ``runtime_kind != shared`` or row absent).
+    * ``503`` when the agent exists but ``enabled == False`` —
+      "administratively stopped".  This is the lifecycle gate the
+      management plane flips on ``stop_agent``.
+    """
+    agent_id = request.query_params.get("agent_id")
+
+    if not agent_id:
+        host = request.headers.get("host", "")
+        slug = host.split(".", 1)[0] if "." in host else None
+        if slug and slug.lower() not in {"www", "api", "localhost"}:
+            agent_id = await _resolve_slug_to_agent_id(request, slug)
+
+    settings = getattr(request.app.state, "settings", None)
+    runtime_mode = getattr(settings, "runtime_mode", "helm")
+
+    if not agent_id and runtime_mode == "helm":
+        agent_id = getattr(settings, "agent_id", "") or None
+
+    if not agent_id:
+        raise HTTPException(400, "no agent_id in request")
+
+    cache = request.app.state.runtime_config_cache
+    try:
+        payload = await cache.get(agent_id)
+    except LookupError:
+        raise HTTPException(
+            404,
+            f"agent {agent_id} not configured for shared runtime",
+        )
+
+    ctx = build_agent_runtime_context(payload)
+    if not ctx.enabled:
+        raise HTTPException(
+            503,
+            f"agent {agent_id} is stopped (enabled=false)",
+        )
+    return ctx

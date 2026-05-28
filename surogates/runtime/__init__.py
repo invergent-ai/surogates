@@ -11,7 +11,10 @@ from __future__ import annotations
 from surogates.runtime.cache import RuntimeConfigCache
 from surogates.runtime.context import AgentRuntimeContext, LLMEndpoint
 from surogates.runtime.platform_client import PlatformAuthError, PlatformClient
-from surogates.runtime.resolver import build_agent_runtime_context
+from surogates.runtime.resolver import (
+    agent_runtime_context_dep,
+    build_agent_runtime_context,
+)
 
 __all__ = [
     "AgentRuntimeContext",
@@ -19,5 +22,6 @@ __all__ = [
     "PlatformAuthError",
     "PlatformClient",
     "RuntimeConfigCache",
+    "agent_runtime_context_dep",
     "build_agent_runtime_context",
 ]
