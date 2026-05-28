@@ -227,7 +227,7 @@ async def _try_inline_attachment(
             return None, None, "parse_error"
         from surogates.tools.builtin.file_ops import (  # noqa: PLC0415
             DocumentParseError,
-            _parse_document_to_markdown,
+            _parse_document_to_text,
         )
         from surogates.tools.utils.document_cache import (  # noqa: PLC0415
             default_cache,
@@ -235,7 +235,7 @@ async def _try_inline_attachment(
 
         try:
             md = await default_cache().get_or_parse(
-                document_path, _parse_document_to_markdown,
+                document_path, _parse_document_to_text,
             )
         except DocumentParseError as exc:
             reason = (
@@ -806,13 +806,14 @@ async def send_message(
             # For files small enough and of a supported type, parse or
             # decode the content server-side and persist it on the event
             # so the LLM sees it directly without calling read_file.
-            # The expensive parse step (markitdown / python-docx /
-            # pymupdf4llm) runs as an asyncio.Task here and is awaited
-            # in parallel below via asyncio.gather, so an N-attachment
-            # message takes roughly max(parse_i) wall-clock instead of
-            # sum(parse_i) — and the per-parse work itself runs in a
-            # subprocess pool (see file_ops._parse_document_to_markdown)
-            # so the API event loop is never GIL-blocked.
+            # The parse step (liteparse: mupdf for PDFs, LibreOffice
+            # shellout for Office formats) runs as an asyncio.Task here
+            # and is awaited in parallel below via asyncio.gather, so an
+            # N-attachment message takes roughly max(parse_i) wall-clock
+            # instead of sum(parse_i) — and the per-parse work itself
+            # runs in a subprocess pool (see
+            # file_ops._parse_document_to_text) so the API event loop
+            # is never GIL-blocked even on OCR-heavy scanned PDFs.
             inline_kind = _inline_extension_kind(attachment.filename)
             if (
                 real_size <= _INLINE_MAX_BYTES

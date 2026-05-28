@@ -2,7 +2,7 @@
 
 Generates fixtures at test time rather than checking binaries into git.
 Each builder writes a small but real document with a known probe string
-so tests can assert that markitdown extracted it.
+so tests can assert that liteparse extracted it.
 """
 
 from __future__ import annotations
@@ -46,18 +46,23 @@ def build_minimal_docx(path: Path) -> Path:
 
 
 def build_minimal_xlsx(path: Path) -> Path:
-    """Write an xlsx with two sheets named Alpha and Beta."""
+    """Write an xlsx with two sheets, each containing a probe string in cells.
+
+    Probes are written into cells (not sheet titles) because liteparse
+    routes xlsx → LibreOffice → PDF, and the PDF stream doesn't carry
+    sheet metadata.
+    """
     from openpyxl import Workbook
 
     wb = Workbook()
     ws1 = wb.active
     ws1.title = "Alpha"
-    ws1["A1"] = "name"
+    ws1["A1"] = "Alpha header"
     ws1["B1"] = "value"
     ws1["A2"] = "x"
     ws1["B2"] = 1
     ws2 = wb.create_sheet("Beta")
-    ws2["A1"] = "name"
+    ws2["A1"] = "Beta header"
     ws2["A2"] = "y"
     wb.save(str(path))
     return path

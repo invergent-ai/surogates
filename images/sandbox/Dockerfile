@@ -41,9 +41,9 @@ RUN uv venv /opt/venv \
         pypdfium2 \
         pytesseract \
         pdf2image
-# markitdown[docx,xlsx,pptx], pymupdf4llm, pypdf, python-docx,
-# python-pptx, openpyxl are pulled in by the surogates package install
-# above (project deps), so they are not listed here.
+# liteparse, pypdf, python-docx, python-pptx, openpyxl are pulled in
+# by the surogates package install above (project deps), so they are
+# not listed here.
 #
 # The extra libraries above (reportlab, pdfplumber, pypdfium2,
 # pytesseract, pdf2image) are referenced by the bundled productivity
@@ -64,10 +64,14 @@ LABEL org.opencontainers.image.title="surogates-agent-sandbox" \
 # qpdf + pdftk-java are command-line PDF manipulation tools the skill
 # documents as alternatives.  pandoc is the actual binary referenced by
 # the docx skill's "Reading Content (advanced)" recipe.  libreoffice is
-# required by scripts/office/soffice.py (.doc → .docx conversion and
-# docx → pdf rendering for the docx/pptx skills).  tesseract-ocr is the
-# OCR engine the pytesseract Python wrapper drives.  pdfgrep is a nice
-# CLI for full-text PDF search.
+# used by scripts/office/soffice.py (.doc → .docx conversion and
+# docx → pdf rendering for the docx/pptx skills) *and* by liteparse
+# (read_file's document parser) to convert docx/xlsx/pptx to PDF before
+# parsing.  tesseract-ocr is the OCR engine: pytesseract wraps it for
+# skills, and liteparse uses it as the OCR backend for scanned PDFs.
+# imagemagick is used by liteparse to rasterise image inputs (tiff/
+# webp/svg/etc.) before parsing.  pdfgrep is a nice CLI for full-text
+# PDF search.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         ripgrep \
@@ -87,6 +91,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-writer \
         libreoffice-calc \
         libreoffice-impress \
+        imagemagick \
         pdfgrep \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \

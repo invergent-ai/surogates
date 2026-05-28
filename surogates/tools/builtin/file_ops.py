@@ -3,6 +3,10 @@
 These tools are classified as sandbox tools: in production the
 :class:`ToolRouter` forwards them to the sandbox runtime.  The handlers
 here serve as harness-local fallbacks for development and testing.
+
+Document parsing (PDF/DOCX/XLSX/PPTX/images) goes through liteparse,
+which wraps mupdf for PDFs natively and shells out to LibreOffice for
+Office formats.  See ``_convert_to_text_sync``.
 """
 
 from __future__ import annotations
@@ -32,22 +36,22 @@ logger = logging.getLogger(__name__)
 
 _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
 
-# Wall-clock cap for markitdown conversions.  Set high enough that
-# OCR-requiring scanned PDFs (~1s/page via Tesseract) get through, but
-# low enough that a misbehaving document doesn't stall the tool loop
-# indefinitely.  Tunable via env so PROD can shorten it without a
-# release when health probes are tight.
+# Wall-clock cap for liteparse conversions.  Text-layer PDFs parse in
+# under a second; the budget is sized for OCR-heavy scanned documents
+# (~1s/page with Tesseract).  Tunable via env so PROD can shorten it
+# without a release when health probes are tight.
 _DOCUMENT_PARSE_TIMEOUT_S: float = float(
     os.environ.get("SUROGATES_DOCUMENT_PARSE_TIMEOUT_S", "60.0")
 )
 
-# Subprocess pool used for ``_convert_to_markdown_sync``.  markitdown
-# and python-docx do pure-Python text processing that holds the GIL,
-# so running the conversion via ``asyncio.to_thread`` starves the
-# event loop on a CPU-limited container.  Running it in a separate
-# process gives the conversion its own GIL.  Pool size is bounded
-# (default 2) so a burst of attachments can't fork-bomb the API
-# container.
+# Subprocess pool used for ``_convert_to_text_sync``.  liteparse links
+# against mupdf via Python bindings that release the GIL during most
+# of the work, but OCR (Tesseract) and the LibreOffice shellout are
+# CPU-bound; running them in a separate process keeps the API event
+# loop (FastAPI on a 1-2 vCPU container with aggressive liveness
+# probes) scheduling so kubelet health checks don't trip.  Pool size
+# is bounded (default 2) so a burst of attachments can't fork-bomb
+# the API container.
 #
 # Disable via ``SUROGATES_DOCUMENT_PARSE_USE_SUBPROCESS=0`` to fall
 # back to a thread (useful for tests that monkeypatch internal
@@ -83,7 +87,7 @@ def _get_parse_pool() -> ProcessPoolExecutor:
 
 
 class DocumentParseError(Exception):
-    """Raised when markitdown fails to convert a document.
+    """Raised when liteparse fails to convert a document.
 
     Carries the file path and the underlying error message so the
     tool-error envelope can surface a useful fallback hint.
@@ -95,60 +99,44 @@ class DocumentParseError(Exception):
         super().__init__(f"Could not parse {path}: {reason}")
 
 
-def _load_markitdown() -> Any:
-    """Lazy-import markitdown.  Indirected so tests can monkeypatch it.
+def _load_liteparse() -> Any:
+    """Lazy-import liteparse.  Indirected so tests can monkeypatch it.
 
     Eager import would force every consumer of ``file_ops`` (including
     the worker, which loads this module just to register tool schemas)
-    to pay the markitdown import cost on startup.
+    to pay the liteparse import cost on startup.  Returns the
+    :class:`LiteParse` class itself; callers instantiate it with the
+    options they want.
     """
-    from markitdown import MarkItDown  # noqa: PLC0415
+    from liteparse import LiteParse  # noqa: PLC0415
 
-    return MarkItDown()
-
-
-def _load_pymupdf4llm() -> Any:
-    """Lazy-import pymupdf4llm.  Same rationale as ``_load_markitdown``."""
-    import pymupdf4llm  # noqa: PLC0415
-
-    return pymupdf4llm
+    return LiteParse
 
 
-def _convert_pdf_to_markdown_sync(path: Path) -> str:
-    """PDF → markdown via pymupdf4llm.
+def _convert_to_text_sync(path: Path) -> str:
+    """Sync entry point for the subprocess pool / ``asyncio.to_thread``.
 
-    pymupdf4llm preserves table structure (emitting real pipe tables) and
-    heading hierarchy, which markitdown's pdfminer backend flattens.
+    Routes PDF/DOCX/XLSX/PPTX/images uniformly through liteparse.  The
+    parser is constructed per-call (it's cheap) with ``quiet=True`` to
+    suppress its progress chatter on stderr in production logs.  OCR
+    is left at its default (on); for text-layer PDFs liteparse skips
+    it automatically, and scanned PDFs need it.
     """
-    pymupdf4llm = _load_pymupdf4llm()
-    return pymupdf4llm.to_markdown(str(path)) or ""
+    LiteParse = _load_liteparse()
+    parser = LiteParse(quiet=True)
+    result = parser.parse(str(path))
+    return result.text or ""
 
 
-def _convert_to_markdown_sync(path: Path) -> str:
-    """Sync entry point for ``asyncio.to_thread``.
-
-    Dispatches PDFs to pymupdf4llm and routes everything else through
-    markitdown.  pymupdf4llm produces much higher-quality markdown for
-    table-heavy PDFs (financial reports, registers) where markitdown's
-    flat text stream loses cell boundaries.
-    """
-    if path.suffix.lower() == ".pdf":
-        return _convert_pdf_to_markdown_sync(path)
-    md = _load_markitdown()
-    result = md.convert(str(path))
-    return result.text_content or ""
-
-
-async def _parse_document_to_markdown(path: Path) -> str:
-    """Convert a document to markdown via markitdown.
+async def _parse_document_to_text(path: Path) -> str:
+    """Convert a document to text via liteparse.
 
     Runs in a :class:`ProcessPoolExecutor` rather than a thread because
-    markitdown / python-docx / openpyxl are pure-Python text processing
-    that holds the GIL.  In the API process (FastAPI on a 1-2 vCPU
-    container with aggressive liveness probes) a thread-based parse
-    starves the asyncio event loop and trips the kubelet's health
-    checks.  A subprocess has its own GIL, so the event loop keeps
-    scheduling.
+    OCR (Tesseract) and the LibreOffice shellout are CPU-bound.  In the
+    API process (FastAPI on a 1-2 vCPU container with aggressive
+    liveness probes) a thread-based parse can starve the asyncio event
+    loop and trip the kubelet's health checks; a subprocess has its
+    own GIL so the event loop keeps scheduling.
 
     Bounded by ``_DOCUMENT_PARSE_TIMEOUT_S`` wall-clock; any exception,
     including timeout, is normalised to :class:`DocumentParseError`.
@@ -159,7 +147,7 @@ async def _parse_document_to_markdown(path: Path) -> str:
     if _USE_SUBPROCESS_PARSE:
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(
-            _get_parse_pool(), _convert_to_markdown_sync, path,
+            _get_parse_pool(), _convert_to_text_sync, path,
         )
         awaitable: asyncio.Future | asyncio.Task = asyncio.shield(future)
         on_timeout_cancel = future
@@ -168,7 +156,7 @@ async def _parse_document_to_markdown(path: Path) -> str:
         # contention is acceptable here because the test environment
         # isn't on the critical liveness-probe path.
         awaitable = asyncio.create_task(
-            asyncio.to_thread(_convert_to_markdown_sync, path),
+            asyncio.to_thread(_convert_to_text_sync, path),
         )
         on_timeout_cancel = awaitable
 
@@ -188,7 +176,7 @@ async def _parse_document_to_markdown(path: Path) -> str:
         ) from exc
     except DocumentParseError:
         raise
-    except Exception as exc:  # noqa: BLE001 — markitdown raises ad-hoc types
+    except Exception as exc:  # noqa: BLE001 — liteparse raises ad-hoc types
         raise DocumentParseError(path, str(exc)) from exc
 
 # ---------------------------------------------------------------------------
@@ -666,9 +654,9 @@ READ_FILE_SCHEMA = ToolSchema(
         "Read a file with line numbers and pagination. Use this instead of "
         "cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. "
         "Handles plain text plus .pdf, .docx, .xlsx, .pptx (parsed to "
-        "markdown natively) and image files (described by a vision model) "
-        "— do NOT pre-extract documents with subprocess tools or pip-install "
-        "pypdf/python-docx/openpyxl yourself; just call read_file. "
+        "text natively via liteparse) and image files (described by a vision "
+        "model) — do NOT pre-extract documents with subprocess tools or "
+        "pip-install pypdf/python-docx/openpyxl yourself; just call read_file. "
         "Suggests similar filenames if not found. Use offset and limit for "
         "large files. Reads exceeding ~100K characters are rejected; use "
         "offset and limit to read specific sections of large files."
@@ -965,7 +953,7 @@ def register(registry: ToolRegistry) -> None:
 # ---------------------------------------------------------------------------
 
 
-# Document extensions handled natively by markitdown (see _handle_document).
+# Document extensions handled natively by liteparse (see _handle_document).
 _DOCUMENT_EXTENSIONS: frozenset[str] = frozenset({
     ".pdf",
     ".docx",
@@ -1006,7 +994,7 @@ async def _read_file_handler(
         ``surogates.harness.tool_exec``; this handler returns a defensive
         redirect error if the worker branch was bypassed.
       * document extensions (.pdf/.docx/.xlsx/.pptx) — parsed via
-        markitdown by ``_handle_document``.
+        liteparse by ``_handle_document``.
       * everything else — treated as text by ``_handle_text``.
     """
     path = arguments.get("path", "")
@@ -1067,7 +1055,7 @@ async def _handle_document(
     arguments: dict[str, Any],
     **kwargs: Any,  # noqa: ARG001 — kwargs accepted for signature parity with _handle_text
 ) -> str:
-    """Parse a PDF/docx/xlsx/pptx via markitdown and return markdown.
+    """Parse a PDF/docx/xlsx/pptx via liteparse and return its text.
 
     Pagination matches ``_handle_text``: ``offset`` is 1-indexed,
     ``limit`` caps the line count, and lines are emitted with
@@ -1086,7 +1074,7 @@ async def _handle_document(
 
     try:
         markdown = await default_cache().get_or_parse(
-            resolved, _parse_document_to_markdown,
+            resolved, _parse_document_to_text,
         )
     except DocumentParseError as exc:
         ext = resolved.suffix.lower().lstrip(".")

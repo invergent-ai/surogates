@@ -346,7 +346,7 @@ def _render_inlined_attachments(
         header = f"**Attachment: {filename}**"
         if kind == "markdown":
             subtitle = (
-                "*(parsed via markitdown/pymupdf4llm — to re-read or "
+                "*(parsed via liteparse — to re-read or "
                 f"paginate, use `read_file(\"{path}\")`)*"
             )
             block = f"---\n{header}\n{subtitle}\n\n{inlined}\n---"

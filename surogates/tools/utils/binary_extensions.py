@@ -19,7 +19,7 @@ BINARY_EXTENSIONS = frozenset({
     ".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a", ".obj", ".lib",
     ".app", ".msi", ".deb", ".rpm",
     # Legacy binary office formats only.  .pdf/.docx/.xlsx/.pptx are
-    # handled natively by read_file via markitdown (see file_ops.py).
+    # handled natively by read_file via liteparse (see file_ops.py).
     ".doc", ".xls", ".ppt",
     ".odt", ".ods", ".odp",
     # Fonts

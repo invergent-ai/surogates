@@ -1,8 +1,8 @@
-"""End-to-end: write a real document, call read_file, expect parsed markdown.
+"""End-to-end: write a real document, call read_file, expect parsed text.
 
 Uses the in-process workspace (no S3, no sandbox) so the test stays
 hermetic but still exercises the full ``_read_file_handler`` →
-``_handle_document`` → ``_parse_document_to_markdown`` → cache path.
+``_handle_document`` → ``_parse_document_to_text`` → cache path.
 """
 
 from __future__ import annotations
@@ -86,13 +86,13 @@ async def test_read_file_pagination_round_trip(
     src = build_minimal_docx(tmp_path / "windowed.docx")
 
     parse_calls = {"n": 0}
-    original_parse = file_ops._parse_document_to_markdown
+    original_parse = file_ops._parse_document_to_text
 
     async def counting_parse(path):
         parse_calls["n"] += 1
         return await original_parse(path)
 
-    file_ops._parse_document_to_markdown = counting_parse
+    file_ops._parse_document_to_text = counting_parse
     try:
         first = json.loads(
             await _read_file_handler({"path": str(src), "offset": 1, "limit": 1})
@@ -101,7 +101,7 @@ async def test_read_file_pagination_round_trip(
             await _read_file_handler({"path": str(src), "offset": 2, "limit": 1})
         )
     finally:
-        file_ops._parse_document_to_markdown = original_parse
+        file_ops._parse_document_to_text = original_parse
 
     assert "error" not in first, first
     assert "error" not in second, second

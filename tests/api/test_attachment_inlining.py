@@ -245,13 +245,14 @@ async def test_try_inline_attachment_skips_when_parse_fails(
     )
     from surogates.tools.builtin import file_ops
 
-    class RaisingPyMuPDF4LLM:
-        def to_markdown(self, *args, **kwargs):
+    class RaisingLiteParse:
+        def __init__(self, **kwargs):
+            pass
+
+        def parse(self, path_str):
             raise RuntimeError("not a pdf")
 
-    monkeypatch.setattr(
-        file_ops, "_load_pymupdf4llm", lambda: RaisingPyMuPDF4LLM(),
-    )
+    monkeypatch.setattr(file_ops, "_load_liteparse", lambda: RaisingLiteParse)
 
     bad = tmp_path / "bad.pdf"
     bad.write_bytes(b"%PDF-1.4 placeholder")
@@ -267,7 +268,7 @@ async def test_try_inline_attachment_skips_when_parse_fails(
 
 
 @pytest.mark.asyncio
-async def test_try_inline_attachment_skips_when_markdown_empty(
+async def test_try_inline_attachment_skips_when_text_empty(
     tmp_path, monkeypatch, isolated_document_cache,
 ) -> None:
     from surogates.api.routes.sessions import (
@@ -275,14 +276,16 @@ async def test_try_inline_attachment_skips_when_markdown_empty(
         _try_inline_attachment,
     )
     from surogates.tools.builtin import file_ops
+    from types import SimpleNamespace
 
-    class EmptyPyMuPDF4LLM:
-        def to_markdown(self, *args, **kwargs):
-            return "   \n  "
+    class EmptyLiteParse:
+        def __init__(self, **kwargs):
+            pass
 
-    monkeypatch.setattr(
-        file_ops, "_load_pymupdf4llm", lambda: EmptyPyMuPDF4LLM(),
-    )
+        def parse(self, path_str):
+            return SimpleNamespace(text="   \n  ")
+
+    monkeypatch.setattr(file_ops, "_load_liteparse", lambda: EmptyLiteParse)
 
     src = tmp_path / "empty.pdf"
     src.write_bytes(b"%PDF-1.4 placeholder")

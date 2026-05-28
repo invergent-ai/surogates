@@ -77,13 +77,13 @@ async def test_replay_produces_identical_user_content(
     call_count = {"n": 0}
     from surogates.tools.builtin import file_ops
 
-    real_parser = file_ops._parse_document_to_markdown
+    real_parser = file_ops._parse_document_to_text
 
     async def counting(p):
         call_count["n"] += 1
         return await real_parser(p)
 
-    monkeypatch.setattr(file_ops, "_parse_document_to_markdown", counting)
+    monkeypatch.setattr(file_ops, "_parse_document_to_text", counting)
 
     third = AgentHarness._rebuild_messages(SimpleNamespace(), [event])
     assert third == first

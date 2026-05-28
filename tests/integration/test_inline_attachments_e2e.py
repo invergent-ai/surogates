@@ -137,4 +137,4 @@ async def test_round_trip_inlines_plain_text(tmp_path: Path) -> None:
     assert "**Attachment: notes.md**" in content
     assert "# title" in content
     # text kind should not get the parser subtitle.
-    assert "parsed via markitdown" not in content
+    assert "parsed via liteparse" not in content

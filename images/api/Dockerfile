@@ -33,9 +33,26 @@ LABEL org.opencontainers.image.title="surogates-api" \
       org.opencontainers.image.source="https://github.com/invergent-ai/surogates"
 
 # ── OS packages ──────────────────────────────────────────────────────
+# libreoffice-core + filter packages: liteparse uses LibreOffice headless
+#   to convert Office docs (docx/xlsx/pptx/odt/etc.) to PDF before
+#   parsing.  ``libreoffice-core`` alone is not enough — without the
+#   format-specific filters (writer/calc/impress) the conversion fails.
+# imagemagick: liteparse uses ImageMagick to rasterise non-PDF image
+#   formats (tiff/webp/svg/etc.) before parsing.
+# tesseract-ocr + tesseract-ocr-eng: optional OCR backend for scanned
+#   PDFs.  Without it liteparse falls back to bundled Tesseract data
+#   shipped with the wheel, which the upstream package occasionally
+#   omits on minimal base images.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tini \
         curl \
+        libreoffice-core \
+        libreoffice-writer \
+        libreoffice-calc \
+        libreoffice-impress \
+        imagemagick \
+        tesseract-ocr \
+        tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Python dependencies + SPA install ───────────────────────────────

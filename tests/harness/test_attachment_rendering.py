@@ -19,7 +19,7 @@ def test_render_inlined_appends_fenced_block_for_markdown_kind() -> None:
     )
     assert out.startswith("summarise this")
     assert "**Attachment: report.pdf**" in out
-    assert "parsed via markitdown/pymupdf4llm" in out
+    assert "parsed via liteparse" in out
     assert "read_file(\"uploads/report.pdf\")" in out
     assert "# Heading" in out
 
@@ -39,7 +39,7 @@ def test_render_inlined_text_kind_omits_parser_subtitle() -> None:
         ],
     )
     assert "**Attachment: notes.md**" in out
-    assert "parsed via markitdown" not in out  # no parser subtitle for text
+    assert "parsed via liteparse" not in out  # no parser subtitle for text
     assert "# notes" in out
 
 

@@ -48,12 +48,14 @@ dependencies = [
     "croniter>=3.0,<7.0",
     "outlines>=1.2,<2.0",
     "mcp>=1.2,<2.0",
-    # markitdown handles docx/xlsx/pptx well; PDFs use pymupdf4llm
-    # directly (markitdown's PDF backend produces a flat text stream
-    # that loses table and heading structure; pymupdf4llm emits real
-    # markdown tables/headings).
-    "markitdown[docx,xlsx,pptx]>=0.1,<1.0",
-    "pymupdf4llm>=0.0.17",
+    # liteparse parses PDF/DOCX/XLSX/PPTX/images uniformly via mupdf
+    # bindings (PDF) and LibreOffice (Office) -> PDF.  Sub-second on
+    # text-layer PDFs; built-in Tesseract OCR for scanned docs.  Office
+    # support requires the libreoffice system package; image support
+    # requires imagemagick.  pypdf / python-docx / openpyxl / python-pptx
+    # are kept available as user-callable fallbacks (the read_file tool
+    # error envelope hints at them when liteparse fails).
+    "liteparse>=2.0,<3.0",
     "pypdf>=4.0",
     "python-docx>=1.1",
     "openpyxl>=3.1",
@@ -104,6 +106,6 @@ dev = [
     "respx>=0.21",
     # Test-only: used to synthesise minimal PDF fixtures in
     # tests/tools/fixtures/build_documents.py.  Production parsing goes
-    # through markitdown; reportlab is never imported by surogates code.
+    # through liteparse; reportlab is never imported by surogates code.
     "reportlab>=4.0",
 ]
