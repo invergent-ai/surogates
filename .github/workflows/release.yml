@@ -108,6 +108,10 @@ jobs:
         run: pnpm -r --filter './sdk/*' --if-present run build
 
       - name: Publish SDK packages
+        env:
+          # OIDC trusted publishing requires github-hosted runners, so on
+          # self-hosted we authenticate with a long-lived npm automation token.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: node scripts/publish-sdk-packages.mjs --version="${GITHUB_REF_NAME#v}"
 
   release:
