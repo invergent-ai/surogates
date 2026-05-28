@@ -31,6 +31,7 @@ from surogates.storage.tenant import (
     prefixed_session_workspace_key,
     prefixed_session_workspace_prefix,
 )
+from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 
@@ -526,6 +527,7 @@ async def _get_session_for_tenant(
     request: Request,
     session_id: UUID,
     tenant: TenantContext,
+    agent_id: str,
 ) -> Session:
     """Fetch a session and verify it belongs to the tenant's org and this agent.
 
@@ -535,6 +537,10 @@ async def _get_session_for_tenant(
     modes — missing, wrong org, wrong agent, cross-session — collapse
     into the same 404 so callers cannot probe session existence across
     scopes.
+
+    ``agent_id`` is supplied by the caller (typically from
+    :func:`surogates.runtime.agent_runtime_context_dep`) so the helper
+    works identically in helm and shared modes.
     """
     store = _get_session_store(request)
     try:
@@ -545,7 +551,6 @@ async def _get_session_for_tenant(
             detail=f"Session {session_id} not found.",
         )
 
-    agent_id = request.app.state.settings.agent_id
     if session.agent_id != agent_id or not tenant.owns_session(
         session.org_id, session_id
     ):
@@ -561,12 +566,18 @@ async def _create_session(
     body: CreateSessionRequest,
     request: Request,
     tenant: TenantContext,
+    agent_id: str,
     *,
     channel: str,
     user_id: UUID | None,
     service_account_id: UUID | None,
 ) -> Session:
-    """Create a chat session for either the web or service-account channel."""
+    """Create a chat session for either the web or service-account channel.
+
+    ``agent_id`` is supplied by the caller (resolved per-request via
+    :func:`surogates.runtime.agent_runtime_context_dep`) so this
+    helper is independent of process-wide ``settings.agent_id``.
+    """
     store = _get_session_store(request)
 
     # Model is always set from server config — not user-selectable.
@@ -592,7 +603,7 @@ async def _create_session(
         settings=settings,
         user_id=user_id,
         org_id=tenant.org_id,
-        agent_id=settings.agent_id,
+        agent_id=agent_id,
         channel=channel,
         model=model,
         config=config,
@@ -616,12 +627,14 @@ async def create_session(
     body: CreateSessionRequest,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> Session:
     """Create a new session for the authenticated user."""
     return await _create_session(
         body,
         request,
         tenant,
+        agent_runtime.agent_id,
         channel="web",
         user_id=tenant.user_id,
         service_account_id=None,
@@ -637,6 +650,7 @@ async def create_api_session(
     body: CreateSessionRequest,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> Session:
     """Create a new API-channel session for a service-account client."""
     service_account_id = _require_service_account_api_route(
@@ -653,6 +667,7 @@ async def create_api_session(
         body,
         request,
         tenant,
+        agent_runtime.agent_id,
         channel=API_CHANNEL,
         user_id=None,
         service_account_id=service_account_id,
@@ -674,11 +689,14 @@ async def send_message(
     body: SendMessageRequest,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> SendMessageResponse:
     """Send a user message to a session, triggering agent processing."""
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(request, session_id, tenant)
+    session = await _get_session_for_tenant(
+        request, session_id, tenant, agent_runtime.agent_id,
+    )
     require_user_writable_session(session)
 
     if session.status not in ("active", "idle", "failed", "paused", "completed"):
@@ -952,6 +970,7 @@ async def confirm_disclosure(
     session_id: UUID,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> None:
     """Confirm AI disclosure for a session (EU AI Act Art. 50).
 
@@ -959,7 +978,7 @@ async def confirm_disclosure(
     enforcement is enabled.  Typically called by the frontend after
     showing the AI disclosure notice to the user.
     """
-    await _get_session_for_tenant(request, session_id, tenant)
+    await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
 
     governance = getattr(request.app.state, "governance_gate", None)
     if governance is not None:
@@ -972,10 +991,11 @@ async def get_session(
     session_id: UUID,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> Session:
     """Retrieve metadata for a single session."""
     _require_service_account_api_route(request, tenant)
-    return await _get_session_for_tenant(request, session_id, tenant)
+    return await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
 
 
 def _tree_node_from_row(row: dict) -> SessionTreeNode:
@@ -1020,6 +1040,7 @@ async def get_session_tree(
     session_id: UUID,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> SessionTreeResponse:
     """Return the full delegation tree containing *session_id*.
 
@@ -1041,10 +1062,10 @@ async def get_session_tree(
     ``session.config.agent_type``) so the frontend can display badges
     for sub-agent types without extra lookups.
     """
-    await _get_session_for_tenant(request, session_id, tenant)
+    await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
 
     session_factory = request.app.state.session_factory
-    agent_id = request.app.state.settings.agent_id
+    agent_id = agent_runtime.agent_id
 
     # ``v_session_tree`` walks the entire forest from every root, so reusing
     # it twice (once for the input → root lookup, once for the descendant
@@ -1099,6 +1120,7 @@ async def get_session_children(
     session_id: UUID,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> SessionChildrenResponse:
     """Return the direct children (one level) of a session.
 
@@ -1107,10 +1129,10 @@ async def get_session_children(
     Authorization: the parent session must belong to this tenant and
     agent; child rows inherit tenancy.
     """
-    await _get_session_for_tenant(request, session_id, tenant)
+    await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
 
     session_factory = request.app.state.session_factory
-    agent_id = request.app.state.settings.agent_id
+    agent_id = agent_runtime.agent_id
 
     async with session_factory() as db:
         result = await db.execute(
@@ -1138,6 +1160,7 @@ async def get_session_children(
 async def list_sessions(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
     limit: int = 50,
     offset: int = 0,
 ) -> ListSessionsResponse:
@@ -1155,7 +1178,7 @@ async def list_sessions(
     sessions = await store.list_sessions(
         org_id=tenant.org_id,
         user_id=tenant.user_id,
-        agent_id=settings.agent_id,
+        agent_id=agent_runtime.agent_id,
         limit=limit,
         offset=offset,
     )
@@ -1174,11 +1197,12 @@ async def pause_session(
     session_id: UUID,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> Session:
     """Pause an active session."""
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(request, session_id, tenant)
+    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
 
     if session.status not in ("active", "processing", "paused"):
         raise HTTPException(
@@ -1210,10 +1234,11 @@ async def resume_session(
     session_id: UUID,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> Session:
     """Resume a paused session."""
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(request, session_id, tenant)
+    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
     require_user_writable_session(session)
 
     if session.status != "paused":
@@ -1237,6 +1262,7 @@ async def retry_session(
     session_id: UUID,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> Session:
     """Retry a failed (or paused) session.
 
@@ -1249,7 +1275,7 @@ async def retry_session(
     """
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(request, session_id, tenant)
+    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
     require_user_writable_session(session)
 
     if session.status not in ("failed", "paused"):
@@ -1350,6 +1376,7 @@ async def update_session(
     body: UpdateSessionRequest,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> Session:
     """Update mutable session metadata.
 
@@ -1360,7 +1387,7 @@ async def update_session(
     """
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(request, session_id, tenant)
+    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
     require_user_writable_session(session)
 
     await store.update_session_title(session_id, body.title)
@@ -1380,11 +1407,12 @@ async def delete_session(
     request: Request,
     background_tasks: BackgroundTasks,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> None:
     """Archive (soft-delete) a session and delete its workspace storage."""
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(request, session_id, tenant)
+    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
     require_user_writable_session(session)
 
     archived_sessions = await store.archive_session_tree_and_delete_schedules(

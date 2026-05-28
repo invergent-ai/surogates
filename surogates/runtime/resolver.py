@@ -74,6 +74,27 @@ async def _resolve_slug_to_agent_id(
     return None
 
 
+def _legacy_helm_context(settings, *, agent_id: str) -> AgentRuntimeContext:
+    """Build an AgentRuntimeContext from process-wide settings (helm mode).
+
+    The runtime-config endpoint exists only for shared agents, so in
+    helm mode we synthesise the context from the values baked into the
+    pod's env: ``settings.agent_id`` / ``settings.org_id``.  The other
+    fields take harmless defaults — helm-mode code paths never use the
+    LLM endpoint accessors here (they keep reading ``settings.llm``
+    directly).  Mapped this way so a single dependency works in both
+    modes; callers do not branch on runtime_mode at every read site.
+    """
+    return AgentRuntimeContext(
+        agent_id=agent_id,
+        org_id=getattr(settings, "org_id", "") or "",
+        project_id="",
+        enabled=True,
+        config_version=0,
+        storage_key_prefix="",
+    )
+
+
 async def agent_runtime_context_dep(request: Request) -> AgentRuntimeContext:
     """Resolve the per-request :class:`AgentRuntimeContext`.
 
@@ -90,14 +111,22 @@ async def agent_runtime_context_dep(request: Request) -> AgentRuntimeContext:
        ``settings.agent_id`` would silently route to the wrong
        tenant otherwise.
 
-    Failure responses:
+    Mode-dependent behaviour after agent_id is known:
 
-    * ``400`` when no ``agent_id`` can be resolved.
-    * ``404`` when surogate-ops refuses the agent (404 from the
-      platform = ``runtime_kind != shared`` or row absent).
-    * ``503`` when the agent exists but ``enabled == False`` —
-      "administratively stopped".  This is the lifecycle gate the
-      management plane flips on ``stop_agent``.
+    * ``helm``: synthesise the context from ``settings`` and return
+      it; the cache + management-plane endpoint do not exist in helm
+      mode.
+    * ``shared``: fetch from the cache (which fronts the management-
+      plane endpoint).  Failure responses:
+
+        * ``404`` when surogate-ops refuses the agent (404 from the
+          platform = ``runtime_kind != shared`` or row absent).
+        * ``503`` when the agent exists but ``enabled == False`` —
+          "administratively stopped".  This is the lifecycle gate
+          the management plane flips on ``stop_agent``.
+
+    The single shared response in either mode is ``400`` when no
+    ``agent_id`` can be resolved at all.
     """
     agent_id = request.query_params.get("agent_id")
 
@@ -115,6 +144,9 @@ async def agent_runtime_context_dep(request: Request) -> AgentRuntimeContext:
 
     if not agent_id:
         raise HTTPException(400, "no agent_id in request")
+
+    if runtime_mode == "helm":
+        return _legacy_helm_context(settings, agent_id=agent_id)
 
     cache = request.app.state.runtime_config_cache
     try:
