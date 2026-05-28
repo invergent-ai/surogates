@@ -180,6 +180,7 @@ async def test_race_recovery_streams_resumed_events(
     session_factory,
     app,
     client,
+    monkeypatch,
 ):
     """Resume-during-grace must deliver the new events, not fast-close.
 
@@ -194,7 +195,20 @@ async def test_race_recovery_streams_resumed_events(
     Uses the app's redis-aware ``session_store`` (not the conftest fixture)
     so ``emit_event`` actually publishes on ``surogates:session:{id}`` —
     the publish is the entire point of the race guard.
+
+    httpx's ``ASGITransport`` buffers the response body and only returns the
+    Response object after the ASGI app finishes — it does not stream live.
+    For a terminal-closing handler that's invisible (the handler returns
+    after ``session.done``), but here the handler keeps the stream open
+    after recovery. Shorten ``_MAX_STREAM_DURATION`` so it exits via the
+    ``stream.timeout`` branch a moment after the recovered events are
+    flushed; the race-guard behaviour we care about (which events arrive,
+    and that ``session.done`` does not) is independent of when the stream
+    eventually closes.
     """
+    import surogates.api.routes.events as events_module
+    monkeypatch.setattr(events_module, "_MAX_STREAM_DURATION", 2)
+
     redis_store: SessionStore = app.state.session_store
     session, token = await _create_completed_session(session_factory, redis_store)
 

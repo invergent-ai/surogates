@@ -343,7 +343,23 @@ async def test_enqueue_respects_per_tick_cap(
     session_factory, session_store, org_id: uuid.UUID, parent_session,
 ):
     """If more than _MAX_ENQUEUES_PER_TICK ready tasks exist, only the cap is enqueued."""
+    from sqlalchemy import delete, text
+
     from surogates.tasks.dispatcher import _MAX_ENQUEUES_PER_TICK
+
+    # Integration tests share a session-scoped DB. Prior tests may have
+    # left ``ready`` Tasks pointing at parent sessions without the
+    # required workspace config; those would fail to spawn here and
+    # silently lower our enqueue count below the cap. Clear the slate
+    # so our 13 tasks are the only candidates the dispatcher sees.
+    async with session_factory() as db:
+        await db.execute(text(
+            "DELETE FROM task_links "
+            "WHERE parent_id IN (SELECT id FROM tasks WHERE status = 'ready') "
+            "OR child_id IN (SELECT id FROM tasks WHERE status = 'ready')"
+        ))
+        await db.execute(delete(Task).where(Task.status == "ready"))
+        await db.commit()
 
     n = _MAX_ENQUEUES_PER_TICK + 3
     async with session_factory() as db:
