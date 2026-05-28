@@ -615,24 +615,43 @@ async def run_worker(settings: Settings) -> None:
     worker_id = settings.worker_id or f"worker-{id(asyncio.get_event_loop()):x}"
     settings.worker_id = worker_id
 
-    # Resolve the org_id from config (required).
-    if not settings.org_id:
-        raise RuntimeError(
-            "SUROGATES_ORG_ID is not set. Each agent instance must belong to an org. "
-            "Set org_id in config.yaml or SUROGATES_ORG_ID env var."
-        )
-    configured_org_id = UUID(settings.org_id)
+    # Worker bootstrap branches on runtime_mode.
+    #
+    # ``helm`` (legacy, default): each worker process serves exactly
+    # one agent.  ``SUROGATES_ORG_ID`` and ``SUROGATES_AGENT_ID`` are
+    # required and we resolve them up front; the harness factory below
+    # closes over them.
+    #
+    # ``shared`` (Plan 1+): the worker pool serves any tenant.  Both
+    # values are resolved per-session inside ``harness_factory`` from
+    # the dequeued session's row (``session.org_id``,
+    # ``session.agent_id``).  The startup guard is relaxed; the
+    # per-session mismatch refusal lower down is also relaxed for
+    # shared mode (every session is in scope).
+    runtime_mode = getattr(settings, "runtime_mode", "helm")
 
-    # Resolve the agent_id from config (required).  Sessions belong to an
-    # agent; a worker refuses to process sessions that belong to a
-    # different agent.
-    if not settings.agent_id:
-        raise RuntimeError(
-            "SUROGATES_AGENT_ID is not set. Each worker instance serves "
-            "exactly one agent. Set agent_id in config.yaml or "
-            "SUROGATES_AGENT_ID env var."
-        )
-    configured_agent_id = settings.agent_id
+    if runtime_mode == "helm":
+        if not settings.org_id:
+            raise RuntimeError(
+                "SUROGATES_ORG_ID is not set. Each agent instance must belong to an org. "
+                "Set org_id in config.yaml or SUROGATES_ORG_ID env var."
+            )
+        configured_org_id: UUID | None = UUID(settings.org_id)
+        if not settings.agent_id:
+            raise RuntimeError(
+                "SUROGATES_AGENT_ID is not set. Each worker instance serves "
+                "exactly one agent. Set agent_id in config.yaml or "
+                "SUROGATES_AGENT_ID env var."
+            )
+        configured_agent_id: str | None = settings.agent_id
+    else:
+        # In shared mode we deliberately ignore any stale
+        # SUROGATES_AGENT_ID / SUROGATES_ORG_ID set in the pod env so
+        # a misconfigured rollout cannot silently route traffic to the
+        # wrong tenant.  The harness factory below builds the tenant
+        # context per session from the dequeued row instead.
+        configured_org_id = None
+        configured_agent_id = None
 
     # 7. Harness factory -- creates a fully-wired AgentHarness for a given session.
     async def harness_factory(session_id: UUID) -> AgentHarness:
@@ -643,21 +662,37 @@ async def run_worker(settings: Settings) -> None:
         # Load session to get user_id.
         session = await session_store.get_session(session_id)
 
-        # Refuse to process sessions that belong to a different agent —
-        # defence-in-depth in case a foreign session id leaks into this
-        # worker's queue.
-        if session.agent_id != configured_agent_id:
+        # In helm mode, refuse to process sessions that belong to a
+        # different agent — defence-in-depth in case a foreign session
+        # id leaks into this worker's queue.  In shared mode every
+        # tenant is in scope by design; the per-agent queue keys still
+        # guarantee an agent's sessions are not stolen by another.
+        if (
+            runtime_mode == "helm"
+            and configured_agent_id is not None
+            and session.agent_id != configured_agent_id
+        ):
             raise RuntimeError(
                 f"session {session_id} belongs to agent {session.agent_id!r}, "
                 f"this worker serves agent {configured_agent_id!r}"
             )
+
+        # Per-session tenant identity.  In helm mode we use the bootstrap-
+        # validated configured_org_id; in shared mode we take org_id off
+        # the session row.  Either way the harness sees a tenant context
+        # bound to *this* session, never to process-wide state.
+        session_org_id = (
+            configured_org_id
+            if runtime_mode == "helm"
+            else UUID(str(session.org_id))
+        )
 
         from sqlalchemy import select as sa_select
         from surogates.db.models import Org, User
 
         async with session_factory() as db:
             org_row = (
-                await db.execute(sa_select(Org).where(Org.id == configured_org_id))
+                await db.execute(sa_select(Org).where(Org.id == session_org_id))
             ).scalar_one_or_none()
             if session.user_id is not None:
                 user_row = (
@@ -667,12 +702,12 @@ async def run_worker(settings: Settings) -> None:
                 user_row = None
 
         tenant = TenantContext(
-            org_id=configured_org_id,
+            org_id=session_org_id,
             user_id=session.user_id,
             org_config=org_row.config if org_row else {},
             user_preferences=user_row.preferences if user_row else {},
             permissions=frozenset(),
-            asset_root=f"{settings.tenant_assets_root}/{configured_org_id}",
+            asset_root=f"{settings.tenant_assets_root}/{session_org_id}",
             service_account_id=session.service_account_id,
         )
 
