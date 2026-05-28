@@ -26,7 +26,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from surogates.config import load_settings
-from surogates.harness.auxiliary_client import build_summary_auxiliary_llm
+from surogates.harness.auxiliary_client import build_base_auxiliary_llm
 from surogates.harness.structured_output import generate_structured
 
 logger = logging.getLogger(__name__)
@@ -341,15 +341,18 @@ async def classify_hard_task_async(
 ) -> HardTaskClassification:
     """Classify the latest user message using recent conversation context.
 
-    Sends the last few user/assistant turns to the auxiliary LLM so the
+    Sends the last few user/assistant turns to the base LLM so the
     classifier can disambiguate short or anaphoric messages ("yes do
     it") that only make sense given prior context.  Falls back to the
     regex :func:`classify_hard_task` on the latest user text when the
-    auxiliary is unconfigured, the call fails, or Outlines is missing.
+    base LLM is unconfigured, the call fails, or Outlines is missing.
 
-    The auxiliary client (typically ``settings.llm.summary_model``) is
-    built on demand at the call site -- same pattern as
-    :func:`title_generator.maybe_generate_session_title`.
+    The auxiliary client targets ``settings.llm.model`` (the same model
+    that handles the main iteration loop) via
+    :func:`build_base_auxiliary_llm`. Reusing the base endpoint keeps
+    the classifier on the upstream that's already warm for the session,
+    instead of paying a separate cold-prefix penalty against the
+    summary endpoint.
     """
     if not messages:
         return HardTaskClassification(False)
@@ -363,10 +366,10 @@ async def classify_hard_task_async(
         return cached
 
     try:
-        aux = build_summary_auxiliary_llm(load_settings(), tenant)
+        aux = build_base_auxiliary_llm(load_settings(), tenant)
     except Exception:
         logger.debug(
-            "Auxiliary client unavailable for hard-task classifier; "
+            "Base LLM client unavailable for hard-task classifier; "
             "falling back to regex.",
             exc_info=True,
         )

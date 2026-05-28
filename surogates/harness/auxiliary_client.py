@@ -57,6 +57,46 @@ def build_summary_auxiliary_llm(
     return AuxiliaryLLM(client=AsyncOpenAI(**kwargs), model=str(model))
 
 
+def build_base_auxiliary_llm(
+    settings: Settings,
+    tenant: TenantContext | None = None,
+) -> AuxiliaryLLM | None:
+    """Build an auxiliary client targeting the base LLM, if configured.
+
+    Used for harness-side tasks that should run against the same model
+    that handles the main turn (e.g. the hard-task classifier in
+    :func:`classify_hard_task_async`). Reusing the base endpoint means
+    the classifier benefits from the same upstream prefix cache and
+    provider warmth as the iteration loop, instead of paying an extra
+    round trip against a separately-tiered summary endpoint.
+    """
+    llm = settings.llm
+    org_llm = _mapping_get(getattr(tenant, "org_config", None), "llm")
+    user_llm = _mapping_get(getattr(tenant, "user_preferences", None), "llm")
+
+    model = (
+        _mapping_get(user_llm, "model")
+        or _mapping_get(org_llm, "model")
+        or llm.model
+    )
+    if not model:
+        return None
+
+    base_url = (
+        _mapping_get(org_llm, "base_url")
+        or llm.base_url
+    )
+    api_key = (
+        _mapping_get(org_llm, "api_key")
+        or llm.api_key
+    )
+
+    kwargs: dict[str, Any] = {"api_key": api_key or "EMPTY"}
+    if base_url:
+        kwargs["base_url"] = base_url
+    return AuxiliaryLLM(client=AsyncOpenAI(**kwargs), model=str(model))
+
+
 def build_vision_auxiliary_llm(
     settings: Settings,
     tenant: TenantContext | None = None,
