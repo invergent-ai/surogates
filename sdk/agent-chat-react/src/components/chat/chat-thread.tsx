@@ -725,7 +725,7 @@ function SimpleFinalAnswer({
   const content = useSmoothStream(text, isStreaming);
   const revealComplete = content.length >= text.length;
   return (
-    <div className="mt-3">
+    <div>
       <MessageResponse>{content}</MessageResponse>
       {tail?.status === "complete" && revealComplete && (
         <TurnFeedback msg={tail} />
@@ -1222,7 +1222,7 @@ export function IterationGroup({
     }
     const label = liveIterationLabel(message);
     return (
-      <div className="px-1 py-0.5 text-sm">
+      <div className="py-0.5 text-sm">
         <Shimmer duration={3} spread={3} className="text-sm">
           {label}
         </Shimmer>
@@ -1478,11 +1478,6 @@ function SimpleAssistantGroup({
               />
             );
           })}
-          {showThinkingShim && (
-            <Shimmer duration={3} spread={3} className="text-sm">
-              Working on it...
-            </Shimmer>
-          )}
         </div>
         {finalText && (
           <SimpleFinalAnswer
@@ -1490,6 +1485,13 @@ function SimpleAssistantGroup({
             isStreaming={tail?.status === "streaming"}
             tail={tail}
           />
+        )}
+        {showThinkingShim && (
+          <div className="mt-2">
+            <Shimmer duration={3} spread={3} className="text-sm">
+              Working on it...
+            </Shimmer>
+          </div>
         )}
         {effectiveTurnSummary ? (
           <TurnSummaryCard
