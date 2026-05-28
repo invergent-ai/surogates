@@ -15,10 +15,17 @@ class RoutingDecision(BaseModel):
     confidence: float
 
 
-async def test_generate_structured_uses_vllm_guided_json_for_custom_base_url() -> None:
+async def test_generate_structured_uses_json_schema_for_custom_base_url() -> None:
+    """Non-OpenAI base URLs (OpenRouter, our proxy, DeepInfra, modern vLLM)
+    all accept ``response_format={"type": "json_schema", strict: true}`` --
+    the shape Outlines' ``from_openai`` adapter emits.  The old code
+    routed these through ``from_vllm``, which sends a vLLM-only
+    ``extra_body={"guided_json": ...}`` that routers silently drop; the
+    model then returned free-form text and the call always failed.
+    """
     llm_client = AsyncOpenAI(
         api_key="test-key",
-        base_url="http://localhost:8000/v1",
+        base_url="https://openrouter.ai/api/v1",
     )
     llm_client.chat.completions.create = AsyncMock(
         return_value=SimpleNamespace(
@@ -38,7 +45,7 @@ async def test_generate_structured_uses_vllm_guided_json_for_custom_base_url() -
 
     decision = await generate_structured(
         llm_client=llm_client,
-        model="surogate",
+        model="@preset/summary",
         messages=[{"role": "user", "content": "Route this."}],
         output_model=RoutingDecision,
         max_tokens=64,
@@ -46,10 +53,13 @@ async def test_generate_structured_uses_vllm_guided_json_for_custom_base_url() -
 
     assert decision == RoutingDecision(route="ask_user_question", confidence=0.95)
     call_kwargs = llm_client.chat.completions.create.await_args.kwargs
-    assert call_kwargs["model"] == "surogate"
-    assert "response_format" not in call_kwargs
-    assert call_kwargs["extra_body"]["guided_json"]["type"] == "object"
-    assert "route" in call_kwargs["extra_body"]["guided_json"]["properties"]
+    assert call_kwargs["model"] == "@preset/summary"
+    assert "extra_body" not in call_kwargs
+    assert call_kwargs["response_format"]["type"] == "json_schema"
+    assert call_kwargs["response_format"]["json_schema"]["strict"] is True
+    schema = call_kwargs["response_format"]["json_schema"]["schema"]
+    assert schema["type"] == "object"
+    assert "route" in schema["properties"]
 
 
 async def test_generate_structured_uses_openai_response_format_by_default() -> None:

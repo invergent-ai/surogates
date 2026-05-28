@@ -197,10 +197,21 @@ def _make_outlines_model(
     llm_client: Any,
     model: str,
 ) -> Any:
-    """Choose the Outlines adapter for the configured OpenAI-compatible client."""
-    base_url = str(getattr(llm_client, "base_url", "") or "")
-    if base_url and "api.openai.com" not in base_url:
-        return outlines_module.from_vllm(llm_client, model)
+    """Build an Outlines adapter for an OpenAI-compatible client.
+
+    Every OpenAI-compatible endpoint we target -- OpenAI, OpenRouter,
+    DeepInfra, Together, our own chat-completion proxy, and modern vLLM
+    deployments -- accepts ``response_format={"type": "json_schema",
+    "strict": true, ...}``, which is what Outlines' ``from_openai``
+    adapter emits.  The ``from_vllm`` adapter instead sends
+    ``extra_body={"guided_json": ...}``, a vLLM server-only parameter
+    that routers like OpenRouter silently drop; the model then returns
+    free-form text and the call always fails.  Using ``from_openai``
+    unconditionally is correct for every endpoint we actually call; if
+    a provider rejects ``json_schema`` mode the exception is caught
+    upstream and the JSON-mode fallback in
+    :func:`_try_openai_json_mode` takes over.
+    """
     return outlines_module.from_openai(llm_client, model)
 
 
