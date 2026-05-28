@@ -80,8 +80,11 @@ jobs:
   npm:
     runs-on: self-hosted
     permissions:
-      id-token: write
       contents: read
+    env:
+      # Self-hosted runners cannot produce npm provenance: npmjs.org only
+      # accepts provenance bundles built from "github-hosted" runners.
+      NPM_CONFIG_PROVENANCE: "false"
     steps:
       - uses: actions/checkout@v4
 
