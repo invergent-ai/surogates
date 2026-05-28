@@ -128,14 +128,65 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.pairing_store = PairingStore(redis=app.state.redis)
     _install_browser_api_dependencies(app, settings)
 
+    # Shared-runtime plumbing (Plan 1).  In ``runtime_mode='shared'``
+    # the api pod serves any tenant; per-request resolution goes through
+    # ``agent_runtime_context_dep`` which reads the cache below.
+    if getattr(settings, "runtime_mode", "helm") == "shared":
+        _install_shared_runtime_plumbing(app, settings)
+    else:
+        app.state.platform_client = None
+        app.state.runtime_config_cache = None
+
     logger.info("Surogates API started (workers=%d)", settings.api.workers)
 
     yield
 
     # -- shutdown ---------------------------------------------------------
     logger.info("Surogates API shutting down")
+    await _shutdown_shared_runtime_plumbing(app)
     await app.state.redis.aclose()
     await engine.dispose()
+
+
+def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
+    """Wire the PlatformClient + RuntimeConfigCache onto app.state.
+
+    Constructed once per process; ``aclose()``'d on shutdown.  When
+    ``platform_api_url`` is empty we deliberately skip the wiring so
+    misconfigured shared-mode pods fail fast on first request (the
+    resolver dependency raises rather than masking the misconfig).
+    """
+    from surogates.runtime import PlatformClient, RuntimeConfigCache
+
+    if not settings.platform_api_url:
+        logger.error(
+            "runtime_mode='shared' but SUROGATES_PLATFORM_API_URL is empty; "
+            "agent_runtime_context_dep will fail on every request",
+        )
+        app.state.platform_client = None
+        app.state.runtime_config_cache = None
+        return
+
+    client = PlatformClient(
+        base_url=settings.platform_api_url,
+        token=settings.platform_api_token,
+    )
+    cache = RuntimeConfigCache(
+        loader=client.get_runtime_config,
+        ttl_seconds=1.0,
+    )
+    app.state.platform_client = client
+    app.state.runtime_config_cache = cache
+    logger.info(
+        "Shared-runtime plumbing wired (platform=%s)", settings.platform_api_url,
+    )
+
+
+async def _shutdown_shared_runtime_plumbing(app: FastAPI) -> None:
+    client = getattr(app.state, "platform_client", None)
+    if client is not None:
+        await client.aclose()
+        app.state.platform_client = None
 
 
 def create_app() -> FastAPI:

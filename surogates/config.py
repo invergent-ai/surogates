@@ -625,7 +625,29 @@ class Settings(BaseSettings):
     platform_agents_dir: str = "/etc/surogates/agents"
     tenant_assets_root: str = "/data/tenant-assets"
 
-    # Identity
+    # Runtime mode.
+    #
+    # ``helm`` (default) — legacy one-agent-per-pod path.  ``org_id``
+    # and ``agent_id`` below are baked into the pod's env and identify
+    # the tenant the entire process serves.
+    #
+    # ``shared`` — multi-tenant pool (Plan 1+).  The pod serves any
+    # tenant; ``(org_id, agent_id)`` is resolved per-request via the
+    # platform API.  ``org_id`` / ``agent_id`` settings are unused.
+    runtime_mode: str = "helm"
+
+    # Platform (surogate-ops) API base URL + bearer token.  Only
+    # consulted in ``runtime_mode='shared'``; the runtime fetches per-
+    # tenant config via GET /api/agents/{id}/runtime-config.  The
+    # token must carry the ``runtime`` scope (see surogate-ops
+    # mint-runtime-token CLI).
+    platform_api_url: str = ""
+    platform_api_token: str = ""
+
+    # Identity (helm mode).  Defaults preserve the legacy zero-config
+    # behaviour for tests that instantiate ``Settings()`` directly.
+    # Shared-mode pods leave these at their defaults — the runtime
+    # resolves ``(org_id, agent_id)`` per request instead.
     org_id: str = ""  # the org this agent instance belongs to
     agent_id: str = "default"  # the agent this instance serves (sessions belong to an agent)
     worker_id: str = ""  # set from K8s downward API (pod name)
