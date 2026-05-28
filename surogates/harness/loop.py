@@ -228,7 +228,7 @@ _ATTACHMENT_SKIP_HINTS: dict[str, str] = {
         "try read_file with pdftotext/pandoc fallbacks"
     ),
     "parse_timeout": (
-        "the parser hit the 30 s cap; try read_file with a narrower offset/limit"
+        "the parser hit its wall-clock cap; try read_file with a narrower offset/limit"
     ),
     "decode_error": (
         "the file is not UTF-8; try read_file which has full BOM detection"
@@ -240,6 +240,10 @@ _ATTACHMENT_SKIP_HINTS: dict[str, str] = {
     "empty_output": (
         "the parser produced no text; the file may be a scan — try the"
         " ocr-and-documents skill"
+    ),
+    "total_budget_exceeded": (
+        "earlier attachments already filled the inline-budget; use read_file"
+        " when you actually need this file's content"
     ),
 }
 

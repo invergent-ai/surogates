@@ -315,3 +315,68 @@ async def test_try_inline_attachment_skips_when_oversize_output(
     assert text is None
     assert kind is None
     assert reason == "oversize_output"
+
+
+# ---------------------------------------------------------------------------
+# Per-message inlined-text budget
+# ---------------------------------------------------------------------------
+
+def test_apply_inline_total_budget_under_cap_keeps_everything() -> None:
+    """Successful parses within budget pass through unchanged."""
+    from surogates.api.routes.sessions import _apply_inline_total_budget
+
+    outcomes = [
+        ("aaaa", "markdown", None),     # 4 chars
+        ("bbbb", "text", None),         # 4 chars
+    ]
+    result = _apply_inline_total_budget(outcomes, budget=100)
+    assert result == [
+        ("aaaa", "markdown", None),
+        ("bbbb", "text", None),
+    ]
+
+
+def test_apply_inline_total_budget_demotes_overflow_to_skip_reason() -> None:
+    """Once cumulative inlined chars exceed budget, remaining successful
+    parses are demoted to ``total_budget_exceeded`` even though they
+    individually parsed cleanly."""
+    from surogates.api.routes.sessions import _apply_inline_total_budget
+
+    outcomes = [
+        ("a" * 30, "markdown", None),   # fits
+        ("b" * 30, "markdown", None),   # fits (total 60)
+        ("c" * 30, "markdown", None),   # 90 > 80 → demoted
+        ("d" * 5, "text", None),        # would fit but order matters
+    ]
+    result = _apply_inline_total_budget(outcomes, budget=80)
+    assert result[0] == ("a" * 30, "markdown", None)
+    assert result[1] == ("b" * 30, "markdown", None)
+    assert result[2] == (None, None, "total_budget_exceeded")
+    # Greedy in-order: once a single overflow occurs, every subsequent
+    # success is demoted too — the policy is intentionally
+    # order-deterministic rather than backtracking to pack the budget.
+    assert result[3] == (None, None, "total_budget_exceeded")
+
+
+def test_apply_inline_total_budget_preserves_existing_skip_reasons() -> None:
+    """Pre-existing skip reasons (parse_error, oversize_output, …) are
+    untouched; they do not consume the budget."""
+    from surogates.api.routes.sessions import _apply_inline_total_budget
+
+    outcomes = [
+        (None, None, "parse_error"),
+        ("a" * 50, "markdown", None),   # consumes 50 of 80
+        (None, None, "oversize_output"),
+        ("b" * 50, "markdown", None),   # 100 > 80 → demoted
+    ]
+    result = _apply_inline_total_budget(outcomes, budget=80)
+    assert result[0] == (None, None, "parse_error")
+    assert result[1] == ("a" * 50, "markdown", None)
+    assert result[2] == (None, None, "oversize_output")
+    assert result[3] == (None, None, "total_budget_exceeded")
+
+
+def test_apply_inline_total_budget_empty_input() -> None:
+    from surogates.api.routes.sessions import _apply_inline_total_budget
+
+    assert _apply_inline_total_budget([]) == []

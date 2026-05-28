@@ -78,15 +78,68 @@ _MAX_ATTACHMENTS_TOTAL_BYTES = 200_000_000  # 200 MB total per message
 # 2026-05-25-inline-attachments-design.md).  Files under
 # ``_INLINE_MAX_BYTES`` and matching a supported extension are parsed at
 # send time; the rendered output is rejected if it exceeds
-# ``_INLINE_RENDERED_CAP_CHARS``.
+# ``_INLINE_RENDERED_CAP_CHARS``.  A per-message total budget
+# (``_INLINE_TOTAL_RENDERED_CAP_CHARS``) caps the *sum* of inlined text
+# across all attachments — without it, a user sending 5 medium files
+# could push >500 KB of markdown into a single user.message event and
+# crowd the LLM's context window.  Any attachment whose inlined text
+# would push past the total is dropped to ref-only with
+# ``inline_skip_reason="total_budget_exceeded"`` and the agent must
+# call ``read_file`` for its content.
 _INLINE_MAX_BYTES = 2 * 1024 * 1024  # 2 MB raw cap for inline parsing
 _INLINE_RENDERED_CAP_CHARS = 200_000  # 200 KB of rendered text/markdown
+_INLINE_TOTAL_RENDERED_CAP_CHARS = int(
+    os.environ.get("SUROGATES_INLINE_TOTAL_RENDERED_CAP_CHARS", "50000"),
+)
 
 _INLINE_DOC_EXTS = frozenset({".pdf", ".docx", ".xlsx", ".pptx"})
 _INLINE_TEXT_EXTS = frozenset({
     ".txt", ".md", ".json", ".csv", ".tsv",
     ".yaml", ".yml", ".log",
 })
+
+
+def _apply_inline_total_budget(
+    parse_outcomes: list[tuple[str | None, str | None, str | None]],
+    budget: int = _INLINE_TOTAL_RENDERED_CAP_CHARS,
+) -> list[tuple[str | None, str | None, str | None]]:
+    """Enforce the per-message inlined-text budget across attachments.
+
+    Walks ``parse_outcomes`` (one tuple per inline-candidate attachment,
+    in submission order, of ``(inlined_text, inlined_kind,
+    skip_reason)``) and returns the same list demoted by the budget:
+    once the running total of ``len(inlined_text)`` would exceed
+    ``budget``, every subsequent successful parse is dropped and tagged
+    ``inline_skip_reason="total_budget_exceeded"``.  Failed parses
+    (``inlined_text=None``) and pre-existing skip reasons are preserved
+    untouched.
+
+    Pure function — extracted so the budget policy can be unit-tested
+    without spinning up the full send-message route.
+    """
+    out: list[tuple[str | None, str | None, str | None]] = []
+    used = 0
+    over_budget = False
+    for inlined_text, inlined_kind, skip_reason in parse_outcomes:
+        if inlined_text is None:
+            out.append((None, None, skip_reason))
+            continue
+        if over_budget:
+            # First-overflow-stops: once a single successful parse
+            # would push us past the cap, every later successful parse
+            # is demoted too — deterministic and order-respecting, vs.
+            # greedy packing which can fragmentally keep tiny tail
+            # files while dropping a useful middle one.
+            out.append((None, None, "total_budget_exceeded"))
+            continue
+        chars = len(inlined_text)
+        if used + chars > budget:
+            over_budget = True
+            out.append((None, None, "total_budget_exceeded"))
+            continue
+        used += chars
+        out.append((inlined_text, inlined_kind, None))
+    return out
 
 
 def _inline_extension_kind(filename: str) -> Literal["document", "text"] | None:
@@ -259,6 +312,7 @@ class AttachmentRef(BaseModel):
         "decode_error",
         "oversize_output",
         "empty_output",
+        "total_budget_exceeded",
     ] | None = None
 
     @field_validator("path")
@@ -806,11 +860,25 @@ async def send_message(
         # keeps a single bad attachment from cancelling its siblings —
         # we surface the failure on that attachment's entry rather than
         # failing the whole message.
+        #
+        # After all parses settle we walk the results in submission
+        # order and apply ``_INLINE_TOTAL_RENDERED_CAP_CHARS`` as a
+        # per-message budget on the *sum* of inlined text.  Once the
+        # budget is exhausted, any subsequent successful parse is
+        # demoted to a ref with ``total_budget_exceeded`` so the
+        # event payload (and the LLM context) stays bounded.  The
+        # agent still has ``read_file`` and can pull content for the
+        # demoted attachments on demand.
         if inline_tasks:
             results = await asyncio.gather(
                 *(t for _, _, t in inline_tasks), return_exceptions=True,
             )
-            for (idx, attachment, _task), result in zip(
+            # Normalise raw results: errors become a parse_error skip;
+            # successes pass through unchanged.  This gives a uniform
+            # ``(inlined_text, inlined_kind, skip_reason)`` shape that
+            # the pure budget helper can walk in submission order.
+            normalised: list[tuple[str | None, str | None, str | None]] = []
+            for (_idx, attachment, _task), result in zip(
                 inline_tasks, results, strict=True,
             ):
                 if isinstance(result, BaseException):
@@ -819,9 +887,13 @@ async def send_message(
                         "filename=%s err=%s",
                         attachment.filename, result,
                     )
-                    resolved[idx]["inline_skip_reason"] = "parse_error"
-                    continue
-                inlined_text, inlined_kind, skip_reason = result
+                    normalised.append((None, None, "parse_error"))
+                else:
+                    normalised.append(result)
+            budgeted = _apply_inline_total_budget(normalised)
+            for (idx, attachment, _task), (
+                inlined_text, inlined_kind, skip_reason,
+            ) in zip(inline_tasks, budgeted, strict=True):
                 if inlined_text is not None:
                     resolved[idx]["inlined_text"] = inlined_text
                     resolved[idx]["inlined_render_kind"] = inlined_kind
@@ -832,6 +904,14 @@ async def send_message(
                         resolved[idx]["size"], len(inlined_text),
                     )
                 elif skip_reason is not None:
+                    if skip_reason == "total_budget_exceeded":
+                        logger.info(
+                            "event=attachment.inline result=skip "
+                            "reason=total_budget_exceeded "
+                            "filename=%s budget_cap=%d",
+                            attachment.filename,
+                            _INLINE_TOTAL_RENDERED_CAP_CHARS,
+                        )
                     resolved[idx]["inline_skip_reason"] = skip_reason
         attachments_payload = resolved
 
