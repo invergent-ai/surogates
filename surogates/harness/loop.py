@@ -1716,13 +1716,29 @@ class AgentHarness:
         # moment a new user turn shifted the insertion point.
 
         # --- Hidden advisor guidance for hard tasks (one-shot before loop) ---
-        await self._maybe_consult_required_advisor(
-            session,
-            messages,
-            all_events or [],
-            system_prompt,
-            consulted_advisor_categories,
+        # Spawned as a background task so iteration 0 isn't blocked
+        # waiting for the classifier + advisor LLM call. The task
+        # mutates the shared ``messages`` list when it finishes
+        # (``_consult_advisor_for_category`` appends an advisor
+        # scaffold). The main loop rebuilds ``api_messages`` from
+        # ``messages`` at the start of every iteration, so as soon
+        # as the advisor completes the next iteration picks up its
+        # guidance. If the task is still pending when wake()
+        # returns, ``_drain_background_tasks`` bounds the wait at
+        # ``_BACKGROUND_DRAIN_TIMEOUT_SECONDS``; advisor events
+        # persist via the event log regardless.
+        advisor_task = asyncio.create_task(
+            self._maybe_consult_required_advisor(
+                session,
+                messages,
+                all_events or [],
+                system_prompt,
+                consulted_advisor_categories,
+            ),
+            name=f"advisor-{session.id}",
         )
+        self._background_tasks.add(advisor_task)
+        advisor_task.add_done_callback(self._background_tasks.discard)
 
         # --- User turn tracking for memory nudge ---
         self._user_turn_count += 1

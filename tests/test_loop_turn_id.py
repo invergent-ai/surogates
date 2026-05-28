@@ -8,6 +8,7 @@ carries the per-turn correlator the Simple chat view consumes.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -358,3 +359,83 @@ async def test_request_final_summary_stamps_turn_id(
     assert payload["turn_id"] == "turn-final"
     assert payload["finish_reason"] == "budget_exhausted"
     assert "iteration_index" in payload
+
+
+@pytest.mark.asyncio
+async def test_advisor_does_not_block_first_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the early advisor is spawned as a background task.
+
+    Under the previous behavior, ``_run_loop`` awaited
+    ``_maybe_consult_required_advisor`` synchronously, which forced
+    iteration 0 to wait for the classifier + advisor LLM call (30–70 s in
+    production). The current implementation fires it via
+    ``asyncio.create_task`` so the main loop proceeds while the advisor
+    runs concurrently. This test pins that contract by replacing the
+    advisor with a coroutine that hangs until the test releases it: if
+    the loop awaited the advisor, this test would deadlock.
+    """
+    store = AsyncMock()
+    store.emit_event = AsyncMock(side_effect=range(100, 200))
+    store.get_events = AsyncMock(return_value=[])
+
+    harness = _make_loop_harness(session_store=store)
+
+    advisor_started = asyncio.Event()
+    advisor_can_finish = asyncio.Event()
+
+    async def hanging_advisor(*args: Any, **kwargs: Any) -> bool:
+        advisor_started.set()
+        await advisor_can_finish.wait()
+        # Mimic the real function's side effect so the next iteration
+        # would observe the scaffold in ``messages``.
+        messages = args[1] if len(args) > 1 else kwargs.get("messages")
+        if isinstance(messages, list):
+            messages.append({
+                "role": "user",
+                "content": "[Advisor guidance: coding]\nappended-by-test",
+            })
+        return True
+
+    harness._maybe_consult_required_advisor = hanging_advisor
+
+    # If the loop ever reverts to awaiting the advisor synchronously,
+    # ``hanging_advisor`` never completes and this call would deadlock;
+    # the wait_for ensures the failure surfaces as a fast timeout
+    # rather than a CI hang.
+    await asyncio.wait_for(
+        _drive_run_loop(
+            harness=harness,
+            responses=[
+                (
+                    {"role": "assistant", "content": "Done.", "tool_calls": None},
+                    {"model": "test-model", "finish_reason": "stop",
+                     "input_tokens": 1, "output_tokens": 2},
+                ),
+            ],
+            monkeypatch=monkeypatch,
+        ),
+        timeout=5.0,
+    )
+
+    # Yield once so the event loop schedules any pending tasks (the
+    # mocked awaits inside _run_loop don't always block, which would
+    # prevent the advisor task from getting a turn before we assert).
+    await asyncio.sleep(0)
+
+    # The advisor was scheduled and entered its body (proves create_task
+    # was used and the loop didn't sit on an unscheduled coroutine).
+    assert advisor_started.is_set(), \
+        "advisor coroutine was never scheduled or never started"
+
+    # _run_loop returned with the advisor still pending — proving the
+    # loop did not await it.
+    pending = [t for t in harness._background_tasks if not t.done()]
+    assert pending, \
+        "expected the advisor task to still be pending after _run_loop returns"
+
+    # Release the advisor so the background task can complete; otherwise
+    # asyncio would warn about an unawaited task at test teardown.
+    advisor_can_finish.set()
+    await asyncio.gather(*pending, return_exceptions=True)
