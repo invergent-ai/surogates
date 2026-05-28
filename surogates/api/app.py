@@ -155,8 +155,19 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     ``platform_api_url`` is empty we deliberately skip the wiring so
     misconfigured shared-mode pods fail fast on first request (the
     resolver dependency raises rather than masking the misconfig).
+
+    Also starts a background ``run_invalidator`` task that listens on
+    the Redis pub/sub channels surogate-ops publishes to when admins
+    mutate per-agent runtime config.  The task is cancelled cleanly on
+    shutdown.
     """
-    from surogates.runtime import PlatformClient, RuntimeConfigCache
+    import asyncio
+
+    from surogates.runtime import (
+        PlatformClient,
+        RuntimeConfigCache,
+        run_invalidator,
+    )
 
     if not settings.platform_api_url:
         logger.error(
@@ -165,6 +176,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         )
         app.state.platform_client = None
         app.state.runtime_config_cache = None
+        app.state.runtime_invalidator_task = None
         return
 
     client = PlatformClient(
@@ -177,12 +189,25 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     )
     app.state.platform_client = client
     app.state.runtime_config_cache = cache
+    app.state.runtime_invalidator_task = asyncio.create_task(
+        run_invalidator(app.state.redis, cache),
+        name="surogates-runtime-invalidator",
+    )
     logger.info(
         "Shared-runtime plumbing wired (platform=%s)", settings.platform_api_url,
     )
 
 
 async def _shutdown_shared_runtime_plumbing(app: FastAPI) -> None:
+    task = getattr(app.state, "runtime_invalidator_task", None)
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except BaseException:  # noqa: BLE001 — cancellation expected here
+            pass
+        app.state.runtime_invalidator_task = None
+
     client = getattr(app.state, "platform_client", None)
     if client is not None:
         await client.aclose()
