@@ -381,4 +381,167 @@ describe("Simple mode ChatThread rendering", () => {
     expect(dom.querySelector("button[aria-expanded='false']"))
       .not.toBeNull();
   });
+
+  it("shows 'Working on it...' in the between-iterations gap", () => {
+    // Previous tool-bearing iteration finished (all tool calls resolved)
+    // but the next llm.response hasn't landed yet. Tool-using messages
+    // stay tagged status="streaming" per the reducer, so the iteration
+    // row is collapsed/complete. While isRunning is still true, the
+    // group-level shimmer must surface so users see continued progress.
+    const messages: ChatMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        content: "Build me a thing",
+        createdAt: new Date(),
+        status: "complete",
+      },
+      {
+        id: "iter-0",
+        role: "assistant",
+        content: "",
+        createdAt: new Date(),
+        status: "streaming",
+        turnId: "t-1",
+        iterationIndex: 0,
+        iterationSummary: {
+          iterationIndex: 0,
+          summary: "Edited the hero copy",
+          toolCallIds: ["c1"],
+          startedAt: "",
+          endedAt: "",
+        },
+        toolCalls: [
+          { id: "c1", toolName: "patch", args: "{}", status: "complete", result: "{}" },
+        ],
+      },
+    ];
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={messages}
+        isRunning={true}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+    expect(dom.textContent).toContain("Working on it");
+  });
+
+  it("shows 'Working on it...' below complete preamble text while isRunning", () => {
+    // The tail iteration emitted text-only content ("Let me write the
+    // script:") and flipped to status="complete", but isRunning is
+    // still true because the agent will call tools next. The Simple
+    // mode group shimmer must surface below SimpleFinalAnswer so the
+    // user sees the agent is still working — Expert mode appends an
+    // equivalent thinking entry in the same window.
+    const messages: ChatMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        content: "create a powerpoint",
+        createdAt: new Date(),
+        status: "complete",
+      },
+      {
+        id: "iter-0",
+        role: "assistant",
+        content: "Now I'll create the presentation. Let me write the script:",
+        createdAt: new Date(),
+        status: "complete",
+        turnId: "t-1",
+        iterationIndex: 0,
+      },
+    ];
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={messages}
+        isRunning={true}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+    expect(dom.textContent).toContain("Let me write the script:");
+    expect(dom.textContent).toContain("Working on it");
+  });
+
+  it("suppresses the group shimmer while finalText is mid-stream", () => {
+    // Mid-stream text-only iteration with non-empty content: the
+    // SimpleFinalAnswer's useSmoothStream animation is the active
+    // progress signal, so the group shimmer must stay hidden to avoid
+    // a redundant duplicate indicator.
+    const messages: ChatMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        content: "hi",
+        createdAt: new Date(),
+        status: "complete",
+      },
+      {
+        id: "iter-0",
+        role: "assistant",
+        content: "Half a sentence so f",
+        createdAt: new Date(),
+        status: "streaming",
+        turnId: "t-1",
+        iterationIndex: 0,
+      },
+    ];
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={messages}
+        isRunning={true}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+    expect(dom.textContent).not.toContain("Working on it");
+  });
+
+  it("shows 'Working on it...' when the tail is a hidden skill-only iteration", () => {
+    // skill_view-only iteration is filtered to null by IterationGroup,
+    // so without the group-level fallback the user would see nothing.
+    const messages: ChatMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        content: "What can you do?",
+        createdAt: new Date(),
+        status: "complete",
+      },
+      {
+        id: "iter-0",
+        role: "assistant",
+        content: "",
+        createdAt: new Date(),
+        status: "streaming",
+        turnId: "t-1",
+        iterationIndex: 0,
+        toolCalls: [
+          { id: "c1", toolName: "skill_view", args: "{}", status: "running" },
+        ],
+      },
+    ];
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={messages}
+        isRunning={true}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+    expect(dom.textContent).toContain("Working on it");
+  });
 });

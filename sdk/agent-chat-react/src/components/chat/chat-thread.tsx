@@ -1416,22 +1416,37 @@ function SimpleAssistantGroup({
   const tailIsTextOnly = !!tail && !tailHasTools;
   const finalText = tailIsTextOnly && tail!.content ? tail!.content : "";
 
-  // A tail iteration that's mid-stream and has no IterationSummary yet
-  // surfaces via the IterationGroup's own placeholders. But if the
-  // group's tail is the user message (no assistant message at all yet),
-  // we still need a Working-on-it shimmer — same defensive layer the
-  // Expert path appends. We also need it when the tail is a text-only
-  // streaming iteration that hasn't emitted content yet: we skip that
-  // iteration from the loop below to avoid duplicating the finalText
-  // render, so without this we'd show nothing while reasoning streams.
+  // Mirror Expert mode's defensive "Working on it..." row: whenever
+  // this is the tail group and the session is still running, surface
+  // a group-level shimmer unless something else is already animating
+  // (a per-iteration live shimmer, or the final-answer text being
+  // streamed via SimpleFinalAnswer). This covers:
+  //   - pre-assistant gap (only user/system messages so far)
+  //   - text-only streaming tail with no content yet (the loop below
+  //     skips it to avoid duplicating the finalText render)
+  //   - skill-only iterations hidden by _isSkillOnlyIteration
+  //   - between-iterations gap (previous tool-bearing iteration is
+  //     done, next llm.response hasn't landed) — tool-using messages
+  //     stay tagged "streaming" but isIterationLive correctly returns
+  //     false once every tool resolved
   const isTailGroup = lastGlobalIndex === totalMessages - 1;
+  const tailRendersOwnShimmer =
+    !!tail
+    && isIterationLive(tail)
+    && !tailIsTextOnly
+    && !_isSkillOnlyIteration(tail);
+  // SimpleFinalAnswer's useSmoothStream is the active progress signal
+  // while finalText is mid-stream; only suppress the group shimmer in
+  // that window. Once status flips to "complete" but isRunning is
+  // still true (interim preamble text before the agent calls more
+  // tools), the shimmer must surface below the text.
+  const finalTextStreaming =
+    !!finalText && tail?.status === "streaming";
   const showThinkingShim =
     isTailGroup
     && isRunning
-    && (
-      (!tail && messages.some((m) => m.role !== "assistant"))
-      || (tailIsTextOnly && tail!.status === "streaming" && !tail!.content)
-    );
+    && !tailRendersOwnShimmer
+    && !finalTextStreaming;
 
   const showErrorInfo =
     !!tail && tail.status === "error" && !!tail.errorInfo;
