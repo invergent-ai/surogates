@@ -8,6 +8,7 @@ import cycle.
 
 from __future__ import annotations
 
+from surogates.runtime.cache import RuntimeConfigCache
 from surogates.runtime.context import AgentRuntimeContext, LLMEndpoint
 from surogates.runtime.platform_client import PlatformAuthError, PlatformClient
 
@@ -16,4 +17,5 @@ __all__ = [
     "LLMEndpoint",
     "PlatformAuthError",
     "PlatformClient",
+    "RuntimeConfigCache",
 ]
