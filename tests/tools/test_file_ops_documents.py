@@ -108,31 +108,32 @@ async def test_pptx_no_longer_blocked_as_binary(tmp_path: Path) -> None:
     assert "Cannot read binary file" not in result.get("error", "")
 
 
+@pytest.mark.parametrize(
+    "ext",
+    [".doc", ".xls", ".ppt", ".odt", ".ods", ".odp", ".rtf"],
+)
 @pytest.mark.asyncio
-async def test_legacy_doc_still_blocked(tmp_path: Path) -> None:
-    src = tmp_path / "legacy.doc"
+async def test_legacy_and_odf_routed_to_document_handler(
+    tmp_path: Path, ext: str, monkeypatch,
+) -> None:
+    """Legacy Office / ODF / RTF must reach _handle_document via the
+    liteparse path, not get rejected as binary.  We stub the parser to
+    avoid actually invoking LibreOffice on a placeholder file (which
+    hangs on garbage input until the 60s wall-clock fires).
+    """
+    from surogates.tools.builtin import file_ops
+
+    async def fake_parse(p):
+        return f"stub for {p.suffix}\n"
+
+    monkeypatch.setattr(file_ops, "_parse_document_to_text", fake_parse)
+
+    src = tmp_path / f"legacy{ext}"
     src.write_bytes(b"placeholder")
     result_json = await _read_file_handler({"path": str(src)})
     result = json.loads(result_json)
-    assert "Cannot read binary file" in result["error"]
-
-
-@pytest.mark.asyncio
-async def test_legacy_xls_still_blocked(tmp_path: Path) -> None:
-    src = tmp_path / "legacy.xls"
-    src.write_bytes(b"placeholder")
-    result_json = await _read_file_handler({"path": str(src)})
-    result = json.loads(result_json)
-    assert "Cannot read binary file" in result["error"]
-
-
-@pytest.mark.asyncio
-async def test_legacy_ppt_still_blocked(tmp_path: Path) -> None:
-    src = tmp_path / "legacy.ppt"
-    src.write_bytes(b"placeholder")
-    result_json = await _read_file_handler({"path": str(src)})
-    result = json.loads(result_json)
-    assert "Cannot read binary file" in result["error"]
+    assert "Cannot read binary file" not in result.get("error", "")
+    assert "stub for" in result.get("content", "")
 
 
 # ---------------------------------------------------------------------------

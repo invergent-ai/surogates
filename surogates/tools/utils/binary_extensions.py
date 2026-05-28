@@ -18,10 +18,11 @@ BINARY_EXTENSIONS = frozenset({
     # Executables/binaries
     ".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a", ".obj", ".lib",
     ".app", ".msi", ".deb", ".rpm",
-    # Legacy binary office formats only.  .pdf/.docx/.xlsx/.pptx are
-    # handled natively by read_file via liteparse (see file_ops.py).
-    ".doc", ".xls", ".ppt",
-    ".odt", ".ods", ".odp",
+    # Office formats (.pdf/.docx/.xlsx/.pptx/.doc/.xls/.ppt/.odt/.ods/
+    # .odp/.rtf and macro-enabled variants) are handled natively by
+    # read_file via liteparse (see file_ops.py).  They are intentionally
+    # NOT in this binary list -- the read_file dispatcher routes them
+    # to the document handler instead of rejecting them.
     # Fonts
     ".ttf", ".otf", ".woff", ".woff2", ".eot",
     # Bytecode / VM artifacts

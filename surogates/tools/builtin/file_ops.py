@@ -113,14 +113,14 @@ def _load_liteparse() -> Any:
     return LiteParse
 
 
-def _convert_to_text_sync(path: Path) -> str:
-    """Sync entry point for the subprocess pool / ``asyncio.to_thread``.
+def _convert_pdf_or_legacy_sync(path: Path) -> str:
+    """Parse PDF / legacy Office / ODF / RTF via liteparse.
 
-    Routes PDF/DOCX/XLSX/PPTX/images uniformly through liteparse.  The
-    parser is constructed per-call (it's cheap) with ``quiet=True`` to
-    suppress its progress chatter on stderr in production logs.  OCR
-    is left at its default (on); for text-layer PDFs liteparse skips
-    it automatically, and scanned PDFs need it.
+    liteparse routes the PDF directly through mupdf; everything else
+    is converted to PDF via LibreOffice headless first.  Modern Open
+    XML formats (.docx/.xlsx/.pptx) deliberately do NOT come here —
+    they go through their format-specific Python libraries to avoid
+    a lossy round-trip through PDF.
     """
     LiteParse = _load_liteparse()
     parser = LiteParse(quiet=True)
@@ -128,15 +128,194 @@ def _convert_to_text_sync(path: Path) -> str:
     return result.text or ""
 
 
-async def _parse_document_to_text(path: Path) -> str:
-    """Convert a document to text via liteparse.
+def _render_docx_sync(path: Path) -> str:
+    """Render a .docx to markdown-ish text via python-docx.
 
-    Runs in a :class:`ProcessPoolExecutor` rather than a thread because
-    OCR (Tesseract) and the LibreOffice shellout are CPU-bound.  In the
-    API process (FastAPI on a 1-2 vCPU container with aggressive
-    liveness probes) a thread-based parse can starve the asyncio event
-    loop and trip the kubelet's health checks; a subprocess has its
-    own GIL so the event loop keeps scheduling.
+    Walks the document body in source order so headings, paragraphs,
+    lists, and tables come out interleaved the way the user authored
+    them — python-docx's ``doc.paragraphs`` and ``doc.tables`` lists
+    are deliberately not used because they fragment that order.
+    """
+    from docx import Document  # noqa: PLC0415
+    from docx.oxml.ns import qn  # noqa: PLC0415
+    from docx.table import Table  # noqa: PLC0415
+    from docx.text.paragraph import Paragraph  # noqa: PLC0415
+
+    doc = Document(str(path))
+    out: list[str] = []
+
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            para = Paragraph(child, doc)
+            text = para.text.rstrip()
+            style_name = (para.style.name if para.style else "") or ""
+            if not text:
+                out.append("")
+                continue
+            if style_name.startswith("Heading "):
+                try:
+                    level = int(style_name.removeprefix("Heading ").strip())
+                except ValueError:
+                    level = 1
+                level = max(1, min(6, level))
+                out.append("#" * level + " " + text)
+            elif style_name.startswith("List "):
+                out.append("- " + text)
+            else:
+                out.append(text)
+            out.append("")
+        elif child.tag == qn("w:tbl"):
+            table = Table(child, doc)
+            rows = list(table.rows)
+            if not rows:
+                continue
+            header = [cell.text.strip() for cell in rows[0].cells]
+            out.append("| " + " | ".join(header) + " |")
+            out.append("| " + " | ".join(["---"] * len(header)) + " |")
+            for row in rows[1:]:
+                cells = [cell.text.strip() for cell in row.cells]
+                out.append("| " + " | ".join(cells) + " |")
+            out.append("")
+
+    return "\n".join(out).rstrip() + "\n"
+
+
+def _render_xlsx_sync(path: Path) -> str:
+    """Render an .xlsx to markdown-ish text via openpyxl.
+
+    Each sheet becomes a ``## {sheet_name}`` block followed by a pipe
+    table of the cell values (formulas are evaluated to their cached
+    result via ``data_only=True``).  ``read_only=True`` keeps memory
+    bounded on large workbooks.
+    """
+    from openpyxl import load_workbook  # noqa: PLC0415
+
+    wb = load_workbook(str(path), read_only=True, data_only=True)
+    out: list[str] = []
+    try:
+        for sheet in wb.worksheets:
+            out.append(f"## {sheet.title}")
+            out.append("")
+            rows = [
+                ["" if v is None else str(v) for v in row]
+                for row in sheet.iter_rows(values_only=True)
+            ]
+            # Trim trailing empty rows so a mostly-empty sheet doesn't
+            # spam the output.
+            while rows and not any(cell for cell in rows[-1]):
+                rows.pop()
+            if not rows:
+                continue
+            max_cols = max(len(r) for r in rows)
+            for i, row in enumerate(rows):
+                padded = row + [""] * (max_cols - len(row))
+                out.append("| " + " | ".join(padded) + " |")
+                if i == 0:
+                    out.append("| " + " | ".join(["---"] * max_cols) + " |")
+            out.append("")
+    finally:
+        wb.close()
+
+    return "\n".join(out).rstrip() + "\n"
+
+
+def _render_pptx_sync(path: Path) -> str:
+    """Render a .pptx to markdown-ish text via python-pptx.
+
+    Each slide becomes a ``## Slide N: {title}`` heading followed by
+    the concatenated text of non-title shapes (text frames and tables).
+    Tables are rendered with the same pipe-table format used for docx.
+    """
+    from pptx import Presentation  # noqa: PLC0415
+
+    prs = Presentation(str(path))
+    out: list[str] = []
+
+    for idx, slide in enumerate(prs.slides, start=1):
+        title_shape = None
+        title_element = None
+        title_text = ""
+        try:
+            title_shape = slide.shapes.title
+            if title_shape is not None:
+                title_element = title_shape.element
+                title_text = (title_shape.text or "").strip()
+        except (AttributeError, KeyError):
+            pass
+
+        heading = f"## Slide {idx}"
+        if title_text:
+            heading += f": {title_text}"
+        out.append(heading)
+        out.append("")
+
+        for shape in slide.shapes:
+            # ``slide.shapes.title`` may return a freshly-constructed
+            # wrapper, so ``shape is title_shape`` is unreliable —
+            # compare the underlying ``<p:sp>`` element identity instead.
+            if title_element is not None and shape.element is title_element:
+                continue
+            if shape.has_text_frame:
+                text = (shape.text_frame.text or "").rstrip()
+                if text:
+                    out.append(text)
+                    out.append("")
+            elif getattr(shape, "has_table", False):
+                tbl = shape.table
+                tbl_rows = list(tbl.rows)
+                if not tbl_rows:
+                    continue
+                header = [cell.text.strip() for cell in tbl_rows[0].cells]
+                out.append("| " + " | ".join(header) + " |")
+                out.append("| " + " | ".join(["---"] * len(header)) + " |")
+                for row in tbl_rows[1:]:
+                    cells = [cell.text.strip() for cell in row.cells]
+                    out.append("| " + " | ".join(cells) + " |")
+                out.append("")
+
+    return "\n".join(out).rstrip() + "\n"
+
+
+# Modern Open XML formats handled by per-format Python libraries —
+# python-docx / openpyxl / python-pptx — which give us direct access
+# to the document structure (headings, sheet names, slide titles)
+# without losing fidelity through a LibreOffice -> PDF round-trip.
+_MODERN_OFFICE_RENDERERS: dict[str, Any] = {
+    ".docx": _render_docx_sync,
+    ".xlsx": _render_xlsx_sync,
+    ".pptx": _render_pptx_sync,
+}
+
+
+def _convert_to_text_sync(path: Path) -> str:
+    """Sync entry point for the subprocess pool / ``asyncio.to_thread``.
+
+    Dispatches by extension:
+
+      * .docx / .xlsx / .pptx → python-docx / openpyxl / python-pptx
+        (direct structured access, no LibreOffice dependency)
+      * .pdf and the long-tail formats (.doc/.xls/.ppt, .odt/.ods/.odp,
+        .rtf) → liteparse (mupdf for PDF, LibreOffice → PDF for the
+        rest)
+    """
+    renderer = _MODERN_OFFICE_RENDERERS.get(path.suffix.lower())
+    if renderer is not None:
+        return renderer(path)
+    return _convert_pdf_or_legacy_sync(path)
+
+
+async def _parse_document_to_text(path: Path) -> str:
+    """Convert a document to text via the appropriate per-format backend.
+
+    See :func:`_convert_to_text_sync` for the dispatch rules.  Runs the
+    sync work in a :class:`ProcessPoolExecutor` rather than a thread
+    because OCR (Tesseract) and the LibreOffice shellout used by
+    liteparse are CPU-bound — and python-docx / openpyxl / python-pptx
+    are pure-Python text processing that holds the GIL.  In the API
+    process (FastAPI on a 1-2 vCPU container with aggressive liveness
+    probes) thread-based parsing can starve the asyncio event loop and
+    trip the kubelet's health checks; a subprocess has its own GIL so
+    the event loop keeps scheduling.
 
     Bounded by ``_DOCUMENT_PARSE_TIMEOUT_S`` wall-clock; any exception,
     including timeout, is normalised to :class:`DocumentParseError`.
@@ -176,7 +355,7 @@ async def _parse_document_to_text(path: Path) -> str:
         ) from exc
     except DocumentParseError:
         raise
-    except Exception as exc:  # noqa: BLE001 — liteparse raises ad-hoc types
+    except Exception as exc:  # noqa: BLE001 — parsers raise ad-hoc types
         raise DocumentParseError(path, str(exc)) from exc
 
 # ---------------------------------------------------------------------------
@@ -662,13 +841,16 @@ READ_FILE_SCHEMA = ToolSchema(
     description=(
         "Read a file with line numbers and pagination. Use this instead of "
         "cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. "
-        "Handles plain text plus .pdf, .docx, .xlsx, .pptx (parsed to "
-        "text natively via liteparse) and image files (described by a vision "
-        "model) — do NOT pre-extract documents with subprocess tools or "
-        "pip-install pypdf/python-docx/openpyxl yourself; just call read_file. "
-        "Suggests similar filenames if not found. Use offset and limit for "
-        "large files. Reads exceeding ~100K characters are rejected; use "
-        "offset and limit to read specific sections of large files."
+        "Handles plain text plus .pdf (via liteparse/mupdf), Word "
+        "(.doc/.docx/.docm), Excel (.xls/.xlsx/.xlsm), PowerPoint "
+        "(.ppt/.pptx/.pptm), OpenDocument (.odt/.ods/.odp), and .rtf — all "
+        "parsed to text natively — and image files (described by a vision "
+        "model). Do NOT pre-extract documents with subprocess tools or "
+        "pip-install pypdf/python-docx/openpyxl yourself; just call "
+        "read_file. Suggests similar filenames if not found. Use offset "
+        "and limit for large files. Reads exceeding ~100K characters are "
+        "rejected; use offset and limit to read specific sections of "
+        "large files."
     ),
     parameters={
         "type": "object",
@@ -963,11 +1145,23 @@ def register(registry: ToolRegistry) -> None:
 
 
 # Document extensions handled natively by liteparse (see _handle_document).
+# liteparse routes:
+#   - PDFs through mupdf directly
+#   - Office formats (modern + legacy + macro-enabled + ODF) through
+#     LibreOffice -> PDF -> mupdf
+#   - RTF via the same LibreOffice pipeline
 _DOCUMENT_EXTENSIONS: frozenset[str] = frozenset({
     ".pdf",
-    ".docx",
-    ".xlsx",
-    ".pptx",
+    # Modern Office (Open XML)
+    ".docx", ".xlsx", ".pptx",
+    # Macro-enabled Open XML
+    ".docm", ".xlsm", ".pptm",
+    # Legacy binary Office
+    ".doc", ".xls", ".ppt",
+    # OpenDocument
+    ".odt", ".ods", ".odp",
+    # Rich Text
+    ".rtf",
 })
 
 
