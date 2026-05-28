@@ -183,6 +183,15 @@ async def _parse_document_to_text(path: Path) -> str:
 # Write-path deny list — blocks writes to sensitive system/credential files
 # ---------------------------------------------------------------------------
 
+# Ripgrep binary path, resolved at import time.  search_files routes
+# through rg -- the worker and sandbox images both install it, and
+# config.py declares it as a worker requirement alongside srt/bubblewrap/
+# socat, so callers can rely on it being present.  If it's missing we
+# raise from the handler with a clear "install ripgrep" message rather
+# than silently degrading to a slow Python loop.
+_RIPGREP_PATH: str | None = shutil.which("rg")
+
+
 _HOME = str(Path.home())
 
 WRITE_DENIED_PATHS = {
@@ -2022,19 +2031,232 @@ def _write_patched(
         return {"error": f"Failed to write patched file: {exc}"}
 
 
+class _RipgrepError(RuntimeError):
+    """Raised when ripgrep exits non-{0,1} (rc=1 just means no matches)."""
+
+
+async def _run_ripgrep(args: list[str]) -> str:
+    """Run ripgrep with *args* and return stdout.
+
+    Exit codes: 0 = matches found, 1 = no matches (not an error), 2+ =
+    real failure (invalid regex, I/O error, etc.).  rc>=2 raises so the
+    caller surfaces a useful error to the agent instead of silently
+    returning an empty result set.
+    """
+    if _RIPGREP_PATH is None:
+        raise _RipgrepError(
+            "ripgrep (rg) not found on PATH -- install it (apt/brew/dnf "
+            "install ripgrep) or rebuild the worker image"
+        )
+    proc = await asyncio.create_subprocess_exec(
+        _RIPGREP_PATH, *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    rc = proc.returncode or 0
+    if rc not in (0, 1):
+        raise _RipgrepError(
+            f"rg exited {rc}: {stderr.decode('utf-8', errors='replace')[:200]}"
+        )
+    return stdout.decode("utf-8", errors="replace")
+
+
+async def _files_target_rg(
+    pattern: str,
+    expanded: str,
+    offset: int,
+    limit: int,
+) -> dict[str, Any]:
+    """Find files matching glob *pattern* under *expanded* via ripgrep.
+
+    ``--no-ignore`` preserves the legacy behaviour of NOT respecting
+    .gitignore; hidden files/dirs are skipped (rg default).  Results
+    are sorted by modification time (newest first) to match the legacy
+    glob-based path.
+    """
+    out = await _run_ripgrep([
+        "--no-ignore",
+        "--files",
+        "-g", pattern,
+        expanded,
+    ])
+    files = [line for line in out.splitlines() if line]
+    files.sort(
+        key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0,
+        reverse=True,
+    )
+    total_count = len(files)
+    paginated = files[offset : offset + limit]
+    return {
+        "matches": paginated,
+        "count": len(paginated),
+        "total_count": total_count,
+        "truncated": total_count > offset + limit,
+    }
+
+
+async def _content_target_rg(
+    pattern: str,
+    expanded: str,
+    file_glob: str | None,
+    output_mode: str,
+    context: int,
+    offset: int,
+    limit: int,
+) -> dict[str, Any]:
+    """Run a content search via ripgrep and return the result dict.
+
+    ``output_mode='content'`` uses ``rg --json`` so we can carry line
+    numbers and ``-C`` context cleanly.  ``files_only`` and ``count``
+    share a single ``rg -c`` invocation -- the per-file count gives us
+    both the file list (for files_only) and ``total_matches`` (the sum).
+    rg's automatic binary-file detection replaces the legacy extension
+    blocklist.
+    """
+    base_args = ["--no-ignore"]
+    if file_glob:
+        base_args += ["-g", file_glob]
+
+    if output_mode in ("files_only", "count"):
+        out = await _run_ripgrep(
+            base_args + ["-c", "-e", pattern, expanded],
+        )
+        file_counts: list[tuple[str, int]] = []
+        total_matches = 0
+        for ln in out.splitlines():
+            # `rg -c` output: "<path>:<count>".  Linux paths *can* contain
+            # ':' but the legacy fallback has the same ambiguity; rfind is
+            # the safest split without an extra subprocess.
+            sep = ln.rfind(":")
+            if sep < 0:
+                continue
+            try:
+                cnt = int(ln[sep + 1:])
+            except ValueError:
+                continue
+            file_counts.append((ln[:sep], cnt))
+            total_matches += cnt
+        file_counts.sort(key=lambda x: x[0])
+        page = file_counts[offset : offset + limit]
+        if output_mode == "files_only":
+            results: list[dict[str, Any]] = [{"file": p} for p, _ in page]
+        else:  # count
+            results = [{"file": p, "count": c} for p, c in page]
+        return {
+            "matches": results,
+            "count": len(results),
+            "total_matches": total_matches,
+            "truncated": len(file_counts) > offset + limit,
+        }
+
+    # output_mode == "content"
+    args = base_args + ["--json"]
+    if context > 0:
+        args += ["-C", str(context)]
+    args += ["-e", pattern, expanded]
+    out = await _run_ripgrep(args)
+    return _parse_rg_json_content(out, context, offset, limit)
+
+
+def _parse_rg_json_content(
+    raw: str,
+    context: int,
+    offset: int,
+    limit: int,
+) -> dict[str, Any]:
+    """Parse ``rg --json`` stream into a content-mode result dict.
+
+    rg emits one JSON event per line: ``begin`` (new file), ``match``
+    (matching line), ``context`` (a -C line within the window), ``end``
+    (file done), ``summary`` (final stats).  Matches and context for a
+    given file are emitted contiguously; we buffer per-file then flush
+    on ``end`` so each match entry can pick up its surrounding context
+    lines from the per-file dict.
+    """
+    all_matches: list[dict[str, Any]] = []
+    current_file: str | None = None
+    file_match_lines: list[tuple[int, str]] = []  # (lineno, text) for matches
+    file_lines: dict[int, str] = {}  # lineno → text, populated by match+context
+
+    def flush() -> None:
+        nonlocal current_file, file_match_lines, file_lines
+        if current_file is not None:
+            for line_no, line_text in file_match_lines:
+                entry: dict[str, Any] = {
+                    "file": current_file,
+                    "line": line_no,
+                    "content": line_text,
+                }
+                if context > 0:
+                    before = [
+                        f"{n}|{file_lines[n]}"
+                        for n in range(line_no - context, line_no)
+                        if n in file_lines
+                    ]
+                    after = [
+                        f"{n}|{file_lines[n]}"
+                        for n in range(line_no + 1, line_no + context + 1)
+                        if n in file_lines
+                    ]
+                    if before:
+                        entry["before"] = before
+                    if after:
+                        entry["after"] = after
+                all_matches.append(entry)
+        current_file = None
+        file_match_lines = []
+        file_lines = {}
+
+    for raw_line in raw.splitlines():
+        if not raw_line:
+            continue
+        try:
+            evt = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        evt_type = evt.get("type")
+        data = evt.get("data", {})
+        if evt_type == "begin":
+            flush()
+            current_file = (data.get("path") or {}).get("text")
+        elif evt_type == "end":
+            flush()
+        elif evt_type in ("match", "context"):
+            line_no = data.get("line_number")
+            text_val = (data.get("lines") or {}).get("text")
+            # text is absent when the line contains non-UTF-8 bytes
+            # (rg emits a 'bytes' field instead); skip rather than try
+            # to repr the binary payload.
+            if line_no is None or text_val is None:
+                continue
+            text = text_val.rstrip("\r\n")
+            file_lines[line_no] = text
+            if evt_type == "match":
+                file_match_lines.append((line_no, text))
+    flush()
+
+    total_matches = len(all_matches)
+    paginated = all_matches[offset : offset + limit]
+    return {
+        "matches": paginated,
+        "count": len(paginated),
+        "total_matches": total_matches,
+        "truncated": total_matches > offset + limit,
+    }
+
+
 async def _search_files_handler(
     arguments: dict[str, Any],
     **kwargs: Any,
 ) -> str:
-    """Harness-local fallback: search file contents or find files by name.
+    """Search file contents or find files by name via ripgrep.
 
-    In production, the ToolRouter sends search_files to the sandbox
-    runtime instead of invoking this handler.  Implements the search_files
-    logic: content search with regex, file search with glob,
-    output modes, pagination, context lines, and consecutive-loop detection.
+    Ripgrep is a hard requirement (declared by :class:`SandboxConfig` and
+    baked into the worker/sandbox images alongside srt/bubblewrap/socat).
+    The sandbox runtime's ``tool-executor`` dispatches through this same
+    handler, so both code paths get the rg speedup.
     """
-    import glob as glob_mod
-
     pattern = arguments.get("pattern", "")
     target = arguments.get("target", "content")
     path = arguments.get("path", ".")
@@ -2089,121 +2311,18 @@ async def _search_files_handler(
         expanded = _resolve_user_path(path, workspace_path)
 
         if target == "files":
-            # Find files by glob pattern
-            glob_pattern = os.path.join(expanded, "**", pattern)
-            all_matches = sorted(
-                glob_mod.glob(glob_pattern, recursive=True),
-                key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0,
-                reverse=True,
+            result_dict = await _files_target_rg(
+                pattern, expanded, offset, limit,
             )
-            # Apply pagination
-            paginated = all_matches[offset : offset + limit]
-            total_count = len(all_matches)
+        else:
+            result_dict = await _content_target_rg(
+                pattern, expanded, file_glob, output_mode,
+                context, offset, limit,
+            )
 
-            result_dict: dict[str, Any] = {
-                "matches": paginated,
-                "count": len(paginated),
-                "total_count": total_count,
-                "pattern": pattern,
-                "path": path,
-                "truncated": total_count > offset + limit,
-            }
-
-            if count >= 3:
-                result_dict["_warning"] = (
-                    f"You have run this exact search {count} times consecutively. "
-                    "The results have not changed. Use the information you already have."
-                )
-
-            result_json = json.dumps(result_dict, ensure_ascii=False)
-            if result_dict.get("truncated"):
-                next_offset = offset + limit
-                result_json += (
-                    f"\n\n[Hint: Results truncated. Use offset={next_offset} to see more, "
-                    "or narrow with a more specific pattern or file_glob.]"
-                )
-            return result_json
-
-        # Content search: regex grep
-        regex = re.compile(pattern)
-        results: list[dict[str, Any]] = []
-        total_matches = 0
-
-        for root, _dirs, files in os.walk(expanded):
-            # Skip hidden directories
-            _dirs[:] = [d for d in _dirs if not d.startswith(".")]
-            for fname in sorted(files):
-                # Apply file_glob filter
-                if file_glob:
-                    import fnmatch
-                    if not fnmatch.fnmatch(fname, file_glob):
-                        continue
-
-                fpath = os.path.join(root, fname)
-
-                # Skip binary files
-                if has_binary_extension(fpath):
-                    continue
-
-                try:
-                    with open(fpath, encoding="utf-8", errors="ignore") as fh:
-                        file_lines = fh.readlines()
-                except (OSError, UnicodeDecodeError):
-                    continue
-
-                file_matches: list[dict[str, Any]] = []
-                for lineno, line in enumerate(file_lines, 1):
-                    if regex.search(line):
-                        total_matches += 1
-                        if total_matches <= offset:
-                            continue
-                        if len(results) >= limit:
-                            continue
-
-                        if output_mode == "content":
-                            match_entry: dict[str, Any] = {
-                                "file": fpath,
-                                "line": lineno,
-                                "content": line.rstrip(),
-                            }
-                            # Add context lines if requested
-                            if context > 0:
-                                before = []
-                                for ci in range(max(0, lineno - 1 - context), lineno - 1):
-                                    before.append(f"{ci + 1}|{file_lines[ci].rstrip()}")
-                                after = []
-                                for ci in range(lineno, min(len(file_lines), lineno + context)):
-                                    after.append(f"{ci + 1}|{file_lines[ci].rstrip()}")
-                                if before:
-                                    match_entry["before"] = before
-                                if after:
-                                    match_entry["after"] = after
-                            results.append(match_entry)
-                        elif output_mode == "count":
-                            file_matches.append({
-                                "line": lineno,
-                                "content": line.rstrip(),
-                            })
-                        elif output_mode == "files_only":
-                            # Just track that this file has a match
-                            if not results or results[-1].get("file") != fpath:
-                                results.append({"file": fpath})
-
-                if output_mode == "count" and file_matches:
-                    results.append({
-                        "file": fpath,
-                        "count": len(file_matches),
-                    })
-
-        result_dict = {
-            "matches": results,
-            "count": len(results),
-            "total_matches": total_matches,
-            "pattern": pattern,
-            "path": path,
-            "truncated": total_matches > offset + limit,
-        }
-
+        # ── Common envelope ──────────────────────────────────────────
+        result_dict["pattern"] = pattern
+        result_dict["path"] = path
         if count >= 3:
             result_dict["_warning"] = (
                 f"You have run this exact search {count} times consecutively. "
