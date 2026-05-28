@@ -111,8 +111,6 @@ RUN npm install -g \
         pptxgenjs \
         pdf-lib \
         pdfjs-dist \
-        @anthropic-ai/claude-code \
-        opencode-ai@latest \
         pnpm \
     && npm cache clean --force
 
