@@ -171,7 +171,7 @@ _SYSTEM_PROMPT = dedent("""\
       what's missing or wrong.
     - "blocked": the rubric cannot be progressed without external input
       that the coordinator has not yet requested (rare; usually the
-      coordinator should call ``task_block`` instead and this verdict
+      coordinator should call ``worker_block`` instead and this verdict
       should be reserved for true dead-ends).
     - "failed": the rubric is unreachable from current state (e.g. data
       is impossible, contradictory rubric).
@@ -302,13 +302,13 @@ _CONTINUATION_TEMPLATE = dedent("""\
     - {n_in_flight} task(s) in flight (running/ready/todo/blocked)
     - Iteration {iteration}/{max_iterations}
 
-    Inspect the mission task tree via ``task_show`` on a recent child if
-    you need detail. Then either:
+    Inspect the mission task tree via ``worker_context`` on a recent
+    child if you need detail. Then either:
       (a) spawn one or more corrective tasks (via ``spawn_task``) to
           address the evaluator's feedback, OR
-      (b) call ``task_block`` on your own session with a question if you
-          need human input, OR
-      (c) call ``task_complete`` on your own session with a failure
+      (b) call ``worker_block`` on your own session with a question if
+          you need human input, OR
+      (c) call ``worker_complete`` on your own session with a failure
           summary if you believe the rubric cannot be satisfied.
 
     Do NOT claim completion in prose alone. The evaluator only honours a

@@ -9,7 +9,7 @@ terminal state the Task belongs in:
   completion.  ``Task.status='done'``, ``Task.result`` is filled from
   the event payload.
 * If the last task-relevant event is ``TASK_BLOCKED`` — the worker
-  self-blocked via ``task_block``.  The tool handler already wrote
+  self-blocked via ``worker_block``.  The tool handler already wrote
   ``Task.status='blocked'`` inside its own transaction; the tick is a
   belt-and-suspenders no-op (the WHERE clause filtered it out anyway,
   but documented here in case finalize runs against an orphaned row).

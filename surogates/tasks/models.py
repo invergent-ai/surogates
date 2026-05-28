@@ -33,7 +33,7 @@ Owners by transition:
                    or eagerly by ``spawn_task`` when ``parents=[]``.
 * ``running``    — set by the dispatcher (or eager spawn) when a Session
                    attempt has been created and ``current_session_id`` is set.
-* ``blocked``    — set by the ``task_block`` self-tool. Does not consume
+* ``blocked``    — set by the ``worker_block`` self-tool. Does not consume
                    a retry attempt.
 * ``done``       — set by the dispatcher tick when the current Session
                    ends with a ``WORKER_COMPLETE`` event.

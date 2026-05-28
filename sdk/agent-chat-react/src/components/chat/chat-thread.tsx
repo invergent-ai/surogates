@@ -892,23 +892,6 @@ const _SIMPLE_MODE_HIDDEN_TOOLS: ReadonlySet<string> = new Set([
   "execute_code",
 ]);
 
-// Skill-discovery / skill-management tools. Iterations whose only
-// tool calls are in this set get hidden outright in Simple mode —
-// otherwise the harness's iteration summary ("Loaded pptx skill")
-// still labels the row even though every constituent tool call is
-// suppressed by ``visibleToolCalls``.
-const _SKILL_TOOL_NAMES: ReadonlySet<string> = new Set([
-  "skills_list",
-  "skill_view",
-  "skill_manage",
-]);
-
-function _isSkillOnlyIteration(message: ChatMessageType): boolean {
-  const calls = message.toolCalls ?? [];
-  if (calls.length === 0) return false;
-  return calls.every((tc) => _SKILL_TOOL_NAMES.has(tc.toolName));
-}
-
 function _isHiddenSimpleTool(tc: ToolCallInfo): boolean {
   if (_SIMPLE_MODE_HIDDEN_TOOLS.has(tc.toolName)) return true;
   // Browser tools are an internal sub-grouped activity in Expert
@@ -1214,12 +1197,6 @@ export function IterationGroup({
   const summary = message.iterationSummary?.summary;
   const [open, setOpen] = useState(false);
 
-  // Hide iterations whose only tool calls are skill-discovery /
-  // skill-management calls — Simple mode treats skill plumbing as
-  // invisible, and otherwise the harness's iteration summary still
-  // labels the row even when every constituent tool is hidden.
-  if (_isSkillOnlyIteration(message)) return null;
-
   // 1. Live iteration: shimmer label only. "Live" means a tool is
   //    actively running, OR a text-only iteration is mid-stream.
   //    message.status === "streaming" alone is NOT a reliable signal —
@@ -1418,35 +1395,23 @@ function SimpleAssistantGroup({
 
   // Mirror Expert mode's defensive "Working on it..." row: whenever
   // this is the tail group and the session is still running, surface
-  // a group-level shimmer unless something else is already animating
-  // (a per-iteration live shimmer, or the final-answer text being
-  // streamed via SimpleFinalAnswer). This covers:
-  //   - pre-assistant gap (only user/system messages so far)
-  //   - text-only streaming tail with no content yet (the loop below
-  //     skips it to avoid duplicating the finalText render)
-  //   - skill-only iterations hidden by _isSkillOnlyIteration
-  //   - between-iterations gap (previous tool-bearing iteration is
-  //     done, next llm.response hasn't landed) — tool-using messages
-  //     stay tagged "streaming" but isIterationLive correctly returns
-  //     false once every tool resolved
+  // a group-level shimmer unless an iteration is already showing its
+  // own live shimmer. We DON'T also suppress when finalText is set —
+  // the reducer keeps tool-using and pre-response messages in
+  // status="streaming" indefinitely (next llm.response is the only
+  // signal that flips them), so once the text deltas stop the
+  // smoothstream finishes its reveal but status stays "streaming";
+  // without a sibling shimmer the UI looks frozen. Expert mode
+  // appends an equivalent thinking entry in the same window.
   const isTailGroup = lastGlobalIndex === totalMessages - 1;
   const tailRendersOwnShimmer =
     !!tail
     && isIterationLive(tail)
-    && !tailIsTextOnly
-    && !_isSkillOnlyIteration(tail);
-  // SimpleFinalAnswer's useSmoothStream is the active progress signal
-  // while finalText is mid-stream; only suppress the group shimmer in
-  // that window. Once status flips to "complete" but isRunning is
-  // still true (interim preamble text before the agent calls more
-  // tools), the shimmer must surface below the text.
-  const finalTextStreaming =
-    !!finalText && tail?.status === "streaming";
+    && !tailIsTextOnly;
   const showThinkingShim =
     isTailGroup
     && isRunning
-    && !tailRendersOwnShimmer
-    && !finalTextStreaming;
+    && !tailRendersOwnShimmer;
 
   const showErrorInfo =
     !!tail && tail.status === "error" && !!tail.errorInfo;

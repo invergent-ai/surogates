@@ -1,4 +1,4 @@
-"""Integration tests for unblock_task, cancel_task, and task_block tool handlers."""
+"""Integration tests for unblock_task, cancel_task, and worker_block tool handlers."""
 from __future__ import annotations
 
 import json
@@ -312,18 +312,18 @@ async def test_cancel_task_enforces_ownership(
 
 
 # ---------------------------------------------------------------------------
-# task_block
+# worker_block
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_task_block_marks_blocked_emits_event_publishes_interrupt(
+async def test_worker_block_marks_blocked_emits_event_publishes_interrupt(
     session_factory, org_id: uuid.UUID, parent_session, session_store,
 ):
-    """task_block sets task to blocked, emits TASK_BLOCKED to parent,
+    """worker_block sets task to blocked, emits TASK_BLOCKED to parent,
     publishes INTERRUPT to its own session."""
     from surogates.config import INTERRUPT_CHANNEL_PREFIX
-    from surogates.tasks.tools import _task_block_handler
+    from surogates.tasks.tools import _worker_block_handler
 
     worker_session_id = uuid.uuid4()
     async with session_factory() as db:
@@ -347,7 +347,7 @@ async def test_task_block_marks_blocked_emits_event_publishes_interrupt(
     redis = AsyncMock()
     redis.publish = AsyncMock()
 
-    result = await _task_block_handler(
+    result = await _worker_block_handler(
         {"reason": "rate limit key unclear"},
         session_store=session_store, redis=redis,
         tenant=MagicMock(org_id=org_id),
@@ -385,14 +385,14 @@ async def test_task_block_marks_blocked_emits_event_publishes_interrupt(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_task_block_refuses_when_session_has_no_task(
+async def test_worker_block_refuses_when_session_has_no_task(
     session_factory, org_id: uuid.UUID, parent_session, session_store,
 ):
-    """A plain (non-task) session calling task_block gets an error."""
-    from surogates.tasks.tools import _task_block_handler
+    """A plain (non-task) session calling worker_block gets an error."""
+    from surogates.tasks.tools import _worker_block_handler
 
     # parent_session has task_id=None
-    result = await _task_block_handler(
+    result = await _worker_block_handler(
         {"reason": "anything"},
         session_store=session_store, redis=AsyncMock(),
         tenant=MagicMock(org_id=org_id),
@@ -405,12 +405,12 @@ async def test_task_block_refuses_when_session_has_no_task(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_task_block_refuses_when_attempt_was_reclaimed(
+async def test_worker_block_refuses_when_attempt_was_reclaimed(
     session_factory, org_id: uuid.UUID, parent_session, session_store,
 ):
     """If task.current_session_id no longer matches the caller, refuse
     (e.g., the dispatcher reclaimed this attempt as stale)."""
-    from surogates.tasks.tools import _task_block_handler
+    from surogates.tasks.tools import _worker_block_handler
 
     stale_session_id = uuid.uuid4()
     new_session_id = uuid.uuid4()
@@ -435,7 +435,7 @@ async def test_task_block_refuses_when_attempt_was_reclaimed(
         ))
         await db.commit()
 
-    result = await _task_block_handler(
+    result = await _worker_block_handler(
         {"reason": "I'm stale but trying"},
         session_store=session_store, redis=AsyncMock(),
         tenant=MagicMock(org_id=org_id),
@@ -448,11 +448,11 @@ async def test_task_block_refuses_when_attempt_was_reclaimed(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_task_block_does_not_increment_attempt_count(
+async def test_worker_block_does_not_increment_attempt_count(
     session_factory, org_id: uuid.UUID, parent_session, session_store,
 ):
     """Blocking is a deliberate pause, NOT a failure — attempt_count stays."""
-    from surogates.tasks.tools import _task_block_handler
+    from surogates.tasks.tools import _worker_block_handler
 
     worker_session_id = uuid.uuid4()
     async with session_factory() as db:
@@ -473,7 +473,7 @@ async def test_task_block_does_not_increment_attempt_count(
 
     redis = AsyncMock()
     redis.publish = AsyncMock()
-    await _task_block_handler(
+    await _worker_block_handler(
         {"reason": "stop me"},
         session_store=session_store, redis=redis,
         tenant=MagicMock(org_id=org_id),

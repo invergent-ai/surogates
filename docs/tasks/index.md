@@ -8,7 +8,7 @@ When to reach for a task vs the existing primitives:
 |---|---|
 | Short reasoning subtask, parent blocks for the result | `delegate_task` (existing) |
 | Fire-and-forget async work, one shot, no retry, no DAG | `spawn_worker` (existing) |
-| Durable goal that survives crashes; multi-parent DAG; auto-retry; mid-flight pause via `task_block` | `spawn_task` (this chapter) |
+| Durable goal that survives crashes; multi-parent DAG; auto-retry; mid-flight pause via `worker_block` | `spawn_task` (this chapter) |
 
 The task layer **wraps** `spawn_worker`, it does not replace it. Both remain registered side-by-side; child sessions that get spawned for a task are normal `Session` rows with a new `task_id` column pointing at their owning task.
 
@@ -18,7 +18,7 @@ The task layer **wraps** `spawn_worker`, it does not replace it. Both remain reg
 
 **TaskLink** -- a row in `task_links` carrying one parent->child DAG edge. A child task may have multiple parents (fan-in); it stays in `todo` until *every* parent has reached `done`. Cancelled or failed parents intentionally do **not** unblock children -- orchestrators must cancel/replan downstream explicitly.
 
-**Attempt** -- one execution of a task by a worker session. Recorded via `sessions.task_id`; the dispatcher tick bumps `attempt_count` on each claim. After `max_attempts` (default 3) consecutive crash/timeout failures the task transitions to `failed`. A `task_block` does *not* consume an attempt -- blocking is a deliberate pause, not a failure.
+**Attempt** -- one execution of a task by a worker session. Recorded via `sessions.task_id`; the dispatcher tick bumps `attempt_count` on each claim. After `max_attempts` (default 3) consecutive crash/timeout failures the task transitions to `failed`. A `worker_block` does *not* consume an attempt -- blocking is a deliberate pause, not a failure.
 
 **Spawning parent** -- the `Session` that called `spawn_task`. Stored as `tasks.parent_session_id`. Only the spawning parent's session may `unblock_task` or `cancel_task` its children.
 
@@ -29,8 +29,8 @@ The task layer **wraps** `spawn_worker`, it does not replace it. Both remain reg
 | `todo` | tick | Created; one or more parents not yet `done` |
 | `ready` | tick | All parents done (or none); eligible for atomic claim |
 | `running` | tick | A Session (`current_session_id`) is executing |
-| `blocked` | `task_block` tool | Awaiting unblock_task or human intervention |
-| `done` | tick / `task_complete` | Result written; terminal |
+| `blocked` | `worker_block` tool | Awaiting unblock_task or human intervention |
+| `done` | tick / `worker_complete` | Result written; terminal |
 | `failed` | tick | All `max_attempts` exhausted, terminal |
 | `cancelled` | `cancel_task` tool | Explicitly aborted; terminal |
 
@@ -43,7 +43,7 @@ The task layer **wraps** `spawn_worker`, it does not replace it. Both remain reg
        │              attempt_count < max_attempts                  │
        │           ┌───────── retry on crash ──────────────────────┤
        │           │                                                │
-       │           │              task_block                        ▼
+       │           │              worker_block                       ▼
        │           │            ┌───────────────────────────► ┌─────────┐
        │           │            │                              │ blocked │
        │           │            │                              └─────────┘
@@ -51,7 +51,7 @@ The task layer **wraps** `spawn_worker`, it does not replace it. Both remain reg
        │           │            └◄──────────────────────────────────┘
        │           │
        │           │   max_attempts exhausted          natural complete
-       │           │                                         OR task_complete
+       │           │                                         OR worker_complete
        │           ▼                                                ▼
        │       ┌────────┐                                      ┌──────┐
        │       │ failed │                                      │ done │
@@ -78,9 +78,9 @@ The task layer ships **six** tools, registered into the `core` toolset alongside
 
 | Tool | Purpose |
 |---|---|
-| `task_complete` | Mark own task `done` with explicit `summary` + structured `metadata` |
-| `task_block` | Self-pause without consuming a retry attempt |
-| `task_show` | Read own task + parents (with results) + prior attempt summaries |
+| `worker_complete` | Mark own task `done` with explicit `summary` + structured `metadata` |
+| `worker_block` | Self-pause without consuming a retry attempt |
+| `worker_context` | Read own task + parents (with results) + prior attempt summaries |
 
 See [Tools](../tools/index.md) for full parameter tables.
 
@@ -103,17 +103,17 @@ When a worker session for a task ends, the parent session is woken via the exist
 
 | Event | When emitted | Payload |
 |---|---|---|
-| `worker.complete` | Worker session ended (natural or via `task_complete`) | `{worker_id, result, task_id?, metadata?}` |
-| `task.blocked` | Worker called `task_block` | `{task_id, worker_id, reason}` |
+| `worker.complete` | Worker session ended (natural or via `worker_complete`) | `{worker_id, result, task_id?, metadata?}` |
+| `task.blocked` | Worker called `worker_block` | `{task_id, worker_id, reason}` |
 | `task.failed` | Tick observed crash after `attempt_count >= max_attempts` | `{task_id, worker_id, attempt_count}` |
 
-`WORKER_COMPLETE` is reused (rather than introducing a separate `TASK_COMPLETED`) so a parent agent's handling of "a child finished" stays uniform across `spawn_worker` and `spawn_task` paths. The `task_id` key is present only for task-backed sessions; plain `spawn_worker` completions omit it. When the worker called `task_complete` explicitly, the `result` and `metadata` reflect the worker's structured handoff; when the worker completed naturally, `result` is the auto-extracted LLM final response and `metadata` is omitted.
+`WORKER_COMPLETE` is reused (rather than introducing a separate `TASK_COMPLETED`) so a parent agent's handling of "a child finished" stays uniform across `spawn_worker` and `spawn_task` paths. The `task_id` key is present only for task-backed sessions; plain `spawn_worker` completions omit it. When the worker called `worker_complete` explicitly, the `result` and `metadata` reflect the worker's structured handoff; when the worker completed naturally, `result` is the auto-extracted LLM final response and `metadata` is omitted.
 
 ## Retry context
 
 When the dispatcher claims a task for the second or subsequent attempt, `_create_session_for_task` injects a `## Prior attempts on this task` section into the new attempt's initial USER_MESSAGE. Each prior session contributes one line: completed attempts include their result, blocked attempts include the reason, crashed/timed-out attempts get a placeholder. Bounded to the last 5 entries so deep retry chains stay context-bounded.
 
-A retry worker can also call `task_show` to read the full structured detail of every prior attempt (session_id, outcome, summary).
+A retry worker can also call `worker_context` to read the full structured detail of every prior attempt (session_id, outcome, summary).
 
 ## Multi-tenancy
 
@@ -140,7 +140,7 @@ No new configuration. The dispatcher tick is enabled automatically when the orch
 - The work needs to survive a parent crash.
 - Multiple specialist tasks must complete before a synthesizer runs (fan-in).
 - You want bounded automatic retry on crash / timeout.
-- The worker might need to pause for context mid-run (via `task_block`).
+- The worker might need to pause for context mid-run (via `worker_block`).
 - Humans (or other agents) need to see and steer the work.
 
 Both can coexist within one parent session; pick per call.
@@ -202,7 +202,7 @@ A 30-second rate limit per mission keeps a burst of completing tasks from trigge
 The judge can't grade prose. It needs evidence in a structured form. The pattern that always works:
 
 1. The orchestrator spawns the work tasks (research, training, generation, fixing, whatever).
-2. The orchestrator spawns a **verifier task** that depends on the work tasks (`parents=[…]` so it runs after they finish). The verifier's job is to compute the measurable signal the rubric mentions and call `task_complete(summary, metadata={"<key>": <value>})` with it.
+2. The orchestrator spawns a **verifier task** that depends on the work tasks (`parents=[…]` so it runs after they finish). The verifier's job is to compute the measurable signal the rubric mentions and call `worker_complete(summary, metadata={"<key>": <value>})` with it.
 3. When the verifier finishes, the judge sees the verifier's metadata and grades against it.
 
 So write rubrics in terms of metadata a verifier can produce:
@@ -224,7 +224,7 @@ The judge picks one of four verdicts: `satisfied`, `needs_revision`, `blocked`, 
 - The coordinator wakes, reads the feedback, decides what to do next — usually spawn corrective tasks.
 - After 20 iterations without a `satisfied` verdict, the mission terminates as `max_iterations_reached`.
 
-If the coordinator decides the rubric genuinely can't be met (contradictory criteria, missing data), it can call `task_complete` on itself with a failure summary; the judge reads that as evidence and returns `failed`.
+If the coordinator decides the rubric genuinely can't be met (contradictory criteria, missing data), it can call `worker_complete` on itself with a failure summary; the judge reads that as evidence and returns `failed`.
 
 ### Pausing, resuming, cancelling
 
@@ -246,7 +246,7 @@ The dashboard is the right place to watch a mission in flight; the chat thread i
 ## See also
 
 - [Sub-Agents](../sub-agents/index.md) -- the `AgentDef` catalog that `spawn_task`'s `agent_type` parameter resolves into.
-- [Tools](../tools/index.md) -- full parameter tables for `spawn_task`, `task_complete`, `task_show`, etc.
+- [Tools](../tools/index.md) -- full parameter tables for `spawn_task`, `worker_complete`, `worker_context`, etc.
 - Design spec: [`docs/sub-agents/2026-05-16-subagent-task-layer-v1.md`](../sub-agents/2026-05-16-subagent-task-layer-v1.md)
 - Implementation plan: [`docs/sub-agents/2026-05-16-subagent-task-layer-v1-plan.md`](../sub-agents/2026-05-16-subagent-task-layer-v1-plan.md)
 - Mission spec: [`docs/superpowers/specs/2026-05-16-mission-orchestrated-goals-design.md`](../superpowers/specs/2026-05-16-mission-orchestrated-goals-design.md)

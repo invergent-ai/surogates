@@ -470,11 +470,12 @@ describe("Simple mode ChatThread rendering", () => {
     expect(dom.textContent).toContain("Working on it");
   });
 
-  it("suppresses the group shimmer while finalText is mid-stream", () => {
-    // Mid-stream text-only iteration with non-empty content: the
-    // SimpleFinalAnswer's useSmoothStream animation is the active
-    // progress signal, so the group shimmer must stay hidden to avoid
-    // a redundant duplicate indicator.
+  it("shows 'Working on it...' alongside a mid-stream text tail", () => {
+    // The reducer keeps the message in status="streaming" until the
+    // closing llm.response lands, but llm.delta cadence can stop long
+    // before that (the model is still reasoning / about to call a
+    // tool). Showing the shimmer below the streamed text matches
+    // Expert mode, which appends a thinking entry in the same window.
     const messages: ChatMessage[] = [
       {
         id: "user-1",
@@ -504,17 +505,21 @@ describe("Simple mode ChatThread rendering", () => {
         viewMode="simple"
       />,
     );
-    expect(dom.textContent).not.toContain("Working on it");
+    expect(dom.textContent).toContain("Working on it");
   });
 
-  it("shows 'Working on it...' when the tail is a hidden skill-only iteration", () => {
-    // skill_view-only iteration is filtered to null by IterationGroup,
-    // so without the group-level fallback the user would see nothing.
+  it("renders skill-only iterations so reasoning stays accessible", () => {
+    // Previously these iterations were hidden outright, leaving Simple
+    // mode showing only "Working on it..." while the model was producing
+    // useful reasoning + a meaningful iteration summary. We now surface
+    // them as a normal collapsible row so the user can read the
+    // reasoning on demand — same access as Expert mode's "Thought
+    // for a few seconds" entries.
     const messages: ChatMessage[] = [
       {
         id: "user-1",
         role: "user",
-        content: "What can you do?",
+        content: "create a pptx",
         createdAt: new Date(),
         status: "complete",
       },
@@ -522,12 +527,20 @@ describe("Simple mode ChatThread rendering", () => {
         id: "iter-0",
         role: "assistant",
         content: "",
+        reasoning: "Let me load the pptx skill first.",
         createdAt: new Date(),
         status: "streaming",
         turnId: "t-1",
         iterationIndex: 0,
+        iterationSummary: {
+          iterationIndex: 0,
+          summary: "Loaded pptx skill",
+          toolCallIds: ["c1"],
+          startedAt: "",
+          endedAt: "",
+        },
         toolCalls: [
-          { id: "c1", toolName: "skill_view", args: "{}", status: "running" },
+          { id: "c1", toolName: "skill_view", args: "{}", status: "complete", result: "{}" },
         ],
       },
     ];
@@ -542,6 +555,10 @@ describe("Simple mode ChatThread rendering", () => {
         viewMode="simple"
       />,
     );
+    // The iteration summary label surfaces (collapsed row).
+    expect(dom.textContent).toContain("Loaded pptx skill");
+    // The shimmer also still appears below — the iteration is complete
+    // but the session is still running.
     expect(dom.textContent).toContain("Working on it");
   });
 });

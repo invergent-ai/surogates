@@ -18,7 +18,7 @@ Three coordinator-side tools, all gated on the calling agent having `spawn_task`
 | Tool | Purpose |
 |---|---|
 | `spawn_task` | Create a durable task. Returns `{task_id, status}` immediately (fire-and-forget). Use `parents=[...]` for fan-in DAG. |
-| `unblock_task` | Resume a child you spawned that called `task_block`. Append `additional_context` so the next attempt sees what was missing. |
+| `unblock_task` | Resume a child you spawned that called `worker_block`. Append `additional_context` so the next attempt sees what was missing. |
 | `cancel_task` | Abort a child you spawned. Only works on non-terminal tasks; running attempts get interrupted. |
 
 You also have `delegate_task` (sync fork-join for short reasoning subtasks) and `spawn_worker` (async one-shot, no retry/DAG). Choose between them per call -- see *When to use what* below.
@@ -167,7 +167,7 @@ In plain prose, tell the user what you queued and how to follow it:
 
 **Same-type queue:** N tasks all assigned to the same `agent_type`, no `parents`. The dispatcher serialises them on the per-agent work queue — that type's worker processes them in order.
 
-**Human-in-the-loop:** any task can `task_block`. The block event arrives on YOUR session as an inbox-equivalent event. Decide whether to provide the missing context (`unblock_task` with `additional_context`) or change direction (`cancel_task` and a fresh `spawn_task` with a revised goal).
+**Human-in-the-loop:** any task can `worker_block`. The block event arrives on YOUR session as an inbox-equivalent event. Decide whether to provide the missing context (`unblock_task` with `additional_context`) or change direction (`cancel_task` and a fresh `spawn_task` with a revised goal).
 
 ## Pitfalls
 
@@ -183,7 +183,7 @@ In plain prose, tell the user what you queued and how to follow it:
 
 **Pre-creating the whole graph when its shape depends on intermediate findings.** If T3's structure depends on what T1 and T2 find, let T3 be a "synthesize findings" task whose own first step is to read parent results and plan the rest. Orchestrators can spawn orchestrators (if the next layer's `AgentDef` includes `spawn_task`).
 
-**Argument order on parent ids.** `spawn_task(parents=[parent_id_1, parent_id_2, …])` — these are the ids of tasks that must complete before this one starts. Don't pass the new task's id (it doesn't exist yet), don't pass session ids (they're a different concept). When in doubt, use `task_show` from inside a worker to inspect the actual `parents` structure.
+**Argument order on parent ids.** `spawn_task(parents=[parent_id_1, parent_id_2, …])` — these are the ids of tasks that must complete before this one starts. Don't pass the new task's id (it doesn't exist yet), don't pass session ids (they're a different concept). When in doubt, use `worker_context` from inside a worker to inspect the actual `parents` structure.
 
 ## Recovering stuck children
 
@@ -252,11 +252,11 @@ prose-only completion claims.
 
 **Giving up too early.** The evaluator gives you `max_iterations` (20
 by default). Use them. If you're stuck after 3-4 rounds, call
-`task_block` on your own session — describe what you've tried and what
+`worker_block` on your own session — describe what you've tried and what
 external input would help. The user (or another agent) can answer and
 unblock.
 
 **Giving up too late.** If the rubric is fundamentally unreachable
 (contradictory criteria, missing data, infeasible target), call
-`task_complete` on your own session with a failure summary in
+`worker_complete` on your own session with a failure summary in
 `result`. The evaluator will read this as evidence and return `failed`.

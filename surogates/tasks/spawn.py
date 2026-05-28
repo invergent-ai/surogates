@@ -8,7 +8,8 @@ duplication.
 Behavioural differences vs ``spawn_worker``:
 
 * Sets ``Session.task_id`` to the spawning Task's id so the harness can
-  gate ``task_block`` on it (see ``_filter_effective_tools``).
+  gate ``worker_block`` / ``worker_complete`` / ``worker_context`` on
+  it (see ``_filter_effective_tools``).
 * Uses ``channel="task"`` so the channel column distinguishes
   task-backed Sessions from plain ``spawn_worker`` children.
 * Reads goal / context / agent_def_name from the Task row instead of
@@ -164,7 +165,7 @@ async def _create_session_for_task(
             user_msg += (
                 "\n\n## Prior attempts on this task\n"
                 "Earlier worker sessions for this task and what they "
-                "produced or why they ended. Use ``task_show`` for "
+                "produced or why they ended. Use ``worker_context`` for "
                 "full detail; don't repeat the paths that failed.\n\n"
                 + body
             )

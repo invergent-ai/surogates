@@ -5835,10 +5835,9 @@ class AgentHarness:
         the current turn (mtime >= ``self._turn_started_at``).
 
         Skips entries already surfaced via tool-call inspection
-        (``already_seen_paths``) to avoid duplicates. Cheap: the
-        ``stat`` call after ``list_keys`` is per-object, but workspace
-        sessions rarely exceed a few hundred files and the summarizer
-        only runs at turn end.
+        (``already_seen_paths``) to avoid duplicates. Uses ``list_entries``
+        so mtime/size come from the bulk list response — no per-key HEAD
+        round trips.
         """
         from surogates.harness.turn_summarizer import TurnArtifact
         from surogates.storage.tenant import prefixed_session_workspace_prefix
@@ -5861,26 +5860,22 @@ class AgentHarness:
         prefix = prefixed_session_workspace_prefix(session.config, str(root_id))
 
         try:
-            keys = await storage.list_keys(bucket, prefix=prefix)
+            entries = await storage.list_entries(bucket, prefix=prefix)
         except Exception:
             logger.debug(
-                "Workspace list_keys failed for bucket %r prefix %r",
+                "Workspace list_entries failed for bucket %r prefix %r",
                 bucket, prefix, exc_info=True,
             )
             return []
 
         out: list[TurnArtifact] = []
         turn_start = self._turn_started_at
-        for key in keys:
-            # Relative path the workspace viewer / file APIs use.
+        for entry in entries:
+            key = entry["key"]
             rel = key[len(prefix):] if key.startswith(prefix) else key
             if not rel or rel in already_seen_paths:
                 continue
-            try:
-                meta = await storage.stat(bucket, key)
-            except Exception:
-                continue
-            modified = _coerce_modified_to_datetime(meta.get("modified"))
+            modified = _coerce_modified_to_datetime(entry.get("modified"))
             if modified is None or modified < turn_start:
                 continue
             out.append(

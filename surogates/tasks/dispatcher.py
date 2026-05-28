@@ -92,7 +92,7 @@ async def _finalize_ended_sessions(
     classified by ``classify_attempt_outcome``:
 
     * COMPLETED → ``status='done'``, ``result`` from event payload
-    * BLOCKED   → already handled by the ``task_block`` tool; no-op
+    * BLOCKED   → already handled by the ``worker_block`` tool; no-op
     * CRASHED   → retry (``status='ready'``) if attempts remain, else
                   ``status='failed'`` + ``TASK_FAILED`` event to parent
     """
@@ -115,7 +115,7 @@ async def _finalize_ended_sessions(
             task.completed_at = func.now()
             finalized += 1
         elif outcome is TaskAttemptOutcome.BLOCKED:
-            # The task_block tool already wrote status='blocked' inside
+            # The worker_block tool already wrote status='blocked' inside
             # its own txn before publishing the interrupt that stopped
             # this Session. The WHERE clause should have filtered this
             # task out — if we got here it means a race: read the

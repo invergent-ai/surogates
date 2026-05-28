@@ -153,6 +153,30 @@ class TestLocalBackendObjects:
         keys = await backend.list_keys("bucket")
         assert keys == []
 
+    async def test_list_entries(self, backend: LocalBackend):
+        await backend.write_text("bucket", "a.txt", "12")
+        await backend.write_text("bucket", "b/c.txt", "12345")
+        entries = await backend.list_entries("bucket")
+        assert [e["key"] for e in entries] == ["a.txt", "b/c.txt"]
+        sizes = {e["key"]: e["size"] for e in entries}
+        assert sizes == {"a.txt": 2, "b/c.txt": 5}
+        for entry in entries:
+            assert entry["modified"] is not None
+
+    async def test_list_entries_with_prefix(self, backend: LocalBackend):
+        await backend.write_text("bucket", "a.txt", "x")
+        await backend.write_text("bucket", "sub/b.txt", "yy")
+        entries = await backend.list_entries("bucket", prefix="sub")
+        assert [e["key"] for e in entries] == ["sub/b.txt"]
+        assert entries[0]["size"] == 2
+
+    async def test_list_keys_delegates_to_list_entries(self, backend: LocalBackend):
+        await backend.write_text("bucket", "a.txt", "1")
+        await backend.write_text("bucket", "b.txt", "2")
+        keys = await backend.list_keys("bucket")
+        entry_keys = [e["key"] for e in await backend.list_entries("bucket")]
+        assert keys == entry_keys
+
     async def test_stat(self, backend: LocalBackend):
         await backend.write_text("bucket", "key", "hello")
         info = await backend.stat("bucket", "key")

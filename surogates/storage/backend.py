@@ -89,6 +89,20 @@ class StorageBackend(Protocol):
         """List object keys under *prefix*.  Returns relative keys."""
         ...
 
+    async def list_entries(self, bucket: str, prefix: str = "") -> list[dict[str, Any]]:
+        """List objects under *prefix* with metadata.
+
+        Each entry is ``{"key": str, "modified": datetime|float, "size": int}``,
+        sorted by ``key``.  ``modified`` follows the same convention as
+        :meth:`stat` (boto3 ``datetime`` on S3, POSIX float locally).
+
+        Backends should populate this from their native list response —
+        ``list_objects_v2`` already returns ``LastModified``/``Size`` for
+        every entry, so this avoids a per-key ``head_object`` round trip
+        when callers need both keys and metadata.
+        """
+        ...
+
     async def stat(self, bucket: str, key: str) -> dict[str, Any]:
         """Return metadata for an object (size, etc.).
 
@@ -214,16 +228,25 @@ class LocalBackend:
         return deleted
 
     async def list_keys(self, bucket: str, prefix: str = "") -> list[str]:
+        return [entry["key"] for entry in await self.list_entries(bucket, prefix)]
+
+    async def list_entries(self, bucket: str, prefix: str = "") -> list[dict[str, Any]]:
         bucket_root = self._bucket_path(bucket)
         search_root = bucket_root / prefix if prefix else bucket_root
         if not search_root.is_dir():
             return []
-        keys: list[str] = []
+        entries: list[dict[str, Any]] = []
         for path in search_root.rglob("*"):
-            if path.is_file():
-                keys.append(str(path.relative_to(bucket_root)))
-        keys.sort()
-        return keys
+            if not path.is_file():
+                continue
+            st = path.stat()
+            entries.append({
+                "key": str(path.relative_to(bucket_root)),
+                "modified": st.st_mtime,
+                "size": st.st_size,
+            })
+        entries.sort(key=lambda e: e["key"])
+        return entries
 
     async def stat(self, bucket: str, key: str) -> dict[str, Any]:
         path = self._resolve(bucket, key)
@@ -395,19 +418,24 @@ class S3Backend:
         return deleted
 
     async def list_keys(self, bucket: str, prefix: str = "") -> list[str]:
-        import aioboto3
-        session = aioboto3.Session()
-        keys: list[str] = []
-        async with session.client("s3", **self._session_kwargs()) as s3:
+        return [entry["key"] for entry in await self.list_entries(bucket, prefix)]
+
+    async def list_entries(self, bucket: str, prefix: str = "") -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        async with self._client() as s3:
             paginator = s3.get_paginator("list_objects_v2")
             kwargs: dict[str, Any] = {"Bucket": bucket}
             if prefix:
                 kwargs["Prefix"] = prefix
             async for page in paginator.paginate(**kwargs):
                 for obj in page.get("Contents", []):
-                    keys.append(obj["Key"])
-        keys.sort()
-        return keys
+                    entries.append({
+                        "key": obj["Key"],
+                        "modified": obj.get("LastModified"),
+                        "size": obj.get("Size", 0),
+                    })
+        entries.sort(key=lambda e: e["key"])
+        return entries
 
     async def stat(self, bucket: str, key: str) -> dict[str, Any]:
         async with self._client() as s3:

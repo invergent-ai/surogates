@@ -322,8 +322,8 @@ class TestDynamicLoopToolPolicy:
         """/mission sets strict_coordinator=True so implementation tools
         (terminal, read_file, write_file, browser_*, web_*, vision_analyze,
         kb_*, create_artifact, list_files, search_files, patch, process)
-        plus the task_id-gated self-tools (task_show, task_block,
-        task_complete) are stripped — the LLM has to delegate via
+        plus the task_id-gated self-tools (worker_context, worker_block,
+        worker_complete) are stripped — the LLM has to delegate via
         spawn_task/delegate_task and cannot call self-tools that would
         target a non-existent ``Session.task_id``."""
         from surogates.tools.builtin.coordinator import (
@@ -336,7 +336,7 @@ class TestDynamicLoopToolPolicy:
             "spawn_task", "delegate_task", "memory",
             "terminal", "read_file", "write_file", "browser_navigate",
             "web_search", "vision_analyze", "create_artifact",
-            "task_show", "task_block", "task_complete",
+            "worker_context", "worker_block", "worker_complete",
         }
         for name in registered:
             reg.register(
@@ -364,9 +364,9 @@ class TestDynamicLoopToolPolicy:
             )
         # task_id-gated self-tools must be stripped — a coordinator has no
         # task_id, so these would error or no-op if the LLM tried to call them.
-        assert "task_show" not in tool_names
-        assert "task_block" not in tool_names
-        assert "task_complete" not in tool_names
+        assert "worker_context" not in tool_names
+        assert "worker_block" not in tool_names
+        assert "worker_complete" not in tool_names
 
     def test_strict_coordinator_combines_with_user_excluded_tools(self) -> None:
         """Operator-supplied ``excluded_tools`` adds to the implementation

@@ -41,7 +41,7 @@ _WORKER_MAX_ITERATIONS: int = 30
 # Tools that workers are NOT allowed to use (prevents recursive spawning).
 # Both the spawn_worker family and the spawn_task family are excluded so
 # children inherited the same recursion-prevention regardless of which
-# primitive spawned them.  task_block is NOT in this set — it's a
+# primitive spawned them.  worker_block is NOT in this set — it's a
 # self-tool and children running for a task SHOULD be able to block
 # themselves; gating is by Session.task_id in _filter_effective_tools.
 WORKER_EXCLUDED_TOOLS: frozenset[str] = frozenset({
@@ -71,14 +71,15 @@ WORKER_EXCLUDED_TOOLS: frozenset[str] = frozenset({
 # ``skills_list``, ``skill_view``, ``skill_manage``, ``cron_*``, ``loop_wait``,
 # ``loop_complete``) stay available.
 #
-# ``task_block``, ``task_complete``, ``task_show`` are also stripped here
-# even though their schemas are nominally about coordination — they are
-# *self*-tools that operate on ``Session.task_id``, which is unset on the
-# coordinator (the coordinator IS the parent, not an attempt-of-task).
-# ``orchestrator.worker._filter_effective_tools`` strips them from the
-# prompt-fragment guidance via the same task_id check, but that path
-# only affects the system prompt, not the LLM's actual tool schemas —
-# so they have to live here too or strict coordinators still see them.
+# ``worker_block``, ``worker_complete``, ``worker_context`` are also
+# stripped here even though their schemas are nominally about coordination
+# — they are *self*-tools that operate on ``Session.task_id``, which is
+# unset on the coordinator (the coordinator IS the parent, not an
+# attempt-of-task). ``orchestrator.worker._filter_effective_tools``
+# strips them from the prompt-fragment guidance via the same task_id
+# check, but that path only affects the system prompt, not the LLM's
+# actual tool schemas — so they have to live here too or strict
+# coordinators still see them.
 COORDINATOR_IMPLEMENTATION_TOOLS: frozenset[str] = frozenset({
     # File I/O
     "read_file",
@@ -112,9 +113,9 @@ COORDINATOR_IMPLEMENTATION_TOOLS: frozenset[str] = frozenset({
     "create_artifact",
     # Self-tools that require Session.task_id — useless for a parent
     # coordinator session (task_id is None).
-    "task_block",
-    "task_complete",
-    "task_show",
+    "worker_block",
+    "worker_complete",
+    "worker_context",
 })
 
 # ---------------------------------------------------------------------------

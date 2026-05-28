@@ -2,18 +2,24 @@
 
 Public surface (all registered via :func:`register`):
 
-* ``spawn_task``    — create a durable subagent task with optional DAG
-                      parents and ``max_attempts``; eagerly spawns when
-                      no parents are pending.
-* ``unblock_task``  — orchestrator-only; resume a blocked task with
-                      optional additional context.
-* ``cancel_task``   — orchestrator-only; abort a non-terminal task.
-* ``task_block``    — self-tool gated on ``Session.task_id``; pauses the
-                      current attempt without consuming a retry.
+* ``spawn_task``     — create a durable subagent task with optional DAG
+                       parents and ``max_attempts``; eagerly spawns when
+                       no parents are pending.
+* ``unblock_task``   — orchestrator-only; resume a blocked task with
+                       optional additional context.
+* ``cancel_task``    — orchestrator-only; abort a non-terminal task.
+* ``worker_block``   — self-tool gated on ``Session.task_id``; pauses the
+                       current attempt without consuming a retry.
+* ``worker_complete``— self-tool gated on ``Session.task_id``; emits a
+                       structured handoff to the spawning parent.
+* ``worker_context`` — self-tool gated on ``Session.task_id``; reads the
+                       calling worker's task context (goal, parents,
+                       prior attempts).
 
-All four are registered into the ``"core"`` toolset. Per-session gating
-(``task_block`` only visible when ``Session.task_id is not None``) lives
-in ``surogates.orchestrator.worker._filter_effective_tools`` to match
+All are registered into the ``"core"`` toolset. Per-session gating (the
+``worker_*`` self-tools are only visible when ``Session.task_id is not
+None``) lives in
+``surogates.orchestrator.worker._filter_effective_tools`` to match
 the pattern used for other context-conditional tools. Children spawned
 via either ``spawn_worker`` or ``spawn_task`` inherit the
 ``WORKER_EXCLUDED_TOOLS`` exclusion so they cannot recursively spawn
@@ -99,7 +105,7 @@ _SPAWN_TASK_SCHEMA = ToolSchema(
         "Spawn a durable subagent task. The task survives the parent's "
         "crash, can wait on multiple parent tasks (fan-in), retries on "
         "transient failure, and supports human-or-parent block/unblock "
-        "via task_block + unblock_task. Use this when work must outlive "
+        "via worker_block + unblock_task. Use this when work must outlive "
         "a single LLM turn, depend on prior tasks, or be inspectable "
         "before completion. Prefer spawn_worker when the work is "
         "fire-and-forget and a single attempt is acceptable."
@@ -201,16 +207,19 @@ _CANCEL_TASK_SCHEMA = ToolSchema(
 )
 
 
-_TASK_COMPLETE_SCHEMA = ToolSchema(
-    name="task_complete",
+_WORKER_COMPLETE_SCHEMA = ToolSchema(
+    name="worker_complete",
     description=(
-        "Mark your own task done with a structured handoff. Available "
-        "only when running for a task. Prefer this over letting the "
-        "harness emit WORKER_COMPLETE implicitly when you want to give "
-        "the parent agent (or future retries) machine-readable "
-        "structured output: changed_files, tests_run, decisions, "
-        "findings, etc. The ``summary`` is a 1-3 sentence human-readable "
-        "description; ``metadata`` is a free-form JSON object."
+        "Worker self-tool: mark your own subagent execution attempt as "
+        "done with a structured handoff to your spawning parent. "
+        "Available only when the harness has spawned you for a task — "
+        "NOT a tool for signalling that a user's chat request is "
+        "finished. Prefer this over letting the harness emit "
+        "WORKER_COMPLETE implicitly when you want to give the parent "
+        "agent (or future retries) machine-readable structured output: "
+        "changed_files, tests_run, decisions, findings, etc. The "
+        "``summary`` is a 1-3 sentence human-readable description; "
+        "``metadata`` is a free-form JSON object."
     ),
     parameters={
         "type": "object",
@@ -239,15 +248,17 @@ _TASK_COMPLETE_SCHEMA = ToolSchema(
 )
 
 
-_TASK_SHOW_SCHEMA = ToolSchema(
-    name="task_show",
+_WORKER_CONTEXT_SCHEMA = ToolSchema(
+    name="worker_context",
     description=(
-        "Read the current task's full context: goal, accumulated "
-        "context, parent tasks (with their results), and prior "
-        "attempts of THIS task (with summaries / errors / outcomes). "
-        "Available only when running for a task. Useful on retry to "
-        "see why earlier attempts failed and what they produced before "
-        "failing — don't repeat their mistakes."
+        "Worker self-tool: read your own execution attempt's full "
+        "context — goal, accumulated context from your parent, parent "
+        "tasks (with their results), and prior attempts of THIS task "
+        "(with summaries / errors / outcomes). Available only when the "
+        "harness has spawned you for a task — NOT a tool for inspecting "
+        "the user's chat request. Useful on retry to see why earlier "
+        "attempts failed and what they produced before failing — don't "
+        "repeat their mistakes."
     ),
     parameters={
         "type": "object",
@@ -257,16 +268,17 @@ _TASK_SHOW_SCHEMA = ToolSchema(
 )
 
 
-_TASK_BLOCK_SCHEMA = ToolSchema(
-    name="task_block",
+_WORKER_BLOCK_SCHEMA = ToolSchema(
+    name="worker_block",
     description=(
-        "Pause your own task and wait for additional context from your "
-        "parent agent or a human. Only available when the harness has "
-        "spawned you for a task (the dispatcher sets the gating "
-        "automatically). Provide a one-sentence reason naming the "
-        "specific decision you need; deeper context belongs in your "
-        "ongoing reasoning. Does NOT consume a retry attempt — blocking "
-        "is a deliberate pause, not a failure."
+        "Worker self-tool: pause your own subagent execution attempt "
+        "and wait for additional context from your spawning parent or "
+        "a human. Available only when the harness has spawned you for "
+        "a task (the dispatcher sets the gating automatically) — NOT a "
+        "tool for pausing the user's chat. Provide a one-sentence "
+        "reason naming the specific decision you need; deeper context "
+        "belongs in your ongoing reasoning. Does NOT consume a retry "
+        "attempt — blocking is a deliberate pause, not a failure."
     ),
     parameters={
         "type": "object",
@@ -530,7 +542,7 @@ async def _spawn_task_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# unblock_task / cancel_task / task_block handlers (implemented in Tasks 5-6)
+# unblock_task / cancel_task / worker_block handlers (implemented in Tasks 5-6)
 # ---------------------------------------------------------------------------
 
 
@@ -646,7 +658,7 @@ async def _cancel_task_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     return _tool_ok(task_id=str(task_id), status="cancelled")
 
 
-async def _task_complete_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+async def _worker_complete_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     """Worker explicitly marks its own task done with a structured handoff.
 
     Gating: per-session filter strips this from the schema when
@@ -691,7 +703,8 @@ async def _task_complete_handler(arguments: dict[str, Any], **kwargs: Any) -> st
             )
         if session_row.task_id is None:
             return _tool_error(
-                "task_complete is only available when running for a task"
+                "worker_complete is only available when running for a task "
+                "(this is a worker self-tool, not a chat-completion signal)"
             )
         task_id = session_row.task_id
 
@@ -724,12 +737,12 @@ async def _task_complete_handler(arguments: dict[str, Any], **kwargs: Any) -> st
     # carrying our explicit summary + metadata via the override in
     # notify_parent_on_completion.
     await redis.publish(
-        f"{INTERRUPT_CHANNEL_PREFIX}{session_id}", "task_complete",
+        f"{INTERRUPT_CHANNEL_PREFIX}{session_id}", "worker_complete",
     )
     return _tool_ok(task_id=str(task_id), status="done")
 
 
-async def _task_show_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+async def _worker_context_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     """Return the calling worker's full task context.
 
     Includes: the task row itself, parent tasks with their completed
@@ -737,7 +750,7 @@ async def _task_show_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     sessions linked via ``sessions.task_id``).  Workers use this on
     retry to understand why earlier attempts failed and what they
     produced — the new attempt's initial USER_MESSAGE includes a brief
-    summary already, but ``task_show`` exposes the full detail when
+    summary already, but ``worker_context`` exposes the full detail when
     needed.
     """
     session_factory = kwargs.get("session_factory")
@@ -755,7 +768,8 @@ async def _task_show_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         session_row = await db.get(ORMSession, session_id)
         if session_row is None or session_row.task_id is None:
             return _tool_error(
-                "task_show is only available when running for a task"
+                "worker_context is only available when running for a task "
+                "(this is a worker self-tool, not a chat-context inspector)"
             )
         task_id = session_row.task_id
         task = await db.get(Task, task_id)
@@ -835,7 +849,7 @@ async def _task_show_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     })
 
 
-async def _task_block_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+async def _worker_block_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     """Pause the calling Session's task without consuming a retry attempt.
 
     Gating: the per-session filter in
@@ -874,7 +888,8 @@ async def _task_block_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
             )
         if session_row.task_id is None:
             return _tool_error(
-                "task_block is only available when running for a task"
+                "worker_block is only available when running for a task "
+                "(this is a worker self-tool, not a chat-pause signal)"
             )
         task_id = session_row.task_id
 
@@ -917,7 +932,7 @@ async def _task_block_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     # Cleanly terminate this Session via the same interrupt mechanism
     # stop_worker uses; the harness loop exits between iterations.
     await redis.publish(
-        f"{INTERRUPT_CHANNEL_PREFIX}{session_id}", "task_block",
+        f"{INTERRUPT_CHANNEL_PREFIX}{session_id}", "worker_block",
     )
     return _tool_ok(task_id=str(task_id), status="blocked")
 
@@ -953,20 +968,20 @@ def register(registry: ToolRegistry) -> None:
         toolset="core",
     )
     registry.register(
-        name="task_block",
-        schema=_TASK_BLOCK_SCHEMA,
-        handler=_task_block_handler,
+        name="worker_block",
+        schema=_WORKER_BLOCK_SCHEMA,
+        handler=_worker_block_handler,
         toolset="core",
     )
     registry.register(
-        name="task_complete",
-        schema=_TASK_COMPLETE_SCHEMA,
-        handler=_task_complete_handler,
+        name="worker_complete",
+        schema=_WORKER_COMPLETE_SCHEMA,
+        handler=_worker_complete_handler,
         toolset="core",
     )
     registry.register(
-        name="task_show",
-        schema=_TASK_SHOW_SCHEMA,
-        handler=_task_show_handler,
+        name="worker_context",
+        schema=_WORKER_CONTEXT_SCHEMA,
+        handler=_worker_context_handler,
         toolset="core",
     )

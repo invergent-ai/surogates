@@ -94,7 +94,7 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - What is a task? (durable, DAG-aware coordination on top of `spawn_worker`)
 - Tasks vs. `delegate_task` vs. `spawn_worker` (when to use which)
 - Status state machine (`todo` -> `ready` -> `running` -> `done` / `blocked` / `failed` / `cancelled`)
-- The six tools (`spawn_task`, `unblock_task`, `cancel_task`, `task_block`, `task_complete`, `task_show`)
+- The six tools (`spawn_task`, `unblock_task`, `cancel_task`, `worker_block`, `worker_complete`, `worker_context`)
 - Dispatcher tick (promote, finalize, enqueue at 5s cadence)
 - Retry-with-history and prior-attempt context injection
 - Event vocabulary (`worker.complete` extended with `task_id`, plus `task.blocked` / `task.failed`)

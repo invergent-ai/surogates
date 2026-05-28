@@ -88,7 +88,7 @@ class ToolRuntime:
             cron,
             coordinator,
             artifact,
-            task_tools,  # spawn_task, unblock_task, cancel_task, task_block
+            task_tools,  # spawn_task, unblock_task, cancel_task, worker_block/complete/context
         ]
 
         for mod in modules:

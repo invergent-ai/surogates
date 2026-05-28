@@ -348,15 +348,13 @@ async def test_collect_candidate_artifacts_includes_workspace_mtime_files() -> N
     stale_key = "sessions/abc/old.txt"
 
     class _FakeStorage:
-        async def list_keys(self, _bucket: str, prefix: str = "") -> list[str]:
-            return [fresh_key, stale_key]
-
-        async def stat(self, _bucket: str, key: str) -> dict[str, Any]:
-            if key == fresh_key:
-                # 5 seconds after turn start.
-                return {"modified": turn_start + timedelta(seconds=5)}
-            # Stale file: 1 hour before turn start.
-            return {"modified": turn_start - timedelta(hours=1)}
+        async def list_entries(
+            self, _bucket: str, prefix: str = "",
+        ) -> list[dict[str, Any]]:
+            return [
+                {"key": fresh_key, "modified": turn_start + timedelta(seconds=5), "size": 1},
+                {"key": stale_key, "modified": turn_start - timedelta(hours=1), "size": 2},
+            ]
 
     harness = _make_loop_harness(session_store=store, turn_summarizer=None)
     harness._storage = _FakeStorage()

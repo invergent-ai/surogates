@@ -15,9 +15,9 @@ from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
 
 _TASK_TOOLS = (
     "spawn_task",
-    "task_block",
-    "task_complete",
-    "task_show",
+    "worker_block",
+    "worker_complete",
+    "worker_context",
     "cancel_task",
     "unblock_task",
 )

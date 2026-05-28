@@ -7,7 +7,7 @@ license: MIT
 
 # Subagent Task Worker — Pitfalls and Examples
 
-> You're seeing this skill because the dispatcher spawned you for a subagent task — your `Session.task_id` is set and the harness has exposed the `task_complete`, `task_block`, and `task_show` self-tools to you. This skill is the deeper detail beyond the system-prompt basics: good handoff shapes, retry diagnostics, edge cases, and what NOT to do.
+> You're seeing this skill because the dispatcher spawned you for a subagent task — your `Session.task_id` is set and the harness has exposed the `worker_complete`, `worker_block`, and `worker_context` self-tools to you. This skill is the deeper detail beyond the system-prompt basics: good handoff shapes, retry diagnostics, edge cases, and what NOT to do.
 
 See [Tasks (Subagent Task Layer)](../../../docs/tasks/index.md) for the conceptual chapter and [Tools](../../../docs/tools/index.md) for the parameter tables.
 
@@ -17,31 +17,31 @@ You're running for a Task. Three self-tools are available only to you, gated by 
 
 | Tool | Use it when |
 |---|---|
-| `task_show` | At the start of your run, *especially* on retry. Returns goal, accumulated context (from prior unblocks), parent task results, and prior attempt summaries. |
-| `task_complete` | When you've actually finished. Writes the explicit summary + structured metadata to the task row; the parent agent sees this in its `worker.complete` event. |
-| `task_block` | When you need new context that isn't available without a human or peer providing it. Does NOT consume a retry attempt. |
+| `worker_context` | At the start of your run, *especially* on retry. Returns goal, accumulated context (from prior unblocks), parent task results, and prior attempt summaries. |
+| `worker_complete` | When you've actually finished. Writes the explicit summary + structured metadata to the task row; the parent agent sees this in its `worker.complete` event. |
+| `worker_block` | When you need new context that isn't available without a human or peer providing it. Does NOT consume a retry attempt. |
 
 You also have the same tool surface a `spawn_worker` child would have: read/write files, web, terminal, etc. -- subject to the `AgentDef` filter pinned to this attempt.
 
 ## Step 0 — Orient yourself
 
-The first thing you should do on a non-trivial task is `task_show`. It tells you:
+The first thing you should do on a non-trivial task is `worker_context`. It tells you:
 
 - The original `goal`.
 - Any `context` accumulated from prior unblocks (timestamped).
 - `attempt_count` -- if > 1, you are a retry. Read the `prior_attempts` list before doing anything.
 - `parents` -- if non-empty, each entry's `result` and `result_metadata` is the upstream work you're building on. Don't re-derive it.
 
-Your initial USER_MESSAGE already includes a short summary of prior attempts (when `attempt_count > 1`), bounded to the last 5. `task_show` is how you read the full detail.
+Your initial USER_MESSAGE already includes a short summary of prior attempts (when `attempt_count > 1`), bounded to the last 5. `worker_context` is how you read the full detail.
 
 ## Good `summary` + `metadata` shapes
 
-`task_complete(summary, metadata)` is how downstream readers (the parent agent, future retries, humans) understand what you did. Aim for `summary` to be 1-3 sentences a human can scan; `metadata` to be machine-readable facts.
+`worker_complete(summary, metadata)` is how downstream readers (the parent agent, future retries, humans) understand what you did. Aim for `summary` to be 1-3 sentences a human can scan; `metadata` to be machine-readable facts.
 
 **Coding task:**
 
 ```python
-task_complete(
+worker_complete(
     summary="shipped rate limiter — token bucket keyed on user_id with IP fallback; 14 tests pass",
     metadata={
         "changed_files": ["rate_limiter.py", "tests/test_rate_limiter.py"],
@@ -54,11 +54,11 @@ task_complete(
 
 **Coding task that needs human review:**
 
-For most code-changing work, "done" should mean "human reviewed and approved." Use `task_block` instead of `task_complete`, with a `reason` that starts `review-required:`. Leave the structured info (diff path, test counts, what to look at) for the parent agent or human to discover via `task_show`.
+For most code-changing work, "done" should mean "human reviewed and approved." Use `worker_block` instead of `worker_complete`, with a `reason` that starts `review-required:`. Leave the structured info (diff path, test counts, what to look at) for the parent agent or human to discover via `worker_context`.
 
 ```python
-# (NOT task_complete — block instead so a reviewer steps in)
-task_block(
+# (NOT worker_complete — block instead so a reviewer steps in)
+worker_block(
     reason=(
         "review-required: rate limiter shipped, 14/14 tests pass — "
         "needs eyes on the user_id-vs-IP fallback choice before merge"
@@ -71,7 +71,7 @@ A reviewer (human, or another task spawned by the orchestrator) then calls `unbl
 **Research task:**
 
 ```python
-task_complete(
+worker_complete(
     summary="3 inference servers reviewed; vLLM wins on throughput, SGLang on latency, TRT-LLM on memory",
     metadata={
         "sources_read": 12,
@@ -84,7 +84,7 @@ task_complete(
 **Review task:**
 
 ```python
-task_complete(
+worker_complete(
     summary="reviewed PR #123; 2 blocking issues: SQL injection in /search, missing CSRF on /settings",
     metadata={
         "pr_number": 123,
@@ -103,10 +103,10 @@ Shape `metadata` so downstream parsers (the parent orchestrator, an aggregator t
 
 Bad: `"stuck"`. The human or parent has no context.
 
-Good: one sentence naming the specific decision. If you need more context to justify the question, do it in the work you've done so far -- don't stuff a paragraph into the reason. The parent/human can call `task_show` to read your full state.
+Good: one sentence naming the specific decision. If you need more context to justify the question, do it in the work you've done so far -- don't stuff a paragraph into the reason. The parent/human can call `worker_context` to read your full state.
 
 ```python
-task_block(
+worker_block(
     reason=(
         "Rate-limit key choice: should I key on IP (simple, NAT-unsafe) "
         "or user_id (requires auth — skips anonymous endpoints)?"
@@ -116,11 +116,11 @@ task_block(
 
 ## Retry scenarios
 
-When `task_show` returns `task.attempt_count > 1`, you are a retry. The `prior_attempts` array tells you what earlier sessions did:
+When `worker_context` returns `task.attempt_count > 1`, you are a retry. The `prior_attempts` array tells you what earlier sessions did:
 
 - `outcome: "completed"` -- they emitted a structured summary but the task was reopened (rare). Their `summary` is in the entry. Don't redo their work.
 - `outcome: "blocked"` -- a previous attempt blocked; an `unblock_task` re-launched you. Read the accumulated `task.context` for what was added on unblock.
-- `outcome: "crashed"` -- the prior session ended without emitting either a complete or block event (crash, OOM, timeout, hard-kill). No structured summary is available; check the parent's events or `task_show` for any clue.
+- `outcome: "crashed"` -- the prior session ended without emitting either a complete or block event (crash, OOM, timeout, hard-kill). No structured summary is available; check the parent's events or `worker_context` for any clue.
 
 **Don't repeat what failed.** If three prior attempts crashed at the same step, change your approach, narrow scope, or block for guidance.
 
@@ -132,16 +132,16 @@ If your session has `org_id` set, you are scoped to that tenant. Any persistent 
 
 - **Call `delegate_task` as a substitute for `spawn_task`.** `delegate_task` is a synchronous fork-join for short reasoning subtasks inside YOUR run; `spawn_task` is for durable cross-agent handoffs that outlive one API loop.
 - **Call `spawn_task` if you are a leaf worker.** Children spawned by either `spawn_worker` or `spawn_task` have `WORKER_EXCLUDED_TOOLS` applied; if `spawn_task` is in your toolset, you're an orchestrator-shaped session (and you should see the [orchestrator skill](../subagent-task-orchestrator/SKILL.md) instead).
-- **Complete a task you didn't actually finish.** Use `task_block` to ask for help; the retry budget is not consumed by blocking.
+- **Complete a task you didn't actually finish.** Use `worker_block` to ask for help; the retry budget is not consumed by blocking.
 - **Modify files outside your sandbox workspace** unless the task body says to. The parent's workspace is shared via inheritance; don't surprise it.
-- **Hand-write task ids into your prose.** When you spawn child tasks (only if you're an orchestrator-shaped worker), keep the returned `task_id` from each `spawn_task` call and reference them in your `task_complete` summary by quoting the actual return value, not making one up.
+- **Hand-write task ids into your prose.** When you spawn child tasks (only if you're an orchestrator-shaped worker), keep the returned `task_id` from each `spawn_task` call and reference them in your `worker_complete` summary by quoting the actual return value, not making one up.
 
 ## Pitfalls
 
-**Task state can change between dispatch and your startup.** Between when the dispatcher claimed the task and your process boot, the task may have been cancelled or reblocked. Always `task_show` first. If the task is no longer `running` (e.g. `cancelled` or `blocked`), stop — you shouldn't be doing the work.
+**Task state can change between dispatch and your startup.** Between when the dispatcher claimed the task and your process boot, the task may have been cancelled or reblocked. Always `worker_context` first. If the task is no longer `running` (e.g. `cancelled` or `blocked`), stop — you shouldn't be doing the work.
 
-**Your attempt may have been reclaimed.** If the session lease expired while you were inside a long-running tool call, the dispatcher's stale-claim recovery may have started a new attempt. The `task_complete` / `task_block` tools refuse with "this attempt is no longer the current task attempt" — that's the signal. Exit cleanly; the new attempt has the work.
+**Your attempt may have been reclaimed.** If the session lease expired while you were inside a long-running tool call, the dispatcher's stale-claim recovery may have started a new attempt. The `worker_complete` / `worker_block` tools refuse with "this attempt is no longer the current task attempt" — that's the signal. Exit cleanly; the new attempt has the work.
 
 **Don't rely on a CLI.** The `task_*` tools work uniformly across all execution backends (sandbox, Modal, remote SSH). There is no `surogates kanban` CLI to fall back on — use the tool surface.
 
-**Read your parents' results.** When the task has `parents`, each parent's `result` and `result_metadata` is the upstream work. The orchestrator placed you here because their output is your input. Read it via `task_show`; don't re-derive.
+**Read your parents' results.** When the task has `parents`, each parent's `result` and `result_metadata` is the upstream work. The orchestrator placed you here because their output is your input. Read it via `worker_context`; don't re-derive.

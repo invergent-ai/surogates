@@ -57,11 +57,11 @@ async def notify_parent_on_completion(
     When ``task_id`` is set AND ``session_factory`` is provided, the
     function reads the Task row and overrides the auto-extracted result
     with ``task.result`` / ``task.result_metadata`` if the worker called
-    the ``task_complete`` self-tool explicitly.  This keeps the
+    the ``worker_complete`` self-tool explicitly.  This keeps the
     parent's view of "what did the worker produce" consistent with what
     the worker chose to hand off (rather than the LLM's last response
     text, which may differ from the explicit summary).  When the worker
-    completed naturally without ``task_complete``, ``task.result`` is
+    completed naturally without ``worker_complete``, ``task.result`` is
     typically ``None`` and we fall back to the extracted LLM response.
     """
     try:
@@ -77,7 +77,7 @@ async def notify_parent_on_completion(
         if task_id is not None:
             payload["task_id"] = str(task_id)
             # Override result/metadata with explicit handoff from
-            # task_complete when the worker called it. Defensive: any
+            # worker_complete when the worker called it. Defensive: any
             # error reading the Task falls through to the LLM-response
             # default so we never lose the notification.
             if session_factory is not None:

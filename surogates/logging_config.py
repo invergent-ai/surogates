@@ -103,3 +103,9 @@ def configure_logging(
         )
 
     root.addHandler(handler)
+
+    # AWS/HTTP client libraries are pathologically chatty at DEBUG (~40
+    # lines per S3 call). Clamp them to WARNING so they can never flood
+    # the worker log regardless of the root level.
+    for noisy in ("botocore", "aiobotocore", "boto3", "urllib3", "s3transfer"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)

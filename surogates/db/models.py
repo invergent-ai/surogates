@@ -934,7 +934,7 @@ class Task(Base):
     * ``todo``      — created; one or more parents not yet done
     * ``ready``     — parents complete; eligible for atomic claim
     * ``running``   — a Session (``current_session_id``) is executing
-    * ``blocked``   — worker called ``task_block``; awaiting unblock
+    * ``blocked``   — worker called ``worker_block``; awaiting unblock
     * ``done``      — worker session ended with WORKER_COMPLETE
     * ``failed``    — exhausted ``max_attempts`` after crash/timeout
     * ``cancelled`` — parent or operator aborted before terminal state
@@ -981,20 +981,20 @@ class Task(Base):
     )
     # Worker's final summary; populated from WORKER_COMPLETE event payload
     # (auto-extracted on natural session end), or set explicitly by the
-    # ``task_complete`` self-tool when a worker wants a structured handoff.
+    # ``worker_complete`` self-tool when a worker wants a structured handoff.
     result: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Structured handoff metadata — set only when the worker called
-    # ``task_complete(summary, metadata=...)`` explicitly. Shape is a
+    # ``worker_complete(summary, metadata=...)`` explicitly. Shape is a
     # free-form JSON object (e.g. ``{"changed_files": [...],
     # "tests_run": 12, "decisions": [...]}``).  Plain workers that
     # complete naturally never populate this field.
     result_metadata: Mapped[Optional[dict[str, Any]]] = mapped_column(
         JSONB, nullable=True,
     )
-    # One-sentence reason captured by the ``task_block`` tool.
+    # One-sentence reason captured by the ``worker_block`` tool.
     blocked_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Number of Sessions that have been claimed for this task (including
-    # in-flight). ``task_block`` deliberately does not increment this —
+    # in-flight). ``worker_block`` deliberately does not increment this —
     # blocking is a pause, not a failure.
     attempt_count: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"

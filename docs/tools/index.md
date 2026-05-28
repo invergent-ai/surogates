@@ -255,9 +255,9 @@ The task layer wraps `spawn_worker` with durable, DAG-aware, retry-with-history 
 | `spawn_task` | Coordinator agents | Create a durable task; optionally with DAG `parents=[...]` |
 | `unblock_task` | Coordinator agents | Resume a blocked task with optional context |
 | `cancel_task` | Coordinator agents | Abort a non-terminal task |
-| `task_complete` | Workers running for a task | Mark own task done with structured handoff |
-| `task_block` | Workers running for a task | Self-pause without consuming a retry |
-| `task_show` | Workers running for a task | Read own task + parents + prior attempts |
+| `worker_complete` | Workers running for a task | Mark own attempt done with structured handoff |
+| `worker_block` | Workers running for a task | Self-pause without consuming a retry |
+| `worker_context` | Workers running for a task | Read own task + parents + prior attempts |
 
 The three "self-tools" are gated by `Session.task_id is not None`; plain chat and `spawn_worker` children never see them. Children spawned via either `spawn_worker` or `spawn_task` cannot recursively spawn tasks (the coordinator-side tools are in `WORKER_EXCLUDED_TOOLS`).
 
@@ -293,7 +293,7 @@ Only the spawning parent session may unblock its own children. Status must be `b
 
 Only the spawning parent session may cancel. Status must be non-terminal (`todo` / `ready` / `running` / `blocked`). If `running`, publishes to `INTERRUPT_CHANNEL_PREFIX<worker_id>` (the same channel `stop_worker` uses) so the in-flight Session exits cleanly.
 
-#### `task_complete` -- Explicit Structured Handoff
+#### `worker_complete` -- Explicit Structured Handoff
 
 Available only when running for a task. Marks the task `done` and writes the structured handoff fields. Prefer this over the natural-completion path when you want machine-readable output for downstream automation.
 
@@ -304,7 +304,7 @@ Available only when running for a task. Marks the task `done` and writes the str
 
 Plain workers that complete naturally (without calling this tool) get their auto-extracted LLM final response as `result` and no `metadata` -- the existing `spawn_worker` contract is unchanged.
 
-#### `task_block` -- Self-Pause for Context
+#### `worker_block` -- Self-Pause for Context
 
 Available only when running for a task. Pauses the current attempt without consuming a retry budget (blocking is a deliberate pause, not a failure).
 
@@ -314,9 +314,9 @@ Available only when running for a task. Pauses the current attempt without consu
 
 Emits a `task.blocked` event to the spawning parent and publishes an interrupt on the worker's own session channel so the harness exits cleanly. The task stays in `blocked` until someone calls `unblock_task` -- the spawning parent agent or a future human-facing dashboard control.
 
-#### `task_show` -- Read Own Task Context
+#### `worker_context` -- Read Own Task Context
 
-Available only when running for a task. Returns a JSON object with the calling worker's task, its parent tasks (with their completed results and metadata), and prior attempt summaries linked via `sessions.task_id`. Use this on retry to read the full detail of every prior attempt -- the new attempt's USER_MESSAGE already includes a brief summary, but `task_show` exposes the structured form.
+Available only when running for a task. Returns a JSON object with the calling worker's task, its parent tasks (with their completed results and metadata), and prior attempt summaries linked via `sessions.task_id`. Use this on retry to read the full detail of every prior attempt -- the new attempt's USER_MESSAGE already includes a brief summary, but `worker_context` exposes the structured form.
 
 No parameters. Returns:
 
@@ -328,7 +328,7 @@ No parameters. Returns:
 }
 ```
 
-Prior attempts are classified as `"completed"` (worker finished, summary present), `"blocked"` (called `task_block`, reason present), or `"crashed"` (no completion event -- timeout / hard-kill / OOM).
+Prior attempts are classified as `"completed"` (worker finished, summary present), `"blocked"` (called `worker_block`, reason present), or `"crashed"` (no completion event -- timeout / hard-kill / OOM).
 
 ### `clarify` -- Interactive Clarification
 

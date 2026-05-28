@@ -148,12 +148,12 @@ The **task layer** adds durable, DAG-aware coordination on top of
   optional `parents=[...]` for fan-in dependencies, structured `result` /
   `result_metadata`, and a `todo → ready → running → done/blocked/failed/cancelled`
   state machine.
-- Six tools: `spawn_task`, `unblock_task`, `cancel_task`, `task_complete`,
-  `task_block`, `task_show`.
+- Six tools: `spawn_task`, `unblock_task`, `cancel_task`, `worker_complete`,
+  `worker_block`, `worker_context`.
 - A 5-second dispatcher tick promotes ready tasks, finalizes completed attempts,
   retries on crash up to `max_attempts`, and enqueues new workers.
 - Retry attempts get a "Prior attempts on this task" section injected into the
-  initial user message, plus full structured access via `task_show`.
+  initial user message, plus full structured access via `worker_context`.
 
 **Missions** are long-running, rubric-judged objectives built on the task
 layer:

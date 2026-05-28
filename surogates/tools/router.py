@@ -87,9 +87,9 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     # would route them there and surface as ``Unknown tool`` from the
     # sandbox executor.
     "spawn_task": ToolLocation.HARNESS,
-    "task_block": ToolLocation.HARNESS,
-    "task_complete": ToolLocation.HARNESS,
-    "task_show": ToolLocation.HARNESS,
+    "worker_block": ToolLocation.HARNESS,
+    "worker_complete": ToolLocation.HARNESS,
+    "worker_context": ToolLocation.HARNESS,
     "cancel_task": ToolLocation.HARNESS,
     "unblock_task": ToolLocation.HARNESS,
     # Sandbox (code execution, file mutation, need isolation)

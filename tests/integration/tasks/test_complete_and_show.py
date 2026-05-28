@@ -1,6 +1,6 @@
 """Integration tests for the worker-observability v1.5 tools.
 
-Covers ``task_complete``, ``task_show``, retry-context injection into
+Covers ``worker_complete``, ``worker_context``, retry-context injection into
 the next attempt's USER_MESSAGE, and the ``notify_parent_on_completion``
 override that surfaces explicit summary + metadata to the parent.
 """
@@ -76,15 +76,15 @@ async def _make_running_task(
 
 
 # ---------------------------------------------------------------------------
-# task_complete
+# worker_complete
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_task_complete_sets_done_with_summary_and_metadata(
+async def test_worker_complete_sets_done_with_summary_and_metadata(
     session_factory, session_store, org_id: uuid.UUID, parent_session,
 ):
-    from surogates.tasks.tools import _task_complete_handler
+    from surogates.tasks.tools import _worker_complete_handler
 
     task_id, worker_session_id = await _make_running_task(
         session_factory, org_id, parent_session,
@@ -93,7 +93,7 @@ async def test_task_complete_sets_done_with_summary_and_metadata(
     redis = AsyncMock()
     redis.publish = AsyncMock()
 
-    result = await _task_complete_handler(
+    result = await _worker_complete_handler(
         {
             "summary": "shipped rate limiter",
             "metadata": {
@@ -124,16 +124,16 @@ async def test_task_complete_sets_done_with_summary_and_metadata(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_task_complete_without_metadata_works(
+async def test_worker_complete_without_metadata_works(
     session_factory, session_store, org_id: uuid.UUID, parent_session,
 ):
-    from surogates.tasks.tools import _task_complete_handler
+    from surogates.tasks.tools import _worker_complete_handler
 
     task_id, worker_session_id = await _make_running_task(
         session_factory, org_id, parent_session,
     )
 
-    result = await _task_complete_handler(
+    result = await _worker_complete_handler(
         {"summary": "done"},
         session_store=session_store, redis=AsyncMock(publish=AsyncMock()),
         tenant=MagicMock(org_id=org_id),
@@ -150,13 +150,13 @@ async def test_task_complete_without_metadata_works(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_task_complete_refuses_when_session_has_no_task(
+async def test_worker_complete_refuses_when_session_has_no_task(
     session_factory, session_store, org_id: uuid.UUID, parent_session,
 ):
-    """A plain session calling task_complete gets an error."""
-    from surogates.tasks.tools import _task_complete_handler
+    """A plain session calling worker_complete gets an error."""
+    from surogates.tasks.tools import _worker_complete_handler
 
-    result = await _task_complete_handler(
+    result = await _worker_complete_handler(
         {"summary": "anyway"},
         session_store=session_store, redis=AsyncMock(),
         tenant=MagicMock(org_id=org_id),
@@ -168,11 +168,11 @@ async def test_task_complete_refuses_when_session_has_no_task(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_task_complete_refuses_stale_attempt(
+async def test_worker_complete_refuses_stale_attempt(
     session_factory, session_store, org_id: uuid.UUID, parent_session,
 ):
     """A stale attempt whose claim was reclaimed cannot complete the new attempt's task."""
-    from surogates.tasks.tools import _task_complete_handler
+    from surogates.tasks.tools import _worker_complete_handler
 
     stale_session_id = uuid.uuid4()
     new_session_id = uuid.uuid4()
@@ -195,7 +195,7 @@ async def test_task_complete_refuses_stale_attempt(
         ))
         await db.commit()
 
-    result = await _task_complete_handler(
+    result = await _worker_complete_handler(
         {"summary": "stale attempt"},
         session_store=session_store, redis=AsyncMock(),
         tenant=MagicMock(org_id=org_id),
@@ -208,15 +208,15 @@ async def test_task_complete_refuses_stale_attempt(
 
 
 # ---------------------------------------------------------------------------
-# task_show
+# worker_context
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_task_show_returns_task_parents_and_prior_attempts(
+async def test_worker_context_returns_task_parents_and_prior_attempts(
     session_factory, session_store, org_id: uuid.UUID, parent_session,
 ):
-    from surogates.tasks.tools import _task_show_handler
+    from surogates.tasks.tools import _worker_context_handler
 
     # Build: 2 done parents + a synthesizer that's on its 2nd attempt.
     async with session_factory() as db:
@@ -265,7 +265,7 @@ async def test_task_show_returns_task_parents_and_prior_attempts(
         {"task_id": str(synth_id), "reason": "ambiguous metric definition"},
     )
 
-    result = await _task_show_handler(
+    result = await _worker_context_handler(
         {},
         session_store=session_store, redis=AsyncMock(),
         tenant=MagicMock(org_id=org_id),
@@ -292,17 +292,17 @@ async def test_task_show_returns_task_parents_and_prior_attempts(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_task_show_with_no_parents_or_prior(
+async def test_worker_context_with_no_parents_or_prior(
     session_factory, session_store, org_id: uuid.UUID, parent_session,
 ):
     """First attempt of a parentless task returns empty parents/prior lists."""
-    from surogates.tasks.tools import _task_show_handler
+    from surogates.tasks.tools import _worker_context_handler
 
     task_id, worker_id = await _make_running_task(
         session_factory, org_id, parent_session, goal="solo",
     )
 
-    result = await _task_show_handler(
+    result = await _worker_context_handler(
         {},
         session_store=session_store, redis=AsyncMock(),
         tenant=MagicMock(org_id=org_id),
@@ -316,12 +316,12 @@ async def test_task_show_with_no_parents_or_prior(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_task_show_refuses_when_session_has_no_task(
+async def test_worker_context_refuses_when_session_has_no_task(
     session_factory, session_store, org_id: uuid.UUID, parent_session,
 ):
-    from surogates.tasks.tools import _task_show_handler
+    from surogates.tasks.tools import _worker_context_handler
 
-    result = await _task_show_handler(
+    result = await _worker_context_handler(
         {},
         session_store=session_store, redis=AsyncMock(),
         tenant=MagicMock(org_id=org_id),
@@ -450,14 +450,14 @@ async def test_first_attempt_user_message_omits_prior_attempts_section(
 async def test_notify_parent_uses_task_result_when_set(
     session_factory, session_store, org_id: uuid.UUID, parent_session,
 ):
-    """When task.result is set (worker called task_complete), the parent
+    """When task.result is set (worker called worker_complete), the parent
     sees the explicit summary, not the LLM's last response."""
     from surogates.harness.worker_notify import notify_parent_on_completion
 
     task_id, worker_id = await _make_running_task(
         session_factory, org_id, parent_session,
     )
-    # Simulate worker called task_complete: task fields are set.
+    # Simulate worker called worker_complete: task fields are set.
     async with session_factory() as db:
         t = await db.get(Task, task_id)
         t.status = "done"
@@ -502,7 +502,7 @@ async def test_notify_parent_uses_task_result_when_set(
 async def test_notify_parent_falls_back_to_llm_response_when_no_explicit_result(
     session_factory, session_store, org_id: uuid.UUID, parent_session,
 ):
-    """A plain worker (no task_complete) gets the LLM's last response in WORKER_COMPLETE."""
+    """A plain worker (no worker_complete) gets the LLM's last response in WORKER_COMPLETE."""
     from surogates.harness.worker_notify import notify_parent_on_completion
 
     task_id, worker_id = await _make_running_task(

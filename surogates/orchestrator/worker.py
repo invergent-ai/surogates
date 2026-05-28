@@ -168,15 +168,19 @@ def _filter_effective_tools(
         result.discard("memory")
         result.discard("skill_manage")
 
-    # task_block / task_complete / task_show are only meaningful when
-    # this session is executing a subagent task (the dispatcher set
+    # worker_block / worker_complete / worker_context are only meaningful
+    # when this session is executing a subagent task (the dispatcher set
     # ``Session.task_id``). Plain chat and spawn_worker children never
     # have a task to operate on, so we strip them from the schema so
-    # the LLM is not tempted to call them.
+    # the LLM is not tempted to call them. The ``worker_*`` prefix is
+    # deliberate: these are *self*-tools that act on the calling
+    # worker's task row, NOT user-task-completion signals — earlier
+    # ``task_*`` names confused LLMs into calling them at the end of
+    # plain chat turns.
     if getattr(session, "task_id", None) is None:
-        result.discard("task_block")
-        result.discard("task_complete")
-        result.discard("task_show")
+        result.discard("worker_block")
+        result.discard("worker_complete")
+        result.discard("worker_context")
 
     return result
 
