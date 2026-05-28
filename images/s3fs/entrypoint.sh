@@ -125,6 +125,7 @@ if [ "${FLEET_MODE:-0}" = "1" ]; then
         --gid 1000 \
         --file-mode 0644 \
         --dir-mode 0755 \
+        --read-ahead-large 20 \
         --memory-limit "${GEESEFS_MEMORY_LIMIT_MB}" \
         -f \
         "${BUCKET_SPEC}" "${MOUNT_POINT}" &
