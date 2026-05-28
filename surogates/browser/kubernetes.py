@@ -409,6 +409,16 @@ class K8sBrowserBackend:
                     empty_dir=client.V1EmptyDirVolumeSource(),
                 )
             )
+            # On-disk cache for the geesefs sidecar (see s3fs entrypoint).
+            # Bounded so a runaway session can't exhaust node ephemeral storage.
+            volumes.append(
+                client.V1Volume(
+                    name="geesefs-cache",
+                    empty_dir=client.V1EmptyDirVolumeSource(
+                        size_limit="2Gi",
+                    ),
+                )
+            )
         init_container = client.V1Container(
             name="browser-runtime-init",
             image=spec.image or self._image,
@@ -523,6 +533,10 @@ class K8sBrowserBackend:
                     name="workspace",
                     mount_path="/workspace",
                     mount_propagation="Bidirectional",
+                ),
+                client.V1VolumeMount(
+                    name="geesefs-cache",
+                    mount_path="/var/cache/geesefs",
                 ),
             ],
         )

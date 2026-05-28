@@ -197,6 +197,7 @@ class TestBuildPodManifest:
         assert [(v.name, v.empty_dir is not None) for v in pod.spec.volumes] == [
             ("browser-runtime", True),
             ("workspace", True),
+            ("geesefs-cache", True),
         ]
         browser_container = pod.spec.containers[0]
         s3fs_container = pod.spec.containers[1]
@@ -228,7 +229,14 @@ class TestBuildPodManifest:
         assert [
             (mount.name, mount.mount_path, mount.mount_propagation)
             for mount in s3fs_container.volume_mounts
-        ] == [("workspace", "/workspace", "Bidirectional")]
+        ] == [
+            ("workspace", "/workspace", "Bidirectional"),
+            ("geesefs-cache", "/var/cache/geesefs", None),
+        ]
+        cache_volume = next(
+            v for v in pod.spec.volumes if v.name == "geesefs-cache"
+        )
+        assert cache_volume.empty_dir.size_limit == "2Gi"
 
     def test_pod_manifest_uses_backend_image_when_spec_image_blank(
         self,
