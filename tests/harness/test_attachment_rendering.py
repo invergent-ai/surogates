@@ -233,3 +233,126 @@ def test_attachments_note_includes_skip_reason_diagnostic() -> None:
     assert "corrupt.pdf" in note
     assert "parse_error" in note
     assert "read_file" in note.lower()
+
+
+# ---------------------------------------------------------------------------
+# Raw user-message text used for slash-command dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_latest_user_event_text_returns_raw_content() -> None:
+    from types import SimpleNamespace
+    from surogates.harness.loop import _latest_user_event_text
+    from surogates.session.events import EventType
+
+    events = [
+        SimpleNamespace(
+            type=EventType.USER_MESSAGE.value,
+            data={"content": "/foo bar"},
+            id=1,
+        ),
+    ]
+    assert _latest_user_event_text(events) == "/foo bar"
+
+
+def test_latest_user_event_text_ignores_path_only_attachments() -> None:
+    """Regression: a /command with path-only attachments must still be
+    detected as starting with ``/``.
+
+    Previously the harness derived ``last_user_content`` from the rebuilt
+    message, which has the attachments-note prepended; that pushed the
+    ``/`` off the start and silently disabled slash-command dispatch
+    whenever a message carried a path-only attachment (e.g. a PDF too
+    large to inline).
+    """
+    from types import SimpleNamespace
+    from surogates.harness.loop import _latest_user_event_text
+    from surogates.session.events import EventType
+
+    events = [
+        SimpleNamespace(
+            type=EventType.USER_MESSAGE.value,
+            data={
+                "content": "/puncte-agoa-writer creaza documentul",
+                "attachments": [
+                    {
+                        "path": "uploads/report.pdf",
+                        "filename": "report.pdf",
+                        "mime_type": "application/pdf",
+                        "size": 9_000_000,
+                        "inline_skip_reason": "total_budget_exceeded",
+                    },
+                ],
+            },
+            id=1,
+        ),
+    ]
+    text = _latest_user_event_text(events)
+    assert text.startswith("/")
+    assert text == "/puncte-agoa-writer creaza documentul"
+
+
+def test_latest_user_event_text_returns_last_user_event() -> None:
+    from types import SimpleNamespace
+    from surogates.harness.loop import _latest_user_event_text
+    from surogates.session.events import EventType
+
+    events = [
+        SimpleNamespace(
+            type=EventType.USER_MESSAGE.value,
+            data={"content": "first"},
+            id=1,
+        ),
+        SimpleNamespace(
+            type=EventType.LLM_RESPONSE.value,
+            data={"message": {"role": "assistant", "content": "reply"}},
+            id=2,
+        ),
+        SimpleNamespace(
+            type=EventType.USER_MESSAGE.value,
+            data={"content": "/clear"},
+            id=3,
+        ),
+    ]
+    assert _latest_user_event_text(events) == "/clear"
+
+
+def test_latest_user_event_text_strips_outer_whitespace() -> None:
+    from types import SimpleNamespace
+    from surogates.harness.loop import _latest_user_event_text
+    from surogates.session.events import EventType
+
+    events = [
+        SimpleNamespace(
+            type=EventType.USER_MESSAGE.value,
+            data={"content": "   /foo   "},
+            id=1,
+        ),
+    ]
+    assert _latest_user_event_text(events) == "/foo"
+
+
+def test_latest_user_event_text_handles_list_content() -> None:
+    from types import SimpleNamespace
+    from surogates.harness.loop import _latest_user_event_text
+    from surogates.session.events import EventType
+
+    events = [
+        SimpleNamespace(
+            type=EventType.USER_MESSAGE.value,
+            data={
+                "content": [
+                    {"type": "text", "text": "/foo bar"},
+                    {"type": "image_url", "image_url": {"url": "data:..."}},
+                ],
+            },
+            id=1,
+        ),
+    ]
+    assert _latest_user_event_text(events) == "/foo bar"
+
+
+def test_latest_user_event_text_returns_empty_when_no_user_event() -> None:
+    from surogates.harness.loop import _latest_user_event_text
+
+    assert _latest_user_event_text([]) == ""

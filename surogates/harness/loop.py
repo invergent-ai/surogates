@@ -248,6 +248,44 @@ _ATTACHMENT_SKIP_HINTS: dict[str, str] = {
 }
 
 
+def _latest_user_event_text(events: list[Any]) -> str:
+    """Return the raw text of the latest ``USER_MESSAGE`` event.
+
+    The raw text is what the user actually typed -- without the
+    attachment-note / view-context-note prefixes that
+    :meth:`AgentHarness._rebuild_messages` folds into the rebuilt user
+    content for the LLM call.
+
+    Slash-command dispatch (``/compress``, ``/clear``, ``/goal``,
+    ``/mission``, ``/loop``, ``/<skill>``) inspects this value: looking
+    at the rebuilt message instead would push the leading ``/`` off the
+    start whenever the message carries a path-only attachment (e.g. a
+    PDF too large to inline) and silently disable dispatch.
+
+    Returns ``""`` when no ``USER_MESSAGE`` event exists or the content
+    is missing / malformed.
+    """
+    for event in reversed(events):
+        event_type = event.type
+        type_value = (
+            event_type.value if hasattr(event_type, "value") else event_type
+        )
+        if type_value != EventType.USER_MESSAGE.value:
+            continue
+        data = event.data if isinstance(event.data, dict) else {}
+        raw = data.get("content", "")
+        if isinstance(raw, list):
+            raw = next(
+                (
+                    p["text"] for p in raw
+                    if isinstance(p, dict) and p.get("type") == "text"
+                ),
+                "",
+            )
+        return (raw or "").strip()
+    return ""
+
+
 def _attachments_note(events: list[Any]) -> str | None:
     """Return a per-turn system note describing path-only attachments.
 
@@ -1445,17 +1483,20 @@ class AgentHarness:
             cost_tracker = SessionCostTracker()
 
             # 10. Handle /compress command — compress context without LLM call.
+            #
+            # Slash-command detection MUST look at the raw user text from the
+            # event log, not the rebuilt-message content.  _rebuild_messages
+            # prepends attachment / view-context notes to the user content;
+            # a leading note pushes the "/" off the start and silently
+            # disables every slash command (incl. /<skill>) when the message
+            # carries a path-only attachment.  ``last_user`` (rebuilt message)
+            # is still needed below for in-place mutation when a skill
+            # expansion succeeds.
             last_user = next(
                 (m for m in reversed(messages) if m.get("role") == "user"),
                 None,
             )
-            _raw_content = last_user.get("content", "") if last_user else ""
-            if isinstance(_raw_content, list):
-                _raw_content = next(
-                    (p["text"] for p in _raw_content if p.get("type") == "text"),
-                    "",
-                )
-            last_user_content = (_raw_content or "").strip()
+            last_user_content = _latest_user_event_text(all_events)
 
             if last_user_content == "/compress":
                 await self._handle_compress_command(
