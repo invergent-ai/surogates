@@ -388,6 +388,10 @@ class K8sSandbox:
                     mount_path="/workspace",
                     mount_propagation="Bidirectional",
                 ),
+                client.V1VolumeMount(
+                    name="geesefs-cache",
+                    mount_path="/var/cache/geesefs",
+                ),
             ],
         )
 
@@ -411,6 +415,15 @@ class K8sSandbox:
                     client.V1Volume(
                         name="workspace",
                         empty_dir=client.V1EmptyDirVolumeSource(),
+                    ),
+                    # On-disk cache for the geesefs sidecar. Sized to bound
+                    # node ephemeral-storage pressure; if a session needs
+                    # more, the cache evicts LRU rather than failing writes.
+                    client.V1Volume(
+                        name="geesefs-cache",
+                        empty_dir=client.V1EmptyDirVolumeSource(
+                            size_limit="2Gi",
+                        ),
                     ),
                 ],
                 containers=[sandbox_container, s3fs_container],

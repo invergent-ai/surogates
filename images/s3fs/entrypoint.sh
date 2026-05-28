@@ -108,7 +108,19 @@ BUCKET_SPEC="${S3_BUCKET_PATH/:\//:}"
 # memory limit of 1000MB is unrealistic for our deployment shape.
 GEESEFS_MEMORY_LIMIT_MB="${GEESEFS_MEMORY_LIMIT_MB:-256}"
 
-echo "Mounting s3://${S3_BUCKET_PATH} at ${MOUNT_POINT} (endpoint: ${S3_ENDPOINT}, region: ${S3_REGION})"
+# On-disk data cache. Speeds up repeated reads and lets writes coalesce
+# locally before being flushed to S3. The path must be on a writable
+# volume *outside* the FUSE mount (which would be circular). The sandbox
+# pod manifest mounts an emptyDir at /var/cache/geesefs for this purpose;
+# set GEESEFS_CACHE_DIR="" to disable.
+GEESEFS_CACHE_DIR="${GEESEFS_CACHE_DIR-/var/cache/geesefs}"
+GEESEFS_CACHE_ARGS=()
+if [ -n "${GEESEFS_CACHE_DIR}" ]; then
+    mkdir -p "${GEESEFS_CACHE_DIR}"
+    GEESEFS_CACHE_ARGS=(--cache "${GEESEFS_CACHE_DIR}")
+fi
+
+echo "Mounting s3://${S3_BUCKET_PATH} at ${MOUNT_POINT} (endpoint: ${S3_ENDPOINT}, region: ${S3_REGION}, cache: ${GEESEFS_CACHE_DIR:-off})"
 
 # In legacy mode we exec geesefs so it owns PID 1 and Kubernetes signals
 # reach it directly. In fleet mode we need to write the .s3fs-mounted
@@ -127,6 +139,7 @@ if [ "${FLEET_MODE:-0}" = "1" ]; then
         --dir-mode 0755 \
         --read-ahead-large 20 \
         --memory-limit "${GEESEFS_MEMORY_LIMIT_MB}" \
+        "${GEESEFS_CACHE_ARGS[@]}" \
         -f \
         "${BUCKET_SPEC}" "${MOUNT_POINT}" &
     GEESEFS_PID=$!
@@ -165,5 +178,6 @@ exec geesefs \
     --file-mode 0644 \
     --dir-mode 0755 \
     --memory-limit "${GEESEFS_MEMORY_LIMIT_MB}" \
+    "${GEESEFS_CACHE_ARGS[@]}" \
     -f \
     "${BUCKET_SPEC}" "${MOUNT_POINT}"
