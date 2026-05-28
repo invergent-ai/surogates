@@ -32,12 +32,13 @@ logger = logging.getLogger(__name__)
 
 _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
 
-# Wall-clock cap for markitdown conversions.  Set high enough for large
-# PDFs but low enough that a misbehaving document doesn't stall the
-# tool loop.  Tunable via env so PROD can shorten it without a release
-# when health probes are tight.
+# Wall-clock cap for markitdown conversions.  Set high enough that
+# OCR-requiring scanned PDFs (~1s/page via Tesseract) get through, but
+# low enough that a misbehaving document doesn't stall the tool loop
+# indefinitely.  Tunable via env so PROD can shorten it without a
+# release when health probes are tight.
 _DOCUMENT_PARSE_TIMEOUT_S: float = float(
-    os.environ.get("SUROGATES_DOCUMENT_PARSE_TIMEOUT_S", "10.0")
+    os.environ.get("SUROGATES_DOCUMENT_PARSE_TIMEOUT_S", "60.0")
 )
 
 # Subprocess pool used for ``_convert_to_markdown_sync``.  markitdown
