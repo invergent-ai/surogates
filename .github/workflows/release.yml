@@ -74,8 +74,8 @@ jobs:
           tags: |
             ghcr.io/invergent-ai/${{ matrix.name }}:${{ steps.version.outputs.value }}
             ghcr.io/invergent-ai/${{ matrix.name }}:latest
-          cache-from: type=gha,scope=${{ matrix.dir }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.dir }}
+          cache-from: type=local,src=${{ runner.tool_cache }}/buildx/${{ matrix.dir }}
+          cache-to: type=local,dest=${{ runner.tool_cache }}/buildx/${{ matrix.dir }},mode=max
 
   npm:
     runs-on: self-hosted
