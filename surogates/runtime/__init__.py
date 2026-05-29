@@ -11,6 +11,7 @@ from __future__ import annotations
 from surogates.runtime.cache import RuntimeConfigCache
 from surogates.runtime.context import AgentRuntimeContext, LLMEndpoint
 from surogates.runtime.firebase import FirebaseConfig
+from surogates.runtime.firebase_cache import FirebaseConfigCache
 from surogates.runtime.invalidator import (
     INVALIDATION_CHANNELS,
     handle_invalidation_message,
@@ -25,6 +26,7 @@ from surogates.runtime.resolver import (
 __all__ = [
     "AgentRuntimeContext",
     "FirebaseConfig",
+    "FirebaseConfigCache",
     "INVALIDATION_CHANNELS",
     "LLMEndpoint",
     "PlatformAuthError",

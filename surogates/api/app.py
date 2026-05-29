@@ -164,6 +164,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     import asyncio
 
     from surogates.runtime import (
+        FirebaseConfigCache,
         PlatformClient,
         RuntimeConfigCache,
         run_invalidator,
@@ -176,6 +177,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         )
         app.state.platform_client = None
         app.state.runtime_config_cache = None
+        app.state.firebase_config_cache = None
         app.state.runtime_invalidator_task = None
         return
 
@@ -187,10 +189,19 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         loader=client.get_runtime_config,
         ttl_seconds=1.0,
     )
+    firebase_cache = FirebaseConfigCache(
+        loader=client.get_firebase_config,
+        ttl_seconds=60.0,
+    )
     app.state.platform_client = client
     app.state.runtime_config_cache = cache
+    app.state.firebase_config_cache = firebase_cache
     app.state.runtime_invalidator_task = asyncio.create_task(
-        run_invalidator(app.state.redis, cache),
+        run_invalidator(
+            app.state.redis,
+            runtime_config_cache=cache,
+            firebase_cache=firebase_cache,
+        ),
         name="surogates-runtime-invalidator",
     )
     logger.info(
@@ -212,6 +223,11 @@ async def _shutdown_shared_runtime_plumbing(app: FastAPI) -> None:
     if client is not None:
         await client.aclose()
         app.state.platform_client = None
+
+    # Clear cache references on shutdown so a hot reload cannot inherit
+    # stale entries from the prior process state.
+    if hasattr(app.state, "firebase_config_cache"):
+        app.state.firebase_config_cache = None
 
 
 def create_app() -> FastAPI:

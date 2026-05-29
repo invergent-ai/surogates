@@ -78,6 +78,30 @@ async def test_install_shared_plumbing_wires_client_and_cache():
         await _shutdown_shared_runtime_plumbing(app)
 
 
+@pytest.mark.asyncio
+async def test_install_shared_plumbing_wires_firebase_cache():
+    """Plan 1b / Task 8 regression: shared-mode lifespan now also
+    constructs a FirebaseConfigCache backed by PlatformClient and
+    exposes it on app.state.firebase_config_cache.
+    """
+    from surogates.api.app import (
+        _install_shared_runtime_plumbing,
+        _shutdown_shared_runtime_plumbing,
+    )
+    from surogates.runtime import FirebaseConfigCache
+
+    app = FastAPI()
+    app.state.redis = _FakeRedis()
+    _install_shared_runtime_plumbing(app, _make_settings(runtime_mode="shared"))
+
+    try:
+        assert isinstance(
+            app.state.firebase_config_cache, FirebaseConfigCache,
+        )
+    finally:
+        await _shutdown_shared_runtime_plumbing(app)
+
+
 def test_install_shared_plumbing_skips_when_url_empty():
     """An unconfigured shared-mode pod must NOT silently swallow the
     misconfig — the resolver fails on first request instead."""
@@ -89,6 +113,7 @@ def test_install_shared_plumbing_skips_when_url_empty():
 
     assert app.state.platform_client is None
     assert app.state.runtime_config_cache is None
+    assert app.state.firebase_config_cache is None
 
 
 @pytest.mark.asyncio
