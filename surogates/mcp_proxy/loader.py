@@ -274,14 +274,21 @@ async def _retrieve_credential(
     ``scope`` is ``"user"`` when the user's personal vault supplied the
     value, ``"org"`` when it came from the org-wide vault, and
     ``"missing"`` when neither had the credential.
+
+    Plan 2 / Task 15.  Routes both lookups through
+    :meth:`CredentialVault.resolve_ref` so the single canonical
+    per-session entry point is used; a future refactor cannot
+    re-introduce a process-wide vault.retrieve call without
+    tripping the Task 16 source-level regression.
     """
+    ref = f"vault://{name}"
     # User-scoped first.
-    value = await vault.retrieve(org_id, name, user_id=user_id)
+    value = await vault.resolve_ref(ref, org_id=org_id, user_id=user_id)
     if value is not None:
         return value, "user"
 
     # Fall back to org-scoped.
-    value = await vault.retrieve(org_id, name, user_id=None)
+    value = await vault.resolve_ref(ref, org_id=org_id, user_id=None)
     if value is not None:
         return value, "org"
 
