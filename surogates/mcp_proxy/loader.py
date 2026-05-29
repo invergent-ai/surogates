@@ -39,7 +39,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from surogates.audit import AuditStore, AuditType, credential_access_event
 from surogates.db.models import McpServer
 from surogates.tenant.credentials import CredentialVault
-from surogates.tools.loader import ResourceLoader
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +48,6 @@ async def load_mcp_configs(
     user_id: UUID,
     session_factory: async_sessionmaker[AsyncSession],
     vault: CredentialVault,
-    platform_mcp_dir: str,
     audit_store: AuditStore | None = None,
     *,
     is_service_account: bool = False,
@@ -60,24 +58,19 @@ async def load_mcp_configs(
     Returns a dict of ``{server_name: config_dict}`` ready for
     ``MCPServerTask`` / ``discover_mcp_tools()``.
 
-    Merge precedence: platform < org-wide < user-specific.
-    Disabled servers are excluded.
+    Plan 5 / Task 8.  The on-disk ConfigMap fallback is retired.
+    The MCP server registry is now exclusively DB-backed — admins
+    use the surogate-ops UI which writes to the ``mcp_servers``
+    table; the proxy reads it here.  Merge precedence is just
+    org-wide < user-specific.  Disabled servers are excluded.
 
     When *audit_store* is provided every credential lookup emits a
     ``credential.access`` entry to the tenant audit log.  When it is
     ``None`` resolution proceeds silently (useful in tests and local
     dev).
     """
-    # 1. Platform configs from filesystem.
-    platform_configs = _load_platform_configs(platform_mcp_dir)
-
-    # 2. DB configs (org-wide + user-specific).
-    db_configs = await _load_db_configs(session_factory, org_id, user_id)
-
-    # 3. Merge: platform < org < user (higher precedence overwrites).
-    merged: dict[str, dict[str, Any]] = {}
-    merged.update(platform_configs)
-    merged.update(db_configs)
+    # DB configs (org-wide + user-specific).
+    merged = await _load_db_configs(session_factory, org_id, user_id)
 
     # 4. Resolve credential_refs in parallel across all servers.
     resolve_tasks = []
@@ -123,29 +116,6 @@ async def _resolve_credentials_safe(
         logger.exception(
             "Failed to resolve credentials for MCP server %s", server_name,
         )
-
-
-def _load_platform_configs(platform_mcp_dir: str) -> dict[str, dict[str, Any]]:
-    """Load MCP server definitions from the platform volume."""
-    loader = ResourceLoader(platform_mcp_dir=platform_mcp_dir)
-    configs: dict[str, dict[str, Any]] = {}
-
-    for server_def in loader._load_mcp_from_dir(platform_mcp_dir):
-        configs[server_def.name] = {
-            "transport": server_def.transport,
-            "command": server_def.command,
-            "args": server_def.args,
-            "url": server_def.url,
-            "env": dict(server_def.env),
-            "timeout": server_def.timeout,
-            # Credentials must be carried through so ``_resolve_credentials``
-            # can pop them off and inject the resolved value as a header.
-            # Without this the proxy advertises platform MCP servers but
-            # can never authenticate to them.
-            "credential_refs": list(server_def.credential_refs or []),
-        }
-
-    return configs
 
 
 async def _load_db_configs(

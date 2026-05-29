@@ -43,9 +43,6 @@ class McpProxySettings(BaseSettings):
     jwt_secret: str = "change-me-in-production"
     encryption_key: str = ""  # Fernet key for credential vault
 
-    # Platform MCP configs (mounted from ConfigMap)
-    platform_mcp_dir: str = "/etc/surogates/mcp"
-
     log_level: str = "INFO"
 
     # Plan 5 / Task 1 — shared-runtime plumbing.  These fields are

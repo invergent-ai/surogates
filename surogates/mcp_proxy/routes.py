@@ -100,7 +100,6 @@ async def _ensure_tenant_connected(
         user_id=auth.user_id,
         session_factory=request.app.state.session_factory,
         vault=request.app.state.vault,
-        platform_mcp_dir=request.app.state.platform_mcp_dir,
         audit_store=getattr(request.app.state, "audit_store", None),
         is_service_account=auth.is_service_account,
         agent_id=agent_id,

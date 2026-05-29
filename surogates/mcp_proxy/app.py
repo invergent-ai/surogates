@@ -25,7 +25,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     engine = async_engine_from_settings(settings.db)
 
     app.state.session_factory = async_session_factory(engine)
-    app.state.platform_mcp_dir = settings.platform_mcp_dir
 
     # Plan 5 / Task 1 — Redis client for the rate limiter +
     # pub/sub invalidator.  Created here (the api creates its own
