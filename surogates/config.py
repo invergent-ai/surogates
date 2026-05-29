@@ -432,6 +432,13 @@ class StorageSettings(BaseSettings):
     secret_key: str = ""
     region: str = ""
 
+    # Plan 4 / Task 3 — dedicated bucket for per-user memory.
+    # Defaults to '' which the harness treats as 'reuse
+    # settings.storage.bucket'.  Set to a different bucket name
+    # for deployments that isolate memory (different lifecycle
+    # policy, regional replication, billing).
+    memory_bucket: str = ""
+
 
 class SlackSettings(BaseSettings):
     """Slack channel adapter configuration."""
