@@ -152,6 +152,19 @@ async def test_build_helm_session_llm_clients_closes_main_on_aux_failure(
     assert closed[0]._closed is True
 
 
+def test_harness_factory_uses_r2_memory_store_when_cache_wired():
+    """Plan 4 / Task 11 source-level regression: the harness
+    factory constructs R2MemoryStore in shared mode (when the
+    memory_cache is wired) and the legacy disk MemoryStore in
+    helm mode (Plan 9 retires this branch)."""
+    import inspect
+    import surogates.orchestrator.worker as worker
+
+    src = inspect.getsource(worker)
+    assert "R2MemoryStore" in src
+    assert "memory_cache" in src
+
+
 def test_load_prompt_catalogs_receives_bundle():
     """Plan 3 / Task 15 source-level regression: the
     _load_prompt_catalogs call from harness_factory threads

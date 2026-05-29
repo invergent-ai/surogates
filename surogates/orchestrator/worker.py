@@ -1025,7 +1025,32 @@ async def run_worker(settings: Settings) -> None:
             )
         else:
             memory_dir = Path(tenant.asset_root) / "shared" / "memory"
-        memory_store = MemoryStore(memory_dir=memory_dir)
+
+        # Plan 4 / Task 11 — shared-mode memory is R2-backed.
+        # Helm mode keeps the legacy disk-based MemoryStore until
+        # Plan 9 cutover.  Branch on (runtime_mode == 'shared') AND
+        # memory_cache wired so a misconfigured shared pod (no
+        # storage backend) falls back to disk silently.
+        memory_cache = worker_state.get("memory_cache")
+        if runtime_mode == "shared" and memory_cache is not None:
+            from surogates.memory.r2_store import R2MemoryStore
+            from surogates.runtime.memory_protocol import memory_object_key
+
+            mem_bucket = (
+                settings.storage.memory_bucket or settings.storage.bucket
+            )
+            mem_key = memory_object_key(
+                storage_key_prefix=ctx.storage_key_prefix,
+                user_id=(
+                    str(session.user_id) if session.user_id else None
+                ),
+            )
+            memory_store = R2MemoryStore(
+                backend=storage_backend, bucket=mem_bucket, key=mem_key,
+            )
+            await memory_store.load_from_r2()
+        else:
+            memory_store = MemoryStore(memory_dir=memory_dir)
         memory_manager = MemoryManager(memory_store)
 
         # Plan 3 / Task 12+15 — resolve the per-session file bundle
