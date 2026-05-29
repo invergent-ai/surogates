@@ -27,7 +27,31 @@ from surogates.runtime.memory_protocol import (
     encode_envelope,
 )
 
-__all__ = ["read_user_memory", "write_user_memory"]
+__all__ = ["delete_memory_prefix", "read_user_memory", "write_user_memory"]
+
+
+async def delete_memory_prefix(
+    backend: Any, *, bucket: str, prefix: str,
+) -> int:
+    """Delete every object whose key starts with ``prefix`` in ``bucket``.
+
+    Plan 7 / Task 5.  Used by the delete_agent cascade (surogate-
+    ops side) to drop the agent's per-user memory.  Idempotent: a
+    second call after the prefix is empty returns 0 without
+    raising.
+
+    Returns the number of objects deleted.
+
+    Cross-tenant safety: callers MUST pass a fully-qualified prefix
+    like ``"{project_id}/{agent_id}/"`` (trailing slash matters --
+    without it ``p-1/a-1`` would match ``p-1/a-100`` too).  The
+    helper does not enforce the trailing slash; that's the
+    caller's contract.
+    """
+    keys = await backend.list(bucket, prefix)
+    for key in keys:
+        await backend.delete(bucket, key)
+    return len(keys)
 
 
 async def read_user_memory(
