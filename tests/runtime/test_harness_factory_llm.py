@@ -37,3 +37,87 @@ def test_run_worker_does_not_construct_process_wide_asyncopenai():
         "run_worker must not construct a process-wide AsyncOpenAI; "
         "the per-session SessionLLMClients takes over"
     )
+
+
+def test_auxiliary_builders_only_called_from_allowed_sites():
+    """Plan 2 / Task 8 audit.
+
+    The three ``build_*_auxiliary_llm`` helpers are kept for the
+    transitional period (Plan 9 deletes them with helm retirement),
+    but only the explicitly-allowed call sites may import them:
+
+    - ``surogates/orchestrator/worker.py`` — only inside
+      ``_build_helm_session_llm_clients`` (the helm-mode adapter),
+      NOT inside ``harness_factory``.  Task 7 already enforces the
+      harness_factory side via a separate regression.
+    - ``surogates/harness/title_generator.py`` — standalone title
+      generation for new sessions; doesn't touch the harness's
+      per-session bundle.
+    - ``surogates/harness/self_discover.py`` — standalone plan-step
+      summarisation; same property.
+
+    Any other importer is a Plan 2 regression — every harness path
+    on the hot loop must source LLM clients from the per-session
+    SessionLLMClients bundle (Plan 1b governance + Plan 2 vault
+    isolation rely on this).
+    """
+    import re
+    from pathlib import Path
+
+    allowed = {
+        "surogates/orchestrator/worker.py",
+        "surogates/harness/title_generator.py",
+        "surogates/harness/self_discover.py",
+        # The builders' own definitions:
+        "surogates/harness/auxiliary_client.py",
+    }
+    pattern = re.compile(
+        r"\b(build_summary_auxiliary_llm|"
+        r"build_vision_auxiliary_llm|"
+        r"build_advisor_auxiliary_llm)\b"
+    )
+    offenders: list[str] = []
+    for path in Path("surogates").rglob("*.py"):
+        rel = str(path)
+        if rel in allowed:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for m in pattern.finditer(text):
+            line = text[: m.start()].count("\n") + 1
+            offenders.append(f"{rel}:{line} ({m.group(1)})")
+    assert not offenders, (
+        "Auxiliary LLM builders may only be imported by the allowed "
+        "sites (helm-mode adapter + standalone title/self-discover); "
+        "every other harness path must source LLM clients from the "
+        "per-session SessionLLMClients bundle:\n" + "\n".join(offenders)
+    )
+
+
+def test_harness_factory_does_not_directly_import_auxiliary_builders():
+    """Task 8 sibling — within ``worker.py`` itself, only
+    ``_build_helm_session_llm_clients`` may reference the builders.
+
+    The function-level grep on ``harness_factory`` would let a
+    reference slip if it lived in a module-level closure, so we walk
+    the source by AST-extracting only ``harness_factory``'s body."""
+    import surogates.orchestrator.worker as worker
+
+    # harness_factory is defined inside run_worker; pull its source
+    # via inspect by reading run_worker's source and asserting the
+    # build_*_auxiliary substrings live ONLY in
+    # _build_helm_session_llm_clients's source.
+    run_worker_src = inspect.getsource(worker.run_worker)
+    # In Plan 2 / Task 7, harness_factory inside run_worker became
+    # the closure that wires SessionLLMClients.  The three builder
+    # names must not appear in run_worker's source — they live
+    # exclusively in _build_helm_session_llm_clients at module scope.
+    for symbol in (
+        "build_summary_auxiliary_llm",
+        "build_vision_auxiliary_llm",
+        "build_advisor_auxiliary_llm",
+    ):
+        assert symbol not in run_worker_src, (
+            f"{symbol} must not be referenced inside run_worker "
+            "(including harness_factory); it lives only in the "
+            "_build_helm_session_llm_clients module-scope adapter"
+        )
