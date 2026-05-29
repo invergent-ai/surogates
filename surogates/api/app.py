@@ -200,6 +200,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         app.state.slug_resolver_cache = None
         app.state.rate_limiter = None
         app.state.file_bundle_cache = None
+        app.state.memory_cache = None
         app.state.runtime_invalidator_task = None
         return
 
@@ -232,12 +233,22 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         settings=settings, runtime_config_cache=cache,
     )
 
+    # Plan 4 / Task 6 — per-user memory cache.  Stays None when
+    # storage backend is unconfigured (no bucket); the harness
+    # falls back to legacy disk MemoryStore in that case.  Plan 9
+    # retires the fallback.
+    memory_cache = _maybe_build_memory_cache(
+        settings=settings,
+        storage_backend=getattr(app.state, "storage_backend", None),
+    )
+
     app.state.platform_client = client
     app.state.runtime_config_cache = cache
     app.state.firebase_config_cache = firebase_cache
     app.state.slug_resolver_cache = slug_cache
     app.state.rate_limiter = rate_limiter
     app.state.file_bundle_cache = file_bundle_cache
+    app.state.memory_cache = memory_cache
     app.state.runtime_invalidator_task = asyncio.create_task(
         run_invalidator(
             app.state.redis,
@@ -245,12 +256,61 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
             firebase_cache=firebase_cache,
             slug_cache=slug_cache,
             file_bundle_cache=file_bundle_cache,
+            memory_cache=memory_cache,
         ),
         name="surogates-runtime-invalidator",
     )
     logger.info(
         "Shared-runtime plumbing wired (platform=%s)", settings.platform_api_url,
     )
+
+
+def _maybe_build_memory_cache(
+    *, settings, storage_backend,
+):
+    """Construct a MemoryCache when storage backend + bucket are
+    configured; return None otherwise.
+
+    Plan 4 / Task 6.  Same graceful-degradation shape as
+    :func:`_maybe_build_file_bundle_cache`.  When the storage
+    backend is unwired OR ``settings.storage.bucket`` is empty,
+    the cache stays None and the worker harness falls back to the
+    legacy disk MemoryStore.  Plan 9 retires the fallback and
+    makes R2 required.
+    """
+    from surogates.runtime import MemoryCache
+    from surogates.runtime.memory_protocol import (
+        EnvelopeDecodeError, _MemoryEnvelope,
+        decode_envelope, encode_envelope,
+    )
+
+    storage = getattr(settings, "storage", None)
+    if storage_backend is None or storage is None or not storage.bucket:
+        return None
+
+    bucket = storage.memory_bucket or storage.bucket
+    fresh_envelope_bytes = encode_envelope(
+        _MemoryEnvelope(version=0, content=""),
+    )
+
+    async def _loader(key: str) -> bytes:
+        # The cache key is the R2 object key (computed by the
+        # harness via memory_object_key); the loader fetches the
+        # bytes verbatim.  Missing object OR corrupted envelope
+        # both resolve to "start fresh" (version=0, content="")
+        # so a botched manual migration self-heals on next write
+        # instead of crashing session bootstrap.
+        try:
+            raw = await storage_backend.read(bucket, key)
+        except (KeyError, FileNotFoundError):
+            return fresh_envelope_bytes
+        try:
+            decode_envelope(raw)
+        except EnvelopeDecodeError:
+            return fresh_envelope_bytes
+        return raw
+
+    return MemoryCache(loader=_loader, ttl_seconds=5.0)
 
 
 def _maybe_build_file_bundle_cache(
@@ -357,6 +417,8 @@ async def _shutdown_shared_runtime_plumbing(app: FastAPI) -> None:
         app.state.rate_limiter = None
     if hasattr(app.state, "file_bundle_cache"):
         app.state.file_bundle_cache = None
+    if hasattr(app.state, "memory_cache"):
+        app.state.memory_cache = None
 
 
 def create_app() -> FastAPI:

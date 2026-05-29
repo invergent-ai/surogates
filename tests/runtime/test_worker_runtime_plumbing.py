@@ -21,6 +21,7 @@ def _make_settings(*, runtime_mode: str = "shared",
         platform_api_token="t",
         api=SimpleNamespace(rate_limit_rpm=300),
         hub=SimpleNamespace(endpoint="", username="", password=""),
+        storage=SimpleNamespace(bucket="", memory_bucket=""),
     )
 
 
@@ -153,6 +154,24 @@ async def test_install_worker_runtime_plumbing_wires_file_bundle_cache(
     _install_worker_runtime_plumbing(state, settings)
     try:
         assert isinstance(state["file_bundle_cache"], FileBundleCache)
+    finally:
+        await _shutdown_worker_runtime_plumbing(state)
+
+
+@pytest.mark.asyncio
+async def test_install_worker_runtime_plumbing_exposes_memory_cache_attr():
+    """Plan 4 / Task 6 — worker bootstrap exposes the memory_cache
+    state key (None when storage is unconfigured)."""
+    from surogates.orchestrator.worker import (
+        _install_worker_runtime_plumbing,
+        _shutdown_worker_runtime_plumbing,
+    )
+
+    state = {"redis": _FakeRedis()}
+    _install_worker_runtime_plumbing(state, _make_settings())
+    try:
+        assert "memory_cache" in state
+        assert state["memory_cache"] is None
     finally:
         await _shutdown_worker_runtime_plumbing(state)
 

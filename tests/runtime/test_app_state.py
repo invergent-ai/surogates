@@ -32,6 +32,12 @@ def _make_settings(
         hub=SimpleNamespace(
             endpoint=hub_endpoint, username="", password="",
         ),
+        # Plan 4 / Task 6 — storage namespace expected by
+        # _maybe_build_memory_cache.  Empty bucket → cache stays
+        # None and the harness falls back to disk MemoryStore.
+        storage=SimpleNamespace(
+            bucket="", memory_bucket="",
+        ),
         platform_api_token="t",
         api=SimpleNamespace(rate_limit_rpm=300),
     )
@@ -221,6 +227,59 @@ async def test_install_shared_plumbing_file_bundle_cache_none_when_hub_disabled(
     )
     try:
         assert app.state.file_bundle_cache is None
+    finally:
+        await _shutdown_shared_runtime_plumbing(app)
+
+
+@pytest.mark.asyncio
+async def test_install_shared_plumbing_wires_memory_cache_attr():
+    """Plan 4 / Task 6 — shared-mode lifespan exposes a
+    memory_cache attribute on app.state.  Test settings leave the
+    storage bucket empty so the cache stays None; another test
+    monkeypatches storage to verify the wired branch."""
+    from surogates.api.app import (
+        _install_shared_runtime_plumbing,
+        _shutdown_shared_runtime_plumbing,
+    )
+
+    app = FastAPI()
+    app.state.redis = _FakeRedis()
+    _install_shared_runtime_plumbing(
+        app, _make_settings(runtime_mode="shared"),
+    )
+    try:
+        # Attribute always set (helper wiring landed); value is
+        # None when storage is unconfigured.
+        assert hasattr(app.state, "memory_cache")
+        assert app.state.memory_cache is None
+    finally:
+        await _shutdown_shared_runtime_plumbing(app)
+
+
+@pytest.mark.asyncio
+async def test_install_shared_plumbing_wires_memory_cache_when_storage_set():
+    """When settings.storage.bucket is populated AND a storage
+    backend is on app.state, the helper returns a MemoryCache."""
+    from surogates.api.app import (
+        _install_shared_runtime_plumbing,
+        _shutdown_shared_runtime_plumbing,
+    )
+    from surogates.runtime import MemoryCache
+
+    app = FastAPI()
+    app.state.redis = _FakeRedis()
+
+    settings = _make_settings(runtime_mode="shared")
+    settings.storage.bucket = "test-bucket"
+
+    # The cache loader only fires when get() is called; the lifespan
+    # constructs the cache without touching the storage backend.
+    # Provide a sentinel so the helper sees "backend is configured".
+    app.state.storage_backend = object()
+
+    _install_shared_runtime_plumbing(app, settings)
+    try:
+        assert isinstance(app.state.memory_cache, MemoryCache)
     finally:
         await _shutdown_shared_runtime_plumbing(app)
 

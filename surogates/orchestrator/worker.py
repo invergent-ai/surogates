@@ -421,13 +421,17 @@ def _install_worker_runtime_plumbing(state: dict, settings) -> None:
     None when ``settings.hub.endpoint`` is empty or the Hub SDK is
     not installed).
     """
-    from surogates.api.app import _maybe_build_file_bundle_cache
+    from surogates.api.app import (
+        _maybe_build_file_bundle_cache,
+        _maybe_build_memory_cache,
+    )
     from surogates.runtime import PlatformClient, RuntimeConfigCache
 
     if getattr(settings, "runtime_mode", "helm") != "shared":
         state["platform_client"] = None
         state["runtime_config_cache"] = None
         state["file_bundle_cache"] = None
+        state["memory_cache"] = None
         return
 
     if not settings.platform_api_url:
@@ -438,6 +442,7 @@ def _install_worker_runtime_plumbing(state: dict, settings) -> None:
         state["platform_client"] = None
         state["runtime_config_cache"] = None
         state["file_bundle_cache"] = None
+        state["memory_cache"] = None
         return
 
     client = PlatformClient(
@@ -451,6 +456,14 @@ def _install_worker_runtime_plumbing(state: dict, settings) -> None:
     state["runtime_config_cache"] = runtime_config_cache
     state["file_bundle_cache"] = _maybe_build_file_bundle_cache(
         settings=settings, runtime_config_cache=runtime_config_cache,
+    )
+    # Plan 4 / Task 6 — per-user memory cache.  Reads
+    # state['storage_backend'] when set (caller wires this before
+    # _install_worker_runtime_plumbing).  Stays None when storage
+    # is unconfigured; the harness falls back to disk MemoryStore.
+    state["memory_cache"] = _maybe_build_memory_cache(
+        settings=settings,
+        storage_backend=state.get("storage_backend"),
     )
 
 
@@ -531,6 +544,7 @@ async def _shutdown_worker_runtime_plumbing(state: dict) -> None:
     state["platform_client"] = None
     state["runtime_config_cache"] = None
     state["file_bundle_cache"] = None
+    state["memory_cache"] = None
 
 
 def _start_worker_invalidator(state: dict) -> None:
@@ -556,6 +570,7 @@ def _start_worker_invalidator(state: dict) -> None:
             redis_client,
             runtime_config_cache=cache,
             file_bundle_cache=state.get("file_bundle_cache"),
+            memory_cache=state.get("memory_cache"),
         ),
         name="surogates-worker-runtime-invalidator",
     )
