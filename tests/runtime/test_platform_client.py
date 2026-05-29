@@ -124,6 +124,90 @@ async def test_get_runtime_config_500_raises_http_error():
 
 
 @pytest.mark.asyncio
+async def test_get_agent_id_for_slug_200():
+    """Plan 1b / Task 10.  Happy path resolves a slug to agent_id."""
+    from surogates.runtime import PlatformClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/agents/by-slug/acme"
+        return httpx.Response(200, json={"agent_id": "agent-acme"})
+
+    client = PlatformClient(
+        base_url="https://ops.example.com",
+        token="t",
+        transport=_mock_transport(handler),
+    )
+    try:
+        result = await client.get_agent_id_for_slug("acme")
+    finally:
+        await client.aclose()
+    assert result == "agent-acme"
+
+
+@pytest.mark.asyncio
+async def test_get_agent_id_for_slug_404_returns_none():
+    """Slug misses are common (typos, reserved subdomains like www./api.)
+    — return None instead of raising so the resolver branch is cheap."""
+    from surogates.runtime import PlatformClient
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "not bound"})
+
+    client = PlatformClient(
+        base_url="https://ops.example.com",
+        token="t",
+        transport=_mock_transport(handler),
+    )
+    try:
+        result = await client.get_agent_id_for_slug("nope")
+    finally:
+        await client.aclose()
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_agent_id_for_slug_401_raises_platform_auth_error():
+    """A bad/revoked runtime token is an operations problem, not a slug
+    miss — surface distinctly so monitoring can page."""
+    from surogates.runtime import PlatformClient
+    from surogates.runtime.platform_client import PlatformAuthError
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"detail": "invalid"})
+
+    client = PlatformClient(
+        base_url="https://ops.example.com",
+        token="bad",
+        transport=_mock_transport(handler),
+    )
+    try:
+        with pytest.raises(PlatformAuthError):
+            await client.get_agent_id_for_slug("acme")
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_get_agent_id_for_slug_500_propagates_http_error():
+    from surogates.runtime import PlatformClient
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    client = PlatformClient(
+        base_url="https://ops.example.com",
+        token="t",
+        transport=_mock_transport(handler),
+    )
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.get_agent_id_for_slug("acme")
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_aclose_releases_underlying_client():
     """A closed client refuses subsequent requests."""
     from surogates.runtime import PlatformClient

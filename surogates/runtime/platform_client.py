@@ -123,5 +123,34 @@ class PlatformClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def get_agent_id_for_slug(self, slug: str) -> str | None:
+        """Resolve a DNS-safe agent slug to its agent_id (Plan 1b).
+
+        Returns ``None`` (not :class:`LookupError`) on 404 because slug
+        misses are a common, expected case — the Host-header resolver
+        checks slugs on every incoming request including reserved
+        subdomains like ``www.`` / ``api.`` that the caller already
+        filtered out.  ``None`` lets the resolver write a single
+        branch.
+
+        * :class:`PlatformAuthError` on 401 — operations problem.
+        * ``httpx.HTTPStatusError`` on any other non-2xx — the cache
+          layer may decide to serve a stale entry if it has one.
+        """
+        try:
+            resp = await self._client.get(f"/api/agents/by-slug/{slug}")
+        except httpx.HTTPError as exc:
+            raise exc
+
+        if resp.status_code == 404:
+            return None
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()["agent_id"]
+
     async def aclose(self) -> None:
         await self._client.aclose()
