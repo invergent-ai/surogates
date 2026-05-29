@@ -73,6 +73,18 @@ async def test_install_proxy_plumbing_wires_runtime_cache_and_limiter():
         await _shutdown_shared_runtime_plumbing_for_proxy(app)
 
 
+def test_call_tool_route_has_agent_runtime_context_dep():
+    """Plan 5 / Task 2 source-level regression: call_tool depends
+    on agent_runtime_context_dep so the per-request agent context
+    is resolved before the call dispatch."""
+    import inspect
+    import surogates.mcp_proxy.routes as routes
+
+    src = inspect.getsource(routes.call_tool)
+    assert "agent_runtime_context_dep" in src
+    assert "AgentRuntimeContext" in src
+
+
 @pytest.mark.asyncio
 async def test_install_proxy_plumbing_helm_mode_skips():
     """Helm-mode proxy pods don't run the shared-runtime path;
