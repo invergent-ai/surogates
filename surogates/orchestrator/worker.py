@@ -1374,7 +1374,7 @@ async def run_worker(settings: Settings) -> None:
         "Worker %s starting (concurrency=%d, queue=%s)",
         worker_id,
         settings.worker.concurrency,
-        queue_key,
+        SHARED_WORK_QUEUE_KEY,
     )
 
     try:
