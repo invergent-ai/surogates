@@ -57,7 +57,6 @@ class AgentRuntimeContext:
     * ``agent_id`` — the shared-runtime agent serving this session.
     * ``org_id`` — tenant identity; equal to the project id on the
       management plane (no separate orgs table in this codebase).
-    * ``project_id`` — surogate-ops project the agent belongs to.
     * ``enabled`` — the management plane's lifecycle gate.  When False
       the resolver short-circuits with a 503 before this context is
       ever constructed; callers can assume ``True`` at use time.
@@ -67,11 +66,16 @@ class AgentRuntimeContext:
     * ``storage_key_prefix`` — per-tenant prefix into the shared
       workspaces bucket (typically ``{project_id}/{agent_id}``).
 
-    Optional fields default to absent / empty.  The four LLM endpoint
-    triples are independent: only ``llm_main`` is logically required
-    for the harness to run; ``llm_summary`` / ``llm_vision`` /
-    ``llm_advisor`` are auxiliary clients the harness falls back to
-    ``llm_main`` for when absent.
+    Optional fields default to absent / empty.  ``project_id`` is
+    ``None`` in legacy helm-mode contexts (helm pods do not carry the
+    project id in ``settings``) and the management-plane-supplied
+    value otherwise; consumers that need it must check for ``None``
+    rather than receive a silent empty string.
+
+    The four LLM endpoint triples are independent: only ``llm_main``
+    is logically required for the harness to run; ``llm_summary`` /
+    ``llm_vision`` / ``llm_advisor`` are auxiliary clients the harness
+    falls back to ``llm_main`` for when absent.
 
     ``mcp_server_ids`` is a tuple (immutable counterpart to a list)
     so the frozen dataclass cannot be mutated through the field.
@@ -79,10 +83,11 @@ class AgentRuntimeContext:
 
     agent_id: str
     org_id: str
-    project_id: str
     enabled: bool
     config_version: int
     storage_key_prefix: str
+
+    project_id: str | None = None
 
     api_web_url: str | None = None
 

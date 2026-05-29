@@ -634,7 +634,13 @@ class Settings(BaseSettings):
     # ``shared`` — multi-tenant pool (Plan 1+).  The pod serves any
     # tenant; ``(org_id, agent_id)`` is resolved per-request via the
     # platform API.  ``org_id`` / ``agent_id`` settings are unused.
-    runtime_mode: str = "helm"
+    #
+    # Typed as a ``Literal`` so pydantic rejects typos at config load
+    # rather than silently falling into the helm branch when an
+    # operator writes e.g. ``runtime_mode: sharad`` — every downstream
+    # check is ``== "helm"`` / ``== "shared"`` and an unknown value
+    # would resolve to the helm path with no warning.
+    runtime_mode: Literal["helm", "shared"] = "helm"
 
     # Platform (surogate-ops) API base URL + bearer token.  Only
     # consulted in ``runtime_mode='shared'``; the runtime fetches per-

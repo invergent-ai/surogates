@@ -84,14 +84,21 @@ def _legacy_helm_context(settings, *, agent_id: str) -> AgentRuntimeContext:
     LLM endpoint accessors here (they keep reading ``settings.llm``
     directly).  Mapped this way so a single dependency works in both
     modes; callers do not branch on runtime_mode at every read site.
+
+    ``project_id`` is left as ``None`` rather than empty-string: helm
+    pods do not carry a project id in ``settings``, and downstream
+    consumers that need it (Plan 1b Firebase resolution and other
+    project-scoped lookups) must detect the absence and fall back —
+    silently substituting ``""`` would silently route to project ``""``
+    in any DB query that takes the value verbatim.
     """
     return AgentRuntimeContext(
         agent_id=agent_id,
         org_id=getattr(settings, "org_id", "") or "",
-        project_id="",
         enabled=True,
         config_version=0,
         storage_key_prefix="",
+        project_id=None,
     )
 
 

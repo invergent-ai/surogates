@@ -149,6 +149,34 @@ def test_shared_mode_does_not_fall_back_to_settings_agent_id():
     assert r.status_code == 400
 
 
+def test_helm_context_project_id_is_none_not_empty_string():
+    """Helm pods do not carry a project id; the legacy context must
+    expose its absence as ``None`` rather than silently substituting an
+    empty string that would route project-scoped queries to project
+    ``""``.  Plan 1b Firebase resolution depends on this distinction."""
+    async def loader(_):
+        raise AssertionError("loader must not be called in helm mode")
+
+    app = _build_app(
+        cache=RuntimeConfigCache(loader=loader),
+        runtime_mode="helm",
+        agent_id="legacy-a",
+    )
+
+    @app.get("/probe")
+    async def probe(ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep)):
+        return {
+            "agent_id": ctx.agent_id,
+            "org_id": ctx.org_id,
+            "project_id": ctx.project_id,
+        }
+
+    with TestClient(app) as c:
+        r = c.get("/probe")
+    assert r.status_code == 200
+    assert r.json()["project_id"] is None
+
+
 def test_query_param_overrides_settings_agent_id_in_helm_mode():
     """Explicit query param wins even in helm mode — useful for admin
     tools that pin requests to a specific agent_id from inside a
