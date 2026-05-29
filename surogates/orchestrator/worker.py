@@ -1118,10 +1118,18 @@ async def run_worker(settings: Settings) -> None:
         harness._session_llm_bundle = llm_bundle  # type: ignore[attr-defined]
         return harness
 
-    # 8. Orchestrator — consumes from this agent's dedicated work queue.
-    from surogates.config import agent_queue_key
+    # 8. Orchestrator — consumes from the shared work queue
+    # (Plan 2 / Task 14).  Per-tenant isolation is enforced by the
+    # TurnConcurrencyGate the dispatcher consults on every dequeue.
+    from surogates.config import SHARED_WORK_QUEUE_KEY
+    from surogates.runtime import TurnConcurrencyGate
 
-    queue_key = agent_queue_key(configured_agent_id)
+    turn_gate = TurnConcurrencyGate(
+        redis_client,
+        default_max=getattr(
+            settings.worker, "max_concurrent_turns_default", 10,
+        ),
+    )
 
     # Build the tenant-for-task callable used by ``tasks_tick`` to spawn
     # child sessions on behalf of subagent tasks. The tick runs as a
@@ -1146,11 +1154,12 @@ async def run_worker(settings: Settings) -> None:
         harness_factory=harness_factory,
         max_concurrent=settings.worker.concurrency,
         agent_id=configured_agent_id,
-        queue_key=queue_key,
+        queue_key=SHARED_WORK_QUEUE_KEY,
         poll_timeout=settings.worker.poll_timeout,
         browser_pool=browser_pool,
         session_factory=session_factory,
         tenant_for_task=_tenant_for_task,
+        turn_gate=turn_gate,
     )
 
     scheduled_runner = None

@@ -165,9 +165,13 @@ async def dequeue_next_session(
 class Orchestrator:
     """Pulls session IDs from a Redis sorted-set and dispatches them to the agent harness.
 
-    The ``queue_key`` is per-agent (``surogates:work_queue:<agent_id>``) so that
-    multiple agents sharing a single Redis do not compete for each other's
-    sessions.  Callers build the key via :func:`surogates.config.agent_queue_key`.
+    Plan 2 / Task 14: ``queue_key`` is now the shared
+    ``surogates:work_queue`` for every worker; per-tenant isolation
+    is enforced by :class:`~surogates.runtime.TurnConcurrencyGate`
+    which the dispatcher consults on every dequeue.  Legacy
+    helm-mode pods can still pass a per-agent key if they want to
+    keep per-pod queue isolation (Plan 9 retires the helm path
+    entirely).
     """
 
     def __init__(
@@ -183,6 +187,7 @@ class Orchestrator:
         browser_pool: BrowserPool | None = None,
         session_factory: Any | None = None,
         tenant_for_task: Callable[[Any], Any] | None = None,
+        turn_gate: Any | None = None,
     ) -> None:
         self.redis = redis_client
         self.session_store = session_store
@@ -198,6 +203,9 @@ class Orchestrator:
         # spawn_worker / chat sessions normally).
         self._session_factory = session_factory
         self._tenant_for_task = tenant_for_task
+        # Plan 2 / Task 14 — per-tenant TurnConcurrencyGate.  None in
+        # helm-mode workers (and in tests) → dequeue skips the gate.
+        self._turn_gate = turn_gate
         self._running = True
         self._tasks: set[asyncio.Task] = set()
         # Active harnesses by session ID — for delivering interrupt signals.
@@ -282,9 +290,14 @@ class Orchestrator:
 
         while self._running:
             try:
-                # BZPOPMIN returns (key, member, score) or None on timeout.
-                result = await self.redis.bzpopmin(
-                    self._queue_key,
+                # Plan 2 / Task 14 — shared queue + per-tenant gate.
+                # The dispatcher pops the next session whose tenant
+                # has gate capacity; over-cap candidates are requeued
+                # with backoff inside dequeue_next_session itself.
+                dequeued = await dequeue_next_session(
+                    self.redis,
+                    gate=self._turn_gate,
+                    gate_limit=None,
                     timeout=self._poll_timeout,
                 )
             except asyncio.CancelledError:
@@ -295,26 +308,32 @@ class Orchestrator:
                 await asyncio.sleep(1.0)
                 continue
 
-            if result is None:
-                # Timeout -- no work available.
+            if dequeued is None:
+                # Either the timeout elapsed with an empty queue or
+                # every popped candidate was over-cap.  Sleep
+                # briefly so a freshly-released slot gets picked up
+                # quickly without busy-looping.
+                await asyncio.sleep(_GATE_EMPTY_SLEEP_SECONDS)
                 continue
 
-            # result is (key, member, score) for redis-py >= 5.
-            _key, member, _score = result
-            session_id_str = (
-                member.decode() if isinstance(member, bytes) else str(member)
-            )
-
+            session_id_str = dequeued.session_id
             try:
                 session_id = UUID(session_id_str)
             except ValueError:
                 logger.error("Invalid session ID in work queue: %s", session_id_str)
+                if self._turn_gate is not None:
+                    # The gate slot was acquired but the session is
+                    # bad — release immediately so the tenant isn't
+                    # billed for a slot that produces no work.
+                    await self._turn_gate.release(
+                        dequeued.org_id, dequeued.agent_id,
+                    )
                 continue
 
             # Spawn a bounded task.
             await self.semaphore.acquire()
             task = asyncio.create_task(
-                self._guarded_process(session_id),
+                self._guarded_process(session_id, dequeued=dequeued),
                 name=f"harness-{session_id_str[:8]}",
             )
             self._tasks.add(task)
@@ -350,12 +369,33 @@ class Orchestrator:
     # Internal dispatch
     # ------------------------------------------------------------------
 
-    async def _guarded_process(self, session_id: UUID) -> None:
-        """Wrapper that always releases the semaphore."""
+    async def _guarded_process(
+        self,
+        session_id: UUID,
+        *,
+        dequeued: DequeuedSession | None = None,
+    ) -> None:
+        """Wrapper that always releases the semaphore + TurnConcurrencyGate slot."""
         try:
             await self._process(session_id)
         finally:
             self.semaphore.release()
+            # Plan 2 / Task 14 — release the gate slot acquired in
+            # the dispatch loop so the tenant's next queued session
+            # can come off the queue.
+            if dequeued is not None and self._turn_gate is not None:
+                try:
+                    await self._turn_gate.release(
+                        dequeued.org_id, dequeued.agent_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to release TurnConcurrencyGate slot for "
+                        "org=%s agent=%s; the counter is bounded at zero "
+                        "by release() so this won't drive it negative",
+                        dequeued.org_id, dequeued.agent_id,
+                        exc_info=True,
+                    )
 
     async def _requeue_busy_session(self, session_id: UUID) -> None:
         await asyncio.sleep(_LEASE_BUSY_REQUEUE_DELAY)

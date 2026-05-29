@@ -262,6 +262,10 @@ class WorkerSettings(BaseSettings):
     # per-turn artifact recaps. Off disables the summarizer entirely;
     # older SDK versions ignore the events when this is on.
     emit_turn_summaries: bool = True
+    # Plan 2 / Task 14 — per-(org_id, agent_id) max in-flight turns
+    # cap used by TurnConcurrencyGate.  ``ctx.governance`` may override
+    # per tenant in a later plan; until then this is the uniform cap.
+    max_concurrent_turns_default: int = 10
 
 
 class LLMSettings(BaseSettings):
