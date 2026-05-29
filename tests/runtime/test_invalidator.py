@@ -151,6 +151,30 @@ def test_invalidation_channels_constant_exports_all_five_prefixes():
     assert "user.memory_changed:" in INVALIDATION_CHANNELS
 
 
+def test_handler_routes_mcp_servers_changed_to_mcp_server_cache():
+    """Plan 5 / Task 7.  Admin CRUD on the per-tenant MCP server
+    registry publishes agent.mcp_servers_changed:<agent_id> on
+    Redis; the proxy invalidates its cache so the next call sees
+    the new server list."""
+    from surogates.runtime.invalidator import handle_invalidation_message
+
+    mc = MagicMock()
+    handle_invalidation_message(
+        channel="agent.mcp_servers_changed:a-1",
+        payload=b"",
+        mcp_server_cache=mc,
+    )
+    mc.invalidate.assert_called_once_with("a-1")
+
+
+def test_invalidation_channels_includes_mcp_servers_changed():
+    """Plan 5 / Task 7.  The constant must list the new prefix so
+    `run_invalidator` psubscribes to it from the lifespan."""
+    from surogates.runtime.invalidator import INVALIDATION_CHANNELS
+
+    assert "agent.mcp_servers_changed:" in INVALIDATION_CHANNELS
+
+
 def test_handler_routes_user_memory_changed_to_memory_cache():
     """Plan 4 / Task 2.  When a worker writes to a user's memory it
     publishes user.memory_changed:<org_id>:<user_id> on Redis; other

@@ -50,6 +50,16 @@ _CHANNEL_ROUTING: tuple[tuple[str, str], ...] = (
     # colon-joined string so the channel identifier passes through
     # without a parser.
     ("user.memory_changed:", "memory_cache"),
+    # Plan 5 / Task 7 — admin CRUD on the per-tenant MCP server
+    # registry publishes here.  Identifier is just the agent_id
+    # (no org_id prefix) because admins reference agents by id;
+    # the MCPServerRegistryCache's get() composes the full
+    # "<org_id>:<agent_id>" key from the caller's context, so the
+    # invalidate() side keys on agent_id verbatim — which means a
+    # rare cross-org collision in agent_id would over-invalidate,
+    # not under-invalidate.  Agent ids are UUIDs in PROD; collision
+    # probability is negligible.
+    ("agent.mcp_servers_changed:", "mcp_server_cache"),
 )
 
 INVALIDATION_CHANNELS: tuple[str, ...] = tuple(
@@ -66,6 +76,7 @@ def handle_invalidation_message(
     slug_cache: Any = None,
     file_bundle_cache: Any = None,
     memory_cache: Any = None,
+    mcp_server_cache: Any = None,
 ) -> None:
     """Drop a single cache entry if the channel matches.
 
@@ -81,6 +92,7 @@ def handle_invalidation_message(
         "slug_cache": slug_cache,
         "file_bundle_cache": file_bundle_cache,
         "memory_cache": memory_cache,
+        "mcp_server_cache": mcp_server_cache,
     }
     for prefix, cache_kwarg in _CHANNEL_ROUTING:
         if channel.startswith(prefix):
@@ -99,6 +111,7 @@ async def run_invalidator(
     slug_cache: Any = None,
     file_bundle_cache: Any = None,
     memory_cache: Any = None,
+    mcp_server_cache: Any = None,
 ) -> None:
     """Long-running listener for runtime-config / firebase / slug invalidations.
 
@@ -127,6 +140,7 @@ async def run_invalidator(
                 slug_cache=slug_cache,
                 file_bundle_cache=file_bundle_cache,
                 memory_cache=memory_cache,
+                mcp_server_cache=mcp_server_cache,
             )
     finally:
         try:

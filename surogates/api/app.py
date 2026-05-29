@@ -182,6 +182,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     from surogates.runtime import (
         FileBundleCache,
         FirebaseConfigCache,
+        MCPServerRegistryCache,
         PerTenantRateLimiter,
         PlatformClient,
         RuntimeConfigCache,
@@ -201,6 +202,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         app.state.rate_limiter = None
         app.state.file_bundle_cache = None
         app.state.memory_cache = None
+        app.state.mcp_server_cache = None
         app.state.runtime_invalidator_task = None
         return
 
@@ -242,6 +244,14 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         storage_backend=getattr(app.state, "storage_backend", None),
     )
 
+    # Plan 5 / Task 7 — per-agent MCP server registry cache.  Plan 5
+    # Task 8 retires the /etc/surogates/mcp filesystem fallback in
+    # favour of the DB-backed list served by the management plane;
+    # this cache sits in front of that endpoint.
+    mcp_server_cache = _maybe_build_mcp_server_cache(
+        settings=settings, platform_client=client,
+    )
+
     app.state.platform_client = client
     app.state.runtime_config_cache = cache
     app.state.firebase_config_cache = firebase_cache
@@ -249,6 +259,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     app.state.rate_limiter = rate_limiter
     app.state.file_bundle_cache = file_bundle_cache
     app.state.memory_cache = memory_cache
+    app.state.mcp_server_cache = mcp_server_cache
     app.state.runtime_invalidator_task = asyncio.create_task(
         run_invalidator(
             app.state.redis,
@@ -257,6 +268,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
             slug_cache=slug_cache,
             file_bundle_cache=file_bundle_cache,
             memory_cache=memory_cache,
+            mcp_server_cache=mcp_server_cache,
         ),
         name="surogates-runtime-invalidator",
     )
@@ -311,6 +323,32 @@ def _maybe_build_memory_cache(
         return raw
 
     return MemoryCache(loader=_loader, ttl_seconds=5.0)
+
+
+def _maybe_build_mcp_server_cache(
+    *, settings, platform_client,
+):
+    """Construct an MCPServerRegistryCache when the platform client
+    is wired; return None otherwise.
+
+    Plan 5 / Task 7.  The cache key is the bare ``agent_id`` so the
+    invalidator channel ``agent.mcp_servers_changed:<agent_id>``
+    routes its identifier straight through to ``cache.invalidate``.
+    The loader hits the surogate-ops endpoint
+    ``GET /api/agents/{agent_id}/mcp-servers`` (added on the
+    management plane for Plan 5) which returns the agent's effective
+    MCP server registry — DB-only, no filesystem fallback (Task 8
+    retires the on-disk legacy layer).
+    """
+    from surogates.runtime import MCPServerRegistryCache
+
+    if platform_client is None:
+        return None
+
+    async def _loader(agent_id: str) -> list[dict]:
+        return await platform_client.get_agent_mcp_servers(agent_id)
+
+    return MCPServerRegistryCache(loader=_loader, ttl_seconds=30.0)
 
 
 def _maybe_build_file_bundle_cache(
@@ -419,6 +457,8 @@ async def _shutdown_shared_runtime_plumbing(app: FastAPI) -> None:
         app.state.file_bundle_cache = None
     if hasattr(app.state, "memory_cache"):
         app.state.memory_cache = None
+    if hasattr(app.state, "mcp_server_cache"):
+        app.state.mcp_server_cache = None
 
 
 def create_app() -> FastAPI:

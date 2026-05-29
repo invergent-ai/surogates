@@ -152,5 +152,40 @@ class PlatformClient:
         resp.raise_for_status()
         return resp.json()["agent_id"]
 
+    async def get_agent_mcp_servers(self, agent_id: str) -> list[dict]:
+        """Fetch the agent's effective MCP server registry (Plan 5).
+
+        Returns a list of MCP server config dicts the agent can call
+        — the management plane filters the org's MCP servers by the
+        agent's allow-list (``AgentRuntimeContext.mcp_server_ids``).
+
+        Empty list (``[]``) on 404 because an agent that exists but
+        has no MCP servers configured is a normal state, not an error
+        — the MCPCallSandbox treats both empty and missing as "no
+        tools available for this agent".
+
+        * :class:`PlatformAuthError` on 401 — operations problem.
+        * ``httpx.HTTPStatusError`` on any other non-2xx.
+        """
+        try:
+            resp = await self._client.get(
+                f"/api/agents/{agent_id}/mcp-servers",
+            )
+        except httpx.HTTPError as exc:
+            raise exc
+
+        if resp.status_code == 404:
+            return []
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        body = resp.json()
+        if isinstance(body, dict):
+            return list(body.get("servers", []))
+        return list(body)
+
     async def aclose(self) -> None:
         await self._client.aclose()

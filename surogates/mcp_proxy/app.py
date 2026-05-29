@@ -108,14 +108,15 @@ def _install_shared_runtime_plumbing_for_proxy(app, settings) -> None:
     import asyncio
 
     from surogates.runtime import (
-        PerTenantRateLimiter, PlatformClient, RuntimeConfigCache,
-        run_invalidator,
+        MCPServerRegistryCache, PerTenantRateLimiter, PlatformClient,
+        RuntimeConfigCache, run_invalidator,
     )
 
     if getattr(settings, "runtime_mode", "helm") != "shared":
         app.state.platform_client = None
         app.state.runtime_config_cache = None
         app.state.rate_limiter = None
+        app.state.mcp_server_cache = None
         app.state.runtime_invalidator_task = None
         return
 
@@ -127,6 +128,7 @@ def _install_shared_runtime_plumbing_for_proxy(app, settings) -> None:
         app.state.platform_client = None
         app.state.runtime_config_cache = None
         app.state.rate_limiter = None
+        app.state.mcp_server_cache = None
         app.state.runtime_invalidator_task = None
         return
 
@@ -141,12 +143,22 @@ def _install_shared_runtime_plumbing_for_proxy(app, settings) -> None:
         app.state.redis,
         default_rpm=getattr(settings.api, "rate_limit_rpm", 300),
     )
+
+    async def _mcp_loader(agent_id: str) -> list[dict]:
+        return await client.get_agent_mcp_servers(agent_id)
+
+    mcp_server_cache = MCPServerRegistryCache(
+        loader=_mcp_loader, ttl_seconds=30.0,
+    )
+
     app.state.platform_client = client
     app.state.runtime_config_cache = cache
     app.state.rate_limiter = rate_limiter
+    app.state.mcp_server_cache = mcp_server_cache
     app.state.runtime_invalidator_task = asyncio.create_task(
         run_invalidator(
             app.state.redis, runtime_config_cache=cache,
+            mcp_server_cache=mcp_server_cache,
         ),
         name="surogates-mcp-proxy-runtime-invalidator",
     )
@@ -172,6 +184,8 @@ async def _shutdown_shared_runtime_plumbing_for_proxy(app) -> None:
         app.state.runtime_config_cache = None
     if hasattr(app.state, "rate_limiter"):
         app.state.rate_limiter = None
+    if hasattr(app.state, "mcp_server_cache"):
+        app.state.mcp_server_cache = None
 
 
 def create_app() -> FastAPI:
