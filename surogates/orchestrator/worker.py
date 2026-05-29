@@ -1325,7 +1325,14 @@ async def run_worker(settings: Settings) -> None:
 
     scheduled_runner = None
     scheduled_task = None
-    if settings.scheduled_sessions.enabled:
+    # Plan 8 / Task 8.  Shared-mode workers do NOT bootstrap a
+    # per-tenant ScheduledSessionRunner; the platform ticker
+    # (surogates.scheduled.platform_ticker) runs as its own
+    # Deployment and serves every shared-mode agent from one
+    # leader-elected process.  Helm-mode workers keep the
+    # per-tenant ticker until Plan 9's cutover.
+    _is_shared = getattr(settings, "runtime_mode", "helm") == "shared"
+    if settings.scheduled_sessions.enabled and not _is_shared:
         from surogates.scheduled.runner import ScheduledSessionRunner
         from surogates.scheduled.store import ScheduledSessionStore
 
