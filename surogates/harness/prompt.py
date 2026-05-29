@@ -721,11 +721,18 @@ class PromptBuilder:
 
     def _context_files_section(self) -> str:
         """Load context files (SOUL.md, AGENTS.md, etc.) into the prompt."""
-        from surogates.harness.context_files import load_project_context, load_soul_md
+        # Plan 3 / Task 10: load_soul_md is now an async,
+        # bundle-backed helper.  The PromptBuilder is sync and we
+        # don't have the bundle threaded through yet — that's
+        # Task 12.  Until then, fall through to the legacy
+        # disk-reading helper that takes tenant.asset_root.
+        from surogates.harness.context_files import (
+            load_project_context, load_soul_md_from_disk,
+        )
 
         parts: list[str] = []
 
-        soul = load_soul_md(self.tenant.asset_root)
+        soul = load_soul_md_from_disk(self.tenant.asset_root)
         if soul:
             parts.append(f"## Agent Identity (SOUL.md)\n{soul}")
 

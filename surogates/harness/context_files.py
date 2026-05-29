@@ -59,8 +59,13 @@ _CONTEXT_INVISIBLE_CHARS: frozenset[str] = frozenset({
 # ---------------------------------------------------------------------------
 
 
-def load_soul_md(asset_root: str) -> str | None:
-    """Load SOUL.md from tenant asset root (agent identity).
+def load_soul_md_from_disk(asset_root: str) -> str | None:
+    """Load SOUL.md from tenant asset root (legacy helm path).
+
+    Plan 3 / Task 10.  Kept for the helm-mode legacy path where the
+    agent's SOUL.md lives on the tenant's PVC.  Shared-runtime
+    callers should use the async :func:`load_soul_md(bundle)`
+    instead.  Plan 9 retires this disk-reading variant entirely.
 
     Checks ``{asset_root}/shared/SOUL.md`` and ``{asset_root}/SOUL.md``.
     """
@@ -77,6 +82,33 @@ def load_soul_md(asset_root: str) -> str | None:
             except OSError:
                 logger.warning("Failed to read %s", candidate)
     return None
+
+
+async def load_soul_md(bundle) -> str | None:
+    """Load SOUL.md from the agent's file bundle.
+
+    Plan 3 / Task 10.  Replaces the legacy asset_root-string
+    signature.  Bundle-less agents (helm mode, or an agent that
+    hasn't been onboarded to a bundle yet) pass None and the loader
+    returns None silently so the prompt builder skips the SOUL.md
+    section rather than crashing.
+
+    Runs the loaded content through the same injection scan +
+    truncation pipeline as the legacy disk path — a malicious
+    tenant bundle must not be able to smuggle prompt injection past
+    the LLM's system prompt.
+    """
+    if bundle is None:
+        return None
+    try:
+        raw = await bundle.read_text("SOUL.md")
+    except LookupError:
+        return None
+    content = raw.strip()
+    if not content:
+        return None
+    content = scan_context_content(content, "SOUL.md")
+    return truncate_context(content)
 
 
 def load_project_context(workspace_path: str | None) -> str | None:
