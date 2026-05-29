@@ -20,6 +20,7 @@ def _make_settings(*, runtime_mode: str = "shared",
         platform_api_url=platform_api_url,
         platform_api_token="t",
         api=SimpleNamespace(rate_limit_rpm=300),
+        hub=SimpleNamespace(endpoint="", username="", password=""),
     )
 
 
@@ -115,6 +116,44 @@ async def test_install_worker_runtime_plumbing_starts_invalidator_task():
     finally:
         await _stop_worker_invalidator(state)
         assert state["runtime_invalidator_task"] is None
+        await _shutdown_worker_runtime_plumbing(state)
+
+
+@pytest.mark.asyncio
+async def test_install_worker_runtime_plumbing_wires_file_bundle_cache(
+    monkeypatch,
+):
+    """Plan 3 / Task 9 — worker bootstrap mirrors the api lifespan.
+
+    Same fake-SDK monkeypatch as the api test so the wiring logic
+    can be exercised regardless of CI install state."""
+    import sys
+    import types
+
+    fake_sdk = types.ModuleType("surogate_hub_sdk")
+    fake_sdk.Configuration = lambda **kw: kw
+
+    class _FakeHubClient:
+        def __init__(self, *, configuration):
+            self.objects_api = object()
+            self.config = configuration
+
+    fake_sdk.HubClient = _FakeHubClient
+    monkeypatch.setitem(sys.modules, "surogate_hub_sdk", fake_sdk)
+
+    from surogates.orchestrator.worker import (
+        _install_worker_runtime_plumbing,
+        _shutdown_worker_runtime_plumbing,
+    )
+    from surogates.runtime import FileBundleCache
+
+    state = {"redis": _FakeRedis()}
+    settings = _make_settings()
+    settings.hub.endpoint = "https://hub"  # type: ignore[misc]
+    _install_worker_runtime_plumbing(state, settings)
+    try:
+        assert isinstance(state["file_bundle_cache"], FileBundleCache)
+    finally:
         await _shutdown_worker_runtime_plumbing(state)
 
 

@@ -399,20 +399,26 @@ async def _load_prompt_catalogs(
 
 
 def _install_worker_runtime_plumbing(state: dict, settings) -> None:
-    """Wire PlatformClient + RuntimeConfigCache onto a worker state dict.
+    """Wire PlatformClient + RuntimeConfigCache + FileBundleCache
+    onto a worker state dict.
 
-    Plan 2 / Task 1.  Mirrors
+    Plan 2 / Task 1 + Plan 3 / Task 9.  Mirrors
     :func:`surogates.api.app._install_shared_runtime_plumbing` but
     keyed on a plain dict (workers don't have a FastAPI app.state).
-    ``state['platform_client']`` and ``state['runtime_config_cache']``
-    are set on success; both stay ``None`` when
-    ``runtime_mode != 'shared'`` OR ``platform_api_url`` is empty.
+    ``state['platform_client']``, ``state['runtime_config_cache']``,
+    and ``state['file_bundle_cache']`` are set on success; all stay
+    ``None`` when ``runtime_mode != 'shared'`` OR
+    ``platform_api_url`` is empty (the file_bundle_cache also stays
+    None when ``settings.hub.endpoint`` is empty or the Hub SDK is
+    not installed).
     """
+    from surogates.api.app import _maybe_build_file_bundle_cache
     from surogates.runtime import PlatformClient, RuntimeConfigCache
 
     if getattr(settings, "runtime_mode", "helm") != "shared":
         state["platform_client"] = None
         state["runtime_config_cache"] = None
+        state["file_bundle_cache"] = None
         return
 
     if not settings.platform_api_url:
@@ -422,15 +428,20 @@ def _install_worker_runtime_plumbing(state: dict, settings) -> None:
         )
         state["platform_client"] = None
         state["runtime_config_cache"] = None
+        state["file_bundle_cache"] = None
         return
 
     client = PlatformClient(
         base_url=settings.platform_api_url,
         token=settings.platform_api_token,
     )
-    state["platform_client"] = client
-    state["runtime_config_cache"] = RuntimeConfigCache(
+    runtime_config_cache = RuntimeConfigCache(
         loader=client.get_runtime_config, ttl_seconds=1.0,
+    )
+    state["platform_client"] = client
+    state["runtime_config_cache"] = runtime_config_cache
+    state["file_bundle_cache"] = _maybe_build_file_bundle_cache(
+        settings=settings, runtime_config_cache=runtime_config_cache,
     )
 
 
@@ -510,6 +521,7 @@ async def _shutdown_worker_runtime_plumbing(state: dict) -> None:
         await client.aclose()
     state["platform_client"] = None
     state["runtime_config_cache"] = None
+    state["file_bundle_cache"] = None
 
 
 def _start_worker_invalidator(state: dict) -> None:
@@ -531,7 +543,11 @@ def _start_worker_invalidator(state: dict) -> None:
     from surogates.runtime import run_invalidator
 
     state["runtime_invalidator_task"] = asyncio.create_task(
-        run_invalidator(redis_client, runtime_config_cache=cache),
+        run_invalidator(
+            redis_client,
+            runtime_config_cache=cache,
+            file_bundle_cache=state.get("file_bundle_cache"),
+        ),
         name="surogates-worker-runtime-invalidator",
     )
 

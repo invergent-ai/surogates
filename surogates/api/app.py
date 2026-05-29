@@ -180,6 +180,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     import asyncio
 
     from surogates.runtime import (
+        FileBundleCache,
         FirebaseConfigCache,
         PerTenantRateLimiter,
         PlatformClient,
@@ -198,6 +199,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         app.state.firebase_config_cache = None
         app.state.slug_resolver_cache = None
         app.state.rate_limiter = None
+        app.state.file_bundle_cache = None
         app.state.runtime_invalidator_task = None
         return
 
@@ -221,22 +223,112 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         app.state.redis,
         default_rpm=getattr(settings.api, "rate_limit_rpm", 300),
     )
+
+    # Plan 3 / Task 9 — file-bundle cache.  When the Hub endpoint
+    # is unset the cache stays None and the worker falls back to
+    # legacy filesystem reads for SOUL.md / platform skills.  Plan 9
+    # retires the fallback and makes Hub required.
+    file_bundle_cache: FileBundleCache | None = _maybe_build_file_bundle_cache(
+        settings=settings, runtime_config_cache=cache,
+    )
+
     app.state.platform_client = client
     app.state.runtime_config_cache = cache
     app.state.firebase_config_cache = firebase_cache
     app.state.slug_resolver_cache = slug_cache
     app.state.rate_limiter = rate_limiter
+    app.state.file_bundle_cache = file_bundle_cache
     app.state.runtime_invalidator_task = asyncio.create_task(
         run_invalidator(
             app.state.redis,
             runtime_config_cache=cache,
             firebase_cache=firebase_cache,
             slug_cache=slug_cache,
+            file_bundle_cache=file_bundle_cache,
         ),
         name="surogates-runtime-invalidator",
     )
     logger.info(
         "Shared-runtime plumbing wired (platform=%s)", settings.platform_api_url,
+    )
+
+
+def _maybe_build_file_bundle_cache(
+    *, settings, runtime_config_cache,
+):
+    """Construct a FileBundleCache when both HubSettings and the SDK
+    are available; return None otherwise.
+
+    Plan 3 / Task 9.  The Hub SDK (``surogate_hub_sdk``) is an
+    optional install in the surogates wheel — production deployments
+    pin it, dev / test environments may not have it.  When the SDK
+    is missing OR ``settings.hub.endpoint`` is empty, the cache
+    stays None and the worker falls back to legacy filesystem reads
+    for SOUL.md / platform skills.  Plan 9 makes Hub required.
+    """
+    from surogates.runtime import (
+        AgentFileBundle,
+        FileBundleCache,
+        HubBundleClient,
+    )
+    from surogates.runtime.bundle_accessor import _BundleSpec
+    from surogates.runtime.bundle_cache import (
+        _L2DiskCache, _L2ReadThroughHub,
+    )
+
+    hub_settings = getattr(settings, "hub", None)
+    if hub_settings is None or not hub_settings.endpoint:
+        return None
+
+    try:
+        from surogate_hub_sdk import Configuration as _HubConfig
+        from surogate_hub_sdk import HubClient as _HubSDK
+    except ImportError:
+        logger.warning(
+            "surogate_hub_sdk not installed; file_bundle_cache disabled. "
+            "Install the SDK to enable Hub-backed bundles.",
+        )
+        return None
+
+    from pathlib import Path
+
+    hub_sdk = _HubSDK(
+        configuration=_HubConfig(
+            host=hub_settings.endpoint,
+            username=hub_settings.username,
+            password=hub_settings.password,
+        ),
+    )
+    l2 = _L2DiskCache(
+        root=Path.home() / ".surogate" / "bundle-cache",
+    )
+
+    async def _bundle_loader(agent_id: str) -> AgentFileBundle:
+        payload = await runtime_config_cache.get(agent_id)
+        hub_ref = payload.get("bundle_hub_ref")
+        version = payload.get("bundle_version")
+        if not hub_ref or not version:
+            raise LookupError(
+                f"agent {agent_id} has no bundle configured",
+            )
+        spec = _BundleSpec.parse(hub_ref)
+        hub_client = HubBundleClient(
+            objects_api=hub_sdk.objects_api,
+            user=spec.user,
+            repository=spec.repository,
+        )
+        read_through = _L2ReadThroughHub(
+            agent_id=agent_id, hub=hub_client, l2=l2,
+        )
+        return AgentFileBundle(
+            agent_id=agent_id,
+            hub_ref=hub_ref,
+            version=version,
+            client=read_through,
+        )
+
+    return FileBundleCache(
+        loader=_bundle_loader, ttl_seconds=30.0, l2=l2,
     )
 
 
@@ -263,6 +355,8 @@ async def _shutdown_shared_runtime_plumbing(app: FastAPI) -> None:
         app.state.slug_resolver_cache = None
     if hasattr(app.state, "rate_limiter"):
         app.state.rate_limiter = None
+    if hasattr(app.state, "file_bundle_cache"):
+        app.state.file_bundle_cache = None
 
 
 def create_app() -> FastAPI:
