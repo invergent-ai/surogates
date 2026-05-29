@@ -116,3 +116,125 @@ def _make_fake_bundle(agent_id):
         agent_id=agent_id, hub_ref="acme/agents", version="v1",
         client=object(),  # not exercised in L1 tests
     )
+
+
+# ---------------------------------------------------------------------------
+# L2 disk cache + read-through wrapper (Plan 3 / Task 7)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bundle_cache_l2_writes_file_to_disk(tmp_path):
+    """L2 disk cache: when the L1 loader fetches a file the bytes
+    are written atomically to disk so a worker restart doesn't
+    blast the Hub re-pulling everything."""
+    from surogates.runtime.bundle_cache import _L2DiskCache
+
+    cache = _L2DiskCache(root=tmp_path, max_bytes=10_000)
+    await cache.write("a-1", "v1", "SOUL.md", b"hello")
+    assert (tmp_path / "a-1" / "v1" / "SOUL.md").read_bytes() == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_bundle_cache_l2_read_hit(tmp_path):
+    from surogates.runtime.bundle_cache import _L2DiskCache
+
+    cache = _L2DiskCache(root=tmp_path, max_bytes=10_000)
+    await cache.write("a-1", "v1", "SOUL.md", b"hello")
+    assert await cache.read("a-1", "v1", "SOUL.md") == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_bundle_cache_l2_read_miss_returns_none(tmp_path):
+    from surogates.runtime.bundle_cache import _L2DiskCache
+
+    cache = _L2DiskCache(root=tmp_path, max_bytes=10_000)
+    assert await cache.read("a-1", "v1", "missing.md") is None
+
+
+@pytest.mark.asyncio
+async def test_bundle_cache_l2_atomic_write(tmp_path):
+    """A concurrent reader must never see a partially-written file.
+    The cache writes to a .tmp sibling and renames into place."""
+    from surogates.runtime.bundle_cache import _L2DiskCache
+
+    cache = _L2DiskCache(root=tmp_path, max_bytes=10_000)
+    await cache.write("a-1", "v1", "SOUL.md", b"complete")
+    final = tmp_path / "a-1" / "v1" / "SOUL.md"
+    assert not list(final.parent.glob("*.tmp"))
+
+
+@pytest.mark.asyncio
+async def test_bundle_cache_l2_invalidate_agent_drops_all_versions(tmp_path):
+    """When ``agent.bundle_changed:<agent_id>`` fires the cache
+    drops every cached version for that agent_id (not just the
+    one matching the new pointer) — operators rolling back can
+    pick any prior version and the cache must re-fetch."""
+    from surogates.runtime.bundle_cache import _L2DiskCache
+
+    cache = _L2DiskCache(root=tmp_path, max_bytes=10_000)
+    await cache.write("a-1", "v1", "SOUL.md", b"v1-content")
+    await cache.write("a-1", "v2", "SOUL.md", b"v2-content")
+    await cache.invalidate_agent("a-1")
+    assert await cache.read("a-1", "v1", "SOUL.md") is None
+    assert await cache.read("a-1", "v2", "SOUL.md") is None
+
+
+@pytest.mark.asyncio
+async def test_l2_read_through_hub_hits_l2_on_repeat_read(tmp_path):
+    """The L2 read-through wrapper checks disk first; on warm read
+    the Hub is not touched at all."""
+    from surogates.runtime.bundle_cache import (
+        _L2DiskCache, _L2ReadThroughHub,
+    )
+
+    class _FakeHub:
+        def __init__(self):
+            self.read_calls = 0
+
+        async def read_bytes(self, ref, path):
+            self.read_calls += 1
+            return b"hub-bytes"
+
+        async def list_paths(self, ref, *, prefix=""):
+            return []
+
+        async def aclose(self):
+            return None
+
+    l2 = _L2DiskCache(root=tmp_path, max_bytes=10_000)
+    hub = _FakeHub()
+    wrapper = _L2ReadThroughHub(agent_id="a-1", hub=hub, l2=l2)
+
+    # First read misses L2 → hub call + write-through.
+    assert await wrapper.read_bytes("v1", "SOUL.md") == b"hub-bytes"
+    # Second read hits L2 → no extra hub call.
+    assert await wrapper.read_bytes("v1", "SOUL.md") == b"hub-bytes"
+    assert hub.read_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_l2_read_through_hub_forwards_list_paths(tmp_path):
+    """list_paths is not L2-cached; the wrapper forwards verbatim
+    so directory listings always reflect the current Hub view."""
+    from surogates.runtime.bundle_cache import (
+        _L2DiskCache, _L2ReadThroughHub,
+    )
+
+    class _FakeHub:
+        async def read_bytes(self, ref, path):
+            raise AssertionError("not called")
+
+        async def list_paths(self, ref, *, prefix=""):
+            return ["SOUL.md", "skills/foo/SKILL.md"]
+
+        async def aclose(self):
+            return None
+
+    l2 = _L2DiskCache(root=tmp_path, max_bytes=10_000)
+    wrapper = _L2ReadThroughHub(
+        agent_id="a-1", hub=_FakeHub(), l2=l2,
+    )
+    assert await wrapper.list_paths("v1", prefix="skills/") == [
+        "SOUL.md", "skills/foo/SKILL.md",
+    ]
