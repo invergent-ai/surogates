@@ -37,8 +37,10 @@ __all__ = [
 # instance the handler invalidates when the channel matches.
 _CHANNEL_ROUTING: tuple[tuple[str, str], ...] = (
     ("agent.runtime_config_changed:", "runtime_config_cache"),
-    # File bundle hub_ref bumped (Plan 3 — pre-routed here).
-    ("agent.bundle_changed:", "runtime_config_cache"),
+    # File bundle hub_ref / version bumped (Plan 3 / Task 8).
+    # Retargeted from runtime_config_cache (Plan 1b pre-routing) to
+    # the new FileBundleCache.
+    ("agent.bundle_changed:", "file_bundle_cache"),
     # Project Firebase config row changed (Plan 1b).
     ("project.firebase_config_changed:", "firebase_cache"),
     # Agent slug → agent_id mapping changed (Plan 1b Task 11).
@@ -57,6 +59,7 @@ def handle_invalidation_message(
     runtime_config_cache: Any = None,
     firebase_cache: Any = None,
     slug_cache: Any = None,
+    file_bundle_cache: Any = None,
 ) -> None:
     """Drop a single cache entry if the channel matches.
 
@@ -70,6 +73,7 @@ def handle_invalidation_message(
         "runtime_config_cache": runtime_config_cache,
         "firebase_cache": firebase_cache,
         "slug_cache": slug_cache,
+        "file_bundle_cache": file_bundle_cache,
     }
     for prefix, cache_kwarg in _CHANNEL_ROUTING:
         if channel.startswith(prefix):
@@ -86,6 +90,7 @@ async def run_invalidator(
     runtime_config_cache: Any = None,
     firebase_cache: Any = None,
     slug_cache: Any = None,
+    file_bundle_cache: Any = None,
 ) -> None:
     """Long-running listener for runtime-config / firebase / slug invalidations.
 
@@ -112,6 +117,7 @@ async def run_invalidator(
                 runtime_config_cache=runtime_config_cache,
                 firebase_cache=firebase_cache,
                 slug_cache=slug_cache,
+                file_bundle_cache=file_bundle_cache,
             )
     finally:
         try:

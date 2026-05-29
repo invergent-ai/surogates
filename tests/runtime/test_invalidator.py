@@ -34,19 +34,22 @@ def test_handler_routes_runtime_config_changed_to_runtime_cache():
     sl.invalidate.assert_not_called()
 
 
-def test_handler_routes_bundle_changed_to_runtime_cache():
-    """Bundle invalidation lands in Plan 3 (file artifacts) but we
-    pre-route the channel through the runtime-config cache so the wiring
-    exists when the bundle accessor is added."""
+def test_handler_routes_bundle_changed_to_file_bundle_cache():
+    """Plan 3 / Task 8.  agent.bundle_changed: was pre-routed by
+    Plan 1b Task 7 to runtime_config_cache as a transitional
+    target; Plan 3 retargets it to the new file_bundle_cache."""
     from surogates.runtime.invalidator import handle_invalidation_message
 
     rt = MagicMock()
+    fb = MagicMock()
     handle_invalidation_message(
         channel="agent.bundle_changed:a-2",
         payload=b"",
         runtime_config_cache=rt,
+        file_bundle_cache=fb,
     )
-    rt.invalidate.assert_called_once_with("a-2")
+    fb.invalidate.assert_called_once_with("a-2")
+    rt.invalidate.assert_not_called()
 
 
 def test_handler_routes_firebase_changed_to_firebase_cache():
