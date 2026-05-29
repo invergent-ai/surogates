@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-__all__ = ["ResolvedLLM", "SessionLLMClients"]
+__all__ = ["ResolvedLLM", "SessionLLMClients", "build_session_llm_clients"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,3 +60,52 @@ class SessionLLMClients:
             if slot is None:
                 continue
             await slot.client.close()
+
+
+async def build_session_llm_clients(
+    ctx: "AgentRuntimeContext",
+    *,
+    vault: Any,
+    user_id: Any = None,
+) -> SessionLLMClients:
+    """Build the four-slot LLM bundle for one session.
+
+    Plan 2 / Task 6.  Each ``LLMEndpoint`` on the context becomes a
+    ``ResolvedLLM`` — one ``AsyncOpenAI`` instance pointed at
+    ``endpoint.base_url`` with the vault-resolved API key, paired
+    with ``endpoint.model``.
+
+    The four slots are independent connection pools; mid-call
+    failover (Plan 6) lives in the harness, not here.  Plan 2's
+    contract is just "give me clients keyed to the four slots; I'll
+    call them how the agent wants."
+    """
+    from openai import AsyncOpenAI
+
+    from surogates.runtime.context import LLMEndpoint
+
+    if ctx.llm_main is None:
+        raise ValueError(
+            f"agent {ctx.agent_id} has no llm_main configured — "
+            "every session needs a main LLM",
+        )
+
+    async def _resolve(endpoint: LLMEndpoint) -> ResolvedLLM:
+        key = await vault.resolve_ref(
+            endpoint.api_key_ref, org_id=ctx.org_id, user_id=user_id,
+        )
+        client = AsyncOpenAI(api_key=key, base_url=endpoint.base_url)
+        return ResolvedLLM(client=client, model=endpoint.model)
+
+    async def _opt(endpoint: LLMEndpoint | None) -> ResolvedLLM | None:
+        if endpoint is None:
+            return None
+        return await _resolve(endpoint)
+
+    main = await _resolve(ctx.llm_main)
+    return SessionLLMClients(
+        main=main,
+        summary=await _opt(ctx.llm_summary),
+        vision=await _opt(ctx.llm_vision),
+        advisor=await _opt(ctx.llm_advisor),
+    )
