@@ -45,6 +45,11 @@ _CHANNEL_ROUTING: tuple[tuple[str, str], ...] = (
     ("project.firebase_config_changed:", "firebase_cache"),
     # Agent slug → agent_id mapping changed (Plan 1b Task 11).
     ("agent.slug_changed:", "slug_cache"),
+    # Plan 4 / Task 2 — per-user memory invalidation.  Identifier
+    # is ``<org_id>:<user_id>``; the MemoryCache keys on the same
+    # colon-joined string so the channel identifier passes through
+    # without a parser.
+    ("user.memory_changed:", "memory_cache"),
 )
 
 INVALIDATION_CHANNELS: tuple[str, ...] = tuple(
@@ -60,6 +65,7 @@ def handle_invalidation_message(
     firebase_cache: Any = None,
     slug_cache: Any = None,
     file_bundle_cache: Any = None,
+    memory_cache: Any = None,
 ) -> None:
     """Drop a single cache entry if the channel matches.
 
@@ -74,6 +80,7 @@ def handle_invalidation_message(
         "firebase_cache": firebase_cache,
         "slug_cache": slug_cache,
         "file_bundle_cache": file_bundle_cache,
+        "memory_cache": memory_cache,
     }
     for prefix, cache_kwarg in _CHANNEL_ROUTING:
         if channel.startswith(prefix):
@@ -91,6 +98,7 @@ async def run_invalidator(
     firebase_cache: Any = None,
     slug_cache: Any = None,
     file_bundle_cache: Any = None,
+    memory_cache: Any = None,
 ) -> None:
     """Long-running listener for runtime-config / firebase / slug invalidations.
 
@@ -118,6 +126,7 @@ async def run_invalidator(
                 firebase_cache=firebase_cache,
                 slug_cache=slug_cache,
                 file_bundle_cache=file_bundle_cache,
+                memory_cache=memory_cache,
             )
     finally:
         try:

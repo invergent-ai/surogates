@@ -139,8 +139,8 @@ def test_handler_skips_routing_when_target_cache_is_none():
     )  # must not raise
 
 
-def test_invalidation_channels_constant_exports_all_four_prefixes():
-    """Plans 3 / 6 / 7 will publish on additional channels; keep the
+def test_invalidation_channels_constant_exports_all_five_prefixes():
+    """Plans 3 / 4 / 6 / 7 will publish on additional channels; keep the
     constant importable so they extend it in one place."""
     from surogates.runtime.invalidator import INVALIDATION_CHANNELS
 
@@ -148,3 +148,21 @@ def test_invalidation_channels_constant_exports_all_four_prefixes():
     assert "agent.bundle_changed:" in INVALIDATION_CHANNELS
     assert "project.firebase_config_changed:" in INVALIDATION_CHANNELS
     assert "agent.slug_changed:" in INVALIDATION_CHANNELS
+    assert "user.memory_changed:" in INVALIDATION_CHANNELS
+
+
+def test_handler_routes_user_memory_changed_to_memory_cache():
+    """Plan 4 / Task 2.  When a worker writes to a user's memory it
+    publishes user.memory_changed:<org_id>:<user_id> on Redis; other
+    workers serving the same user invalidate their L1 entry so the
+    next read fetches the new bytes from R2."""
+    from surogates.runtime.invalidator import handle_invalidation_message
+
+    mc = MagicMock()
+    handle_invalidation_message(
+        channel="user.memory_changed:o-1:u-1",
+        payload=b"",
+        memory_cache=mc,
+    )
+    # The identifier is the everything-after-the-prefix string.
+    mc.invalidate.assert_called_once_with("o-1:u-1")
