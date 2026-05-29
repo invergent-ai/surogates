@@ -1,0 +1,61 @@
+# Plan 8 / Task 13.  Platform-level cleanup CronJob.
+#
+# Replaces the per-tenant cleanup-sessions CronJob from the helm
+# chart (one CronJob per agent, scaled poorly) with a single
+# platform-level CronJob that iterates all shared-mode agents via
+# the surogates.jobs.platform_cleanup script.
+#
+# Same cadence as the helm version (every 6 hours by default).
+#
+# Placeholders to fill in (Plan 8 follow-up / operations):
+#   {{ namespace }}, {{ image_registry }}, {{ image_tag }},
+#   {{ db_secret }}, {{ redis_secret }}, {{ ops_api_url }},
+#   {{ ops_api_token_secret }}, {{ schedule }}  (default "0 */6 * * *")
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: surogates-platform-cleanup
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: surogates-platform-cleanup
+    app.kubernetes.io/component: platform-cleanup
+    app.kubernetes.io/managed-by: surogate-ops
+spec:
+  schedule: "{{ schedule }}"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: cleanup
+              image: "{{ image_registry }}/surogates:{{ image_tag }}"
+              imagePullPolicy: IfNotPresent
+              command: ["python", "-m", "surogates.jobs.platform_cleanup"]
+              env:
+                - name: SUROGATES_RUNTIME_MODE
+                  value: "shared"
+                - name: SUROGATES_DB__URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ db_secret }}
+                      key: url
+                - name: SUROGATES_PLATFORM_API_URL
+                  value: "{{ ops_api_url }}"
+                - name: SUROGATES_PLATFORM_API_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ ops_api_token_secret }}
+                      key: token
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "256Mi"
