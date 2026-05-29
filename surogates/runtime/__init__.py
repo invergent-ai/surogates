@@ -13,6 +13,7 @@ from surogates.runtime.bundle_cache import FileBundleCache
 from surogates.runtime.cache import RuntimeConfigCache
 from surogates.runtime.context import AgentRuntimeContext, LLMEndpoint
 from surogates.runtime.hub_client import HubBundleClient
+from surogates.runtime.mcp_server_cache import MCPServerRegistryCache
 from surogates.runtime.memory_cache import MemoryCache
 from surogates.runtime.firebase import FirebaseConfig
 from surogates.runtime.firebase_cache import FirebaseConfigCache
@@ -44,6 +45,7 @@ __all__ = [
     "HubBundleClient",
     "INVALIDATION_CHANNELS",
     "LLMEndpoint",
+    "MCPServerRegistryCache",
     "MemoryCache",
     "PerTenantRateLimiter",
     "PlatformAuthError",
