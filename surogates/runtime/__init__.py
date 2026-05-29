@@ -24,8 +24,13 @@ from surogates.runtime.resolver import (
     build_agent_runtime_context,
 )
 from surogates.runtime.slug_cache import SlugResolverCache
+from surogates.runtime.worker_resolver import (
+    AgentDisabledError,
+    resolve_runtime_context_for_session,
+)
 
 __all__ = [
+    "AgentDisabledError",
     "AgentRuntimeContext",
     "FirebaseConfig",
     "FirebaseConfigCache",
@@ -40,5 +45,6 @@ __all__ = [
     "build_agent_runtime_context",
     "handle_invalidation_message",
     "rate_limit_dep",
+    "resolve_runtime_context_for_session",
     "run_invalidator",
 ]
