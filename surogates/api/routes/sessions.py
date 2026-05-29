@@ -31,7 +31,11 @@ from surogates.storage.tenant import (
     prefixed_session_workspace_key,
     prefixed_session_workspace_prefix,
 )
-from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
+from surogates.runtime import (
+    AgentRuntimeContext,
+    agent_runtime_context_dep,
+    rate_limit_dep,
+)
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 
@@ -628,6 +632,7 @@ async def create_session(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+    _rate: None = Depends(rate_limit_dep),
 ) -> Session:
     """Create a new session for the authenticated user."""
     return await _create_session(
@@ -651,6 +656,7 @@ async def create_api_session(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+    _rate: None = Depends(rate_limit_dep),
 ) -> Session:
     """Create a new API-channel session for a service-account client."""
     service_account_id = _require_service_account_api_route(
@@ -690,6 +696,7 @@ async def send_message(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+    _rate: None = Depends(rate_limit_dep),
 ) -> SendMessageResponse:
     """Send a user message to a session, triggering agent processing."""
     _require_service_account_api_route(request, tenant)

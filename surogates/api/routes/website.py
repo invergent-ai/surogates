@@ -61,7 +61,11 @@ from surogates.channels.website_session import (
     verify_csrf_token,
 )
 from surogates.config import Settings, enqueue_session
-from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
+from surogates.runtime import (
+    AgentRuntimeContext,
+    agent_runtime_context_dep,
+    rate_limit_dep,
+)
 from surogates.session.events import EventType
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.tenant import agent_session_bucket
@@ -348,6 +352,7 @@ async def bootstrap_website_session(
     request: Request,
     response: Response,
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+    _rate: None = Depends(rate_limit_dep),
 ) -> BootstrapResponse:
     """Exchange a publishable key + approved origin for a session cookie.
 
@@ -472,6 +477,7 @@ async def send_website_message(
     session_id: UUID,
     body: SendMessageRequest,
     request: Request,
+    _rate: None = Depends(rate_limit_dep),
 ) -> SendMessageResponse:
     """Send a visitor message to the session, triggering agent processing.
 

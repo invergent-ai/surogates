@@ -24,7 +24,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
 from surogates.config import enqueue_session
-from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
+from surogates.runtime import (
+    AgentRuntimeContext,
+    agent_runtime_context_dep,
+    rate_limit_dep,
+)
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionStore
@@ -232,6 +236,7 @@ async def submit_prompt(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+    _rate: None = Depends(rate_limit_dep),
 ) -> PromptAccepted:
     """Submit a single prompt for asynchronous processing.
 
@@ -263,6 +268,7 @@ async def submit_prompts_batch(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+    _rate: None = Depends(rate_limit_dep),
 ) -> BatchPromptResponse:
     """Submit up to :data:`MAX_BATCH_SIZE` prompts in one round-trip.
 
