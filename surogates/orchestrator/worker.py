@@ -397,6 +397,54 @@ async def _load_prompt_catalogs(
     return available_agents, available_skills
 
 
+def _install_worker_runtime_plumbing(state: dict, settings) -> None:
+    """Wire PlatformClient + RuntimeConfigCache onto a worker state dict.
+
+    Plan 2 / Task 1.  Mirrors
+    :func:`surogates.api.app._install_shared_runtime_plumbing` but
+    keyed on a plain dict (workers don't have a FastAPI app.state).
+    ``state['platform_client']`` and ``state['runtime_config_cache']``
+    are set on success; both stay ``None`` when
+    ``runtime_mode != 'shared'`` OR ``platform_api_url`` is empty.
+    """
+    from surogates.runtime import PlatformClient, RuntimeConfigCache
+
+    if getattr(settings, "runtime_mode", "helm") != "shared":
+        state["platform_client"] = None
+        state["runtime_config_cache"] = None
+        return
+
+    if not settings.platform_api_url:
+        logger.error(
+            "runtime_mode='shared' but SUROGATES_PLATFORM_API_URL is empty; "
+            "worker harness_factory will fail on every session",
+        )
+        state["platform_client"] = None
+        state["runtime_config_cache"] = None
+        return
+
+    client = PlatformClient(
+        base_url=settings.platform_api_url,
+        token=settings.platform_api_token,
+    )
+    state["platform_client"] = client
+    state["runtime_config_cache"] = RuntimeConfigCache(
+        loader=client.get_runtime_config, ttl_seconds=1.0,
+    )
+
+
+async def _shutdown_worker_runtime_plumbing(state: dict) -> None:
+    """Close the worker-side platform client and drop cache references.
+
+    Idempotent — calling twice is a no-op.
+    """
+    client = state.get("platform_client")
+    if client is not None:
+        await client.aclose()
+    state["platform_client"] = None
+    state["runtime_config_cache"] = None
+
+
 async def run_worker(settings: Settings) -> None:
     """Bootstrap all dependencies and run the orchestrator loop.
 
