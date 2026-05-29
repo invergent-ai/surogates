@@ -62,16 +62,24 @@ def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
 
 
 async def _resolve_slug_to_agent_id(
-    _request: Request, _slug: str,
+    request: Request, slug: str,
 ) -> str | None:
-    """Look up an agent by its DNS-safe slug.
+    """Look up an agent by its DNS-safe slug (Plan 1b / Task 12).
 
-    Stub for Plan 1.  Plan 1b will wire the slug → agent_id mapping
-    against the management plane and cache the result.  Returning
-    ``None`` here makes the Host-header resolution branch a no-op
-    so existing tests + helm-mode callers keep working.
+    Consults ``request.app.state.slug_resolver_cache`` when wired — the
+    cache fronts ``PlatformClient.get_agent_id_for_slug`` (Task 10) and
+    memoises both hits and misses (Task 11) so the management plane is
+    not hit on every Host-header probe.
+
+    Returns ``None`` when the cache is not wired (helm-mode pods, or
+    shared-mode pods before Plan 1b lifecycle rolls everywhere) so the
+    Host-header branch silently falls through to the next resolution
+    step rather than 500-ing on an AttributeError.
     """
-    return None
+    cache = getattr(request.app.state, "slug_resolver_cache", None)
+    if cache is None:
+        return None
+    return await cache.get(slug)
 
 
 def _legacy_helm_context(settings, *, agent_id: str) -> AgentRuntimeContext:

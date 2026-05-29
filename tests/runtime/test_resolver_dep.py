@@ -177,6 +177,112 @@ def test_helm_context_project_id_is_none_not_empty_string():
     assert r.json()["project_id"] is None
 
 
+def test_resolver_resolves_via_host_header_subdomain():
+    """Plan 1b / Task 12.  A Host like ``acme.runtime.example.com``
+    flows through SlugResolverCache → agent_id and then through the
+    normal runtime-config cache path."""
+    from surogates.runtime import SlugResolverCache
+
+    async def runtime_loader(agent_id: str) -> dict:
+        return _make_payload(agent_id=agent_id)
+
+    async def slug_loader(slug: str) -> str | None:
+        return "agent-from-slug" if slug == "acme" else None
+
+    app = _build_app(cache=RuntimeConfigCache(loader=runtime_loader))
+    app.state.slug_resolver_cache = SlugResolverCache(loader=slug_loader)
+
+    @app.get("/echo2")
+    async def echo2(
+        ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+    ):
+        return {"agent_id": ctx.agent_id}
+
+    with TestClient(app) as c:
+        r = c.get("/echo2", headers={"Host": "acme.runtime.example.com"})
+    assert r.status_code == 200
+    assert r.json()["agent_id"] == "agent-from-slug"
+
+
+def test_resolver_skips_slug_lookup_for_reserved_subdomains():
+    """``www.``, ``api.``, ``localhost`` (and the unset host) must
+    not trigger a slug lookup — the resolver short-circuits before
+    the cache is consulted."""
+    from surogates.runtime import SlugResolverCache
+
+    called: list[str] = []
+
+    async def runtime_loader(agent_id: str) -> dict:
+        return _make_payload(agent_id=agent_id)
+
+    async def slug_loader(slug: str) -> str | None:
+        called.append(slug)
+        return "x"
+
+    app = _build_app(cache=RuntimeConfigCache(loader=runtime_loader))
+    app.state.slug_resolver_cache = SlugResolverCache(loader=slug_loader)
+
+    @app.get("/echo3")
+    async def echo3(
+        ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+    ):
+        return {"agent_id": ctx.agent_id}
+
+    with TestClient(app) as c:
+        r = c.get("/echo3", headers={"Host": "www.example.com"})
+    assert r.status_code == 400
+    assert called == []
+
+
+def test_resolver_falls_through_to_400_when_slug_unknown():
+    """A non-reserved subdomain with no matching agent must surface
+    a clean 400 (no agent_id resolved) — not crash or 500."""
+    from surogates.runtime import SlugResolverCache
+
+    async def runtime_loader(agent_id: str) -> dict:
+        return _make_payload(agent_id=agent_id)
+
+    async def slug_loader(_slug: str) -> str | None:
+        return None
+
+    app = _build_app(cache=RuntimeConfigCache(loader=runtime_loader))
+    app.state.slug_resolver_cache = SlugResolverCache(loader=slug_loader)
+
+    @app.get("/echo4")
+    async def echo4(
+        ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+    ):
+        return {"agent_id": ctx.agent_id}
+
+    with TestClient(app) as c:
+        r = c.get("/echo4", headers={"Host": "unknown.runtime.example.com"})
+    assert r.status_code == 400
+
+
+def test_resolver_without_slug_cache_returns_none_silently():
+    """Helm-mode pods (and shared-mode pods before Plan 1b lifecycle
+    rolls everywhere) do not wire ``slug_resolver_cache``.  The
+    resolver must treat that as "no Host-header routing available"
+    and fall through, not raise AttributeError."""
+    async def runtime_loader(agent_id: str) -> dict:
+        return _make_payload(agent_id=agent_id)
+
+    app = _build_app(cache=RuntimeConfigCache(loader=runtime_loader))
+    # Deliberately leave app.state.slug_resolver_cache unset.
+
+    @app.get("/echo5")
+    async def echo5(
+        ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+    ):
+        return {"agent_id": ctx.agent_id}
+
+    with TestClient(app) as c:
+        r = c.get("/echo5", headers={"Host": "acme.example.com"})
+    # No cache wired ⇒ slug lookup returns None silently ⇒ 400
+    # (no settings.agent_id fallback in shared mode).
+    assert r.status_code == 400
+
+
 def test_query_param_overrides_settings_agent_id_in_helm_mode():
     """Explicit query param wins even in helm mode — useful for admin
     tools that pin requests to a specific agent_id from inside a
