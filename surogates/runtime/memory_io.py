@@ -59,12 +59,23 @@ async def write_user_memory(
 ) -> int:
     """Encode + write the envelope at ``version = expected_version + 1``.
 
+    Plan 4 / Task 9 — the content is run through the same
+    injection scan as SOUL.md / AGENT.md (Plan 3 Task 10) before
+    persistence.  A flagged payload writes a sanitised
+    ``[BLOCKED: ...]`` marker instead of the raw content so a
+    compromised tool can't smuggle 'ignore previous instructions'
+    into the user's memory and bypass the LLM's system prompt
+    guardrails.
+
     The caller is responsible for conflict detection (re-read
     before write, compare version, emit ``MEMORY_CONFLICT`` audit
     on mismatch).  This helper always writes — last-write-wins.
     Returns the new version.
     """
+    from surogates.harness.context_files import scan_context_content
+
+    sanitised = scan_context_content(content, "memory")
     new_version = expected_version + 1
-    env = _MemoryEnvelope(version=new_version, content=content)
+    env = _MemoryEnvelope(version=new_version, content=sanitised)
     await backend.write(bucket, key, encode_envelope(env))
     return new_version
