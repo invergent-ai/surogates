@@ -67,6 +67,46 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class SharedSlackInbound:
+    """Per-event tenant resolver for the shared Slack adapter.
+
+    Plan 6 / Task 7.  Maps an inbound event's ``api_app_id`` to
+    the owning ``(org_id, agent_id, api_web_url)`` via the
+    :class:`ChannelRoutingCache`, and resolves the per-tenant bot
+    token via :meth:`CredentialVault.resolve_ref` (routed through
+    :func:`resolve_channel_token`).
+
+    A request for an unknown ``app_id`` returns ``(None, None)``
+    and the caller drops the event -- silently dropping spurious
+    Slack events from workspaces we don't serve is the safe
+    default; the Plan 6 / Task 13 audit emit records the drop for
+    compliance.
+
+    When the routing exists but the bot token is missing (admin
+    set up the routing but the credential isn't uploaded yet),
+    the resolver returns ``(routing, None)``; the adapter then
+    surfaces a structured 'channel misconfigured' error rather
+    than crashing.
+    """
+
+    def __init__(self, *, channel_routing_cache, vault) -> None:
+        self._cache = channel_routing_cache
+        self._vault = vault
+
+    async def resolve(
+        self, *, app_id: str,
+    ) -> tuple[dict | None, str | None]:
+        routing = await self._cache.get(f"slack:{app_id}")
+        if routing is None:
+            return None, None
+        from surogates.channels.token_resolver import resolve_channel_token
+        token = await resolve_channel_token(
+            vault=self._vault, kind="slack",
+            identifier=app_id, org_id=routing["org_id"],
+        )
+        return routing, token
+
+
 class _ThreadContextCache:
     """Cache entry for fetched thread context."""
     content: str
