@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
+from surogates.audit import AuditStore, AuditType
 from surogates.mcp_proxy.auth import ProxyAuthContext, get_proxy_auth
 from surogates.mcp_proxy.loader import load_mcp_configs
 from surogates.mcp_proxy.pool import ConnectionPool
@@ -183,14 +185,63 @@ async def call_tool(
         return ToolCallResponse(
             error=f"Tool '{body.name}' not found.",
         )
-    _server_name, original_tool, server_config = target
+    server_name, original_tool, server_config = target
 
-    result_text = await _execute_call_sandboxed(
-        server_config=server_config,
-        tool_name=original_tool,
-        arguments=body.arguments,
-        meta=body.meta,
+    audit_store: AuditStore | None = getattr(
+        request.app.state, "audit_store", None,
     )
+    audit_user_id = None if auth.is_service_account else auth.user_id
+    call_start = time.monotonic()
+    outcome = "success"
+    try:
+        result_text = await _execute_call_sandboxed(
+            server_config=server_config,
+            tool_name=original_tool,
+            arguments=body.arguments,
+            meta=body.meta,
+        )
+        # _execute_call_sandboxed swallows transport-level exceptions
+        # into a JSON {"error": ...} envelope; inspect that to set
+        # the audit outcome correctly.
+        try:
+            parsed_outcome = json.loads(result_text)
+            if (
+                isinstance(parsed_outcome, dict)
+                and "error" in parsed_outcome
+            ):
+                outcome = "error"
+        except (json.JSONDecodeError, TypeError):
+            pass
+    except BaseException as exc:
+        outcome = (
+            "timeout" if isinstance(exc, TimeoutError) else "error"
+        )
+        raise
+    finally:
+        duration_ms = int((time.monotonic() - call_start) * 1000)
+        if audit_store is not None:
+            try:
+                # Plan 5 / Task 12 — POLICY_MCP_CALL fires per call
+                # with the per-request ctx.agent_id so compliance can
+                # answer 'which agent invoked tool X on server Y,
+                # when, with what outcome' from the audit log alone.
+                await audit_store.emit(
+                    org_id=auth.org_id,
+                    agent_id=ctx.agent_id,
+                    user_id=audit_user_id,
+                    type=AuditType.POLICY_MCP_CALL,
+                    data={
+                        "server": server_name,
+                        "tool": original_tool,
+                        "outcome": outcome,
+                        "duration_ms": duration_ms,
+                    },
+                )
+            except Exception:  # noqa: BLE001 — emit is best-effort
+                logger.warning(
+                    "Failed to emit POLICY_MCP_CALL audit",
+                    exc_info=True,
+                )
 
     try:
         parsed = json.loads(result_text)
