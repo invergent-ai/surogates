@@ -100,12 +100,25 @@ def _legacy_helm_context(settings, *, agent_id: str) -> AgentRuntimeContext:
     silently substituting ``""`` would silently route to project ``""``
     in any DB query that takes the value verbatim.
     """
+    # Plan 2 / Task 9 — populate storage_key_prefix from the legacy
+    # process-wide path so the worker hot path can read
+    # ``ctx.storage_key_prefix`` uniformly in both modes.  In helm
+    # mode this is ``<tenant_assets_root>/<org_id>`` — the same root
+    # the harness has always used.  Shared mode gets its prefix from
+    # the runtime-config payload (``<project_id>/<agent_id>``).
+    org_id_str = getattr(settings, "org_id", "") or ""
+    tenant_assets_root = getattr(settings, "tenant_assets_root", "")
+    if tenant_assets_root and org_id_str:
+        helm_prefix = f"{tenant_assets_root}/{org_id_str}"
+    else:
+        helm_prefix = ""
+
     return AgentRuntimeContext(
         agent_id=agent_id,
-        org_id=getattr(settings, "org_id", "") or "",
+        org_id=org_id_str,
         enabled=True,
         config_version=0,
-        storage_key_prefix="",
+        storage_key_prefix=helm_prefix,
         project_id=None,
     )
 

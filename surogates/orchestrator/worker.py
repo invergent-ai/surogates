@@ -862,13 +862,26 @@ async def run_worker(settings: Settings) -> None:
             else:
                 user_row = None
 
+        # Plan 2 / Task 9 — resolve AgentRuntimeContext early so its
+        # storage_key_prefix can feed TenantContext.asset_root.  Helm
+        # mode goes through _legacy_helm_context (Task 9 enhances it
+        # to populate the prefix from settings.tenant_assets_root +
+        # org_id); shared mode hits the worker-side cache.
+        from surogates.runtime import resolve_runtime_context_for_session
+
+        ctx = await resolve_runtime_context_for_session(
+            session,
+            cache=runtime_config_cache,
+            settings=settings,
+        )
+
         tenant = TenantContext(
             org_id=session_org_id,
             user_id=session.user_id,
             org_config=org_row.config if org_row else {},
             user_preferences=user_row.preferences if user_row else {},
             permissions=frozenset(),
-            asset_root=f"{settings.tenant_assets_root}/{session_org_id}",
+            asset_root=ctx.storage_key_prefix,
             service_account_id=session.service_account_id,
         )
 
@@ -900,22 +913,15 @@ async def run_worker(settings: Settings) -> None:
 
         # Plan 2 / Task 7 — per-session LLM bundle.  Helm mode wraps
         # the legacy settings + auxiliary-builder path; shared mode
-        # resolves through AgentRuntimeContext + the credential vault.
+        # resolves through the AgentRuntimeContext (already resolved
+        # above for asset_root / Task 9) + the credential vault.
         if runtime_mode == "helm":
             llm_bundle = _build_helm_session_llm_clients(settings, tenant)
         else:
             from surogates.harness.session_llm import (
                 build_session_llm_clients,
             )
-            from surogates.runtime import (
-                resolve_runtime_context_for_session,
-            )
 
-            ctx = await resolve_runtime_context_for_session(
-                session,
-                cache=runtime_config_cache,
-                settings=settings,
-            )
             llm_bundle = await build_session_llm_clients(
                 ctx, vault=credential_vault, user_id=tenant.user_id,
             )
