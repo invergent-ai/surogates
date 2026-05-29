@@ -360,8 +360,15 @@ async def _load_prompt_catalogs(
     settings: Settings,
     tenant: TenantContext,
     session_factory: Any,
+    bundle: Any | None = None,
 ) -> tuple[list[Any], list[Any]]:
-    """Load prompt-visible sub-agent and skill catalogs for a tenant."""
+    """Load prompt-visible sub-agent and skill catalogs for a tenant.
+
+    Plan 3 / Task 15.  When ``bundle`` is provided, layer 1
+    (platform skills + sub-agents) reads from the bundle instead of
+    the on-disk ``/etc/surogates/{skills,agents}/`` paths.  Layers
+    2-4 (user files + DB) are unchanged.
+    """
     resource_loader = ResourceLoader(
         platform_skills_dir=getattr(settings, "platform_skills_dir", None),
         platform_agents_dir=getattr(settings, "platform_agents_dir", None),
@@ -372,6 +379,7 @@ async def _load_prompt_catalogs(
             available_agents = await resource_loader.load_agents(
                 tenant,
                 db_session=_db,
+                bundle=bundle,
             )
     except Exception:
         logger.debug(
@@ -386,6 +394,7 @@ async def _load_prompt_catalogs(
             available_skills = await resource_loader.load_skills(
                 tenant,
                 db_session=_db,
+                bundle=bundle,
             )
     except Exception:
         logger.debug(
@@ -1004,6 +1013,19 @@ async def run_worker(settings: Settings) -> None:
         memory_store = MemoryStore(memory_dir=memory_dir)
         memory_manager = MemoryManager(memory_store)
 
+        # Plan 3 / Task 12+15 — resolve the per-session file bundle
+        # once and share it across the catalog load (Task 15) and the
+        # PromptBuilder content pre-load (Task 12).  None when the
+        # FileBundleCache isn't wired or the agent has no bundle
+        # configured; both downstream consumers fall back to the
+        # legacy filesystem paths silently in that case.
+        bundle = None
+        if file_bundle_cache is not None and ctx.bundle_hub_ref:
+            try:
+                bundle = await file_bundle_cache.get(session.agent_id)
+            except LookupError:
+                bundle = None
+
         # Load prompt-visible catalogs.  Expert skill definitions may still
         # exist in storage, but PromptBuilder hides them from executor prompts
         # now that strategic advice is handled by the harness advisor.
@@ -1014,6 +1036,7 @@ async def run_worker(settings: Settings) -> None:
             settings=settings,
             tenant=tenant,
             session_factory=session_factory,
+            bundle=bundle,
         )
 
         # Knowledge bases attached to this agent. Empty list when
@@ -1047,19 +1070,10 @@ async def run_worker(settings: Settings) -> None:
         )
 
         # Plan 3 / Task 12 — pre-load SOUL.md / AGENT.md from the
-        # per-session bundle so the PromptBuilder (which stays sync)
-        # can render them from string state instead of doing an
-        # async fetch in build().  bundle is None when the
-        # FileBundleCache isn't wired or the agent has no bundle
-        # configured; the loaders return None silently in that case
-        # and PromptBuilder falls back to load_soul_md_from_disk
-        # (legacy helm path).
-        bundle = None
-        if file_bundle_cache is not None and ctx.bundle_hub_ref:
-            try:
-                bundle = await file_bundle_cache.get(session.agent_id)
-            except LookupError:
-                bundle = None
+        # bundle resolved above (shared with the Task 15 catalog
+        # load).  The PromptBuilder stays sync; the loaders return
+        # None silently when bundle is None and the builder falls
+        # back to load_soul_md_from_disk (legacy helm path).
         from surogates.harness.context_files import (
             load_agent_md, load_soul_md,
         )

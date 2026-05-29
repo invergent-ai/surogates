@@ -152,6 +152,19 @@ async def test_build_helm_session_llm_clients_closes_main_on_aux_failure(
     assert closed[0]._closed is True
 
 
+def test_load_prompt_catalogs_receives_bundle():
+    """Plan 3 / Task 15 source-level regression: the
+    _load_prompt_catalogs call from harness_factory threads
+    bundle=bundle through so the platform-skills layer reads from
+    the per-session bundle accessor."""
+    import inspect
+    import surogates.orchestrator.worker as worker
+
+    src = inspect.getsource(worker)
+    assert "_load_prompt_catalogs(" in src
+    assert "bundle=bundle" in src
+
+
 def test_harness_factory_does_not_directly_import_auxiliary_builders():
     """Task 8 sibling — within ``worker.py`` itself, only
     ``_build_helm_session_llm_clients`` may reference the builders.
