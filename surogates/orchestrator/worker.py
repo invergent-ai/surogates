@@ -1046,6 +1046,26 @@ async def run_worker(settings: Settings) -> None:
             use_api_for_harness_tools=settings.worker.use_api_for_harness_tools,
         )
 
+        # Plan 3 / Task 12 — pre-load SOUL.md / AGENT.md from the
+        # per-session bundle so the PromptBuilder (which stays sync)
+        # can render them from string state instead of doing an
+        # async fetch in build().  bundle is None when the
+        # FileBundleCache isn't wired or the agent has no bundle
+        # configured; the loaders return None silently in that case
+        # and PromptBuilder falls back to load_soul_md_from_disk
+        # (legacy helm path).
+        bundle = None
+        if file_bundle_cache is not None and ctx.bundle_hub_ref:
+            try:
+                bundle = await file_bundle_cache.get(session.agent_id)
+            except LookupError:
+                bundle = None
+        from surogates.harness.context_files import (
+            load_agent_md, load_soul_md,
+        )
+        soul_md_content = await load_soul_md(bundle)
+        agent_md_content = await load_agent_md(bundle)
+
         prompt_builder = PromptBuilder(
             tenant,
             skills=available_skills,
@@ -1059,6 +1079,8 @@ async def run_worker(settings: Settings) -> None:
             # tool set keeps those fragments in sync with what the LLM
             # actually has access to this turn.
             available_tools=effective_tools,
+            soul_md_content=soul_md_content,
+            agent_md_content=agent_md_content,
         )
 
         # User / SA / channel-session principals each map to a JWT

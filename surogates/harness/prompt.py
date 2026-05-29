@@ -97,12 +97,21 @@ class PromptBuilder:
         available_agents: list[AgentDef] | None = None,
         available_kbs: list[dict] | None = None,
         prompt_library: PromptLibrary | None = None,
+        soul_md_content: str | None = None,
+        agent_md_content: str | None = None,
     ) -> None:
         self.tenant = tenant
         self.skills: list = skills or []
         self._available_tools: set[str] = available_tools or set()
         self._memory_manager: MemoryManager | None = memory_manager
         self._session: Session | None = session
+        # Plan 3 / Task 12 — pre-loaded bundle content.  When set,
+        # the section builder uses these strings instead of the
+        # legacy disk read.  harness_factory does the async pre-load
+        # via load_soul_md(bundle) / load_agent_md(bundle) so the
+        # builder's build() can stay sync.
+        self._soul_md_content: str | None = soul_md_content
+        self._agent_md_content: str | None = agent_md_content
         # Active sub-agent type for the current session, or None when
         # the session runs with the default identity.  When set, the
         # agent def's system_prompt body replaces the org-level
@@ -720,21 +729,36 @@ class PromptBuilder:
         return "\n".join(lines)
 
     def _context_files_section(self) -> str:
-        """Load context files (SOUL.md, AGENTS.md, etc.) into the prompt."""
-        # Plan 3 / Task 10: load_soul_md is now an async,
-        # bundle-backed helper.  The PromptBuilder is sync and we
-        # don't have the bundle threaded through yet — that's
-        # Task 12.  Until then, fall through to the legacy
-        # disk-reading helper that takes tenant.asset_root.
+        """Load context files (SOUL.md, AGENTS.md, etc.) into the prompt.
+
+        Plan 3 / Task 12.  Reads from pre-loaded bundle content
+        (``self._soul_md_content`` / ``self._agent_md_content``)
+        when available; falls back to the legacy disk-reading
+        path for helm-mode pods and tests that don't wire a
+        bundle.  Plan 9 retires the disk fallback.
+        """
         from surogates.harness.context_files import (
             load_project_context, load_soul_md_from_disk,
         )
 
         parts: list[str] = []
 
-        soul = load_soul_md_from_disk(self.tenant.asset_root)
+        # SOUL.md — prefer pre-loaded bundle content, fall back to disk.
+        if self._soul_md_content is not None:
+            soul = self._soul_md_content
+        else:
+            soul = load_soul_md_from_disk(self.tenant.asset_root)
         if soul:
             parts.append(f"## Agent Identity (SOUL.md)\n{soul}")
+
+        # AGENT.md / AGENTS.md — pre-loaded bundle content only;
+        # the disk-reading variant for AGENT.md doesn't exist in the
+        # legacy path (load_project_context walks workspace, not
+        # asset_root) so there's no fallback to thread.
+        if self._agent_md_content:
+            parts.append(
+                f"## Agent Definition (AGENT.md)\n{self._agent_md_content}",
+            )
 
         workspace = self._get_workspace_path()
         if workspace:
