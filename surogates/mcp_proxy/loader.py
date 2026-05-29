@@ -301,6 +301,11 @@ async def _emit_credential_access(
         return
     await audit_store.emit(
         org_id=org_id,
+        # Credential vault is org-scoped (per ``_retrieve_credential``);
+        # the same MCP server config can be used by any agent that
+        # references it, so a single agent_id would be misleading.
+        # Plan 1b explicitly accepts None for these org-level emitters.
+        agent_id=None,
         user_id=user_id,
         type=AuditType.CREDENTIAL_ACCESS,
         data=credential_access_event(

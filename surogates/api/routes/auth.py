@@ -186,6 +186,7 @@ async def firebase_exchange(
         if audit_store is not None:
             await audit_store.emit(
                 org_id=org_id,
+                agent_id=agent_runtime.agent_id,
                 type=AuditType.AUTH_FAILED,
                 data=auth_failed_event(
                     "firebase", str(exc), source_ip=source_ip,
@@ -244,6 +245,7 @@ async def firebase_exchange(
                 if audit_store is not None:
                     await audit_store.emit(
                         org_id=org_id,
+                        agent_id=agent_runtime.agent_id,
                         type=AuditType.AUTH_FAILED,
                         data=auth_failed_event(
                             "firebase",
@@ -292,6 +294,7 @@ async def firebase_exchange(
     if audit_store is not None:
         await audit_store.emit(
             org_id=org_id,
+            agent_id=agent_runtime.agent_id,
             user_id=user.id,
             type=AuditType.AUTH_LOGIN,
             data=auth_login_event("firebase", source_ip=source_ip),
@@ -340,6 +343,7 @@ async def login(
         if audit_store is not None:
             await audit_store.emit(
                 org_id=org_id,
+                agent_id=agent_runtime.agent_id,
                 type=AuditType.AUTH_FAILED,
                 data=auth_failed_event(
                     "password",
@@ -369,6 +373,7 @@ async def login(
     if audit_store is not None:
         await audit_store.emit(
             org_id=org_id,
+            agent_id=agent_runtime.agent_id,
             user_id=user_id,
             type=AuditType.AUTH_LOGIN,
             data=auth_login_event("password", source_ip=source_ip),

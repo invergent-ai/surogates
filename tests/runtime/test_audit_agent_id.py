@@ -129,6 +129,68 @@ def test_audit_log_model_has_agent_id_column_nullable_indexed():
     ), f"AuditLog must have a per-agent index; have {index_names}"
 
 
+def _extract_call_arguments(text: str, opening_paren_idx: int) -> str:
+    """Return everything inside the matched ``audit_store.emit(...)``
+    by walking parens with a depth counter — so nested calls inside
+    the argument list (``data=rug_pull_event(...)``) do not close
+    the outer call prematurely.
+
+    String/comment-aware parsing would be more robust, but neither
+    Python parens nor matching ``)`` characters legitimately appear
+    inside strings in the audit_store.emit call sites we ship, so
+    the depth counter is sufficient and avoids pulling in ``ast``.
+    """
+    depth = 1
+    i = opening_paren_idx + 1
+    while i < len(text) and depth > 0:
+        c = text[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return text[opening_paren_idx + 1 : i]
+        i += 1
+    raise AssertionError(
+        f"Unmatched ( at offset {opening_paren_idx} — "
+        "audit_store.emit call is malformed",
+    )
+
+
+def test_every_audit_emit_call_passes_agent_id():
+    """Plan 1b / Task 17 source-level regression.
+
+    Every ``audit_store.emit(...)`` call in the ``surogates/`` source
+    tree must pass ``agent_id=`` explicitly (even if the value is
+    ``None``).  This catches a future emitter — added by a refactor
+    or a new auth provider — that silently drops the per-tenant
+    column from the audit row.
+
+    We grep the source rather than instrumenting each call so the
+    test stays fast (no DB or app boot) and so a previously-missed
+    site fails *the next time someone runs the tests*, not eventually
+    in a dashboard.
+    """
+    import re
+    from pathlib import Path
+
+    call_re = re.compile(r"audit_store\.emit\(")
+    missing: list[str] = []
+    for path in Path("surogates").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for m in call_re.finditer(text):
+            opening = m.end() - 1  # the '('
+            args = _extract_call_arguments(text, opening)
+            if "agent_id=" not in args:
+                line = text[: m.start()].count("\n") + 1
+                missing.append(f"{path}:{line}")
+    assert not missing, (
+        "These audit_store.emit(...) calls must pass agent_id= "
+        "(use None if the emitter has no tenant context):\n"
+        + "\n".join(missing)
+    )
+
+
 def test_audit_log_observability_sql_retrofits_agent_id():
     """The idempotent DDL block in ``observability.sql`` retrofits
     existing deployed ``audit_log`` tables with the new column +

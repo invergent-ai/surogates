@@ -359,6 +359,12 @@ class ConnectionPool:
                 if self._audit_store is not None:
                     await self._audit_store.emit(
                         org_id=org_id,
+                        # MCP scans are org-scoped (server definitions
+                        # live at the org level); no single agent_id
+                        # to attribute. Plan 1b accepts None here so
+                        # the per-tenant column is at least visibly
+                        # absent rather than silently omitted.
+                        agent_id=None,
                         user_id=audit_user_id,
                         type=AuditType.POLICY_RUG_PULL,
                         data=rug_pull_event(
@@ -380,6 +386,7 @@ class ConnectionPool:
         if self._audit_store is not None:
             await self._audit_store.emit(
                 org_id=org_id,
+                agent_id=None,  # org-scoped scan — see rug_pull emit above
                 user_id=audit_user_id,
                 type=AuditType.POLICY_MCP_SCAN,
                 data=mcp_scan_event(
