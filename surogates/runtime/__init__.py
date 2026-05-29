@@ -8,8 +8,10 @@ import cycle.
 
 from __future__ import annotations
 
+from surogates.runtime.bundle_accessor import AgentFileBundle
 from surogates.runtime.cache import RuntimeConfigCache
 from surogates.runtime.context import AgentRuntimeContext, LLMEndpoint
+from surogates.runtime.hub_client import HubBundleClient
 from surogates.runtime.firebase import FirebaseConfig
 from surogates.runtime.firebase_cache import FirebaseConfigCache
 from surogates.runtime.invalidator import (
@@ -32,9 +34,11 @@ from surogates.runtime.worker_resolver import (
 
 __all__ = [
     "AgentDisabledError",
+    "AgentFileBundle",
     "AgentRuntimeContext",
     "FirebaseConfig",
     "FirebaseConfigCache",
+    "HubBundleClient",
     "INVALIDATION_CHANNELS",
     "LLMEndpoint",
     "PerTenantRateLimiter",

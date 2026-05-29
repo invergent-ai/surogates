@@ -650,12 +650,29 @@ class AuthSettings(BaseSettings):
         )
 
 
+class HubSettings(BaseSettings):
+    """Surogate Hub credentials for the file-bundle accessor.
+
+    Plan 3 / Task 5.  When ``endpoint`` is empty the worker treats
+    Hub as disabled and falls back to legacy filesystem reads for
+    SOUL.md / platform skills / etc.  Plan 9 retires the legacy
+    filesystem path and makes ``endpoint`` required.
+    """
+
+    model_config = {"env_prefix": "SUROGATES_HUB_"}
+
+    endpoint: str = ""
+    username: str = ""
+    password: str = ""
+
+
 class Settings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_"}
 
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)
     ops_db: OpsDatabaseSettings = Field(default_factory=OpsDatabaseSettings)
     kb_hub: KBHubSettings = Field(default_factory=KBHubSettings)
+    hub: HubSettings = Field(default_factory=HubSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     api: APISettings = Field(default_factory=APISettings)
     tool_output: ToolOutputSettings = Field(default_factory=ToolOutputSettings)
