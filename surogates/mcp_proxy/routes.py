@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from surogates.mcp_proxy.auth import ProxyAuthContext, get_proxy_auth
 from surogates.mcp_proxy.loader import load_mcp_configs
 from surogates.mcp_proxy.pool import ConnectionPool
+from surogates.mcp_proxy.sandbox import MCPCallSandbox
 from surogates.runtime import (
     AgentRuntimeContext,
     agent_runtime_context_dep,
@@ -150,10 +151,22 @@ async def call_tool(
     ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep),
     _rate: None = Depends(rate_limit_dep),
 ) -> ToolCallResponse:
-    """Execute an MCP tool call with credential injection."""
+    """Execute an MCP tool call inside a fresh per-call subprocess.
+
+    Plan 5 / Task 11.  Each call spawns an :class:`MCPCallSandbox`
+    keyed on the resolved tenant config, so the call boundary IS
+    the process boundary — a compromised MCP tool cannot corrupt
+    subprocess state across calls.  Tool discovery (Task 6's cache
+    + governance scan) still happens at first-tool-list time and
+    caches the schemas; per-call cost is one stdio handshake (~50-
+    100ms) plus the actual upstream call.
+    """
     pool: ConnectionPool = request.app.state.pool
 
-    # Lazy-connect on first call for this tenant.
+    # Lazy-connect on first call for this tenant — populates the
+    # pool's schema + governance cache.  The connection is no
+    # longer used for the call itself (that goes through the per-
+    # call MCPCallSandbox below).
     schemas = await _ensure_tenant_connected(
         pool, auth, request, agent_id=ctx.agent_id,
     )
@@ -163,17 +176,24 @@ async def call_tool(
             detail="No MCP servers configured for this tenant.",
         )
 
-    result = await pool.call_tool(
-        org_id=auth.org_id,
-        user_id=auth.user_id,
-        tool_name=body.name,
+    target = pool.resolve_call_target(
+        auth.org_id, auth.user_id, body.name,
+    )
+    if target is None:
+        return ToolCallResponse(
+            error=f"Tool '{body.name}' not found.",
+        )
+    _server_name, original_tool, server_config = target
+
+    result_text = await _execute_call_sandboxed(
+        server_config=server_config,
+        tool_name=original_tool,
         arguments=body.arguments,
         meta=body.meta,
     )
 
-    # Parse the result to separate error from success.
     try:
-        parsed = json.loads(result)
+        parsed = json.loads(result_text)
         if isinstance(parsed, dict) and "error" in parsed:
             return ToolCallResponse(
                 error=_sanitize_error(str(parsed["error"])),
@@ -181,4 +201,78 @@ async def call_tool(
     except (json.JSONDecodeError, TypeError):
         pass
 
-    return ToolCallResponse(result=_sanitize_error(result))
+    return ToolCallResponse(result=_sanitize_error(result_text))
+
+
+async def _execute_call_sandboxed(
+    *,
+    server_config: dict[str, Any],
+    tool_name: str,
+    arguments: dict[str, Any],
+    meta: dict[str, Any] | None,
+) -> str:
+    """Run one MCP tool call inside a per-call :class:`MCPCallSandbox`.
+
+    Returns the upstream result text on success or a structured
+    JSON ``{"error": ...}`` string on failure — matching the legacy
+    ``pool.call_tool`` return shape so the route's response
+    serialisation does not have to branch.
+    """
+    transport = server_config.get("transport", "stdio")
+    if transport != "stdio":
+        # HTTP / SSE MCP transports don't fork a subprocess so the
+        # per-call subprocess isolation doesn't apply; they still
+        # need a per-call ClientSession but we defer that to Plan 6.
+        return json.dumps({
+            "error": (
+                f"MCP transport '{transport}' not supported by the "
+                "Plan 5 per-call sandbox path."
+            ),
+        })
+
+    command = server_config.get("command")
+    if not command:
+        return json.dumps({"error": "MCP server config missing command."})
+
+    sandbox = MCPCallSandbox(
+        command=command,
+        args=list(server_config.get("args", []) or []),
+        env=dict(server_config.get("env", {}) or {}),
+    )
+
+    try:
+        async with sandbox.mcp_session() as session:
+            if meta:
+                call_result = await session.call_tool(
+                    tool_name, arguments=arguments, meta=meta,
+                )
+            else:
+                call_result = await session.call_tool(
+                    tool_name, arguments=arguments,
+                )
+    except Exception as exc:  # noqa: BLE001 — translated to client error
+        return json.dumps({
+            "error": _sanitize_error(
+                f"MCP call failed: {type(exc).__name__}: {exc}",
+            ),
+        })
+
+    if call_result.isError:
+        error_text = "".join(
+            getattr(b, "text", "") for b in (call_result.content or [])
+        )
+        return json.dumps({
+            "error": _sanitize_error(
+                error_text or "MCP tool returned an error",
+            ),
+        })
+
+    parts: list[str] = []
+    for block in (call_result.content or []):
+        if hasattr(block, "text"):
+            parts.append(block.text)
+        elif hasattr(block, "data"):
+            parts.append(
+                f"[binary: {getattr(block, 'mimeType', 'unknown')}]",
+            )
+    return "\n".join(parts)
