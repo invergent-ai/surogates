@@ -11,6 +11,7 @@ from __future__ import annotations
 from surogates.runtime.bundle_accessor import AgentFileBundle
 from surogates.runtime.bundle_cache import FileBundleCache
 from surogates.runtime.cache import RuntimeConfigCache
+from surogates.runtime.channel_routing_cache import ChannelRoutingCache
 from surogates.runtime.context import AgentRuntimeContext, LLMEndpoint
 from surogates.runtime.hub_client import HubBundleClient
 from surogates.runtime.mcp_server_cache import MCPServerRegistryCache
@@ -39,6 +40,7 @@ __all__ = [
     "AgentDisabledError",
     "AgentFileBundle",
     "AgentRuntimeContext",
+    "ChannelRoutingCache",
     "FileBundleCache",
     "FirebaseConfig",
     "FirebaseConfigCache",
