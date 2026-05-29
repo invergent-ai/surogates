@@ -99,6 +99,16 @@ class AgentRuntimeContext:
     mcp_server_ids: tuple[str, ...] = ()
     governance: dict = field(default_factory=dict)
 
+    # Plan 3 / Task 1 — file-bundle reference.  Both optional so
+    # legacy agents that haven't been onboarded to Hub-backed bundles
+    # yet still work.  ``bundle_hub_ref`` is the Hub repository in
+    # ``<owner>/<repo>`` shape (e.g., ``"acme/agent-bundles"``);
+    # ``bundle_version`` is the lakeFS-style ref (commit / branch /
+    # tag).  The worker fetches files from this bundle via the
+    # FileBundleCache (Plan 3 Task 6).
+    bundle_hub_ref: str | None = None
+    bundle_version: str | None = None
+
     @property
     def asset_root(self) -> str:
         """Path to the tenant's on-disk asset directory.
