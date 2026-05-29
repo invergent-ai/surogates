@@ -58,3 +58,11 @@ class AuditType(str, Enum):
     # rate-limited tenants are visible on the audit dashboard
     # (rate_limit_outcome = 'passed' or 'dropped').
     POLICY_CHANNEL_INBOUND = "policy.channel_inbound"
+
+    # Plan 7 — per-agent lifecycle audit.  AGENT_CREATED fires at
+    # the create_agent service-layer boundary (Task 2) with the
+    # admin's user_id who initiated the provision.  AGENT_DELETED
+    # fires at delete_agent (Task 6) with the cascade outcome
+    # payload (which subsystems were cleaned up successfully).
+    AGENT_CREATED = "agent.created"
+    AGENT_DELETED = "agent.deleted"
