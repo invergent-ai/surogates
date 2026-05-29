@@ -36,6 +36,8 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable
 
+from surogates.runtime.leader_lock import RedisLeaderLock
+
 logger = logging.getLogger(__name__)
 
 
@@ -141,3 +143,106 @@ def _field(row: Any, name: str) -> Any:
     if isinstance(row, dict):
         return row[name]
     return getattr(row, name)
+
+
+async def main(
+    *,
+    settings: Any,
+    redis_factory: Callable[[str], Awaitable[Any]] | None = None,
+    store_factory: Callable[[Any], Awaitable[Any]] | None = None,
+    enqueue: EnqueueFn | None = None,
+    install_signal_handlers: bool = True,
+) -> None:
+    """CLI entry for ``python -m surogates.scheduled.platform_ticker``.
+
+    Plan 8 / Task 7.  Wires:
+
+    * Redis client from ``settings.redis.url``
+    * :class:`ScheduledSessionStore` from ``settings.db``
+    * ``enqueue_session`` closure bound to the Redis client
+    * :class:`RedisLeaderLock` with ``holder_id``
+      ``{worker_id}-{pid}`` so a restart of the same K8s pod
+      acquires a fresh holder identity (avoids the
+      release-checks-identity edge where a restarted pod's
+      release would no-op against itself)
+
+    Dependency-injection seams (``redis_factory``,
+    ``store_factory``, ``enqueue``) let tests substitute fakes
+    without standing up real Redis + Postgres.  Production
+    callers pass None and the defaults wire the real
+    implementations.
+    """
+    import os
+    import signal
+
+    if redis_factory is None:
+        async def _real_redis(url):  # pragma: no cover - prod path
+            from redis.asyncio import Redis
+            return Redis.from_url(url, decode_responses=False)
+        redis_factory = _real_redis
+    if store_factory is None:
+        async def _real_store(s):  # pragma: no cover - prod path
+            from surogates.db.engine import (
+                async_engine_from_settings, async_session_factory,
+            )
+            from surogates.scheduled.store import ScheduledSessionStore
+            engine = async_engine_from_settings(s.db)
+            return ScheduledSessionStore(async_session_factory(engine))
+        store_factory = _real_store
+
+    redis = await redis_factory(settings.redis.url)
+    store = await store_factory(settings)
+
+    if enqueue is None:
+        from surogates.config import enqueue_session as _enq
+
+        async def enqueue(*, org_id, agent_id, session_id, priority=0):
+            await _enq(
+                redis, org_id=org_id, agent_id=agent_id,
+                session_id=session_id, priority=priority,
+            )
+
+    sched = settings.scheduled_sessions
+    lock_key = getattr(
+        sched, "leader_lock_key", "surogates:scheduled_ticker:leader",
+    )
+    lock_ttl = int(getattr(sched, "leader_ttl_seconds", 10))
+    tick_interval = float(
+        getattr(sched, "tick_interval_seconds", 5),
+    )
+
+    worker_id = getattr(settings, "worker_id", "platform-ticker")
+    holder_id = f"{worker_id}-{os.getpid()}"
+
+    lock = RedisLeaderLock(
+        redis, key=lock_key, ttl_seconds=lock_ttl, holder_id=holder_id,
+    )
+    ticker = PlatformTicker(
+        lock=lock, store=store, enqueue=enqueue,
+        tick_interval_seconds=tick_interval, worker_id=worker_id,
+    )
+
+    if install_signal_handlers:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, ticker.request_stop)
+            except NotImplementedError:  # pragma: no cover - Windows
+                pass
+
+    try:
+        await ticker.run()
+    finally:
+        close = getattr(redis, "aclose", None) or getattr(
+            redis, "close", None,
+        )
+        if close is not None:
+            try:
+                await close()
+            except Exception:  # noqa: BLE001 — best-effort
+                pass
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI path
+    from surogates.config import load_settings
+    asyncio.run(main(settings=load_settings()))
