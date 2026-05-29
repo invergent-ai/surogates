@@ -826,7 +826,12 @@ class SlackAdapter:
             },
         )
 
-        await enqueue_session(self._redis, self._agent_id, session_id)
+        await enqueue_session(
+            self._redis,
+            org_id=str(identity.org_id),
+            agent_id=self._agent_id,
+            session_id=session_id,
+        )
 
         if should_react:
             await self._remove_reaction(channel_id, ts, "eyes")

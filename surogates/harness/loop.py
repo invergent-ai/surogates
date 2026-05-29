@@ -1610,6 +1610,7 @@ class AgentHarness:
                         session_store=self._store,
                         worker_session_id=session_id,
                         parent_session_id=session.parent_id,
+                        org_id=str(session.org_id),
                         agent_id=session.agent_id,
                         error=traceback.format_exc()[-500:],
                         redis=self._redis,
@@ -4716,7 +4717,9 @@ class AgentHarness:
                         )
                     else:
                         result = await handle_mission_resume(
-                            session_id=session.id, agent_id=session.agent_id,
+                            session_id=session.id,
+                            org_id=str(session.org_id),
+                            agent_id=session.agent_id,
                             session_store=self._store,
                             mission_store=mission_store,
                             redis=redis_client,
@@ -4787,7 +4790,10 @@ class AgentHarness:
                     from surogates.config import enqueue_session
 
                     await enqueue_session(
-                        redis_client, session.agent_id, session.id,
+                        redis_client,
+                        org_id=str(session.org_id),
+                        agent_id=session.agent_id,
+                        session_id=session.id,
                     )
                 except Exception:
                     logger.debug(
@@ -4870,7 +4876,12 @@ class AgentHarness:
                 try:
                     from surogates.config import enqueue_session
 
-                    await enqueue_session(self._redis, session.agent_id, session.id)
+                    await enqueue_session(
+                        self._redis,
+                        org_id=str(session.org_id),
+                        agent_id=session.agent_id,
+                        session_id=session.id,
+                    )
                 except Exception:
                     logger.debug("Failed to enqueue outcome kickoff", exc_info=True)
 
@@ -5151,7 +5162,12 @@ class AgentHarness:
             try:
                 from surogates.config import enqueue_session
 
-                await enqueue_session(self._redis, session.agent_id, session.id)
+                await enqueue_session(
+                    self._redis,
+                    org_id=str(session.org_id),
+                    agent_id=session.agent_id,
+                    session_id=session.id,
+                )
             except Exception:
                 logger.debug("Failed to enqueue outcome continuation", exc_info=True)
         return True
@@ -6040,6 +6056,7 @@ class AgentHarness:
                     session_store=self._store,
                     worker_session_id=session.id,
                     parent_session_id=session.parent_id,
+                    org_id=str(session.org_id),
                     agent_id=session.agent_id,
                     redis=self._redis,
                     task_id=getattr(session, "task_id", None),

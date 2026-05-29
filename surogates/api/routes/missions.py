@@ -389,7 +389,9 @@ async def resume_mission_endpoint(
     from surogates.missions.store import MissionStore
 
     result = await handle_mission_resume(
-        session_id=row.session_id, agent_id=row.agent_id,
+        session_id=row.session_id,
+        org_id=str(tenant.org_id),
+        agent_id=row.agent_id,
         session_store=session_store,
         mission_store=MissionStore(session_factory),
         redis=redis,

@@ -216,7 +216,12 @@ async def _submit_one(
         {"content": body.prompt},
     )
 
-    await enqueue_session(request.app.state.redis, session.agent_id, session.id)
+    await enqueue_session(
+        request.app.state.redis,
+        org_id=str(session.org_id),
+        agent_id=session.agent_id,
+        session_id=session.id,
+    )
 
     return PromptAccepted(session_id=session.id, event_id=event_id)
 

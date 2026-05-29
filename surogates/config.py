@@ -155,39 +155,92 @@ class ToolOutputSettings(BaseSettings):
     max_line_length: int = 2000
 
 
-# Prefix for the per-agent session work queue.  The full key is
-# ``surogates:work_queue:<agent_id>`` — one queue per agent so that many
-# agents can share a single Redis without stealing each other's sessions.
-WORK_QUEUE_KEY: str = "surogates:work_queue"
+# Plan 2 / Task 12 — shared work queue.  Every enqueue lands here;
+# the dispatcher (Task 13) decodes the (org_id, agent_id, session_id)
+# tuple to know which tenant's TurnConcurrencyGate slot to acquire
+# before handing the session to a worker.
+SHARED_WORK_QUEUE_KEY: str = "surogates:work_queue"
+
+# Plan 1 legacy alias — kept as an importable constant so old code
+# that referenced WORK_QUEUE_KEY by name doesn't immediately crash.
+# The per-agent key shape is gone; use SHARED_WORK_QUEUE_KEY.
+WORK_QUEUE_KEY: str = SHARED_WORK_QUEUE_KEY
 
 
 def agent_queue_key(agent_id: str) -> str:
-    """Return the Redis sorted-set key for *agent_id*'s work queue.
+    """DEPRECATED — Plan 2 migrated to a single shared queue.
 
-    Every enqueue and dequeue of a session goes through this helper so the
-    shape of the key stays consistent across the API, channels, the
-    orchestrator worker, and inter-session notifications.
+    The per-agent key shape (``surogates:work_queue:<agent_id>``) is
+    gone.  Use :data:`SHARED_WORK_QUEUE_KEY` + :func:`encode_queue_member`
+    instead.  Plan 9 deletes this shim entirely.
     """
-    if not agent_id:
-        raise ValueError("agent_queue_key requires a non-empty agent_id")
-    return f"{WORK_QUEUE_KEY}:{agent_id}"
+    raise RuntimeError(
+        f"agent_queue_key({agent_id!r}) is removed — Plan 2 migrated "
+        f"to a single shared queue ({SHARED_WORK_QUEUE_KEY}).  Use "
+        f"encode_queue_member(...) + SHARED_WORK_QUEUE_KEY instead.",
+    )
+
+
+def encode_queue_member(
+    *, org_id: str, agent_id: str, session_id: str,
+) -> str:
+    """Encode the tenant tuple as a pipe-delimited queue member.
+
+    Plan 2 / Task 12.  The dispatcher decodes this in
+    :func:`parse_queue_member` to know which tenant's
+    :class:`~surogates.runtime.TurnConcurrencyGate` slot to acquire
+    before handing the session to a worker — no DB round-trip per
+    dequeue.
+
+    Rejects identifiers containing ``'|'`` (the delimiter) so a bad
+    row never lands in the queue."""
+    for part_name, part in (
+        ("org_id", org_id), ("agent_id", agent_id),
+        ("session_id", session_id),
+    ):
+        if "|" in part:
+            raise ValueError(
+                f"{part_name}={part!r} contains '|' which is the "
+                f"queue-member delimiter; reject at enqueue so a "
+                f"bad row never lands in the queue",
+            )
+    return f"{org_id}|{agent_id}|{session_id}"
+
+
+def parse_queue_member(member: str) -> tuple[str, str, str]:
+    """Decode a queue member; raises ``ValueError`` on malformed input."""
+    parts = member.split("|")
+    if len(parts) != 3:
+        raise ValueError(
+            f"malformed queue member {member!r}; expected "
+            f"<org_id>|<agent_id>|<session_id>",
+        )
+    return parts[0], parts[1], parts[2]
 
 
 async def enqueue_session(
     redis: Any,
+    *,
+    org_id: str,
     agent_id: str,
     session_id: Any,
-    *,
     priority: float = 0,
 ) -> None:
-    """Enqueue *session_id* on *agent_id*'s work queue with ``ZADD``.
+    """Enqueue a session on the shared work queue.
 
-    Single entry point used by every component that wakes a session — the
-    API, the channel adapters, the coordinator/delegate tools, and the
-    worker-notify helpers — so all enqueues share one key shape and one
-    priority convention.  Lower *priority* values are popped first.
+    Plan 2 / Task 12.  Single entry point used by every component
+    that wakes a session — the API, channel adapters, coordinator/
+    delegate tools, and worker-notify helpers.  Members encode the
+    ``(org_id, agent_id, session_id)`` tuple so the dispatcher can
+    extract the tenant for the per-tenant concurrency-gate check
+    without a DB round-trip per dequeue.  Lower *priority* values
+    are popped first.
     """
-    await redis.zadd(agent_queue_key(agent_id), {str(session_id): priority})
+    member = encode_queue_member(
+        org_id=str(org_id), agent_id=str(agent_id),
+        session_id=str(session_id),
+    )
+    await redis.zadd(SHARED_WORK_QUEUE_KEY, {member: priority})
 
 
 # Default Redis channel prefix for session interrupts.

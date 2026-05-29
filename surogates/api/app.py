@@ -85,7 +85,20 @@ def _install_browser_api_dependencies(app: Any, settings: Any) -> None:
         )
 
     async def wake_session(session_id: str) -> None:
-        await enqueue_session(app.state.redis, settings.agent_id, session_id)
+        # Plan 2 / Task 12 — the shared queue needs the tenant tuple
+        # so the dispatcher's gate check (Task 13) can find the
+        # session's org without a DB round-trip.  Look up the row
+        # once; the caller's hot path runs at most a few times per
+        # request so the extra read is negligible.
+        session = await app.state.session_store.get_session(
+            UUID(session_id),
+        )
+        await enqueue_session(
+            app.state.redis,
+            org_id=str(session.org_id),
+            agent_id=session.agent_id,
+            session_id=session_id,
+        )
 
     app.state.browser_registry = browser_registry
     app.state.browser_control = browser_control

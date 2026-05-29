@@ -964,7 +964,12 @@ async def send_message(
     )
 
     # Enqueue the session for processing on its agent's dedicated queue.
-    await enqueue_session(request.app.state.redis, session.agent_id, session_id)
+    await enqueue_session(
+        request.app.state.redis,
+        org_id=str(session.org_id),
+        agent_id=session.agent_id,
+        session_id=session_id,
+    )
 
     return SendMessageResponse(event_id=event_id)
 
@@ -1258,7 +1263,12 @@ async def resume_session(
     await store.update_session_status(session_id, "active")
 
     # Re-enqueue so the worker picks it up.
-    await enqueue_session(request.app.state.redis, session.agent_id, session_id)
+    await enqueue_session(
+        request.app.state.redis,
+        org_id=str(session.org_id),
+        agent_id=session.agent_id,
+        session_id=session_id,
+    )
 
     return await store.get_session(session_id)
 
@@ -1297,7 +1307,12 @@ async def retry_session(
         {"source": "user_retry"},
     )
     await store.update_session_status(session_id, "active")
-    await enqueue_session(request.app.state.redis, session.agent_id, session_id)
+    await enqueue_session(
+        request.app.state.redis,
+        org_id=str(session.org_id),
+        agent_id=session.agent_id,
+        session_id=session_id,
+    )
 
     return await store.get_session(session_id)
 

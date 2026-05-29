@@ -226,7 +226,12 @@ async def send_session_events(
 
         redis = getattr(request.app.state, "redis", None)
         if redis is not None:
-            await enqueue_session(redis, session.agent_id, session_id)
+            await enqueue_session(
+                redis,
+                org_id=str(session.org_id),
+                agent_id=session.agent_id,
+                session_id=session_id,
+            )
 
         sent.append(
             SentSessionEvent(

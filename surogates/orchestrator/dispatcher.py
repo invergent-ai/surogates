@@ -256,7 +256,16 @@ class Orchestrator:
 
     async def _requeue_busy_session(self, session_id: UUID) -> None:
         await asyncio.sleep(_LEASE_BUSY_REQUEUE_DELAY)
-        await enqueue_session(self.redis, self._agent_id, session_id)
+        # Plan 2 / Task 12 — the shared queue needs the tenant tuple.
+        # Look up the session row once; this is a cold path (only
+        # taken when another worker holds the lease).
+        session = await self.session_store.get_session(session_id)
+        await enqueue_session(
+            self.redis,
+            org_id=str(session.org_id),
+            agent_id=session.agent_id,
+            session_id=session_id,
+        )
 
     async def _process(self, session_id: UUID, attempt: int = 0) -> None:
         """Process a single session.  Retry with exponential backoff on failure."""
@@ -322,7 +331,16 @@ class Orchestrator:
                 )
                 await self._requeue_busy_session(session_id)
             elif rewake_pending:
-                await enqueue_session(self.redis, self._agent_id, session_id)
+                # Plan 2 / Task 12 — tenant tuple required.
+                rewake_session = await self.session_store.get_session(
+                    session_id,
+                )
+                await enqueue_session(
+                    self.redis,
+                    org_id=str(rewake_session.org_id),
+                    agent_id=rewake_session.agent_id,
+                    session_id=session_id,
+                )
         except Exception as exc:
             logger.exception(
                 "Harness failed for session %s (attempt %d/%d)",
@@ -491,8 +509,9 @@ class Orchestrator:
                         await self.session_store.release_stale_lease(session.id)
                         await enqueue_session(
                             self.redis,
-                            session.agent_id,
-                            session.id,
+                            org_id=str(session.org_id),
+                            agent_id=session.agent_id,
+                            session_id=session.id,
                         )
                         logger.warning(
                             "Recovered orphaned session %s — re-enqueued",

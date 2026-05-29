@@ -538,7 +538,10 @@ async def send_website_message(
         {"content": body.content},
     )
     await enqueue_session(
-        request.app.state.redis, session.agent_id, session_id,
+        request.app.state.redis,
+        org_id=str(session.org_id),
+        agent_id=session.agent_id,
+        session_id=session_id,
     )
     return SendMessageResponse(event_id=event_id)
 

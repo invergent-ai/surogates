@@ -429,7 +429,12 @@ async def _run_single_delegation(
             },
         )
         if redis is not None:
-            await enqueue_session(redis, agent_id, child_id)
+            await enqueue_session(
+                redis,
+                org_id=str(tenant.org_id),
+                agent_id=agent_id,
+                session_id=child_id,
+            )
 
         outcome = await _poll_child_completion(
             session_store=session_store,
