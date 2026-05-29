@@ -18,6 +18,7 @@ from surogates.runtime.invalidator import (
     run_invalidator,
 )
 from surogates.runtime.platform_client import PlatformAuthError, PlatformClient
+from surogates.runtime.rate_limiter import PerTenantRateLimiter, rate_limit_dep
 from surogates.runtime.resolver import (
     agent_runtime_context_dep,
     build_agent_runtime_context,
@@ -30,6 +31,7 @@ __all__ = [
     "FirebaseConfigCache",
     "INVALIDATION_CHANNELS",
     "LLMEndpoint",
+    "PerTenantRateLimiter",
     "PlatformAuthError",
     "PlatformClient",
     "RuntimeConfigCache",
@@ -37,5 +39,6 @@ __all__ = [
     "agent_runtime_context_dep",
     "build_agent_runtime_context",
     "handle_invalidation_message",
+    "rate_limit_dep",
     "run_invalidator",
 ]

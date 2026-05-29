@@ -27,6 +27,7 @@ def _make_settings(
         runtime_mode=runtime_mode,
         platform_api_url=platform_api_url,
         platform_api_token="t",
+        api=SimpleNamespace(rate_limit_rpm=300),
     )
 
 
@@ -75,10 +76,14 @@ async def test_install_shared_plumbing_wires_client_and_cache():
         assert app.state.runtime_invalidator_task is not None
         assert not app.state.runtime_invalidator_task.done()
         # Plan 1b / Task 11 — slug cache lands alongside the rest.
-        from surogates.runtime import SlugResolverCache
+        from surogates.runtime import PerTenantRateLimiter, SlugResolverCache
 
         assert isinstance(
             app.state.slug_resolver_cache, SlugResolverCache,
+        )
+        # Plan 1b / Task 14 — rate limiter wired by lifespan.
+        assert isinstance(
+            app.state.rate_limiter, PerTenantRateLimiter,
         )
     finally:
         await _shutdown_shared_runtime_plumbing(app)
@@ -121,6 +126,7 @@ def test_install_shared_plumbing_skips_when_url_empty():
     assert app.state.runtime_config_cache is None
     assert app.state.firebase_config_cache is None
     assert app.state.slug_resolver_cache is None
+    assert app.state.rate_limiter is None
 
 
 @pytest.mark.asyncio

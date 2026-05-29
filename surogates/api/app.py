@@ -138,6 +138,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.runtime_config_cache = None
         app.state.firebase_config_cache = None
         app.state.slug_resolver_cache = None
+        app.state.rate_limiter = None
 
     logger.info("Surogates API started (workers=%d)", settings.api.workers)
 
@@ -167,6 +168,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
 
     from surogates.runtime import (
         FirebaseConfigCache,
+        PerTenantRateLimiter,
         PlatformClient,
         RuntimeConfigCache,
         SlugResolverCache,
@@ -182,6 +184,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         app.state.runtime_config_cache = None
         app.state.firebase_config_cache = None
         app.state.slug_resolver_cache = None
+        app.state.rate_limiter = None
         app.state.runtime_invalidator_task = None
         return
 
@@ -201,10 +204,15 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         loader=client.get_agent_id_for_slug,
         ttl_seconds=30.0,
     )
+    rate_limiter = PerTenantRateLimiter(
+        app.state.redis,
+        default_rpm=getattr(settings.api, "rate_limit_rpm", 300),
+    )
     app.state.platform_client = client
     app.state.runtime_config_cache = cache
     app.state.firebase_config_cache = firebase_cache
     app.state.slug_resolver_cache = slug_cache
+    app.state.rate_limiter = rate_limiter
     app.state.runtime_invalidator_task = asyncio.create_task(
         run_invalidator(
             app.state.redis,
@@ -240,6 +248,8 @@ async def _shutdown_shared_runtime_plumbing(app: FastAPI) -> None:
         app.state.firebase_config_cache = None
     if hasattr(app.state, "slug_resolver_cache"):
         app.state.slug_resolver_cache = None
+    if hasattr(app.state, "rate_limiter"):
+        app.state.rate_limiter = None
 
 
 def create_app() -> FastAPI:
