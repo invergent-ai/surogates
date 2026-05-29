@@ -191,6 +191,21 @@ def test_every_audit_emit_call_passes_agent_id():
     )
 
 
+def test_mcp_proxy_loader_credential_access_emits_agent_id():
+    """Plan 5 / Task 5.  Plan 1b Task 17 left this emit at
+    ``agent_id=None`` because the loader had no agent_id in scope.
+    Plan 5 threads it through the call stack from the proxy
+    routes (where agent_runtime_context_dep resolves it)."""
+    import inspect
+
+    import surogates.mcp_proxy.loader as loader
+
+    src = inspect.getsource(loader._emit_credential_access)
+    sig = inspect.signature(loader._emit_credential_access)
+    assert "agent_id" in sig.parameters
+    assert "agent_id=None" not in src
+
+
 def test_audit_log_observability_sql_retrofits_agent_id():
     """The idempotent DDL block in ``observability.sql`` retrofits
     existing deployed ``audit_log`` tables with the new column +

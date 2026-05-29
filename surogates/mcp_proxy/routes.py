@@ -76,11 +76,20 @@ async def _ensure_tenant_connected(
     pool: ConnectionPool,
     auth: ProxyAuthContext,
     request: Request,
+    *,
+    agent_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Load MCP configs and ensure the tenant is connected.
 
     Returns cached schemas if the tenant is already connected, otherwise
     loads configs from DB + platform and connects.
+
+    Plan 5 / Task 5.  ``agent_id`` flows from the proxy route (where
+    ``agent_runtime_context_dep`` resolves the per-request
+    ``AgentRuntimeContext``) down into ``load_mcp_configs`` so the
+    credential.access audit emit carries the requesting agent's id.
+    ``list_tools`` is a metadata probe with no agent in scope and
+    passes ``None``.
     """
     cached = pool.get_cached_schemas(auth.org_id, auth.user_id)
     if cached is not None:
@@ -94,6 +103,7 @@ async def _ensure_tenant_connected(
         platform_mcp_dir=request.app.state.platform_mcp_dir,
         audit_store=getattr(request.app.state, "audit_store", None),
         is_service_account=auth.is_service_account,
+        agent_id=agent_id,
     )
 
     if not configs:
@@ -145,7 +155,9 @@ async def call_tool(
     pool: ConnectionPool = request.app.state.pool
 
     # Lazy-connect on first call for this tenant.
-    schemas = await _ensure_tenant_connected(pool, auth, request)
+    schemas = await _ensure_tenant_connected(
+        pool, auth, request, agent_id=ctx.agent_id,
+    )
     if not schemas:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -53,6 +53,7 @@ async def load_mcp_configs(
     audit_store: AuditStore | None = None,
     *,
     is_service_account: bool = False,
+    agent_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Load, merge, and credential-resolve MCP server configs.
 
@@ -88,6 +89,7 @@ async def load_mcp_configs(
                     server_name, config, credential_refs, vault, org_id,
                     user_id, audit_store,
                     is_service_account=is_service_account,
+                    agent_id=agent_id,
                 )
             )
 
@@ -107,6 +109,7 @@ async def _resolve_credentials_safe(
     audit_store: AuditStore | None,
     *,
     is_service_account: bool = False,
+    agent_id: str | None = None,
 ) -> None:
     """Wrapper that catches and logs credential resolution failures."""
     try:
@@ -114,6 +117,7 @@ async def _resolve_credentials_safe(
             config, credential_refs, vault, org_id, user_id,
             server_name, audit_store,
             is_service_account=is_service_account,
+            agent_id=agent_id,
         )
     except Exception:
         logger.exception(
@@ -198,6 +202,7 @@ async def _resolve_credentials(
     audit_store: AuditStore | None,
     *,
     is_service_account: bool = False,
+    agent_id: str | None = None,
 ) -> None:
     """Resolve credential references and inject into the config.
 
@@ -224,6 +229,7 @@ async def _resolve_credentials(
             )
             await _emit_credential_access(
                 audit_store, org_id, audit_user_id, name, consumer, scope,
+                agent_id=agent_id,
             )
             if value is None:
                 logger.warning(
@@ -246,6 +252,7 @@ async def _resolve_credentials(
             )
             await _emit_credential_access(
                 audit_store, org_id, audit_user_id, name, consumer, scope,
+                agent_id=agent_id,
             )
             if value is None:
                 logger.warning(
@@ -302,17 +309,24 @@ async def _emit_credential_access(
     name: str,
     consumer: str,
     scope: str,
+    *,
+    agent_id: str | None,
 ) -> None:
-    """Record a credential.access entry when the audit store is wired."""
+    """Record a credential.access entry when the audit store is wired.
+
+    Plan 5 / Task 5.  ``agent_id`` is required (keyword-only) instead
+    of being silently set to ``None`` at the ``audit_store.emit`` call
+    site (Plan 1b Task 17 workaround retirement).  Callers thread it
+    through from the proxy routes via ``ctx.agent_id`` resolved by
+    ``agent_runtime_context_dep``.  Helm-mode pods that have no
+    AgentRuntimeContext still pass ``None`` explicitly so the row
+    persists with a NULL agent_id (the column is nullable by design).
+    """
     if audit_store is None:
         return
     await audit_store.emit(
         org_id=org_id,
-        # Credential vault is org-scoped (per ``_retrieve_credential``);
-        # the same MCP server config can be used by any agent that
-        # references it, so a single agent_id would be misleading.
-        # Plan 1b explicitly accepts None for these org-level emitters.
-        agent_id=None,
+        agent_id=agent_id,
         user_id=user_id,
         type=AuditType.CREDENTIAL_ACCESS,
         data=credential_access_event(
