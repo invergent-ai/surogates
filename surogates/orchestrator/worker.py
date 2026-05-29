@@ -38,6 +38,7 @@ from surogates.memory.store import MemoryStore
 from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.session.store import SessionStore
 from surogates.tenant.context import TenantContext
+from surogates.tenant.credentials import CredentialVault
 from surogates.sandbox.pool import SandboxPool
 from surogates.sandbox.process import ProcessSandbox
 from surogates.tools.loader import ResourceLoader
@@ -433,6 +434,59 @@ def _install_worker_runtime_plumbing(state: dict, settings) -> None:
     )
 
 
+def _build_helm_session_llm_clients(settings, tenant) -> "SessionLLMClients":
+    """Helm-mode adapter: build a SessionLLMClients from process-wide
+    settings.llm + tenant overrides.
+
+    Plan 2 / Task 7 transitional helper.  Wraps the legacy
+    auxiliary-client builders so harness_factory uses a unified
+    SessionLLMClients shape in both modes.  Plan 9 retires helm mode
+    entirely and deletes this helper along with the auxiliary builders.
+
+    The main slot uses process-wide settings.llm.{api_key,base_url,model}
+    directly — there's no per-session vault resolution in helm mode
+    because the legacy contract was a single key per pod.
+    """
+    from openai import AsyncOpenAI
+
+    from surogates.harness.auxiliary_client import (
+        build_advisor_auxiliary_llm,
+        build_summary_auxiliary_llm,
+        build_vision_auxiliary_llm,
+    )
+    from surogates.harness.session_llm import ResolvedLLM, SessionLLMClients
+
+    llm_kwargs: dict[str, Any] = {}
+    if settings.llm.api_key:
+        llm_kwargs["api_key"] = settings.llm.api_key
+    if settings.llm.base_url:
+        llm_kwargs["base_url"] = settings.llm.base_url
+
+    main_client = AsyncOpenAI(**llm_kwargs)
+    summary = build_summary_auxiliary_llm(settings, tenant)
+    vision = build_vision_auxiliary_llm(settings, tenant)
+    advisor = build_advisor_auxiliary_llm(settings, tenant)
+
+    return SessionLLMClients(
+        main=ResolvedLLM(client=main_client, model=settings.llm.model),
+        summary=(
+            ResolvedLLM(client=summary.client, model=summary.model)
+            if summary is not None
+            else None
+        ),
+        vision=(
+            ResolvedLLM(client=vision.client, model=vision.model)
+            if vision is not None
+            else None
+        ),
+        advisor=(
+            ResolvedLLM(client=advisor.client, model=advisor.model)
+            if advisor is not None
+            else None
+        ),
+    )
+
+
 async def _shutdown_worker_runtime_plumbing(state: dict) -> None:
     """Close the worker-side platform client and drop cache references.
 
@@ -679,21 +733,44 @@ async def run_worker(settings: Settings) -> None:
         else:
             logger.debug("No MCP servers configured")
 
-    # 6. LLM client -- configured from settings.llm (config.yaml + env vars).
-    llm_kwargs: dict[str, Any] = {}
-    if settings.llm.api_key:
-        llm_kwargs["api_key"] = settings.llm.api_key
-    if settings.llm.base_url:
-        llm_kwargs["base_url"] = settings.llm.base_url
-    llm_client = AsyncOpenAI(**llm_kwargs)
-
+    # 6. LLM clients -- now per-session (Plan 2 / Task 7).  Helm-mode
+    # sessions get a bundle from _build_helm_session_llm_clients in
+    # harness_factory (wraps settings.llm + tenant overrides); shared-
+    # mode sessions get a bundle from build_session_llm_clients fed by
+    # the per-agent runtime config + the credential vault.  No
+    # process-wide AsyncOpenAI instance here — every session owns its
+    # own connection pool.
     logger.info(
-        "LLM client: model=%s, base_url=%s, api_key=%s",
+        "LLM defaults: model=%s, base_url=%s, api_key=%s",
         settings.llm.model,
         settings.llm.base_url or "(default)",
         f"{settings.llm.api_key[:12]}..." if settings.llm.api_key else "(not set)",
     )
     _warn_if_base_model_missing_from_metadata(settings.llm.model)
+
+    # Worker-side shared-runtime plumbing (Plan 2 / Tasks 1+2).  In
+    # shared mode this gives harness_factory a RuntimeConfigCache to
+    # pull AgentRuntimeContext from per session; in helm mode it's a
+    # no-op and ``runtime_config_cache`` stays ``None``.
+    worker_state: dict = {"redis": redis_client}
+    _install_worker_runtime_plumbing(worker_state, settings)
+    _start_worker_invalidator(worker_state)
+    runtime_config_cache = worker_state["runtime_config_cache"]
+
+    # Credential vault — required in shared mode for per-session
+    # vault://<name> resolution; tolerated as None in helm mode where
+    # settings.llm.api_key is the single key for the pod.
+    if settings.encryption_key:
+        credential_vault: CredentialVault | None = CredentialVault(
+            session_factory,
+            encryption_key=settings.encryption_key.encode("utf-8"),
+        )
+    else:
+        credential_vault = None
+        logger.warning(
+            "SUROGATES_ENCRYPTION_KEY not set; shared-mode sessions "
+            "will fail to resolve api_key_ref through the vault",
+        )
 
     # Worker identity -- from K8s downward API or a generated fallback.
     worker_id = settings.worker_id or f"worker-{id(asyncio.get_event_loop()):x}"
@@ -821,34 +898,58 @@ async def run_worker(settings: Settings) -> None:
                     session.id, exc_info=True,
                 )
 
-        if not settings.llm.model:
+        # Plan 2 / Task 7 — per-session LLM bundle.  Helm mode wraps
+        # the legacy settings + auxiliary-builder path; shared mode
+        # resolves through AgentRuntimeContext + the credential vault.
+        if runtime_mode == "helm":
+            llm_bundle = _build_helm_session_llm_clients(settings, tenant)
+        else:
+            from surogates.harness.session_llm import (
+                build_session_llm_clients,
+            )
+            from surogates.runtime import (
+                resolve_runtime_context_for_session,
+            )
+
+            ctx = await resolve_runtime_context_for_session(
+                session,
+                cache=runtime_config_cache,
+                settings=settings,
+            )
+            llm_bundle = await build_session_llm_clients(
+                ctx, vault=credential_vault, user_id=tenant.user_id,
+            )
+
+        if not llm_bundle.main.model:
             # Worker raises rather than returns a 503 because there's no
             # HTTP response surface here.  ``dispatcher._process``
             # catches and emits ``HARNESS_CRASH`` events; after 3 retries
             # with exponential backoff the dispatcher promotes the
             # session to ``SESSION_FAIL``.  A deployment that
-            # legitimately leaves ``llm.model`` blank therefore burns
+            # legitimately leaves the model blank therefore burns
             # ~7s + log noise per session — operators should fix the
             # config rather than rely on the retry loop.
+            await llm_bundle.aclose()
             raise RuntimeError(
-                f"LLM model is not configured (settings.llm.model is empty); "
+                f"LLM model is not configured (main slot has empty model); "
                 f"cannot wake session {session.id}."
             )
-        model_id = settings.llm.model
+        model_id = llm_bundle.main.model
+        llm_client = llm_bundle.main.client
         budget = IterationBudget(max_total=90)
-        summary_auxiliary = build_summary_auxiliary_llm(settings, tenant)
-        vision_auxiliary = build_vision_auxiliary_llm(settings, tenant)
-        advisor_auxiliary = build_advisor_auxiliary_llm(settings, tenant)
+        summary_slot = llm_bundle.summary
+        vision_slot = llm_bundle.vision
+        advisor_slot = llm_bundle.advisor
         compressor = ContextCompressor(
             model_id,
             base_url=settings.llm.base_url,
             api_key=settings.llm.api_key,
             model_overrides=settings.llm.models,
             summary_model_override=(
-                summary_auxiliary.model if summary_auxiliary is not None else None
+                summary_slot.model if summary_slot is not None else None
             ),
             summary_client=(
-                summary_auxiliary.client if summary_auxiliary is not None else None
+                summary_slot.client if summary_slot is not None else None
             ),
         )
 
@@ -958,16 +1059,16 @@ async def run_worker(settings: Settings) -> None:
 
         if (
             settings.worker.emit_turn_summaries
-            and summary_auxiliary is not None
+            and summary_slot is not None
         ):
             turn_summarizer: TurnSummarizer | None = TurnSummarizer(
-                summary_client=summary_auxiliary.client,
-                summary_model=summary_auxiliary.model,
+                summary_client=summary_slot.client,
+                summary_model=summary_slot.model,
             )
         else:
             turn_summarizer = None
 
-        return AgentHarness(
+        harness = AgentHarness(
             session_store=session_store,
             tool_registry=tool_registry,
             llm_client=llm_client,
@@ -989,21 +1090,27 @@ async def run_worker(settings: Settings) -> None:
             saga_settings=settings.saga if settings.saga.enabled else None,
             log_policy_allowed=settings.governance.log_allowed,
             vision_client=(
-                vision_auxiliary.client if vision_auxiliary is not None else None
+                vision_slot.client if vision_slot is not None else None
             ),
             vision_model=(
-                vision_auxiliary.model if vision_auxiliary is not None else ""
+                vision_slot.model if vision_slot is not None else ""
             ),
             advisor_client=(
-                advisor_auxiliary.client if advisor_auxiliary is not None else None
+                advisor_slot.client if advisor_slot is not None else None
             ),
             advisor_model=(
-                advisor_auxiliary.model if advisor_auxiliary is not None else ""
+                advisor_slot.model if advisor_slot is not None else ""
             ),
             advisor_max_calls_per_turn=settings.llm.advisor_max_calls_per_turn,
             advisor_max_tokens=settings.llm.advisor_max_tokens,
             turn_summarizer=turn_summarizer,
         )
+        # Plan 2 / Task 7 — stash the bundle so the dispatcher can
+        # aclose its four connection pools at session retirement.
+        # A long-running worker would otherwise accumulate one pool
+        # per processed session.
+        harness._session_llm_bundle = llm_bundle  # type: ignore[attr-defined]
+        return harness
 
     # 8. Orchestrator — consumes from this agent's dedicated work queue.
     from surogates.config import agent_queue_key
@@ -1111,7 +1218,10 @@ async def run_worker(settings: Settings) -> None:
         mcp_proxy.shutdown_all()
         if mcp_proxy_client is not None:
             await mcp_proxy_client.close()
+        # Plan 2 / Tasks 1+2 — drain the worker-side runtime cache +
+        # invalidator before tearing down the redis client.
+        await _stop_worker_invalidator(worker_state)
+        await _shutdown_worker_runtime_plumbing(worker_state)
         await redis_client.aclose()
         await engine.dispose()
-        await llm_client.close()
         logger.info("Worker %s stopped", worker_id)

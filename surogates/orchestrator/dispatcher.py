@@ -295,6 +295,19 @@ class Orchestrator:
                 wake_result = await harness.wake(session_id)
             finally:
                 self._active_harnesses.pop(session_id, None)
+                # Plan 2 / Task 7 — per-session SessionLLMClients
+                # bundle.  Close its four connection pools so a
+                # long-running worker process doesn't accumulate one
+                # pool per processed session.
+                bundle = getattr(harness, "_session_llm_bundle", None)
+                if bundle is not None:
+                    try:
+                        await bundle.aclose()
+                    except Exception:
+                        logger.warning(
+                            "Failed to aclose SessionLLMClients for "
+                            "session %s", session_id, exc_info=True,
+                        )
 
             # Slot is free; settle any follow-up enqueue.  ``lease_held``
             # (another worker owns the lease) backs off briefly first; a
