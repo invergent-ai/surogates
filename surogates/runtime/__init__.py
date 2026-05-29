@@ -9,6 +9,7 @@ import cycle.
 from __future__ import annotations
 
 from surogates.runtime.bundle_accessor import AgentFileBundle
+from surogates.runtime.bundle_cache import FileBundleCache
 from surogates.runtime.cache import RuntimeConfigCache
 from surogates.runtime.context import AgentRuntimeContext, LLMEndpoint
 from surogates.runtime.hub_client import HubBundleClient
@@ -36,6 +37,7 @@ __all__ = [
     "AgentDisabledError",
     "AgentFileBundle",
     "AgentRuntimeContext",
+    "FileBundleCache",
     "FirebaseConfig",
     "FirebaseConfigCache",
     "HubBundleClient",
