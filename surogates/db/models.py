@@ -827,6 +827,11 @@ class AuditLog(Base):
             postgresql_using="btree",
         ),
         Index("idx_audit_log_user_time", "user_id", "created_at"),
+        # Plan 1b / Task 16 — per-tenant audit queries.  Shared-runtime
+        # dashboards filter by (agent_id, created_at); without this index
+        # the query degrades to a seq-scan on the org-wide partition once
+        # the tenant has > a few thousand rows.
+        Index("idx_audit_log_agent_time", "agent_id", "created_at"),
     )
 
     id: Mapped[int] = mapped_column(
@@ -839,6 +844,14 @@ class AuditLog(Base):
     # (e.g. MCP tool scan on platform-wide server definitions).
     user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    # Nullable: helm-mode pods that have not been migrated yet, and the
+    # rare audit events with no per-tenant context (e.g. platform copilot
+    # writes in helm mode), pass None.  Plan 7 lifecycle will tighten
+    # this once every emit call site has been routed through the shared
+    # agent runtime.
+    agent_id: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
     )
     type: Mapped[str] = mapped_column(Text, nullable=False)
     data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=True)

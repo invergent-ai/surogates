@@ -48,6 +48,17 @@ CREATE INDEX IF NOT EXISTS idx_events_feedback_dedupe
     )
     WHERE type IN ('user.feedback', 'expert.endorse', 'expert.override');
 
+-- Plan 1b / Task 16 — per-tenant audit attribution.
+-- ``agent_id`` is nullable so the retrofit is non-blocking on existing
+-- rows (helm-mode emitters and pre-Task-17 callers leave it NULL).
+-- The (agent_id, created_at) index backs the per-tenant audit
+-- dashboards that filter on a single agent over a time window.
+ALTER TABLE audit_log
+    ADD COLUMN IF NOT EXISTS agent_id text;
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_agent_time
+    ON audit_log (agent_id, created_at);
+
 
 -- ----------------------------------------------------------------------------
 -- Service accounts — API-channel auth (programmatic clients).

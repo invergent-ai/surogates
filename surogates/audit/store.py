@@ -42,6 +42,7 @@ class AuditStore:
         type: AuditType,
         data: dict[str, Any],
         user_id: UUID | None = None,
+        agent_id: str | None = None,
         trace_id: str | None = None,
         span_id: str | None = None,
     ) -> int | None:
@@ -51,10 +52,16 @@ class AuditStore:
         persistence failed (e.g. DB unavailable).  Failures are logged
         at ``error`` level but never raised — the caller's business
         logic must continue regardless.
+
+        ``agent_id`` is Plan 1b / Task 16.  Shared-runtime emitters
+        thread the per-request :class:`AgentRuntimeContext` agent_id
+        through; helm-mode and legacy callers may pass ``None`` and
+        the row will still persist (the column is nullable).
         """
         row = AuditLog(
             org_id=org_id,
             user_id=user_id,
+            agent_id=agent_id,
             type=type.value,
             data=data,
             trace_id=trace_id,
