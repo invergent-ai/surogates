@@ -23,6 +23,7 @@ from surogates.runtime.invalidator import (
     handle_invalidation_message,
     run_invalidator,
 )
+from surogates.runtime.leader_lock import RedisLeaderLock
 from surogates.runtime.platform_client import PlatformAuthError, PlatformClient
 from surogates.runtime.rate_limiter import PerTenantRateLimiter, rate_limit_dep
 from surogates.runtime.resolver import (
@@ -52,6 +53,7 @@ __all__ = [
     "PerTenantRateLimiter",
     "PlatformAuthError",
     "PlatformClient",
+    "RedisLeaderLock",
     "RuntimeConfigCache",
     "SlugResolverCache",
     "TurnConcurrencyGate",
