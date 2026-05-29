@@ -45,3 +45,9 @@ class AuditType(str, Enum):
     # last-write-wins; the audit event surfaces the race rate so
     # admins can dashboard noisy tenants.
     MEMORY_CONFLICT = "memory.conflict"
+
+    # Plan 5 — per-agent MCP call.  Fires at the MCPCallSandbox
+    # boundary (Task 12) so every tool invocation lands in the
+    # audit log with the agent_id that initiated it + the call
+    # outcome (success / timeout / RLIMIT exhausted).
+    POLICY_MCP_CALL = "policy.mcp_call"
