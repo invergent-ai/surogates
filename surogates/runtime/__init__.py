@@ -24,6 +24,7 @@ from surogates.runtime.resolver import (
     build_agent_runtime_context,
 )
 from surogates.runtime.slug_cache import SlugResolverCache
+from surogates.runtime.turn_gate import TurnConcurrencyGate, TurnGateBusy
 from surogates.runtime.worker_resolver import (
     AgentDisabledError,
     resolve_runtime_context_for_session,
@@ -41,6 +42,8 @@ __all__ = [
     "PlatformClient",
     "RuntimeConfigCache",
     "SlugResolverCache",
+    "TurnConcurrencyGate",
+    "TurnGateBusy",
     "agent_runtime_context_dep",
     "build_agent_runtime_context",
     "handle_invalidation_message",
