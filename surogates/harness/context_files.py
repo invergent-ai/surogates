@@ -84,6 +84,33 @@ def load_soul_md_from_disk(asset_root: str) -> str | None:
     return None
 
 
+async def load_agent_md(bundle) -> str | None:
+    """Load AGENT.md (preferred) or AGENTS.md from the bundle.
+
+    Plan 3 / Task 11.  Both filenames are common in the wild;
+    AGENT.md (singular) wins as the modern convention.  Falls back
+    to AGENTS.md so legacy bundles still load.
+
+    Returns None on bundle=None OR when neither file exists in the
+    bundle.  Content is run through the same injection scan +
+    truncation pipeline as SOUL.md — AGENT.md content lands in the
+    LLM's system prompt and must be sanitised.
+    """
+    if bundle is None:
+        return None
+    for name in ("AGENT.md", "AGENTS.md"):
+        try:
+            raw = await bundle.read_text(name)
+        except LookupError:
+            continue
+        content = raw.strip()
+        if not content:
+            continue
+        content = scan_context_content(content, name)
+        return truncate_context(content)
+    return None
+
+
 async def load_soul_md(bundle) -> str | None:
     """Load SOUL.md from the agent's file bundle.
 
