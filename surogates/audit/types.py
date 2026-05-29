@@ -51,3 +51,10 @@ class AuditType(str, Enum):
     # audit log with the agent_id that initiated it + the call
     # outcome (success / timeout / RLIMIT exhausted).
     POLICY_MCP_CALL = "policy.mcp_call"
+
+    # Plan 6 — per-tenant channel routing audit.  Fires at the
+    # shared adapter's per-event resolution boundary so compliance
+    # can answer 'which tenant did Slack message X route to' and
+    # rate-limited tenants are visible on the audit dashboard
+    # (rate_limit_outcome = 'passed' or 'dropped').
+    POLICY_CHANNEL_INBOUND = "policy.channel_inbound"
