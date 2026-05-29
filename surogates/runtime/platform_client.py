@@ -90,5 +90,38 @@ class PlatformClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def get_firebase_config(self, project_id: str) -> dict:
+        """Fetch the per-project Firebase web config (Plan 1b).
+
+        Returns the raw JSON dict; projection into
+        :class:`~surogates.runtime.firebase.FirebaseConfig` is the
+        cache loader's job.  Raises:
+
+        * :class:`LookupError` on 404 — the project exists but has no
+          BYO Firebase configured.  The cache surfaces this to the
+          login route, which falls back to platform-default auth.
+        * :class:`PlatformAuthError` on 401 — runtime token is bad or
+          revoked.  Operations problem.
+        * ``httpx.HTTPStatusError`` on any other non-2xx.
+        """
+        try:
+            resp = await self._client.get(
+                f"/api/projects/{project_id}/firebase-config",
+            )
+        except httpx.HTTPError as exc:
+            raise exc
+
+        if resp.status_code == 404:
+            raise LookupError(
+                f"project {project_id} has no Firebase config",
+            )
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
     async def aclose(self) -> None:
         await self._client.aclose()
