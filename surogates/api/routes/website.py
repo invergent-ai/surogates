@@ -36,7 +36,7 @@ import time
 import uuid
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -61,6 +61,7 @@ from surogates.channels.website_session import (
     verify_csrf_token,
 )
 from surogates.config import Settings, enqueue_session
+from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.session.events import EventType
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.tenant import agent_session_bucket
@@ -346,6 +347,7 @@ async def _load_and_authorize_session(
 async def bootstrap_website_session(
     request: Request,
     response: Response,
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> BootstrapResponse:
     """Exchange a publishable key + approved origin for a session cookie.
 
@@ -366,23 +368,23 @@ async def bootstrap_website_session(
             detail="Request origin is not in the configured allow-list.",
         )
 
-    if not settings.org_id:
+    if not agent_runtime.org_id:
         # Visitor sessions need a real org to attach to (memory,
         # storage, governance are all org-scoped).  A misconfigured
-        # deployment that hasn't set org_id cannot honour the channel
-        # contract; surface it explicitly rather than crashing the
-        # SQLAlchemy insert with a NULL constraint failure.
+        # deployment whose tenant context has no org_id cannot honour
+        # the channel contract; surface it explicitly rather than
+        # crashing the SQLAlchemy insert with a NULL constraint failure.
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Website channel is enabled but the deployment org is not configured.",
+            detail="Website channel is enabled but the tenant has no org_id.",
         )
 
     try:
-        org_uuid = UUID(settings.org_id)
+        org_uuid = UUID(agent_runtime.org_id)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Configured org_id is not a valid UUID.",
+            detail="Tenant org_id is not a valid UUID.",
         ) from exc
 
     if not settings.storage.bucket:
@@ -418,7 +420,7 @@ async def bootstrap_website_session(
         session_id=session_id,
         user_id=None,
         org_id=org_uuid,
-        agent_id=settings.agent_id,
+        agent_id=agent_runtime.agent_id,
         channel=WEBSITE_CHANNEL,
         model=settings.llm.model,
         config=config,
@@ -457,7 +459,7 @@ async def bootstrap_website_session(
         session_id=session.id,
         csrf_token=csrf_token,
         expires_at=int(time.time()) + DEFAULT_SESSION_TTL_SECONDS,
-        agent_name=settings.agent_id,
+        agent_name=agent_runtime.agent_id,
     )
 
 
