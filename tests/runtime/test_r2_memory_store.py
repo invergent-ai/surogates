@@ -75,3 +75,62 @@ async def test_r2_memory_store_format_for_system_prompt_includes_entries():
     formatted = store.format_for_system_prompt("memory")
     assert formatted is not None
     assert "first remembered fact" in formatted
+
+
+@pytest.mark.asyncio
+async def test_r2_memory_store_calls_on_write_after_persist():
+    """Plan 4 / Task 12.  The on_write callback fires after a
+    successful persist so the harness can publish the invalidation
+    message AND emit the audit event in one place."""
+    from surogates.memory.r2_store import R2MemoryStore
+
+    backend = _FakeBackend()
+    write_calls: list[dict] = []
+
+    async def on_write(action, *, new_version, conflict_detected):
+        write_calls.append({
+            "action": action,
+            "new_version": new_version,
+            "conflict_detected": conflict_detected,
+        })
+
+    store = R2MemoryStore(
+        backend=backend, bucket="bk", key="p/users/u/memory.json",
+        on_write=on_write,
+    )
+    await store.load_from_r2()
+    await store.add("memory", "x")
+    assert write_calls == [
+        {"action": "add", "new_version": 1, "conflict_detected": False},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_r2_memory_store_detects_conflict_in_callback():
+    """When another writer lands between load_from_r2 and the
+    next add, the callback fires with conflict_detected=True so
+    the harness can emit MEMORY_CONFLICT audit."""
+    from surogates.memory.r2_store import R2MemoryStore
+    from surogates.runtime.memory_io import write_user_memory
+
+    backend = _FakeBackend()
+    seen: list[bool] = []
+
+    async def on_write(action, *, new_version, conflict_detected):
+        seen.append(conflict_detected)
+
+    store = R2MemoryStore(
+        backend=backend, bucket="bk", key="p/users/u/memory.json",
+        on_write=on_write,
+    )
+    await store.load_from_r2()  # version 0
+
+    # Simulate another writer landing version 5 on R2 while our
+    # session was working in-memory.
+    await write_user_memory(
+        backend, bucket="bk", key="p/users/u/memory.json",
+        content="other-writer", expected_version=4,
+    )
+
+    await store.add("memory", "ours")
+    assert seen == [True]

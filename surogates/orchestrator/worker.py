@@ -634,6 +634,11 @@ async def run_worker(settings: Settings) -> None:
     # 3. Session store
     session_store = SessionStore(session_factory, redis=redis_client)
 
+    # Plan 4 / Task 12 — audit store for memory write / conflict
+    # events (and any other worker-side audit emit added later).
+    from surogates.audit.store import AuditStore
+    audit_store = AuditStore(session_factory)
+
     # 3b. Workspace storage shared by the API, sandbox mounts, and
     # harness-local tools that need to materialize session files.
     from surogates.storage.backend import create_backend
@@ -1045,8 +1050,57 @@ async def run_worker(settings: Settings) -> None:
                     str(session.user_id) if session.user_id else None
                 ),
             )
+            # Plan 4 / Task 12 — on every successful write,
+            # publish user.memory_changed:<org_id>:<user_id> on
+            # Redis so other workers serving the same user
+            # invalidate their L1 MemoryCache entry; also emit
+            # MEMORY_WRITE / MEMORY_CONFLICT audit so dashboards
+            # surface conflict rates per tenant.
+            from surogates.audit.types import AuditType
+
+            _user_token = (
+                str(session.user_id) if session.user_id else "shared"
+            )
+            _memory_channel = (
+                f"user.memory_changed:{ctx.org_id}:{_user_token}".encode()
+            )
+
+            async def _on_memory_write(
+                action, *, new_version, conflict_detected,
+            ):
+                try:
+                    await redis_client.publish(
+                        f"user.memory_changed:{ctx.org_id}:{_user_token}",
+                        _memory_channel,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to publish memory invalidation",
+                        exc_info=True,
+                    )
+                try:
+                    await audit_store.emit(
+                        org_id=session_org_id,
+                        agent_id=ctx.agent_id,
+                        user_id=session.user_id,
+                        type=(
+                            AuditType.MEMORY_CONFLICT
+                            if conflict_detected
+                            else AuditType.MEMORY_WRITE
+                        ),
+                        data={
+                            "action": action,
+                            "version": new_version,
+                        },
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to emit memory audit", exc_info=True,
+                    )
+
             memory_store = R2MemoryStore(
                 backend=storage_backend, bucket=mem_bucket, key=mem_key,
+                on_write=_on_memory_write,
             )
             await memory_store.load_from_r2()
         else:
