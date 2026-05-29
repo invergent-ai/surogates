@@ -74,6 +74,12 @@ async def test_install_shared_plumbing_wires_client_and_cache():
         assert isinstance(app.state.runtime_config_cache, RuntimeConfigCache)
         assert app.state.runtime_invalidator_task is not None
         assert not app.state.runtime_invalidator_task.done()
+        # Plan 1b / Task 11 — slug cache lands alongside the rest.
+        from surogates.runtime import SlugResolverCache
+
+        assert isinstance(
+            app.state.slug_resolver_cache, SlugResolverCache,
+        )
     finally:
         await _shutdown_shared_runtime_plumbing(app)
 
@@ -114,6 +120,7 @@ def test_install_shared_plumbing_skips_when_url_empty():
     assert app.state.platform_client is None
     assert app.state.runtime_config_cache is None
     assert app.state.firebase_config_cache is None
+    assert app.state.slug_resolver_cache is None
 
 
 @pytest.mark.asyncio

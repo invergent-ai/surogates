@@ -22,6 +22,7 @@ from surogates.runtime.resolver import (
     agent_runtime_context_dep,
     build_agent_runtime_context,
 )
+from surogates.runtime.slug_cache import SlugResolverCache
 
 __all__ = [
     "AgentRuntimeContext",
@@ -32,6 +33,7 @@ __all__ = [
     "PlatformAuthError",
     "PlatformClient",
     "RuntimeConfigCache",
+    "SlugResolverCache",
     "agent_runtime_context_dep",
     "build_agent_runtime_context",
     "handle_invalidation_message",

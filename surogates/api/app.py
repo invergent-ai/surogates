@@ -136,6 +136,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         app.state.platform_client = None
         app.state.runtime_config_cache = None
+        app.state.firebase_config_cache = None
+        app.state.slug_resolver_cache = None
 
     logger.info("Surogates API started (workers=%d)", settings.api.workers)
 
@@ -167,6 +169,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         FirebaseConfigCache,
         PlatformClient,
         RuntimeConfigCache,
+        SlugResolverCache,
         run_invalidator,
     )
 
@@ -178,6 +181,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         app.state.platform_client = None
         app.state.runtime_config_cache = None
         app.state.firebase_config_cache = None
+        app.state.slug_resolver_cache = None
         app.state.runtime_invalidator_task = None
         return
 
@@ -193,14 +197,20 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         loader=client.get_firebase_config,
         ttl_seconds=60.0,
     )
+    slug_cache = SlugResolverCache(
+        loader=client.get_agent_id_for_slug,
+        ttl_seconds=30.0,
+    )
     app.state.platform_client = client
     app.state.runtime_config_cache = cache
     app.state.firebase_config_cache = firebase_cache
+    app.state.slug_resolver_cache = slug_cache
     app.state.runtime_invalidator_task = asyncio.create_task(
         run_invalidator(
             app.state.redis,
             runtime_config_cache=cache,
             firebase_cache=firebase_cache,
+            slug_cache=slug_cache,
         ),
         name="surogates-runtime-invalidator",
     )
@@ -228,6 +238,8 @@ async def _shutdown_shared_runtime_plumbing(app: FastAPI) -> None:
     # stale entries from the prior process state.
     if hasattr(app.state, "firebase_config_cache"):
         app.state.firebase_config_cache = None
+    if hasattr(app.state, "slug_resolver_cache"):
+        app.state.slug_resolver_cache = None
 
 
 def create_app() -> FastAPI:
