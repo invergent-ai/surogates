@@ -25,9 +25,11 @@ async def test_mcp_server_cache_hits_within_ttl():
         fetches += 1
         return [{"name": "fs", "transport": "stdio"}]
 
+    # Key shape is the bare agent_id -- see mcp_server_cache.py
+    # docstring for why it diverges from MemoryCache's colon shape.
     cache = MCPServerRegistryCache(loader=loader, ttl_seconds=10)
-    assert (await cache.get("o-1:a-1"))[0]["name"] == "fs"
-    assert (await cache.get("o-1:a-1"))[0]["name"] == "fs"
+    assert (await cache.get("a-1"))[0]["name"] == "fs"
+    assert (await cache.get("a-1"))[0]["name"] == "fs"
     assert fetches == 1
 
 
@@ -43,9 +45,9 @@ async def test_mcp_server_cache_invalidate_drops_entry():
         return []
 
     cache = MCPServerRegistryCache(loader=loader, ttl_seconds=10)
-    await cache.get("o-1:a-1")
-    cache.invalidate("o-1:a-1")
-    await cache.get("o-1:a-1")
+    await cache.get("a-1")
+    cache.invalidate("a-1")
+    await cache.get("a-1")
     assert fetches == 2
 
 
@@ -63,7 +65,7 @@ async def test_mcp_server_cache_concurrent_dedup():
         return []
 
     cache = MCPServerRegistryCache(loader=loader, ttl_seconds=10)
-    tasks = [asyncio.create_task(cache.get("o-1:a-1")) for _ in range(20)]
+    tasks = [asyncio.create_task(cache.get("a-1")) for _ in range(20)]
     await asyncio.sleep(0)
     gate.set()
     await asyncio.gather(*tasks)
@@ -85,6 +87,6 @@ async def test_mcp_server_cache_loader_exception_not_memoised():
 
     cache = MCPServerRegistryCache(loader=loader, ttl_seconds=10)
     with pytest.raises(RuntimeError):
-        await cache.get("o-1:a-1")
-    await cache.get("o-1:a-1")
+        await cache.get("a-1")
+    await cache.get("a-1")
     assert calls == 2

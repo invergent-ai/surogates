@@ -6,9 +6,28 @@ parent process's environment is NOT inherited — this is the
 isolation primitive that prevents tenant A's credentials from
 leaking to tenant B's MCP server).
 
-The Task 10 ``apply_rlimits`` hook is wired into the subprocess's
-``preexec_fn`` so RLIMIT_AS + RLIMIT_CPU apply before ``exec()``;
-an OOM-bomb or fork-bomb tool cannot take down the proxy pod.
+Two APIs live on this class:
+
+* :meth:`__aenter__` / :meth:`__aexit__` — low-level direct
+  subprocess primitive.  Applies RLIMIT_AS + RLIMIT_CPU via
+  ``preexec_fn`` so an OOM-bomb or fork-bomb tool cannot take
+  down the proxy pod.  Used by tests + future direct callers.
+* :meth:`mcp_session` — higher-level path used by the route's
+  hot path (:mod:`surogates.mcp_proxy.routes`).  Delegates the
+  subprocess spawn to the mcp SDK's ``stdio_client`` so the SDK
+  can speak MCP protocol over the pipes.
+
+**Known gap (Plan 6 / Risk #1 follow-up):**  ``mcp_session``
+spawns through the SDK's ``stdio_client`` which uses
+``anyio.open_process`` -- and ``anyio.open_process`` does NOT
+expose ``preexec_fn``.  So the route's hot path today applies
+env-isolation but NOT RLIMIT enforcement; an OOM-bomb tool
+invoked via the route can still allocate until the pod's cgroup
+limit triggers.  Plan 6 closes this by either (a) replacing the
+SDK call with our own subprocess + stream-wrapper layer that
+keeps ``preexec_fn``, or (b) running the proxy pod in a cgroup
+namespace where the per-pod memory limit is small enough to
+contain the worst-case OOM-bomb's blast radius.
 
 The async context manager always terminates the subprocess on
 exit — even on exception — so a tool that hangs (or that the

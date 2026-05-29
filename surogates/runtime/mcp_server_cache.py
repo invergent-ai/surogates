@@ -1,14 +1,22 @@
 """Per-process L1 cache for the per-agent MCP server registry.
 
-Plan 5 / Task 6.  Key shape: ``"<org_id>:<agent_id>"`` — same
-contract as Plan 4's MemoryCache (the invalidator channel
-``agent.mcp_servers_changed:<agent_id>`` passes the agent_id
-through verbatim; the cache loader composes the full key with the
-caller's org context).
+Plan 5 / Task 6 + 7.  Key shape: bare ``agent_id`` (NOT
+``"<org_id>:<agent_id>"`` — that's Plan 4's MemoryCache shape).
 
-Loader exceptions are NOT memoised so a transient DB hiccup doesn't
-poison the cache for the full TTL window — same rule as the other
-Plan 1+1b+2+3+4 caches.
+The shape diverges from MemoryCache deliberately: admins reference
+agents by id when mutating the MCP server registry, so the
+invalidator channel ``agent.mcp_servers_changed:<agent_id>`` only
+carries the agent_id.  Routing the channel identifier straight
+through to :meth:`invalidate` without a parser is the simplest
+correct path, and agent ids are UUIDs in PROD so cross-org
+collisions are negligible (and would over-invalidate, not under-
+invalidate — strictly safe).
+
+The cache treats keys as opaque strings; the loader is the
+authoritative place that converts the key into a platform-client
+call.  Loader exceptions are NOT memoised so a transient DB
+hiccup doesn't poison the cache for the full TTL window — same
+rule as the other Plan 1+1b+2+3+4 caches.
 """
 
 from __future__ import annotations

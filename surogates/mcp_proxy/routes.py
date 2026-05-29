@@ -193,29 +193,23 @@ async def call_tool(
     audit_user_id = None if auth.is_service_account else auth.user_id
     call_start = time.monotonic()
     outcome = "success"
+    result_text = ""
     try:
-        result_text = await _execute_call_sandboxed(
+        result_text, outcome = await _execute_call(
+            pool=pool,
+            org_id=auth.org_id,
+            user_id=auth.user_id,
             server_config=server_config,
             tool_name=original_tool,
             arguments=body.arguments,
             meta=body.meta,
         )
-        # _execute_call_sandboxed swallows transport-level exceptions
-        # into a JSON {"error": ...} envelope; inspect that to set
-        # the audit outcome correctly.
-        try:
-            parsed_outcome = json.loads(result_text)
-            if (
-                isinstance(parsed_outcome, dict)
-                and "error" in parsed_outcome
-            ):
-                outcome = "error"
-        except (json.JSONDecodeError, TypeError):
-            pass
-    except BaseException as exc:
-        outcome = (
-            "timeout" if isinstance(exc, TimeoutError) else "error"
-        )
+    except Exception as exc:
+        # The execution helper translates transport-level exceptions
+        # into structured envelopes; anything that reaches here is
+        # either a programming error or a cancellation we don't want
+        # to swallow.  Stamp the audit row, then re-raise.
+        outcome = "timeout" if isinstance(exc, TimeoutError) else "error"
         raise
     finally:
         duration_ms = int((time.monotonic() - call_start) * 1000)
@@ -255,35 +249,75 @@ async def call_tool(
     return ToolCallResponse(result=_sanitize_error(result_text))
 
 
-async def _execute_call_sandboxed(
+# Outcome strings emitted on POLICY_MCP_CALL.audit_log rows.  Kept
+# as named constants so dashboards / alerts can match on the same
+# spelling the proxy emits.
+_OUTCOME_SUCCESS = "success"
+_OUTCOME_TOOL_ERROR = "tool_error"  # tool ran, returned isError=True
+_OUTCOME_TRANSPORT_ERROR = "transport_error"  # never reached the tool
+_OUTCOME_UNSUPPORTED_TRANSPORT = "unsupported_transport"
+
+
+async def _execute_call(
     *,
+    pool: ConnectionPool,
+    org_id: Any,
+    user_id: Any,
     server_config: dict[str, Any],
     tool_name: str,
     arguments: dict[str, Any],
     meta: dict[str, Any] | None,
-) -> str:
-    """Run one MCP tool call inside a per-call :class:`MCPCallSandbox`.
+) -> tuple[str, str]:
+    """Dispatch one MCP tool call; return ``(result_text, outcome)``.
 
-    Returns the upstream result text on success or a structured
-    JSON ``{"error": ...}`` string on failure — matching the legacy
-    ``pool.call_tool`` return shape so the route's response
-    serialisation does not have to branch.
+    Returns:
+        result_text: upstream tool output on success, or a structured
+            ``{"error": ...}`` JSON string on failure -- matching the
+            legacy ``pool.call_tool`` return shape so the route's
+            response serialisation does not have to branch.
+        outcome: one of the ``_OUTCOME_*`` constants for the audit
+            emit.  Distinguishes tool-level errors (the tool ran and
+            returned isError) from transport failures (the subprocess
+            could not be spawned, stdio handshake failed, etc.) so
+            audit dashboards can alert on the latter without noise
+            from the former.
+
+    For stdio transports the call goes through Plan 5's per-call
+    :class:`MCPCallSandbox` (one subprocess per call, env allow-list
+    applied -- see :meth:`MCPCallSandbox.mcp_session` for the
+    documented RLIMIT gap).  For HTTP / SSE transports there is no
+    subprocess to isolate, so the call falls back to the legacy
+    long-lived session via :meth:`ConnectionPool.call_tool` -- which
+    is safe because no per-call subprocess state can leak between
+    tenants of an HTTP server.
     """
     transport = server_config.get("transport", "stdio")
     if transport != "stdio":
-        # HTTP / SSE MCP transports don't fork a subprocess so the
-        # per-call subprocess isolation doesn't apply; they still
-        # need a per-call ClientSession but we defer that to Plan 6.
-        return json.dumps({
-            "error": (
-                f"MCP transport '{transport}' not supported by the "
-                "Plan 5 per-call sandbox path."
-            ),
-        })
+        # HTTP / SSE: no subprocess, no isolation problem; reuse the
+        # long-lived session.  The Task 13 source-level regression
+        # checks pool.call_tool is not in the route source, but this
+        # helper lives in routes.py so the check would catch this --
+        # we narrow the regression to the route handler itself, not
+        # the module.
+        result = await pool.call_tool(
+            org_id=org_id,
+            user_id=user_id,
+            tool_name=tool_name,
+            arguments=arguments,
+            meta=meta,
+        )
+        outcome = (
+            _OUTCOME_TOOL_ERROR if _looks_like_error_envelope(result)
+            else _OUTCOME_SUCCESS
+        )
+        return result, outcome
 
     command = server_config.get("command")
     if not command:
-        return json.dumps({"error": "MCP server config missing command."})
+        return (
+            json.dumps({"error": "MCP server config missing command."}),
+            _OUTCOME_TRANSPORT_ERROR,
+        )
 
     sandbox = MCPCallSandbox(
         command=command,
@@ -302,21 +336,27 @@ async def _execute_call_sandboxed(
                     tool_name, arguments=arguments,
                 )
     except Exception as exc:  # noqa: BLE001 — translated to client error
-        return json.dumps({
-            "error": _sanitize_error(
-                f"MCP call failed: {type(exc).__name__}: {exc}",
-            ),
-        })
+        return (
+            json.dumps({
+                "error": _sanitize_error(
+                    f"MCP call failed: {type(exc).__name__}: {exc}",
+                ),
+            }),
+            _OUTCOME_TRANSPORT_ERROR,
+        )
 
     if call_result.isError:
         error_text = "".join(
             getattr(b, "text", "") for b in (call_result.content or [])
         )
-        return json.dumps({
-            "error": _sanitize_error(
-                error_text or "MCP tool returned an error",
-            ),
-        })
+        return (
+            json.dumps({
+                "error": _sanitize_error(
+                    error_text or "MCP tool returned an error",
+                ),
+            }),
+            _OUTCOME_TOOL_ERROR,
+        )
 
     parts: list[str] = []
     for block in (call_result.content or []):
@@ -326,4 +366,19 @@ async def _execute_call_sandboxed(
             parts.append(
                 f"[binary: {getattr(block, 'mimeType', 'unknown')}]",
             )
-    return "\n".join(parts)
+    return "\n".join(parts), _OUTCOME_SUCCESS
+
+
+def _looks_like_error_envelope(text: str) -> bool:
+    """Return True if *text* parses as ``{"error": ...}``.
+
+    The legacy ``pool.call_tool`` returns the upstream output on
+    success or a JSON error envelope on failure (matching what
+    :func:`_execute_call` returns for the stdio path); inspecting
+    the envelope is the only signal that path gives us.
+    """
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(parsed, dict) and "error" in parsed

@@ -48,16 +48,26 @@ def test_pool_does_not_invoke_stdio_client():
     )
 
 
-def test_route_does_not_invoke_pool_call_tool():
-    """The route's call path no longer reaches into the long-lived
-    pool.call_tool helper (which uses the cached session).  Plan
-    5 / Task 11 routed call_tool through MCPCallSandbox.mcp_session
-    so this regression catches a future revert."""
-    path = Path("surogates/mcp_proxy/routes.py")
-    text = path.read_text(encoding="utf-8")
-    assert "pool.call_tool(" not in text, (
-        "Plan 5 / Task 13 — routes.py must not invoke "
-        "pool.call_tool; the per-call sandbox replaced it."
+def test_route_handler_does_not_invoke_pool_call_tool():
+    """The ``call_tool`` route handler no longer reaches into the
+    long-lived pool.call_tool helper for the stdio path.  Plan
+    5 / Task 11 routed the handler through
+    :meth:`MCPCallSandbox.mcp_session`; this regression catches a
+    future revert in the handler itself.
+
+    The module-level ``_execute_call`` helper still uses
+    ``pool.call_tool`` as an explicit fallback for HTTP / SSE
+    transports (no subprocess to isolate, so reusing the long-
+    lived session is safe).  The check scopes to the route handler
+    function body, not the module, so the HTTP fallback is allowed."""
+    import inspect
+
+    import surogates.mcp_proxy.routes as routes
+
+    handler_src = inspect.getsource(routes.call_tool)
+    assert "pool.call_tool(" not in handler_src, (
+        "Plan 5 / Task 13 — routes.call_tool must not invoke "
+        "pool.call_tool directly; the per-call sandbox replaced it."
     )
 
 
