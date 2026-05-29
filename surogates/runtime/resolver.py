@@ -58,6 +58,11 @@ def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
         llm_advisor=_opt_llm(payload.get("llm_advisor")),
         mcp_server_ids=tuple(payload.get("mcp_server_ids") or ()),
         governance=dict(payload.get("governance") or {}),
+        # Plan 3 / Task 2 — bundle reference.  Empty strings → None
+        # (a misconfigured payload that ships "" must not turn into
+        # a Hub fetch against an empty ref).
+        bundle_hub_ref=payload.get("bundle_hub_ref") or None,
+        bundle_version=payload.get("bundle_version") or None,
     )
 
 
