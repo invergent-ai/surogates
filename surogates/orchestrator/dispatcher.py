@@ -19,7 +19,15 @@ import traceback
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID
 
-from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
+from dataclasses import dataclass
+
+from surogates.config import (
+    INTERRUPT_CHANNEL_PREFIX,
+    SHARED_WORK_QUEUE_KEY,
+    encode_queue_member,
+    enqueue_session,
+    parse_queue_member,
+)
 from surogates.harness.error_classify import classify_harness_error
 from surogates.session.events import EventType
 
@@ -57,6 +65,101 @@ _TASKS_TICK_INTERVAL: float = 5.0
 # sends a replacement message. Back off briefly before requeueing so the
 # interrupted harness has time to release its lease.
 _LEASE_BUSY_REQUEUE_DELAY: float = 0.25
+
+# Plan 2 / Task 13 — priority bump applied when a session is requeued
+# because its tenant is over the TurnConcurrencyGate cap.  Larger
+# numbers = later delivery, so the noisy tenant slips to the back of
+# the queue without starving everyone else.  Tuned for ~30s deferral
+# at typical pop rates.
+_GATE_REQUEUE_BACKOFF: float = 30.0
+
+# How long the dispatcher sleeps when dequeue_next_session returned
+# None (either the queue was empty within ``timeout`` or the only
+# popped session was gate-busy).  Keep this small so a freshly
+# unblocked tenant gets served quickly.
+_GATE_EMPTY_SLEEP_SECONDS: float = 0.1
+
+
+@dataclass(frozen=True, slots=True)
+class DequeuedSession:
+    """A session popped off the shared queue + decoded tenant tuple."""
+
+    org_id: str
+    agent_id: str
+    session_id: str
+    priority: float
+
+
+# Maximum number of gate-busy candidates dequeue_next_session will
+# requeue-and-skip in a single call before giving up and returning
+# None.  Prevents a fully-busy queue from busy-looping inside one
+# call; the dispatcher's outer loop sleeps briefly and retries.
+_MAX_GATE_BUSY_ATTEMPTS: int = 16
+
+
+async def dequeue_next_session(
+    redis,
+    *,
+    gate: "Any | None" = None,
+    gate_limit: int | None = None,
+    timeout: float = 0.0,
+):
+    """Pop the next session off the shared queue, gated per tenant.
+
+    Plan 2 / Task 13.  Walks the queue front-to-back, requeueing
+    over-cap candidates with backoff, until either (a) an
+    unblocked candidate is found and its gate slot is acquired,
+    (b) the queue is empty, or (c) the queue cycles — i.e. the
+    next pop yields a member we already requeued this call, which
+    means every distinct tenant in the queue is at cap.  In case
+    (c) the function returns ``None`` and the dispatcher loop
+    sleeps briefly before retrying.
+
+    When ``gate`` is ``None`` the gate is skipped — used in tests
+    and helm-mode workers that don't have a Redis gate yet.
+    """
+    requeued: set[str] = set()
+    for _ in range(max(1, _MAX_GATE_BUSY_ATTEMPTS)):
+        popped = await redis.bzpopmin(SHARED_WORK_QUEUE_KEY, timeout=timeout)
+        if popped is None:
+            return None
+        _key, member, score = popped
+        if isinstance(member, bytes):
+            member = member.decode("utf-8")
+
+        if member in requeued:
+            # Queue cycled — every distinct tenant in the queue
+            # was at cap.  Put this member back at its current
+            # (post-backoff) score and stop scanning so the
+            # dispatcher's outer loop can sleep briefly.
+            await redis.zadd(SHARED_WORK_QUEUE_KEY, {member: score})
+            return None
+
+        org_id, agent_id, session_id = parse_queue_member(member)
+
+        if gate is None:
+            return DequeuedSession(
+                org_id=org_id, agent_id=agent_id,
+                session_id=session_id, priority=score,
+            )
+
+        acquired = await gate.try_acquire(
+            org_id, agent_id, limit=gate_limit,
+        )
+        if acquired:
+            return DequeuedSession(
+                org_id=org_id, agent_id=agent_id,
+                session_id=session_id, priority=score,
+            )
+
+        # Gate-busy candidate: requeue with backoff (no slot
+        # consumed) and continue scanning the queue.
+        await redis.zadd(
+            SHARED_WORK_QUEUE_KEY,
+            {member: score + _GATE_REQUEUE_BACKOFF},
+        )
+        requeued.add(member)
+    return None
 
 
 class Orchestrator:
