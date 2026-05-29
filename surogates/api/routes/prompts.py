@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
 from surogates.config import enqueue_session
+from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionStore
@@ -135,6 +136,7 @@ async def _submit_one(
     *,
     request: Request,
     tenant: TenantContext,
+    agent_id: str,
     service_account_id: UUID,
     store: SessionStore,
 ) -> PromptAccepted:
@@ -180,7 +182,7 @@ async def _submit_one(
             settings=settings,
             user_id=None,
             org_id=tenant.org_id,
-            agent_id=settings.agent_id,
+            agent_id=agent_id,
             channel=API_CHANNEL,
             model=model,
             config=config,
@@ -229,6 +231,7 @@ async def submit_prompt(
     body: PromptRequest,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> PromptAccepted:
     """Submit a single prompt for asynchronous processing.
 
@@ -244,6 +247,7 @@ async def submit_prompt(
         body,
         request=request,
         tenant=tenant,
+        agent_id=agent_runtime.agent_id,
         service_account_id=service_account_id,
         store=store,
     )
@@ -258,6 +262,7 @@ async def submit_prompts_batch(
     body: BatchPromptRequest,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> BatchPromptResponse:
     """Submit up to :data:`MAX_BATCH_SIZE` prompts in one round-trip.
 
@@ -278,6 +283,7 @@ async def submit_prompts_batch(
                 prompt,
                 request=request,
                 tenant=tenant,
+                agent_id=agent_runtime.agent_id,
                 service_account_id=service_account_id,
                 store=store,
             )
