@@ -71,3 +71,63 @@ def test_install_worker_runtime_plumbing_shared_with_empty_url_skips_loudly(capl
         "SUROGATES_PLATFORM_API_URL is empty" in rec.message
         for rec in caplog.records
     )
+
+
+class _FakePubsub:
+    async def psubscribe(self, _pattern: str) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+    def listen(self):
+        async def _gen():
+            import asyncio
+            await asyncio.Event().wait()
+            yield  # pragma: no cover
+        return _gen()
+
+
+class _FakeRedis:
+    def pubsub(self) -> _FakePubsub:
+        return _FakePubsub()
+
+
+@pytest.mark.asyncio
+async def test_install_worker_runtime_plumbing_starts_invalidator_task():
+    """Plan 2 / Task 2.  The worker subscribes to the same Redis
+    invalidation channels as the api so admin changes propagate to
+    in-flight sessions without restart."""
+    from surogates.orchestrator.worker import (
+        _install_worker_runtime_plumbing,
+        _start_worker_invalidator,
+        _shutdown_worker_runtime_plumbing,
+        _stop_worker_invalidator,
+    )
+
+    state = {"redis": _FakeRedis()}
+    _install_worker_runtime_plumbing(state, _make_settings())
+    _start_worker_invalidator(state)
+    try:
+        task = state["runtime_invalidator_task"]
+        assert task is not None
+        assert not task.done()
+    finally:
+        await _stop_worker_invalidator(state)
+        assert state["runtime_invalidator_task"] is None
+        await _shutdown_worker_runtime_plumbing(state)
+
+
+@pytest.mark.asyncio
+async def test_install_worker_runtime_plumbing_invalidator_no_op_when_cache_absent():
+    """Helm-mode workers (no cache) must not start a listener that
+    has nothing to invalidate."""
+    from surogates.orchestrator.worker import (
+        _install_worker_runtime_plumbing,
+        _start_worker_invalidator,
+    )
+
+    state = {"redis": _FakeRedis()}
+    _install_worker_runtime_plumbing(state, _make_settings(runtime_mode="helm"))
+    _start_worker_invalidator(state)
+    assert state.get("runtime_invalidator_task") is None

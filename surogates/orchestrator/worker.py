@@ -445,6 +445,42 @@ async def _shutdown_worker_runtime_plumbing(state: dict) -> None:
     state["runtime_config_cache"] = None
 
 
+def _start_worker_invalidator(state: dict) -> None:
+    """Start the Redis pub/sub listener that invalidates the worker's
+    RuntimeConfigCache when surogate-ops publishes a change.
+
+    Plan 2 / Task 2.  No-op when the cache wasn't wired (helm mode or
+    empty platform url).  The worker only routes runtime-config +
+    bundle changes; firebase / slug invalidations are api-side only.
+    """
+    import asyncio
+
+    cache = state.get("runtime_config_cache")
+    redis_client = state.get("redis")
+    if cache is None or redis_client is None:
+        state["runtime_invalidator_task"] = None
+        return
+
+    from surogates.runtime import run_invalidator
+
+    state["runtime_invalidator_task"] = asyncio.create_task(
+        run_invalidator(redis_client, runtime_config_cache=cache),
+        name="surogates-worker-runtime-invalidator",
+    )
+
+
+async def _stop_worker_invalidator(state: dict) -> None:
+    task = state.get("runtime_invalidator_task")
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except BaseException:  # noqa: BLE001 — cancellation expected
+        pass
+    state["runtime_invalidator_task"] = None
+
+
 async def run_worker(settings: Settings) -> None:
     """Bootstrap all dependencies and run the orchestrator loop.
 
