@@ -18,7 +18,11 @@ from pydantic import BaseModel
 from surogates.mcp_proxy.auth import ProxyAuthContext, get_proxy_auth
 from surogates.mcp_proxy.loader import load_mcp_configs
 from surogates.mcp_proxy.pool import ConnectionPool
-from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
+from surogates.runtime import (
+    AgentRuntimeContext,
+    agent_runtime_context_dep,
+    rate_limit_dep,
+)
 from surogates.tools.mcp.client import _sanitize_error
 
 logger = logging.getLogger(__name__)
@@ -135,6 +139,7 @@ async def call_tool(
     request: Request,
     auth: ProxyAuthContext = Depends(get_proxy_auth),
     ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+    _rate: None = Depends(rate_limit_dep),
 ) -> ToolCallResponse:
     """Execute an MCP tool call with credential injection."""
     pool: ConnectionPool = request.app.state.pool

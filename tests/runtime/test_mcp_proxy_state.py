@@ -85,6 +85,20 @@ def test_call_tool_route_has_agent_runtime_context_dep():
     assert "AgentRuntimeContext" in src
 
 
+def test_call_tool_route_has_rate_limit_dep():
+    """Plan 5 / Task 3 source-level regression: the call entry
+    point has rate_limit_dep so per-tenant MCP call budgets are
+    enforced.  tools/list stays unrated — it's a metadata probe."""
+    import inspect
+    import surogates.mcp_proxy.routes as routes
+
+    call_src = inspect.getsource(routes.call_tool)
+    assert "rate_limit_dep" in call_src
+
+    list_src = inspect.getsource(routes.list_tools)
+    assert "rate_limit_dep" not in list_src
+
+
 @pytest.mark.asyncio
 async def test_install_proxy_plumbing_helm_mode_skips():
     """Helm-mode proxy pods don't run the shared-runtime path;
