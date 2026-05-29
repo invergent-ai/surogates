@@ -60,6 +60,11 @@ _CHANNEL_ROUTING: tuple[tuple[str, str], ...] = (
     # not under-invalidate.  Agent ids are UUIDs in PROD; collision
     # probability is negligible.
     ("agent.mcp_servers_changed:", "mcp_server_cache"),
+    # Plan 6 / Task 2 — channel routing rows mutated.  Identifier
+    # shape is "<kind>:<identifier>" (e.g. "slack:A0123ABCD" or
+    # "telegram:@my_bot") and the ChannelRoutingCache keys on the
+    # same shape so the channel suffix passes through verbatim.
+    ("channel_routing_changed:", "channel_routing_cache"),
 )
 
 INVALIDATION_CHANNELS: tuple[str, ...] = tuple(
@@ -77,6 +82,7 @@ def handle_invalidation_message(
     file_bundle_cache: Any = None,
     memory_cache: Any = None,
     mcp_server_cache: Any = None,
+    channel_routing_cache: Any = None,
 ) -> None:
     """Drop a single cache entry if the channel matches.
 
@@ -93,6 +99,7 @@ def handle_invalidation_message(
         "file_bundle_cache": file_bundle_cache,
         "memory_cache": memory_cache,
         "mcp_server_cache": mcp_server_cache,
+        "channel_routing_cache": channel_routing_cache,
     }
     for prefix, cache_kwarg in _CHANNEL_ROUTING:
         if channel.startswith(prefix):
@@ -112,6 +119,7 @@ async def run_invalidator(
     file_bundle_cache: Any = None,
     memory_cache: Any = None,
     mcp_server_cache: Any = None,
+    channel_routing_cache: Any = None,
 ) -> None:
     """Long-running listener for runtime-config / firebase / slug invalidations.
 
@@ -141,6 +149,7 @@ async def run_invalidator(
                 file_bundle_cache=file_bundle_cache,
                 memory_cache=memory_cache,
                 mcp_server_cache=mcp_server_cache,
+                channel_routing_cache=channel_routing_cache,
             )
     finally:
         try:

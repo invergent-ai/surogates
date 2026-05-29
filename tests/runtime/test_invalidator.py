@@ -151,6 +151,28 @@ def test_invalidation_channels_constant_exports_all_five_prefixes():
     assert "user.memory_changed:" in INVALIDATION_CHANNELS
 
 
+def test_handler_routes_channel_routing_changed_to_channel_routing_cache():
+    """Plan 6 / Task 2.  Admin CRUD on the channel_routing table
+    publishes channel_routing_changed:<kind>:<identifier> on
+    Redis; the shared adapter pod invalidates its cache so the
+    next inbound event for that channel sees the new routing."""
+    from surogates.runtime.invalidator import handle_invalidation_message
+
+    crc = MagicMock()
+    handle_invalidation_message(
+        channel="channel_routing_changed:slack:A0123ABCD",
+        payload=b"",
+        channel_routing_cache=crc,
+    )
+    crc.invalidate.assert_called_once_with("slack:A0123ABCD")
+
+
+def test_invalidation_channels_includes_channel_routing_changed():
+    from surogates.runtime.invalidator import INVALIDATION_CHANNELS
+
+    assert "channel_routing_changed:" in INVALIDATION_CHANNELS
+
+
 def test_handler_routes_mcp_servers_changed_to_mcp_server_cache():
     """Plan 5 / Task 7.  Admin CRUD on the per-tenant MCP server
     registry publishes agent.mcp_servers_changed:<agent_id> on
