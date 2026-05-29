@@ -93,6 +93,65 @@ def test_auxiliary_builders_only_called_from_allowed_sites():
     )
 
 
+import pytest as _pytest
+
+
+@_pytest.mark.asyncio
+async def test_build_helm_session_llm_clients_closes_main_on_aux_failure(
+    monkeypatch,
+):
+    """Plan 2 post-review: the helm adapter instantiates AsyncOpenAI
+    for the main slot before invoking the auxiliary builders.  If any
+    of the three auxiliary builders raises, the main client must be
+    aclose()d before the exception propagates so a flaky settings
+    override doesn't leak an AsyncOpenAI per failed session start."""
+    from types import SimpleNamespace
+
+    import surogates.orchestrator.worker as worker
+
+    closed: list = []
+
+    class _FakeOpenAI:
+        def __init__(self, *_a, **_k):
+            self._closed = False
+            closed.append(self)
+
+        async def close(self):
+            self._closed = True
+
+    monkeypatch.setattr(
+        "surogates.orchestrator.worker.AsyncOpenAI", _FakeOpenAI,
+        raising=True,
+    )
+
+    def boom_summary(*_a, **_k):
+        raise RuntimeError("settings.llm.summary_model is malformed")
+
+    monkeypatch.setattr(
+        "surogates.harness.auxiliary_client.build_summary_auxiliary_llm",
+        boom_summary,
+        raising=True,
+    )
+
+    settings = SimpleNamespace(
+        llm=SimpleNamespace(
+            api_key="sk-helm", base_url="https://api.example.com",
+            model="m",
+        ),
+    )
+    tenant = SimpleNamespace(
+        org_id="o-1", user_id=None, org_config={}, user_preferences={},
+    )
+
+    with _pytest.raises(RuntimeError, match="malformed"):
+        await worker._build_helm_session_llm_clients(settings, tenant)
+
+    # Main was instantiated before the auxiliary builder raised; it
+    # must have been aclose()d before the exception propagated.
+    assert len(closed) == 1
+    assert closed[0]._closed is True
+
+
 def test_harness_factory_does_not_directly_import_auxiliary_builders():
     """Task 8 sibling — within ``worker.py`` itself, only
     ``_build_helm_session_llm_clients`` may reference the builders.

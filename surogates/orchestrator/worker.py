@@ -434,7 +434,7 @@ def _install_worker_runtime_plumbing(state: dict, settings) -> None:
     )
 
 
-def _build_helm_session_llm_clients(settings, tenant) -> "SessionLLMClients":
+async def _build_helm_session_llm_clients(settings, tenant) -> "SessionLLMClients":
     """Helm-mode adapter: build a SessionLLMClients from process-wide
     settings.llm + tenant overrides.
 
@@ -446,9 +446,11 @@ def _build_helm_session_llm_clients(settings, tenant) -> "SessionLLMClients":
     The main slot uses process-wide settings.llm.{api_key,base_url,model}
     directly — there's no per-session vault resolution in helm mode
     because the legacy contract was a single key per pod.
-    """
-    from openai import AsyncOpenAI
 
+    Async so it can ``await main_client.close()`` on a partial-build
+    failure — without that, a flaky auxiliary builder would leak the
+    main client's connection pool per failed session start.
+    """
     from surogates.harness.auxiliary_client import (
         build_advisor_auxiliary_llm,
         build_summary_auxiliary_llm,
@@ -463,9 +465,20 @@ def _build_helm_session_llm_clients(settings, tenant) -> "SessionLLMClients":
         llm_kwargs["base_url"] = settings.llm.base_url
 
     main_client = AsyncOpenAI(**llm_kwargs)
-    summary = build_summary_auxiliary_llm(settings, tenant)
-    vision = build_vision_auxiliary_llm(settings, tenant)
-    advisor = build_advisor_auxiliary_llm(settings, tenant)
+    try:
+        summary = build_summary_auxiliary_llm(settings, tenant)
+        vision = build_vision_auxiliary_llm(settings, tenant)
+        advisor = build_advisor_auxiliary_llm(settings, tenant)
+    except BaseException:
+        try:
+            await main_client.close()
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            logger.warning(
+                "Failed to aclose helm main AsyncOpenAI during partial-"
+                "build cleanup; original error being re-raised",
+                exc_info=True,
+            )
+        raise
 
     return SessionLLMClients(
         main=ResolvedLLM(client=main_client, model=settings.llm.model),
@@ -916,7 +929,9 @@ async def run_worker(settings: Settings) -> None:
         # resolves through the AgentRuntimeContext (already resolved
         # above for asset_root / Task 9) + the credential vault.
         if runtime_mode == "helm":
-            llm_bundle = _build_helm_session_llm_clients(settings, tenant)
+            llm_bundle = await _build_helm_session_llm_clients(
+                settings, tenant,
+            )
         else:
             from surogates.harness.session_llm import (
                 build_session_llm_clients,
