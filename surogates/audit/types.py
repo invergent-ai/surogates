@@ -34,3 +34,14 @@ class AuditType(str, Enum):
     # action on the chat user's behalf; data field carries action +
     # target_id + tool-specific extras).
     POLICY_COPILOT_ACTION = "policy.copilot_action"
+
+    # Plan 4 — per-user memory writes.  Surface for compliance
+    # (the user's memory ends up in the LLM's system prompt) and
+    # for operator debugging (who changed what, when).
+    MEMORY_WRITE = "memory.write"
+
+    # Plan 4 — concurrent writes from /loop + interactive chat
+    # racing on the same memory key.  The R2MemoryStore uses
+    # last-write-wins; the audit event surfaces the race rate so
+    # admins can dashboard noisy tenants.
+    MEMORY_CONFLICT = "memory.conflict"
