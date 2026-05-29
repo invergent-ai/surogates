@@ -180,6 +180,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     import asyncio
 
     from surogates.runtime import (
+        ChannelRoutingCache,
         FileBundleCache,
         FirebaseConfigCache,
         MCPServerRegistryCache,
@@ -203,6 +204,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         app.state.file_bundle_cache = None
         app.state.memory_cache = None
         app.state.mcp_server_cache = None
+        app.state.channel_routing_cache = None
         app.state.runtime_invalidator_task = None
         return
 
@@ -252,6 +254,17 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         settings=settings, platform_client=client,
     )
 
+    # Plan 6 / Task 3 — channel routing cache.  Powers the shared
+    # adapter pod's per-event tenant resolution.  In the api process
+    # the cache is wired primarily so the invalidator subscribes to
+    # the channel_routing_changed:<kind>:<id> Redis channel; the api
+    # itself doesn't currently dispatch inbound channel events, but
+    # keeping the cache + invalidator alive here means any shared-
+    # mode pod that needs it picks up the same code path.
+    channel_routing_cache = _maybe_build_channel_routing_cache(
+        settings=settings, platform_client=client,
+    )
+
     app.state.platform_client = client
     app.state.runtime_config_cache = cache
     app.state.firebase_config_cache = firebase_cache
@@ -260,6 +273,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     app.state.file_bundle_cache = file_bundle_cache
     app.state.memory_cache = memory_cache
     app.state.mcp_server_cache = mcp_server_cache
+    app.state.channel_routing_cache = channel_routing_cache
     app.state.runtime_invalidator_task = asyncio.create_task(
         run_invalidator(
             app.state.redis,
@@ -269,6 +283,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
             file_bundle_cache=file_bundle_cache,
             memory_cache=memory_cache,
             mcp_server_cache=mcp_server_cache,
+            channel_routing_cache=channel_routing_cache,
         ),
         name="surogates-runtime-invalidator",
     )
@@ -349,6 +364,32 @@ def _maybe_build_mcp_server_cache(
         return await platform_client.get_agent_mcp_servers(agent_id)
 
     return MCPServerRegistryCache(loader=_loader, ttl_seconds=30.0)
+
+
+def _maybe_build_channel_routing_cache(
+    *, settings, platform_client,
+):
+    """Construct a ChannelRoutingCache when the platform client is
+    wired; return None otherwise.
+
+    Plan 6 / Task 3.  Loader splits the cache key
+    ``"<kind>:<identifier>"`` back into the two
+    :meth:`PlatformClient.get_channel_routing` args.  Same
+    graceful-degradation shape as Plan 3 / 4 / 5's
+    ``_maybe_build_*_cache`` helpers -- ``None`` cache means the
+    proxy / api still boots in helm mode (where the channel
+    adapter reads tokens from process-wide settings).
+    """
+    from surogates.runtime import ChannelRoutingCache
+
+    if platform_client is None:
+        return None
+
+    async def _loader(key: str) -> dict | None:
+        kind, _, identifier = key.partition(":")
+        return await platform_client.get_channel_routing(kind, identifier)
+
+    return ChannelRoutingCache(loader=_loader, ttl_seconds=30.0)
 
 
 def _maybe_build_file_bundle_cache(
@@ -459,6 +500,8 @@ async def _shutdown_shared_runtime_plumbing(app: FastAPI) -> None:
         app.state.memory_cache = None
     if hasattr(app.state, "mcp_server_cache"):
         app.state.mcp_server_cache = None
+    if hasattr(app.state, "channel_routing_cache"):
+        app.state.channel_routing_cache = None
 
 
 def create_app() -> FastAPI:

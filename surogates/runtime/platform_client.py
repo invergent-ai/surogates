@@ -187,5 +187,36 @@ class PlatformClient:
             return list(body.get("servers", []))
         return list(body)
 
+    async def get_channel_routing(
+        self, kind: str, identifier: str,
+    ) -> dict | None:
+        """Fetch the routing record for an inbound channel event (Plan 6).
+
+        Returns the JSON dict (``{"org_id", "agent_id", "api_web_url"}``)
+        when a row exists in the ``channel_routing`` table; returns
+        ``None`` on 404 (no routing configured for this identifier --
+        a normal state) so the :class:`ChannelRoutingCache`'s
+        negative-memoise path is the single code path.
+
+        * :class:`PlatformAuthError` on 401 -- operations problem.
+        * ``httpx.HTTPStatusError`` on any other non-2xx.
+        """
+        try:
+            resp = await self._client.get(
+                f"/api/channels/by-identifier/{kind}/{identifier}",
+            )
+        except httpx.HTTPError as exc:
+            raise exc
+
+        if resp.status_code == 404:
+            return None
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
     async def aclose(self) -> None:
         await self._client.aclose()
