@@ -50,6 +50,30 @@ class RedisLeaderLock:
             nx=True, ex=self._ttl,
         ))
 
+    async def heartbeat(self) -> bool:
+        """Extend the lease.  Returns True on success, False on
+        loss-of-lock.
+
+        Two-step: check identity via GET, then SET XX EX.  Not
+        fully atomic (a steal between GET and SET would let the
+        SET XX win against the new holder), but the new holder
+        would itself heartbeat on the next tick and reclaim, so
+        the worst-case window is one tick of double-extend.  An
+        EVAL Lua script could close the gap; defer to Plan 11
+        if measured drift becomes a real concern.
+
+        A False return means the holder MUST stop dispatching
+        mid-tick -- a tick in progress at the boundary is the
+        canonical double-fire risk.
+        """
+        current = await self._redis.get(self._key)
+        if current != self._holder_id.encode():
+            return False
+        return bool(await self._redis.set(
+            self._key, self._holder_id.encode(),
+            xx=True, ex=self._ttl,
+        ))
+
     async def release(self) -> None:
         """Drop the lock if we still hold it.
 

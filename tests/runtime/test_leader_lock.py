@@ -91,6 +91,54 @@ async def test_release_drops_the_lock():
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_extends_ttl_while_holder_owns_lock():
+    from surogates.runtime.leader_lock import RedisLeaderLock
+
+    redis = _FakeRedis()
+    lock = RedisLeaderLock(
+        redis, key="k", ttl_seconds=10, holder_id="replica-a",
+    )
+    await lock.acquire()
+    assert await lock.heartbeat() is True
+    # The second SET should be SET XX EX (only set if exists).
+    last = redis.set_calls[-1]
+    assert last["xx"] is True
+    assert last["ex"] == 10
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_returns_false_when_lock_lost_to_another():
+    """Loss-of-lock: identity mismatch.  Either the TTL elapsed
+    and someone else acquired, OR another holder stole the
+    lock during a network blip."""
+    from surogates.runtime.leader_lock import RedisLeaderLock
+
+    redis = _FakeRedis()
+    lock = RedisLeaderLock(
+        redis, key="k", ttl_seconds=10, holder_id="replica-a",
+    )
+    await lock.acquire()
+
+    redis._values["k"] = (b"replica-b", 10)
+
+    assert await lock.heartbeat() is False
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_returns_false_when_key_missing():
+    """Loss-of-lock: TTL elapsed with no replacement."""
+    from surogates.runtime.leader_lock import RedisLeaderLock
+
+    redis = _FakeRedis()
+    lock = RedisLeaderLock(
+        redis, key="k", ttl_seconds=10, holder_id="replica-a",
+    )
+    await lock.acquire()
+    redis._values.pop("k")
+    assert await lock.heartbeat() is False
+
+
+@pytest.mark.asyncio
 async def test_release_only_drops_if_we_hold_it():
     """Risk #13 mitigation: a stale release call (e.g. after a
     delayed shutdown that already lost the lock to a new leader)
