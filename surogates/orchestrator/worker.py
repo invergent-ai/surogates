@@ -978,13 +978,37 @@ async def run_worker(settings: Settings) -> None:
                 settings, tenant,
             )
         else:
-            from surogates.harness.session_llm import (
-                build_session_llm_clients,
+            # Dev convenience: if the runtime-config endpoint
+            # served an empty llm_main placeholder (Plan 1's
+            # ``_default_llm_main`` -- no AgentRuntimeConfig
+            # populated yet) AND ``settings.llm`` carries a
+            # complete LLM block, fall back to the helm-mode
+            # builder so dev agents work out of the box without
+            # a per-agent llm_main + vault credential.  Plan 9's
+            # migration tool will populate llm_main per-agent;
+            # this fallback retires then.
+            empty_main = (
+                ctx.llm_main is None
+                or not getattr(ctx.llm_main, "model", "")
+                or not getattr(ctx.llm_main, "api_key_ref", "")
             )
+            if empty_main and settings.llm.api_key:
+                logger.warning(
+                    "agent %s has no llm_main in runtime-config; "
+                    "falling back to settings.llm (dev convenience)",
+                    ctx.agent_id,
+                )
+                llm_bundle = await _build_helm_session_llm_clients(
+                    settings, tenant,
+                )
+            else:
+                from surogates.harness.session_llm import (
+                    build_session_llm_clients,
+                )
 
-            llm_bundle = await build_session_llm_clients(
-                ctx, vault=credential_vault, user_id=tenant.user_id,
-            )
+                llm_bundle = await build_session_llm_clients(
+                    ctx, vault=credential_vault, user_id=tenant.user_id,
+                )
 
         if not llm_bundle.main.model:
             # Worker raises rather than returns a 503 because there's no
@@ -1114,6 +1138,7 @@ async def run_worker(settings: Settings) -> None:
         # configured; both downstream consumers fall back to the
         # legacy filesystem paths silently in that case.
         bundle = None
+        file_bundle_cache = worker_state.get("file_bundle_cache")
         if file_bundle_cache is not None and ctx.bundle_hub_ref:
             try:
                 bundle = await file_bundle_cache.get(session.agent_id)

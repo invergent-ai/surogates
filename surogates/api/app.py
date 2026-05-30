@@ -431,13 +431,16 @@ def _maybe_build_file_bundle_cache(
 
     from pathlib import Path
 
-    hub_sdk = _HubSDK(
-        configuration=_HubConfig(
-            host=hub_settings.endpoint,
-            username=hub_settings.username,
-            password=hub_settings.password,
-        ),
+    sdk_config = _HubConfig(
+        host=hub_settings.endpoint,
+        username=hub_settings.username,
+        password=hub_settings.password,
     )
+    # Local dev clusters issue self-signed certs for the Hub ingress.
+    # The ops side already disables verification (surogate_hub.py:53);
+    # mirror that here so the runtime can reach the same endpoint.
+    sdk_config.verify_ssl = False
+    hub_sdk = _HubSDK(configuration=sdk_config)
     l2 = _L2DiskCache(
         root=Path.home() / ".surogate" / "bundle-cache",
     )

@@ -70,7 +70,12 @@ class PlatformClient:
         """
         try:
             resp = await self._client.get(
-                f"/api/agents/{agent_id}/runtime-config",
+                # surogate-ops mounts the agent_runtime_router at
+                # ``/api/agents`` AND the route itself is declared with
+                # ``/agents/{agent_id}/runtime-config`` -- so the actual
+                # URL is the doubled prefix.  Studio + every other ops
+                # client uses this shape; we match it here.
+                f"/api/agents/agents/{agent_id}/runtime-config",
             )
         except httpx.HTTPError as exc:
             # Network-level failure (DNS, refused, timeout, etc.).  We
@@ -169,7 +174,7 @@ class PlatformClient:
         """
         try:
             resp = await self._client.get(
-                f"/api/agents/{agent_id}/mcp-servers",
+                f"/api/agents/agents/{agent_id}/mcp-servers",
             )
         except httpx.HTTPError as exc:
             raise exc
