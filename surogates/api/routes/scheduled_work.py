@@ -9,6 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel
 
+from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.scheduled.models import ScheduledSession
 from surogates.scheduled.store import ScheduledSessionStore
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -68,10 +69,6 @@ def _require_user(tenant: TenantContext) -> UUID:
     return tenant.user_id
 
 
-def _agent_id(request: Request) -> str:
-    return str(request.app.state.settings.agent_id)
-
-
 def _kind(row: ScheduledSession) -> str:
     if row.schedule.get("kind") == "dynamic_loop":
         return "dynamic_loop"
@@ -108,6 +105,7 @@ def _item(row: ScheduledSession) -> ScheduledWorkItem:
 async def list_scheduled_work(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
     status_filter: Literal["active", "paused", "completed", "failed", "all"] = Query(
         "active",
         alias="status",
@@ -119,7 +117,7 @@ async def list_scheduled_work(
     rows = await _scheduled_store(request).list_for_user(
         org_id=tenant.org_id,
         user_id=user_id,
-        agent_id=_agent_id(request),
+        agent_id=agent_runtime.agent_id,
         status=status_filter,
         include_inactive=status_filter == "all",
         limit=limit,
@@ -139,12 +137,13 @@ async def run_scheduled_work_now(
     schedule_id: UUID,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> RunScheduledWorkNowResponse:
     user_id = _require_user(tenant)
     queued = await _scheduled_store(request).run_now(
         org_id=tenant.org_id,
         user_id=user_id,
-        agent_id=_agent_id(request),
+        agent_id=agent_runtime.agent_id,
         schedule_id=schedule_id,
     )
     if not queued:
@@ -163,12 +162,13 @@ async def cancel_scheduled_work(
     schedule_id: UUID,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> Response:
     user_id = _require_user(tenant)
     deleted = await _scheduled_store(request).delete(
         org_id=tenant.org_id,
         user_id=user_id,
-        agent_id=_agent_id(request),
+        agent_id=agent_runtime.agent_id,
         schedule_id=schedule_id,
     )
     if not deleted:

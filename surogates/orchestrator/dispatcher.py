@@ -19,7 +19,14 @@ import traceback
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID
 
-from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
+from dataclasses import dataclass
+
+from surogates.config import (
+    INTERRUPT_CHANNEL_PREFIX,
+    SHARED_WORK_QUEUE_KEY,
+    enqueue_session,
+    parse_queue_member,
+)
 from surogates.harness.error_classify import classify_harness_error
 from surogates.session.events import EventType
 
@@ -37,13 +44,30 @@ _MAX_RETRIES: int = 3
 # Base delay (seconds) for exponential back-off on retry.
 _BASE_RETRY_DELAY: float = 1.0
 
-# Orphan sweep cadence.  Must comfortably exceed the lease TTL (60s) and
-# the stream-stale timeout (180s) so slow-but-alive turns aren't
-# misidentified — 300s leaves a safe margin.  The sweep itself runs
-# every ``_ORPHAN_SWEEP_INTERVAL``; a session has to be idle for the
-# full ``_ORPHAN_STALE_SECONDS`` before it's considered orphaned.
+# Orphan sweep cadence.  The sweep runs every ``_ORPHAN_SWEEP_INTERVAL``
+# seconds and recovers any session whose lease has expired AND whose
+# last event landed more than ``_ORPHAN_STALE_SECONDS`` ago.
+#
+# ``_ORPHAN_STALE_SECONDS`` only needs to exceed the lease TTL: a
+# live worker's lease is continuously renewed by
+# ``_renew_lease_forever`` and the orphan finder excludes any session
+# with a valid lease (LEFT JOIN on ``LeaseRow.expires_at > now()``),
+# so slow-but-alive turns are protected by the lease, not by this
+# threshold.  Earlier versions used 300s as a redundant safety net,
+# but that left dead-worker sessions in "Working on it…" state for
+# 5+ minutes after a restart.  60s matches the lease TTL: lease
+# expires → 60s later the session is past the threshold → next sweep
+# (within ``_ORPHAN_SWEEP_INTERVAL``) recovers it.  Worst-case
+# recovery time is now ~2 min instead of ~6 min.
 _ORPHAN_SWEEP_INTERVAL: float = 60.0
-_ORPHAN_STALE_SECONDS: int = 300
+_ORPHAN_STALE_SECONDS: int = 60
+
+# Boot-time aggressive orphan sweep threshold.  Now identical to the
+# steady-state ``_ORPHAN_STALE_SECONDS`` (both 60s, matching lease
+# TTL); the boot sweep stays a distinct knob so we can tune the two
+# independently if we later add a sub-lease-TTL aggressive recovery
+# mode for restart scenarios.
+_ORPHAN_BOOT_STALE: int = 60
 
 # Subagent task layer tick cadence — promote ``todo`` Tasks whose parents
 # have all completed, finalise ended worker Sessions, and atomically
@@ -58,13 +82,112 @@ _TASKS_TICK_INTERVAL: float = 5.0
 # interrupted harness has time to release its lease.
 _LEASE_BUSY_REQUEUE_DELAY: float = 0.25
 
+# Plan 2 / Task 13 — priority bump applied when a session is requeued
+# because its tenant is over the TurnConcurrencyGate cap.  Larger
+# numbers = later delivery, so the noisy tenant slips to the back of
+# the queue without starving everyone else.  Tuned for ~30s deferral
+# at typical pop rates.
+_GATE_REQUEUE_BACKOFF: float = 30.0
+
+# How long the dispatcher sleeps when dequeue_next_session returned
+# None (either the queue was empty within ``timeout`` or the only
+# popped session was gate-busy).  Keep this small so a freshly
+# unblocked tenant gets served quickly.
+_GATE_EMPTY_SLEEP_SECONDS: float = 0.1
+
+
+@dataclass(frozen=True, slots=True)
+class DequeuedSession:
+    """A session popped off the shared queue + decoded tenant tuple."""
+
+    org_id: str
+    agent_id: str
+    session_id: str
+    priority: float
+
+
+# Maximum number of gate-busy candidates dequeue_next_session will
+# requeue-and-skip in a single call before giving up and returning
+# None.  Prevents a fully-busy queue from busy-looping inside one
+# call; the dispatcher's outer loop sleeps briefly and retries.
+_MAX_GATE_BUSY_ATTEMPTS: int = 16
+
+
+async def dequeue_next_session(
+    redis,
+    *,
+    gate: "Any | None" = None,
+    gate_limit: int | None = None,
+    timeout: float = 0.0,
+):
+    """Pop the next session off the shared queue, gated per tenant.
+
+    Plan 2 / Task 13.  Walks the queue front-to-back, requeueing
+    over-cap candidates with backoff, until either (a) an
+    unblocked candidate is found and its gate slot is acquired,
+    (b) the queue is empty, or (c) the queue cycles — i.e. the
+    next pop yields a member we already requeued this call, which
+    means every distinct tenant in the queue is at cap.  In case
+    (c) the function returns ``None`` and the dispatcher loop
+    sleeps briefly before retrying.
+
+    When ``gate`` is ``None`` the gate is skipped — used in tests
+    and helm-mode workers that don't have a Redis gate yet.
+    """
+    requeued: set[str] = set()
+    for _ in range(max(1, _MAX_GATE_BUSY_ATTEMPTS)):
+        popped = await redis.bzpopmin(SHARED_WORK_QUEUE_KEY, timeout=timeout)
+        if popped is None:
+            return None
+        _key, member, score = popped
+        if isinstance(member, bytes):
+            member = member.decode("utf-8")
+
+        if member in requeued:
+            # Queue cycled — every distinct tenant in the queue
+            # was at cap.  Put this member back at its current
+            # (post-backoff) score and stop scanning so the
+            # dispatcher's outer loop can sleep briefly.
+            await redis.zadd(SHARED_WORK_QUEUE_KEY, {member: score})
+            return None
+
+        org_id, agent_id, session_id = parse_queue_member(member)
+
+        if gate is None:
+            return DequeuedSession(
+                org_id=org_id, agent_id=agent_id,
+                session_id=session_id, priority=score,
+            )
+
+        acquired = await gate.try_acquire(
+            org_id, agent_id, limit=gate_limit,
+        )
+        if acquired:
+            return DequeuedSession(
+                org_id=org_id, agent_id=agent_id,
+                session_id=session_id, priority=score,
+            )
+
+        # Gate-busy candidate: requeue with backoff (no slot
+        # consumed) and continue scanning the queue.
+        await redis.zadd(
+            SHARED_WORK_QUEUE_KEY,
+            {member: score + _GATE_REQUEUE_BACKOFF},
+        )
+        requeued.add(member)
+    return None
+
 
 class Orchestrator:
     """Pulls session IDs from a Redis sorted-set and dispatches them to the agent harness.
 
-    The ``queue_key`` is per-agent (``surogates:work_queue:<agent_id>``) so that
-    multiple agents sharing a single Redis do not compete for each other's
-    sessions.  Callers build the key via :func:`surogates.config.agent_queue_key`.
+    Plan 2 / Task 14: ``queue_key`` is now the shared
+    ``surogates:work_queue`` for every worker; per-tenant isolation
+    is enforced by :class:`~surogates.runtime.TurnConcurrencyGate`
+    which the dispatcher consults on every dequeue.  Legacy
+    helm-mode pods can still pass a per-agent key if they want to
+    keep per-pod queue isolation (Plan 9 retires the helm path
+    entirely).
     """
 
     def __init__(
@@ -80,6 +203,7 @@ class Orchestrator:
         browser_pool: BrowserPool | None = None,
         session_factory: Any | None = None,
         tenant_for_task: Callable[[Any], Any] | None = None,
+        turn_gate: Any | None = None,
     ) -> None:
         self.redis = redis_client
         self.session_store = session_store
@@ -95,6 +219,9 @@ class Orchestrator:
         # spawn_worker / chat sessions normally).
         self._session_factory = session_factory
         self._tenant_for_task = tenant_for_task
+        # Plan 2 / Task 14 — per-tenant TurnConcurrencyGate.  None in
+        # helm-mode workers (and in tests) → dequeue skips the gate.
+        self._turn_gate = turn_gate
         self._running = True
         self._tasks: set[asyncio.Task] = set()
         # Active harnesses by session ID — for delivering interrupt signals.
@@ -150,7 +277,24 @@ class Orchestrator:
             name="interrupt-listener",
         )
 
-        # Start the orphan sweeper.  Self-heals sessions abandoned by a
+        # Boot-time aggressive orphan sweep — fire-and-forget so dispatch
+        # starts immediately.  Restarted workers would otherwise leave
+        # any mid-flight session looking "Working on it…" for up to
+        # ``_ORPHAN_STALE_SECONDS + _ORPHAN_SWEEP_INTERVAL`` (~6 min)
+        # before the steady-state sweeper picks it up; the boot variant
+        # uses a much tighter ``_ORPHAN_BOOT_STALE`` (60s, just above
+        # lease TTL) so any session whose previous owner died ≥60s ago
+        # is recovered within a fresh worker's first heartbeat instead.
+        # Live workers' sessions are protected by the lease-validity
+        # filter inside ``find_orphaned_sessions`` (see the LEFT JOIN
+        # on ``LeaseRow.expires_at > now()``), so this is safe even
+        # with 50 concurrent replicas all racing on the same boot.
+        asyncio.create_task(
+            self._sweep_orphans_on_boot(),
+            name="orphan-sweeper-boot",
+        )
+
+        # Start the periodic orphan sweeper.  Self-heals sessions abandoned by a
         # dead worker (SIGKILL / OOM / debugger stop / pod eviction) —
         # those paths never hit the in-process exception handler, so
         # no ``HARNESS_CRASH`` or ``SESSION_FAIL`` lands naturally and
@@ -179,9 +323,14 @@ class Orchestrator:
 
         while self._running:
             try:
-                # BZPOPMIN returns (key, member, score) or None on timeout.
-                result = await self.redis.bzpopmin(
-                    self._queue_key,
+                # Plan 2 / Task 14 — shared queue + per-tenant gate.
+                # The dispatcher pops the next session whose tenant
+                # has gate capacity; over-cap candidates are requeued
+                # with backoff inside dequeue_next_session itself.
+                dequeued = await dequeue_next_session(
+                    self.redis,
+                    gate=self._turn_gate,
+                    gate_limit=None,
                     timeout=self._poll_timeout,
                 )
             except asyncio.CancelledError:
@@ -192,26 +341,32 @@ class Orchestrator:
                 await asyncio.sleep(1.0)
                 continue
 
-            if result is None:
-                # Timeout -- no work available.
+            if dequeued is None:
+                # Either the timeout elapsed with an empty queue or
+                # every popped candidate was over-cap.  Sleep
+                # briefly so a freshly-released slot gets picked up
+                # quickly without busy-looping.
+                await asyncio.sleep(_GATE_EMPTY_SLEEP_SECONDS)
                 continue
 
-            # result is (key, member, score) for redis-py >= 5.
-            _key, member, _score = result
-            session_id_str = (
-                member.decode() if isinstance(member, bytes) else str(member)
-            )
-
+            session_id_str = dequeued.session_id
             try:
                 session_id = UUID(session_id_str)
             except ValueError:
                 logger.error("Invalid session ID in work queue: %s", session_id_str)
+                if self._turn_gate is not None:
+                    # The gate slot was acquired but the session is
+                    # bad — release immediately so the tenant isn't
+                    # billed for a slot that produces no work.
+                    await self._turn_gate.release(
+                        dequeued.org_id, dequeued.agent_id,
+                    )
                 continue
 
             # Spawn a bounded task.
             await self.semaphore.acquire()
             task = asyncio.create_task(
-                self._guarded_process(session_id),
+                self._guarded_process(session_id, dequeued=dequeued),
                 name=f"harness-{session_id_str[:8]}",
             )
             self._tasks.add(task)
@@ -247,16 +402,46 @@ class Orchestrator:
     # Internal dispatch
     # ------------------------------------------------------------------
 
-    async def _guarded_process(self, session_id: UUID) -> None:
-        """Wrapper that always releases the semaphore."""
+    async def _guarded_process(
+        self,
+        session_id: UUID,
+        *,
+        dequeued: DequeuedSession | None = None,
+    ) -> None:
+        """Wrapper that always releases the semaphore + TurnConcurrencyGate slot."""
         try:
             await self._process(session_id)
         finally:
             self.semaphore.release()
+            # Plan 2 / Task 14 — release the gate slot acquired in
+            # the dispatch loop so the tenant's next queued session
+            # can come off the queue.
+            if dequeued is not None and self._turn_gate is not None:
+                try:
+                    await self._turn_gate.release(
+                        dequeued.org_id, dequeued.agent_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to release TurnConcurrencyGate slot for "
+                        "org=%s agent=%s; the counter is bounded at zero "
+                        "by release() so this won't drive it negative",
+                        dequeued.org_id, dequeued.agent_id,
+                        exc_info=True,
+                    )
 
     async def _requeue_busy_session(self, session_id: UUID) -> None:
         await asyncio.sleep(_LEASE_BUSY_REQUEUE_DELAY)
-        await enqueue_session(self.redis, self._agent_id, session_id)
+        # Plan 2 / Task 12 — the shared queue needs the tenant tuple.
+        # Look up the session row once; this is a cold path (only
+        # taken when another worker holds the lease).
+        session = await self.session_store.get_session(session_id)
+        await enqueue_session(
+            self.redis,
+            org_id=str(session.org_id),
+            agent_id=session.agent_id,
+            session_id=session_id,
+        )
 
     async def _process(self, session_id: UUID, attempt: int = 0) -> None:
         """Process a single session.  Retry with exponential backoff on failure."""
@@ -295,6 +480,19 @@ class Orchestrator:
                 wake_result = await harness.wake(session_id)
             finally:
                 self._active_harnesses.pop(session_id, None)
+                # Plan 2 / Task 7 — per-session SessionLLMClients
+                # bundle.  Close its four connection pools so a
+                # long-running worker process doesn't accumulate one
+                # pool per processed session.
+                bundle = getattr(harness, "_session_llm_bundle", None)
+                if bundle is not None:
+                    try:
+                        await bundle.aclose()
+                    except Exception:
+                        logger.warning(
+                            "Failed to aclose SessionLLMClients for "
+                            "session %s", session_id, exc_info=True,
+                        )
 
             # Slot is free; settle any follow-up enqueue.  ``lease_held``
             # (another worker owns the lease) backs off briefly first; a
@@ -309,7 +507,16 @@ class Orchestrator:
                 )
                 await self._requeue_busy_session(session_id)
             elif rewake_pending:
-                await enqueue_session(self.redis, self._agent_id, session_id)
+                # Plan 2 / Task 12 — tenant tuple required.
+                rewake_session = await self.session_store.get_session(
+                    session_id,
+                )
+                await enqueue_session(
+                    self.redis,
+                    org_id=str(rewake_session.org_id),
+                    agent_id=rewake_session.agent_id,
+                    session_id=session_id,
+                )
         except Exception as exc:
             logger.exception(
                 "Harness failed for session %s (attempt %d/%d)",
@@ -437,6 +644,79 @@ class Orchestrator:
                 session_id,
             )
 
+    async def _sweep_orphans_once(self, *, stale_seconds: int, reason: str) -> int:
+        """Run a single orphan-sweep pass; return the number recovered.
+
+        Extracted from :meth:`_sweep_orphans_forever` so the boot-time
+        aggressive sweep (:meth:`_sweep_orphans_on_boot`) can reuse the
+        exact same recovery path with a tighter ``stale_seconds`` value.
+        """
+        recovered = 0
+        try:
+            orphans = await self.session_store.find_orphaned_sessions(
+                stale_seconds=stale_seconds,
+                agent_id=self._agent_id,
+            )
+        except Exception:
+            logger.exception("Orphan sweep failed; continuing")
+            return 0
+        for session in orphans:
+            try:
+                await self.session_store.emit_event(
+                    session.id,
+                    EventType.HARNESS_RECOVERED,
+                    {
+                        "recovered_by": reason,
+                        "stale_seconds": stale_seconds,
+                    },
+                )
+                await self.session_store.release_stale_lease(session.id)
+                await enqueue_session(
+                    self.redis,
+                    org_id=str(session.org_id),
+                    agent_id=session.agent_id,
+                    session_id=session.id,
+                )
+                recovered += 1
+                logger.warning(
+                    "Recovered orphaned session %s (%s, stale>=%ds) — re-enqueued",
+                    session.id, reason, stale_seconds,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to recover orphaned session %s",
+                    session.id,
+                )
+        return recovered
+
+    async def _sweep_orphans_on_boot(self) -> None:
+        """One-shot aggressive sweep right after worker start.
+
+        A normal restart leaves any mid-flight session looking
+        "running" in the UI for up to ``_ORPHAN_STALE_SECONDS + 60s``
+        (5+ minutes) before the periodic sweeper re-enqueues it,
+        because the steady-state threshold is set high to avoid racing
+        with genuinely slow turns on healthy workers.
+
+        On boot we know THIS process didn't own those leases (we just
+        started), so we can recover much faster.  ``_ORPHAN_BOOT_STALE``
+        is set just above the lease TTL so a turn that was actively
+        being processed by another live worker on the cluster isn't
+        falsely flagged — ``release_stale_lease`` only releases
+        EXPIRED leases anyway, so a live worker's lease is safe.
+        """
+        try:
+            count = await self._sweep_orphans_once(
+                stale_seconds=_ORPHAN_BOOT_STALE,
+                reason="orchestrator_boot_sweep",
+            )
+            if count > 0:
+                logger.info(
+                    "Boot-time orphan sweep recovered %d session(s)", count,
+                )
+        except asyncio.CancelledError:
+            return
+
     async def _sweep_orphans_forever(self) -> None:
         """Periodically re-enqueue sessions abandoned by a dead worker.
 
@@ -461,39 +741,12 @@ class Orchestrator:
 
         while self._running:
             try:
-                orphans = await self.session_store.find_orphaned_sessions(
+                await self._sweep_orphans_once(
                     stale_seconds=_ORPHAN_STALE_SECONDS,
-                    agent_id=self._agent_id,
+                    reason="orchestrator_sweeper",
                 )
-                for session in orphans:
-                    try:
-                        await self.session_store.emit_event(
-                            session.id,
-                            EventType.HARNESS_RECOVERED,
-                            {
-                                "recovered_by": "orchestrator_sweeper",
-                                "stale_seconds": _ORPHAN_STALE_SECONDS,
-                            },
-                        )
-                        await self.session_store.release_stale_lease(session.id)
-                        await enqueue_session(
-                            self.redis,
-                            session.agent_id,
-                            session.id,
-                        )
-                        logger.warning(
-                            "Recovered orphaned session %s — re-enqueued",
-                            session.id,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Failed to recover orphaned session %s",
-                            session.id,
-                        )
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                logger.exception("Orphan sweep failed; continuing")
 
             try:
                 await asyncio.sleep(_ORPHAN_SWEEP_INTERVAL)

@@ -42,6 +42,7 @@ class HarnessAPIClient:
         token: str,
         timeout: float = 30.0,
         session_id: str | None = None,
+        agent_id: str | None = None,
     ) -> None:
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
@@ -49,6 +50,24 @@ class HarnessAPIClient:
             timeout=timeout,
         )
         self._session_id = session_id
+        self._agent_id = agent_id
+
+    def _merge_params(
+        self, params: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Auto-inject ``agent_id`` into the request's query string.
+
+        Caller-supplied ``agent_id`` overrides the constructor default
+        so a tool can intentionally route at a different tenant if
+        ever needed.  ``None`` agent_id is passed through unchanged
+        for helm-mode pods.
+        """
+        if self._agent_id is None:
+            return params
+        merged: dict[str, Any] = {"agent_id": self._agent_id}
+        if params:
+            merged.update(params)
+        return merged
 
     async def close(self) -> None:
         """Close the underlying HTTP client."""
@@ -60,31 +79,39 @@ class HarnessAPIClient:
 
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Send a GET request and return the parsed JSON response."""
-        resp = await self._client.get(path, params=params)
+        resp = await self._client.get(path, params=self._merge_params(params))
         resp.raise_for_status()
         return resp.json()
 
     async def _post(self, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         """Send a POST request and return the parsed JSON response."""
-        resp = await self._client.post(path, json=body)
+        resp = await self._client.post(
+            path, json=body, params=self._merge_params(None),
+        )
         resp.raise_for_status()
         return resp.json()
 
     async def _put(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         """Send a PUT request and return the parsed JSON response."""
-        resp = await self._client.put(path, json=body)
+        resp = await self._client.put(
+            path, json=body, params=self._merge_params(None),
+        )
         resp.raise_for_status()
         return resp.json()
 
     async def _patch(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         """Send a PATCH request and return the parsed JSON response."""
-        resp = await self._client.patch(path, json=body)
+        resp = await self._client.patch(
+            path, json=body, params=self._merge_params(None),
+        )
         resp.raise_for_status()
         return resp.json()
 
     async def _delete(self, path: str, params: dict[str, Any] | None = None) -> None:
         """Send a DELETE request."""
-        resp = await self._client.delete(path, params=params)
+        resp = await self._client.delete(
+            path, params=self._merge_params(params),
+        )
         resp.raise_for_status()
 
     # ------------------------------------------------------------------

@@ -283,6 +283,7 @@ class ResourceLoader:
         self,
         tenant: Any,
         db_session: Any | None = None,
+        bundle: Any | None = None,
     ) -> list[SkillDef]:
         """Merge skills from all four layers.
 
@@ -313,15 +314,27 @@ class ResourceLoader:
         # string.
         user_id = tenant.user_id
 
-        # Layer 1: platform filesystem
-        # `_load_skills_from_dir` does sync `os.walk` + `read_text` per
-        # SKILL.md; offload to a thread so we don't stall the event loop
-        # (which would starve the FastAPI health probes and get the pod
-        # killed by kubelet liveness checks).
-        platform = await asyncio.to_thread(
+        # Layer 1: platform skills.
+        # Plan 3 / Task 13 — the on-disk platform-skills directory
+        # holds the shared built-ins baked into the worker image
+        # (docx, pptx, subagent-task-worker, etc.).  When a bundle
+        # is present the per-agent ``skills/`` prefix is layered ON
+        # TOP of the disk catalogue so tenant-attached skills extend
+        # rather than replace the shared built-ins.  ``_merge`` keeps
+        # later layers (user files, DB) winning on name collision so
+        # a tenant can still override a bundle entry — and a bundle
+        # entry still overrides the matching disk built-in.
+        disk_platform = await asyncio.to_thread(
             self._load_skills_from_dir,
             self._platform_skills_dir, SKILL_SOURCE_PLATFORM,
         )
+        if bundle is not None:
+            bundle_platform = await self._load_skills_from_bundle(
+                bundle, source=SKILL_SOURCE_PLATFORM,
+            )
+            platform = self._merge(disk_platform, bundle_platform)
+        else:
+            platform = disk_platform
 
         # Layer 2: user bucket files
         if user_id is not None:
@@ -446,6 +459,7 @@ class ResourceLoader:
         self,
         tenant: Any,
         db_session: Any | None = None,
+        bundle: Any | None = None,
     ) -> list[AgentDef]:
         """Merge sub-agent types from all four layers.
 
@@ -476,10 +490,17 @@ class ResourceLoader:
             asset_root / org_id / "users" / user_id / "agents"
         )
 
-        # Layer 1: platform filesystem
-        platform = self._load_agents_from_dir(
-            self._platform_agents_dir, AGENT_SOURCE_PLATFORM,
-        )
+        # Layer 1: platform sub-agents.
+        # Plan 3 / Task 14 — when a bundle is provided the platform
+        # layer comes from the bundle's agents/ prefix.
+        if bundle is not None:
+            platform = await self._load_agents_from_bundle(
+                bundle, source=AGENT_SOURCE_PLATFORM,
+            )
+        else:
+            platform = self._load_agents_from_dir(
+                self._platform_agents_dir, AGENT_SOURCE_PLATFORM,
+            )
 
         # Layer 2: user bucket files
         user_files = self._load_agents_from_dir(
@@ -679,9 +700,97 @@ class ResourceLoader:
 
         return skills
 
+    async def _load_skills_from_bundle(
+        self, bundle: Any, *, source: str,
+    ) -> list[SkillDef]:
+        """Plan 3 / Task 13 — read platform skills from the agent's
+        Hub-backed bundle.
+
+        Iterates ``bundle/skills/*/SKILL.md`` and constructs the same
+        SkillDef objects the on-disk loader produces.  Layout
+        mirrors the directory-based on-disk shape; the flat-legacy
+        layout is not supported in bundles (Plan 9 retires it from
+        disk too).
+        """
+        try:
+            paths = await bundle.list("skills/")
+        except Exception:
+            logger.exception(
+                "Failed to list bundle skills/; falling back to empty layer 1",
+            )
+            return []
+
+        skills: list[SkillDef] = []
+        seen_names: set[str] = set()
+        for path in paths:
+            if not path.endswith("/SKILL.md"):
+                continue
+            # bundle/skills/<dir>/SKILL.md → <dir>
+            inner = path[len("skills/"):-len("/SKILL.md")]
+            if not inner:
+                continue
+            try:
+                text = await bundle.read_text(path)
+            except LookupError:
+                continue
+            try:
+                parsed = _parse_skill_frontmatter(text, inner.split("/")[-1])
+                name = parsed["name"]
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
+                skills.append(_build_skill_def(parsed, source))
+            except Exception:
+                logger.exception(
+                    "Failed to parse bundle skill at %s", path,
+                )
+        return skills
+
     # ------------------------------------------------------------------
     # Sub-agent parsing
     # ------------------------------------------------------------------
+
+    async def _load_agents_from_bundle(
+        self, bundle: Any, *, source: str,
+    ) -> list[AgentDef]:
+        """Plan 3 / Task 14 — read platform sub-agent definitions
+        from the agent's Hub-backed bundle.
+
+        Iterates ``bundle/agents/*/AGENT.md`` and constructs the same
+        AgentDef objects the on-disk loader produces.
+        """
+        try:
+            paths = await bundle.list("agents/")
+        except Exception:
+            logger.exception(
+                "Failed to list bundle agents/; falling back to empty layer 1",
+            )
+            return []
+
+        agents: list[AgentDef] = []
+        seen_names: set[str] = set()
+        for path in paths:
+            if not path.endswith("/AGENT.md"):
+                continue
+            inner = path[len("agents/"):-len("/AGENT.md")]
+            if not inner:
+                continue
+            try:
+                text = await bundle.read_text(path)
+            except LookupError:
+                continue
+            try:
+                parsed = _parse_agent_frontmatter(text, inner.split("/")[-1])
+                name = parsed["name"]
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
+                agents.append(_build_agent_def(parsed, source))
+            except Exception:
+                logger.exception(
+                    "Failed to parse bundle agent at %s", path,
+                )
+        return agents
 
     def _load_agents_from_dir(self, path: str, source: str) -> list[AgentDef]:
         """Load sub-agent types from *path*.

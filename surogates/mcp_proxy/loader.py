@@ -39,7 +39,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from surogates.audit import AuditStore, AuditType, credential_access_event
 from surogates.db.models import McpServer
 from surogates.tenant.credentials import CredentialVault
-from surogates.tools.loader import ResourceLoader
 
 logger = logging.getLogger(__name__)
 
@@ -49,34 +48,29 @@ async def load_mcp_configs(
     user_id: UUID,
     session_factory: async_sessionmaker[AsyncSession],
     vault: CredentialVault,
-    platform_mcp_dir: str,
     audit_store: AuditStore | None = None,
     *,
     is_service_account: bool = False,
+    agent_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Load, merge, and credential-resolve MCP server configs.
 
     Returns a dict of ``{server_name: config_dict}`` ready for
     ``MCPServerTask`` / ``discover_mcp_tools()``.
 
-    Merge precedence: platform < org-wide < user-specific.
-    Disabled servers are excluded.
+    Plan 5 / Task 8.  The on-disk ConfigMap fallback is retired.
+    The MCP server registry is now exclusively DB-backed — admins
+    use the surogate-ops UI which writes to the ``mcp_servers``
+    table; the proxy reads it here.  Merge precedence is just
+    org-wide < user-specific.  Disabled servers are excluded.
 
     When *audit_store* is provided every credential lookup emits a
     ``credential.access`` entry to the tenant audit log.  When it is
     ``None`` resolution proceeds silently (useful in tests and local
     dev).
     """
-    # 1. Platform configs from filesystem.
-    platform_configs = _load_platform_configs(platform_mcp_dir)
-
-    # 2. DB configs (org-wide + user-specific).
-    db_configs = await _load_db_configs(session_factory, org_id, user_id)
-
-    # 3. Merge: platform < org < user (higher precedence overwrites).
-    merged: dict[str, dict[str, Any]] = {}
-    merged.update(platform_configs)
-    merged.update(db_configs)
+    # DB configs (org-wide + user-specific).
+    merged = await _load_db_configs(session_factory, org_id, user_id)
 
     # 4. Resolve credential_refs in parallel across all servers.
     resolve_tasks = []
@@ -88,6 +82,7 @@ async def load_mcp_configs(
                     server_name, config, credential_refs, vault, org_id,
                     user_id, audit_store,
                     is_service_account=is_service_account,
+                    agent_id=agent_id,
                 )
             )
 
@@ -107,6 +102,7 @@ async def _resolve_credentials_safe(
     audit_store: AuditStore | None,
     *,
     is_service_account: bool = False,
+    agent_id: str | None = None,
 ) -> None:
     """Wrapper that catches and logs credential resolution failures."""
     try:
@@ -114,34 +110,12 @@ async def _resolve_credentials_safe(
             config, credential_refs, vault, org_id, user_id,
             server_name, audit_store,
             is_service_account=is_service_account,
+            agent_id=agent_id,
         )
     except Exception:
         logger.exception(
             "Failed to resolve credentials for MCP server %s", server_name,
         )
-
-
-def _load_platform_configs(platform_mcp_dir: str) -> dict[str, dict[str, Any]]:
-    """Load MCP server definitions from the platform volume."""
-    loader = ResourceLoader(platform_mcp_dir=platform_mcp_dir)
-    configs: dict[str, dict[str, Any]] = {}
-
-    for server_def in loader._load_mcp_from_dir(platform_mcp_dir):
-        configs[server_def.name] = {
-            "transport": server_def.transport,
-            "command": server_def.command,
-            "args": server_def.args,
-            "url": server_def.url,
-            "env": dict(server_def.env),
-            "timeout": server_def.timeout,
-            # Credentials must be carried through so ``_resolve_credentials``
-            # can pop them off and inject the resolved value as a header.
-            # Without this the proxy advertises platform MCP servers but
-            # can never authenticate to them.
-            "credential_refs": list(server_def.credential_refs or []),
-        }
-
-    return configs
 
 
 async def _load_db_configs(
@@ -198,6 +172,7 @@ async def _resolve_credentials(
     audit_store: AuditStore | None,
     *,
     is_service_account: bool = False,
+    agent_id: str | None = None,
 ) -> None:
     """Resolve credential references and inject into the config.
 
@@ -224,6 +199,7 @@ async def _resolve_credentials(
             )
             await _emit_credential_access(
                 audit_store, org_id, audit_user_id, name, consumer, scope,
+                agent_id=agent_id,
             )
             if value is None:
                 logger.warning(
@@ -246,6 +222,7 @@ async def _resolve_credentials(
             )
             await _emit_credential_access(
                 audit_store, org_id, audit_user_id, name, consumer, scope,
+                agent_id=agent_id,
             )
             if value is None:
                 logger.warning(
@@ -274,14 +251,21 @@ async def _retrieve_credential(
     ``scope`` is ``"user"`` when the user's personal vault supplied the
     value, ``"org"`` when it came from the org-wide vault, and
     ``"missing"`` when neither had the credential.
+
+    Plan 2 / Task 15.  Routes both lookups through
+    :meth:`CredentialVault.resolve_ref` so the single canonical
+    per-session entry point is used; a future refactor cannot
+    re-introduce a process-wide vault.retrieve call without
+    tripping the Task 16 source-level regression.
     """
+    ref = f"vault://{name}"
     # User-scoped first.
-    value = await vault.retrieve(org_id, name, user_id=user_id)
+    value = await vault.resolve_ref(ref, org_id=org_id, user_id=user_id)
     if value is not None:
         return value, "user"
 
     # Fall back to org-scoped.
-    value = await vault.retrieve(org_id, name, user_id=None)
+    value = await vault.resolve_ref(ref, org_id=org_id, user_id=None)
     if value is not None:
         return value, "org"
 
@@ -295,12 +279,24 @@ async def _emit_credential_access(
     name: str,
     consumer: str,
     scope: str,
+    *,
+    agent_id: str | None,
 ) -> None:
-    """Record a credential.access entry when the audit store is wired."""
+    """Record a credential.access entry when the audit store is wired.
+
+    Plan 5 / Task 5.  ``agent_id`` is required (keyword-only) instead
+    of being silently set to ``None`` at the ``audit_store.emit`` call
+    site (Plan 1b Task 17 workaround retirement).  Callers thread it
+    through from the proxy routes via ``ctx.agent_id`` resolved by
+    ``agent_runtime_context_dep``.  Helm-mode pods that have no
+    AgentRuntimeContext still pass ``None`` explicitly so the row
+    persists with a NULL agent_id (the column is nullable by design).
+    """
     if audit_store is None:
         return
     await audit_store.emit(
         org_id=org_id,
+        agent_id=agent_id,
         user_id=user_id,
         type=AuditType.CREDENTIAL_ACCESS,
         data=credential_access_event(

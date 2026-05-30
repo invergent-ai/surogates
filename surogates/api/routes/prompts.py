@@ -24,6 +24,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
 from surogates.config import enqueue_session
+from surogates.runtime import (
+    AgentRuntimeContext,
+    agent_runtime_context_dep,
+    rate_limit_dep,
+)
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionStore
@@ -135,6 +140,7 @@ async def _submit_one(
     *,
     request: Request,
     tenant: TenantContext,
+    agent_id: str,
     service_account_id: UUID,
     store: SessionStore,
 ) -> PromptAccepted:
@@ -180,7 +186,7 @@ async def _submit_one(
             settings=settings,
             user_id=None,
             org_id=tenant.org_id,
-            agent_id=settings.agent_id,
+            agent_id=agent_id,
             channel=API_CHANNEL,
             model=model,
             config=config,
@@ -210,7 +216,12 @@ async def _submit_one(
         {"content": body.prompt},
     )
 
-    await enqueue_session(request.app.state.redis, session.agent_id, session.id)
+    await enqueue_session(
+        request.app.state.redis,
+        org_id=str(session.org_id),
+        agent_id=session.agent_id,
+        session_id=session.id,
+    )
 
     return PromptAccepted(session_id=session.id, event_id=event_id)
 
@@ -229,6 +240,8 @@ async def submit_prompt(
     body: PromptRequest,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+    _rate: None = Depends(rate_limit_dep),
 ) -> PromptAccepted:
     """Submit a single prompt for asynchronous processing.
 
@@ -244,6 +257,7 @@ async def submit_prompt(
         body,
         request=request,
         tenant=tenant,
+        agent_id=agent_runtime.agent_id,
         service_account_id=service_account_id,
         store=store,
     )
@@ -258,6 +272,8 @@ async def submit_prompts_batch(
     body: BatchPromptRequest,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+    _rate: None = Depends(rate_limit_dep),
 ) -> BatchPromptResponse:
     """Submit up to :data:`MAX_BATCH_SIZE` prompts in one round-trip.
 
@@ -278,6 +294,7 @@ async def submit_prompts_batch(
                 prompt,
                 request=request,
                 tenant=tenant,
+                agent_id=agent_runtime.agent_id,
                 service_account_id=service_account_id,
                 store=store,
             )

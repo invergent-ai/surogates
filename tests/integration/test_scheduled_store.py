@@ -74,6 +74,100 @@ async def test_claim_due_is_agent_scoped_and_skip_locked_safe(session_factory):
     assert second == []
 
 
+async def test_find_due_across_tenants_returns_rows_for_multiple_agents(
+    session_factory,
+):
+    """Plan 8 / Task 4.  The platform ticker's multi-tenant
+    claim_due returns due rows across all tenants in one DB
+    query so a single platform Deployment can fire schedules
+    for every shared-mode agent."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    due = datetime.now(timezone.utc) - timedelta(minutes=1)
+
+    rows = []
+    for agent in ("agent-a", "agent-b", "agent-c"):
+        rows.append(await store.create(
+            org_id=org_id, user_id=user_id, agent_id=agent,
+            name=agent, prompt="run", schedule=parse_schedule("10m"),
+            source="tool", created_from_session_id=None,
+            next_run_at=due,
+        ))
+
+    claimed = await store.find_due_across_tenants(
+        worker_id="ticker-1", limit=10,
+    )
+
+    assert {r.agent_id for r in claimed} == {
+        "agent-a", "agent-b", "agent-c",
+    }
+    # Each row is locked by the ticker.
+    assert all(r.locked_by == "ticker-1" for r in claimed)
+
+
+async def test_find_due_across_tenants_respects_limit(session_factory):
+    """A small limit returns the oldest-due rows first."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+
+    now = datetime.now(timezone.utc)
+    # Three due rows, staggered in time.
+    older = now - timedelta(minutes=30)
+    mid = now - timedelta(minutes=15)
+    fresh = now - timedelta(minutes=1)
+    for agent, when in (
+        ("agent-a", older),
+        ("agent-b", mid),
+        ("agent-c", fresh),
+    ):
+        await store.create(
+            org_id=org_id, user_id=user_id, agent_id=agent,
+            name=agent, prompt="run", schedule=parse_schedule("10m"),
+            source="tool", created_from_session_id=None,
+            next_run_at=when,
+        )
+
+    claimed = await store.find_due_across_tenants(
+        worker_id="ticker-1", limit=2,
+    )
+
+    assert len(claimed) == 2
+    # Oldest-first ordering.
+    assert {r.agent_id for r in claimed} == {"agent-a", "agent-b"}
+
+
+async def test_find_due_across_tenants_skips_already_claimed(
+    session_factory,
+):
+    """A second call (after the first locked all rows) returns []
+    -- the existing per-claim DB lock is reused.  Belt-and-braces
+    against a leader-lock leak where two platform ticker
+    replicas briefly think they hold the leader."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    due = datetime.now(timezone.utc) - timedelta(minutes=1)
+
+    await store.create(
+        org_id=org_id, user_id=user_id, agent_id="agent-a",
+        name="A", prompt="run", schedule=parse_schedule("10m"),
+        source="tool", created_from_session_id=None,
+        next_run_at=due,
+    )
+
+    first = await store.find_due_across_tenants(
+        worker_id="ticker-1", limit=10,
+    )
+    second = await store.find_due_across_tenants(
+        worker_id="ticker-2", limit=10,
+    )
+
+    assert len(first) == 1
+    assert second == []
+
+
 async def test_mark_run_created_advances_or_expires(session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)

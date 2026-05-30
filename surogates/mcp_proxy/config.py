@@ -14,6 +14,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings
 
 from surogates.config import (
+    APISettings,
     DatabaseSettings,
     RedisSettings,
     _load_yaml_config,
@@ -42,10 +43,17 @@ class McpProxySettings(BaseSettings):
     jwt_secret: str = "change-me-in-production"
     encryption_key: str = ""  # Fernet key for credential vault
 
-    # Platform MCP configs (mounted from ConfigMap)
-    platform_mcp_dir: str = "/etc/surogates/mcp"
-
     log_level: str = "INFO"
+
+    # Plan 5 / Task 1 — shared-runtime plumbing.  These fields are
+    # the same as the main Settings class's surface (the main api
+    # already wires them); the proxy reads them so
+    # _install_shared_runtime_plumbing_for_proxy can construct the
+    # PlatformClient + RuntimeConfigCache + PerTenantRateLimiter.
+    runtime_mode: str = "helm"  # 'helm' | 'shared'
+    platform_api_url: str = ""
+    platform_api_token: str = ""
+    api: APISettings = Field(default_factory=APISettings)
 
 
 def load_proxy_settings() -> McpProxySettings:

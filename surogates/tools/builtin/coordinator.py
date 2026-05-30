@@ -395,7 +395,12 @@ async def _spawn_worker_handler(
             },
         )
         if redis is not None:
-            await enqueue_session(redis, agent_id, child_id)
+            await enqueue_session(
+                redis,
+                org_id=str(tenant.org_id),
+                agent_id=agent_id,
+                session_id=child_id,
+            )
 
         return json.dumps({
             "worker_id": str(child_id),
@@ -466,10 +471,13 @@ async def _send_worker_message_handler(
             {"content": message},
         )
 
-        # Re-enqueue the worker on its agent's queue so it wakes up.
+        # Re-enqueue the worker so it wakes up.
         if redis is not None:
             await enqueue_session(
-                redis, worker_session.agent_id, worker_id,
+                redis,
+                org_id=str(worker_session.org_id),
+                agent_id=worker_session.agent_id,
+                session_id=worker_id,
             )
 
         return json.dumps({

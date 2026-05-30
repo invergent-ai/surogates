@@ -18,6 +18,7 @@ from surogates.audit import (
     client_ip,
 )
 from surogates.db.models import ChannelIdentity, User
+from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.tenant.auth.database import DatabaseAuthProvider
 from surogates.tenant.auth.firebase import (
     FirebaseTokenError,
@@ -140,7 +141,9 @@ def _display_name_from_firebase_claims(
 
 @router.post("/auth/firebase/exchange", response_model=TokenResponse)
 async def firebase_exchange(
-    body: FirebaseExchangeRequest, request: Request,
+    body: FirebaseExchangeRequest,
+    request: Request,
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> TokenResponse:
     """Exchange a verified Firebase ID token for Surogates tokens.
 
@@ -168,12 +171,12 @@ async def firebase_exchange(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Firebase auth is not configured.",
         )
-    if not settings.org_id:
+    if not agent_runtime.org_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="org_id is required (server has no default org configured).",
+            detail="org_id is required (tenant has no org configured).",
         )
-    org_id = UUID(settings.org_id)
+    org_id = UUID(agent_runtime.org_id)
 
     try:
         claims = await verify_firebase_id_token(
@@ -183,6 +186,7 @@ async def firebase_exchange(
         if audit_store is not None:
             await audit_store.emit(
                 org_id=org_id,
+                agent_id=agent_runtime.agent_id,
                 type=AuditType.AUTH_FAILED,
                 data=auth_failed_event(
                     "firebase", str(exc), source_ip=source_ip,
@@ -241,6 +245,7 @@ async def firebase_exchange(
                 if audit_store is not None:
                     await audit_store.emit(
                         org_id=org_id,
+                        agent_id=agent_runtime.agent_id,
                         type=AuditType.AUTH_FAILED,
                         data=auth_failed_event(
                             "firebase",
@@ -289,6 +294,7 @@ async def firebase_exchange(
     if audit_store is not None:
         await audit_store.emit(
             org_id=org_id,
+            agent_id=agent_runtime.agent_id,
             user_id=user.id,
             type=AuditType.AUTH_LOGIN,
             data=auth_login_event("firebase", source_ip=source_ip),
@@ -299,7 +305,11 @@ async def firebase_exchange(
 
 
 @router.post("/auth/login", response_model=TokenResponse)
-async def login(body: LoginRequest, request: Request) -> TokenResponse:
+async def login(
+    body: LoginRequest,
+    request: Request,
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+) -> TokenResponse:
     """Authenticate a user and issue access + refresh tokens.
 
     Every attempt — success or failure — is written to ``audit_log``
@@ -312,16 +322,17 @@ async def login(body: LoginRequest, request: Request) -> TokenResponse:
     )
     source_ip = client_ip(request)
 
-    # Use the request's org_id if provided, otherwise the server's configured org.
+    # Use the request body's org_id if provided, otherwise the tenant
+    # resolved per-request via agent_runtime_context_dep (helm mode
+    # sources from settings; shared mode from the runtime config).
     org_id = body.org_id
     if org_id is None:
-        settings = request.app.state.settings
-        if not settings.org_id:
+        if not agent_runtime.org_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="org_id is required (server has no default org configured).",
+                detail="org_id is required (tenant has no org configured).",
             )
-        org_id = UUID(settings.org_id)
+        org_id = UUID(agent_runtime.org_id)
 
     provider = DatabaseAuthProvider(session_factory, org_id)
     result = await provider.authenticate(
@@ -332,6 +343,7 @@ async def login(body: LoginRequest, request: Request) -> TokenResponse:
         if audit_store is not None:
             await audit_store.emit(
                 org_id=org_id,
+                agent_id=agent_runtime.agent_id,
                 type=AuditType.AUTH_FAILED,
                 data=auth_failed_event(
                     "password",
@@ -361,6 +373,7 @@ async def login(body: LoginRequest, request: Request) -> TokenResponse:
     if audit_store is not None:
         await audit_store.emit(
             org_id=org_id,
+            agent_id=agent_runtime.agent_id,
             user_id=user_id,
             type=AuditType.AUTH_LOGIN,
             data=auth_login_event("password", source_ip=source_ip),

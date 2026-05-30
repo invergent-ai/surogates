@@ -17,6 +17,7 @@ from surogates.harness.context import (
 from surogates.harness.context_files import (
     load_project_context,
     load_soul_md,
+    load_soul_md_from_disk,
     scan_context_content,
     truncate_context,
 )
@@ -187,6 +188,7 @@ __all__ = [
     "jittered_backoff",
     "load_project_context",
     "load_soul_md",
+    "load_soul_md_from_disk",
     "make_skipped_tool_result",
     "message_to_dict",
     "openai_to_anthropic_messages",

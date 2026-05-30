@@ -155,39 +155,92 @@ class ToolOutputSettings(BaseSettings):
     max_line_length: int = 2000
 
 
-# Prefix for the per-agent session work queue.  The full key is
-# ``surogates:work_queue:<agent_id>`` — one queue per agent so that many
-# agents can share a single Redis without stealing each other's sessions.
-WORK_QUEUE_KEY: str = "surogates:work_queue"
+# Plan 2 / Task 12 — shared work queue.  Every enqueue lands here;
+# the dispatcher (Task 13) decodes the (org_id, agent_id, session_id)
+# tuple to know which tenant's TurnConcurrencyGate slot to acquire
+# before handing the session to a worker.
+SHARED_WORK_QUEUE_KEY: str = "surogates:work_queue"
+
+# Plan 1 legacy alias — kept as an importable constant so old code
+# that referenced WORK_QUEUE_KEY by name doesn't immediately crash.
+# The per-agent key shape is gone; use SHARED_WORK_QUEUE_KEY.
+WORK_QUEUE_KEY: str = SHARED_WORK_QUEUE_KEY
 
 
 def agent_queue_key(agent_id: str) -> str:
-    """Return the Redis sorted-set key for *agent_id*'s work queue.
+    """DEPRECATED — Plan 2 migrated to a single shared queue.
 
-    Every enqueue and dequeue of a session goes through this helper so the
-    shape of the key stays consistent across the API, channels, the
-    orchestrator worker, and inter-session notifications.
+    The per-agent key shape (``surogates:work_queue:<agent_id>``) is
+    gone.  Use :data:`SHARED_WORK_QUEUE_KEY` + :func:`encode_queue_member`
+    instead.  Plan 9 deletes this shim entirely.
     """
-    if not agent_id:
-        raise ValueError("agent_queue_key requires a non-empty agent_id")
-    return f"{WORK_QUEUE_KEY}:{agent_id}"
+    raise RuntimeError(
+        f"agent_queue_key({agent_id!r}) is removed — Plan 2 migrated "
+        f"to a single shared queue ({SHARED_WORK_QUEUE_KEY}).  Use "
+        f"encode_queue_member(...) + SHARED_WORK_QUEUE_KEY instead.",
+    )
+
+
+def encode_queue_member(
+    *, org_id: str, agent_id: str, session_id: str,
+) -> str:
+    """Encode the tenant tuple as a pipe-delimited queue member.
+
+    Plan 2 / Task 12.  The dispatcher decodes this in
+    :func:`parse_queue_member` to know which tenant's
+    :class:`~surogates.runtime.TurnConcurrencyGate` slot to acquire
+    before handing the session to a worker — no DB round-trip per
+    dequeue.
+
+    Rejects identifiers containing ``'|'`` (the delimiter) so a bad
+    row never lands in the queue."""
+    for part_name, part in (
+        ("org_id", org_id), ("agent_id", agent_id),
+        ("session_id", session_id),
+    ):
+        if "|" in part:
+            raise ValueError(
+                f"{part_name}={part!r} contains '|' which is the "
+                f"queue-member delimiter; reject at enqueue so a "
+                f"bad row never lands in the queue",
+            )
+    return f"{org_id}|{agent_id}|{session_id}"
+
+
+def parse_queue_member(member: str) -> tuple[str, str, str]:
+    """Decode a queue member; raises ``ValueError`` on malformed input."""
+    parts = member.split("|")
+    if len(parts) != 3:
+        raise ValueError(
+            f"malformed queue member {member!r}; expected "
+            f"<org_id>|<agent_id>|<session_id>",
+        )
+    return parts[0], parts[1], parts[2]
 
 
 async def enqueue_session(
     redis: Any,
+    *,
+    org_id: str,
     agent_id: str,
     session_id: Any,
-    *,
     priority: float = 0,
 ) -> None:
-    """Enqueue *session_id* on *agent_id*'s work queue with ``ZADD``.
+    """Enqueue a session on the shared work queue.
 
-    Single entry point used by every component that wakes a session — the
-    API, the channel adapters, the coordinator/delegate tools, and the
-    worker-notify helpers — so all enqueues share one key shape and one
-    priority convention.  Lower *priority* values are popped first.
+    Plan 2 / Task 12.  Single entry point used by every component
+    that wakes a session — the API, channel adapters, coordinator/
+    delegate tools, and worker-notify helpers.  Members encode the
+    ``(org_id, agent_id, session_id)`` tuple so the dispatcher can
+    extract the tenant for the per-tenant concurrency-gate check
+    without a DB round-trip per dequeue.  Lower *priority* values
+    are popped first.
     """
-    await redis.zadd(agent_queue_key(agent_id), {str(session_id): priority})
+    member = encode_queue_member(
+        org_id=str(org_id), agent_id=str(agent_id),
+        session_id=str(session_id),
+    )
+    await redis.zadd(SHARED_WORK_QUEUE_KEY, {member: priority})
 
 
 # Default Redis channel prefix for session interrupts.
@@ -209,6 +262,10 @@ class WorkerSettings(BaseSettings):
     # per-turn artifact recaps. Off disables the summarizer entirely;
     # older SDK versions ignore the events when this is on.
     emit_turn_summaries: bool = True
+    # Plan 2 / Task 14 — per-(org_id, agent_id) max in-flight turns
+    # cap used by TurnConcurrencyGate.  ``ctx.governance`` may override
+    # per tenant in a later plan; until then this is the uniform cap.
+    max_concurrent_turns_default: int = 10
 
 
 class LLMSettings(BaseSettings):
@@ -374,6 +431,13 @@ class StorageSettings(BaseSettings):
     access_key: str = ""
     secret_key: str = ""
     region: str = ""
+
+    # Plan 4 / Task 3 — dedicated bucket for per-user memory.
+    # Defaults to '' which the harness treats as 'reuse
+    # settings.storage.bucket'.  Set to a different bucket name
+    # for deployments that isolate memory (different lifecycle
+    # policy, regional replication, billing).
+    memory_bucket: str = ""
 
 
 class SlackSettings(BaseSettings):
@@ -593,12 +657,29 @@ class AuthSettings(BaseSettings):
         )
 
 
+class HubSettings(BaseSettings):
+    """Surogate Hub credentials for the file-bundle accessor.
+
+    Plan 3 / Task 5.  When ``endpoint`` is empty the worker treats
+    Hub as disabled and falls back to legacy filesystem reads for
+    SOUL.md / platform skills / etc.  Plan 9 retires the legacy
+    filesystem path and makes ``endpoint`` required.
+    """
+
+    model_config = {"env_prefix": "SUROGATES_HUB_"}
+
+    endpoint: str = ""
+    username: str = ""
+    password: str = ""
+
+
 class Settings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_"}
 
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)
     ops_db: OpsDatabaseSettings = Field(default_factory=OpsDatabaseSettings)
     kb_hub: KBHubSettings = Field(default_factory=KBHubSettings)
+    hub: HubSettings = Field(default_factory=HubSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     api: APISettings = Field(default_factory=APISettings)
     tool_output: ToolOutputSettings = Field(default_factory=ToolOutputSettings)
@@ -625,7 +706,35 @@ class Settings(BaseSettings):
     platform_agents_dir: str = "/etc/surogates/agents"
     tenant_assets_root: str = "/data/tenant-assets"
 
-    # Identity
+    # Runtime mode.
+    #
+    # ``helm`` (default) — legacy one-agent-per-pod path.  ``org_id``
+    # and ``agent_id`` below are baked into the pod's env and identify
+    # the tenant the entire process serves.
+    #
+    # ``shared`` — multi-tenant pool (Plan 1+).  The pod serves any
+    # tenant; ``(org_id, agent_id)`` is resolved per-request via the
+    # platform API.  ``org_id`` / ``agent_id`` settings are unused.
+    #
+    # Typed as a ``Literal`` so pydantic rejects typos at config load
+    # rather than silently falling into the helm branch when an
+    # operator writes e.g. ``runtime_mode: sharad`` — every downstream
+    # check is ``== "helm"`` / ``== "shared"`` and an unknown value
+    # would resolve to the helm path with no warning.
+    runtime_mode: Literal["helm", "shared"] = "helm"
+
+    # Platform (surogate-ops) API base URL + bearer token.  Only
+    # consulted in ``runtime_mode='shared'``; the runtime fetches per-
+    # tenant config via GET /api/agents/{id}/runtime-config.  The
+    # token must carry the ``runtime`` scope (see surogate-ops
+    # mint-runtime-token CLI).
+    platform_api_url: str = ""
+    platform_api_token: str = ""
+
+    # Identity (helm mode).  Defaults preserve the legacy zero-config
+    # behaviour for tests that instantiate ``Settings()`` directly.
+    # Shared-mode pods leave these at their defaults — the runtime
+    # resolves ``(org_id, agent_id)`` per request instead.
     org_id: str = ""  # the org this agent instance belongs to
     agent_id: str = "default"  # the agent this instance serves (sessions belong to an agent)
     worker_id: str = ""  # set from K8s downward API (pod name)

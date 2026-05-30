@@ -4,7 +4,7 @@
 // Custom chat thread — uses ai-elements Conversation + Message
 // with a compact, Claude Code-inspired layout.
 //
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Conversation,
   ConversationContent,
@@ -41,9 +41,10 @@ import { ChatMessage } from "./chat-message";
 import { ChatComposer } from "./chat-composer";
 import { TurnFeedback } from "./turn-feedback";
 import { useSmoothStream } from "./use-smooth-stream";
+import { stripAndParseNextAction } from "../../lib/next-action";
 import { ArtifactBlock } from "./artifacts/artifact-block";
 import { ErrorMessage } from "./error-message";
-import { TurnSummaryCard, TurnSummaryPending } from "./turn-summary-card";
+import { TurnSummaryCard } from "./turn-summary-card";
 import { cn } from "../../lib/utils";
 import {
   AlertTriangle,
@@ -65,7 +66,6 @@ import {
   WrenchIcon,
   type LucideIcon,
 } from "lucide-react";
-import { useState } from "react";
 import type {
   AgentChatImageAttachment,
   AgentChatPendingAttachment,
@@ -82,10 +82,9 @@ interface ChatThreadProps {
   sessionId: string | null;
   messages: ChatMessageType[];
   isRunning: boolean;
-  /** True once the session has ended terminally. Skeleton placeholders
-   *  for the post-answer summarizer window gate on ``!terminal`` because
-   *  ``isRunning`` already flipped false on the final text-only
-   *  ``llm.response``, before the harness summarizer runs. */
+  /** True once the session has ended terminally. Kept in the prop
+   *  contract for callers that already thread runtime state through
+   *  ChatThread. */
   terminal: boolean;
   isLoadingHistory?: boolean;
   onSend: (
@@ -139,6 +138,16 @@ type TimelineEntry =
       msg: ChatMessageType;
       isFinalTurnText?: boolean;
     }
+  /**
+   * Italic narration line rendered above the iteration's tool calls.
+   * Carries the assistant's prose preamble ("I'll fetch the weather
+   * data...") that the model emits before its ``tool_calls``.  Without
+   * this entry the prose would be buried inside the reasoning
+   * collapsible -- this surfaces it as the iteration's natural
+   * narration line.  When the model emits a ``<next_action>`` footer
+   * the renderer prefers it over the heuristic.
+   */
+  | { kind: "narration"; key: string; text: string; isStreaming: boolean }
   | { kind: "thinking"; key: string }
   | { kind: "skill_invoked"; key: string; skill: string; stagedAt: string | null }
   | {
@@ -149,6 +158,8 @@ type TimelineEntry =
       artifactKind: ArtifactKind;
       version: number;
     };
+
+const WORKING_ON_IT_DELAY_MS = 250;
 
 /**
  * Flatten an assistant message into a list of timeline entries
@@ -198,20 +209,29 @@ function messageToEntries(
   const hasContent = !!(msg.content && msg.content !== msg.reasoning);
   const isStreaming = msg.status === "streaming" && isLast;
 
-  // When tool calls are present, the content text is just a preamble
-  // ("I'll run both tasks in parallel...") — fold it into reasoning
-  // instead of showing it as a separate text block.
-  const effectiveReasoning = hasToolCalls && hasContent
-    ? (msg.reasoning ? msg.reasoning + "\n" + msg.content : msg.content)
-    : msg.reasoning;
+  // When tool calls are present the content text is just a preamble
+  // ("I'll run both tasks in parallel...").  We surface it as its own
+  // ``narration`` entry rendered as an italic line above the tool
+  // calls, instead of folding it into the reasoning collapsible.  The
+  // reasoning collapsible then carries pure chain-of-thought; the
+  // narration is always visible without expanding.
   const effectiveHasContent = hasContent && !hasToolCalls;
 
-  if (effectiveReasoning) {
+  if (msg.reasoning) {
     entries.push({
       kind: "reasoning",
       key: `${msg.id}-reasoning`,
-      reasoning: effectiveReasoning,
+      reasoning: msg.reasoning,
       isStreaming: isStreaming && !effectiveHasContent && !hasToolCalls,
+    });
+  }
+
+  if (hasContent && hasToolCalls) {
+    entries.push({
+      kind: "narration",
+      key: `${msg.id}-narration`,
+      text: msg.content,
+      isStreaming: isStreaming && !effectiveHasContent,
     });
   }
 
@@ -250,21 +270,6 @@ function messageToEntries(
       isStreaming,
       msg,
     });
-  }
-
-  // Show "Working on it..." shimmer whenever the turn is active but
-  // nothing visible is progressing:
-  //   - initial thinking before the first reasoning/tool/content arrives
-  //   - post-reasoning gap (reasoning has landed but the next tool or
-  //     content hasn't -- common between llm.response and tool.call, or
-  //     while the LLM is still composing the next iteration)
-  //   - between tool rounds once every tool call has completed
-  // A running tool call already shows its own shimmer, so skip then.
-  const hasRunningTool = hasToolCalls && msg.toolCalls!.some(
-    (tc) => tc.status === "running",
-  );
-  if (isStreaming && !effectiveHasContent && !hasRunningTool) {
-    entries.push({ kind: "thinking", key: `${msg.id}-thinking` });
   }
 
   return entries;
@@ -425,7 +430,7 @@ function OrphanSystemMarker({
       <div className="my-2 flex items-center gap-2 px-4 text-xs text-foreground/60 ">
         <span className="size-2 rounded-full bg-emerald-500" />
         <span>
-          <span className="font-semibold text-foreground">Skill</span>
+          <span className="font-semibold text-foreground">Running skill{" "}</span>
           <span className="text-foreground/60 truncate">{skill}</span>
         </span>
       </div>
@@ -598,6 +603,10 @@ function TimelineEntryItem({
     return <TextEntry entry={entry} step={step} />;
   }
 
+  if (entry.kind === "narration") {
+    return <NarrationEntry entry={entry} step={step} />;
+  }
+
   if (entry.kind === "skill_invoked") {
     return (
       <TimelineItem step={step}>
@@ -684,6 +693,41 @@ function ReasoningEntry({
   );
 }
 
+// Renders the assistant's prose preamble ("I'll fetch the weather
+// next.") above its tool calls as a small italic line.  When the
+// model emitted a structured ``<next_action>`` footer the body of
+// that footer wins; otherwise we fall back to the first-sentence
+// heuristic (language-agnostic).  Hidden when the model marked the
+// turn as ``done`` so the final answer doesn't carry a trailing
+// whisper, and hidden when the preamble produced no usable text.
+function NarrationEntry({
+  entry,
+  step,
+}: {
+  entry: Extract<TimelineEntry, { kind: "narration" }>;
+  step: number;
+}) {
+  const text = useSmoothStream(entry.text, entry.isStreaming);
+  const { action, inferredNarration } = stripAndParseNextAction(text);
+  const line = action
+    ? action.body.trim().toLowerCase() === "done"
+      ? null
+      : action.body
+    : inferredNarration;
+  if (!line) return null;
+  return (
+    <TimelineItem step={step}>
+      <TimelineHeader>
+        <TimelineSeparator style={{ backgroundColor: "var(--color-border)" }} />
+        <TimelineIndicator className="size-2 border-none bg-foreground/30" />
+      </TimelineHeader>
+      <TimelineContent>
+        <p>{line}</p>
+      </TimelineContent>
+    </TimelineItem>
+  );
+}
+
 function TextEntry({
   entry,
   step,
@@ -692,6 +736,13 @@ function TextEntry({
   step: number;
 }) {
   const content = useSmoothStream(entry.content, entry.isStreaming);
+  // Strip the harness ``<next_action>`` footer from the rendered
+  // markdown.  No narration line here -- a text-only iteration IS
+  // the final answer; the first sentence would duplicate the body.
+  // Tool-call iterations get their narration via ``NarrationEntry``
+  // (Expert mode) or the parent assistant-group renderer (Simple
+  // mode), not here.
+  const { cleaned } = stripAndParseNextAction(content);
   return (
     <TimelineItem step={step}>
       <TimelineHeader>
@@ -699,7 +750,7 @@ function TextEntry({
         <TimelineIndicator className="size-2 border-none bg-foreground/40" />
       </TimelineHeader>
       <TimelineContent>
-        <MessageResponse>{content}</MessageResponse>
+        <MessageResponse>{cleaned}</MessageResponse>
         {entry.isFinalTurnText && entry.msg.status === "complete" && (
           <TurnFeedback msg={entry.msg} />
         )}
@@ -724,9 +775,14 @@ function SimpleFinalAnswer({
 }) {
   const content = useSmoothStream(text, isStreaming);
   const revealComplete = content.length >= text.length;
+  // Strip the next_action footer so it doesn't leak into the
+  // rendered markdown.  No narration line here -- a final answer's
+  // content IS the answer; surfacing its first sentence below would
+  // duplicate the body during streaming.
+  const { cleaned } = stripAndParseNextAction(content);
   return (
     <div>
-      <MessageResponse>{content}</MessageResponse>
+      <MessageResponse>{cleaned}</MessageResponse>
       {tail?.status === "complete" && revealComplete && (
         <TurnFeedback msg={tail} />
       )}
@@ -1241,8 +1297,8 @@ export function IterationGroup({
     return null;
   }
   const labelTone = summary
-    ? "text-foreground/80"
-    : "text-foreground/50";
+    ? "text-muted-foreground italic"
+    : "text-muted-foreground";
   return (
     <div className="space-y-1">
       <button
@@ -1362,20 +1418,14 @@ function deriveFileArtifactsFromMessages(
 
 function SimpleAssistantGroup({
   messages,
-  lastGlobalIndex,
-  totalMessages,
   isRunning,
-  terminal,
   sessionId,
   artifactFallbacks,
   onFileSelect,
   onRetry,
 }: {
   messages: ChatMessageType[];
-  lastGlobalIndex: number;
-  totalMessages: number;
   isRunning: boolean;
-  terminal: boolean;
   sessionId: string | null;
   artifactFallbacks: Record<string, string>;
   onFileSelect?: (path: string) => void;
@@ -1393,26 +1443,6 @@ function SimpleAssistantGroup({
   const tailIsTextOnly = !!tail && !tailHasTools;
   const finalText = tailIsTextOnly && tail!.content ? tail!.content : "";
 
-  // Mirror Expert mode's defensive "Working on it..." row: whenever
-  // this is the tail group and the session is still running, surface
-  // a group-level shimmer unless an iteration is already showing its
-  // own live shimmer. We DON'T also suppress when finalText is set —
-  // the reducer keeps tool-using and pre-response messages in
-  // status="streaming" indefinitely (next llm.response is the only
-  // signal that flips them), so once the text deltas stop the
-  // smoothstream finishes its reveal but status stays "streaming";
-  // without a sibling shimmer the UI looks frozen. Expert mode
-  // appends an equivalent thinking entry in the same window.
-  const isTailGroup = lastGlobalIndex === totalMessages - 1;
-  const tailRendersOwnShimmer =
-    !!tail
-    && isIterationLive(tail)
-    && !tailIsTextOnly;
-  const showThinkingShim =
-    isTailGroup
-    && isRunning
-    && !tailRendersOwnShimmer;
-
   const showErrorInfo =
     !!tail && tail.status === "error" && !!tail.errorInfo;
 
@@ -1429,11 +1459,22 @@ function SimpleAssistantGroup({
   // iteration has stopped streaming so the summary card matches what
   // the harness would have emitted at turn end.
   const turnComplete = !isRunning && tail?.status === "complete";
+  // Honour the model's own ``summary="show|hide"`` declaration in the
+  // tail iteration's <next_action> footer.  Default is "hide" so a
+  // missing/malformed declaration suppresses the card — model has to
+  // opt IN to the heavier UI affordance.  Artifact-derived summaries
+  // still render even when hidden, because file output is a strong
+  // signal the user wants the artifact tray visible.
+  const summaryPref =
+    finalText !== null
+      ? stripAndParseNextAction(finalText).action?.summary ?? "hide"
+      : "hide";
   const effectiveTurnSummary = (() => {
     const fromHarness = tail?.turnSummary;
     if (fromHarness && fromHarness.artifacts.length > 0) {
       return fromHarness;
     }
+    if (summaryPref === "hide") return null;
     if (!turnComplete) return fromHarness;
     const derived = deriveFileArtifactsFromMessages(messages);
     if (derived.length === 0) return fromHarness;
@@ -1467,15 +1508,41 @@ function SimpleAssistantGroup({
             // or its mid-stream "Thinking…" shimmer (and post-stream
             // "Thought through the problem" label) will sit above the
             // same text the user sees in finalText.
-            if (message === tail && tailIsTextOnly) return null;
+            //
+            // BUT only skip once finalText is non-empty.  During the
+            // initial thinking phase (reasoning streaming, no content
+            // yet) finalText is "" and SimpleFinalAnswer won't render
+            // anything either — letting IterationGroup through ensures
+            // the live "Thinking…" shimmer is visible instead of a
+            // blank gap.
+            if (message === tail && tailIsTextOnly && finalText) return null;
+            // Pull the narration line up as a sibling of the iteration
+            // card so it reads as "agent voice at root level" instead
+            // of buried inside the collapsible body.  Hidden when the
+            // assistant message had no narration to surface (typed
+            // ``done`` footer, no prose preamble, or empty content).
+            const rawContent = (message.content ?? "").trim();
+            const { action, inferredNarration } =
+              stripAndParseNextAction(rawContent);
+            const narrationLine = action
+              ? action.body.trim().toLowerCase() === "done"
+                ? null
+                : action.body
+              : inferredNarration;
             return (
-              <IterationGroup
-                key={message.id}
-                message={message}
-                sessionId={sessionId}
-                artifactFallbacks={artifactFallbacks}
-                onFileSelect={onFileSelect}
-              />
+              <div key={message.id} className="space-y-2">
+                {narrationLine && (
+                  <p className="text-sm text-foreground">
+                    {narrationLine}
+                  </p>
+                )}
+                <IterationGroup
+                  message={message}
+                  sessionId={sessionId}
+                  artifactFallbacks={artifactFallbacks}
+                  onFileSelect={onFileSelect}
+                />
+              </div>
             );
           })}
         </div>
@@ -1486,34 +1553,13 @@ function SimpleAssistantGroup({
             tail={tail}
           />
         )}
-        {showThinkingShim && (
-          <div className="mt-2">
-            <Shimmer duration={3} spread={3} className="text-sm">
-              Working on it...
-            </Shimmer>
-          </div>
-        )}
-        {effectiveTurnSummary ? (
+        {effectiveTurnSummary && (
           <TurnSummaryCard
             summary={effectiveTurnSummary}
             sessionId={sessionId}
             messages={messages}
             onFileSelect={onFileSelect}
           />
-        ) : (
-          // The harness summarizer runs after the last assistant
-          // response and before ``session.complete``. Show a pending
-          // placeholder during that window so users aren't surprised
-          // when the Summary card pops in. Gated on ``!terminal``
-          // rather than ``isRunning`` because the text-only final
-          // ``llm.response`` already flips ``isRunning`` to false —
-          // the summarizer then runs in the gap before
-          // ``session.complete`` (which is what sets ``terminal``).
-          isTailGroup
-          && !terminal
-          && !!finalText
-          && tail?.status === "complete"
-          && <TurnSummaryPending />
         )}
         {showErrorInfo && (
           <div className="mt-3">
@@ -1532,7 +1578,6 @@ function AssistantGroup({
   lastGlobalIndex,
   totalMessages,
   isRunning,
-  terminal,
   sessionId,
   artifactFallbacks,
   onFileSelect,
@@ -1543,7 +1588,6 @@ function AssistantGroup({
   lastGlobalIndex: number;
   totalMessages: number;
   isRunning: boolean;
-  terminal: boolean;
   sessionId: string | null;
   artifactFallbacks: Record<string, string>;
   onFileSelect?: (path: string) => void;
@@ -1554,10 +1598,7 @@ function AssistantGroup({
     return (
       <SimpleAssistantGroup
         messages={messages}
-        lastGlobalIndex={lastGlobalIndex}
-        totalMessages={totalMessages}
         isRunning={isRunning}
-        terminal={terminal}
         sessionId={sessionId}
         artifactFallbacks={artifactFallbacks}
         onFileSelect={onFileSelect}
@@ -1586,27 +1627,6 @@ function AssistantGroup({
       entries[i] = { ...entry, isFinalTurnText: true };
       break;
     }
-  }
-
-  // Whenever this is the tail assistant group and the session is still
-  // running, append a "Working on it..." row unless something visible is
-  // already in progress (a running tool, or messageToEntries already added
-  // a thinking entry for an empty streaming turn). This covers both the
-  // mid-stream pause between text and the next tool call AND the gap
-  // between LLM iterations after a turn has fully completed.
-  const isTailGroup = lastGlobalIndex === totalMessages - 1;
-  const lastEntry = entries[entries.length - 1];
-  const hasRunningTool = entries.some(
-    (e) => e.kind === "tool" && e.tc.status === "running",
-  );
-  const tailMsg = messages[messages.length - 1];
-  if (
-    isTailGroup
-    && isRunning
-    && !hasRunningTool
-    && lastEntry?.kind !== "thinking"
-  ) {
-    entries.push({ kind: "thinking", key: `${tailMsg.id}-tail-thinking` });
   }
 
   // Surface the classifier's error info inline below the timeline when
@@ -1674,13 +1694,46 @@ function RetryBanner({ indicator }: { indicator: RetryIndicator }) {
   );
 }
 
+function WorkingOnItIndicator() {
+  return (
+    <Message from="assistant">
+      <MessageContent>
+        <Shimmer duration={3} spread={3} className="text-sm">
+          Working on it...
+        </Shimmer>
+      </MessageContent>
+    </Message>
+  );
+}
+
+function useDelayedRunningIndicator(isRunning: boolean): boolean {
+  const [visible, setVisible] = useState(isRunning);
+
+  useEffect(() => {
+    if (!isRunning) {
+      setVisible(false);
+      return;
+    }
+    if (visible) return;
+
+    const timeout = window.setTimeout(() => {
+      setVisible(true);
+    }, WORKING_ON_IT_DELAY_MS);
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [isRunning, visible]);
+
+  return visible;
+}
+
 // ── Main thread ──────────────────────────────────────────────────────
 
 export function ChatThread({
   sessionId,
   messages,
   isRunning,
-  terminal,
   isLoadingHistory = false,
   onSend,
   onStop,
@@ -1701,6 +1754,7 @@ export function ChatThread({
   onViewModeChange,
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
+  const showWorkingOnIt = useDelayedRunningIndicator(isRunning);
 
   // Pair ``create_artifact`` tool calls to their matching
   // ``artifact.created`` system messages by emission order across the
@@ -1757,7 +1811,7 @@ export function ChatThread({
   }, [messages]);
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden bg-background text-sm">
+    <div className="flex flex-1 flex-col overflow-hidden bg-background text-base">
       <Conversation className="relative flex-1 min-h-0">
         <ConversationContent className="mx-auto w-full max-w-4xl">
           {messages.length === 0 && isLoadingHistory ? (
@@ -1820,7 +1874,6 @@ export function ChatThread({
                     lastGlobalIndex={group.lastGlobalIndex}
                     totalMessages={messages.length}
                     isRunning={isRunning}
-                    terminal={terminal}
                     sessionId={sessionId}
                     artifactFallbacks={artifactFallbacks}
                     onFileSelect={onFileSelect}
@@ -1829,13 +1882,7 @@ export function ChatThread({
                   />
                 );
               })}
-              {isRunning && messages.length > 0 && messages[messages.length - 1].role === "user" && (
-                <Message from="assistant">
-                  <MessageContent>
-                    <Shimmer duration={3} spread={3} className="text-sm">Working on it...</Shimmer>
-                  </MessageContent>
-                </Message>
-              )}
+              {showWorkingOnIt && <WorkingOnItIndicator />}
             </>
           )}
         </ConversationContent>

@@ -87,6 +87,12 @@ class PoolEntry:
     tool_schemas: list[dict[str, Any]] = field(default_factory=list)
     # Reverse index: clean tool name -> (prefixed server key, original MCP tool name)
     tool_index: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # Plan 5 / Task 11.  Per-server config (unresolved -- credentials
+    # have already been injected into ``env`` during
+    # ``load_mcp_configs`` -> ``_resolve_credentials``).  The route
+    # looks up ``server_configs[original_server_name]`` to spawn an
+    # ``MCPCallSandbox`` per call.
+    server_configs: dict[str, dict[str, Any]] = field(default_factory=dict)
     sanitized_prefix: str = ""
     last_used: float = field(default_factory=time.monotonic)
     governance: MCPGovernance | None = None
@@ -168,6 +174,40 @@ class ConnectionPool:
             return None
         entry.last_used = time.monotonic()
         return entry.tool_schemas
+
+    def resolve_call_target(
+        self, org_id: UUID, user_id: UUID, tool_name: str,
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        """Resolve a clean tool name to the per-call subprocess parameters.
+
+        Plan 5 / Task 11.  Returns
+        ``(original_server_name, original_tool_name, server_config)``
+        if the tenant is connected and the tool is in scope; ``None``
+        otherwise.  The route uses the returned ``server_config`` to
+        spawn a fresh :class:`MCPCallSandbox` per call instead of
+        reaching into the module-level ``_servers`` dict for the
+        long-lived session.
+        """
+        entry = self._entries.get((org_id, user_id))
+        if entry is None:
+            return None
+        entry.last_used = time.monotonic()
+        routing = entry.tool_index.get(tool_name)
+        if routing is None:
+            return None
+        server_key, original_tool = routing
+        # Strip the tenant prefix from the server key to recover the
+        # config dict key (server_configs is indexed by the original
+        # unprefixed name).
+        expected_prefix = f"{_tenant_prefix(org_id, user_id)}__"
+        if server_key.startswith(expected_prefix):
+            original_server = server_key[len(expected_prefix):]
+        else:
+            original_server = server_key
+        config = entry.server_configs.get(original_server)
+        if config is None:
+            return None
+        return original_server, original_tool, config
 
     # ------------------------------------------------------------------
     # Tool discovery
@@ -301,6 +341,9 @@ class ConnectionPool:
                 server_names=original_names,
                 tool_schemas=clean_schemas,
                 tool_index=tool_index,
+                server_configs={
+                    name: dict(cfg) for name, cfg in configs.items()
+                },
                 sanitized_prefix=tenant_pfx,
                 governance=tenant_governance,
             )
@@ -359,6 +402,12 @@ class ConnectionPool:
                 if self._audit_store is not None:
                     await self._audit_store.emit(
                         org_id=org_id,
+                        # MCP scans are org-scoped (server definitions
+                        # live at the org level); no single agent_id
+                        # to attribute. Plan 1b accepts None here so
+                        # the per-tenant column is at least visibly
+                        # absent rather than silently omitted.
+                        agent_id=None,
                         user_id=audit_user_id,
                         type=AuditType.POLICY_RUG_PULL,
                         data=rug_pull_event(
@@ -380,6 +429,7 @@ class ConnectionPool:
         if self._audit_store is not None:
             await self._audit_store.emit(
                 org_id=org_id,
+                agent_id=None,  # org-scoped scan — see rug_pull emit above
                 user_id=audit_user_id,
                 type=AuditType.POLICY_MCP_SCAN,
                 data=mcp_scan_event(

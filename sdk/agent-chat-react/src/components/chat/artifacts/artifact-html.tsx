@@ -11,7 +11,7 @@
 // boundary; we intentionally do not sanitise the HTML payload because
 // the whole point of this artifact kind is that it renders as-is.
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { cn } from "../../../lib/utils";
 import type { HtmlArtifactSpec } from "../../../types";
 
@@ -22,6 +22,44 @@ const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 2;
 const ZOOM_STEP = 0.1;
 
+/**
+ * Defensive CSS preamble injected into every artifact's srcdoc.
+ *
+ * Models occasionally generate HTML that puts a Chart.js ``<canvas>``
+ * inside a flex/auto-sized parent with ``maintainAspectRatio:false`` --
+ * the classic footgun: chart.js sizes the canvas to fill its parent,
+ * the parent (lacking a fixed height) sizes to fit the canvas, the
+ * ResizeObserver fires, repeat forever.  The iframe stays at its own
+ * fixed CSS height but the content inside it grows tall and the user
+ * sees a runaway scrollbar inside the artifact.
+ *
+ * We cap every ``<canvas>`` at the iframe's viewport (80vh) so the
+ * resize feedback loop terminates at a sensible ceiling.  The cap is
+ * intentionally high enough to leave a legitimate full-iframe chart
+ * looking right, and low enough to terminate the runaway.
+ */
+const SAFETY_STYLE_PREAMBLE = (
+  "<style>html,body{max-height:100vh}" +
+  "canvas{max-height:80vh!important}</style>"
+);
+
+function injectSafetyStyle(html: string): string {
+  // Insert just before </head> so the rules cascade after the
+  // document's own styles.  No </head> (or no <head> at all) means
+  // the model emitted a body-only fragment -- prepend at the top so
+  // the style still applies via the implicit <head> the browser
+  // synthesises.
+  const headCloseIdx = html.search(/<\/head\s*>/i);
+  if (headCloseIdx >= 0) {
+    return (
+      html.slice(0, headCloseIdx) +
+      SAFETY_STYLE_PREAMBLE +
+      html.slice(headCloseIdx)
+    );
+  }
+  return SAFETY_STYLE_PREAMBLE + html;
+}
+
 export function ArtifactHtml({
   spec,
   fill = false,
@@ -31,6 +69,10 @@ export function ArtifactHtml({
 }) {
   const [expanded, setExpanded] = useState(false);
   const [zoom, setZoom] = useState(1);
+
+  // Inject the safety preamble exactly once per spec.html so we don't
+  // re-string-build on every zoom/expand state change.
+  const safeSrcdoc = useMemo(() => injectSafetyStyle(spec.html), [spec.html]);
 
   const viewportHeight = expanded ? EXPANDED_HEIGHT_PX : DEFAULT_HEIGHT_PX;
   const clamp = (v: number) =>
@@ -49,7 +91,7 @@ export function ArtifactHtml({
       >
         <iframe
           title="artifact-html"
-          srcDoc={spec.html}
+          srcDoc={safeSrcdoc}
           sandbox="allow-scripts"
           className={cn("border-0", fill && "h-full w-full")}
           style={

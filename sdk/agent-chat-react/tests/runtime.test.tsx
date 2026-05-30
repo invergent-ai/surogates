@@ -610,6 +610,42 @@ describe("useAgentChatRuntime", () => {
     expect(runtime.api.messages[0]?.status).toBe("complete");
   });
 
+  it("ignores late live events after stop so running does not flash again", async () => {
+    const calls: AdapterCalls = {
+      opened: [],
+      sent: [],
+      paused: [],
+      retried: [],
+      created: [],
+    };
+    const adapter = createFakeAdapter(calls);
+    const runtime = renderRuntime({ adapter, sessionId: "s-1" });
+
+    act(() => {
+      calls.opened[0]?.stream.emit("llm.delta", 3, { content: "working" });
+    });
+    expect(runtime.api.isRunning).toBe(true);
+
+    await act(async () => {
+      await runtime.api.stop();
+    });
+    expect(runtime.api.isRunning).toBe(false);
+
+    act(() => {
+      calls.opened[0]?.stream.emit("session.resume", 4, {});
+      calls.opened[0]?.stream.emit("llm.request", 5, {});
+      calls.opened[0]?.stream.emit("llm.delta", 6, { content: "late" });
+      calls.opened[0]?.stream.emit("tool.call", 7, {
+        tool_call_id: "late-tool",
+        name: "terminal",
+        arguments: {},
+      });
+    });
+
+    expect(runtime.api.isRunning).toBe(false);
+    expect(runtime.api.messages[0]?.content).toBe("working");
+  });
+
   it("calls retrySession and clears terminal state on retry", async () => {
     const calls: AdapterCalls = {
       opened: [],

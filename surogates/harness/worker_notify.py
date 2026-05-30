@@ -35,6 +35,7 @@ async def notify_parent_on_completion(
     session_store: SessionStore,
     worker_session_id: UUID,
     parent_session_id: UUID,
+    org_id: str,
     agent_id: str,
     redis: Redis | None = None,
     task_id: UUID | None = None,
@@ -110,7 +111,12 @@ async def notify_parent_on_completion(
 
         # Re-enqueue the parent so it wakes up.
         if redis is not None:
-            await enqueue_session(redis, agent_id, parent_session_id)
+            await enqueue_session(
+                redis,
+                org_id=str(org_id),
+                agent_id=agent_id,
+                session_id=parent_session_id,
+            )
 
     except Exception:
         logger.exception(
@@ -125,6 +131,7 @@ async def notify_parent_on_failure(
     session_store: SessionStore,
     worker_session_id: UUID,
     parent_session_id: UUID,
+    org_id: str,
     agent_id: str,
     error: str,
     redis: Redis | None = None,
@@ -153,7 +160,12 @@ async def notify_parent_on_failure(
         )
 
         if redis is not None:
-            await enqueue_session(redis, agent_id, parent_session_id)
+            await enqueue_session(
+                redis,
+                org_id=str(org_id),
+                agent_id=agent_id,
+                session_id=parent_session_id,
+            )
 
     except Exception:
         logger.exception(

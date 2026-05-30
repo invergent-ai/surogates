@@ -533,7 +533,12 @@ async def _spawn_task_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
             task_id, child.id,
         )
 
-    await enqueue_session(redis, child.agent_id, child.id)
+    await enqueue_session(
+        redis,
+        org_id=str(child.org_id),
+        agent_id=child.agent_id,
+        session_id=child.id,
+    )
     return json.dumps({
         "task_id": str(task_id),
         "status": "running",

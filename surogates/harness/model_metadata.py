@@ -197,6 +197,7 @@ _ALIASES: dict[str, str] = {
     "@preset/glm-5-1": "glm-5.1",
     "@preset/qwen-3-7-max": "qwen-3-7-max",
     "qwen3.7-max": "qwen-3-7-max",
+    "xiaomi/mimo-v2.5-pro": "mimo-v2.5-pro",
 }
 
 

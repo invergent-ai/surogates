@@ -88,7 +88,12 @@ def _serialize_item(item) -> dict:
 
 async def _wake_session_from_request(request: Request, session_id: UUID) -> None:
     session = await request.app.state.session_store.get_session(session_id)
-    await enqueue_session(request.app.state.redis, session.agent_id, session_id)
+    await enqueue_session(
+        request.app.state.redis,
+        org_id=str(session.org_id),
+        agent_id=session.agent_id,
+        session_id=session_id,
+    )
 
 
 @router.get("")

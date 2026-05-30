@@ -97,12 +97,21 @@ class PromptBuilder:
         available_agents: list[AgentDef] | None = None,
         available_kbs: list[dict] | None = None,
         prompt_library: PromptLibrary | None = None,
+        soul_md_content: str | None = None,
+        agent_md_content: str | None = None,
     ) -> None:
         self.tenant = tenant
         self.skills: list = skills or []
         self._available_tools: set[str] = available_tools or set()
         self._memory_manager: MemoryManager | None = memory_manager
         self._session: Session | None = session
+        # Plan 3 / Task 12 — pre-loaded bundle content.  When set,
+        # the section builder uses these strings instead of the
+        # legacy disk read.  harness_factory does the async pre-load
+        # via load_soul_md(bundle) / load_agent_md(bundle) so the
+        # builder's build() can stay sync.
+        self._soul_md_content: str | None = soul_md_content
+        self._agent_md_content: str | None = agent_md_content
         # Active sub-agent type for the current session, or None when
         # the session runs with the default identity.  When set, the
         # agent def's system_prompt body replaces the org-level
@@ -159,6 +168,9 @@ class PromptBuilder:
         8. Available experts (when any are active)
         9. Context files (AGENTS.md, .cursorrules)
         10. Timestamp, model info, platform hint
+        11. Next-action footer directive (always last so the model sees
+            it most recently before generating; competes less with the
+            middle-of-prompt guidance fragments)
         """
         sections: list[str] = []
         sections.append(self._identity_section())
@@ -175,6 +187,7 @@ class PromptBuilder:
         sections.append(self._kb_section())
         sections.append(self._context_files_section())
         sections.append(self._context_section())
+        sections.append(self._next_action_section())
 
         return "\n\n".join(s for s in sections if s)
 
@@ -274,6 +287,23 @@ class PromptBuilder:
         """
         return self._prompts.get("guidance/working_principles")
 
+    def _next_action_section(self) -> str:
+        """Self-declared next-action footer directive.
+
+        Rendered as the LAST section of the system prompt so the
+        instruction is the most recent thing the model sees before it
+        starts generating.  Middle-of-prompt placement competed too
+        heavily with the surrounding guidance fragments on weaker
+        instruction-followers (qwen-3.7-max was emitting zero blocks).
+
+        Missing-fragment fallback: log + return empty string so the
+        rest of the prompt builds normally.
+        """
+        try:
+            return self._prompts.get("guidance/next_action")
+        except Exception:
+            return ""
+
     def _identity_section(self) -> str:
         """Agent identity.
 
@@ -300,14 +330,24 @@ class PromptBuilder:
         org_cfg = self.tenant.org_config
 
         agent_name: str = org_cfg.get("agent_name", "Surogate")
-        personality: str = org_cfg.get(
-            "personality",
-            self._prompts.get("identity/default_personality"),
-        )
         custom_instructions: str = org_cfg.get("custom_instructions", "")
 
-        parts = [f"# Identity\nYou are **{agent_name}**."]
-        parts.append(personality)
+        # SOUL.md, when present, OWNS the identity section — it is
+        # what the tenant authored to override the default persona.
+        # Emitting the default ``You are **Surogate**`` header on top
+        # of it would smother the override (the LLM latches onto the
+        # most prominent name signal).  When SOUL.md is absent the
+        # legacy default-personality path applies unchanged.
+        parts: list[str] = ["# Identity"]
+        if self._soul_md_content:
+            parts.append(self._soul_md_content)
+        else:
+            personality: str = org_cfg.get(
+                "personality",
+                self._prompts.get("identity/default_personality"),
+            )
+            parts.insert(1, f"You are **{agent_name}**.")
+            parts.append(personality)
         if custom_instructions:
             safe = self._sanitise(custom_instructions, "custom_instructions")
             parts.append(safe)
@@ -720,14 +760,41 @@ class PromptBuilder:
         return "\n".join(lines)
 
     def _context_files_section(self) -> str:
-        """Load context files (SOUL.md, AGENTS.md, etc.) into the prompt."""
-        from surogates.harness.context_files import load_project_context, load_soul_md
+        """Load context files (SOUL.md, AGENTS.md, etc.) into the prompt.
+
+        Plan 3 / Task 12.  Reads from pre-loaded bundle content
+        (``self._soul_md_content`` / ``self._agent_md_content``)
+        when available; falls back to the legacy disk-reading
+        path for helm-mode pods and tests that don't wire a
+        bundle.  Plan 9 retires the disk fallback.
+        """
+        from surogates.harness.context_files import (
+            load_project_context, load_soul_md_from_disk,
+        )
 
         parts: list[str] = []
 
-        soul = load_soul_md(self.tenant.asset_root)
-        if soul:
-            parts.append(f"## Agent Identity (SOUL.md)\n{soul}")
+        # NOTE: SOUL.md content is rendered as the body of the
+        # ``# Identity`` section (see ``_identity_section``).  We
+        # deliberately do NOT also emit it here as
+        # ``## Agent Identity (SOUL.md)`` because two copies of the
+        # tenant's persona at different prominences confused the LLM
+        # ("You are Surogate" wins over "Your name is X").  The
+        # legacy helm-mode disk path is still consulted when no
+        # pre-loaded content was injected by the worker.
+        if self._soul_md_content is None:
+            soul = load_soul_md_from_disk(self.tenant.asset_root)
+            if soul:
+                parts.append(f"## Agent Identity (SOUL.md)\n{soul}")
+
+        # AGENT.md / AGENTS.md — pre-loaded bundle content only;
+        # the disk-reading variant for AGENT.md doesn't exist in the
+        # legacy path (load_project_context walks workspace, not
+        # asset_root) so there's no fallback to thread.
+        if self._agent_md_content:
+            parts.append(
+                f"## Agent Definition (AGENT.md)\n{self._agent_md_content}",
+            )
 
         workspace = self._get_workspace_path()
         if workspace:

@@ -31,6 +31,7 @@ from surogates.api.routes._shared import (
     normalize_source,
     raise_validation,
     require_not_channel_principal,
+    resolve_agent_bundle as _resolve_agent_bundle,
 )
 from surogates.storage.skill_staging import SkillStager, has_stageable_assets
 from surogates.storage.tenant import (
@@ -223,17 +224,24 @@ async def _authorize_session_for_staging(
     Staging writes under ``sessions/{session_id}/`` in the agent bucket;
     without this check any authenticated user could pollute another tenant's
     sessions or trigger arbitrary workspace writes with forged UUIDs.  Raises
-    ``HTTPException(404)`` with a generic message for both the not-found
-    and wrong-tenant cases to avoid leaking session existence.
+    ``HTTPException(404)`` with a generic message for both the not-found,
+    wrong-tenant, and wrong-agent cases to avoid leaking session existence.
 
     Returns the authorized session so callers can read its
     ``storage_key_prefix`` without re-fetching from the store.
     """
     from surogates.api.routes.sessions import _get_session_for_tenant
+    from surogates.runtime import agent_runtime_context_dep
 
-    # Delegates to the sessions helper — matches the authorization model
-    # used by every other session-scoped endpoint (events, workspace, etc.).
-    return await _get_session_for_tenant(request, session_id, tenant)
+    # ``_get_session_for_tenant`` now requires ``agent_id`` so it can
+    # gate cross-agent session reads.  Resolve it from the request
+    # exactly the way ``agent_runtime_context_dep`` does (query,
+    # host, helm-mode settings fallback) so the staging helper stays
+    # in lock-step with every other session-scoped route.
+    agent_runtime = await agent_runtime_context_dep(request)
+    return await _get_session_for_tenant(
+        request, session_id, tenant, agent_runtime.agent_id,
+    )
 
 
 async def _stage_skill_for_session(
@@ -243,6 +251,7 @@ async def _stage_skill_for_session(
     session_id: UUID,
     linked_files: list[str] | dict[str, list[str]] | None,
     storage_key_prefix: str = "",
+    bundle: Any = None,
 ) -> str | None:
     """Auto-stage a skill into the session workspace when it has assets to stage.
 
@@ -252,6 +261,11 @@ async def _stage_skill_for_session(
     The caller is responsible for authorizing the session against the
     tenant via :func:`_authorize_session_for_staging` before calling this
     function.
+
+    ``bundle`` is the per-tenant Hub-backed bundle for shared-runtime
+    sessions; when set AND the platform skill has no on-disk source
+    directory (i.e. it came from the bundle's ``skills/{name}/`` tree),
+    we stage from the bundle instead of failing.
     """
     from surogates.tools.loader import (
         SKILL_SOURCE_ORG,
@@ -267,17 +281,24 @@ async def _stage_skill_for_session(
     if skill_def.source == SKILL_SOURCE_PLATFORM:
         loader = _resource_loader(request)
         source_dir = loader.resolve_platform_skill_dir(skill_def.name)
-        if source_dir is None:
-            logger.warning(
-                "Cannot stage platform skill '%s': source directory not found",
-                skill_def.name,
+        if source_dir is not None:
+            return await stager.stage_from_filesystem(
+                session_id=session_id,
+                skill_name=skill_def.name,
+                source_dir=source_dir,
             )
-            return None
-        return await stager.stage_from_filesystem(
-            session_id=session_id,
-            skill_name=skill_def.name,
-            source_dir=source_dir,
+        if bundle is not None:
+            return await stager.stage_from_bundle(
+                session_id=session_id,
+                skill_name=skill_def.name,
+                bundle=bundle,
+            )
+        logger.warning(
+            "Cannot stage platform skill '%s': no on-disk source dir "
+            "and no bundle available",
+            skill_def.name,
         )
+        return None
 
     if skill_def.source in (SKILL_SOURCE_USER, SKILL_SOURCE_ORG):
         ts = _get_tenant_storage(request, tenant)
@@ -379,8 +400,11 @@ async def list_skills(
     """
     loader = _resource_loader(request)
     session_factory = request.app.state.session_factory
+    bundle = await _resolve_agent_bundle(request)
     async with session_factory() as db_session:
-        all_skills = await loader.load_skills(tenant, db_session=db_session)
+        all_skills = await loader.load_skills(
+            tenant, db_session=db_session, bundle=bundle,
+        )
 
     summaries: list[SkillSummary] = []
     for skill in all_skills:
@@ -421,8 +445,11 @@ async def view_skill(
 
     loader = _resource_loader(request)
     session_factory = request.app.state.session_factory
+    bundle = await _resolve_agent_bundle(request)
     async with session_factory() as db_session:
-        all_skills = await loader.load_skills(tenant, db_session=db_session)
+        all_skills = await loader.load_skills(
+            tenant, db_session=db_session, bundle=bundle,
+        )
 
     skill_def = next((s for s in all_skills if s.name == name), None)
     if skill_def is None:
@@ -451,11 +478,23 @@ async def view_skill(
     elif skill_def.source == SKILL_SOURCE_PLATFORM:
         source_dir = loader.resolve_platform_skill_dir(name)
         if source_dir is not None:
+            # Built-in platform skill on disk.
             detail.linked_files = [
                 f.relative_to(source_dir).as_posix()
                 for f in sorted(source_dir.rglob("*"))
                 if f.is_file() and f.name != "SKILL.md"
             ]
+        elif bundle is not None:
+            # Bundle-backed platform skill: enumerate the bundle's
+            # ``skills/{name}/`` prefix.  SKILL.md is excluded so the
+            # list mirrors what the disk variant returns.
+            prefix = f"skills/{name}/"
+            bundle_paths = await bundle.list(prefix)
+            detail.linked_files = sorted(
+                p[len(prefix):] for p in bundle_paths
+                if p.startswith(prefix) and not p.endswith("/SKILL.md")
+                and p != prefix
+            )
 
     # Auto-stage the skill tree when a session is specified and there are
     # files beyond SKILL.md itself.  Authorize first: the session must
@@ -469,6 +508,7 @@ async def view_skill(
             session_id=session_id,
             linked_files=detail.linked_files,
             storage_key_prefix=_session_storage_key_prefix(session),
+            bundle=bundle,
         )
         if staged_at is not None:
             detail.staged_at = staged_at
@@ -519,8 +559,11 @@ async def read_skill_file(
 
     loader = _resource_loader(request)
     session_factory = request.app.state.session_factory
+    bundle = await _resolve_agent_bundle(request)
     async with session_factory() as db_session:
-        all_skills = await loader.load_skills(tenant, db_session=db_session)
+        all_skills = await loader.load_skills(
+            tenant, db_session=db_session, bundle=bundle,
+        )
     skill_def = next((s for s in all_skills if s.name == name), None)
     if skill_def is None:
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")

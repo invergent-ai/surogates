@@ -95,6 +95,19 @@ class TestHardTaskClassification:
         assert result.category is None
 
 
+class TestNextActionParsing:
+    def test_parses_complexity_when_summary_attribute_is_present(self):
+        from surogates.harness.expert_routing import parse_next_action_complexity
+
+        text = """Answer body.
+
+<next_action complexity="low" summary="hide">
+done
+</next_action>"""
+
+        assert parse_next_action_complexity(text) == "low"
+
+
 class TestDeadHelpersRemoved:
     """Auto-router helpers must be gone — the design dropped auto-routing.
 

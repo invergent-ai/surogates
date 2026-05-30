@@ -61,8 +61,9 @@ class ScheduledSessionRunner:
                 continue
             await enqueue_session(
                 self._redis,
-                schedule.agent_id,
-                schedule.last_session_id,
+                org_id=str(schedule.org_id),
+                agent_id=schedule.agent_id,
+                session_id=schedule.last_session_id,
             )
             logger.warning(
                 "Requeued stalled dynamic loop session %s for schedule %s",
@@ -169,5 +170,10 @@ class ScheduledSessionRunner:
             EventType.USER_MESSAGE,
             {"content": schedule.prompt, "scheduled_session_id": str(schedule.id)},
         )
-        await enqueue_session(self._redis, session.agent_id, session.id)
+        await enqueue_session(
+            self._redis,
+            org_id=str(session.org_id),
+            agent_id=session.agent_id,
+            session_id=session.id,
+        )
         await self._scheduled_store.mark_run_created(schedule, session_id=session.id)

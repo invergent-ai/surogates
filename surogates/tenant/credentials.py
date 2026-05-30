@@ -19,7 +19,43 @@ from surogates.db.models import Credential
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
-__all__ = ["CredentialVault"]
+__all__ = ["CredentialVault", "InvalidVaultRef", "parse_vault_ref"]
+
+
+class InvalidVaultRef(ValueError):
+    """The ``vault://<credential>`` reference is malformed.
+
+    Raised by :func:`parse_vault_ref` for any value that isn't
+    exactly ``vault://`` followed by a non-empty credential name.
+    The worker treats this as a configuration error — the runtime
+    config is bad, the session cannot proceed."""
+
+
+_VAULT_SCHEME = "vault://"
+
+
+def parse_vault_ref(ref: str) -> str:
+    """Extract the credential name from a ``vault://<name>`` reference.
+
+    Plan 2 / Task 4.  AgentRuntimeContext carries every API key as a
+    ``vault://<credential>`` reference, never the raw value — secrets
+    stay in the vault and the runtime-config payload that travels
+    over HTTP to the worker only carries the reference.
+
+    Returns the credential name (the substring after the scheme).
+    Raises :class:`InvalidVaultRef` on any malformed input — empty
+    string, missing scheme, wrong scheme, empty credential name.
+    """
+    if not ref or not ref.startswith(_VAULT_SCHEME):
+        raise InvalidVaultRef(
+            f"expected 'vault://<credential>'; got {ref!r}",
+        )
+    name = ref[len(_VAULT_SCHEME):]
+    if not name:
+        raise InvalidVaultRef(
+            "vault reference has empty credential name",
+        )
+    return name
 
 
 class CredentialVault:
@@ -115,6 +151,24 @@ class CredentialVault:
                 f"Failed to decrypt credential {name!r} for org {org_id}. "
                 "The encryption key may have been rotated."
             )
+
+    async def resolve_ref(
+        self,
+        ref: str,
+        *,
+        org_id: UUID,
+        user_id: UUID | None = None,
+    ) -> str | None:
+        """Resolve a ``vault://<name>`` reference to plaintext.
+
+        Plan 2 / Task 4.  Wraps :meth:`retrieve` so the caller can
+        hand the raw ``api_key_ref`` field from
+        :class:`~surogates.runtime.LLMEndpoint` directly, without
+        parsing the scheme itself.  Raises :class:`InvalidVaultRef`
+        on a malformed reference.
+        """
+        name = parse_vault_ref(ref)
+        return await self.retrieve(org_id, name, user_id=user_id)
 
     async def delete(
         self,

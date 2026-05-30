@@ -34,3 +34,35 @@ class AuditType(str, Enum):
     # action on the chat user's behalf; data field carries action +
     # target_id + tool-specific extras).
     POLICY_COPILOT_ACTION = "policy.copilot_action"
+
+    # Plan 4 — per-user memory writes.  Surface for compliance
+    # (the user's memory ends up in the LLM's system prompt) and
+    # for operator debugging (who changed what, when).
+    MEMORY_WRITE = "memory.write"
+
+    # Plan 4 — concurrent writes from /loop + interactive chat
+    # racing on the same memory key.  The R2MemoryStore uses
+    # last-write-wins; the audit event surfaces the race rate so
+    # admins can dashboard noisy tenants.
+    MEMORY_CONFLICT = "memory.conflict"
+
+    # Plan 5 — per-agent MCP call.  Fires at the MCPCallSandbox
+    # boundary (Task 12) so every tool invocation lands in the
+    # audit log with the agent_id that initiated it + the call
+    # outcome (success / timeout / RLIMIT exhausted).
+    POLICY_MCP_CALL = "policy.mcp_call"
+
+    # Plan 6 — per-tenant channel routing audit.  Fires at the
+    # shared adapter's per-event resolution boundary so compliance
+    # can answer 'which tenant did Slack message X route to' and
+    # rate-limited tenants are visible on the audit dashboard
+    # (rate_limit_outcome = 'passed' or 'dropped').
+    POLICY_CHANNEL_INBOUND = "policy.channel_inbound"
+
+    # Plan 7 — per-agent lifecycle audit.  AGENT_CREATED fires at
+    # the create_agent service-layer boundary (Task 2) with the
+    # admin's user_id who initiated the provision.  AGENT_DELETED
+    # fires at delete_agent (Task 6) with the cascade outcome
+    # payload (which subsystems were cleaned up successfully).
+    AGENT_CREATED = "agent.created"
+    AGENT_DELETED = "agent.deleted"

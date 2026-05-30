@@ -43,6 +43,7 @@ from surogates.harness.expert_routing import (
     classify_hard_task_async,
     merge_extra_body,
     model_supports_thinking_toggle,
+    parse_next_action_complexity,
 )
 from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
 from surogates.harness.self_discover import (
@@ -434,6 +435,41 @@ def _last_assistant_message_excerpt(
             return text
         return text[: max(0, limit - 3)].rstrip() + "..."
     return ""
+
+
+def _prior_next_action_complexity(
+    messages: list[dict[str, Any]],
+) -> str | None:
+    """Return the complexity declared by the latest assistant turn, or ``None``.
+
+    Reads the most recent assistant message's full text (not the
+    truncated excerpt — the ``<next_action>`` footer can land anywhere
+    in a long answer) and parses the ``<next_action complexity="...">``
+    block via :func:`parse_next_action_complexity`.
+
+    Returns ``None`` when there is no prior assistant turn (turn 1 of
+    a session) OR when the model failed to emit the directive (older
+    sessions, prompt drift).  Callers treat ``None`` as "no signal —
+    fall through to the classifier" and ``low``/``medium``/``high`` as
+    the model's self-reported intent.
+    """
+    for message in reversed(messages):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content") or ""
+        if isinstance(content, list):
+            text = " ".join(
+                str(part.get("text", ""))
+                for part in content
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") in {"text", "output_text"}
+                )
+            )
+        else:
+            text = str(content)
+        return parse_next_action_complexity(text)
+    return None
 
 
 def _coerce_modified_to_datetime(raw: Any) -> "datetime | None":
@@ -1056,6 +1092,7 @@ class AgentHarness:
         advisor_max_calls_per_turn: int = 2,
         advisor_max_tokens: int = 700,
         turn_summarizer: Any | None = None,
+        bundle: Any | None = None,
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
@@ -1072,6 +1109,11 @@ class AgentHarness:
         self._storage = storage
         self._api_client = api_client
         self._session_factory = session_factory
+        # Plan 3 / Task 13 — per-session Hub-backed bundle shared by
+        # every catalogue load inside the harness (sub-agent resolver,
+        # prompt builder, future skill staging).  ``None`` keeps the
+        # legacy disk-only behaviour for helm pods.
+        self._bundle: Any | None = bundle
 
         # Optional dedicated vision client.  When the active LLM does not
         # support image input, ``_prepare_messages_for_model_vision_support``
@@ -1369,6 +1411,15 @@ class AgentHarness:
         # orchestrator or API middleware).
         new_span()
 
+        # Skip thinking-gate + SELF-DISCOVER scaffolding on turns where
+        # the user explicitly invoked a slash-skill: the skill body is
+        # already the planning structure, so layering an additional
+        # classifier-driven scaffold on top is dead weight that adds
+        # ~40s of LLM round-trips on cold sessions for no quality
+        # gain.  Flag is set below if expand_slash_skill succeeds, and
+        # consumed once by ``_run_iteration`` before the first LLM call.
+        self._skip_pre_llm_scaffold_for_turn = False
+
         # Honour streaming preference from env.
         env_streaming = os.environ.get("SUROGATES_STREAMING_ENABLED", "").lower()
         if env_streaming in ("0", "false", "no"):
@@ -1400,7 +1451,9 @@ class AgentHarness:
         # the prompt builder so the identity section reflects the active
         # agent type.
         active_agent_def = await resolve_agent_def(
-            session, self._tenant, session_factory=self._session_factory,
+            session, self._tenant,
+            session_factory=self._session_factory,
+            bundle=self._bundle,
         )
         if active_agent_def is not None:
             apply_agent_def_to_session(session, active_agent_def)
@@ -1546,6 +1599,10 @@ class AgentHarness:
                 if expansion is not None:
                     expanded_text, skill_name, staged_at, kind = expansion
                     last_user["content"] = expanded_text
+                    # The skill body itself is the planning structure;
+                    # don't pay for the thinking-gate + SELF-DISCOVER
+                    # classifier pair on this turn.
+                    self._skip_pre_llm_scaffold_for_turn = True
                     if kind == "skill":
                         # Suppress duplicate audit events on crash-recovery wakes.
                         # skill_view itself is idempotent (staging short-circuits via
@@ -1610,6 +1667,7 @@ class AgentHarness:
                         session_store=self._store,
                         worker_session_id=session_id,
                         parent_session_id=session.parent_id,
+                        org_id=str(session.org_id),
                         agent_id=session.agent_id,
                         error=traceback.format_exc()[-500:],
                         redis=self._redis,
@@ -1936,10 +1994,31 @@ class AgentHarness:
             if tool_schemas:
                 create_kwargs["tools"] = tool_schemas
 
-            await self._maybe_apply_thinking_gate(
-                create_kwargs, api_messages, session,
+            # Skip both scaffolding hops when a slash-skill
+            # expansion already supplied planning structure for this
+            # turn.  The flag is one-shot — consumed here and reset
+            # so subsequent iterations within the same wake cycle go
+            # back to the default behaviour (tool-call follow-ups
+            # still get the gate so the model can drop thinking on
+            # easy assistant turns).
+            _skip_scaffold = getattr(
+                self, "_skip_pre_llm_scaffold_for_turn", False,
             )
-            await self._maybe_apply_self_discover(create_kwargs, api_messages)
+            self._skip_pre_llm_scaffold_for_turn = False
+            if not _skip_scaffold:
+                # Run both concurrently.  They mutate disjoint
+                # parts of create_kwargs (gate → extra_body, self_discover
+                # → messages), so gather is safe.  Wall-clock collapses
+                # to max(gate_classifier, classifier+scaffold) instead
+                # of their sum.
+                await asyncio.gather(
+                    self._maybe_apply_thinking_gate(
+                        create_kwargs, api_messages, session,
+                    ),
+                    self._maybe_apply_self_discover(
+                        create_kwargs, api_messages,
+                    ),
+                )
 
             # Create a streaming tool executor when eligible.  The executor
             # starts executing concurrency-safe (read-only) tools as their
@@ -3687,20 +3766,38 @@ class AgentHarness:
     ) -> None:
         """Inject a SELF-DISCOVER scaffold as a synthetic user message.
 
-        Runs the cached classifier (free after the thinking-gate has
-        already invoked it this turn), and only fires for categories
-        that benefit from a planning preamble.  The scaffold itself
-        is also cached per-turn so iterations within a user turn reuse
-        it without re-paying the auxiliary-LLM cost.
+        Two-tier gate before paying for ``build_scaffold`` (~24s upstream
+        LLM call on cold sessions):
 
-        The scaffold is appended to a **copy** of the messages list
-        on ``create_kwargs``; the persistent conversation log is not
-        mutated.  This keeps the prompt cache, compressor, and event
-        log untouched -- the scaffold is per-call ephemeral context.
+        1. If the prior assistant turn emitted a ``<next_action>``
+           footer (per ``guidance/next_action`` prompt fragment),
+           trust that as the model's self-reported intent for THIS
+           turn.  Complexity ``low`` → skip scaffold entirely; ``high``
+           → proceed; ``medium`` (or missing) → fall through to the
+           classifier.
+        2. Classifier gate: ``classify_hard_task_async`` returns a
+           ``needs_scaffold`` field (see ``HardTaskJudgment``).  Only
+           build the scaffold when the LLM judges it genuinely helpful.
+
+        The scaffold itself is cached per-turn so iterations within a
+        user turn reuse it without re-paying the build cost.  Appended
+        to a **copy** of the messages list on ``create_kwargs``; the
+        persistent conversation log is not mutated -- keeps the prompt
+        cache, compressor, and event log untouched.
         """
         if not messages:
             return
 
+        # Tier 1: trust the model's prior next_action declaration.
+        prior_complexity = _prior_next_action_complexity(messages)
+        if prior_complexity == "low":
+            return  # Model said next turn is simple — believe it.
+
+        # Tier 2: classifier-gated build.  Whether we reach here
+        # because there was no prior declaration (turn 1, or model
+        # forgot to emit one) or because the declaration was
+        # ``medium``/``high`` (uncertain enough to warrant a check),
+        # the classifier's ``needs_scaffold`` field is the final say.
         try:
             classification = await classify_hard_task_async(
                 messages,
@@ -3713,6 +3810,12 @@ class AgentHarness:
             )
             return
 
+        if not classification.needs_scaffold:
+            return
+        # Defensive: SCAFFOLD_CATEGORIES still gates the category
+        # whitelist so a misclassified ``needs_scaffold=true`` paired
+        # with an unknown/none category cannot trigger an unscaffolded
+        # build.
         if classification.category not in SCAFFOLD_CATEGORIES:
             return
 
@@ -4716,7 +4819,9 @@ class AgentHarness:
                         )
                     else:
                         result = await handle_mission_resume(
-                            session_id=session.id, agent_id=session.agent_id,
+                            session_id=session.id,
+                            org_id=str(session.org_id),
+                            agent_id=session.agent_id,
                             session_store=self._store,
                             mission_store=mission_store,
                             redis=redis_client,
@@ -4787,7 +4892,10 @@ class AgentHarness:
                     from surogates.config import enqueue_session
 
                     await enqueue_session(
-                        redis_client, session.agent_id, session.id,
+                        redis_client,
+                        org_id=str(session.org_id),
+                        agent_id=session.agent_id,
+                        session_id=session.id,
                     )
                 except Exception:
                     logger.debug(
@@ -4870,7 +4978,12 @@ class AgentHarness:
                 try:
                     from surogates.config import enqueue_session
 
-                    await enqueue_session(self._redis, session.agent_id, session.id)
+                    await enqueue_session(
+                        self._redis,
+                        org_id=str(session.org_id),
+                        agent_id=session.agent_id,
+                        session_id=session.id,
+                    )
                 except Exception:
                     logger.debug("Failed to enqueue outcome kickoff", exc_info=True)
 
@@ -5151,7 +5264,12 @@ class AgentHarness:
             try:
                 from surogates.config import enqueue_session
 
-                await enqueue_session(self._redis, session.agent_id, session.id)
+                await enqueue_session(
+                    self._redis,
+                    org_id=str(session.org_id),
+                    agent_id=session.agent_id,
+                    session_id=session.id,
+                )
             except Exception:
                 logger.debug("Failed to enqueue outcome continuation", exc_info=True)
         return True
@@ -6040,6 +6158,7 @@ class AgentHarness:
                     session_store=self._store,
                     worker_session_id=session.id,
                     parent_session_id=session.parent_id,
+                    org_id=str(session.org_id),
                     agent_id=session.agent_id,
                     redis=self._redis,
                     task_id=getattr(session, "task_id", None),

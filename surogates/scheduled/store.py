@@ -363,6 +363,64 @@ class ScheduledSessionStore:
             await db.commit()
         return rows
 
+    async def find_due_across_tenants(
+        self,
+        *,
+        worker_id: str,
+        limit: int,
+        lease_seconds: int = 120,
+    ) -> list[ScheduledSession]:
+        """Multi-tenant variant of :meth:`claim_due` for Plan 8's
+        platform ticker.
+
+        Drops the ``agent_id`` filter so a single call returns
+        due rows across ALL tenants in one DB round-trip.  The
+        existing claim-lock (``locked_by`` / ``locked_until``)
+        and the partial index on ``(agent_id, status,
+        next_run_at)`` apply unchanged -- ``SELECT ... FOR
+        UPDATE SKIP LOCKED`` ensures concurrent platform
+        replicas (if leader election briefly leaks) don't fight
+        for the same rows.
+
+        Returns at most ``limit`` rows ordered by
+        ``next_run_at ASC`` so the oldest due work fires first.
+        """
+        query = text(
+            """
+            WITH due AS (
+                SELECT id
+                FROM scheduled_sessions
+                WHERE status = 'active'
+                  AND next_run_at IS NOT NULL
+                  AND next_run_at <= now()
+                  AND (locked_until IS NULL OR locked_until <= now())
+                  AND (expires_at IS NULL OR expires_at > now())
+                ORDER BY next_run_at ASC
+                LIMIT :limit
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE scheduled_sessions s
+            SET locked_by = :worker_id,
+                locked_until = now() + make_interval(secs => :lease_seconds),
+                updated_at = now()
+            FROM due
+            WHERE s.id = due.id
+            RETURNING s.*
+            """
+        )
+        async with self._sf() as db:
+            result = await db.execute(
+                query,
+                {
+                    "worker_id": worker_id,
+                    "limit": limit,
+                    "lease_seconds": lease_seconds,
+                },
+            )
+            rows = [ScheduledSession.model_validate(dict(row._mapping)) for row in result]
+            await db.commit()
+        return rows
+
     async def mark_run_created(
         self,
         schedule: ScheduledSession,

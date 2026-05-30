@@ -1,0 +1,57 @@
+# Plan 8 / Task 13.  Platform-level idle-reset CronJob.
+#
+# Replaces the per-tenant reset-idle-sessions CronJob from the helm
+# chart.  Same cadence (every 5 minutes by default).
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: surogates-platform-idle-reset
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: surogates-platform-idle-reset
+    app.kubernetes.io/component: platform-idle-reset
+    app.kubernetes.io/managed-by: surogate-ops
+spec:
+  schedule: "{{ schedule }}"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: idle-reset
+              image: "{{ image_registry }}/surogates:{{ image_tag }}"
+              imagePullPolicy: IfNotPresent
+              command: ["python", "-m", "surogates.jobs.platform_idle_reset"]
+              env:
+                - name: SUROGATES_RUNTIME_MODE
+                  value: "shared"
+                - name: SUROGATES_DB__URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ db_secret }}
+                      key: url
+                - name: SUROGATES_REDIS__URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ redis_secret }}
+                      key: url
+                - name: SUROGATES_PLATFORM_API_URL
+                  value: "{{ ops_api_url }}"
+                - name: SUROGATES_PLATFORM_API_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ ops_api_token_secret }}
+                      key: token
+              resources:
+                requests:
+                  cpu: "250m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "1"
+                  memory: "512Mi"

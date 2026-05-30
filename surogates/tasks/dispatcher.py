@@ -284,7 +284,12 @@ async def _enqueue_ready_tasks(
             # functional. The next finalize pass will observe the
             # orphan if necessary.
 
-        await enqueue_session(redis, child.agent_id, child.id)
+        await enqueue_session(
+            redis,
+            org_id=str(child.org_id),
+            agent_id=child.agent_id,
+            session_id=child.id,
+        )
         enqueued += 1
 
     return enqueued

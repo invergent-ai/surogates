@@ -111,6 +111,44 @@ except (ImportError, AttributeError):
     _TelegramTimedOut = None  # type: ignore[assignment,misc]
 
 
+class SharedTelegramInbound:
+    """Per-event tenant resolver for the shared Telegram adapter.
+
+    Plan 6 / Task 8.  Counterpart to
+    :class:`surogates.channels.slack.SharedSlackInbound` for the
+    Telegram channel.  Identifier shape is the bot username (e.g.
+    ``"@my_bot"``) -- Telegram exposes this per webhook update in
+    the ``Message.via_bot`` field for forwarded messages or as the
+    receiving bot identity for direct updates.
+
+    Contract mirrors SharedSlackInbound:
+
+    * Unknown bot_username -> ``(None, None)``; vault is NOT
+      consulted (avoids spurious credential.access audit rows).
+    * Routing present but token missing -> ``(routing, None)``;
+      adapter surfaces a structured misconfigured error.
+    * Both present -> ``(routing, token)``; adapter constructs an
+      ephemeral python-telegram-bot client with the resolved token.
+    """
+
+    def __init__(self, *, channel_routing_cache, vault) -> None:
+        self._cache = channel_routing_cache
+        self._vault = vault
+
+    async def resolve(
+        self, *, bot_username: str,
+    ) -> tuple[dict | None, str | None]:
+        routing = await self._cache.get(f"telegram:{bot_username}")
+        if routing is None:
+            return None, None
+        from surogates.channels.token_resolver import resolve_channel_token
+        token = await resolve_channel_token(
+            vault=self._vault, kind="telegram",
+            identifier=bot_username, org_id=routing["org_id"],
+        )
+        return routing, token
+
+
 class TelegramAdapter:
     """Telegram bot adapter.
 
@@ -1900,7 +1938,12 @@ class TelegramAdapter:
         )
 
         # Enqueue to Redis work queue so the worker picks it up
-        await enqueue_session(self._redis, self._agent_id, session_id)
+        await enqueue_session(
+            self._redis,
+            org_id=str(identity.org_id),
+            agent_id=self._agent_id,
+            session_id=session_id,
+        )
 
         logger.info(
             "[telegram] Message from %s (%s) -> session %s",

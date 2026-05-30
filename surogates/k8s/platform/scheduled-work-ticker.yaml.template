@@ -1,0 +1,80 @@
+# Plan 8 / Task 13.  Platform-level scheduled-work ticker Deployment.
+#
+# Replaces the per-tenant ScheduledSessionRunner inside every worker
+# pod (Plan 2 artifact, helm-mode legacy) with a single Deployment
+# that runs N replicas for HA; only one replica fires at a time via
+# Redis leader election (RedisLeaderLock, Plan 8 Tasks 1-3).
+#
+# Placeholders to fill in (Plan 8 follow-up / operations):
+#   {{ namespace }}           -- e.g. surogates-platform
+#   {{ image_registry }}      -- e.g. ghcr.io/invergent-ai
+#   {{ image_tag }}           -- the surogates wheel image tag
+#   {{ db_secret }}           -- name of Secret holding SUROGATES_DB__URL
+#   {{ redis_secret }}        -- name of Secret holding SUROGATES_REDIS__URL
+#   {{ replica_count }}       -- e.g. 3 for HA
+#
+# Apply with:
+#   envsubst < scheduled-work-ticker.yaml.template | kubectl apply -f -
+# or use a templating tool of choice (yq, helm template, kustomize).
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: surogates-scheduled-work-ticker
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: surogates-scheduled-work-ticker
+    app.kubernetes.io/component: platform-ticker
+    app.kubernetes.io/managed-by: surogate-ops
+spec:
+  replicas: {{ replica_count }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: surogates-scheduled-work-ticker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: surogates-scheduled-work-ticker
+        app.kubernetes.io/component: platform-ticker
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: ticker
+          image: "{{ image_registry }}/surogates:{{ image_tag }}"
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "surogates.scheduled.platform_ticker"]
+          env:
+            - name: SUROGATES_RUNTIME_MODE
+              value: "shared"
+            - name: SUROGATES_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SUROGATES_DB__URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ db_secret }}
+                  key: url
+            - name: SUROGATES_REDIS__URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ redis_secret }}
+                  key: url
+            - name: SUROGATES_SCHEDULED_SESSIONS__ENABLED
+              value: "true"
+            - name: SUROGATES_SCHEDULED_SESSIONS__TICK_INTERVAL_SECONDS
+              value: "5"
+            - name: SUROGATES_SCHEDULED_SESSIONS__LEADER_LOCK_KEY
+              value: "surogates:scheduled_ticker:leader"
+            - name: SUROGATES_SCHEDULED_SESSIONS__LEADER_TTL_SECONDS
+              value: "10"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          # SIGTERM grace period so the ticker can release the lock
+          # cleanly before the pod is killed.
+          terminationGracePeriodSeconds: 15

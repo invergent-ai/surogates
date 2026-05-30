@@ -325,6 +325,7 @@ async def handle_mission_pause(
 async def handle_mission_resume(
     *,
     session_id: UUID,
+    org_id: str,
     agent_id: str,
     session_store: Any,
     mission_store: MissionStore,
@@ -341,7 +342,12 @@ async def handle_mission_resume(
         {"mission_id": str(active.id)},
     )
     # Wake the coordinator so pending continuations are processed.
-    await enqueue_session(redis, agent_id, session_id)
+    await enqueue_session(
+        redis,
+        org_id=str(org_id),
+        agent_id=agent_id,
+        session_id=session_id,
+    )
     return MissionHandlerResult(
         ok=True, mission_id=active.id, message="Mission resumed.",
     )
