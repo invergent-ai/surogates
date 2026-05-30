@@ -44,13 +44,30 @@ _MAX_RETRIES: int = 3
 # Base delay (seconds) for exponential back-off on retry.
 _BASE_RETRY_DELAY: float = 1.0
 
-# Orphan sweep cadence.  Must comfortably exceed the lease TTL (60s) and
-# the stream-stale timeout (180s) so slow-but-alive turns aren't
-# misidentified — 300s leaves a safe margin.  The sweep itself runs
-# every ``_ORPHAN_SWEEP_INTERVAL``; a session has to be idle for the
-# full ``_ORPHAN_STALE_SECONDS`` before it's considered orphaned.
+# Orphan sweep cadence.  The sweep runs every ``_ORPHAN_SWEEP_INTERVAL``
+# seconds and recovers any session whose lease has expired AND whose
+# last event landed more than ``_ORPHAN_STALE_SECONDS`` ago.
+#
+# ``_ORPHAN_STALE_SECONDS`` only needs to exceed the lease TTL: a
+# live worker's lease is continuously renewed by
+# ``_renew_lease_forever`` and the orphan finder excludes any session
+# with a valid lease (LEFT JOIN on ``LeaseRow.expires_at > now()``),
+# so slow-but-alive turns are protected by the lease, not by this
+# threshold.  Earlier versions used 300s as a redundant safety net,
+# but that left dead-worker sessions in "Working on it…" state for
+# 5+ minutes after a restart.  60s matches the lease TTL: lease
+# expires → 60s later the session is past the threshold → next sweep
+# (within ``_ORPHAN_SWEEP_INTERVAL``) recovers it.  Worst-case
+# recovery time is now ~2 min instead of ~6 min.
 _ORPHAN_SWEEP_INTERVAL: float = 60.0
-_ORPHAN_STALE_SECONDS: int = 300
+_ORPHAN_STALE_SECONDS: int = 60
+
+# Boot-time aggressive orphan sweep threshold.  Now identical to the
+# steady-state ``_ORPHAN_STALE_SECONDS`` (both 60s, matching lease
+# TTL); the boot sweep stays a distinct knob so we can tune the two
+# independently if we later add a sub-lease-TTL aggressive recovery
+# mode for restart scenarios.
+_ORPHAN_BOOT_STALE: int = 60
 
 # Subagent task layer tick cadence — promote ``todo`` Tasks whose parents
 # have all completed, finalise ended worker Sessions, and atomically
@@ -260,7 +277,24 @@ class Orchestrator:
             name="interrupt-listener",
         )
 
-        # Start the orphan sweeper.  Self-heals sessions abandoned by a
+        # Boot-time aggressive orphan sweep — fire-and-forget so dispatch
+        # starts immediately.  Restarted workers would otherwise leave
+        # any mid-flight session looking "Working on it…" for up to
+        # ``_ORPHAN_STALE_SECONDS + _ORPHAN_SWEEP_INTERVAL`` (~6 min)
+        # before the steady-state sweeper picks it up; the boot variant
+        # uses a much tighter ``_ORPHAN_BOOT_STALE`` (60s, just above
+        # lease TTL) so any session whose previous owner died ≥60s ago
+        # is recovered within a fresh worker's first heartbeat instead.
+        # Live workers' sessions are protected by the lease-validity
+        # filter inside ``find_orphaned_sessions`` (see the LEFT JOIN
+        # on ``LeaseRow.expires_at > now()``), so this is safe even
+        # with 50 concurrent replicas all racing on the same boot.
+        asyncio.create_task(
+            self._sweep_orphans_on_boot(),
+            name="orphan-sweeper-boot",
+        )
+
+        # Start the periodic orphan sweeper.  Self-heals sessions abandoned by a
         # dead worker (SIGKILL / OOM / debugger stop / pod eviction) —
         # those paths never hit the in-process exception handler, so
         # no ``HARNESS_CRASH`` or ``SESSION_FAIL`` lands naturally and
@@ -610,6 +644,79 @@ class Orchestrator:
                 session_id,
             )
 
+    async def _sweep_orphans_once(self, *, stale_seconds: int, reason: str) -> int:
+        """Run a single orphan-sweep pass; return the number recovered.
+
+        Extracted from :meth:`_sweep_orphans_forever` so the boot-time
+        aggressive sweep (:meth:`_sweep_orphans_on_boot`) can reuse the
+        exact same recovery path with a tighter ``stale_seconds`` value.
+        """
+        recovered = 0
+        try:
+            orphans = await self.session_store.find_orphaned_sessions(
+                stale_seconds=stale_seconds,
+                agent_id=self._agent_id,
+            )
+        except Exception:
+            logger.exception("Orphan sweep failed; continuing")
+            return 0
+        for session in orphans:
+            try:
+                await self.session_store.emit_event(
+                    session.id,
+                    EventType.HARNESS_RECOVERED,
+                    {
+                        "recovered_by": reason,
+                        "stale_seconds": stale_seconds,
+                    },
+                )
+                await self.session_store.release_stale_lease(session.id)
+                await enqueue_session(
+                    self.redis,
+                    org_id=str(session.org_id),
+                    agent_id=session.agent_id,
+                    session_id=session.id,
+                )
+                recovered += 1
+                logger.warning(
+                    "Recovered orphaned session %s (%s, stale>=%ds) — re-enqueued",
+                    session.id, reason, stale_seconds,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to recover orphaned session %s",
+                    session.id,
+                )
+        return recovered
+
+    async def _sweep_orphans_on_boot(self) -> None:
+        """One-shot aggressive sweep right after worker start.
+
+        A normal restart leaves any mid-flight session looking
+        "running" in the UI for up to ``_ORPHAN_STALE_SECONDS + 60s``
+        (5+ minutes) before the periodic sweeper re-enqueues it,
+        because the steady-state threshold is set high to avoid racing
+        with genuinely slow turns on healthy workers.
+
+        On boot we know THIS process didn't own those leases (we just
+        started), so we can recover much faster.  ``_ORPHAN_BOOT_STALE``
+        is set just above the lease TTL so a turn that was actively
+        being processed by another live worker on the cluster isn't
+        falsely flagged — ``release_stale_lease`` only releases
+        EXPIRED leases anyway, so a live worker's lease is safe.
+        """
+        try:
+            count = await self._sweep_orphans_once(
+                stale_seconds=_ORPHAN_BOOT_STALE,
+                reason="orchestrator_boot_sweep",
+            )
+            if count > 0:
+                logger.info(
+                    "Boot-time orphan sweep recovered %d session(s)", count,
+                )
+        except asyncio.CancelledError:
+            return
+
     async def _sweep_orphans_forever(self) -> None:
         """Periodically re-enqueue sessions abandoned by a dead worker.
 
@@ -634,40 +741,12 @@ class Orchestrator:
 
         while self._running:
             try:
-                orphans = await self.session_store.find_orphaned_sessions(
+                await self._sweep_orphans_once(
                     stale_seconds=_ORPHAN_STALE_SECONDS,
-                    agent_id=self._agent_id,
+                    reason="orchestrator_sweeper",
                 )
-                for session in orphans:
-                    try:
-                        await self.session_store.emit_event(
-                            session.id,
-                            EventType.HARNESS_RECOVERED,
-                            {
-                                "recovered_by": "orchestrator_sweeper",
-                                "stale_seconds": _ORPHAN_STALE_SECONDS,
-                            },
-                        )
-                        await self.session_store.release_stale_lease(session.id)
-                        await enqueue_session(
-                            self.redis,
-                            org_id=str(session.org_id),
-                            agent_id=session.agent_id,
-                            session_id=session.id,
-                        )
-                        logger.warning(
-                            "Recovered orphaned session %s — re-enqueued",
-                            session.id,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Failed to recover orphaned session %s",
-                            session.id,
-                        )
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                logger.exception("Orphan sweep failed; continuing")
 
             try:
                 await asyncio.sleep(_ORPHAN_SWEEP_INTERVAL)

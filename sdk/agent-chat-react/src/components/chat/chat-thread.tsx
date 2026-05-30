@@ -1811,7 +1811,7 @@ export function ChatThread({
   }, [messages]);
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden bg-background text-sm">
+    <div className="flex flex-1 flex-col overflow-hidden bg-background text-base">
       <Conversation className="relative flex-1 min-h-0">
         <ConversationContent className="mx-auto w-full max-w-4xl">
           {messages.length === 0 && isLoadingHistory ? (

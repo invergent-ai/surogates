@@ -48,7 +48,7 @@ CREATE INDEX IF NOT EXISTS idx_events_feedback_dedupe
     )
     WHERE type IN ('user.feedback', 'expert.endorse', 'expert.override');
 
--- Plan 1b / Task 16 — per-tenant audit attribution.
+-- Per-tenant audit attribution.
 -- ``agent_id`` is nullable so the retrofit is non-blocking on existing
 -- rows (helm-mode emitters and pre-Task-17 callers leave it NULL).
 -- The (agent_id, created_at) index backs the per-tenant audit
@@ -58,6 +58,25 @@ ALTER TABLE audit_log
 
 CREATE INDEX IF NOT EXISTS idx_audit_log_agent_time
     ON audit_log (agent_id, created_at);
+
+
+-- Orphan-sweep backing index.  ``Orchestrator._sweep_orphans_*``
+-- (dispatcher.py) re-enqueues sessions whose worker died mid-turn.
+-- The query filters on ``status = 'active' AND updated_at < cutoff``
+-- and is fired on a 60s timer by every replica plus a one-shot
+-- aggressive boot sweep on each worker startup.  Without an index,
+-- shared-mode workers (no ``agent_id`` filter) full-scan the sessions
+-- table on every sweep — at 1M+ sessions and 50 replicas booting
+-- simultaneously the DB grinds.
+--
+-- A PARTIAL index over the active rows only is much smaller (active
+-- sessions are typically <1% of total) and is ordered by the exact
+-- predicate the sweep uses (``updated_at < cutoff``) so the planner
+-- can index-range-scan and stop at the first non-stale row.  Sub-100ms
+-- regardless of total session count.
+CREATE INDEX IF NOT EXISTS idx_sessions_active_updated
+    ON sessions (updated_at)
+    WHERE status = 'active';
 
 
 -- ----------------------------------------------------------------------------
