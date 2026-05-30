@@ -126,8 +126,6 @@ async def expand_slash_skill(
     The function never raises -- failures degrade to ``None`` so the
     original user message reaches the LLM unchanged.
     """
-    import time as _time
-
     parsed = parse_slash_command(text)
     if parsed is None:
         return None
@@ -137,7 +135,6 @@ async def expand_slash_skill(
     # on type before dispatching skill_view.  An active expert routes to
     # the mini-loop; everything else (regular skill, draft/retired expert,
     # unknown name) falls through to the legacy skill_view path.
-    _t_cat = _time.perf_counter()
     try:
         catalog = await _load_skills_for_slash(
             tenant,
@@ -151,10 +148,6 @@ async def expand_slash_skill(
             exc_info=True,
         )
         catalog = []
-    logger.info(
-        "ttft slash_skill /%s catalog_load=%.0fms",
-        name, (_time.perf_counter() - _t_cat) * 1000.0,
-    )
 
     matched = next((s for s in catalog if s.name == name), None)
     if matched is not None and getattr(matched, "is_active_expert", False):
@@ -168,8 +161,7 @@ async def expand_slash_skill(
             sandbox_pool=sandbox_pool,
         )
 
-    _t_view = _time.perf_counter()
-    out = await _expand_skill(
+    return await _expand_skill(
         name=name,
         args=args,
         tools=tools,
@@ -178,11 +170,6 @@ async def expand_slash_skill(
         api_client=api_client,
         session_factory=session_factory,
     )
-    logger.info(
-        "ttft slash_skill /%s skill_view+stage=%.0fms",
-        name, (_time.perf_counter() - _t_view) * 1000.0,
-    )
-    return out
 
 
 async def _expand_skill(

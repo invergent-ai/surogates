@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
-import time
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -876,19 +875,8 @@ async def run_worker(settings: Settings) -> None:
 
         Resolves the tenant from the session's user_id + the configured org_id.
         """
-        # TTFT diagnostic: per-block wall-clock costs.  One INFO line
-        # at the bottom summarises the breakdown so a slow cold start
-        # can be attributed to its dominant cost (bundle fetch, R2
-        # memory load, catalog walk, etc.) from a single log entry.
-        _ttft_t0 = time.perf_counter()
-        _ttft_marks: dict[str, float] = {}
-
-        def _mark(label: str) -> None:
-            _ttft_marks[label] = time.perf_counter() - _ttft_t0
-
         # Load session to get user_id.
         session = await session_store.get_session(session_id)
-        _mark("session_load")
 
         # In helm mode, refuse to process sessions that belong to a
         # different agent — defence-in-depth in case a foreign session
@@ -928,7 +916,6 @@ async def run_worker(settings: Settings) -> None:
                 ).scalar_one_or_none()
             else:
                 user_row = None
-        _mark("org_user_load")
 
         # resolve AgentRuntimeContext early so its
         # storage_key_prefix can feed TenantContext.asset_root.  Helm
@@ -942,7 +929,6 @@ async def run_worker(settings: Settings) -> None:
             cache=runtime_config_cache,
             settings=settings,
         )
-        _mark("runtime_ctx")
 
         tenant = TenantContext(
             org_id=session_org_id,
@@ -979,7 +965,6 @@ async def run_worker(settings: Settings) -> None:
                     "built-in tools still available",
                     session.id, exc_info=True,
                 )
-        _mark("mcp_discover")
 
         # per-session LLM bundle.  Helm mode wraps
         # the legacy settings + auxiliary-builder path; shared mode
@@ -1052,7 +1037,6 @@ async def run_worker(settings: Settings) -> None:
                 summary_slot.client if summary_slot is not None else None
             ),
         )
-        _mark("llm_clients")
 
         # User-scoped memory dir for interactive sessions, org-shared
         # memory dir for service-account sessions (no per-user context
@@ -1141,7 +1125,6 @@ async def run_worker(settings: Settings) -> None:
         else:
             memory_store = MemoryStore(memory_dir=memory_dir)
         memory_manager = MemoryManager(memory_store)
-        _mark("memory_load")
 
         # Resolve the per-session file bundle
         # once and share it across the catalog load and the
@@ -1156,7 +1139,6 @@ async def run_worker(settings: Settings) -> None:
                 bundle = await file_bundle_cache.get(session.agent_id)
             except LookupError:
                 bundle = None
-        _mark("bundle_resolve")
 
         # Load prompt-visible catalogs.  Expert skill definitions may still
         # exist in storage, but PromptBuilder hides them from executor prompts
@@ -1170,7 +1152,6 @@ async def run_worker(settings: Settings) -> None:
             session_factory=session_factory,
             bundle=bundle,
         )
-        _mark("prompt_catalogs")
 
         # Knowledge bases attached to this agent. Empty list when
         # KB tools are unavailable (no ops DB) or no KBs are wired
@@ -1179,7 +1160,6 @@ async def run_worker(settings: Settings) -> None:
             agent_id=configured_agent_id,
             ops_db_url=settings.ops_db.url,
         )
-        _mark("kb_load")
         # Filter the tool set to drop kb_list_pages / kb_read_page
         # when this agent has nothing to navigate. Keeps the LLM from
         # ever seeing tool schemas it cannot meaningfully use, and
@@ -1212,7 +1192,6 @@ async def run_worker(settings: Settings) -> None:
         )
         soul_md_content = await load_soul_md(bundle)
         agent_md_content = await load_agent_md(bundle)
-        _mark("soul_agent_md")
 
         prompt_builder = PromptBuilder(
             tenant,
@@ -1325,23 +1304,6 @@ async def run_worker(settings: Settings) -> None:
         # A long-running worker would otherwise accumulate one pool
         # per processed session.
         harness._session_llm_bundle = llm_bundle  # type: ignore[attr-defined]
-        _mark("harness_built")
-
-        # TTFT summary: emit one line with per-block deltas sorted by
-        # contribution so a 10s cold start can be attributed to the
-        # dominant cost in a single grep.  Format: ``{label}=ms``.
-        _previous = 0.0
-        _deltas: list[tuple[str, float]] = []
-        for _label, _t in _ttft_marks.items():
-            _deltas.append((_label, (_t - _previous) * 1000.0))
-            _previous = _t
-        _deltas.sort(key=lambda x: x[1], reverse=True)
-        _summary = " ".join(f"{l}={ms:.0f}ms" for l, ms in _deltas)
-        logger.info(
-            "ttft session=%s total=%.0fms %s",
-            session_id, _ttft_marks.get("harness_built", 0.0) * 1000.0,
-            _summary,
-        )
         return harness
 
     # 8. Orchestrator — consumes from the shared work queue.

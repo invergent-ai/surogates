@@ -41,6 +41,7 @@ import { ChatMessage } from "./chat-message";
 import { ChatComposer } from "./chat-composer";
 import { TurnFeedback } from "./turn-feedback";
 import { useSmoothStream } from "./use-smooth-stream";
+import { stripAndParseNextAction } from "../../lib/next-action";
 import { ArtifactBlock } from "./artifacts/artifact-block";
 import { ErrorMessage } from "./error-message";
 import { TurnSummaryCard } from "./turn-summary-card";
@@ -137,6 +138,16 @@ type TimelineEntry =
       msg: ChatMessageType;
       isFinalTurnText?: boolean;
     }
+  /**
+   * Italic narration line rendered above the iteration's tool calls.
+   * Carries the assistant's prose preamble ("I'll fetch the weather
+   * data...") that the model emits before its ``tool_calls``.  Without
+   * this entry the prose would be buried inside the reasoning
+   * collapsible -- this surfaces it as the iteration's natural
+   * narration line.  When the model emits a ``<next_action>`` footer
+   * the renderer prefers it over the heuristic.
+   */
+  | { kind: "narration"; key: string; text: string; isStreaming: boolean }
   | { kind: "thinking"; key: string }
   | { kind: "skill_invoked"; key: string; skill: string; stagedAt: string | null }
   | {
@@ -198,20 +209,29 @@ function messageToEntries(
   const hasContent = !!(msg.content && msg.content !== msg.reasoning);
   const isStreaming = msg.status === "streaming" && isLast;
 
-  // When tool calls are present, the content text is just a preamble
-  // ("I'll run both tasks in parallel...") — fold it into reasoning
-  // instead of showing it as a separate text block.
-  const effectiveReasoning = hasToolCalls && hasContent
-    ? (msg.reasoning ? msg.reasoning + "\n" + msg.content : msg.content)
-    : msg.reasoning;
+  // When tool calls are present the content text is just a preamble
+  // ("I'll run both tasks in parallel...").  We surface it as its own
+  // ``narration`` entry rendered as an italic line above the tool
+  // calls, instead of folding it into the reasoning collapsible.  The
+  // reasoning collapsible then carries pure chain-of-thought; the
+  // narration is always visible without expanding.
   const effectiveHasContent = hasContent && !hasToolCalls;
 
-  if (effectiveReasoning) {
+  if (msg.reasoning) {
     entries.push({
       kind: "reasoning",
       key: `${msg.id}-reasoning`,
-      reasoning: effectiveReasoning,
+      reasoning: msg.reasoning,
       isStreaming: isStreaming && !effectiveHasContent && !hasToolCalls,
+    });
+  }
+
+  if (hasContent && hasToolCalls) {
+    entries.push({
+      kind: "narration",
+      key: `${msg.id}-narration`,
+      text: msg.content,
+      isStreaming: isStreaming && !effectiveHasContent,
     });
   }
 
@@ -583,6 +603,10 @@ function TimelineEntryItem({
     return <TextEntry entry={entry} step={step} />;
   }
 
+  if (entry.kind === "narration") {
+    return <NarrationEntry entry={entry} step={step} />;
+  }
+
   if (entry.kind === "skill_invoked") {
     return (
       <TimelineItem step={step}>
@@ -669,6 +693,41 @@ function ReasoningEntry({
   );
 }
 
+// Renders the assistant's prose preamble ("I'll fetch the weather
+// next.") above its tool calls as a small italic line.  When the
+// model emitted a structured ``<next_action>`` footer the body of
+// that footer wins; otherwise we fall back to the first-sentence
+// heuristic (language-agnostic).  Hidden when the model marked the
+// turn as ``done`` so the final answer doesn't carry a trailing
+// whisper, and hidden when the preamble produced no usable text.
+function NarrationEntry({
+  entry,
+  step,
+}: {
+  entry: Extract<TimelineEntry, { kind: "narration" }>;
+  step: number;
+}) {
+  const text = useSmoothStream(entry.text, entry.isStreaming);
+  const { action, inferredNarration } = stripAndParseNextAction(text);
+  const line = action
+    ? action.body.trim().toLowerCase() === "done"
+      ? null
+      : action.body
+    : inferredNarration;
+  if (!line) return null;
+  return (
+    <TimelineItem step={step}>
+      <TimelineHeader>
+        <TimelineSeparator style={{ backgroundColor: "var(--color-border)" }} />
+        <TimelineIndicator className="size-2 border-none bg-foreground/30" />
+      </TimelineHeader>
+      <TimelineContent>
+        <p>{line}</p>
+      </TimelineContent>
+    </TimelineItem>
+  );
+}
+
 function TextEntry({
   entry,
   step,
@@ -677,6 +736,20 @@ function TextEntry({
   step: number;
 }) {
   const content = useSmoothStream(entry.content, entry.isStreaming);
+  // Strip the harness ``<next_action>`` footer from the rendered
+  // markdown and surface its body as a small italic line below the
+  // message body so it reads as natural agent narration ("I'll fetch
+  // the weather next.").  Hidden when the model marked the turn as
+  // ``done`` so the final answer doesn't carry a trailing whisper.
+  // When the model didn't emit the structured block at all, fall back
+  // to the first-sentence heuristic so non-compliant models still get
+  // a narration line.
+  const { cleaned, action, inferredNarration } = stripAndParseNextAction(content);
+  const nextActionLine = action
+    ? action.body.trim().toLowerCase() === "done"
+      ? null
+      : action.body
+    : inferredNarration;
   return (
     <TimelineItem step={step}>
       <TimelineHeader>
@@ -684,7 +757,12 @@ function TextEntry({
         <TimelineIndicator className="size-2 border-none bg-foreground/40" />
       </TimelineHeader>
       <TimelineContent>
-        <MessageResponse>{content}</MessageResponse>
+        <MessageResponse>{cleaned}</MessageResponse>
+        {nextActionLine && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            {nextActionLine}
+          </p>
+        )}
         {entry.isFinalTurnText && entry.msg.status === "complete" && (
           <TurnFeedback msg={entry.msg} />
         )}
@@ -709,9 +787,22 @@ function SimpleFinalAnswer({
 }) {
   const content = useSmoothStream(text, isStreaming);
   const revealComplete = content.length >= text.length;
+  // Same next_action stripping (with first-sentence fallback) as
+  // TextEntry — see comment there.
+  const { cleaned, action, inferredNarration } = stripAndParseNextAction(content);
+  const nextActionLine = action
+    ? action.body.trim().toLowerCase() === "done"
+      ? null
+      : action.body
+    : inferredNarration;
   return (
     <div>
-      <MessageResponse>{content}</MessageResponse>
+      <MessageResponse>{cleaned}</MessageResponse>
+      {nextActionLine && (
+        <p className="mt-2 text-xs text-muted-foreground">
+          {nextActionLine}
+        </p>
+      )}
       {tail?.status === "complete" && revealComplete && (
         <TurnFeedback msg={tail} />
       )}
@@ -1226,8 +1317,8 @@ export function IterationGroup({
     return null;
   }
   const labelTone = summary
-    ? "text-foreground/80"
-    : "text-foreground/50";
+    ? "text-muted-foreground italic"
+    : "text-muted-foreground";
   return (
     <div className="space-y-1">
       <button
@@ -1388,11 +1479,22 @@ function SimpleAssistantGroup({
   // iteration has stopped streaming so the summary card matches what
   // the harness would have emitted at turn end.
   const turnComplete = !isRunning && tail?.status === "complete";
+  // Honour the model's own ``summary="show|hide"`` declaration in the
+  // tail iteration's <next_action> footer.  Default is "hide" so a
+  // missing/malformed declaration suppresses the card — model has to
+  // opt IN to the heavier UI affordance.  Artifact-derived summaries
+  // still render even when hidden, because file output is a strong
+  // signal the user wants the artifact tray visible.
+  const summaryPref =
+    finalText !== null
+      ? stripAndParseNextAction(finalText).action?.summary ?? "hide"
+      : "hide";
   const effectiveTurnSummary = (() => {
     const fromHarness = tail?.turnSummary;
     if (fromHarness && fromHarness.artifacts.length > 0) {
       return fromHarness;
     }
+    if (summaryPref === "hide") return null;
     if (!turnComplete) return fromHarness;
     const derived = deriveFileArtifactsFromMessages(messages);
     if (derived.length === 0) return fromHarness;
@@ -1427,14 +1529,33 @@ function SimpleAssistantGroup({
             // "Thought through the problem" label) will sit above the
             // same text the user sees in finalText.
             if (message === tail && tailIsTextOnly) return null;
+            // Pull the narration line up as a sibling of the iteration
+            // card so it reads as "agent voice at root level" instead
+            // of buried inside the collapsible body.  Hidden when the
+            // assistant message had no narration to surface (typed
+            // ``done`` footer, no prose preamble, or empty content).
+            const rawContent = (message.content ?? "").trim();
+            const { action, inferredNarration } =
+              stripAndParseNextAction(rawContent);
+            const narrationLine = action
+              ? action.body.trim().toLowerCase() === "done"
+                ? null
+                : action.body
+              : inferredNarration;
             return (
-              <IterationGroup
-                key={message.id}
-                message={message}
-                sessionId={sessionId}
-                artifactFallbacks={artifactFallbacks}
-                onFileSelect={onFileSelect}
-              />
+              <div key={message.id} className="space-y-2">
+                {narrationLine && (
+                  <p className="text-sm text-foreground">
+                    {narrationLine}
+                  </p>
+                )}
+                <IterationGroup
+                  message={message}
+                  sessionId={sessionId}
+                  artifactFallbacks={artifactFallbacks}
+                  onFileSelect={onFileSelect}
+                />
+              </div>
             );
           })}
         </div>

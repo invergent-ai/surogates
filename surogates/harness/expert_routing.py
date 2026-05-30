@@ -43,13 +43,68 @@ HARD_TASK_CATEGORIES: tuple[str, ...] = (
 _HARD_CATEGORY_SET: frozenset[str] = frozenset(HARD_TASK_CATEGORIES)
 
 
+#: Recognised values for the ``complexity`` attribute on a
+#: ``<next_action>`` block emitted by the assistant.  Anything else
+#: is treated as ``medium`` (the conservative middle ground that
+#: falls through to the classifier instead of skipping or forcing).
+_NEXT_ACTION_COMPLEXITY_VALUES: frozenset[str] = frozenset(
+    {"low", "medium", "high"}
+)
+
+
+_NEXT_ACTION_RE = re.compile(
+    # Match the LAST <next_action ... complexity="..."> ... </next_action>
+    # block in the input. Extra attributes such as summary="hide" are
+    # allowed because the prompt contract uses them for UI rendering.
+    r'<next_action\b(?=[^>]*\bcomplexity="([^"]+)")[^>]*>(.*?)</next_action>',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def parse_next_action_complexity(assistant_text: str | None) -> str | None:
+    """Return ``"low" | "medium" | "high"`` from an assistant message footer.
+
+    The model is instructed by the ``guidance/next_action`` prompt
+    fragment to emit one ``<next_action ...>...</next_action>`` block
+    at the end of every assistant turn.  This helper pulls the
+    complexity field out so the harness can gate downstream planning
+    work (SELF-DISCOVER scaffold, etc.) on the model's own self-reported
+    intent for the upcoming turn.
+
+    Returns ``None`` when no block is present (older assistant turns,
+    or the model failed to emit one) so callers can fall through to
+    the classifier-driven gate.  Returns the lower-cased complexity
+    value when present; unknown values normalise to ``"medium"`` (the
+    conservative fall-through).
+    """
+    if not assistant_text:
+        return None
+    matches = list(_NEXT_ACTION_RE.finditer(assistant_text))
+    if not matches:
+        return None
+    # Last block wins so a model that emits the directive twice
+    # (e.g. retried thinking pre-amble) reports its FINAL intent.
+    complexity = matches[-1].group(1).strip().lower()
+    if complexity in _NEXT_ACTION_COMPLEXITY_VALUES:
+        return complexity
+    return "medium"
+
+
 @dataclass(frozen=True, slots=True)
 class HardTaskClassification:
-    """Result of deterministic hard-task classification."""
+    """Result of deterministic hard-task classification.
+
+    ``needs_scaffold`` is the gate for SELF-DISCOVER scaffold building.
+    The regex fallback defaults it to False (conservative — costs the
+    model a small chain-of-thought lift rather than 24s of upstream
+    scaffold-build latency); the LLM classifier sets it explicitly per
+    its prompt rules.
+    """
 
     required: bool
     category: str | None = None
     reason: str = ""
+    needs_scaffold: bool = False
 
 
 _DEBUGGING_RE = re.compile(
@@ -145,10 +200,25 @@ class HardTaskJudgment(BaseModel):
         default="none",
         description="One of the routing categories, or 'none' for chitchat / trivial lookups.",
     )
+    needs_scaffold: bool = Field(
+        default=False,
+        description=(
+            "True iff this turn genuinely benefits from a structured "
+            "planning preamble (SELF-DISCOVER scaffold).  Short refinements, "
+            "conversational replies, and small follow-ups inside an active "
+            "tool-using conversation should be False even when 'required' "
+            "is True -- the model already has chain-of-thought built in and "
+            "the conversation context already carries the prior plan.  "
+            "Reserve True for genuinely novel multi-step work where the "
+            "model would benefit from being told to consider problem "
+            "decomposition / typical solutions / risk analysis before it "
+            "starts."
+        ),
+    )
 
 
 _CLASSIFIER_SYSTEM_PROMPT = """\
-You decide whether a specialist (expert) should be consulted before the main assistant answers the user's most recent message.
+You decide whether a specialist (expert) should be consulted before the main assistant answers the user's most recent message, and whether the model would benefit from a structured planning preamble before answering.
 
 You will see a short slice of the recent conversation. Short or anaphoric replies like "yes do it", "now the same for the API", "ok try that" inherit the topic of the immediately preceding turn -- read the prior assistant turn to figure out what work the user is approving or extending, and classify based on THAT work.
 
@@ -162,6 +232,12 @@ Categories:
 - problem_solving: long multi-part requests that need careful reasoning but do not fit a category above.
 - none: greetings, casual conversation, acknowledgements, simple lookups, requests that genuinely need no expert.
 
+needs_scaffold rules of thumb:
+- True ONLY for genuinely novel multi-step work that the model has not already started: a new feature spec, a fresh debugging session, a multi-system migration plan, an architecture decision spanning several components.
+- False for refinements within an active conversation ("now do X also", "give me a nicer artifact", "use a python script instead"), for short anaphoric replies inheriting prior plan, for simple lookups, and for chit-chat.  The model's chain-of-thought + the prior conversation context already cover these.
+- False when the assistant's prior turn already laid out a plan and the user is just approving / iterating on it.
+- A turn can be required=true (expert routing useful) but needs_scaffold=false (no need to re-plan from scratch).
+
 Examples (transcripts shown in the same format you will receive):
 
 EX1:
@@ -173,7 +249,7 @@ Could you share the full traceback?
 
 [USER]
 yes do it
-=> {"required": true, "category": "debugging"}
+=> {"required": true, "category": "debugging", "needs_scaffold": false}
 
 EX2:
 [USER]
@@ -184,12 +260,12 @@ A sessions table with (id, user_id, created_at, expires_at, token) is typical. W
 
 [USER]
 yes please
-=> {"required": true, "category": "data_reasoning"}
+=> {"required": true, "category": "data_reasoning", "needs_scaffold": false}
 
 EX3:
 [USER]
 hi there
-=> {"required": false, "category": "none"}
+=> {"required": false, "category": "none", "needs_scaffold": false}
 
 EX4:
 [USER]
@@ -200,9 +276,25 @@ You're welcome.
 
 [USER]
 one more thing -- what time is it in Tokyo?
-=> {"required": false, "category": "none"}
+=> {"required": false, "category": "none", "needs_scaffold": false}
 
-Reply with JSON only: {"required": <bool>, "category": "<category>"}.
+EX5 (genuine new complex task, no prior planning context):
+[USER]
+Design a multi-region failover strategy for our postgres replicas and write the runbook
+=> {"required": true, "category": "planning", "needs_scaffold": true}
+
+EX6 (follow-up refinement on an active conversation):
+[USER]
+check the weather today in bucharest from 3 sources and average them
+
+[ASSISTANT]
+[fetched 3 weather APIs, computed average, returned the result]
+
+[USER]
+give me a nice artifact
+=> {"required": false, "category": "none", "needs_scaffold": false}
+
+Reply with JSON only: {"required": <bool>, "category": "<category>", "needs_scaffold": <bool>}.
 "required" must be true iff "category" != "none".
 """
 
@@ -418,6 +510,12 @@ async def classify_hard_task_async(
         required=required,
         category=category,
         reason="llm",
+        # needs_scaffold is meaningful only when 'required' is True;
+        # AND-gate here so a future regression in the classifier
+        # (returning needs_scaffold=True for category=none) can't
+        # silently re-introduce the 24s scaffold-build penalty on
+        # chitchat turns.
+        needs_scaffold=bool(judgment.needs_scaffold) and required,
     )
     _classifier_cache.put(cache_key, result)
     return result

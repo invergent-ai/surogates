@@ -168,6 +168,9 @@ class PromptBuilder:
         8. Available experts (when any are active)
         9. Context files (AGENTS.md, .cursorrules)
         10. Timestamp, model info, platform hint
+        11. Next-action footer directive (always last so the model sees
+            it most recently before generating; competes less with the
+            middle-of-prompt guidance fragments)
         """
         sections: list[str] = []
         sections.append(self._identity_section())
@@ -184,6 +187,7 @@ class PromptBuilder:
         sections.append(self._kb_section())
         sections.append(self._context_files_section())
         sections.append(self._context_section())
+        sections.append(self._next_action_section())
 
         return "\n\n".join(s for s in sections if s)
 
@@ -282,6 +286,23 @@ class PromptBuilder:
         coordinator-specific.
         """
         return self._prompts.get("guidance/working_principles")
+
+    def _next_action_section(self) -> str:
+        """Self-declared next-action footer directive.
+
+        Rendered as the LAST section of the system prompt so the
+        instruction is the most recent thing the model sees before it
+        starts generating.  Middle-of-prompt placement competed too
+        heavily with the surrounding guidance fragments on weaker
+        instruction-followers (qwen-3.7-max was emitting zero blocks).
+
+        Missing-fragment fallback: log + return empty string so the
+        rest of the prompt builds normally.
+        """
+        try:
+            return self._prompts.get("guidance/next_action")
+        except Exception:
+            return ""
 
     def _identity_section(self) -> str:
         """Agent identity.

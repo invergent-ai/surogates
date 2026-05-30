@@ -501,34 +501,29 @@ function applyLlmResponse(
       ),
   );
 
+  // NOTE: on tool-call iterations we now KEEP ``content`` separate
+  // from ``reasoning`` instead of folding them.  ``messageToEntries``
+  // surfaces ``content`` as a dedicated narration entry rendered as
+  // the iteration's italic prose line ("I'll fetch the weather…");
+  // ``reasoning`` stays inside the collapsible CoT viewer.  Older
+  // sessions that pre-date this change won't have the split signal
+  // but the new rendering handles ``content === ""`` gracefully.
   if (state.hadDeltas && idx >= 0 && !hasUserAfter) {
     const current = messages[idx]!;
-    if (hasToolCalls) {
-      messages[idx] = {
-        ...current,
-        reasoning: (current.reasoning ?? "") + current.content,
-        content: "",
-        status: "streaming",
-        llmResponseEventId: event.eventId,
-        turnId: turnId ?? current.turnId,
-        iterationIndex: iterationIndex ?? current.iterationIndex,
-      };
-    } else {
-      messages[idx] = {
-        ...current,
-        status: "complete",
-        llmResponseEventId: event.eventId,
-        turnId: turnId ?? current.turnId,
-        iterationIndex: iterationIndex ?? current.iterationIndex,
-      };
-    }
+    messages[idx] = {
+      ...current,
+      status: hasToolCalls ? "streaming" : "complete",
+      llmResponseEventId: event.eventId,
+      turnId: turnId ?? current.turnId,
+      iterationIndex: iterationIndex ?? current.iterationIndex,
+    };
   } else if (matchesExistingToolTurn && idx >= 0) {
     const current = messages[idx]!;
     messages[idx] = {
       ...current,
-      reasoning: responseContent
-        ? appendText(current.reasoning, responseContent)
-        : current.reasoning,
+      content: responseContent
+        ? appendText(current.content, responseContent)
+        : current.content,
       status: "streaming",
       llmResponseEventId: event.eventId,
       turnId: turnId ?? current.turnId,
@@ -538,8 +533,8 @@ function applyLlmResponse(
     messages.push({
       id: `evt-${event.eventId}`,
       role: "assistant",
-      content: hasToolCalls ? "" : responseContent,
-      reasoning: hasToolCalls && responseContent ? responseContent : undefined,
+      content: responseContent,
+      reasoning: undefined,
       createdAt: new Date(),
       status: hasToolCalls ? "streaming" : "complete",
       llmResponseEventId: event.eventId,
@@ -548,25 +543,14 @@ function applyLlmResponse(
     });
   } else {
     const current = messages[idx]!;
-    if (hasToolCalls && responseContent) {
-      messages[idx] = {
-        ...current,
-        reasoning: (current.reasoning ?? "") + responseContent,
-        status: "streaming",
-        llmResponseEventId: event.eventId,
-        turnId: turnId ?? current.turnId,
-        iterationIndex: iterationIndex ?? current.iterationIndex,
-      };
-    } else {
-      messages[idx] = {
-        ...current,
-        content: responseContent || current.content,
-        status: hasToolCalls ? "streaming" : "complete",
-        llmResponseEventId: event.eventId,
-        turnId: turnId ?? current.turnId,
-        iterationIndex: iterationIndex ?? current.iterationIndex,
-      };
-    }
+    messages[idx] = {
+      ...current,
+      content: responseContent || current.content,
+      status: hasToolCalls ? "streaming" : "complete",
+      llmResponseEventId: event.eventId,
+      turnId: turnId ?? current.turnId,
+      iterationIndex: iterationIndex ?? current.iterationIndex,
+    };
   }
 
   const inputTokens = numberValue(event.data.input_tokens);

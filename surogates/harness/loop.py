@@ -22,7 +22,6 @@ import json
 import logging
 import os
 import re
-import time
 import traceback
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -44,6 +43,7 @@ from surogates.harness.expert_routing import (
     classify_hard_task_async,
     merge_extra_body,
     model_supports_thinking_toggle,
+    parse_next_action_complexity,
 )
 from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
 from surogates.harness.self_discover import (
@@ -435,6 +435,41 @@ def _last_assistant_message_excerpt(
             return text
         return text[: max(0, limit - 3)].rstrip() + "..."
     return ""
+
+
+def _prior_next_action_complexity(
+    messages: list[dict[str, Any]],
+) -> str | None:
+    """Return the complexity declared by the latest assistant turn, or ``None``.
+
+    Reads the most recent assistant message's full text (not the
+    truncated excerpt — the ``<next_action>`` footer can land anywhere
+    in a long answer) and parses the ``<next_action complexity="...">``
+    block via :func:`parse_next_action_complexity`.
+
+    Returns ``None`` when there is no prior assistant turn (turn 1 of
+    a session) OR when the model failed to emit the directive (older
+    sessions, prompt drift).  Callers treat ``None`` as "no signal —
+    fall through to the classifier" and ``low``/``medium``/``high`` as
+    the model's self-reported intent.
+    """
+    for message in reversed(messages):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content") or ""
+        if isinstance(content, list):
+            text = " ".join(
+                str(part.get("text", ""))
+                for part in content
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") in {"text", "output_text"}
+                )
+            )
+        else:
+            text = str(content)
+        return parse_next_action_complexity(text)
+    return None
 
 
 def _coerce_modified_to_datetime(raw: Any) -> "datetime | None":
@@ -1376,14 +1411,6 @@ class AgentHarness:
         # orchestrator or API middleware).
         new_span()
 
-        # TTFT diagnostic: stamp wake entry + reset the "first LLM call
-        # issued" flag so the inner _run_iteration can log the delta on
-        # the first call only (subsequent iterations during the same
-        # wake cycle aren't TTFT — they're tool-call follow-ups).
-        self._ttft_wake_t0 = time.perf_counter()
-        self._ttft_first_llm_issued = False
-        self._ttft_wake_marks: dict[str, float] = {}
-
         # Skip thinking-gate + SELF-DISCOVER scaffolding on turns where
         # the user explicitly invoked a slash-skill: the skill body is
         # already the planning structure, so layering an additional
@@ -1392,11 +1419,6 @@ class AgentHarness:
         # gain.  Flag is set below if expand_slash_skill succeeds, and
         # consumed once by ``_run_iteration`` before the first LLM call.
         self._skip_pre_llm_scaffold_for_turn = False
-
-        def _wake_mark(label: str) -> None:
-            self._ttft_wake_marks[label] = (
-                time.perf_counter() - self._ttft_wake_t0
-            )
 
         # Honour streaming preference from env.
         env_streaming = os.environ.get("SUROGATES_STREAMING_ENABLED", "").lower()
@@ -1409,11 +1431,9 @@ class AgentHarness:
             await cleanup_dead_connections(self._llm)
         except Exception:
             logger.debug("Connection health cleanup failed", exc_info=True)
-        _wake_mark("conn_cleanup")
 
         # 1. Fetch session metadata.
         session = await self._store.get_session(session_id)
-        _wake_mark("get_session")
 
         # Bail out if the session was already paused/completed/failed before
         # this wake cycle — prevents re-running a session the user stopped.
@@ -1438,7 +1458,6 @@ class AgentHarness:
         if active_agent_def is not None:
             apply_agent_def_to_session(session, active_agent_def)
         self._prompt.set_agent_def(active_agent_def)
-        _wake_mark("resolve_agent_def")
 
         # Honour per-session streaming config.
         if not session.config.get("streaming", True):
@@ -1454,7 +1473,6 @@ class AgentHarness:
                 session_id,
             )
             return "lease_held"
-        _wake_mark("acquire_lease")
 
         # Start the background lease renewal task alongside the main loop.
         # Cancelled in the ``finally`` block below so the lease renews
@@ -1468,7 +1486,6 @@ class AgentHarness:
             # 3. Retrieve the harness cursor and the full event history.
             cursor = await self._store.get_harness_cursor(session_id)
             all_events = await self._store.get_events(session_id)
-            _wake_mark("load_events")
 
             # 4. Check for pending events (events after the cursor).
             pending = _actionable_pending_events(all_events, cursor)
@@ -1496,7 +1513,6 @@ class AgentHarness:
 
             # 6. Rebuild the message list from the full event history.
             messages = self._rebuild_messages(all_events)
-            _wake_mark("rebuild_messages")
 
             # 6a. Kick off title generation in the background as soon as we
             # see the user's first message.  Runs in parallel with context
@@ -1507,17 +1523,14 @@ class AgentHarness:
                 messages=messages,
                 model=session.model or self._default_model,
             )
-            _wake_mark("kick_title")
 
             # 7. Compress context if needed.
             messages = await self._engineer_context(
                 session, all_events, messages,
             )
-            _wake_mark("engineer_context")
 
             # 8. Build the system prompt (with caching).
             system_prompt = await self._build_system_prompt(session)
-            _wake_mark("build_system_prompt")
 
             # 9. Create per-session cost tracker.
             cost_tracker = SessionCostTracker()
@@ -1573,7 +1586,6 @@ class AgentHarness:
             # the two paths so we don't double-emit a skill.invoked when
             # the service already emitted expert.delegation.
             if last_user_content.startswith("/"):
-                _slash_t0 = time.perf_counter()
                 expansion = await expand_slash_skill(
                     text=last_user_content,
                     tools=self._tools,
@@ -1583,13 +1595,6 @@ class AgentHarness:
                     session_factory=self._session_factory,
                     session_store=self._store,
                     sandbox_pool=self._sandbox_pool,
-                )
-                _wake_mark("slash_skill_expand")
-                logger.info(
-                    "ttft session=%s slash_skill_expand=%.0fms text=%r",
-                    session.id,
-                    (time.perf_counter() - _slash_t0) * 1000.0,
-                    last_user_content[:60],
                 )
                 if expansion is not None:
                     expanded_text, skill_name, staged_at, kind = expansion
@@ -1795,14 +1800,7 @@ class AgentHarness:
         prefill_messages: list[dict] = session.config.get("prefill_messages") or []
 
         # --- Memory prefetch (one-shot before loop; snapshotted per session) ---
-        _ttft_mem_t0 = time.perf_counter()
         memory_context = await self._prefetch_memory(session.id)
-        if not getattr(self, "_ttft_first_llm_issued", True):
-            logger.info(
-                "ttft session=%s prefetch_memory=%.0fms",
-                session.id,
-                (time.perf_counter() - _ttft_mem_t0) * 1000.0,
-            )
 
         consulted_advisor_categories = self._advisor_categories_after_latest_user(
             all_events or [],
@@ -2007,16 +2005,7 @@ class AgentHarness:
                 self, "_skip_pre_llm_scaffold_for_turn", False,
             )
             self._skip_pre_llm_scaffold_for_turn = False
-
-            _ttft_gate_t0 = time.perf_counter()
-            if _skip_scaffold:
-                if not getattr(self, "_ttft_first_llm_issued", True):
-                    logger.info(
-                        "ttft session=%s thinking_gate+self_discover=skipped "
-                        "(slash-skill turn)",
-                        session.id,
-                    )
-            else:
+            if not _skip_scaffold:
                 # Run both concurrently.  They mutate disjoint
                 # parts of create_kwargs (gate → extra_body, self_discover
                 # → messages), so gather is safe.  Wall-clock collapses
@@ -2030,14 +2019,6 @@ class AgentHarness:
                         create_kwargs, api_messages,
                     ),
                 )
-                _ttft_gate_end = time.perf_counter()
-                if not getattr(self, "_ttft_first_llm_issued", True):
-                    logger.info(
-                        "ttft session=%s thinking_gate+self_discover="
-                        "%.0fms (parallel, classifier+scaffold LLM)",
-                        session.id,
-                        (_ttft_gate_end - _ttft_gate_t0) * 1000.0,
-                    )
 
             # Create a streaming tool executor when eligible.  The executor
             # starts executing concurrency-safe (read-only) tools as their
@@ -2087,38 +2068,6 @@ class AgentHarness:
                 streaming_executor = _make_streaming_executor()
                 on_tool_call_cb = streaming_executor.add_tool
 
-            # TTFT diagnostic: on the FIRST LLM call of this wake
-            # cycle, log the wake-prep cost (wake entry → call issue)
-            # and the call duration as a single summary line.
-            _ttft_first = (
-                not getattr(self, "_ttft_first_llm_issued", True)
-                and getattr(self, "_ttft_wake_t0", None) is not None
-            )
-            if _ttft_first:
-                self._ttft_first_llm_issued = True
-                _ttft_wake_prep_ms = (
-                    time.perf_counter() - self._ttft_wake_t0
-                ) * 1000.0
-                _ttft_llm_t0 = time.perf_counter()
-                # Per-phase deltas (subtract previous mark) sorted
-                # high-to-low so the dominant cost surfaces first
-                # in the log line.
-                _prev = 0.0
-                _phase_deltas: list[tuple[str, float]] = []
-                for _ph, _t in (
-                    getattr(self, "_ttft_wake_marks", {}) or {}
-                ).items():
-                    _phase_deltas.append((_ph, (_t - _prev) * 1000.0))
-                    _prev = _t
-                _phase_deltas.sort(key=lambda x: x[1], reverse=True)
-                _phase_summary = " ".join(
-                    f"{_l}={_ms:.0f}ms" for _l, _ms in _phase_deltas
-                )
-                logger.info(
-                    "ttft session=%s wake_prep=%.0fms (issuing first LLM call) %s",
-                    session.id, _ttft_wake_prep_ms, _phase_summary,
-                )
-
             try:
                 assistant_message, usage_data = await call_llm_with_retry(
                     session=session,
@@ -2145,15 +2094,6 @@ class AgentHarness:
                     rate_limit_guard=self._provider_rate_limit_guard(),
                 )
                 self._propagate_runaway_flag(session, usage_data)
-                if _ttft_first:
-                    _ttft_llm_call_ms = (
-                        time.perf_counter() - _ttft_llm_t0
-                    ) * 1000.0
-                    logger.info(
-                        "ttft session=%s first_llm_call=%.0fms "
-                        "(includes upstream TTFT + streaming to completion)",
-                        session.id, _ttft_llm_call_ms,
-                    )
             except Exception as exc:
                 logger.exception(
                     "LLM call failed for session %s (iteration %d, model %s): %s",
@@ -3826,20 +3766,38 @@ class AgentHarness:
     ) -> None:
         """Inject a SELF-DISCOVER scaffold as a synthetic user message.
 
-        Runs the cached classifier (free after the thinking-gate has
-        already invoked it this turn), and only fires for categories
-        that benefit from a planning preamble.  The scaffold itself
-        is also cached per-turn so iterations within a user turn reuse
-        it without re-paying the auxiliary-LLM cost.
+        Two-tier gate before paying for ``build_scaffold`` (~24s upstream
+        LLM call on cold sessions):
 
-        The scaffold is appended to a **copy** of the messages list
-        on ``create_kwargs``; the persistent conversation log is not
-        mutated.  This keeps the prompt cache, compressor, and event
-        log untouched -- the scaffold is per-call ephemeral context.
+        1. If the prior assistant turn emitted a ``<next_action>``
+           footer (per ``guidance/next_action`` prompt fragment),
+           trust that as the model's self-reported intent for THIS
+           turn.  Complexity ``low`` → skip scaffold entirely; ``high``
+           → proceed; ``medium`` (or missing) → fall through to the
+           classifier.
+        2. Classifier gate: ``classify_hard_task_async`` returns a
+           ``needs_scaffold`` field (see ``HardTaskJudgment``).  Only
+           build the scaffold when the LLM judges it genuinely helpful.
+
+        The scaffold itself is cached per-turn so iterations within a
+        user turn reuse it without re-paying the build cost.  Appended
+        to a **copy** of the messages list on ``create_kwargs``; the
+        persistent conversation log is not mutated -- keeps the prompt
+        cache, compressor, and event log untouched.
         """
         if not messages:
             return
 
+        # Tier 1: trust the model's prior next_action declaration.
+        prior_complexity = _prior_next_action_complexity(messages)
+        if prior_complexity == "low":
+            return  # Model said next turn is simple — believe it.
+
+        # Tier 2: classifier-gated build.  Whether we reach here
+        # because there was no prior declaration (turn 1, or model
+        # forgot to emit one) or because the declaration was
+        # ``medium``/``high`` (uncertain enough to warrant a check),
+        # the classifier's ``needs_scaffold`` field is the final say.
         try:
             classification = await classify_hard_task_async(
                 messages,
@@ -3852,6 +3810,12 @@ class AgentHarness:
             )
             return
 
+        if not classification.needs_scaffold:
+            return
+        # Defensive: SCAFFOLD_CATEGORIES still gates the category
+        # whitelist so a misclassified ``needs_scaffold=true`` paired
+        # with an unknown/none category cannot trigger an unscaffolded
+        # build.
         if classification.category not in SCAFFOLD_CATEGORIES:
             return
 
