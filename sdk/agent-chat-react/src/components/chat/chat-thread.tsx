@@ -737,19 +737,12 @@ function TextEntry({
 }) {
   const content = useSmoothStream(entry.content, entry.isStreaming);
   // Strip the harness ``<next_action>`` footer from the rendered
-  // markdown and surface its body as a small italic line below the
-  // message body so it reads as natural agent narration ("I'll fetch
-  // the weather next.").  Hidden when the model marked the turn as
-  // ``done`` so the final answer doesn't carry a trailing whisper.
-  // When the model didn't emit the structured block at all, fall back
-  // to the first-sentence heuristic so non-compliant models still get
-  // a narration line.
-  const { cleaned, action, inferredNarration } = stripAndParseNextAction(content);
-  const nextActionLine = action
-    ? action.body.trim().toLowerCase() === "done"
-      ? null
-      : action.body
-    : inferredNarration;
+  // markdown.  No narration line here -- a text-only iteration IS
+  // the final answer; the first sentence would duplicate the body.
+  // Tool-call iterations get their narration via ``NarrationEntry``
+  // (Expert mode) or the parent assistant-group renderer (Simple
+  // mode), not here.
+  const { cleaned } = stripAndParseNextAction(content);
   return (
     <TimelineItem step={step}>
       <TimelineHeader>
@@ -758,11 +751,6 @@ function TextEntry({
       </TimelineHeader>
       <TimelineContent>
         <MessageResponse>{cleaned}</MessageResponse>
-        {nextActionLine && (
-          <p className="mt-2 text-xs text-muted-foreground">
-            {nextActionLine}
-          </p>
-        )}
         {entry.isFinalTurnText && entry.msg.status === "complete" && (
           <TurnFeedback msg={entry.msg} />
         )}
@@ -787,22 +775,14 @@ function SimpleFinalAnswer({
 }) {
   const content = useSmoothStream(text, isStreaming);
   const revealComplete = content.length >= text.length;
-  // Same next_action stripping (with first-sentence fallback) as
-  // TextEntry — see comment there.
-  const { cleaned, action, inferredNarration } = stripAndParseNextAction(content);
-  const nextActionLine = action
-    ? action.body.trim().toLowerCase() === "done"
-      ? null
-      : action.body
-    : inferredNarration;
+  // Strip the next_action footer so it doesn't leak into the
+  // rendered markdown.  No narration line here -- a final answer's
+  // content IS the answer; surfacing its first sentence below would
+  // duplicate the body during streaming.
+  const { cleaned } = stripAndParseNextAction(content);
   return (
     <div>
       <MessageResponse>{cleaned}</MessageResponse>
-      {nextActionLine && (
-        <p className="mt-2 text-xs text-muted-foreground">
-          {nextActionLine}
-        </p>
-      )}
       {tail?.status === "complete" && revealComplete && (
         <TurnFeedback msg={tail} />
       )}
@@ -1528,7 +1508,14 @@ function SimpleAssistantGroup({
             // or its mid-stream "Thinking…" shimmer (and post-stream
             // "Thought through the problem" label) will sit above the
             // same text the user sees in finalText.
-            if (message === tail && tailIsTextOnly) return null;
+            //
+            // BUT only skip once finalText is non-empty.  During the
+            // initial thinking phase (reasoning streaming, no content
+            // yet) finalText is "" and SimpleFinalAnswer won't render
+            // anything either — letting IterationGroup through ensures
+            // the live "Thinking…" shimmer is visible instead of a
+            // blank gap.
+            if (message === tail && tailIsTextOnly && finalText) return null;
             // Pull the narration line up as a sibling of the iteration
             // card so it reads as "agent voice at root level" instead
             // of buried inside the collapsible body.  Hidden when the

@@ -461,6 +461,40 @@ describe("SessionTreePanel", () => {
     expect(container.textContent).not.toContain("First session");
   });
 
+  it("keeps the delete action visible without requiring a hover reveal", async () => {
+    const sessions = [
+      session({ id: "s-1", title: "First session", agentId: "agent-1" }),
+    ];
+    const adapter: AgentChatAdapter = {
+      ...createAdapter(sessions),
+      async listSessions() {
+        return { sessions, total: sessions.length };
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <SessionTreePanel
+          adapter={adapter}
+          agentId="agent-1"
+          loadList
+          title="Sessions"
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    const deleteButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Delete session"]',
+    );
+
+    expect(deleteButton).not.toBeNull();
+    expect(deleteButton?.className).not.toContain("md:opacity-0");
+  });
+
   it("removes a deleted session before the delete refetch completes", async () => {
     const sessions = [
       session({ id: "s-1", title: "First session", agentId: "agent-1" }),

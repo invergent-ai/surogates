@@ -293,7 +293,7 @@ function TreeNodeRow({
               "p-2 md:p-1 rounded hover:bg-destructive/10 hover:text-destructive disabled:pointer-events-none transition-all",
               deletingSessionId === entry.id
                 ? "opacity-100"
-                : "opacity-100 md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100",
+                : "opacity-60 md:opacity-50 md:group-hover:opacity-100 md:focus-visible:opacity-100",
             )}
             onClick={(e) => {
               e.stopPropagation();
