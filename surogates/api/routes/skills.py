@@ -38,7 +38,6 @@ from surogates.storage.tenant import (
     agent_session_bucket,
     tenant_bucket,
 )
-from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 from surogates.tools.builtin.skill_validation import (
@@ -191,39 +190,61 @@ def _resource_loader(request: Request):
     return ResourceLoader.from_settings(request.app.state.settings)
 
 
-async def _resolve_agent_bundle(
-    request: Request, agent_runtime: AgentRuntimeContext | None,
-):
+async def _resolve_agent_bundle(request: Request):
     """Return the active agent's file bundle, or ``None``.
 
-    The ``/v1/api/skills`` endpoints serve the chat slash menu and the
-    in-session skill viewer, both of which must surface the agent's
-    Hub-backed platform-skill catalogue (Plan 3 / Task 13 — without
-    this layer the ResourceLoader silently falls back to the empty
-    on-disk path and the user sees no platform skills at all).
-
-    Returns None when the file_bundle_cache isn't wired (helm mode,
-    Hub SDK missing, ``settings.hub.endpoint`` empty) OR when the
-    agent has no ``bundle_hub_ref`` in its runtime config (a freshly
-    created shared agent before its first publish).  Both cases are
-    benign — the loader's other layers still apply.
+    See module docstring; the helper falls through to ``None`` when
+    any link in the chain (cache wiring, agent_id, bundle ref) is
+    missing, and the load_skills caller continues without Layer 1.
     """
-    if agent_runtime is None:
-        return None
     cache = getattr(request.app.state, "file_bundle_cache", None)
     if cache is None:
+        logger.warning(
+            "skills bundle: file_bundle_cache is None on app.state — "
+            "check SUROGATES_HUB_ENDPOINT is set in the api process",
+        )
+        return None
+    agent_id = request.query_params.get("agent_id")
+    if not agent_id:
+        host = request.headers.get("host", "")
+        slug = host.split(".", 1)[0] if "." in host else None
+        if slug and slug.lower() not in {"www", "api", "localhost"}:
+            from surogates.runtime.resolver import _resolve_slug_to_agent_id
+            try:
+                agent_id = await _resolve_slug_to_agent_id(request, slug)
+            except Exception:  # noqa: BLE001 — slug lookup is best-effort
+                agent_id = None
+    if not agent_id:
+        settings = getattr(request.app.state, "settings", None)
+        if getattr(settings, "runtime_mode", "helm") == "helm":
+            agent_id = getattr(settings, "agent_id", "") or None
+    if not agent_id:
+        logger.warning(
+            "skills bundle: no agent_id resolvable (query/host/settings) "
+            "— skipping bundle layer for this request",
+        )
         return None
     try:
-        return await cache.get(agent_runtime.agent_id)
-    except LookupError:
+        bundle = await cache.get(agent_id)
+        logger.info(
+            "skills bundle: resolved agent=%s ref=%s version=%s",
+            agent_id, getattr(bundle, "hub_ref", "?"),
+            getattr(bundle, "version", "?"),
+        )
+        return bundle
+    except LookupError as exc:
+        logger.warning(
+            "skills bundle: agent %s has no bundle configured (%s)",
+            agent_id, exc,
+        )
         return None
     except Exception:  # noqa: BLE001 — Hub network failure should
         # degrade gracefully (catalogue minus bundle) rather than 500
         # the slash menu.
         logger.warning(
-            "Failed to load file bundle for agent %s; "
-            "falling back to legacy layer 1",
-            agent_runtime.agent_id, exc_info=True,
+            "skills bundle: failed to load for agent %s; "
+            "falling back to layer 1 disk path",
+            agent_id, exc_info=True,
         )
         return None
 
@@ -402,7 +423,6 @@ def _populate_expert_detail(
 async def list_skills(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
-    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
     type: str | None = None,
 ) -> SkillListResponse:
     """List available skills from all layers (platform, user files, org DB, user DB).
@@ -418,7 +438,7 @@ async def list_skills(
     """
     loader = _resource_loader(request)
     session_factory = request.app.state.session_factory
-    bundle = await _resolve_agent_bundle(request, agent_runtime)
+    bundle = await _resolve_agent_bundle(request)
     async with session_factory() as db_session:
         all_skills = await loader.load_skills(
             tenant, db_session=db_session, bundle=bundle,
@@ -449,7 +469,6 @@ async def view_skill(
     name: str,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
-    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
     session_id: UUID | None = None,
 ) -> SkillDetail:
     """View full skill content and linked files listing.
@@ -464,7 +483,7 @@ async def view_skill(
 
     loader = _resource_loader(request)
     session_factory = request.app.state.session_factory
-    bundle = await _resolve_agent_bundle(request, agent_runtime)
+    bundle = await _resolve_agent_bundle(request)
     async with session_factory() as db_session:
         all_skills = await loader.load_skills(
             tenant, db_session=db_session, bundle=bundle,
@@ -529,7 +548,6 @@ async def read_skill_file(
     path: str,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
-    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
     session_id: UUID | None = None,
 ) -> dict[str, Any]:
     """Read a linked file from a skill directory.
@@ -566,7 +584,7 @@ async def read_skill_file(
 
     loader = _resource_loader(request)
     session_factory = request.app.state.session_factory
-    bundle = await _resolve_agent_bundle(request, agent_runtime)
+    bundle = await _resolve_agent_bundle(request)
     async with session_factory() as db_session:
         all_skills = await loader.load_skills(
             tenant, db_session=db_session, bundle=bundle,

@@ -315,25 +315,26 @@ class ResourceLoader:
         user_id = tenant.user_id
 
         # Layer 1: platform skills.
-        # Plan 3 / Task 13 — when a bundle is provided the platform
-        # layer comes from the bundle's skills/ prefix (per-tenant,
-        # Hub-backed) instead of the on-disk /etc/surogates/skills/
-        # path.  Layers 2-4 (user files / org DB / user DB) are
-        # unchanged so a tenant override still wins over the
-        # bundle's built-in.
+        # Plan 3 / Task 13 — the on-disk platform-skills directory
+        # holds the shared built-ins baked into the worker image
+        # (docx, pptx, subagent-task-worker, etc.).  When a bundle
+        # is present the per-agent ``skills/`` prefix is layered ON
+        # TOP of the disk catalogue so tenant-attached skills extend
+        # rather than replace the shared built-ins.  ``_merge`` keeps
+        # later layers (user files, DB) winning on name collision so
+        # a tenant can still override a bundle entry — and a bundle
+        # entry still overrides the matching disk built-in.
+        disk_platform = await asyncio.to_thread(
+            self._load_skills_from_dir,
+            self._platform_skills_dir, SKILL_SOURCE_PLATFORM,
+        )
         if bundle is not None:
-            platform = await self._load_skills_from_bundle(
+            bundle_platform = await self._load_skills_from_bundle(
                 bundle, source=SKILL_SOURCE_PLATFORM,
             )
+            platform = self._merge(disk_platform, bundle_platform)
         else:
-            # `_load_skills_from_dir` does sync `os.walk` + `read_text` per
-            # SKILL.md; offload to a thread so we don't stall the event loop
-            # (which would starve the FastAPI health probes and get the pod
-            # killed by kubelet liveness checks).
-            platform = await asyncio.to_thread(
-                self._load_skills_from_dir,
-                self._platform_skills_dir, SKILL_SOURCE_PLATFORM,
-            )
+            platform = disk_platform
 
         # Layer 2: user bucket files
         if user_id is not None:

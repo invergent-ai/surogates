@@ -419,19 +419,10 @@ def _maybe_build_file_bundle_cache(
     if hub_settings is None or not hub_settings.endpoint:
         return None
 
-    try:
-        from surogate_hub_sdk import Configuration as _HubConfig
-        from surogate_hub_sdk import HubClient as _HubSDK
-    except ImportError:
-        logger.warning(
-            "surogate_hub_sdk not installed; file_bundle_cache disabled. "
-            "Install the SDK to enable Hub-backed bundles.",
-        )
-        return None
-
+    from surogate_hub_sdk import ApiClient, Configuration, ObjectsApi
     from pathlib import Path
 
-    sdk_config = _HubConfig(
+    sdk_config = Configuration(
         host=hub_settings.endpoint,
         username=hub_settings.username,
         password=hub_settings.password,
@@ -440,7 +431,8 @@ def _maybe_build_file_bundle_cache(
     # The ops side already disables verification (surogate_hub.py:53);
     # mirror that here so the runtime can reach the same endpoint.
     sdk_config.verify_ssl = False
-    hub_sdk = _HubSDK(configuration=sdk_config)
+    api_client = ApiClient(sdk_config)
+    objects_api = ObjectsApi(api_client)
     l2 = _L2DiskCache(
         root=Path.home() / ".surogate" / "bundle-cache",
     )
@@ -455,7 +447,7 @@ def _maybe_build_file_bundle_cache(
             )
         spec = _BundleSpec.parse(hub_ref)
         hub_client = HubBundleClient(
-            objects_api=hub_sdk.objects_api,
+            objects_api=objects_api,
             user=spec.user,
             repository=spec.repository,
         )

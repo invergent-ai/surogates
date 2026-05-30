@@ -70,12 +70,28 @@ class HubBundleClient:
         Returns a flat list of paths (no metadata).  The caller is
         responsible for distinguishing directories from files by path
         suffix (e.g., the skill loader filters for ``SKILL.md``).
+
+        Paginates internally so even bundles with hundreds of files
+        come back in one call.  No ``delimiter`` is passed, so the
+        result is the recursive flat list (one entry per file).
         """
-        stats = await asyncio.to_thread(
-            self._objects_api.list_objects,
-            self._user, self._repository, ref, prefix or None,
-        )
-        return [s.path for s in (stats.results or [])]
+        paths: list[str] = []
+        after: str | None = ""
+        while True:
+            page = await asyncio.to_thread(
+                self._objects_api.list_objects,
+                self._user, self._repository, ref,
+                prefix=prefix or None,
+                after=after,
+                amount=1000,
+            )
+            for s in page.results or []:
+                paths.append(s.path)
+            pagination = getattr(page, "pagination", None)
+            if not pagination or not getattr(pagination, "has_more", False):
+                break
+            after = getattr(pagination, "next_offset", None) or ""
+        return paths
 
     async def aclose(self) -> None:
         """Symmetric teardown.  Today a no-op because the SDK is
