@@ -193,9 +193,7 @@ def _warn_if_base_model_missing_from_metadata(model_id: str) -> None:
         return
     logger.warning(
         "Base LLM model %r is not present in surogates.harness.model_metadata "
-        "MODEL_CATALOG or aliases; add model metadata so context sizing, "
-        "capability checks, and cost estimates remain accurate.",
-        normalized,
+        "MODEL_CATALOG or aliases; add model metadata so context sizing and capability checks remain accurate.",
     )
 
 
@@ -1241,6 +1239,7 @@ async def run_worker(settings: Settings) -> None:
                     base_url=settings.worker.api_base_url,
                     token=token,
                     session_id=str(session.id),
+                    agent_id=session.agent_id or settings.agent_id,
                 )
 
         # Build a TurnSummarizer when both the summary auxiliary LLM is
@@ -1296,6 +1295,13 @@ async def run_worker(settings: Settings) -> None:
             advisor_max_calls_per_turn=settings.llm.advisor_max_calls_per_turn,
             advisor_max_tokens=settings.llm.advisor_max_tokens,
             turn_summarizer=turn_summarizer,
+            # Plan 3 / Task 13 — share the per-session bundle with
+            # the harness so sub-agent resolution at wake time can
+            # see Hub-backed ``agents/`` entries alongside the disk
+            # built-ins.  Already resolved at line ~1140 for the
+            # PromptBuilder catalog load; threading it here avoids a
+            # second file_bundle_cache lookup per session.
+            bundle=bundle,
         )
         # Plan 2 / Task 7 — stash the bundle so the dispatcher can
         # aclose its four connection pools at session retirement.

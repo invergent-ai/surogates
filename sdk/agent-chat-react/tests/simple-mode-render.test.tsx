@@ -430,6 +430,54 @@ describe("Simple mode ChatThread rendering", () => {
     expect(dom.textContent).toContain("Working on it");
   });
 
+  it("shows 'Working on it...' after every assistant message while running", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        content: "First question",
+        createdAt: new Date(),
+        status: "complete",
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "First answer.",
+        createdAt: new Date(),
+        status: "complete",
+      },
+      {
+        id: "user-2",
+        role: "user",
+        content: "Follow up",
+        createdAt: new Date(),
+        status: "complete",
+      },
+      {
+        id: "assistant-2",
+        role: "assistant",
+        content: "Second answer.",
+        createdAt: new Date(),
+        status: "complete",
+      },
+    ];
+
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={messages}
+        isRunning={true}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+
+    const indicators = dom.textContent?.match(/Working on it/g) ?? [];
+    expect(indicators).toHaveLength(2);
+  });
+
   it("shows 'Working on it...' below complete preamble text while isRunning", () => {
     // The tail iteration emitted text-only content ("Let me write the
     // script:") and flipped to status="complete", but isRunning is

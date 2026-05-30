@@ -28,7 +28,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, AsyncIterator, Final
+from typing import TYPE_CHECKING, Any, AsyncIterator, Final
 from uuid import UUID
 
 from surogates.storage.backend import StorageBackend
@@ -341,6 +341,75 @@ class SkillStager:
             logger.info(
                 "Staged tenant skill '%s' (%d files) for session %s",
                 skill_name, copied, session_id,
+            )
+            return self.workspace_path_for(session_id, skill_name)
+
+    # ------------------------------------------------------------------
+    # Staging from a Hub-backed AgentFileBundle
+    # ------------------------------------------------------------------
+
+    async def stage_from_bundle(
+        self,
+        session_id: UUID | str,
+        skill_name: str,
+        bundle: Any,
+    ) -> str:
+        """Copy a bundle-backed skill's directory tree into the workspace.
+
+        Used for shared-runtime agents whose per-tenant bundle carries
+        ``skills/{name}/...``.  Walks the bundle prefix, reads each
+        file via the bundle's read-through L2 cache, and writes it to
+        ``sessions/{session_id}/.skills/{skill_name}/<relpath>``.  A
+        ``.staged`` marker is written last to signal completion, so
+        repeat views in the same session hit the fast path.
+
+        Concurrent callers for the same ``(session_id, skill_name)``
+        are serialised via :meth:`_stage_lock`.
+        """
+        if await self.is_staged(session_id, skill_name):
+            return self.workspace_path_for(session_id, skill_name)
+
+        prefix = f"skills/{skill_name}/"
+        paths = await bundle.list(prefix)
+        # ``SKILL.md`` lives in the bundle but doesn't need to land in
+        # the session workspace — the LLM has it inline already.  Any
+        # other path under ``skills/<name>/`` is supporting content.
+        rel_paths = [
+            p[len(prefix):] for p in paths
+            if p.startswith(prefix) and not p.endswith("/SKILL.md")
+        ]
+        rel_paths = [r for r in rel_paths if r]
+        if not rel_paths:
+            return self.workspace_path_for(session_id, skill_name)
+
+        async with self._stage_lock(session_id, skill_name):
+            if await self.is_staged(session_id, skill_name):
+                return self.workspace_path_for(session_id, skill_name)
+
+            dest_prefix = self.staged_key_prefix(skill_name)
+            sem = asyncio.Semaphore(_STAGE_CONCURRENCY)
+
+            async def _copy_one(rel: str) -> None:
+                async with sem:
+                    data = await bundle.read_bytes(f"{prefix}{rel}")
+                    await self._backend.write(
+                        self._storage_bucket,
+                        self._physical_key(
+                            session_id, f"{dest_prefix}/{rel}",
+                        ),
+                        data,
+                    )
+
+            await asyncio.gather(*(_copy_one(r) for r in rel_paths))
+
+            await self._backend.write(
+                self._storage_bucket,
+                self._physical_key(session_id, f"{dest_prefix}/{STAGING_MARKER}"),
+                b"",
+            )
+            logger.info(
+                "Staged bundle skill '%s' (%d files) for session %s",
+                skill_name, len(rel_paths), session_id,
             )
             return self.workspace_path_for(session_id, skill_name)
 

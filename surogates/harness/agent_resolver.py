@@ -45,6 +45,7 @@ async def resolve_agent_by_name(
     *,
     session_factory: Any | None = None,
     loader: ResourceLoader | None = None,
+    bundle: Any | None = None,
 ) -> AgentDef | None:
     """Find an enabled :class:`AgentDef` by *name* in the tenant catalog.
 
@@ -71,6 +72,11 @@ async def resolve_agent_by_name(
     loader:
         Optional injected :class:`ResourceLoader` for tests.  A default
         instance is created when not provided.
+    bundle:
+        Per-tenant Hub-backed file bundle.  When set, the loader's
+        Layer 1 includes the bundle's ``agents/`` subtree alongside
+        the on-disk built-ins.  Helm-mode callers pass ``None`` for
+        the legacy disk-only behaviour.
     """
     if not name:
         return None
@@ -81,9 +87,11 @@ async def resolve_agent_by_name(
     try:
         if session_factory is not None:
             async with session_factory() as db:
-                agents = await loader.load_agents(tenant, db_session=db)
+                agents = await loader.load_agents(
+                    tenant, db_session=db, bundle=bundle,
+                )
         else:
-            agents = await loader.load_agents(tenant)
+            agents = await loader.load_agents(tenant, bundle=bundle)
     except Exception:
         logger.warning(
             "Failed to load agent catalog for agent_type=%s",
@@ -103,6 +111,7 @@ async def resolve_agent_def(
     *,
     session_factory: Any | None = None,
     loader: ResourceLoader | None = None,
+    bundle: Any | None = None,
 ) -> AgentDef | None:
     """Resolve ``session.config['agent_type']`` to an :class:`AgentDef`.
 
@@ -110,6 +119,10 @@ async def resolve_agent_def(
     name doesn't resolve to an enabled agent, or loading fails.  Emits
     a warning when ``agent_type`` is set but unresolvable so the
     condition is visible in worker logs.
+
+    Forwards ``bundle`` to :func:`resolve_agent_by_name` so the
+    catalogue scan includes Hub-backed bundle entries; see that
+    function's docstring for the contract.
     """
     agent_type = (session.config or {}).get("agent_type")
     if not agent_type:
@@ -118,6 +131,7 @@ async def resolve_agent_def(
     resolved = await resolve_agent_by_name(
         agent_type, tenant,
         session_factory=session_factory, loader=loader,
+        bundle=bundle,
     )
     if resolved is None:
         logger.warning(

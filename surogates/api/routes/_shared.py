@@ -8,9 +8,13 @@ resource module, so they live here instead of being copied verbatim.
 
 from __future__ import annotations
 
-from fastapi import HTTPException, status
+import logging
+
+from fastapi import HTTPException, Request, status
 
 from surogates.tenant.context import PrincipalKind, TenantContext
+
+logger = logging.getLogger(__name__)
 
 
 def raise_validation(err: str | None) -> None:
@@ -59,3 +63,72 @@ def require_not_channel_principal(tenant: TenantContext) -> None:
                 "sessions."
             ),
         )
+
+
+async def resolve_agent_bundle(request: Request):
+    """Return the active agent's file bundle, or ``None``.
+
+    Routes that surface ``/v1/skills``, ``/v1/agents``, and similar
+    catalogue endpoints need to include the per-tenant Hub bundle's
+    ``skills/`` and ``agents/`` subtrees in the catalogue so
+    bundle-attached entries reach Studio and the chat slash menu.
+
+    Resolution order mirrors ``agent_runtime_context_dep``:
+
+    1. ``?agent_id=<id>`` query parameter — the path the ops proxy
+       and Studio both take.
+    2. ``Host`` header subdomain slug — per-tenant chat web apps
+       at ``slug.example.com``.
+    3. ``settings.agent_id`` when ``runtime_mode == 'helm'`` — the
+       legacy single-agent pod baseline.
+
+    Returns ``None`` (never raises) when:
+
+    * ``file_bundle_cache`` is not wired (Hub disabled, dev pods
+      without ``SUROGATES_HUB_ENDPOINT``).
+    * No ``agent_id`` is resolvable (e.g. the harness's in-process
+      API client hitting ``/v1/skills`` before agent_id auto-injection
+      lands; helm-mode pods with no slug).
+    * The agent has no published bundle yet (``bundle_hub_ref`` is
+      empty in the runtime config).
+    * The Hub network round-trip fails — degrade gracefully rather
+      than 500 the catalogue route.
+
+    Each fallthrough path emits a single WARNING so a misconfigured
+    pod surfaces in the next request instead of needing a startup
+    banner re-read.
+    """
+    cache = getattr(request.app.state, "file_bundle_cache", None)
+    if cache is None:
+        logger.warning(
+            "bundle resolver: file_bundle_cache is None on app.state — "
+            "check SUROGATES_HUB_ENDPOINT is set in the api process",
+        )
+        return None
+    agent_id = request.query_params.get("agent_id")
+    if not agent_id:
+        host = request.headers.get("host", "")
+        slug = host.split(".", 1)[0] if "." in host else None
+        if slug and slug.lower() not in {"www", "api", "localhost"}:
+            from surogates.runtime.resolver import _resolve_slug_to_agent_id
+            try:
+                agent_id = await _resolve_slug_to_agent_id(request, slug)
+            except Exception:  # noqa: BLE001 — slug lookup is best-effort
+                agent_id = None
+    if not agent_id:
+        settings = getattr(request.app.state, "settings", None)
+        if getattr(settings, "runtime_mode", "helm") == "helm":
+            agent_id = getattr(settings, "agent_id", "") or None
+    if not agent_id:
+        return None
+    try:
+        return await cache.get(agent_id)
+    except LookupError:
+        return None
+    except Exception:  # noqa: BLE001 — Hub network failure
+        logger.warning(
+            "bundle resolver: failed to load bundle for agent %s; "
+            "falling back to disk layer 1",
+            agent_id, exc_info=True,
+        )
+        return None

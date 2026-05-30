@@ -49,7 +49,16 @@ class HubBundleClient:
         Raises :class:`LookupError` when the file does not exist at
         this version of the bundle.  Network / auth errors propagate
         verbatim — the cache layer interprets them.
+
+        The SDK signals "object not found" via its own
+        ``NotFoundException`` (an ``ApiException`` subclass with
+        ``status == 404``); we also catch ``FileNotFoundError`` for
+        any SDK build that surfaces a stdlib variant instead.  Both
+        map to ``LookupError`` so callers like ``load_agent_md`` can
+        treat optional files as absent without crashing the session.
         """
+        from surogate_hub_sdk import ApiException
+
         try:
             result = await asyncio.to_thread(
                 self._objects_api.get_object,
@@ -60,6 +69,13 @@ class HubBundleClient:
                 f"bundle {self._user}/{self._repository}@{ref}: "
                 f"path {path!r} not found",
             ) from exc
+        except ApiException as exc:
+            if getattr(exc, "status", None) == 404:
+                raise LookupError(
+                    f"bundle {self._user}/{self._repository}@{ref}: "
+                    f"path {path!r} not found",
+                ) from exc
+            raise
         # SDK returns bytearray; convert to bytes for stable hashing
         # and immutability.
         return bytes(result)

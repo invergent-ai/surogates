@@ -31,6 +31,7 @@ from surogates.api.routes._shared import (
     normalize_source,
     raise_validation,
     require_not_channel_principal,
+    resolve_agent_bundle as _resolve_agent_bundle,
 )
 from surogates.storage.skill_staging import SkillStager, has_stageable_assets
 from surogates.storage.tenant import (
@@ -190,65 +191,6 @@ def _resource_loader(request: Request):
     return ResourceLoader.from_settings(request.app.state.settings)
 
 
-async def _resolve_agent_bundle(request: Request):
-    """Return the active agent's file bundle, or ``None``.
-
-    See module docstring; the helper falls through to ``None`` when
-    any link in the chain (cache wiring, agent_id, bundle ref) is
-    missing, and the load_skills caller continues without Layer 1.
-    """
-    cache = getattr(request.app.state, "file_bundle_cache", None)
-    if cache is None:
-        logger.warning(
-            "skills bundle: file_bundle_cache is None on app.state — "
-            "check SUROGATES_HUB_ENDPOINT is set in the api process",
-        )
-        return None
-    agent_id = request.query_params.get("agent_id")
-    if not agent_id:
-        host = request.headers.get("host", "")
-        slug = host.split(".", 1)[0] if "." in host else None
-        if slug and slug.lower() not in {"www", "api", "localhost"}:
-            from surogates.runtime.resolver import _resolve_slug_to_agent_id
-            try:
-                agent_id = await _resolve_slug_to_agent_id(request, slug)
-            except Exception:  # noqa: BLE001 — slug lookup is best-effort
-                agent_id = None
-    if not agent_id:
-        settings = getattr(request.app.state, "settings", None)
-        if getattr(settings, "runtime_mode", "helm") == "helm":
-            agent_id = getattr(settings, "agent_id", "") or None
-    if not agent_id:
-        logger.warning(
-            "skills bundle: no agent_id resolvable (query/host/settings) "
-            "— skipping bundle layer for this request",
-        )
-        return None
-    try:
-        bundle = await cache.get(agent_id)
-        logger.info(
-            "skills bundle: resolved agent=%s ref=%s version=%s",
-            agent_id, getattr(bundle, "hub_ref", "?"),
-            getattr(bundle, "version", "?"),
-        )
-        return bundle
-    except LookupError as exc:
-        logger.warning(
-            "skills bundle: agent %s has no bundle configured (%s)",
-            agent_id, exc,
-        )
-        return None
-    except Exception:  # noqa: BLE001 — Hub network failure should
-        # degrade gracefully (catalogue minus bundle) rather than 500
-        # the slash menu.
-        logger.warning(
-            "skills bundle: failed to load for agent %s; "
-            "falling back to layer 1 disk path",
-            agent_id, exc_info=True,
-        )
-        return None
-
-
 def _staging_preamble(skill_name: str, staged_at: str) -> str:
     """Return a directive preamble that tells the LLM how to address staged files.
 
@@ -282,17 +224,24 @@ async def _authorize_session_for_staging(
     Staging writes under ``sessions/{session_id}/`` in the agent bucket;
     without this check any authenticated user could pollute another tenant's
     sessions or trigger arbitrary workspace writes with forged UUIDs.  Raises
-    ``HTTPException(404)`` with a generic message for both the not-found
-    and wrong-tenant cases to avoid leaking session existence.
+    ``HTTPException(404)`` with a generic message for both the not-found,
+    wrong-tenant, and wrong-agent cases to avoid leaking session existence.
 
     Returns the authorized session so callers can read its
     ``storage_key_prefix`` without re-fetching from the store.
     """
     from surogates.api.routes.sessions import _get_session_for_tenant
+    from surogates.runtime import agent_runtime_context_dep
 
-    # Delegates to the sessions helper — matches the authorization model
-    # used by every other session-scoped endpoint (events, workspace, etc.).
-    return await _get_session_for_tenant(request, session_id, tenant)
+    # ``_get_session_for_tenant`` now requires ``agent_id`` so it can
+    # gate cross-agent session reads.  Resolve it from the request
+    # exactly the way ``agent_runtime_context_dep`` does (query,
+    # host, helm-mode settings fallback) so the staging helper stays
+    # in lock-step with every other session-scoped route.
+    agent_runtime = await agent_runtime_context_dep(request)
+    return await _get_session_for_tenant(
+        request, session_id, tenant, agent_runtime.agent_id,
+    )
 
 
 async def _stage_skill_for_session(
@@ -302,6 +251,7 @@ async def _stage_skill_for_session(
     session_id: UUID,
     linked_files: list[str] | dict[str, list[str]] | None,
     storage_key_prefix: str = "",
+    bundle: Any = None,
 ) -> str | None:
     """Auto-stage a skill into the session workspace when it has assets to stage.
 
@@ -311,6 +261,11 @@ async def _stage_skill_for_session(
     The caller is responsible for authorizing the session against the
     tenant via :func:`_authorize_session_for_staging` before calling this
     function.
+
+    ``bundle`` is the per-tenant Hub-backed bundle for shared-runtime
+    sessions; when set AND the platform skill has no on-disk source
+    directory (i.e. it came from the bundle's ``skills/{name}/`` tree),
+    we stage from the bundle instead of failing.
     """
     from surogates.tools.loader import (
         SKILL_SOURCE_ORG,
@@ -326,17 +281,24 @@ async def _stage_skill_for_session(
     if skill_def.source == SKILL_SOURCE_PLATFORM:
         loader = _resource_loader(request)
         source_dir = loader.resolve_platform_skill_dir(skill_def.name)
-        if source_dir is None:
-            logger.warning(
-                "Cannot stage platform skill '%s': source directory not found",
-                skill_def.name,
+        if source_dir is not None:
+            return await stager.stage_from_filesystem(
+                session_id=session_id,
+                skill_name=skill_def.name,
+                source_dir=source_dir,
             )
-            return None
-        return await stager.stage_from_filesystem(
-            session_id=session_id,
-            skill_name=skill_def.name,
-            source_dir=source_dir,
+        if bundle is not None:
+            return await stager.stage_from_bundle(
+                session_id=session_id,
+                skill_name=skill_def.name,
+                bundle=bundle,
+            )
+        logger.warning(
+            "Cannot stage platform skill '%s': no on-disk source dir "
+            "and no bundle available",
+            skill_def.name,
         )
+        return None
 
     if skill_def.source in (SKILL_SOURCE_USER, SKILL_SOURCE_ORG):
         ts = _get_tenant_storage(request, tenant)
@@ -516,11 +478,23 @@ async def view_skill(
     elif skill_def.source == SKILL_SOURCE_PLATFORM:
         source_dir = loader.resolve_platform_skill_dir(name)
         if source_dir is not None:
+            # Built-in platform skill on disk.
             detail.linked_files = [
                 f.relative_to(source_dir).as_posix()
                 for f in sorted(source_dir.rglob("*"))
                 if f.is_file() and f.name != "SKILL.md"
             ]
+        elif bundle is not None:
+            # Bundle-backed platform skill: enumerate the bundle's
+            # ``skills/{name}/`` prefix.  SKILL.md is excluded so the
+            # list mirrors what the disk variant returns.
+            prefix = f"skills/{name}/"
+            bundle_paths = await bundle.list(prefix)
+            detail.linked_files = sorted(
+                p[len(prefix):] for p in bundle_paths
+                if p.startswith(prefix) and not p.endswith("/SKILL.md")
+                and p != prefix
+            )
 
     # Auto-stage the skill tree when a session is specified and there are
     # files beyond SKILL.md itself.  Authorize first: the session must
@@ -534,6 +508,7 @@ async def view_skill(
             session_id=session_id,
             linked_files=detail.linked_files,
             storage_key_prefix=_session_storage_key_prefix(session),
+            bundle=bundle,
         )
         if staged_at is not None:
             detail.staged_at = staged_at

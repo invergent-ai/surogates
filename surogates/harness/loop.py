@@ -1056,6 +1056,7 @@ class AgentHarness:
         advisor_max_calls_per_turn: int = 2,
         advisor_max_tokens: int = 700,
         turn_summarizer: Any | None = None,
+        bundle: Any | None = None,
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
@@ -1072,6 +1073,11 @@ class AgentHarness:
         self._storage = storage
         self._api_client = api_client
         self._session_factory = session_factory
+        # Plan 3 / Task 13 — per-session Hub-backed bundle shared by
+        # every catalogue load inside the harness (sub-agent resolver,
+        # prompt builder, future skill staging).  ``None`` keeps the
+        # legacy disk-only behaviour for helm pods.
+        self._bundle: Any | None = bundle
 
         # Optional dedicated vision client.  When the active LLM does not
         # support image input, ``_prepare_messages_for_model_vision_support``
@@ -1400,7 +1406,9 @@ class AgentHarness:
         # the prompt builder so the identity section reflects the active
         # agent type.
         active_agent_def = await resolve_agent_def(
-            session, self._tenant, session_factory=self._session_factory,
+            session, self._tenant,
+            session_factory=self._session_factory,
+            bundle=self._bundle,
         )
         if active_agent_def is not None:
             apply_agent_def_to_session(session, active_agent_def)

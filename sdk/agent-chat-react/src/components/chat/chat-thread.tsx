@@ -4,7 +4,7 @@
 // Custom chat thread — uses ai-elements Conversation + Message
 // with a compact, Claude Code-inspired layout.
 //
-import { useMemo } from "react";
+import { Fragment, useMemo, useState } from "react";
 import {
   Conversation,
   ConversationContent,
@@ -65,7 +65,6 @@ import {
   WrenchIcon,
   type LucideIcon,
 } from "lucide-react";
-import { useState } from "react";
 import type {
   AgentChatImageAttachment,
   AgentChatPendingAttachment,
@@ -252,21 +251,6 @@ function messageToEntries(
     });
   }
 
-  // Show "Working on it..." shimmer whenever the turn is active but
-  // nothing visible is progressing:
-  //   - initial thinking before the first reasoning/tool/content arrives
-  //   - post-reasoning gap (reasoning has landed but the next tool or
-  //     content hasn't -- common between llm.response and tool.call, or
-  //     while the LLM is still composing the next iteration)
-  //   - between tool rounds once every tool call has completed
-  // A running tool call already shows its own shimmer, so skip then.
-  const hasRunningTool = hasToolCalls && msg.toolCalls!.some(
-    (tc) => tc.status === "running",
-  );
-  if (isStreaming && !effectiveHasContent && !hasRunningTool) {
-    entries.push({ kind: "thinking", key: `${msg.id}-thinking` });
-  }
-
   return entries;
 }
 
@@ -425,7 +409,7 @@ function OrphanSystemMarker({
       <div className="my-2 flex items-center gap-2 px-4 text-xs text-foreground/60 ">
         <span className="size-2 rounded-full bg-emerald-500" />
         <span>
-          <span className="font-semibold text-foreground">Skill</span>
+          <span className="font-semibold text-foreground">Running skill{" "}</span>
           <span className="text-foreground/60 truncate">{skill}</span>
         </span>
       </div>
@@ -1393,25 +1377,7 @@ function SimpleAssistantGroup({
   const tailIsTextOnly = !!tail && !tailHasTools;
   const finalText = tailIsTextOnly && tail!.content ? tail!.content : "";
 
-  // Mirror Expert mode's defensive "Working on it..." row: whenever
-  // this is the tail group and the session is still running, surface
-  // a group-level shimmer unless an iteration is already showing its
-  // own live shimmer. We DON'T also suppress when finalText is set —
-  // the reducer keeps tool-using and pre-response messages in
-  // status="streaming" indefinitely (next llm.response is the only
-  // signal that flips them), so once the text deltas stop the
-  // smoothstream finishes its reveal but status stays "streaming";
-  // without a sibling shimmer the UI looks frozen. Expert mode
-  // appends an equivalent thinking entry in the same window.
   const isTailGroup = lastGlobalIndex === totalMessages - 1;
-  const tailRendersOwnShimmer =
-    !!tail
-    && isIterationLive(tail)
-    && !tailIsTextOnly;
-  const showThinkingShim =
-    isTailGroup
-    && isRunning
-    && !tailRendersOwnShimmer;
 
   const showErrorInfo =
     !!tail && tail.status === "error" && !!tail.errorInfo;
@@ -1485,13 +1451,6 @@ function SimpleAssistantGroup({
             isStreaming={tail?.status === "streaming"}
             tail={tail}
           />
-        )}
-        {showThinkingShim && (
-          <div className="mt-2">
-            <Shimmer duration={3} spread={3} className="text-sm">
-              Working on it...
-            </Shimmer>
-          </div>
         )}
         {effectiveTurnSummary ? (
           <TurnSummaryCard
@@ -1588,27 +1547,6 @@ function AssistantGroup({
     }
   }
 
-  // Whenever this is the tail assistant group and the session is still
-  // running, append a "Working on it..." row unless something visible is
-  // already in progress (a running tool, or messageToEntries already added
-  // a thinking entry for an empty streaming turn). This covers both the
-  // mid-stream pause between text and the next tool call AND the gap
-  // between LLM iterations after a turn has fully completed.
-  const isTailGroup = lastGlobalIndex === totalMessages - 1;
-  const lastEntry = entries[entries.length - 1];
-  const hasRunningTool = entries.some(
-    (e) => e.kind === "tool" && e.tc.status === "running",
-  );
-  const tailMsg = messages[messages.length - 1];
-  if (
-    isTailGroup
-    && isRunning
-    && !hasRunningTool
-    && lastEntry?.kind !== "thinking"
-  ) {
-    entries.push({ kind: "thinking", key: `${tailMsg.id}-tail-thinking` });
-  }
-
   // Surface the classifier's error info inline below the timeline when
   // the last assistant message in the group ended in error.
   const tail = messages[messages.length - 1];
@@ -1671,6 +1609,18 @@ function RetryBanner({ indicator }: { indicator: RetryIndicator }) {
         </pre>
       )}
     </div>
+  );
+}
+
+function WorkingOnItIndicator() {
+  return (
+    <Message from="assistant">
+      <MessageContent>
+        <Shimmer duration={3} spread={3} className="text-sm">
+          Working on it...
+        </Shimmer>
+      </MessageContent>
+    </Message>
   );
 }
 
@@ -1814,28 +1764,23 @@ export function ChatThread({
                 const groupRetry =
                   groupTail.id === activeFailureId ? onRetry : undefined;
                 return (
-                  <AssistantGroup
-                    key={group.messages[0].id}
-                    messages={group.messages}
-                    lastGlobalIndex={group.lastGlobalIndex}
-                    totalMessages={messages.length}
-                    isRunning={isRunning}
-                    terminal={terminal}
-                    sessionId={sessionId}
-                    artifactFallbacks={artifactFallbacks}
-                    onFileSelect={onFileSelect}
-                    onRetry={groupRetry}
-                    viewMode={viewMode}
-                  />
+                  <Fragment key={group.messages[0].id}>
+                    <AssistantGroup
+                      messages={group.messages}
+                      lastGlobalIndex={group.lastGlobalIndex}
+                      totalMessages={messages.length}
+                      isRunning={isRunning}
+                      terminal={terminal}
+                      sessionId={sessionId}
+                      artifactFallbacks={artifactFallbacks}
+                      onFileSelect={onFileSelect}
+                      onRetry={groupRetry}
+                      viewMode={viewMode}
+                    />
+                    {isRunning && <WorkingOnItIndicator />}
+                  </Fragment>
                 );
               })}
-              {isRunning && messages.length > 0 && messages[messages.length - 1].role === "user" && (
-                <Message from="assistant">
-                  <MessageContent>
-                    <Shimmer duration={3} spread={3} className="text-sm">Working on it...</Shimmer>
-                  </MessageContent>
-                </Message>
-              )}
             </>
           )}
         </ConversationContent>

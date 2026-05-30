@@ -31,6 +31,7 @@ from surogates.api.routes._shared import (
     normalize_source,
     raise_validation,
     require_not_channel_principal,
+    resolve_agent_bundle,
 )
 from surogates.storage.tenant import TenantStorage
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -231,11 +232,14 @@ async def _merged_agent_catalog(
     """
     loader = ResourceLoader()
     session_factory = request.app.state.session_factory
+    bundle = await resolve_agent_bundle(request)
     async with session_factory() as db_session:
         # Platform + DB layers via the loader.  Pass db_session so the
-        # DB overlay layers are included.
+        # DB overlay layers are included; pass bundle so the per-
+        # tenant Hub bundle's ``agents/`` subtree contributes to
+        # Layer 1 alongside the on-disk built-ins.
         loader_defs = await loader.load_agents(
-            tenant, db_session=db_session,
+            tenant, db_session=db_session, bundle=bundle,
         )
 
     ts = _get_tenant_storage(request, tenant)
