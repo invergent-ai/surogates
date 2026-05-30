@@ -309,14 +309,24 @@ class PromptBuilder:
         org_cfg = self.tenant.org_config
 
         agent_name: str = org_cfg.get("agent_name", "Surogate")
-        personality: str = org_cfg.get(
-            "personality",
-            self._prompts.get("identity/default_personality"),
-        )
         custom_instructions: str = org_cfg.get("custom_instructions", "")
 
-        parts = [f"# Identity\nYou are **{agent_name}**."]
-        parts.append(personality)
+        # SOUL.md, when present, OWNS the identity section — it is
+        # what the tenant authored to override the default persona.
+        # Emitting the default ``You are **Surogate**`` header on top
+        # of it would smother the override (the LLM latches onto the
+        # most prominent name signal).  When SOUL.md is absent the
+        # legacy default-personality path applies unchanged.
+        parts: list[str] = ["# Identity"]
+        if self._soul_md_content:
+            parts.append(self._soul_md_content)
+        else:
+            personality: str = org_cfg.get(
+                "personality",
+                self._prompts.get("identity/default_personality"),
+            )
+            parts.insert(1, f"You are **{agent_name}**.")
+            parts.append(personality)
         if custom_instructions:
             safe = self._sanitise(custom_instructions, "custom_instructions")
             parts.append(safe)
@@ -743,13 +753,18 @@ class PromptBuilder:
 
         parts: list[str] = []
 
-        # SOUL.md — prefer pre-loaded bundle content, fall back to disk.
-        if self._soul_md_content is not None:
-            soul = self._soul_md_content
-        else:
+        # NOTE: SOUL.md content is rendered as the body of the
+        # ``# Identity`` section (see ``_identity_section``).  We
+        # deliberately do NOT also emit it here as
+        # ``## Agent Identity (SOUL.md)`` because two copies of the
+        # tenant's persona at different prominences confused the LLM
+        # ("You are Surogate" wins over "Your name is X").  The
+        # legacy helm-mode disk path is still consulted when no
+        # pre-loaded content was injected by the worker.
+        if self._soul_md_content is None:
             soul = load_soul_md_from_disk(self.tenant.asset_root)
-        if soul:
-            parts.append(f"## Agent Identity (SOUL.md)\n{soul}")
+            if soul:
+                parts.append(f"## Agent Identity (SOUL.md)\n{soul}")
 
         # AGENT.md / AGENTS.md — pre-loaded bundle content only;
         # the disk-reading variant for AGENT.md doesn't exist in the
