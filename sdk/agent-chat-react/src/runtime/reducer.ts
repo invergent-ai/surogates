@@ -58,6 +58,10 @@ export function applyAgentChatEvent(
 
   nextState = applyRetryIndicator(nextState, event);
 
+  if (state.terminal && isPostTerminalLiveEvent(event.type)) {
+    return nextState;
+  }
+
   switch (event.type) {
     case "user.message":
       // A new user message means the session is about to run a new turn.
@@ -238,6 +242,18 @@ export function applyAgentChatEvent(
     case "turn.summary":
       return applyTurnSummary(nextState, event);
   }
+}
+
+function isPostTerminalLiveEvent(type: AgentChatRuntimeEvent["type"]): boolean {
+  return (
+    type === "harness.wake" ||
+    type === "llm.request" ||
+    type === "session.resume" ||
+    type === "llm.delta" ||
+    type === "llm.response" ||
+    type === "llm.thinking" ||
+    type === "tool.call"
+  );
 }
 
 function applyRetryIndicator(

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 import traceback
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID
@@ -26,6 +27,7 @@ from surogates.config import (
     SHARED_WORK_QUEUE_KEY,
     encode_queue_member,
     enqueue_session,
+    enqueue_ts_key,
     parse_queue_member,
 )
 from surogates.harness.error_classify import classify_harness_error
@@ -329,6 +331,38 @@ class Orchestrator:
                         dequeued.org_id, dequeued.agent_id,
                     )
                 continue
+
+            # TTFT diagnostic: compute and log queue-wait latency.
+            # The enqueue site stamps a per-member ts key with a 60s
+            # TTL; we read it once on dequeue, log the delta, then
+            # delete the key so the next enqueue on the same tuple
+            # starts a fresh clock.  Missing key (e.g. crash recovery,
+            # TTL expiry) logs ``queue_wait=unknown`` rather than
+            # blocking the dispatch.
+            _member = encode_queue_member(
+                org_id=dequeued.org_id, agent_id=dequeued.agent_id,
+                session_id=session_id_str,
+            )
+            try:
+                _raw = await self.redis.get(enqueue_ts_key(_member))
+                if _raw is not None:
+                    _enq_ts = float(
+                        _raw.decode() if isinstance(_raw, bytes) else _raw,
+                    )
+                    _wait_ms = (time.time() - _enq_ts) * 1000.0
+                    logger.info(
+                        "ttft session=%s queue_wait=%.0fms",
+                        session_id, _wait_ms,
+                    )
+                    await self.redis.delete(enqueue_ts_key(_member))
+                else:
+                    logger.info(
+                        "ttft session=%s queue_wait=unknown "
+                        "(enqueue ts key missing)",
+                        session_id,
+                    )
+            except Exception:  # noqa: BLE001 — diagnostic only
+                pass
 
             # Spawn a bounded task.
             await self.semaphore.acquire()

@@ -4,7 +4,7 @@
 // Custom chat thread — uses ai-elements Conversation + Message
 // with a compact, Claude Code-inspired layout.
 //
-import { Fragment, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Conversation,
   ConversationContent,
@@ -43,7 +43,7 @@ import { TurnFeedback } from "./turn-feedback";
 import { useSmoothStream } from "./use-smooth-stream";
 import { ArtifactBlock } from "./artifacts/artifact-block";
 import { ErrorMessage } from "./error-message";
-import { TurnSummaryCard, TurnSummaryPending } from "./turn-summary-card";
+import { TurnSummaryCard } from "./turn-summary-card";
 import { cn } from "../../lib/utils";
 import {
   AlertTriangle,
@@ -81,10 +81,9 @@ interface ChatThreadProps {
   sessionId: string | null;
   messages: ChatMessageType[];
   isRunning: boolean;
-  /** True once the session has ended terminally. Skeleton placeholders
-   *  for the post-answer summarizer window gate on ``!terminal`` because
-   *  ``isRunning`` already flipped false on the final text-only
-   *  ``llm.response``, before the harness summarizer runs. */
+  /** True once the session has ended terminally. Kept in the prop
+   *  contract for callers that already thread runtime state through
+   *  ChatThread. */
   terminal: boolean;
   isLoadingHistory?: boolean;
   onSend: (
@@ -148,6 +147,8 @@ type TimelineEntry =
       artifactKind: ArtifactKind;
       version: number;
     };
+
+const WORKING_ON_IT_DELAY_MS = 250;
 
 /**
  * Flatten an assistant message into a list of timeline entries
@@ -1346,20 +1347,14 @@ function deriveFileArtifactsFromMessages(
 
 function SimpleAssistantGroup({
   messages,
-  lastGlobalIndex,
-  totalMessages,
   isRunning,
-  terminal,
   sessionId,
   artifactFallbacks,
   onFileSelect,
   onRetry,
 }: {
   messages: ChatMessageType[];
-  lastGlobalIndex: number;
-  totalMessages: number;
   isRunning: boolean;
-  terminal: boolean;
   sessionId: string | null;
   artifactFallbacks: Record<string, string>;
   onFileSelect?: (path: string) => void;
@@ -1376,8 +1371,6 @@ function SimpleAssistantGroup({
   const tailHasTools = !!(tail?.toolCalls && tail.toolCalls.length > 0);
   const tailIsTextOnly = !!tail && !tailHasTools;
   const finalText = tailIsTextOnly && tail!.content ? tail!.content : "";
-
-  const isTailGroup = lastGlobalIndex === totalMessages - 1;
 
   const showErrorInfo =
     !!tail && tail.status === "error" && !!tail.errorInfo;
@@ -1452,27 +1445,13 @@ function SimpleAssistantGroup({
             tail={tail}
           />
         )}
-        {effectiveTurnSummary ? (
+        {effectiveTurnSummary && (
           <TurnSummaryCard
             summary={effectiveTurnSummary}
             sessionId={sessionId}
             messages={messages}
             onFileSelect={onFileSelect}
           />
-        ) : (
-          // The harness summarizer runs after the last assistant
-          // response and before ``session.complete``. Show a pending
-          // placeholder during that window so users aren't surprised
-          // when the Summary card pops in. Gated on ``!terminal``
-          // rather than ``isRunning`` because the text-only final
-          // ``llm.response`` already flips ``isRunning`` to false —
-          // the summarizer then runs in the gap before
-          // ``session.complete`` (which is what sets ``terminal``).
-          isTailGroup
-          && !terminal
-          && !!finalText
-          && tail?.status === "complete"
-          && <TurnSummaryPending />
         )}
         {showErrorInfo && (
           <div className="mt-3">
@@ -1491,7 +1470,6 @@ function AssistantGroup({
   lastGlobalIndex,
   totalMessages,
   isRunning,
-  terminal,
   sessionId,
   artifactFallbacks,
   onFileSelect,
@@ -1502,7 +1480,6 @@ function AssistantGroup({
   lastGlobalIndex: number;
   totalMessages: number;
   isRunning: boolean;
-  terminal: boolean;
   sessionId: string | null;
   artifactFallbacks: Record<string, string>;
   onFileSelect?: (path: string) => void;
@@ -1513,10 +1490,7 @@ function AssistantGroup({
     return (
       <SimpleAssistantGroup
         messages={messages}
-        lastGlobalIndex={lastGlobalIndex}
-        totalMessages={totalMessages}
         isRunning={isRunning}
-        terminal={terminal}
         sessionId={sessionId}
         artifactFallbacks={artifactFallbacks}
         onFileSelect={onFileSelect}
@@ -1624,13 +1598,34 @@ function WorkingOnItIndicator() {
   );
 }
 
+function useDelayedRunningIndicator(isRunning: boolean): boolean {
+  const [visible, setVisible] = useState(isRunning);
+
+  useEffect(() => {
+    if (!isRunning) {
+      setVisible(false);
+      return;
+    }
+    if (visible) return;
+
+    const timeout = window.setTimeout(() => {
+      setVisible(true);
+    }, WORKING_ON_IT_DELAY_MS);
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [isRunning, visible]);
+
+  return visible;
+}
+
 // ── Main thread ──────────────────────────────────────────────────────
 
 export function ChatThread({
   sessionId,
   messages,
   isRunning,
-  terminal,
   isLoadingHistory = false,
   onSend,
   onStop,
@@ -1651,6 +1646,7 @@ export function ChatThread({
   onViewModeChange,
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
+  const showWorkingOnIt = useDelayedRunningIndicator(isRunning);
 
   // Pair ``create_artifact`` tool calls to their matching
   // ``artifact.created`` system messages by emission order across the
@@ -1764,23 +1760,21 @@ export function ChatThread({
                 const groupRetry =
                   groupTail.id === activeFailureId ? onRetry : undefined;
                 return (
-                  <Fragment key={group.messages[0].id}>
-                    <AssistantGroup
-                      messages={group.messages}
-                      lastGlobalIndex={group.lastGlobalIndex}
-                      totalMessages={messages.length}
-                      isRunning={isRunning}
-                      terminal={terminal}
-                      sessionId={sessionId}
-                      artifactFallbacks={artifactFallbacks}
-                      onFileSelect={onFileSelect}
-                      onRetry={groupRetry}
-                      viewMode={viewMode}
-                    />
-                    {isRunning && <WorkingOnItIndicator />}
-                  </Fragment>
+                  <AssistantGroup
+                    key={group.messages[0].id}
+                    messages={group.messages}
+                    lastGlobalIndex={group.lastGlobalIndex}
+                    totalMessages={messages.length}
+                    isRunning={isRunning}
+                    sessionId={sessionId}
+                    artifactFallbacks={artifactFallbacks}
+                    onFileSelect={onFileSelect}
+                    onRetry={groupRetry}
+                    viewMode={viewMode}
+                  />
                 );
               })}
+              {showWorkingOnIt && <WorkingOnItIndicator />}
             </>
           )}
         </ConversationContent>

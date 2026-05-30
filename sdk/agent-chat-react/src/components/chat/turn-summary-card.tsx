@@ -9,8 +9,6 @@
 
 import { ArtifactBlock } from "./artifacts/artifact-block";
 import { WorkspaceFileCard } from "./workspace-file-card";
-import { Shimmer } from "../ai-elements/shimmer";
-import { Skeleton } from "../ui/skeleton";
 import type {
   AgentChatTurnArtifactRef,
   AgentChatTurnSummary,
@@ -131,33 +129,6 @@ export function TurnSummaryCard({
           })}
         </div>
       )}
-    </div>
-  );
-}
-
-/**
- * Placeholder shown between the agent's final answer and the
- * TurnSummaryCard arriving. The harness's turn summarizer runs an
- * LLM call after the last assistant response and before
- * ``session.complete``; without an indicator users see their answer
- * appear and then a Summary card pop in seconds later with no
- * explanation. This component fills that gap with the same outer
- * frame as the eventual card so the layout doesn't jump when the
- * real summary lands.
- */
-export function TurnSummaryPending() {
-  return (
-    <div className="mt-3 rounded border border-border bg-muted/50 px-3 py-2 text-sm">
-      <div className="mb-2 text-xs font-semibold uppercase tracking-wide">
-        Summary
-      </div>
-      <Shimmer duration={3} spread={3} className="mb-2 text-sm">
-        Summarizing conversation...
-      </Shimmer>
-      <div className="space-y-1.5">
-        <Skeleton className="h-3 w-3/4" />
-        <Skeleton className="h-3 w-2/3" />
-      </div>
     </div>
   );
 }

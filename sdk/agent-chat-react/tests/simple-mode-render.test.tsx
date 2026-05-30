@@ -82,12 +82,27 @@ afterEach(() => {
   root = null;
   container?.remove();
   container = null;
+  vi.useRealTimers();
 });
 
 function mount(node: ReactElement): HTMLDivElement {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
+  act(() => {
+    root?.render(
+      <AgentChatAdapterProvider
+        value={{ adapter: adapterStub(), sessionId: "s-1" }}
+      >
+        <TooltipProvider>{node}</TooltipProvider>
+      </AgentChatAdapterProvider>,
+    );
+  });
+  return container;
+}
+
+function rerender(node: ReactElement): HTMLDivElement {
+  if (!root || !container) throw new Error("Call mount before rerender");
   act(() => {
     root?.render(
       <AgentChatAdapterProvider
@@ -292,13 +307,13 @@ describe("Simple mode ChatThread rendering", () => {
     expect(downloadNames).toEqual(["final.docx"]);
   });
 
-  it("shows the TurnSummaryPending skeleton between the final answer and the harness summarizer landing", () => {
+  it("does not show a TurnSummaryPending skeleton while waiting for an optional summary", () => {
     // Reproduces the post-text-only-response window: the harness has
     // emitted ``llm.response`` (tail.status = complete, finalText set,
     // no tool calls → reducer flipped isRunning to false) but has not
     // yet emitted ``turn.summary`` or ``session.complete`` (terminal
-    // still false). The skeleton must show in this window so users
-    // know the Summary card is on its way.
+    // still false). The summary event is optional, so showing an
+    // inferred loading skeleton causes a flash when no summary lands.
     const messages: ChatMessage[] = [
       {
         id: "final",
@@ -321,7 +336,7 @@ describe("Simple mode ChatThread rendering", () => {
         viewMode="simple"
       />,
     );
-    expect(dom.textContent).toContain("Summarizing conversation");
+    expect(dom.textContent).not.toContain("Summarizing conversation");
   });
 
   it("hides the TurnSummaryPending skeleton once the session is terminal", () => {
@@ -430,7 +445,7 @@ describe("Simple mode ChatThread rendering", () => {
     expect(dom.textContent).toContain("Working on it");
   });
 
-  it("shows 'Working on it...' after every assistant message while running", () => {
+  it("shows one thread-level 'Working on it...' indicator while running", () => {
     const messages: ChatMessage[] = [
       {
         id: "user-1",
@@ -475,7 +490,131 @@ describe("Simple mode ChatThread rendering", () => {
     );
 
     const indicators = dom.textContent?.match(/Working on it/g) ?? [];
-    expect(indicators).toHaveLength(2);
+    expect(indicators).toHaveLength(1);
+  });
+
+  it("shows 'Working on it...' after the last message when the tail is user", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        content: "First question",
+        createdAt: new Date(),
+        status: "complete",
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "First answer.",
+        createdAt: new Date(),
+        status: "complete",
+      },
+      {
+        id: "user-2",
+        role: "user",
+        content: "Follow up",
+        createdAt: new Date(),
+        status: "complete",
+      },
+    ];
+
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={messages}
+        isRunning={true}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+
+    const indicators = dom.textContent?.match(/Working on it/g) ?? [];
+    expect(indicators).toHaveLength(1);
+    expect(dom.textContent).toMatch(/Follow up.*Working on it/s);
+  });
+
+  it("does not flash 'Working on it...' for brief running transitions", () => {
+    vi.useFakeTimers();
+    const messages: ChatMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        content: "Question",
+        createdAt: new Date(),
+        status: "complete",
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "Answer.",
+        createdAt: new Date(),
+        status: "complete",
+      },
+    ];
+    const render = (isRunning: boolean) => (
+      <ChatThread
+        sessionId="s-1"
+        messages={messages}
+        isRunning={isRunning}
+        terminal={!isRunning}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />
+    );
+
+    const dom = mount(render(false));
+    expect(dom.textContent).not.toContain("Working on it");
+
+    rerender(render(true));
+    expect(dom.textContent).not.toContain("Working on it");
+
+    rerender(render(false));
+    act(() => {
+      vi.runOnlyPendingTimers();
+    });
+    expect(dom.textContent).not.toContain("Working on it");
+  });
+
+  it("shows 'Working on it...' when a running transition lasts past the delay", () => {
+    vi.useFakeTimers();
+    const messages: ChatMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        content: "Question",
+        createdAt: new Date(),
+        status: "complete",
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "Answer.",
+        createdAt: new Date(),
+        status: "complete",
+      },
+    ];
+    const render = (isRunning: boolean) => (
+      <ChatThread
+        sessionId="s-1"
+        messages={messages}
+        isRunning={isRunning}
+        terminal={!isRunning}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />
+    );
+
+    const dom = mount(render(false));
+    rerender(render(true));
+    act(() => {
+      vi.advanceTimersByTime(250);
+    });
+
+    expect(dom.textContent).toContain("Working on it");
   });
 
   it("shows 'Working on it...' below complete preamble text while isRunning", () => {

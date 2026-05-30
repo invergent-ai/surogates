@@ -218,6 +218,18 @@ def parse_queue_member(member: str) -> tuple[str, str, str]:
     return parts[0], parts[1], parts[2]
 
 
+#: TTL on the per-enqueue timestamp key the dispatcher reads to log
+#: queue-wait latency.  60 seconds is well above the worst-case dwell
+#: time for a healthy worker (sub-second) and short enough that stale
+#: keys for crashed/abandoned sessions don't accumulate.
+_ENQUEUE_TS_TTL_SECONDS: int = 60
+
+
+def enqueue_ts_key(member: str) -> str:
+    """Redis key for the per-member enqueue timestamp (TTFT diagnostic)."""
+    return f"surogates:enq_ts:{member}"
+
+
 async def enqueue_session(
     redis: Any,
     *,
@@ -235,12 +247,27 @@ async def enqueue_session(
     extract the tenant for the per-tenant concurrency-gate check
     without a DB round-trip per dequeue.  Lower *priority* values
     are popped first.
+
+    TTFT diagnostic: stamps ``surogates:enq_ts:{member}`` with the
+    enqueue wall-clock so the dispatcher can compute queue-wait time
+    when it pops the member.  Best-effort — Redis blip logs but does
+    not fail the enqueue.
     """
+    import time as _time
+
     member = encode_queue_member(
         org_id=str(org_id), agent_id=str(agent_id),
         session_id=str(session_id),
     )
     await redis.zadd(SHARED_WORK_QUEUE_KEY, {member: priority})
+    try:
+        await redis.set(
+            enqueue_ts_key(member),
+            str(_time.time()),
+            ex=_ENQUEUE_TS_TTL_SECONDS,
+        )
+    except Exception:  # noqa: BLE001 — diagnostic only
+        pass
 
 
 # Default Redis channel prefix for session interrupts.
