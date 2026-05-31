@@ -64,6 +64,8 @@ export interface NextActionStripResult {
 const _NEXT_ACTION_RE =
   /<next_action([^>]*)>([\s\S]*?)<\/next_action>\s*/gi;
 
+const _PARTIAL_NEXT_ACTION_FOOTER_RE = /(?:^|\n)\s*<next_action\b[\s\S]*$/i;
+
 const _ATTR_RE = /(\w+)="([^"]*)"/g;
 
 const _VALID_COMPLEXITY: ReadonlySet<NextActionComplexity> = new Set([
@@ -110,6 +112,12 @@ function _inferNarration(text: string): string | null {
   return firstSentence;
 }
 
+function _stripPartialNextActionFooter(text: string): string {
+  const match = _PARTIAL_NEXT_ACTION_FOOTER_RE.exec(text);
+  if (!match) return text;
+  return text.slice(0, match.index).trimEnd();
+}
+
 /**
  * Strip every ``<next_action>`` block from *text* and return both the
  * cleaned text and the parsed last block (if any).  Unknown complexity
@@ -124,10 +132,10 @@ function _inferNarration(text: string): string | null {
  * block always wins -- the heuristic only fires when ``action`` is
  * ``null``.
  *
- * Idempotent for streamed text: while the model is still emitting
- * tokens, an incomplete ``<next_action`` tag without the closing
- * ``</next_action>`` is left in place so the renderer can hide it on
- * the next chunk once the closer arrives.
+ * Streaming-safe: while the model is still emitting tokens, an
+ * incomplete ``<next_action`` footer without the closing
+ * ``</next_action>`` is hidden immediately so metadata never flashes
+ * in the rendered message.
  */
 export function stripAndParseNextAction(text: string): NextActionStripResult {
   if (!text) {
@@ -141,10 +149,11 @@ export function stripAndParseNextAction(text: string): NextActionStripResult {
   // parser convention.
   const matches = Array.from(text.matchAll(_NEXT_ACTION_RE));
   if (matches.length === 0) {
+    const cleaned = _stripPartialNextActionFooter(text);
     return {
-      cleaned: text,
+      cleaned,
       action: null,
-      inferredNarration: _inferNarration(text),
+      inferredNarration: cleaned === text ? _inferNarration(text) : null,
     };
   }
   for (const match of matches) {
@@ -165,7 +174,9 @@ export function stripAndParseNextAction(text: string): NextActionStripResult {
     last = { complexity, summary, body };
   }
 
-  const cleaned = text.replace(_NEXT_ACTION_RE, "").trimEnd();
+  const cleaned = _stripPartialNextActionFooter(
+    text.replace(_NEXT_ACTION_RE, "").trimEnd(),
+  );
   // Explicit block wins over the heuristic.
   return { cleaned, action: last, inferredNarration: null };
 }
