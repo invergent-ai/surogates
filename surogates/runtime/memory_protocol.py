@@ -57,18 +57,27 @@ class _MemoryEnvelope:
 
 def memory_object_key(
     *, storage_key_prefix: str, user_id: str | None,
+    target: str = "memory",
 ) -> str:
-    """Build the R2 object key for the per-user memory file.
+    """Build the R2 object key for one memory target.
 
-    ``storage_key_prefix`` comes from ``AgentRuntimeContext``.  ``user_id`` may be ``None`` for
-    service-account sessions; those route to a ``shared/`` subkey
-    instead of ``users/<id>/`` so principal isolation is preserved
-    even when no user owns the session.
+    ``target`` is ``"memory"`` (agent memory) or ``"user"`` (facts
+    about the user surfaced by the UI).  Each target lands in its own
+    R2 object so writes from the harness and the API gateway can
+    coexist without trampling each other.
+
+    ``storage_key_prefix`` comes from ``AgentRuntimeContext``.
+    ``user_id`` may be ``None`` for service-account sessions; those
+    route to a ``shared/`` subkey instead of ``users/<id>/`` so
+    principal isolation is preserved even when no user owns the
+    session.
     """
+    if target not in ("memory", "user"):
+        raise ValueError(f"unknown memory target: {target!r}")
     prefix = storage_key_prefix.rstrip("/")
     if user_id is None:
-        return f"{prefix}/shared/memory.json"
-    return f"{prefix}/users/{user_id}/memory.json"
+        return f"{prefix}/shared/{target}.json"
+    return f"{prefix}/users/{user_id}/{target}.json"
 
 
 def encode_envelope(env: _MemoryEnvelope) -> bytes:

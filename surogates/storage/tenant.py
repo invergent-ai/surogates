@@ -47,11 +47,6 @@ def storage_key_prefix(config: dict | None) -> str:
     return str(value) if value else ""
 
 
-def tenant_bucket(org_id: UUID | str) -> str:
-    """Return the bucket name for a tenant."""
-    return f"tenant-{org_id}"
-
-
 _S3_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 
 
@@ -144,26 +139,35 @@ class TenantStorage:
         backend: StorageBackend,
         org_id: UUID,
         user_id: UUID | None,
+        bucket: str,
     ) -> None:
+        """Construct tenant-scoped storage on the shared workspaces bucket.
+
+        Every operation routes to ``bucket`` with keys prefixed by
+        ``tenants/{org_id}/`` so different tenants don't collide.
+        The bucket is provisioned out-of-band; the IAM token never
+        receives ``CreateBucket`` rights, so a compromised worker
+        cannot enumerate or mutate cluster-wide buckets.
+        """
+        if not bucket:
+            raise ValueError("TenantStorage requires a non-empty bucket")
         self._backend = backend
-        self._bucket = tenant_bucket(org_id)
+        self._bucket = bucket
         self._org_id = str(org_id)
         self._user_id = str(user_id) if user_id is not None else None
+        self._tenant_prefix = f"tenants/{self._org_id}/"
 
-    # ── Bucket lifecycle ────────────────────────────────────────────
-
-    async def ensure_bucket(self) -> None:
-        """Create the tenant bucket if it doesn't exist."""
-        if not await self._backend.bucket_exists(self._bucket):
-            await self._backend.create_bucket(self._bucket)
+    def _tk(self, rel: str) -> str:
+        """Prepend the per-tenant key prefix so different tenants don't collide on the same relative path."""
+        return f"{self._tenant_prefix}{rel}"
 
     # ── Skills (user layer) ─────────────────────────────────────────
 
     def _shared_skill_key(self, name: str, category: str | None = None) -> str:
         """Build the key prefix for an org-shared skill directory."""
         if category:
-            return f"shared/skills/{category}/{name}"
-        return f"shared/skills/{name}"
+            return self._tk(f"shared/skills/{category}/{name}")
+        return self._tk(f"shared/skills/{name}")
 
     def _user_skill_key(self, name: str, category: str | None = None) -> str:
         """Build the key prefix for a user-scoped skill directory.
@@ -178,8 +182,8 @@ class TenantStorage:
                 "use _shared_skill_key for service-account contexts."
             )
         if category:
-            return f"users/{self._user_id}/skills/{category}/{name}"
-        return f"users/{self._user_id}/skills/{name}"
+            return self._tk(f"users/{self._user_id}/skills/{category}/{name}")
+        return self._tk(f"users/{self._user_id}/skills/{name}")
 
     def _default_skill_write_key(
         self, name: str, category: str | None = None
@@ -207,7 +211,7 @@ class TenantStorage:
         """
         if self._user_id is None:
             return []
-        prefix = f"users/{self._user_id}/skills/"
+        prefix = self._tk(f"users/{self._user_id}/skills/")
         keys = await self._backend.list_keys(self._bucket, prefix=prefix)
         found: list[tuple[str, str]] = []
         for key in keys:
@@ -245,7 +249,7 @@ class TenantStorage:
                 return {"key_prefix": key_prefix, "layer": "user"}
 
         shared_keys = await self._backend.list_keys(
-            self._bucket, prefix="shared/skills/",
+            self._bucket, prefix=self._tk("shared/skills/"),
         )
         for key in shared_keys:
             parts = key.split("/")
@@ -322,7 +326,7 @@ class TenantStorage:
                 }
 
         # Org-shared layer
-        shared_prefix = "shared/skills/"
+        shared_prefix = self._tk("shared/skills/")
         shared_keys = await self._backend.list_keys(self._bucket, prefix=shared_prefix)
         for key in shared_keys:
             if key.endswith("/SKILL.md"):
@@ -339,8 +343,8 @@ class TenantStorage:
     def _shared_agent_key(self, name: str, category: str | None = None) -> str:
         """Build the key prefix for an org-shared sub-agent directory."""
         if category:
-            return f"shared/agents/{category}/{name}"
-        return f"shared/agents/{name}"
+            return self._tk(f"shared/agents/{category}/{name}")
+        return self._tk(f"shared/agents/{name}")
 
     def _user_agent_key(self, name: str, category: str | None = None) -> str:
         """Build the key prefix for a user-scoped sub-agent directory."""
@@ -350,8 +354,8 @@ class TenantStorage:
                 "use _shared_agent_key for service-account contexts."
             )
         if category:
-            return f"users/{self._user_id}/agents/{category}/{name}"
-        return f"users/{self._user_id}/agents/{name}"
+            return self._tk(f"users/{self._user_id}/agents/{category}/{name}")
+        return self._tk(f"users/{self._user_id}/agents/{name}")
 
     def _default_agent_write_key(
         self, name: str, category: str | None = None,
@@ -365,7 +369,7 @@ class TenantStorage:
         """Yield ``(agent_name, key_prefix)`` for every user-layer AGENT.md."""
         if self._user_id is None:
             return []
-        prefix = f"users/{self._user_id}/agents/"
+        prefix = self._tk(f"users/{self._user_id}/agents/")
         keys = await self._backend.list_keys(self._bucket, prefix=prefix)
         found: list[tuple[str, str]] = []
         for key in keys:
@@ -400,7 +404,7 @@ class TenantStorage:
                 return {"key_prefix": key_prefix, "layer": "user"}
 
         shared_keys = await self._backend.list_keys(
-            self._bucket, prefix="shared/agents/",
+            self._bucket, prefix=self._tk("shared/agents/"),
         )
         for key in shared_keys:
             parts = key.split("/")
@@ -454,7 +458,7 @@ class TenantStorage:
                 }
 
         shared_keys = await self._backend.list_keys(
-            self._bucket, prefix="shared/agents/",
+            self._bucket, prefix=self._tk("shared/agents/"),
         )
         for key in shared_keys:
             if key.endswith("/AGENT.md"):
@@ -476,10 +480,13 @@ class TenantStorage:
         Service-account sessions (no user scope) route to
         ``shared/memory/{filename}`` — org-wide memory that persists
         across every SA-submitted session for the tenant.
+
+        Shared-bucket mode prepends ``tenants/{org_id}/`` so different
+        tenants don't collide on the same per-tenant relative path.
         """
         if self._user_id is None:
-            return f"shared/memory/{filename}"
-        return f"users/{self._user_id}/memory/{filename}"
+            return f"{self._tenant_prefix}shared/memory/{filename}"
+        return f"{self._tenant_prefix}users/{self._user_id}/memory/{filename}"
 
     async def read_memory_file(self, filename: str) -> str | None:
         """Read MEMORY.md or USER.md.  Returns None if not found."""

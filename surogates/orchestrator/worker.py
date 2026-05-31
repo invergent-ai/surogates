@@ -872,24 +872,30 @@ async def run_worker(settings: Settings) -> None:
         # in-memory fallback below covers test contexts only.
         memory_cache = worker_state.get("memory_cache")
         if memory_cache is not None:
-            from surogates.memory.r2_store import R2MemoryStore
+            from surogates.memory.r2_store import (
+                MEMORY_TARGETS, R2MemoryStore,
+            )
             from surogates.runtime.memory_protocol import memory_object_key
 
             mem_bucket = (
                 settings.storage.memory_bucket or settings.storage.bucket
             )
-            mem_key = memory_object_key(
-                storage_key_prefix=ctx.storage_key_prefix,
-                user_id=(
-                    str(session.user_id) if session.user_id else None
-                ),
+            _user_id_str = (
+                str(session.user_id) if session.user_id else None
             )
-            # on every successful write,
-            # publish user.memory_changed:<org_id>:<user_id> on
-            # Redis so other workers serving the same user
-            # invalidate their L1 MemoryCache entry; also emit
-            # MEMORY_WRITE / MEMORY_CONFLICT audit so dashboards
-            # surface conflict rates per tenant.
+            mem_keys = {
+                target: memory_object_key(
+                    storage_key_prefix=ctx.storage_key_prefix,
+                    user_id=_user_id_str,
+                    target=target,
+                )
+                for target in MEMORY_TARGETS
+            }
+            # on every successful write, publish
+            # user.memory_changed:<org_id>:<user_id> on Redis so other
+            # workers serving the same user invalidate their L1
+            # MemoryCache entry; also emit a write/conflict audit so
+            # dashboards surface conflict rates per tenant.
             from surogates.audit.types import AuditType
 
             _user_token = (
@@ -900,7 +906,7 @@ async def run_worker(settings: Settings) -> None:
             )
 
             async def _on_memory_write(
-                action, *, new_version, conflict_detected,
+                action, *, target, new_version, conflict_detected,
             ):
                 try:
                     await redis_client.publish(
@@ -924,6 +930,7 @@ async def run_worker(settings: Settings) -> None:
                         ),
                         data={
                             "action": action,
+                            "target": target,
                             "version": new_version,
                         },
                     )
@@ -933,7 +940,7 @@ async def run_worker(settings: Settings) -> None:
                     )
 
             memory_store = R2MemoryStore(
-                backend=storage_backend, bucket=mem_bucket, key=mem_key,
+                backend=storage_backend, bucket=mem_bucket, keys=mem_keys,
                 on_write=_on_memory_write,
             )
             await memory_store.load_from_r2()

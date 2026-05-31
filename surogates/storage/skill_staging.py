@@ -273,22 +273,21 @@ class SkillStager:
             return self.workspace_path_for(session_id, skill_name)
 
     # ------------------------------------------------------------------
-    # Staging from a tenant bucket (user / org-shared file skills)
+    # Staging from object storage (user / org-shared file skills)
     # ------------------------------------------------------------------
 
-    async def stage_from_tenant_bucket(
+    async def stage_from_object_store(
         self,
         session_id: UUID | str,
         skill_name: str,
-        tenant_bucket_name: str,
+        source_bucket: str,
         source_prefix: str,
     ) -> str:
-        """Copy a tenant-bucket-backed skill into the session workspace.
+        """Copy a storage-backed skill into the session workspace.
 
-        Reads every object under *source_prefix* in *tenant_bucket_name*
-        and rewrites it under
-        ``sessions/{session_id}/.skills/{skill_name}/<relpath>``.  A
-        ``.staged`` marker is written last.
+        Reads every object under *source_prefix* in *source_bucket* and
+        rewrites it under ``sessions/{session_id}/.skills/{skill_name}/
+        <relpath>``.  A ``.staged`` marker is written last.
 
         Concurrent callers for the same ``(session_id, skill_name)`` are
         serialised — see :meth:`stage_from_filesystem` for the locking
@@ -308,7 +307,7 @@ class SkillStager:
             strip_len = len(normalized_src) + 1  # +1 for the trailing "/"
 
             src_keys = await self._backend.list_keys(
-                tenant_bucket_name, prefix=f"{normalized_src}/",
+                source_bucket, prefix=f"{normalized_src}/",
             )
 
             sem = asyncio.Semaphore(_STAGE_CONCURRENCY)
@@ -320,7 +319,7 @@ class SkillStager:
                 if not rel:
                     return False
                 async with sem:
-                    data = await self._backend.read(tenant_bucket_name, key)
+                    data = await self._backend.read(source_bucket, key)
                     await self._backend.write(
                         self._storage_bucket,
                         self._physical_key(

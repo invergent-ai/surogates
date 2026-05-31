@@ -117,6 +117,7 @@ def _get_tenant_storage(request: Request, tenant: TenantContext) -> TenantStorag
         backend=request.app.state.storage,
         org_id=tenant.org_id,
         user_id=tenant.user_id,
+        bucket=request.app.state.settings.storage.bucket,
     )
 
 
@@ -350,7 +351,6 @@ async def create_agent(
     raise_validation(_validate_name_matches_frontmatter(body.name, body.content))
 
     ts = _get_tenant_storage(request, tenant)
-    await ts.ensure_bucket()
 
     existing = await ts.agent_exists(body.name)
     if existing:

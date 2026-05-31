@@ -37,7 +37,6 @@ from surogates.storage.skill_staging import SkillStager, has_stageable_assets
 from surogates.storage.tenant import (
     TenantStorage,
     agent_session_bucket,
-    tenant_bucket,
 )
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -151,6 +150,7 @@ def _get_tenant_storage(request: Request, tenant: TenantContext) -> TenantStorag
         backend=request.app.state.storage,
         org_id=tenant.org_id,
         user_id=tenant.user_id,
+        bucket=request.app.state.settings.storage.bucket,
     )
 
 
@@ -304,10 +304,10 @@ async def _stage_skill_for_session(
         existing = await ts.skill_exists(skill_def.name)
         if not existing:
             return None
-        return await stager.stage_from_tenant_bucket(
+        return await stager.stage_from_object_store(
             session_id=session_id,
             skill_name=skill_def.name,
-            tenant_bucket_name=tenant_bucket(tenant.org_id),
+            source_bucket=request.app.state.settings.storage.bucket,
             source_prefix=existing["key_prefix"],
         )
 
@@ -659,7 +659,6 @@ async def create_skill(
     raise_validation(validate_content_size(body.content))
 
     ts = _get_tenant_storage(request, tenant)
-    await ts.ensure_bucket()
 
     existing = await ts.skill_exists(body.name)
     if existing:
