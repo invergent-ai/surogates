@@ -105,7 +105,7 @@ class PromptBuilder:
         self._available_tools: set[str] = available_tools or set()
         self._memory_manager: MemoryManager | None = memory_manager
         self._session: Session | None = session
-        # Plan 3 / Task 12 — pre-loaded bundle content.  When set,
+        # pre-loaded bundle content.  When set,
         # the section builder uses these strings instead of the
         # legacy disk read.  harness_factory does the async pre-load
         # via load_soul_md(bundle) / load_agent_md(bundle) so the
@@ -760,37 +760,19 @@ class PromptBuilder:
         return "\n".join(lines)
 
     def _context_files_section(self) -> str:
-        """Load context files (SOUL.md, AGENTS.md, etc.) into the prompt.
+        """Render the context-file section of the prompt.
 
-        Plan 3 / Task 12.  Reads from pre-loaded bundle content
-        (``self._soul_md_content`` / ``self._agent_md_content``)
-        when available; falls back to the legacy disk-reading
-        path for helm-mode pods and tests that don't wire a
-        bundle.  Plan 9 retires the disk fallback.
+        SOUL.md content is rendered as the body of the ``# Identity``
+        section (see ``_identity_section``) — emitting it again here
+        confused the LLM in early tests ("You are Surogate" winning
+        over "Your name is X"), so this section only carries AGENT.md
+        / AGENTS.md and any in-workspace project context.
         """
-        from surogates.harness.context_files import (
-            load_project_context, load_soul_md_from_disk,
-        )
+        from surogates.harness.context_files import load_project_context
 
         parts: list[str] = []
 
-        # NOTE: SOUL.md content is rendered as the body of the
-        # ``# Identity`` section (see ``_identity_section``).  We
-        # deliberately do NOT also emit it here as
-        # ``## Agent Identity (SOUL.md)`` because two copies of the
-        # tenant's persona at different prominences confused the LLM
-        # ("You are Surogate" wins over "Your name is X").  The
-        # legacy helm-mode disk path is still consulted when no
-        # pre-loaded content was injected by the worker.
-        if self._soul_md_content is None:
-            soul = load_soul_md_from_disk(self.tenant.asset_root)
-            if soul:
-                parts.append(f"## Agent Identity (SOUL.md)\n{soul}")
-
-        # AGENT.md / AGENTS.md — pre-loaded bundle content only;
-        # the disk-reading variant for AGENT.md doesn't exist in the
-        # legacy path (load_project_context walks workspace, not
-        # asset_root) so there's no fallback to thread.
+        # AGENT.md / AGENTS.md — pre-loaded bundle content only.
         if self._agent_md_content:
             parts.append(
                 f"## Agent Definition (AGENT.md)\n{self._agent_md_content}",

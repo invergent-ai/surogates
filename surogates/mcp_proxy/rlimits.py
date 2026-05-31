@@ -1,6 +1,6 @@
 """Apply resource limits to an MCP subprocess.
 
-Plan 5 / Task 10.  Called from the subprocess's preexec_fn (so
+Called from the subprocess's preexec_fn (so
 the rlimits scope to the child, not the parent proxy process).
 RLIMIT_AS caps virtual memory; RLIMIT_CPU caps CPU seconds.
 

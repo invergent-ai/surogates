@@ -1,13 +1,10 @@
-# Plan 8 / Task 13.  Platform-level cleanup CronJob.
+# Platform-level cleanup CronJob.
 #
-# Replaces the per-tenant cleanup-sessions CronJob from the helm
-# chart (one CronJob per agent, scaled poorly) with a single
-# platform-level CronJob that iterates all shared-mode agents via
-# the surogates.jobs.platform_cleanup script.
+# A single platform-level CronJob that iterates all agents via the
+# surogates.jobs.platform_cleanup script.  Default cadence is every
+# 6 hours.
 #
-# Same cadence as the helm version (every 6 hours by default).
-#
-# Placeholders to fill in (Plan 8 follow-up / operations):
+# Placeholders to fill in:
 #   {{ namespace }}, {{ image_registry }}, {{ image_tag }},
 #   {{ db_secret }}, {{ redis_secret }}, {{ ops_api_url }},
 #   {{ ops_api_token_secret }}, {{ schedule }}  (default "0 */6 * * *")

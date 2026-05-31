@@ -52,7 +52,7 @@ def generate_publishable_key() -> str:
     """Return a freshly minted, high-entropy publishable key.
 
     Convenience for ops scripts and tests.  Production keys are minted
-    once during agent provisioning and shipped into the Helm secret —
+    once during agent provisioning and stored in the agent's secret —
     the runtime path never calls this.
     """
     return PUBLISHABLE_KEY_PREFIX + secrets.token_urlsafe(_SECRET_BYTES)

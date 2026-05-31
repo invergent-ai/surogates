@@ -17,7 +17,7 @@ One ``tasks_tick()`` invocation runs three SQL-driven steps:
    ``_create_session_for_task`` primitive, and push the Session id onto
    the agent's Redis work queue.
 
-Hosted by the orchestrator's main loop at a 5-second cadence (Task 10).
+Hosted by the orchestrator's main loop at a 5-second cadence.
 The function is idempotent under concurrent invocation — the ``UPDATE
 ... WHERE status=X`` guards plus ``SKIP LOCKED`` semantics ensure each
 row is claimed by at most one tick.

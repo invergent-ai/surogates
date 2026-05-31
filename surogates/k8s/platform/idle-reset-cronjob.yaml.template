@@ -1,7 +1,6 @@
-# Plan 8 / Task 13.  Platform-level idle-reset CronJob.
+# Platform-level idle-reset CronJob.
 #
-# Replaces the per-tenant reset-idle-sessions CronJob from the helm
-# chart.  Same cadence (every 5 minutes by default).
+# Default cadence is every 5 minutes.
 
 apiVersion: batch/v1
 kind: CronJob

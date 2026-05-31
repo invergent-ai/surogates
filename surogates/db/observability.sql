@@ -49,10 +49,10 @@ CREATE INDEX IF NOT EXISTS idx_events_feedback_dedupe
     WHERE type IN ('user.feedback', 'expert.endorse', 'expert.override');
 
 -- Per-tenant audit attribution.
--- ``agent_id`` is nullable so the retrofit is non-blocking on existing
--- rows (helm-mode emitters and pre-Task-17 callers leave it NULL).
--- The (agent_id, created_at) index backs the per-tenant audit
--- dashboards that filter on a single agent over a time window.
+-- ``agent_id`` is nullable so emitters with no per-tenant context
+-- (e.g. platform-wide events) can leave it NULL.  The
+-- (agent_id, created_at) index backs the per-tenant audit dashboards
+-- that filter on a single agent over a time window.
 ALTER TABLE audit_log
     ADD COLUMN IF NOT EXISTS agent_id text;
 

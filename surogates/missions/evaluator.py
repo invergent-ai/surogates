@@ -10,9 +10,6 @@ This module is the keystone described in the design spec:
   explicit ``[[mission-complete]]`` marker on its own line.
 * It is rate-limited at 30 seconds per mission to bound cost when many
   tasks complete in burst.
-
-Prompt building + verdict handling come in Task 9 (appended to this
-same module so the evaluator's public surface stays in one place).
 """
 from __future__ import annotations
 

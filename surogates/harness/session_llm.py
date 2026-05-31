@@ -1,8 +1,6 @@
 """Per-session LLM client bundle.
 
-Plan 2 / Task 5.  Replaces the process-wide ``AsyncOpenAI`` instance
-(plus the three auxiliary-client builders) the harness used in helm
-mode.  Each session gets its own bundle constructed from the four
+Each session gets its own bundle constructed from the four
 :class:`~surogates.runtime.LLMEndpoint` slots on
 :class:`~surogates.runtime.AgentRuntimeContext`; the bundle is
 immutable so the harness cannot mid-turn-swap a client and silently
@@ -54,8 +52,7 @@ class SessionLLMClients:
     ``summary`` / ``vision`` / ``advisor`` are optional — agents that
     don't configure them get ``None`` and the harness skips the
     corresponding code path (no fallback to ``main`` for the
-    auxiliary slots — Plan 1 + 6 governance keep the four slots
-    distinct).
+    auxiliary slots.
     """
 
     main: ResolvedLLM
@@ -78,14 +75,12 @@ class SessionLLMClients:
 async def _close_partial_bundle(resolved: list[ResolvedLLM]) -> None:
     """Best-effort aclose every already-resolved slot on a failed build.
 
-    Plan 2 post-review: ``build_session_llm_clients`` (and the helm
-    adapter ``_build_helm_session_llm_clients`` in
-    :mod:`surogates.orchestrator.worker`) instantiate
-    ``AsyncOpenAI`` per slot.  If a later slot raises, the
-    already-resolved earlier slots would leak their connection pools
-    over the worker process's lifetime — a flaky vault produces an
-    unbounded FD leak.  Both factories drain through this helper on
-    failure before re-raising the original exception.
+    ``build_session_llm_clients`` instantiates ``AsyncOpenAI`` per
+    slot.  If a later slot raises, the already-resolved earlier
+    slots would leak their connection pools over the worker
+    process's lifetime — a flaky vault produces an unbounded FD
+    leak.  The factory drains through this helper on failure
+    before re-raising the original exception.
     """
     for slot in resolved:
         try:
@@ -106,13 +101,13 @@ async def build_session_llm_clients(
 ) -> SessionLLMClients:
     """Build the four-slot LLM bundle for one session.
 
-    Plan 2 / Task 6.  Each ``LLMEndpoint`` on the context becomes a
+    Each ``LLMEndpoint`` on the context becomes a
     ``ResolvedLLM`` — one ``AsyncOpenAI`` instance pointed at
     ``endpoint.base_url`` with the vault-resolved API key, paired
     with ``endpoint.model``.
 
     The four slots are independent connection pools; mid-call
-    failover (Plan 6) lives in the harness, not here.  Plan 2's
+    failover lives in the harness, not here.  The 
     contract is just "give me clients keyed to the four slots; I'll
     call them how the agent wants."
 

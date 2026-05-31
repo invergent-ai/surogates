@@ -101,11 +101,11 @@ class SandboxSpec:
 def default_sandbox_spec() -> SandboxSpec:
     """Return a :class:`SandboxSpec` seeded from ``SUROGATES_SANDBOX_DEFAULT_*``.
 
-    Worker callsites that have no per-tenant baseline use this so the
-    helm chart's ``sandbox.resources`` values flow into the pod manifest
-    without code changes.  Without env overrides this yields the same
-    values as ``SandboxSpec()`` (the two default sets are aligned in
-    :class:`surogates.config.SandboxSettings`).
+    Worker callsites that have no per-tenant baseline use this so
+    deployment-level defaults flow into the pod manifest without
+    code changes.  Without env overrides this yields the same
+    values as ``SandboxSpec()`` (the two default sets are aligned
+    in :class:`surogates.config.SandboxSettings`).
     """
     from surogates.config import SandboxSettings
 

@@ -45,12 +45,10 @@ class McpProxySettings(BaseSettings):
 
     log_level: str = "INFO"
 
-    # Plan 5 / Task 1 — shared-runtime plumbing.  These fields are
-    # the same as the main Settings class's surface (the main api
-    # already wires them); the proxy reads them so
-    # _install_shared_runtime_plumbing_for_proxy can construct the
-    # PlatformClient + RuntimeConfigCache + PerTenantRateLimiter.
-    runtime_mode: str = "helm"  # 'helm' | 'shared'
+    # Same shape as the main Settings class — the proxy reads them
+    # so ``_install_shared_runtime_plumbing_for_proxy`` can
+    # construct the PlatformClient + RuntimeConfigCache +
+    # PerTenantRateLimiter.
     platform_api_url: str = ""
     platform_api_token: str = ""
     api: APISettings = Field(default_factory=APISettings)

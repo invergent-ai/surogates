@@ -87,7 +87,7 @@ class PoolEntry:
     tool_schemas: list[dict[str, Any]] = field(default_factory=list)
     # Reverse index: clean tool name -> (prefixed server key, original MCP tool name)
     tool_index: dict[str, tuple[str, str]] = field(default_factory=dict)
-    # Plan 5 / Task 11.  Per-server config (unresolved -- credentials
+    # Per-server config (unresolved -- credentials
     # have already been injected into ``env`` during
     # ``load_mcp_configs`` -> ``_resolve_credentials``).  The route
     # looks up ``server_configs[original_server_name]`` to spawn an
@@ -180,7 +180,7 @@ class ConnectionPool:
     ) -> tuple[str, str, dict[str, Any]] | None:
         """Resolve a clean tool name to the per-call subprocess parameters.
 
-        Plan 5 / Task 11.  Returns
+        Returns
         ``(original_server_name, original_tool_name, server_config)``
         if the tenant is connected and the tool is in scope; ``None``
         otherwise.  The route uses the returned ``server_config`` to
@@ -404,9 +404,7 @@ class ConnectionPool:
                         org_id=org_id,
                         # MCP scans are org-scoped (server definitions
                         # live at the org level); no single agent_id
-                        # to attribute. Plan 1b accepts None here so
-                        # the per-tenant column is at least visibly
-                        # absent rather than silently omitted.
+                        # to attribute.
                         agent_id=None,
                         user_id=audit_user_id,
                         type=AuditType.POLICY_RUG_PULL,

@@ -1,10 +1,10 @@
 """Redis-backed leader-election lock.
 
-Plan 8 / Task 1.  The platform scheduled-work ticker (Task 5)
+The platform scheduled-work ticker
 deploys with N replicas for HA.  Only one replica should fire at
 a time; the others stand by.  A SET NX EX (``SET key value NX EX
 ttl``) returns True on the winner and False on the losers.  The
-winner's :meth:`heartbeat` (Task 2) extends the TTL while it is
+winner's :meth:`heartbeat` extends the TTL while it is
 alive; if heartbeat returns False the winner has lost the lease
 (probably to a slow tick) and must stop dispatching mid-tick to
 avoid double-fire.
@@ -14,8 +14,8 @@ matches our ``holder_id`` so a stale release after a delayed
 shutdown (where the lease already passed to a new leader)
 cannot delete the new leader's lock.  This costs an extra
 round-trip but is correctness-critical; the alternative is an
-EVAL Lua script which is deferred to Plan 11 (operational
-hardening) if measured contention demands it.
+EVAL Lua script, which can be added later if measured contention
+demands it.
 """
 
 from __future__ import annotations
@@ -59,8 +59,8 @@ class RedisLeaderLock:
         SET XX win against the new holder), but the new holder
         would itself heartbeat on the next tick and reclaim, so
         the worst-case window is one tick of double-extend.  An
-        EVAL Lua script could close the gap; defer to Plan 11
-        if measured drift becomes a real concern.
+        EVAL Lua script could close the gap if measured drift
+        becomes a real concern.
 
         A False return means the holder MUST stop dispatching
         mid-tick -- a tick in progress at the boundary is the

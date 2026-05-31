@@ -1,6 +1,6 @@
 """Per-user memory R2 key layout + JSON envelope.
 
-Plan 4 / Task 4.  The canonical R2 key for per-user memory is
+The canonical R2 key for per-user memory is
 ``<storage_key_prefix>/users/<user_id>/memory.json`` (or
 ``<storage_key_prefix>/shared/memory.json`` for service-account
 sessions that have no user_id).
@@ -60,8 +60,7 @@ def memory_object_key(
 ) -> str:
     """Build the R2 object key for the per-user memory file.
 
-    ``storage_key_prefix`` comes from ``AgentRuntimeContext`` (Plan
-    1 / Plan 2 wired this).  ``user_id`` may be ``None`` for
+    ``storage_key_prefix`` comes from ``AgentRuntimeContext``.  ``user_id`` may be ``None`` for
     service-account sessions; those route to a ``shared/`` subkey
     instead of ``users/<id>/`` so principal isolation is preserved
     even when no user owns the session.

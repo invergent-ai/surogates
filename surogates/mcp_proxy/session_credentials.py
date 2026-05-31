@@ -1,6 +1,6 @@
 """Per-session MCP server credential resolution.
 
-Plan 2 / Task 15.  MCP server definitions reference credentials by
+MCP server definitions reference credentials by
 ``vault://<name>`` — the worker resolves them to plaintext per
 session at connect time.  Process-wide caching is intentionally
 absent: a credential rotation by an admin should land in the next

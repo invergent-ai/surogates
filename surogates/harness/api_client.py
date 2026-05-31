@@ -57,10 +57,10 @@ class HarnessAPIClient:
     ) -> dict[str, Any] | None:
         """Auto-inject ``agent_id`` into the request's query string.
 
-        Caller-supplied ``agent_id`` overrides the constructor default
-        so a tool can intentionally route at a different tenant if
-        ever needed.  ``None`` agent_id is passed through unchanged
-        for helm-mode pods.
+        Caller-supplied ``agent_id`` overrides the constructor
+        default so a tool can intentionally route at a different
+        tenant if ever needed.  ``None`` agent_id is passed through
+        unchanged for callers that don't carry tenant scope.
         """
         if self._agent_id is None:
             return params

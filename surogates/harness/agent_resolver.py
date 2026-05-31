@@ -75,8 +75,7 @@ async def resolve_agent_by_name(
     bundle:
         Per-tenant Hub-backed file bundle.  When set, the loader's
         Layer 1 includes the bundle's ``agents/`` subtree alongside
-        the on-disk built-ins.  Helm-mode callers pass ``None`` for
-        the legacy disk-only behaviour.
+        the on-disk built-ins.
     """
     if not name:
         return None

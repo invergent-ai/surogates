@@ -1,6 +1,6 @@
 """Per-process L1 cache for channel routing records.
 
-Plan 6 / Task 1.  Key shape: ``"<channel_kind>:<channel_identifier>"``
+Key shape: ``"<channel_kind>:<channel_identifier>"``
 (e.g. ``"slack:A0123ABCD"`` / ``"telegram:@my_bot"`` /
 ``"website:pk_abc123"``).  The invalidator channel
 ``channel_routing_changed:<kind>:<identifier>`` passes the key
@@ -8,7 +8,7 @@ through verbatim so admins flipping a routing row -> the inbound
 handler picks up the change on the next event.
 
 Negative lookups (``None``) ARE memoised within the TTL window --
-follows the SlugResolverCache (Plan 1b) convention so a malformed
+follows the SlugResolverCache convention so a malformed
 inbound event storm cannot hammer the platform endpoint.  Loader
 exceptions are NOT memoised (transient DB hiccups retry).
 """

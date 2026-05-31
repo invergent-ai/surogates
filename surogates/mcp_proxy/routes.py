@@ -87,7 +87,7 @@ async def _ensure_tenant_connected(
     Returns cached schemas if the tenant is already connected, otherwise
     loads configs from DB + platform and connects.
 
-    Plan 5 / Task 5.  ``agent_id`` flows from the proxy route (where
+    ``agent_id`` flows from the proxy route (where
     ``agent_runtime_context_dep`` resolves the per-request
     ``AgentRuntimeContext``) down into ``load_mcp_configs`` so the
     credential.access audit emit carries the requesting agent's id.
@@ -155,11 +155,10 @@ async def call_tool(
 ) -> ToolCallResponse:
     """Execute an MCP tool call inside a fresh per-call subprocess.
 
-    Plan 5 / Task 11.  Each call spawns an :class:`MCPCallSandbox`
+    Each call spawns an :class:`MCPCallSandbox`
     keyed on the resolved tenant config, so the call boundary IS
     the process boundary — a compromised MCP tool cannot corrupt
-    subprocess state across calls.  Tool discovery (Task 6's cache
-    + governance scan) still happens at first-tool-list time and
+    subprocess state across calls.  Tool discovery still happens at first-tool-list time and
     caches the schemas; per-call cost is one stdio handshake (~50-
     100ms) plus the actual upstream call.
     """
@@ -215,7 +214,7 @@ async def call_tool(
         duration_ms = int((time.monotonic() - call_start) * 1000)
         if audit_store is not None:
             try:
-                # Plan 5 / Task 12 — POLICY_MCP_CALL fires per call
+                # POLICY_MCP_CALL fires per call
                 # with the per-request ctx.agent_id so compliance can
                 # answer 'which agent invoked tool X on server Y,
                 # when, with what outcome' from the audit log alone.
@@ -282,23 +281,19 @@ async def _execute_call(
             audit dashboards can alert on the latter without noise
             from the former.
 
-    For stdio transports the call goes through Plan 5's per-call
+    For stdio transports the call goes through the per-call
     :class:`MCPCallSandbox` (one subprocess per call, env allow-list
     applied -- see :meth:`MCPCallSandbox.mcp_session` for the
     documented RLIMIT gap).  For HTTP / SSE transports there is no
-    subprocess to isolate, so the call falls back to the legacy
-    long-lived session via :meth:`ConnectionPool.call_tool` -- which
-    is safe because no per-call subprocess state can leak between
-    tenants of an HTTP server.
+    subprocess to isolate, so the call falls back to the long-lived
+    session via :meth:`ConnectionPool.call_tool` -- which is safe
+    because no per-call subprocess state can leak between tenants of
+    an HTTP server.
     """
     transport = server_config.get("transport", "stdio")
     if transport != "stdio":
         # HTTP / SSE: no subprocess, no isolation problem; reuse the
-        # long-lived session.  The Task 13 source-level regression
-        # checks pool.call_tool is not in the route source, but this
-        # helper lives in routes.py so the check would catch this --
-        # we narrow the regression to the route handler itself, not
-        # the module.
+        # long-lived session.
         result = await pool.call_tool(
             org_id=org_id,
             user_id=user_id,

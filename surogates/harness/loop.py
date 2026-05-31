@@ -1109,10 +1109,10 @@ class AgentHarness:
         self._storage = storage
         self._api_client = api_client
         self._session_factory = session_factory
-        # Plan 3 / Task 13 — per-session Hub-backed bundle shared by
-        # every catalogue load inside the harness (sub-agent resolver,
-        # prompt builder, future skill staging).  ``None`` keeps the
-        # legacy disk-only behaviour for helm pods.
+        # Per-session Hub-backed bundle shared by every catalogue
+        # load inside the harness (sub-agent resolver, prompt
+        # builder, future skill staging).  ``None`` for agents
+        # whose first publish hasn't landed yet.
         self._bundle: Any | None = bundle
 
         # Optional dedicated vision client.  When the active LLM does not

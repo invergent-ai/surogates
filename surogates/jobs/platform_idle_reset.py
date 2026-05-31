@@ -1,19 +1,14 @@
 """Platform-level idle-session reset.
 
-Plan 8 / Task 11.  Same shape as
-:mod:`surogates.jobs.platform_cleanup` (Task 9) for the idle-
-reset operation that the legacy per-tenant
-``surogates.jobs.reset_idle_sessions`` handled.
+Same shape as :mod:`surogates.jobs.platform_cleanup` for the
+idle-reset operation.
 
 The K8s CronJob that invokes this script lives in
-``surogates/k8s/platform/idle-reset-cronjob.yaml.template``
-(Task 13) and runs every 5 minutes by default -- same cadence
-the per-tenant helm CronJob used.
+``surogates/k8s/platform/idle-reset-cronjob.yaml.template`` and
+runs every 5 minutes by default.
 
 Agent enumeration + per-agent idle-reset are injected via
-parameters so tests can substitute fakes.  Production wiring
-lives in the Plan 8 follow-up commit that applies the K8s
-manifests; for now the defaults raise NotImplementedError.
+parameters so tests can substitute fakes.
 """
 
 from __future__ import annotations
@@ -34,8 +29,8 @@ async def run_platform_idle_reset(
     agent_iter: AgentIter,
     idle_reset_for_agent: IdleResetFn,
 ) -> dict[str, dict]:
-    """Iterate shared-mode agents; run ``idle_reset_for_agent``
-    for each; return ``{agent_id: per-agent-outcome}``.
+    """Iterate agents; run ``idle_reset_for_agent`` for each;
+    return ``{agent_id: per-agent-outcome}``.
 
     Per-agent failures captured in the outcome dict; iteration
     continues.  Mirrors :func:`run_platform_cleanup`.
@@ -66,15 +61,13 @@ async def _default_idle_reset_for_agent(  # pragma: no cover
     agent: dict,
 ) -> dict:
     raise NotImplementedError(
-        "Production idle-reset helper wiring lands in the Plan 8 "
-        "follow-up that applies the K8s manifests (Task 13).",
+        "Production idle-reset helper wiring is pending.",
     )
 
 
 async def _default_agent_iter() -> AsyncIterator[dict]:  # pragma: no cover
     raise NotImplementedError(
-        "Production agent enumeration wiring lands in the Plan 8 "
-        "follow-up that applies the K8s manifests (Task 13).",
+        "Production agent enumeration wiring is pending.",
     )
     yield {}  # noqa: B901 -- unreachable; typing only
 

@@ -1,15 +1,14 @@
 """Per-process L1 + L2 cache for AgentFileBundle handles.
 
-Plan 3 / Tasks 6+7.  Same TTL + per-key lock + double-checked-
-locking shape as RuntimeConfigCache (Plan 1), FirebaseConfigCache
-(Plan 1b), SlugResolverCache (Plan 1b).
+Same TTL + per-key lock + double-checked-
+locking shape as RuntimeConfigCache, FirebaseConfigCache, SlugResolverCache.
 
 Loader exceptions are NOT memoised: a LookupError on call N must
 let call N+1 retry because an admin rollback (pushing the old
 bundle version back) must land in the next session, not the next
 TTL tick.
 
-The L2 disk cache (Task 7) keys on (agent_id, version) and lives
+The L2 disk cache keys on (agent_id, version) and lives
 under ``~/.surogate/bundle-cache/<agent_id>/<version>/``.  L1
 holds the AgentFileBundle handle; L2 backs the HubBundleClient's
 individual file fetches so a worker restart doesn't blast the Hub
@@ -91,7 +90,7 @@ class FileBundleCache:
 class _L2DiskCache:
     """Per-process on-disk cache for individual bundle files.
 
-    Plan 3 / Task 7.  Layout: ``<root>/<agent_id>/<version>/<path>``.
+    Layout: ``<root>/<agent_id>/<version>/<path>``.
     Each write goes through a ``.tmp`` sibling + rename so a concurrent
     reader never sees a partially-written file.
 
@@ -164,7 +163,7 @@ class _L2DiskCache:
 class _L2ReadThroughHub:
     """Read-through L2 wrapper over a HubBundleClient.
 
-    Plan 3 / Task 7.  AgentFileBundle.read_bytes calls
+    AgentFileBundle.read_bytes calls
     ``self.client.read_bytes(version, path)``; when ``self.client``
     is this wrapper, individual file reads check the on-disk L2
     cache first, fall back to the Hub on miss, and write-through

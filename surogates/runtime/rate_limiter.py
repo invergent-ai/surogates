@@ -1,6 +1,6 @@
 """Per-tenant Redis-backed rate limiter.
 
-Plan 1b / Tasks 13–14.  Fixed-window counter keyed on
+Fixed-window counter keyed on
 ``(org_id, agent_id)`` with a 60-second window:
 
 * :class:`PerTenantRateLimiter` — the storage layer.  ``try_consume``
@@ -11,7 +11,7 @@ Plan 1b / Tasks 13–14.  Fixed-window counter keyed on
   handlers with HTTP 429 when the window is full.
 
 The limiter is the simplest possible thing that gives per-tenant
-isolation; Plan 6 / Plan 7 can swap in a sliding window or token
+isolation; it can swap in a sliding window or token
 bucket without a route-side change because the call shape stays the
 same.
 
@@ -22,8 +22,8 @@ website chat).  Sliding-window in Redis costs O(N) ops or a sorted
 set per call — not worth it at this stage.
 
 The limiter is wired on ``app.state.rate_limiter``.  If unset, the
-dep is a pass-through so helm-mode pods (and tests that don't wire a
-limiter) keep working unchanged.
+dep is a pass-through so tests that don't wire a limiter keep
+working unchanged.
 """
 
 from __future__ import annotations
@@ -92,15 +92,13 @@ async def rate_limit_dep(
     """Enforce the per-tenant rate limit; raises 429 when over.
 
     Reads the limiter off ``request.app.state.rate_limiter``.  If
-    unset (helm-mode pods, or tests that have not wired one), the
-    dep silently passes through — this is intentional so the
-    surogates harness stays usable without a Redis-backed limiter.
+    unset (tests that have not wired one), the dep silently passes
+    through — this keeps the surogates harness usable without a
+    Redis-backed limiter.
 
     The per-tenant override is pulled from
     ``ctx.governance['rate_limit_rpm']`` when present, falling back
-    to the limiter's ``default_rpm`` otherwise.  Plan 6 will surface
-    this field directly on the runtime-config payload; today it just
-    lives in the free-form governance dict.
+    to the limiter's ``default_rpm`` otherwise.
     """
     limiter = getattr(request.app.state, "rate_limiter", None)
     if limiter is None:

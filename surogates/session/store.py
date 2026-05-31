@@ -108,9 +108,7 @@ class SessionStore:
         If *session_id* is provided it is used as the primary key;
         otherwise a random UUID is generated.
 
-        *agent_id* identifies the agent this session belongs to (the agent
-        is the server-side identity this worker instance serves, sourced
-        from ``Settings.agent_id``).
+        *agent_id* identifies the agent this session belongs to.
 
         Exactly one of *user_id* or *service_account_id* should be set —
         the first for interactive users, the second for service-account

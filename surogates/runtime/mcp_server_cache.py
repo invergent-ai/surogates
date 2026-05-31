@@ -1,7 +1,6 @@
 """Per-process L1 cache for the per-agent MCP server registry.
 
-Plan 5 / Task 6 + 7.  Key shape: bare ``agent_id`` (NOT
-``"<org_id>:<agent_id>"`` — that's Plan 4's MemoryCache shape).
+Key shape: bare ``agent_id``.
 
 The shape diverges from MemoryCache deliberately: admins reference
 agents by id when mutating the MCP server registry, so the
@@ -15,8 +14,7 @@ invalidate — strictly safe).
 The cache treats keys as opaque strings; the loader is the
 authoritative place that converts the key into a platform-client
 call.  Loader exceptions are NOT memoised so a transient DB
-hiccup doesn't poison the cache for the full TTL window — same
-rule as the other Plan 1+1b+2+3+4 caches.
+hiccup doesn't poison the cache for the full TTL window.
 """
 
 from __future__ import annotations

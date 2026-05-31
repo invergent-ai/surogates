@@ -1,4 +1,4 @@
-"""Per-session agent runtime context (Plan 1, Task 11).
+"""Per-session agent runtime context.
 
 ``AgentRuntimeContext`` is the immutable snapshot of everything the
 surogates worker needs to serve one session of one shared-runtime
@@ -67,10 +67,10 @@ class AgentRuntimeContext:
       workspaces bucket (typically ``{project_id}/{agent_id}``).
 
     Optional fields default to absent / empty.  ``project_id`` is
-    ``None`` in legacy helm-mode contexts (helm pods do not carry the
-    project id in ``settings``) and the management-plane-supplied
-    value otherwise; consumers that need it must check for ``None``
-    rather than receive a silent empty string.
+    the management-plane-supplied value or ``None`` when the agent
+    has not been associated with a project; consumers that need it
+    must check for ``None`` rather than receive a silent empty
+    string.
 
     The four LLM endpoint triples are independent: only ``llm_main``
     is logically required for the harness to run; ``llm_summary`` /
@@ -99,13 +99,12 @@ class AgentRuntimeContext:
     mcp_server_ids: tuple[str, ...] = ()
     governance: dict = field(default_factory=dict)
 
-    # Plan 3 / Task 1 — file-bundle reference.  Both optional so
-    # legacy agents that haven't been onboarded to Hub-backed bundles
-    # yet still work.  ``bundle_hub_ref`` is the Hub repository in
-    # ``<owner>/<repo>`` shape (e.g., ``"acme/agent-bundles"``);
-    # ``bundle_version`` is the lakeFS-style ref (commit / branch /
-    # tag).  The worker fetches files from this bundle via the
-    # FileBundleCache (Plan 3 Task 6).
+    # File-bundle reference.  Both optional so agents that haven't
+    # been onboarded to Hub-backed bundles yet still work.
+    # ``bundle_hub_ref`` is the Hub repository in ``<owner>/<repo>``
+    # shape (e.g., ``"acme/agent-bundles"``); ``bundle_version`` is
+    # the lakeFS-style ref (commit / branch / tag).  The worker
+    # fetches files from this bundle via the FileBundleCache.
     bundle_hub_ref: str | None = None
     bundle_version: str | None = None
 
@@ -113,9 +112,7 @@ class AgentRuntimeContext:
     def asset_root(self) -> str:
         """Path to the tenant's on-disk asset directory.
 
-        Mirrors the layout used by the helm-deployed
-        ``tenant-assets`` PVC (``/data/tenant-assets/{org_id}``) so
-        legacy harness paths that read assets from disk keep working
-        until Plan 4 migrates per-user memory to R2.
+        Backed by the ``tenant-assets`` PVC at
+        ``/data/tenant-assets/{org_id}``.
         """
         return f"/data/tenant-assets/{self.org_id}"

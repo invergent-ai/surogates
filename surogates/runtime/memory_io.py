@@ -1,6 +1,6 @@
 """R2 read/write wrappers for per-user memory.
 
-Plan 4 / Tasks 7+8.  Thin async functions over the storage
+Thin async functions over the storage
 backend that encode/decode the JSON envelope and surface the
 version field to the caller.
 
@@ -11,9 +11,7 @@ doesn't crash session bootstrap — the next write reseeds the
 object.
 
 Writes always succeed and always increment the version.  Conflict
-detection is the caller's responsibility (compare the version
-returned by ``read_user_memory`` at session start with what's on
-R2 at write time — see ``R2MemoryStore`` in Task 10).
+detection is the caller's responsibility.
 """
 
 from __future__ import annotations
@@ -35,7 +33,7 @@ async def delete_memory_prefix(
 ) -> int:
     """Delete every object whose key starts with ``prefix`` in ``bucket``.
 
-    Plan 7 / Task 5.  Used by the delete_agent cascade (surogate-
+    Used by the delete_agent cascade (surogate-
     ops side) to drop the agent's per-user memory.  Idempotent: a
     second call after the prefix is empty returns 0 without
     raising.
@@ -83,8 +81,8 @@ async def write_user_memory(
 ) -> int:
     """Encode + write the envelope at ``version = expected_version + 1``.
 
-    Plan 4 / Task 9 — the content is run through the same
-    injection scan as SOUL.md / AGENT.md (Plan 3 Task 10) before
+    the content is run through the same
+    injection scan as SOUL.md / AGENT.md before
     persistence.  A flagged payload writes a sanitised
     ``[BLOCKED: ...]`` marker instead of the raw content so a
     compromised tool can't smuggle 'ignore previous instructions'

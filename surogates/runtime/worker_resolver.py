@@ -1,12 +1,8 @@
 """Worker-side per-session runtime-context resolution.
 
-Plan 2 / Task 3.  The api resolves AgentRuntimeContext per request via
-``agent_runtime_context_dep`` (Plan 1 Task 15).  The worker has no
-HTTP request object — it resolves per session, given the session row.
-
-The helper lives in the ``surogates.runtime`` package alongside the
-api-side resolver so future plans can refactor common logic between
-the two without re-plumbing imports.
+The api resolves :class:`AgentRuntimeContext` per request via
+``agent_runtime_context_dep``.  The worker has no HTTP request to
+read from — it resolves per session, given the dequeued row.
 """
 
 from __future__ import annotations
@@ -15,10 +11,7 @@ from typing import Any, Protocol
 
 from surogates.runtime.cache import RuntimeConfigCache
 from surogates.runtime.context import AgentRuntimeContext
-from surogates.runtime.resolver import (
-    _legacy_helm_context,
-    build_agent_runtime_context,
-)
+from surogates.runtime.resolver import build_agent_runtime_context
 
 __all__ = [
     "AgentDisabledError",
@@ -30,9 +23,10 @@ class AgentDisabledError(RuntimeError):
     """Raised when the resolved AgentRuntimeContext has enabled=False.
 
     The session must not be processed; the worker requeues / fails it
-    according to the dispatcher's policy.  Distinct from LookupError
-    (agent missing entirely) so the dispatcher can pick its strategy
-    (back off for disabled, drop for missing)."""
+    according to the dispatcher's policy.  Distinct from
+    :class:`LookupError` (agent missing entirely) so the dispatcher
+    can pick its strategy (back off for disabled, drop for missing).
+    """
 
 
 class _SessionRowLike(Protocol):
@@ -45,25 +39,18 @@ async def resolve_runtime_context_for_session(
     cache: RuntimeConfigCache | None,
     settings: Any,
 ) -> AgentRuntimeContext:
-    """Project a session row into an AgentRuntimeContext.
+    """Project a session row into an :class:`AgentRuntimeContext`.
 
-    Shared mode: pulls the payload from the worker-side cache (which
-    fronts ``PlatformClient.get_runtime_config``) and projects via
+    Pulls the payload from the worker-side cache (which fronts
+    ``PlatformClient.get_runtime_config``) and projects via
     :func:`build_agent_runtime_context`.  Raises
     :class:`AgentDisabledError` when the row is administratively
-    stopped (``enabled=False``).  LookupError from the loader (agent
-    not shared / does not exist) propagates verbatim.
-
-    Helm mode: synthesises a context from ``settings.{org_id,agent_id}``
-    via :func:`_legacy_helm_context`.  No platform-API call.
+    stopped (``enabled=False``); ``LookupError`` from the loader
+    (agent does not exist) propagates verbatim.
     """
-    runtime_mode = getattr(settings, "runtime_mode", "helm")
-    if runtime_mode == "helm":
-        return _legacy_helm_context(settings, agent_id=session.agent_id)
-
     if cache is None:
         raise RuntimeError(
-            "shared-mode worker has no runtime_config_cache wired; "
+            "worker has no runtime_config_cache wired; "
             "_install_worker_runtime_plumbing must run before the "
             "harness factory is invoked",
         )

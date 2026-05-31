@@ -18,10 +18,10 @@ needs to talk to the deployment's agent embedded on a public website:
   headers, so the CSRF header isn't required (GETs are safe by
   CSRF's standard assumption — nothing is mutated).
 
-All authority comes from :class:`WebsiteSettings`.  There is no
-per-row agent record any more: a deployment serves exactly one agent,
-identified by ``settings.agent_id``, and exposes it through this
-channel when ``website.enabled`` is true.  Origin validation is the
+All authority comes from :class:`WebsiteSettings`.  The agent
+identity for a request is resolved from
+:func:`agent_runtime_context_dep` and exposed through this channel
+when ``website.enabled`` is true.  Origin validation is the
 conjunction of two checks: the configured allow-list (authoritative)
 and the session cookie's ``origin`` claim (anchors a bootstrapped
 session to the embed it came from).  A request must satisfy both.

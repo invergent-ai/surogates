@@ -58,7 +58,7 @@ async def load_mcp_configs(
     Returns a dict of ``{server_name: config_dict}`` ready for
     ``MCPServerTask`` / ``discover_mcp_tools()``.
 
-    Plan 5 / Task 8.  The on-disk ConfigMap fallback is retired.
+    The on-disk ConfigMap fallback is retired.
     The MCP server registry is now exclusively DB-backed — admins
     use the surogate-ops UI which writes to the ``mcp_servers``
     table; the proxy reads it here.  Merge precedence is just
@@ -252,11 +252,9 @@ async def _retrieve_credential(
     value, ``"org"`` when it came from the org-wide vault, and
     ``"missing"`` when neither had the credential.
 
-    Plan 2 / Task 15.  Routes both lookups through
+    Routes both lookups through
     :meth:`CredentialVault.resolve_ref` so the single canonical
-    per-session entry point is used; a future refactor cannot
-    re-introduce a process-wide vault.retrieve call without
-    tripping the Task 16 source-level regression.
+    per-session entry point is used;
     """
     ref = f"vault://{name}"
     # User-scoped first.
@@ -284,13 +282,13 @@ async def _emit_credential_access(
 ) -> None:
     """Record a credential.access entry when the audit store is wired.
 
-    Plan 5 / Task 5.  ``agent_id`` is required (keyword-only) instead
-    of being silently set to ``None`` at the ``audit_store.emit`` call
-    site (Plan 1b Task 17 workaround retirement).  Callers thread it
-    through from the proxy routes via ``ctx.agent_id`` resolved by
-    ``agent_runtime_context_dep``.  Helm-mode pods that have no
-    AgentRuntimeContext still pass ``None`` explicitly so the row
-    persists with a NULL agent_id (the column is nullable by design).
+    ``agent_id`` is required (keyword-only) instead of being silently
+    set to ``None`` at the ``audit_store.emit`` call site.  Callers
+    thread it through from the proxy routes via ``ctx.agent_id``
+    resolved by ``agent_runtime_context_dep``.  Callers without an
+    agent context (e.g. platform-wide scans) pass ``None`` explicitly
+    so the row persists with a NULL agent_id (the column is nullable
+    by design).
     """
     if audit_store is None:
         return

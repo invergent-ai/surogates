@@ -53,10 +53,10 @@ class AuditStore:
         at ``error`` level but never raised — the caller's business
         logic must continue regardless.
 
-        ``agent_id`` is Plan 1b / Task 16.  Shared-runtime emitters
-        thread the per-request :class:`AgentRuntimeContext` agent_id
-        through; helm-mode and legacy callers may pass ``None`` and
-        the row will still persist (the column is nullable).
+        Per-request emitters thread the
+        :class:`AgentRuntimeContext` agent_id through; org-scoped
+        emitters (credential vault, MCP scans) pass ``None`` and
+        the row still persists (the column is nullable).
         """
         row = AuditLog(
             org_id=org_id,

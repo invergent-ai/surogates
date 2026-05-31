@@ -1,4 +1,4 @@
-"""Shared agent runtime plumbing (Plan 1+).
+"""Shared agent runtime plumbing.
 
 Multi-tenant building blocks used by the shared surogates api + worker
 pool to serve many agents from a single process.  Each component is

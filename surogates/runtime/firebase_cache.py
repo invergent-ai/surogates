@@ -1,6 +1,6 @@
 """Per-process TTL cache for project Firebase configs.
 
-Plan 1b / Task 7.  Mirrors :class:`~surogates.runtime.RuntimeConfigCache`
+Mirrors :class:`~surogates.runtime.RuntimeConfigCache`
 but keyed on ``project_id``.  Default TTL is longer (60 s) because
 Firebase config changes rarely.  Invalidated via the
 ``project.firebase_config_changed:<project_id>`` Redis pub/sub channel.

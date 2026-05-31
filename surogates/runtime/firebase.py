@@ -1,10 +1,8 @@
 """Per-project Firebase config the shared runtime fetches from
 surogate-ops.
 
-Plan 1b / Task 6.  Frozen dataclass with the same shape as the
-management-plane's :class:`FirebaseConfigResponse` payload.  The cache
-in Task 7 holds these by ``project_id``; the runtime renders the
-values into login-page templates.
+Frozen dataclass with the same shape as the
+management-plane's :class:`FirebaseConfigResponse` payload.
 
 ``enabled_providers`` is a tuple (immutable container for the frozen
 context) — projection logic must convert the JSON list to a tuple

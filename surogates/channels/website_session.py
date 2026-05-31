@@ -8,9 +8,9 @@ must present the same token in the ``X-CSRF-Token`` header as the
 cookie JWT carries, so an attacker who cannot read the cookie also
 cannot forge a matching header from a different origin.
 
-There is no ``agent_id`` claim — a deployment serves exactly one
-agent (``settings.agent_id``), so binding the cookie to the org plus
-the bootstrap origin is the entire identity surface the cookie needs
+There is no ``agent_id`` claim — the per-request agent identity is
+resolved on each call, so binding the cookie to the org plus the
+bootstrap origin is the entire identity surface the cookie needs
 to defend.
 
 The JWT is signed with the platform's existing HS256 secret via

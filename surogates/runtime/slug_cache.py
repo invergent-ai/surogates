@@ -1,6 +1,6 @@
 """Per-process TTL cache for slug → agent_id resolutions.
 
-Plan 1b / Task 11.  Slugs change rarely (renaming an agent is a
+Slugs change rarely (renaming an agent is a
 deliberate admin action) so the default TTL is 30 s — longer than the
 runtime-config cache (1 s) but shorter than the Firebase cache (60 s).
 

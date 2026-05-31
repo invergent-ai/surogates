@@ -26,7 +26,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     app.state.session_factory = async_session_factory(engine)
 
-    # Plan 5 / Task 1 — Redis client for the rate limiter +
+    # Redis client for the rate limiter +
     # pub/sub invalidator.  Created here (the api creates its own
     # in surogates.api.app) so the proxy can share the same
     # invalidation channels as the api + worker.
@@ -62,8 +62,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.pool = pool
     pool.start_eviction_loop()
 
-    # Plan 5 / Task 1 — shared-runtime plumbing on the proxy app.
-    # No-op in helm mode or with empty platform_api_url.
     _install_shared_runtime_plumbing_for_proxy(app, settings)
 
     logger.info(
@@ -91,7 +89,7 @@ class _NoOpVault:
 def _install_shared_runtime_plumbing_for_proxy(app, settings) -> None:
     """Wire shared-runtime building blocks the proxy routes need.
 
-    Plan 5 / Task 1.  Trimmed version of the api-side
+    Trimmed version of the api-side
     :func:`surogates.api.app._install_shared_runtime_plumbing` —
     the proxy only needs ``PlatformClient`` + ``RuntimeConfigCache``
     (so :func:`agent_runtime_context_dep` resolves the per-request
@@ -100,9 +98,9 @@ def _install_shared_runtime_plumbing_for_proxy(app, settings) -> None:
     memory, firebase, and slug caches are session-time concerns
     the worker handles.
 
-    Helm mode + empty ``platform_api_url`` both leave the
-    attributes as ``None`` so the proxy still boots; routes
-    silently bypass the dep checks in those modes.
+    Requires ``settings.platform_api_url``; missing it makes
+    ``agent_runtime_context_dep`` fail on every request — surface
+    that at boot rather than silently degrade.
     """
     import asyncio
 
@@ -111,25 +109,11 @@ def _install_shared_runtime_plumbing_for_proxy(app, settings) -> None:
         RuntimeConfigCache, run_invalidator,
     )
 
-    if getattr(settings, "runtime_mode", "helm") != "shared":
-        app.state.platform_client = None
-        app.state.runtime_config_cache = None
-        app.state.rate_limiter = None
-        app.state.mcp_server_cache = None
-        app.state.runtime_invalidator_task = None
-        return
-
     if not settings.platform_api_url:
-        logger.error(
-            "runtime_mode='shared' but SUROGATES_PLATFORM_API_URL is empty; "
-            "agent_runtime_context_dep will fail on every proxy request",
+        raise RuntimeError(
+            "SUROGATES_PLATFORM_API_URL is required; the MCP proxy "
+            "cannot resolve per-tenant context without it",
         )
-        app.state.platform_client = None
-        app.state.runtime_config_cache = None
-        app.state.rate_limiter = None
-        app.state.mcp_server_cache = None
-        app.state.runtime_invalidator_task = None
-        return
 
     client = PlatformClient(
         base_url=settings.platform_api_url,

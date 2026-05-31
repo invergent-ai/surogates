@@ -1,6 +1,6 @@
 """Per-call subprocess sandbox for MCP stdio servers.
 
-Plan 5 / Task 9.  Each MCP call spawns a fresh subprocess that
+Each MCP call spawns a fresh subprocess that
 inherits ONLY the env vars the sandbox explicitly passes (the
 parent process's environment is NOT inherited — this is the
 isolation primitive that prevents tenant A's credentials from
@@ -17,17 +17,17 @@ Two APIs live on this class:
   subprocess spawn to the mcp SDK's ``stdio_client`` so the SDK
   can speak MCP protocol over the pipes.
 
-**Known gap (Plan 6 / Risk #1 follow-up):**  ``mcp_session``
+**Known gap:**  ``mcp_session``
 spawns through the SDK's ``stdio_client`` which uses
 ``anyio.open_process`` -- and ``anyio.open_process`` does NOT
 expose ``preexec_fn``.  So the route's hot path today applies
 env-isolation but NOT RLIMIT enforcement; an OOM-bomb tool
 invoked via the route can still allocate until the pod's cgroup
-limit triggers.  Plan 6 closes this by either (a) replacing the
-SDK call with our own subprocess + stream-wrapper layer that
-keeps ``preexec_fn``, or (b) running the proxy pod in a cgroup
-namespace where the per-pod memory limit is small enough to
-contain the worst-case OOM-bomb's blast radius.
+limit triggers.  Closing this gap requires either (a) replacing the
+SDK call with our own subprocess + stream-wrapper layer that keeps
+``preexec_fn``, or (b) running the proxy pod in a cgroup namespace
+where the per-pod memory limit is small enough to contain the
+worst-case OOM-bomb's blast radius.
 
 The async context manager always terminates the subprocess on
 exit — even on exception — so a tool that hangs (or that the
@@ -105,7 +105,7 @@ class MCPCallSandbox:
     async def mcp_session(self) -> AsyncIterator:
         """Yield an ``mcp.ClientSession`` backed by a fresh subprocess.
 
-        Plan 5 / Task 11.  The route's per-call MCP execution path
+        The route's per-call MCP execution path
         uses this method instead of the long-lived
         ``MCPServerTask.session`` reuse pattern.  Each call boundary
         is also a process boundary — a compromised tool cannot
@@ -118,13 +118,11 @@ class MCPCallSandbox:
         credentials, other agents' env injections) are NOT inherited
         beyond that conservative allow-list.
 
-        Known gap (Plan 6 follow-up): the SDK's ``stdio_client`` does
-        not expose ``preexec_fn``, so RLIMIT_AS / RLIMIT_CPU are not
-        currently applied to the MCP subprocess (env-isolation is
-        the primary defense today).  The lower-level
-        ``__aenter__/__aexit__`` API on this class DOES apply the
-        rlimits; Plan 6 closes the gap by either forking the SDK or
-        wrapping its streams over our own subprocess.
+        Known gap: the SDK's ``stdio_client`` does not expose
+        ``preexec_fn``, so RLIMIT_AS / RLIMIT_CPU are not currently
+        applied to the MCP subprocess (env-isolation is the primary
+        defense today).  The lower-level ``__aenter__/__aexit__`` API
+        on this class DOES apply the rlimits.
         """
         from mcp import ClientSession
         from mcp.client.stdio import StdioServerParameters, stdio_client

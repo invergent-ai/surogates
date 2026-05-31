@@ -18,11 +18,6 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from surogates.harness.budget import IterationBudget
-from surogates.harness.auxiliary_client import (
-    build_advisor_auxiliary_llm,
-    build_summary_auxiliary_llm,
-    build_vision_auxiliary_llm,
-)
 from surogates.harness.context import ContextCompressor
 from surogates.harness.loop import AgentHarness
 from surogates.harness.model_metadata import get_model_info
@@ -409,38 +404,22 @@ def _install_worker_runtime_plumbing(state: dict, settings) -> None:
     """Wire PlatformClient + RuntimeConfigCache + FileBundleCache
     onto a worker state dict.
 
-    Mirrors :func:`surogates.api.app._install_shared_runtime_plumbing` but
-    keyed on a plain dict (workers don't have a FastAPI app.state).
-    ``state['platform_client']``, ``state['runtime_config_cache']``,
-    and ``state['file_bundle_cache']`` are set on success; all stay
-    ``None`` when ``runtime_mode != 'shared'`` OR
-    ``platform_api_url`` is empty (the file_bundle_cache also stays
-    None when ``settings.hub.endpoint`` is empty or the Hub SDK is
-    not installed).
+    Mirrors :func:`surogates.api.app._install_shared_runtime_plumbing`
+    but keyed on a plain dict (workers don't have a FastAPI
+    app.state).  ``settings.platform_api_url`` is required; missing
+    it makes ``harness_factory`` fail on the first session.
     """
     from surogates.api.app import (
-        _maybe_build_file_bundle_cache,
-        _maybe_build_memory_cache,
+        build_file_bundle_cache,
+        build_memory_cache,
     )
     from surogates.runtime import PlatformClient, RuntimeConfigCache
 
-    if getattr(settings, "runtime_mode", "helm") != "shared":
-        state["platform_client"] = None
-        state["runtime_config_cache"] = None
-        state["file_bundle_cache"] = None
-        state["memory_cache"] = None
-        return
-
     if not settings.platform_api_url:
-        logger.error(
-            "runtime_mode='shared' but SUROGATES_PLATFORM_API_URL is empty; "
-            "worker harness_factory will fail on every session",
+        raise RuntimeError(
+            "SUROGATES_PLATFORM_API_URL is required; the worker cannot "
+            "resolve per-tenant config without it",
         )
-        state["platform_client"] = None
-        state["runtime_config_cache"] = None
-        state["file_bundle_cache"] = None
-        state["memory_cache"] = None
-        return
 
     client = PlatformClient(
         base_url=settings.platform_api_url,
@@ -451,82 +430,12 @@ def _install_worker_runtime_plumbing(state: dict, settings) -> None:
     )
     state["platform_client"] = client
     state["runtime_config_cache"] = runtime_config_cache
-    state["file_bundle_cache"] = _maybe_build_file_bundle_cache(
+    state["file_bundle_cache"] = build_file_bundle_cache(
         settings=settings, runtime_config_cache=runtime_config_cache,
     )
-    # Per-user memory cache.  Reads
-    # state['storage_backend'] when set (caller wires this before
-    # _install_worker_runtime_plumbing).  Stays None when storage
-    # is unconfigured; the harness falls back to disk MemoryStore.
-    state["memory_cache"] = _maybe_build_memory_cache(
+    state["memory_cache"] = build_memory_cache(
         settings=settings,
         storage_backend=state.get("storage_backend"),
-    )
-
-
-async def _build_helm_session_llm_clients(settings, tenant) -> "SessionLLMClients":
-    """Helm-mode adapter: build a SessionLLMClients from process-wide
-    settings.llm + tenant overrides.
-
-    Wraps the legacy
-    auxiliary-client builders so harness_factory uses a unified
-    SessionLLMClients shape in both modes.  Plan 9 retires helm mode
-    entirely and deletes this helper along with the auxiliary builders.
-
-    The main slot uses process-wide settings.llm.{api_key,base_url,model}
-    directly — there's no per-session vault resolution in helm mode
-    because the legacy contract was a single key per pod.
-
-    Async so it can ``await main_client.close()`` on a partial-build
-    failure — without that, a flaky auxiliary builder would leak the
-    main client's connection pool per failed session start.
-    """
-    from surogates.harness.auxiliary_client import (
-        build_advisor_auxiliary_llm,
-        build_summary_auxiliary_llm,
-        build_vision_auxiliary_llm,
-    )
-    from surogates.harness.session_llm import ResolvedLLM, SessionLLMClients
-
-    llm_kwargs: dict[str, Any] = {}
-    if settings.llm.api_key:
-        llm_kwargs["api_key"] = settings.llm.api_key
-    if settings.llm.base_url:
-        llm_kwargs["base_url"] = settings.llm.base_url
-
-    main_client = AsyncOpenAI(**llm_kwargs)
-    try:
-        summary = build_summary_auxiliary_llm(settings, tenant)
-        vision = build_vision_auxiliary_llm(settings, tenant)
-        advisor = build_advisor_auxiliary_llm(settings, tenant)
-    except BaseException:
-        try:
-            await main_client.close()
-        except Exception:  # noqa: BLE001 — best-effort cleanup
-            logger.warning(
-                "Failed to aclose helm main AsyncOpenAI during partial-"
-                "build cleanup; original error being re-raised",
-                exc_info=True,
-            )
-        raise
-
-    return SessionLLMClients(
-        main=ResolvedLLM(client=main_client, model=settings.llm.model),
-        summary=(
-            ResolvedLLM(client=summary.client, model=summary.model)
-            if summary is not None
-            else None
-        ),
-        vision=(
-            ResolvedLLM(client=vision.client, model=vision.model)
-            if vision is not None
-            else None
-        ),
-        advisor=(
-            ResolvedLLM(client=advisor.client, model=advisor.model)
-            if advisor is not None
-            else None
-        ),
     )
 
 
@@ -548,9 +457,8 @@ def _start_worker_invalidator(state: dict) -> None:
     """Start the Redis pub/sub listener that invalidates the worker's
     RuntimeConfigCache when surogate-ops publishes a change.
 
-    No-op when the cache wasn't wired (helm mode or
-    empty platform url).  The worker only routes runtime-config +
-    bundle changes; firebase / slug invalidations are api-side only.
+    The worker only routes runtime-config + bundle changes; firebase
+    / slug invalidations are api-side only.
     """
     import asyncio
 
@@ -788,120 +696,47 @@ async def run_worker(settings: Settings) -> None:
         else:
             logger.debug("No MCP servers configured")
 
-    # 6. LLM clients -- now per-session.  Helm-mode
-    # sessions get a bundle from _build_helm_session_llm_clients in
-    # harness_factory (wraps settings.llm + tenant overrides); shared-
-    # mode sessions get a bundle from build_session_llm_clients fed by
-    # the per-agent runtime config + the credential vault.  No
-    # process-wide AsyncOpenAI instance here — every session owns its
-    # own connection pool.
-    logger.info(
-        "LLM defaults: model=%s, base_url=%s, api_key=%s",
-        settings.llm.model,
-        settings.llm.base_url or "(default)",
-        f"{settings.llm.api_key[:12]}..." if settings.llm.api_key else "(not set)",
-    )
+    # 6. LLM clients are per-session.  Every session gets a fresh
+    # SessionLLMClients bundle built by ``build_session_llm_clients``
+    # from the per-agent runtime config + the credential vault.  No
+    # process-wide AsyncOpenAI instance here — every session owns
+    # its own connection pool.
     _warn_if_base_model_missing_from_metadata(settings.llm.model)
 
-    # Worker-side shared-runtime plumbing.  In
-    # shared mode this gives harness_factory a RuntimeConfigCache to
-    # pull AgentRuntimeContext from per session; in helm mode it's a
-    # no-op and ``runtime_config_cache`` stays ``None``.
+    # Worker-side shared-runtime plumbing.  Wires the
+    # RuntimeConfigCache + FileBundleCache + MemoryCache that
+    # harness_factory reads per session.
     worker_state: dict = {"redis": redis_client}
     _install_worker_runtime_plumbing(worker_state, settings)
     _start_worker_invalidator(worker_state)
     runtime_config_cache = worker_state["runtime_config_cache"]
 
-    # Credential vault — required in shared mode for per-session
-    # vault://<name> resolution; tolerated as None in helm mode where
-    # settings.llm.api_key is the single key for the pod.
-    if settings.encryption_key:
-        credential_vault: CredentialVault | None = CredentialVault(
-            session_factory,
-            encryption_key=settings.encryption_key.encode("utf-8"),
+    # Credential vault — required for per-session ``vault://<name>``
+    # resolution.  Pod cannot serve sessions without it.
+    if not settings.encryption_key:
+        raise RuntimeError(
+            "SUROGATES_ENCRYPTION_KEY is required to resolve per-"
+            "session api_key_ref through the credential vault",
         )
-    else:
-        credential_vault = None
-        logger.warning(
-            "SUROGATES_ENCRYPTION_KEY not set; shared-mode sessions "
-            "will fail to resolve api_key_ref through the vault",
-        )
+    credential_vault = CredentialVault(
+        session_factory,
+        encryption_key=settings.encryption_key.encode("utf-8"),
+    )
 
     # Worker identity -- from K8s downward API or a generated fallback.
     worker_id = settings.worker_id or f"worker-{id(asyncio.get_event_loop()):x}"
     settings.worker_id = worker_id
 
-    # Worker bootstrap branches on runtime_mode.
-    #
-    # ``helm`` (legacy, default): each worker process serves exactly
-    # one agent.  ``SUROGATES_ORG_ID`` and ``SUROGATES_AGENT_ID`` are
-    # required and we resolve them up front; the harness factory below
-    # closes over them.
-    #
-    # ``shared``: the worker pool serves any tenant.  Both
-    # values are resolved per-session inside ``harness_factory`` from
-    # the dequeued session's row (``session.org_id``,
-    # ``session.agent_id``).  The startup guard is relaxed; the
-    # per-session mismatch refusal lower down is also relaxed for
-    # shared mode (every session is in scope).
-    runtime_mode = getattr(settings, "runtime_mode", "helm")
-
-    if runtime_mode == "helm":
-        if not settings.org_id:
-            raise RuntimeError(
-                "SUROGATES_ORG_ID is not set. Each agent instance must belong to an org. "
-                "Set org_id in config.yaml or SUROGATES_ORG_ID env var."
-            )
-        configured_org_id: UUID | None = UUID(settings.org_id)
-        if not settings.agent_id:
-            raise RuntimeError(
-                "SUROGATES_AGENT_ID is not set. Each worker instance serves "
-                "exactly one agent. Set agent_id in config.yaml or "
-                "SUROGATES_AGENT_ID env var."
-            )
-        configured_agent_id: str | None = settings.agent_id
-    else:
-        # In shared mode we deliberately ignore any stale
-        # SUROGATES_AGENT_ID / SUROGATES_ORG_ID set in the pod env so
-        # a misconfigured rollout cannot silently route traffic to the
-        # wrong tenant.  The harness factory below builds the tenant
-        # context per session from the dequeued row instead.
-        configured_org_id = None
-        configured_agent_id = None
-
     # 7. Harness factory -- creates a fully-wired AgentHarness for a given session.
     async def harness_factory(session_id: UUID) -> AgentHarness:
         """Build an AgentHarness with all dependencies injected.
 
-        Resolves the tenant from the session's user_id + the configured org_id.
+        Resolves the tenant per-session from the dequeued row — the
+        worker pool serves every shared-runtime agent on demand and
+        carries no process-wide tenant identity.
         """
-        # Load session to get user_id.
         session = await session_store.get_session(session_id)
-
-        # In helm mode, refuse to process sessions that belong to a
-        # different agent — defence-in-depth in case a foreign session
-        # id leaks into this worker's queue.  In shared mode every
-        # tenant is in scope by design; the per-agent queue keys still
-        # guarantee an agent's sessions are not stolen by another.
-        if (
-            runtime_mode == "helm"
-            and configured_agent_id is not None
-            and session.agent_id != configured_agent_id
-        ):
-            raise RuntimeError(
-                f"session {session_id} belongs to agent {session.agent_id!r}, "
-                f"this worker serves agent {configured_agent_id!r}"
-            )
-
-        # Per-session tenant identity.  In helm mode we use the bootstrap-
-        # validated configured_org_id; in shared mode we take org_id off
-        # the session row.  Either way the harness sees a tenant context
-        # bound to *this* session, never to process-wide state.
-        session_org_id = (
-            configured_org_id
-            if runtime_mode == "helm"
-            else UUID(str(session.org_id))
-        )
+        session_org_id = UUID(str(session.org_id))
 
         from sqlalchemy import select as sa_select
         from surogates.db.models import Org, User
@@ -917,11 +752,8 @@ async def run_worker(settings: Settings) -> None:
             else:
                 user_row = None
 
-        # resolve AgentRuntimeContext early so its
-        # storage_key_prefix can feed TenantContext.asset_root.  Helm
-        # mode goes through _legacy_helm_context (Task 9 enhances it
-        # to populate the prefix from settings.tenant_assets_root +
-        # org_id); shared mode hits the worker-side cache.
+        # Resolve AgentRuntimeContext early so its
+        # storage_key_prefix feeds TenantContext.asset_root.
         from surogates.runtime import resolve_runtime_context_for_session
 
         ctx = await resolve_runtime_context_for_session(
@@ -954,7 +786,7 @@ async def run_worker(settings: Settings) -> None:
                 principal_user_id = session.user_id or session.service_account_id
                 if principal_user_id is not None:
                     await mcp_proxy_client.discover_and_register(
-                        org_id=configured_org_id,
+                        org_id=session_org_id,
                         user_id=principal_user_id,
                         session_id=session.id,
                         is_service_account=session.user_id is None,
@@ -966,44 +798,17 @@ async def run_worker(settings: Settings) -> None:
                     session.id, exc_info=True,
                 )
 
-        # per-session LLM bundle.  Helm mode wraps
-        # the legacy settings + auxiliary-builder path; shared mode
-        # resolves through the AgentRuntimeContext (already resolved
-        # above for asset_root / Task 9) + the credential vault.
-        if runtime_mode == "helm":
-            llm_bundle = await _build_helm_session_llm_clients(
-                settings, tenant,
-            )
-        else:
-            # Dev convenience: if the runtime-config endpoint
-            # served an empty llm_main placeholder AND ``settings.llm`` carries a
-            # complete LLM block, fall back to the helm-mode
-            # builder so dev agents work out of the box without
-            # a per-agent llm_main + vault credential.  Plan 9's
-            # migration tool will populate llm_main per-agent;
-            # this fallback retires then.
-            empty_main = (
-                ctx.llm_main is None
-                or not getattr(ctx.llm_main, "model", "")
-                or not getattr(ctx.llm_main, "api_key_ref", "")
-            )
-            if empty_main and settings.llm.api_key:
-                logger.warning(
-                    "agent %s has no llm_main in runtime-config; "
-                    "falling back to settings.llm (dev convenience)",
-                    ctx.agent_id,
-                )
-                llm_bundle = await _build_helm_session_llm_clients(
-                    settings, tenant,
-                )
-            else:
-                from surogates.harness.session_llm import (
-                    build_session_llm_clients,
-                )
+        # Per-session LLM bundle resolved from the AgentRuntimeContext
+        # (already pulled above for ``asset_root``) + the credential
+        # vault.  Every agent has ``llm_main`` populated at create
+        # time by ops's ``create_shared_agent_extras``; an empty
+        # main here means the agent's runtime config is broken and
+        # the session deserves to fail fast.
+        from surogates.harness.session_llm import build_session_llm_clients
 
-                llm_bundle = await build_session_llm_clients(
-                    ctx, vault=credential_vault, user_id=tenant.user_id,
-                )
+        llm_bundle = await build_session_llm_clients(
+            ctx, vault=credential_vault, user_id=tenant.user_id,
+        )
 
         if not llm_bundle.main.model:
             # Worker raises rather than returns a 503 because there's no
@@ -1050,13 +855,11 @@ async def run_worker(settings: Settings) -> None:
         else:
             memory_dir = Path(tenant.asset_root) / "shared" / "memory"
 
-        # Shared-mode memory is R2-backed.
-        # Helm mode keeps the legacy disk-based MemoryStore until
-        # Plan 9 cutover.  Branch on (runtime_mode == 'shared') AND
-        # memory_cache wired so a misconfigured shared pod (no
-        # storage backend) falls back to disk silently.
+        # R2-backed per-user memory store.  Requires both the memory
+        # cache (wired at worker startup) and a storage backend; the
+        # in-memory fallback below covers test contexts only.
         memory_cache = worker_state.get("memory_cache")
-        if runtime_mode == "shared" and memory_cache is not None:
+        if memory_cache is not None:
             from surogates.memory.r2_store import R2MemoryStore
             from surogates.runtime.memory_protocol import memory_object_key
 
@@ -1126,12 +929,12 @@ async def run_worker(settings: Settings) -> None:
             memory_store = MemoryStore(memory_dir=memory_dir)
         memory_manager = MemoryManager(memory_store)
 
-        # Resolve the per-session file bundle
-        # once and share it across the catalog load and the
-        # PromptBuilder content pre-load.  None when the
-        # FileBundleCache isn't wired or the agent has no bundle
-        # configured; both downstream consumers fall back to the
-        # legacy filesystem paths silently in that case.
+        # Resolve the per-session file bundle once and share it
+        # across the catalog load and the PromptBuilder content
+        # pre-load.  ``None`` is acceptable for agents that haven't
+        # had their first publish yet; the loaders return ``None``
+        # silently and the prompt builder skips the SOUL.md /
+        # AGENT.md sections rather than crashing.
         bundle = None
         file_bundle_cache = worker_state.get("file_bundle_cache")
         if file_bundle_cache is not None and ctx.bundle_hub_ref:
@@ -1157,7 +960,7 @@ async def run_worker(settings: Settings) -> None:
         # KB tools are unavailable (no ops DB) or no KBs are wired
         # to this agent yet.
         attached_kbs = await _load_attached_kbs(
-            agent_id=configured_agent_id,
+            agent_id=session.agent_id,
             ops_db_url=settings.ops_db.url,
         )
         # Filter the tool set to drop kb_list_pages / kb_read_page
@@ -1183,10 +986,10 @@ async def run_worker(settings: Settings) -> None:
             use_api_for_harness_tools=settings.worker.use_api_for_harness_tools,
         )
 
-        # Pre-load SOUL.md / AGENT.md from the
-        # bundle resolved above.  The PromptBuilder stays sync; the loaders return
-        # None silently when bundle is None and the builder falls
-        # back to load_soul_md_from_disk (legacy helm path).
+        # Pre-load SOUL.md / AGENT.md from the bundle resolved
+        # above.  The PromptBuilder stays sync; the loaders return
+        # ``None`` silently when the bundle is missing or doesn't
+        # carry those files and the builder skips those sections.
         from surogates.harness.context_files import (
             load_agent_md, load_soul_md,
         )
@@ -1222,7 +1025,7 @@ async def run_worker(settings: Settings) -> None:
             token = _select_harness_token(
                 tenant=tenant,
                 session=session,
-                agent_id=settings.agent_id,
+                agent_id=session.agent_id,
             )
             if token is None:
                 logger.info(
@@ -1235,7 +1038,7 @@ async def run_worker(settings: Settings) -> None:
                     base_url=settings.worker.api_base_url,
                     token=token,
                     session_id=str(session.id),
-                    agent_id=session.agent_id or settings.agent_id,
+                    agent_id=session.agent_id,
                 )
 
         # Build a TurnSummarizer when both the summary auxiliary LLM is
@@ -1341,7 +1144,7 @@ async def run_worker(settings: Settings) -> None:
         session_store=session_store,
         harness_factory=harness_factory,
         max_concurrent=settings.worker.concurrency,
-        agent_id=configured_agent_id,
+        agent_id=None,
         queue_key=SHARED_WORK_QUEUE_KEY,
         poll_timeout=settings.worker.poll_timeout,
         browser_pool=browser_pool,
@@ -1350,31 +1153,10 @@ async def run_worker(settings: Settings) -> None:
         turn_gate=turn_gate,
     )
 
-    scheduled_runner = None
-    scheduled_task = None
-    # Shared-mode workers do NOT bootstrap a
-    # per-tenant ScheduledSessionRunner; the platform ticker
-    # (surogates.scheduled.platform_ticker) runs as its own
-    # Deployment and serves every shared-mode agent from one
-    # leader-elected process.  Helm-mode workers keep the
-    # per-tenant ticker until the cutover.
-    _is_shared = getattr(settings, "runtime_mode", "helm") == "shared"
-    if settings.scheduled_sessions.enabled and not _is_shared:
-        from surogates.scheduled.runner import ScheduledSessionRunner
-        from surogates.scheduled.store import ScheduledSessionStore
-
-        scheduled_runner = ScheduledSessionRunner(
-            settings=settings,
-            session_factory=session_factory,
-            session_store=session_store,
-            scheduled_store=ScheduledSessionStore(session_factory),
-            redis=redis_client,
-            storage=storage_backend,
-        )
-        scheduled_task = asyncio.create_task(
-            scheduled_runner.run_forever(),
-            name="scheduled-session-runner",
-        )
+    # Scheduled-work polling is owned by the platform ticker
+    # (``surogates.scheduled.platform_ticker``) which runs as its
+    # own Deployment with Redis leader election.  Workers no longer
+    # carry a per-tenant scheduled-session runner.
 
     from surogates.jobs.inbox_expire import run_expire_loop
     inbox_expire_task = asyncio.create_task(
@@ -1409,14 +1191,6 @@ async def run_worker(settings: Settings) -> None:
     finally:
         # Cleanup
         logger.info("Worker %s shutting down", worker_id)
-        if scheduled_runner is not None:
-            await scheduled_runner.shutdown()
-        if scheduled_task is not None:
-            scheduled_task.cancel()
-            try:
-                await scheduled_task
-            except asyncio.CancelledError:
-                pass
         inbox_expire_task.cancel()
         try:
             await inbox_expire_task

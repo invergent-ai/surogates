@@ -1146,7 +1146,7 @@ async def call_llm_streaming_inner(
     # received and whether any content or tool-call delta has landed.
     # If the model emits a large amount of reasoning_content before
     # any visible output, the stream is cancelled and the outer retry
-    # re-issues with enable_thinking=False (see Task 7).
+    # re-issues with enable_thinking=False.
     reasoning_char_count: int = 0
     content_or_tool_emitted: bool = False
 

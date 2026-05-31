@@ -5,7 +5,6 @@ image with a different subcommand:
 
     surogate api              Start the API gateway (FastAPI + web SPA)
     surogate worker           Start a harness worker (Redis queue consumer)
-    surogate channel slack    Start the Slack channel adapter
     surogate mcp-proxy        Start the MCP proxy service
     surogate migrate          Run database migrations
 """
@@ -83,22 +82,6 @@ def cmd_worker(args: argparse.Namespace) -> None:
     asyncio.run(run_worker(settings))
 
 
-def cmd_channel(args: argparse.Namespace) -> None:
-    """Start a channel adapter (slack, teams, telegram, webhook)."""
-    from surogates.config import load_settings
-
-    settings = load_settings()
-    _configure_logging(settings.log_level)
-
-    channel_type: str = args.type
-    logger = logging.getLogger("surogates.channel")
-    logger.info("Starting channel adapter: %s", channel_type)
-
-    from surogates.channels import start_channel
-
-    asyncio.run(start_channel(channel_type, settings))
-
-
 def cmd_mcp_proxy(args: argparse.Namespace) -> None:
     """Start the MCP proxy service."""
     import uvicorn
@@ -149,14 +132,6 @@ def build_parser() -> argparse.ArgumentParser:
     # surogate worker
     sub.add_parser("worker", help="Start a harness worker")
 
-    # surogate channel <type>
-    p_channel = sub.add_parser("channel", help="Start a channel adapter")
-    p_channel.add_argument(
-        "type",
-        choices=["slack", "telegram"],
-        help="Channel type to start",
-    )
-
     # surogate mcp-proxy
     sub.add_parser("mcp-proxy", help="Start the MCP proxy service")
 
@@ -169,7 +144,6 @@ def build_parser() -> argparse.ArgumentParser:
 COMMANDS = {
     "api": cmd_api,
     "worker": cmd_worker,
-    "channel": cmd_channel,
     "mcp-proxy": cmd_mcp_proxy,
     "migrate": cmd_migrate,
 }

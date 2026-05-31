@@ -1,9 +1,9 @@
 """HTTP client for the management plane's per-agent runtime config.
 
-Plan 1 / Task 12.  Wraps a single long-lived ``httpx.AsyncClient`` so
+Wraps a single long-lived ``httpx.AsyncClient`` so
 the api / worker processes hold exactly one connection pool per pod
 toward surogate-ops.  Callers go through
-:class:`surogates.runtime.cache.RuntimeConfigCache` (Task 13) — the
+:class:`surogates.runtime.cache.RuntimeConfigCache` — the
 client is the cache's loader, not the per-request entry point.
 
 Error taxonomy used by the cache + the upstream resolver:
@@ -66,7 +66,7 @@ class PlatformClient:
 
         Returns the raw JSON dict; the projection into
         :class:`~surogates.runtime.context.AgentRuntimeContext` is the
-        resolver's job (Task 14).
+        resolver's job.
         """
         try:
             resp = await self._client.get(
@@ -96,7 +96,7 @@ class PlatformClient:
         return resp.json()
 
     async def get_firebase_config(self, project_id: str) -> dict:
-        """Fetch the per-project Firebase web config (Plan 1b).
+        """Fetch the per-project Firebase web config.
 
         Returns the raw JSON dict; projection into
         :class:`~surogates.runtime.firebase.FirebaseConfig` is the
@@ -129,7 +129,7 @@ class PlatformClient:
         return resp.json()
 
     async def get_agent_id_for_slug(self, slug: str) -> str | None:
-        """Resolve a DNS-safe agent slug to its agent_id (Plan 1b).
+        """Resolve a DNS-safe agent slug to its agent_id.
 
         Returns ``None`` (not :class:`LookupError`) on 404 because slug
         misses are a common, expected case — the Host-header resolver
@@ -158,7 +158,7 @@ class PlatformClient:
         return resp.json()["agent_id"]
 
     async def get_agent_mcp_servers(self, agent_id: str) -> list[dict]:
-        """Fetch the agent's effective MCP server registry (Plan 5).
+        """Fetch the agent's effective MCP server registry.
 
         Returns a list of MCP server config dicts the agent can call
         — the management plane filters the org's MCP servers by the
@@ -195,7 +195,7 @@ class PlatformClient:
     async def get_channel_routing(
         self, kind: str, identifier: str,
     ) -> dict | None:
-        """Fetch the routing record for an inbound channel event (Plan 6).
+        """Fetch the routing record for an inbound channel event.
 
         Returns the JSON dict (``{"org_id", "agent_id", "api_web_url"}``)
         when a row exists in the ``channel_routing`` table; returns

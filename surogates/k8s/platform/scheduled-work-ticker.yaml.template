@@ -1,11 +1,9 @@
-# Plan 8 / Task 13.  Platform-level scheduled-work ticker Deployment.
+# Platform-level scheduled-work ticker Deployment.
 #
-# Replaces the per-tenant ScheduledSessionRunner inside every worker
-# pod (Plan 2 artifact, helm-mode legacy) with a single Deployment
-# that runs N replicas for HA; only one replica fires at a time via
-# Redis leader election (RedisLeaderLock, Plan 8 Tasks 1-3).
+# Runs N replicas for HA; only one replica fires at a time via
+# Redis leader election (RedisLeaderLock).
 #
-# Placeholders to fill in (Plan 8 follow-up / operations):
+# Placeholders to fill in:
 #   {{ namespace }}           -- e.g. surogates-platform
 #   {{ image_registry }}      -- e.g. ghcr.io/invergent-ai
 #   {{ image_tag }}           -- the surogates wheel image tag
@@ -15,7 +13,6 @@
 #
 # Apply with:
 #   envsubst < scheduled-work-ticker.yaml.template | kubectl apply -f -
-# or use a templating tool of choice (yq, helm template, kustomize).
 
 apiVersion: apps/v1
 kind: Deployment

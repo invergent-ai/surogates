@@ -1,11 +1,9 @@
 """Per-event bot token resolution for shared channel adapters.
 
-Plan 6 / Task 6.  The shared adapter pod serves many tenants;
+The shared adapter pod serves many tenants;
 the bot token for an inbound event lives in the per-tenant
 credential vault, not in process-wide settings.  Resolution
-goes through :meth:`CredentialVault.resolve_ref` so Plan 2 Task
-16's source-level regression -- that all vault access is
-per-session, not process-wide -- remains intact.
+goes through :meth:`CredentialVault.resolve_ref`
 
 Vault key conventions (per channel kind):
 

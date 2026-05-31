@@ -1,9 +1,8 @@
 """Platform-level scheduled-work ticker.
 
-Plan 8 / Task 5.  Replaces the per-tenant
+Replaces the per-tenant
 :class:`surogates.scheduled.runner.ScheduledSessionRunner`
-(Plan 2 artifact running inside every worker pod) with a single
-platform-level process that:
+ with a single platform-level process that:
 
 * Acquires a Redis leader lock (:class:`RedisLeaderLock`, Task
   1+2) so only one replica fires at a time across N replicas.
@@ -27,7 +26,7 @@ slow DB read pushing us past the TTL boundary.
 Shutdown: :meth:`request_stop` sets an event that the loop
 checks between sleep boundaries; the next iteration releases
 the lock and exits.  SIGTERM / SIGINT plumbing lives in
-:func:`main` (Task 7) so this class stays signal-agnostic.
+:func:`main` so this class stays signal-agnostic.
 """
 
 from __future__ import annotations
@@ -155,7 +154,7 @@ async def main(
 ) -> None:
     """CLI entry for ``python -m surogates.scheduled.platform_ticker``.
 
-    Plan 8 / Task 7.  Wires:
+    Wires:
 
     * Redis client from ``settings.redis.url``
     * :class:`ScheduledSessionStore` from ``settings.db``

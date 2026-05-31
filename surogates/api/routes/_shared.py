@@ -79,31 +79,18 @@ async def resolve_agent_bundle(request: Request):
        and Studio both take.
     2. ``Host`` header subdomain slug — per-tenant chat web apps
        at ``slug.example.com``.
-    3. ``settings.agent_id`` when ``runtime_mode == 'helm'`` — the
-       legacy single-agent pod baseline.
 
     Returns ``None`` (never raises) when:
 
-    * ``file_bundle_cache`` is not wired (Hub disabled, dev pods
-      without ``SUROGATES_HUB_ENDPOINT``).
-    * No ``agent_id`` is resolvable (e.g. the harness's in-process
-      API client hitting ``/v1/skills`` before agent_id auto-injection
-      lands; helm-mode pods with no slug).
-    * The agent has no published bundle yet (``bundle_hub_ref`` is
-      empty in the runtime config).
+    * ``file_bundle_cache`` is not wired.
+    * No ``agent_id`` is resolvable.
+    * The agent has no published bundle yet
+      (``bundle_hub_ref`` empty in the runtime config).
     * The Hub network round-trip fails — degrade gracefully rather
       than 500 the catalogue route.
-
-    Each fallthrough path emits a single WARNING so a misconfigured
-    pod surfaces in the next request instead of needing a startup
-    banner re-read.
     """
     cache = getattr(request.app.state, "file_bundle_cache", None)
     if cache is None:
-        logger.warning(
-            "bundle resolver: file_bundle_cache is None on app.state — "
-            "check SUROGATES_HUB_ENDPOINT is set in the api process",
-        )
         return None
     agent_id = request.query_params.get("agent_id")
     if not agent_id:
@@ -115,10 +102,6 @@ async def resolve_agent_bundle(request: Request):
                 agent_id = await _resolve_slug_to_agent_id(request, slug)
             except Exception:  # noqa: BLE001 — slug lookup is best-effort
                 agent_id = None
-    if not agent_id:
-        settings = getattr(request.app.state, "settings", None)
-        if getattr(settings, "runtime_mode", "helm") == "helm":
-            agent_id = getattr(settings, "agent_id", "") or None
     if not agent_id:
         return None
     try:

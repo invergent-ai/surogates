@@ -1,10 +1,10 @@
 """Per-process L1 cache for per-user memory bytes.
 
-Plan 4 / Task 5.  Same TTL + per-key-lock + double-checked-locking
+Same TTL + per-key-lock + double-checked-locking
 shape as RuntimeConfigCache / FirebaseConfigCache /
 SlugResolverCache / FileBundleCache.
 
-Key shape: ``"<org_id>:<user_id>"`` verbatim — the Plan 4 Task 2
+Key shape: ``"<org_id>:<user_id>"`` verbatim — the 
 invalidator channel ``user.memory_changed:<org_id>:<user_id>``
 passes the colon-joined string through to ``cache.invalidate``
 without a parser, so the cache key shape and the channel
@@ -14,7 +14,7 @@ Loader exceptions are NOT memoised: a transient R2 failure on
 call N must let call N+1 retry instead of poisoning the cache for
 the full TTL window.
 
-L2 is intentionally absent.  Bundles (Plan 3) cache to disk
+L2 is intentionally absent.  Bundles cache to disk
 because bundle contents are large and pre-existing for a given
 ``(agent_id, version)`` tuple; user memory is small, write-heavy,
 and tied to a session lifetime — a disk cache would add code

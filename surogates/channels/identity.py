@@ -93,7 +93,7 @@ async def get_or_create_channel_session(
         Deterministic routing key from ``build_session_key()``.
     user_id, org_id, agent_id:
         The resolved Surogates user, org, and the agent this session
-        belongs to (``Settings.agent_id``).
+        belongs to.
     channel:
         Channel name (e.g. ``"slack"``, ``"teams"``).
     config:

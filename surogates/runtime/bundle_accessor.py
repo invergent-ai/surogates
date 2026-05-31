@@ -1,6 +1,6 @@
 """Per-session read-only handle on an agent's file bundle.
 
-Plan 3 / Task 4.  Constructed by the FileBundleCache (Task 6) per
+Constructed by the FileBundleCache per
 session and passed into the harness's PromptBuilder + ResourceLoader.
 Frozen so a careless harness mutation can't swap the underlying ref
 mid-session — every read in the session sees the same bundle

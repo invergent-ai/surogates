@@ -1,11 +1,11 @@
 """Per-tenant concurrency limiter for in-flight turns.
 
-Plan 2 / Task 11.  The dispatcher consults the gate before handing a
+The dispatcher consults the gate before handing a
 dequeued session to a worker; tenants that have already hit their
 max-concurrent-turns budget have their session requeued so a noisy
 tenant cannot drain the worker pool.
 
-Distinct from :class:`PerTenantRateLimiter` (Plan 1b Task 13) which
+Distinct from :class:`PerTenantRateLimiter` which
 is a request-rate limit (per-minute window).  The gate is a live
 counter — exactly tracks how many sessions are currently being
 processed for the tenant — and decrements when the dispatcher
@@ -17,7 +17,7 @@ survive a stuck-release scenario (e.g. crash recovery double-
 releasing).
 
 If the worker pool crashes mid-session and never DECRs, the counter
-sticks high until a manual reset.  Plan 7 lifecycle adds an admin
+sticks high until a manual reset. lifecycle adds an admin
 ``reset_turn_counters`` CLI; today an admin can ``DEL`` the key.
 A heartbeat / TTL-based variant is intentionally deferred because
 the simple counter is enough for the canary deploy.

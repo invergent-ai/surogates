@@ -85,8 +85,8 @@ def _install_browser_api_dependencies(app: Any, settings: Any) -> None:
         )
 
     async def wake_session(session_id: str) -> None:
-        # Plan 2 / Task 12 — the shared queue needs the tenant tuple
-        # so the dispatcher's gate check (Task 13) can find the
+        # the shared queue needs the tenant tuple
+        # so the dispatcher's gate check can find the
         # session's org without a DB round-trip.  Look up the row
         # once; the caller's hot path runs at most a few times per
         # request so the extra read is negligible.
@@ -141,17 +141,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.pairing_store = PairingStore(redis=app.state.redis)
     _install_browser_api_dependencies(app, settings)
 
-    # Shared-runtime plumbing (Plan 1).  In ``runtime_mode='shared'``
-    # the api pod serves any tenant; per-request resolution goes through
-    # ``agent_runtime_context_dep`` which reads the cache below.
-    if getattr(settings, "runtime_mode", "helm") == "shared":
-        _install_shared_runtime_plumbing(app, settings)
-    else:
-        app.state.platform_client = None
-        app.state.runtime_config_cache = None
-        app.state.firebase_config_cache = None
-        app.state.slug_resolver_cache = None
-        app.state.rate_limiter = None
+    # Per-request resolution goes through ``agent_runtime_context_dep``
+    # which reads the caches wired below.
+    _install_shared_runtime_plumbing(app, settings)
 
     logger.info("Surogates API started (workers=%d)", settings.api.workers)
 
@@ -167,10 +159,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     """Wire the PlatformClient + RuntimeConfigCache onto app.state.
 
-    Constructed once per process; ``aclose()``'d on shutdown.  When
-    ``platform_api_url`` is empty we deliberately skip the wiring so
-    misconfigured shared-mode pods fail fast on first request (the
-    resolver dependency raises rather than masking the misconfig).
+    Constructed once per process; ``aclose()``'d on shutdown.
+    Requires ``settings.platform_api_url`` — surfaced at boot via
+    the RuntimeError below so a misconfigured pod doesn't silently
+    serve broken requests.
 
     Also starts a background ``run_invalidator`` task that listens on
     the Redis pub/sub channels surogate-ops publishes to when admins
@@ -193,21 +185,10 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     )
 
     if not settings.platform_api_url:
-        logger.error(
-            "runtime_mode='shared' but SUROGATES_PLATFORM_API_URL is empty; "
-            "agent_runtime_context_dep will fail on every request",
+        raise RuntimeError(
+            "SUROGATES_PLATFORM_API_URL is required; the api pod "
+            "cannot resolve per-tenant context without it",
         )
-        app.state.platform_client = None
-        app.state.runtime_config_cache = None
-        app.state.firebase_config_cache = None
-        app.state.slug_resolver_cache = None
-        app.state.rate_limiter = None
-        app.state.file_bundle_cache = None
-        app.state.memory_cache = None
-        app.state.mcp_server_cache = None
-        app.state.channel_routing_cache = None
-        app.state.runtime_invalidator_task = None
-        return
 
     client = PlatformClient(
         base_url=settings.platform_api_url,
@@ -220,7 +201,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     # Project dict → FirebaseConfig dataclass at the loader edge so
     # every callsite gets a typed object back from the cache.  The
     # PlatformClient returns the raw JSON; FirebaseConfig mirrors the
-    # field shape one-to-one (Plan 1b / Task 6).
+    # field shape one-to-one.
     async def _load_firebase(project_id: str) -> FirebaseConfig:
         payload = await client.get_firebase_config(project_id)
         return FirebaseConfig(
@@ -247,39 +228,32 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         default_rpm=getattr(settings.api, "rate_limit_rpm", 300),
     )
 
-    # Plan 3 / Task 9 — file-bundle cache.  When the Hub endpoint
-    # is unset the cache stays None and the worker falls back to
-    # legacy filesystem reads for SOUL.md / platform skills.  Plan 9
-    # retires the fallback and makes Hub required.
-    file_bundle_cache: FileBundleCache | None = _maybe_build_file_bundle_cache(
+    # File-bundle cache — Hub is required.  Builder raises if
+    # ``settings.hub.endpoint`` is empty.
+    file_bundle_cache: FileBundleCache = build_file_bundle_cache(
         settings=settings, runtime_config_cache=cache,
     )
 
-    # Plan 4 / Task 6 — per-user memory cache.  Stays None when
-    # storage backend is unconfigured (no bucket); the harness
-    # falls back to legacy disk MemoryStore in that case.  Plan 9
-    # retires the fallback.
-    memory_cache = _maybe_build_memory_cache(
+    # Per-user memory cache — storage backend is required.  Builder
+    # raises if ``settings.storage.bucket`` is empty.
+    memory_cache = build_memory_cache(
         settings=settings,
         storage_backend=getattr(app.state, "storage_backend", None),
     )
 
-    # Plan 5 / Task 7 — per-agent MCP server registry cache.  Plan 5
-    # Task 8 retires the /etc/surogates/mcp filesystem fallback in
-    # favour of the DB-backed list served by the management plane;
-    # this cache sits in front of that endpoint.
-    mcp_server_cache = _maybe_build_mcp_server_cache(
+    # per-agent MCP server registry cache.
+    mcp_server_cache = build_mcp_server_cache(
         settings=settings, platform_client=client,
     )
 
-    # Plan 6 / Task 3 — channel routing cache.  Powers the shared
-    # adapter pod's per-event tenant resolution.  In the api process
-    # the cache is wired primarily so the invalidator subscribes to
-    # the channel_routing_changed:<kind>:<id> Redis channel; the api
-    # itself doesn't currently dispatch inbound channel events, but
-    # keeping the cache + invalidator alive here means any shared-
-    # mode pod that needs it picks up the same code path.
-    channel_routing_cache = _maybe_build_channel_routing_cache(
+    # Channel routing cache.  Powers the shared adapter pod's
+    # per-event tenant resolution.  In the api process the cache
+    # is wired primarily so the invalidator subscribes to the
+    # channel_routing_changed:<kind>:<id> Redis channel; the api
+    # itself doesn't currently dispatch inbound channel events,
+    # but keeping the cache + invalidator alive here means every
+    # pod picks up the same code path.
+    channel_routing_cache = build_channel_routing_cache(
         settings=settings, platform_client=client,
     )
 
@@ -310,18 +284,12 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     )
 
 
-def _maybe_build_memory_cache(
-    *, settings, storage_backend,
-):
-    """Construct a MemoryCache when storage backend + bucket are
-    configured; return None otherwise.
+def build_memory_cache(*, settings, storage_backend):
+    """Construct an R2-backed MemoryCache.
 
-    Plan 4 / Task 6.  Same graceful-degradation shape as
-    :func:`_maybe_build_file_bundle_cache`.  When the storage
-    backend is unwired OR ``settings.storage.bucket`` is empty,
-    the cache stays None and the worker harness falls back to the
-    legacy disk MemoryStore.  Plan 9 retires the fallback and
-    makes R2 required.
+    Requires both a storage backend and a configured bucket — the
+    harness never falls back to disk memory, so this raises rather
+    than returning ``None`` on a misconfig.
     """
     from surogates.runtime import MemoryCache
     from surogates.runtime.memory_protocol import (
@@ -331,7 +299,10 @@ def _maybe_build_memory_cache(
 
     storage = getattr(settings, "storage", None)
     if storage_backend is None or storage is None or not storage.bucket:
-        return None
+        raise RuntimeError(
+            "Memory cache requires a configured storage backend + "
+            "non-empty ``storage.bucket``",
+        )
 
     bucket = storage.memory_bucket or storage.bucket
     fresh_envelope_bytes = encode_envelope(
@@ -358,25 +329,17 @@ def _maybe_build_memory_cache(
     return MemoryCache(loader=_loader, ttl_seconds=5.0)
 
 
-def _maybe_build_mcp_server_cache(
-    *, settings, platform_client,
-):
-    """Construct an MCPServerRegistryCache when the platform client
-    is wired; return None otherwise.
+def build_mcp_server_cache(*, settings, platform_client):
+    """Construct an :class:`MCPServerRegistryCache`.
 
-    Plan 5 / Task 7.  The cache key is the bare ``agent_id`` so the
-    invalidator channel ``agent.mcp_servers_changed:<agent_id>``
-    routes its identifier straight through to ``cache.invalidate``.
-    The loader hits the surogate-ops endpoint
-    ``GET /api/agents/{agent_id}/mcp-servers`` (added on the
-    management plane for Plan 5) which returns the agent's effective
-    MCP server registry — DB-only, no filesystem fallback (Task 8
-    retires the on-disk legacy layer).
+    The cache key is the bare ``agent_id`` so the invalidator
+    channel ``agent.mcp_servers_changed:<agent_id>`` routes its
+    identifier straight through to ``cache.invalidate``.  The
+    loader hits ``GET /api/agents/{agent_id}/mcp-servers`` on
+    surogate-ops, which returns the agent's effective MCP server
+    registry.
     """
     from surogates.runtime import MCPServerRegistryCache
-
-    if platform_client is None:
-        return None
 
     async def _loader(agent_id: str) -> list[dict]:
         return await platform_client.get_agent_mcp_servers(agent_id)
@@ -384,24 +347,13 @@ def _maybe_build_mcp_server_cache(
     return MCPServerRegistryCache(loader=_loader, ttl_seconds=30.0)
 
 
-def _maybe_build_channel_routing_cache(
-    *, settings, platform_client,
-):
-    """Construct a ChannelRoutingCache when the platform client is
-    wired; return None otherwise.
+def build_channel_routing_cache(*, settings, platform_client):
+    """Construct a :class:`ChannelRoutingCache`.
 
-    Plan 6 / Task 3.  Loader splits the cache key
-    ``"<kind>:<identifier>"`` back into the two
-    :meth:`PlatformClient.get_channel_routing` args.  Same
-    graceful-degradation shape as Plan 3 / 4 / 5's
-    ``_maybe_build_*_cache`` helpers -- ``None`` cache means the
-    proxy / api still boots in helm mode (where the channel
-    adapter reads tokens from process-wide settings).
+    Loader splits the cache key ``"<kind>:<identifier>"`` back into
+    the two :meth:`PlatformClient.get_channel_routing` args.
     """
     from surogates.runtime import ChannelRoutingCache
-
-    if platform_client is None:
-        return None
 
     async def _loader(key: str) -> dict | None:
         kind, _, identifier = key.partition(":")
@@ -410,18 +362,13 @@ def _maybe_build_channel_routing_cache(
     return ChannelRoutingCache(loader=_loader, ttl_seconds=30.0)
 
 
-def _maybe_build_file_bundle_cache(
-    *, settings, runtime_config_cache,
-):
-    """Construct a FileBundleCache when both HubSettings and the SDK
-    are available; return None otherwise.
+def build_file_bundle_cache(*, settings, runtime_config_cache):
+    """Construct a :class:`FileBundleCache`.
 
-    Plan 3 / Task 9.  The Hub SDK (``surogate_hub_sdk``) is an
-    optional install in the surogates wheel — production deployments
-    pin it, dev / test environments may not have it.  When the SDK
-    is missing OR ``settings.hub.endpoint`` is empty, the cache
-    stays None and the worker falls back to legacy filesystem reads
-    for SOUL.md / platform skills.  Plan 9 makes Hub required.
+    Requires both ``settings.hub.endpoint`` and the
+    ``surogate_hub_sdk`` import to succeed.  Hub is required for
+    serving any agent — raises rather than returning ``None`` on
+    misconfig so a broken pod fails at boot.
     """
     from surogates.runtime import (
         AgentFileBundle,
@@ -435,7 +382,10 @@ def _maybe_build_file_bundle_cache(
 
     hub_settings = getattr(settings, "hub", None)
     if hub_settings is None or not hub_settings.endpoint:
-        return None
+        raise RuntimeError(
+            "File bundle cache requires ``settings.hub.endpoint``; "
+            "Hub is mandatory in shared mode",
+        )
 
     from surogate_hub_sdk import ApiClient, Configuration, ObjectsApi
     from pathlib import Path

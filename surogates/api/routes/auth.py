@@ -101,39 +101,12 @@ async def auth_config(
 ) -> AuthConfigResponse:
     """Public runtime auth config consumed by the agent web app.
 
-    Plan 1b retrofit: shared-runtime pods resolve Firebase config
-    per-project via :class:`FirebaseConfigCache` (which fronts ops's
-    ``GET /api/projects/{id}/firebase-config``).  Helm-mode pods fall
-    back to the static ``settings.auth`` block they were deployed
-    with.  Returns ``self_registration_enabled=False`` when no
-    Firebase config is resolvable so the SPA falls back to local
-    login.
+    Resolves Firebase config per-project via :class:`FirebaseConfigCache`
+    (which fronts ops's ``GET /api/projects/{id}/firebase-config``).
+    Returns ``self_registration_enabled=False`` when no Firebase
+    config is configured for this project so the SPA falls back to
+    local login.
     """
-    settings = request.app.state.settings
-    auth = settings.auth
-
-    runtime_mode = getattr(settings, "runtime_mode", "helm")
-    if runtime_mode != "shared":
-        # Helm-mode legacy: per-pod settings carry the project's
-        # Firebase config baked in by the agent_chart values.
-        if not (auth.self_registration_enabled and auth.firebase_configured):
-            return AuthConfigResponse(
-                self_registration_enabled=False, firebase=None,
-            )
-        return AuthConfigResponse(
-            self_registration_enabled=True,
-            firebase=FirebaseWebConfig(
-                api_key=auth.firebase_api_key,
-                auth_domain=auth.firebase_auth_domain,
-                project_id=auth.firebase_project_id,
-                app_id=auth.firebase_app_id or None,
-                messaging_sender_id=auth.firebase_messaging_sender_id or None,
-                measurement_id=auth.firebase_measurement_id or None,
-                enabled_providers=list(auth.providers),
-            ),
-        )
-
-    # Shared mode: per-project resolution via the firebase cache.
     cache = getattr(request.app.state, "firebase_config_cache", None)
     project_id = getattr(agent_runtime, "project_id", None)
     if cache is None or not project_id:
@@ -199,8 +172,6 @@ async def firebase_exchange(
       pre-linked Firebase user already exists. No new rows are created;
       no manual ``database`` user is silently linked.
     """
-    settings = request.app.state.settings
-    auth = settings.auth
     audit_store: AuditStore | None = getattr(
         request.app.state, "audit_store", None,
     )
@@ -213,40 +184,25 @@ async def firebase_exchange(
         )
     org_id = UUID(agent_runtime.org_id)
 
-    # Plan 1b retrofit: in shared mode resolve Firebase project_id /
-    # self-registration-enabled per-tenant via the cache.  Helm-mode
-    # pods keep the legacy ``settings.auth`` path so a Plan 9 revert
-    # is still mechanical.
-    runtime_mode = getattr(settings, "runtime_mode", "helm")
-    fb_project_id: str | None = None
-    self_reg_enabled: bool = False
-    if runtime_mode == "shared":
-        cache = getattr(request.app.state, "firebase_config_cache", None)
-        project_id = getattr(agent_runtime, "project_id", None)
-        fb = None
-        if cache is not None and project_id:
-            try:
-                fb = await cache.get(project_id)
-            except LookupError:
-                fb = None
-        if fb is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Firebase auth is not configured.",
-            )
-        fb_project_id = fb.firebase_project_id
-        # Shared-mode self-registration is gated by the per-project
-        # Firebase row existing at all — projects that haven't opted
-        # in have no row and the LookupError above bails out.
-        self_reg_enabled = True
-    else:
-        if not auth.firebase_configured:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Firebase auth is not configured.",
-            )
-        fb_project_id = auth.firebase_project_id
-        self_reg_enabled = auth.self_registration_enabled
+    # Resolve Firebase per-project via the cache.  Self-registration
+    # is gated by the per-project Firebase row existing at all —
+    # projects that haven't opted in have no row and the LookupError
+    # below bails out with 404.
+    cache = getattr(request.app.state, "firebase_config_cache", None)
+    project_id = getattr(agent_runtime, "project_id", None)
+    fb = None
+    if cache is not None and project_id:
+        try:
+            fb = await cache.get(project_id)
+        except LookupError:
+            fb = None
+    if fb is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Firebase auth is not configured.",
+        )
+    fb_project_id = fb.firebase_project_id
+    self_reg_enabled = True
 
     try:
         claims = await verify_firebase_id_token(
@@ -392,9 +348,8 @@ async def login(
     )
     source_ip = client_ip(request)
 
-    # Use the request body's org_id if provided, otherwise the tenant
-    # resolved per-request via agent_runtime_context_dep (helm mode
-    # sources from settings; shared mode from the runtime config).
+    # Use the request body's org_id if provided, otherwise the
+    # tenant resolved per-request via agent_runtime_context_dep.
     org_id = body.org_id
     if org_id is None:
         if not agent_runtime.org_id:

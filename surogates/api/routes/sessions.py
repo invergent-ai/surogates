@@ -543,8 +543,7 @@ async def _get_session_for_tenant(
     scopes.
 
     ``agent_id`` is supplied by the caller (typically from
-    :func:`surogates.runtime.agent_runtime_context_dep`) so the helper
-    works identically in helm and shared modes.
+    :func:`surogates.runtime.agent_runtime_context_dep`).
     """
     store = _get_session_store(request)
     try:

@@ -1,6 +1,6 @@
 """Async wrapper over the Surogate Hub SDK's ObjectsApi.
 
-Plan 3 / Task 3.  The Hub SDK is auto-generated from OpenAPI and
+The Hub SDK is auto-generated from OpenAPI and
 exposes a synchronous, lakeFS-style API:
 
     objects_api.get_object(user, repository, ref, path) -> bytearray

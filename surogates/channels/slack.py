@@ -70,7 +70,7 @@ logger = logging.getLogger(__name__)
 class SharedSlackInbound:
     """Per-event tenant resolver for the shared Slack adapter.
 
-    Plan 6 / Task 7.  Maps an inbound event's ``api_app_id`` to
+    Maps an inbound event's ``api_app_id`` to
     the owning ``(org_id, agent_id, api_web_url)`` via the
     :class:`ChannelRoutingCache`, and resolves the per-tenant bot
     token via :meth:`CredentialVault.resolve_ref` (routed through
@@ -79,8 +79,7 @@ class SharedSlackInbound:
     A request for an unknown ``app_id`` returns ``(None, None)``
     and the caller drops the event -- silently dropping spurious
     Slack events from workspaces we don't serve is the safe
-    default; the Plan 6 / Task 13 audit emit records the drop for
-    compliance.
+    default;
 
     When the routing exists but the bot token is missing (admin
     set up the routing but the credential isn't uploaded yet),

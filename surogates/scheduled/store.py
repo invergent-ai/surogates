@@ -370,8 +370,7 @@ class ScheduledSessionStore:
         limit: int,
         lease_seconds: int = 120,
     ) -> list[ScheduledSession]:
-        """Multi-tenant variant of :meth:`claim_due` for Plan 8's
-        platform ticker.
+        """Multi-tenant variant of :meth:`claim_due` for platform ticker.
 
         Drops the ``agent_id`` filter so a single call returns
         due rows across ALL tenants in one DB round-trip.  The

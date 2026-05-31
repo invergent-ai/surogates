@@ -155,30 +155,11 @@ class ToolOutputSettings(BaseSettings):
     max_line_length: int = 2000
 
 
-# Plan 2 / Task 12 — shared work queue.  Every enqueue lands here;
-# the dispatcher (Task 13) decodes the (org_id, agent_id, session_id)
+# shared work queue.  Every enqueue lands here;
+# the dispatcher decodes the (org_id, agent_id, session_id)
 # tuple to know which tenant's TurnConcurrencyGate slot to acquire
 # before handing the session to a worker.
 SHARED_WORK_QUEUE_KEY: str = "surogates:work_queue"
-
-# Plan 1 legacy alias — kept as an importable constant so old code
-# that referenced WORK_QUEUE_KEY by name doesn't immediately crash.
-# The per-agent key shape is gone; use SHARED_WORK_QUEUE_KEY.
-WORK_QUEUE_KEY: str = SHARED_WORK_QUEUE_KEY
-
-
-def agent_queue_key(agent_id: str) -> str:
-    """DEPRECATED — Plan 2 migrated to a single shared queue.
-
-    The per-agent key shape (``surogates:work_queue:<agent_id>``) is
-    gone.  Use :data:`SHARED_WORK_QUEUE_KEY` + :func:`encode_queue_member`
-    instead.  Plan 9 deletes this shim entirely.
-    """
-    raise RuntimeError(
-        f"agent_queue_key({agent_id!r}) is removed — Plan 2 migrated "
-        f"to a single shared queue ({SHARED_WORK_QUEUE_KEY}).  Use "
-        f"encode_queue_member(...) + SHARED_WORK_QUEUE_KEY instead.",
-    )
 
 
 def encode_queue_member(
@@ -186,7 +167,7 @@ def encode_queue_member(
 ) -> str:
     """Encode the tenant tuple as a pipe-delimited queue member.
 
-    Plan 2 / Task 12.  The dispatcher decodes this in
+    The dispatcher decodes this in
     :func:`parse_queue_member` to know which tenant's
     :class:`~surogates.runtime.TurnConcurrencyGate` slot to acquire
     before handing the session to a worker — no DB round-trip per
@@ -228,7 +209,7 @@ async def enqueue_session(
 ) -> None:
     """Enqueue a session on the shared work queue.
 
-    Plan 2 / Task 12.  Single entry point used by every component
+    Single entry point used by every component
     that wakes a session — the API, channel adapters, coordinator/
     delegate tools, and worker-notify helpers.  Members encode the
     ``(org_id, agent_id, session_id)`` tuple so the dispatcher can
@@ -262,7 +243,7 @@ class WorkerSettings(BaseSettings):
     # per-turn artifact recaps. Off disables the summarizer entirely;
     # older SDK versions ignore the events when this is on.
     emit_turn_summaries: bool = True
-    # Plan 2 / Task 14 — per-(org_id, agent_id) max in-flight turns
+    # per-(org_id, agent_id) max in-flight turns
     # cap used by TurnConcurrencyGate.  ``ctx.governance`` may override
     # per tenant in a later plan; until then this is the uniform cap.
     max_concurrent_turns_default: int = 10
@@ -432,7 +413,7 @@ class StorageSettings(BaseSettings):
     secret_key: str = ""
     region: str = ""
 
-    # Plan 4 / Task 3 — dedicated bucket for per-user memory.
+    # dedicated bucket for per-user memory.
     # Defaults to '' which the harness treats as 'reuse
     # settings.storage.bucket'.  Set to a different bucket name
     # for deployments that isolate memory (different lifecycle
@@ -611,7 +592,7 @@ class ScheduledSessionSettings(BaseSettings):
 class AuthSettings(BaseSettings):
     """Runtime auth toggle + BYO Firebase web config.
 
-    All values are injected by the Surogate ops Helm chart and reflect
+    All values are injected by the deployment manifests and reflect
     the parent project's Firebase configuration plus the per-agent
     ``self_registration_enabled`` switch. They are *public* Firebase
     web config — no secrets, so they ship as plain env vars.
@@ -623,9 +604,8 @@ class AuthSettings(BaseSettings):
     firebase_project_id: str = ""
     firebase_api_key: str = ""
     firebase_auth_domain: str = ""
-    # Comma-separated providers — the chart joins the list with ``,``
-    # because Helm string templating doesn't have a clean array
-    # serialiser for env vars.
+    # Comma-separated providers — env vars only carry strings, so the
+    # provider set is joined on ``,`` at injection time.
     firebase_enabled_providers: str = ""
     firebase_app_id: str = ""
     firebase_messaging_sender_id: str = ""
@@ -660,10 +640,10 @@ class AuthSettings(BaseSettings):
 class HubSettings(BaseSettings):
     """Surogate Hub credentials for the file-bundle accessor.
 
-    Plan 3 / Task 5.  When ``endpoint`` is empty the worker treats
-    Hub as disabled and falls back to legacy filesystem reads for
-    SOUL.md / platform skills / etc.  Plan 9 retires the legacy
-    filesystem path and makes ``endpoint`` required.
+    Required at boot — the runtime fetches per-agent SOUL.md /
+    skills / sub-agents from Hub bundles, so an empty ``endpoint``
+    means the FileBundleCache cannot be wired and the api / worker
+    bootstrap raises.
     """
 
     model_config = {"env_prefix": "SUROGATES_HUB_"}
@@ -706,37 +686,15 @@ class Settings(BaseSettings):
     platform_agents_dir: str = "/etc/surogates/agents"
     tenant_assets_root: str = "/data/tenant-assets"
 
-    # Runtime mode.
-    #
-    # ``helm`` (default) — legacy one-agent-per-pod path.  ``org_id``
-    # and ``agent_id`` below are baked into the pod's env and identify
-    # the tenant the entire process serves.
-    #
-    # ``shared`` — multi-tenant pool (Plan 1+).  The pod serves any
-    # tenant; ``(org_id, agent_id)`` is resolved per-request via the
-    # platform API.  ``org_id`` / ``agent_id`` settings are unused.
-    #
-    # Typed as a ``Literal`` so pydantic rejects typos at config load
-    # rather than silently falling into the helm branch when an
-    # operator writes e.g. ``runtime_mode: sharad`` — every downstream
-    # check is ``== "helm"`` / ``== "shared"`` and an unknown value
-    # would resolve to the helm path with no warning.
-    runtime_mode: Literal["helm", "shared"] = "helm"
-
-    # Platform (surogate-ops) API base URL + bearer token.  Only
-    # consulted in ``runtime_mode='shared'``; the runtime fetches per-
-    # tenant config via GET /api/agents/{id}/runtime-config.  The
-    # token must carry the ``runtime`` scope (see surogate-ops
-    # mint-runtime-token CLI).
+    # Platform (surogate-ops) API base URL + bearer token used to
+    # fetch per-tenant config via GET /api/agents/{id}/runtime-config.
+    # The token must carry the ``runtime`` scope
+    # (see surogate-ops mint-runtime-token CLI).  Both are required:
+    # an empty url makes ``agent_runtime_context_dep`` raise on every
+    # request so a misconfigured pod fails fast.
     platform_api_url: str = ""
     platform_api_token: str = ""
 
-    # Identity (helm mode).  Defaults preserve the legacy zero-config
-    # behaviour for tests that instantiate ``Settings()`` directly.
-    # Shared-mode pods leave these at their defaults — the runtime
-    # resolves ``(org_id, agent_id)`` per request instead.
-    org_id: str = ""  # the org this agent instance belongs to
-    agent_id: str = "default"  # the agent this instance serves (sessions belong to an agent)
     worker_id: str = ""  # set from K8s downward API (pod name)
     jwt_secret: str = "change-me-in-production"
     encryption_key: str = ""  # Fernet key for credential vault

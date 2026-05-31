@@ -37,7 +37,7 @@ _VAULT_SCHEME = "vault://"
 def parse_vault_ref(ref: str) -> str:
     """Extract the credential name from a ``vault://<name>`` reference.
 
-    Plan 2 / Task 4.  AgentRuntimeContext carries every API key as a
+    AgentRuntimeContext carries every API key as a
     ``vault://<credential>`` reference, never the raw value — secrets
     stay in the vault and the runtime-config payload that travels
     over HTTP to the worker only carries the reference.
@@ -161,7 +161,7 @@ class CredentialVault:
     ) -> str | None:
         """Resolve a ``vault://<name>`` reference to plaintext.
 
-        Plan 2 / Task 4.  Wraps :meth:`retrieve` so the caller can
+        Wraps :meth:`retrieve` so the caller can
         hand the raw ``api_key_ref`` field from
         :class:`~surogates.runtime.LLMEndpoint` directly, without
         parsing the scheme itself.  Raises :class:`InvalidVaultRef`

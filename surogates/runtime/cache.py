@@ -1,4 +1,4 @@
-"""Per-process TTL cache for agent runtime configs (Plan 1, Task 13).
+"""Per-process TTL cache for agent runtime configs.
 
 Pure cache fronting :class:`~surogates.runtime.PlatformClient`.  The
 management plane is the source of truth; the cache exists to absorb
@@ -6,7 +6,7 @@ read load on the hot path.  Eviction policies:
 
 * **TTL** — every entry expires ``ttl_seconds`` after its load.
 * **Explicit invalidate** — :meth:`invalidate` drops a single key,
-  driven by the Redis pub/sub listener (Task 17) when surogate-ops
+  driven by the Redis pub/sub listener when surogate-ops
   publishes ``agent.runtime_config_changed:<agent_id>``.
 
 Concurrent misses for the same ``agent_id`` are de-duplicated through

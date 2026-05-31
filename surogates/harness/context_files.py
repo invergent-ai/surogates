@@ -59,35 +59,10 @@ _CONTEXT_INVISIBLE_CHARS: frozenset[str] = frozenset({
 # ---------------------------------------------------------------------------
 
 
-def load_soul_md_from_disk(asset_root: str) -> str | None:
-    """Load SOUL.md from tenant asset root (legacy helm path).
-
-    Plan 3 / Task 10.  Kept for the helm-mode legacy path where the
-    agent's SOUL.md lives on the tenant's PVC.  Shared-runtime
-    callers should use the async :func:`load_soul_md(bundle)`
-    instead.  Plan 9 retires this disk-reading variant entirely.
-
-    Checks ``{asset_root}/shared/SOUL.md`` and ``{asset_root}/SOUL.md``.
-    """
-    root = Path(asset_root)
-    for candidate in (root / "shared" / "SOUL.md", root / "SOUL.md"):
-        if candidate.is_file():
-            try:
-                content = candidate.read_text(encoding="utf-8").strip()
-                if not content:
-                    continue
-                content = scan_context_content(content, "SOUL.md")
-                content = truncate_context(content)
-                return content
-            except OSError:
-                logger.warning("Failed to read %s", candidate)
-    return None
-
-
 async def load_agent_md(bundle) -> str | None:
     """Load AGENT.md (preferred) or AGENTS.md from the bundle.
 
-    Plan 3 / Task 11.  Both filenames are common in the wild;
+    Both filenames are common in the wild;
     AGENT.md (singular) wins as the modern convention.  Falls back
     to AGENTS.md so legacy bundles still load.
 
@@ -114,11 +89,10 @@ async def load_agent_md(bundle) -> str | None:
 async def load_soul_md(bundle) -> str | None:
     """Load SOUL.md from the agent's file bundle.
 
-    Plan 3 / Task 10.  Replaces the legacy asset_root-string
-    signature.  Bundle-less agents (helm mode, or an agent that
-    hasn't been onboarded to a bundle yet) pass None and the loader
-    returns None silently so the prompt builder skips the SOUL.md
-    section rather than crashing.
+    Replaces the legacy asset_root-string
+    Bundle-less agents (i.e. ones that haven't been published yet)
+    pass ``None`` and the loader returns ``None`` silently so the
+    prompt builder skips the SOUL.md section rather than crashing.
 
     Runs the loaded content through the same injection scan +
     truncation pipeline as the legacy disk path — a malicious

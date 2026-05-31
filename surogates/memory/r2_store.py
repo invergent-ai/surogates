@@ -1,6 +1,6 @@
 """Async sibling of MemoryStore that persists to R2.
 
-Plan 4 / Task 10.  Operates on an in-memory working set
+Operates on an in-memory working set
 populated from R2 at session start via :meth:`load_from_r2`.
 Sync read APIs (``format_for_system_prompt``, ``get_entries``)
 serve from the working set so ``PromptBuilder.build()`` stays
@@ -9,8 +9,7 @@ the working set AND persist to R2.
 
 Conflict detection: every write re-reads R2 before persisting
 and compares the version to ``self.last_seen_version``.  On
-mismatch, emit :attr:`~surogates.audit.types.AuditType.MEMORY_CONFLICT`
-(Task 12 wires the actual emit via the ``on_write`` callback);
+mismatch, emit :attr:`~surogates.audit.types.AuditType.MEMORY_CONFLICT`;
 this method observes the version delta and proceeds with last-
 write-wins by writing at ``current_r2_version + 1``.
 

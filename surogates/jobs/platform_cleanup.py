@@ -1,21 +1,16 @@
 """Platform-level session-workspace cleanup.
 
-Plan 8 / Task 9.  Replaces the per-tenant
-``surogates.jobs.cleanup_sessions`` (which ran as a per-tenant
-CronJob from the agent_chart helm chart) with a single platform-
-level script that iterates ALL shared-mode agents and runs the
-same workspace-prefix-cleanup logic per agent.
+A single platform-level script that iterates ALL agents and
+runs workspace-prefix-cleanup logic per agent.
 
 The K8s CronJob that invokes this script lives in
-``surogates/k8s/platform/cleanup-cronjob.yaml.template`` (Task
-13) and runs every 6 hours by default -- same cadence the per-
-tenant helm CronJob used.
+``surogates/k8s/platform/cleanup-cronjob.yaml.template`` and
+runs every 6 hours by default.
 
 Agent enumeration is injected via the ``agent_iter`` parameter
 so tests can substitute a fixed list.  Production callers pass
-``None`` and the default implementation fetches shared-mode
-agents from the surogate-ops api endpoint
-``GET /api/agents?runtime_kind=shared``.
+``None`` and the default implementation fetches agents from the
+surogate-ops api endpoint ``GET /api/agents``.
 """
 
 from __future__ import annotations
@@ -36,7 +31,7 @@ async def run_platform_cleanup(
     agent_iter: AgentIter,
     cleanup_for_agent: CleanupFn,
 ) -> dict[str, dict]:
-    """Iterate shared-mode agents; run ``cleanup_for_agent`` for
+    """Iterate agents; run ``cleanup_for_agent`` for
     each; return ``{agent_id: per-agent-outcome}``.
 
     Per-agent failures are captured in the outcome dict
@@ -66,40 +61,21 @@ async def run_platform_cleanup(
 
 
 async def _default_cleanup_for_agent(agent: dict) -> dict:  # pragma: no cover
-    """Production cleanup -- delegates to the existing per-agent
-    cleanup logic in ``cleanup_sessions``.
-
-    Plan 8 / Task 12 source-level regression: the per-tenant
-    ``surogates.jobs.cleanup_sessions`` module MUST NOT be
-    imported from the shared-mode entry point of this script
-    (Task 12).  We CAN import it from this internal default
-    because the helm-mode cleanup_sessions logic is the same
-    per-agent work we want to do; importing here keeps the
-    logic in one place.
+    """Production cleanup -- thin orchestration around the
+    storage-backend list/delete for a single agent.
     """
-    # The actual per-agent cleanup body is a thin orchestration
-    # around storage-backend list/delete.  We DO NOT import
-    # cleanup_sessions at module import time; the import lives
-    # inside this function so the Task 12 regression scans the
-    # entry-point module body and not this default.
     raise NotImplementedError(
-        "Production cleanup helper wiring lands in the Plan 8 "
-        "follow-up that applies the K8s manifests (Task 13).  "
+        "Production cleanup helper wiring is pending.  "
         "For now, callers must inject cleanup_for_agent.",
     )
 
 
 async def _default_agent_iter() -> AsyncIterator[dict]:  # pragma: no cover
-    """Production agent enumeration -- fetches shared-mode
-    agents from the surogate-ops api.
-
-    Same comment as :func:`_default_cleanup_for_agent`: the
-    actual HTTP wiring lands in the Plan 8 follow-up.  For now,
-    raise so callers know to inject ``agent_iter``.
+    """Production agent enumeration -- fetches agents from
+    the surogate-ops api.
     """
     raise NotImplementedError(
-        "Production agent enumeration wiring lands in the Plan 8 "
-        "follow-up that applies the K8s manifests (Task 13).  "
+        "Production agent enumeration wiring is pending.  "
         "For now, callers must inject agent_iter.",
     )
     # Unreachable -- here to make the iterator typing valid.

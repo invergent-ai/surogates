@@ -1,13 +1,8 @@
 # Platform-level scheduled work + cleanup manifests
 
-Plan 8 / Task 13.  Text-only Kubernetes manifest templates that the
-operations team applies to deploy the platform-level scheduled-work
-ticker (Plan 8) and the consolidated cleanup + idle-reset CronJobs.
-
-**These are NOT a helm chart.**  Plan 8 deliberately avoids shipping a
-chart because the operational rollout (canary, multi-cluster, secret
-provisioning) is its own design decision that warrants explicit ops
-review per deployment context.
+Text-only Kubernetes manifest templates that the operations team
+applies to deploy the platform-level scheduled-work ticker and the
+consolidated cleanup + idle-reset CronJobs.
 
 ## Files
 
@@ -25,8 +20,8 @@ review per deployment context.
 ## Placeholders
 
 Each template uses `{{ name }}`-style placeholders that the operator
-fills in.  Use `envsubst`, `yq`, `helm template`, `kustomize`, or any
-other tool of choice:
+fills in.  Use `envsubst`, `yq`, `kustomize`, or any other tool of
+choice:
 
 | Placeholder | Description |
 |-------------|-------------|
@@ -56,35 +51,17 @@ other tool of choice:
    missed ticks; the SIGTERM grace period
    (`terminationGracePeriodSeconds: 15`) ensures the released
    pod cleanly drops the lock before exit.
-5. **Disable the per-tenant CronJobs** in the agent_chart helm values
-   (set `jobs.cleanupSessions.enabled=false` +
-   `jobs.resetIdleSessions.enabled=false`) and helm upgrade each
-   shared-mode agent.  The platform CronJobs take over.
-
-## Rollback
-
-If the platform ticker or CronJobs misbehave:
-
-1. Re-enable the per-tenant CronJobs in the agent_chart values; helm
-   upgrade each shared-mode agent.
-2. Scale the platform Deployment to 0 replicas
-   (`kubectl scale deployment surogates-scheduled-work-ticker --replicas=0`).
-3. Delete the platform CronJobs
-   (`kubectl delete cronjob surogates-platform-cleanup surogates-platform-idle-reset`).
-
-The per-tenant tickers resume on the next pod restart.
 
 ## Operations follow-up
 
-The Plan 8 Python code lands the substrate (lock + ticker + cleanup
+The Python code provides the substrate (lock + ticker + cleanup
 scripts) but does NOT wire the production defaults for
 `platform_cleanup._default_agent_iter` /
 `_default_cleanup_for_agent` /
 `platform_idle_reset._default_*`.  Those functions raise
-`NotImplementedError` today.  The Plan 8 follow-up commit (after the
-manifests apply cleanly to staging) wires the surogate-ops API
-client + the existing per-agent cleanup body.
+`NotImplementedError` today.  The follow-up wires the surogate-ops
+API client + the per-agent cleanup body.
 
 The CI smoke test against a kind cluster (apply manifests, run the
-ticker for 60s, verify exactly-once delivery) is also a Plan 8
-follow-up because it needs a real cluster.
+ticker for 60s, verify exactly-once delivery) is also a follow-up
+because it needs a real cluster.

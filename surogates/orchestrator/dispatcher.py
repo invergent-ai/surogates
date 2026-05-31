@@ -82,7 +82,7 @@ _TASKS_TICK_INTERVAL: float = 5.0
 # interrupted harness has time to release its lease.
 _LEASE_BUSY_REQUEUE_DELAY: float = 0.25
 
-# Plan 2 / Task 13 — priority bump applied when a session is requeued
+# priority bump applied when a session is requeued
 # because its tenant is over the TurnConcurrencyGate cap.  Larger
 # numbers = later delivery, so the noisy tenant slips to the back of
 # the queue without starving everyone else.  Tuned for ~30s deferral
@@ -122,7 +122,7 @@ async def dequeue_next_session(
 ):
     """Pop the next session off the shared queue, gated per tenant.
 
-    Plan 2 / Task 13.  Walks the queue front-to-back, requeueing
+    Walks the queue front-to-back, requeueing
     over-cap candidates with backoff, until either (a) an
     unblocked candidate is found and its gate slot is acquired,
     (b) the queue is empty, or (c) the queue cycles — i.e. the
@@ -132,7 +132,7 @@ async def dequeue_next_session(
     sleeps briefly before retrying.
 
     When ``gate`` is ``None`` the gate is skipped — used in tests
-    and helm-mode workers that don't have a Redis gate yet.
+    that don't wire a Redis gate.
     """
     requeued: set[str] = set()
     for _ in range(max(1, _MAX_GATE_BUSY_ATTEMPTS)):
@@ -181,13 +181,10 @@ async def dequeue_next_session(
 class Orchestrator:
     """Pulls session IDs from a Redis sorted-set and dispatches them to the agent harness.
 
-    Plan 2 / Task 14: ``queue_key`` is now the shared
-    ``surogates:work_queue`` for every worker; per-tenant isolation
-    is enforced by :class:`~surogates.runtime.TurnConcurrencyGate`
-    which the dispatcher consults on every dequeue.  Legacy
-    helm-mode pods can still pass a per-agent key if they want to
-    keep per-pod queue isolation (Plan 9 retires the helm path
-    entirely).
+    ``queue_key`` is the shared ``surogates:work_queue`` for every
+    worker; per-tenant isolation is enforced by
+    :class:`~surogates.runtime.TurnConcurrencyGate`, which the
+    dispatcher consults on every dequeue.
     """
 
     def __init__(
@@ -196,7 +193,7 @@ class Orchestrator:
         session_store: SessionStore,
         harness_factory: Callable[..., Any],
         *,
-        agent_id: str,
+        agent_id: str | None = None,
         queue_key: str,
         max_concurrent: int = 50,
         poll_timeout: int = 5,
@@ -219,8 +216,8 @@ class Orchestrator:
         # spawn_worker / chat sessions normally).
         self._session_factory = session_factory
         self._tenant_for_task = tenant_for_task
-        # Plan 2 / Task 14 — per-tenant TurnConcurrencyGate.  None in
-        # helm-mode workers (and in tests) → dequeue skips the gate.
+        # per-tenant TurnConcurrencyGate.  ``None`` in tests →
+        # dequeue skips the gate.
         self._turn_gate = turn_gate
         self._running = True
         self._tasks: set[asyncio.Task] = set()
@@ -323,7 +320,7 @@ class Orchestrator:
 
         while self._running:
             try:
-                # Plan 2 / Task 14 — shared queue + per-tenant gate.
+                # shared queue + per-tenant gate.
                 # The dispatcher pops the next session whose tenant
                 # has gate capacity; over-cap candidates are requeued
                 # with backoff inside dequeue_next_session itself.
@@ -413,7 +410,7 @@ class Orchestrator:
             await self._process(session_id)
         finally:
             self.semaphore.release()
-            # Plan 2 / Task 14 — release the gate slot acquired in
+            # release the gate slot acquired in
             # the dispatch loop so the tenant's next queued session
             # can come off the queue.
             if dequeued is not None and self._turn_gate is not None:
@@ -432,7 +429,7 @@ class Orchestrator:
 
     async def _requeue_busy_session(self, session_id: UUID) -> None:
         await asyncio.sleep(_LEASE_BUSY_REQUEUE_DELAY)
-        # Plan 2 / Task 12 — the shared queue needs the tenant tuple.
+        # the shared queue needs the tenant tuple.
         # Look up the session row once; this is a cold path (only
         # taken when another worker holds the lease).
         session = await self.session_store.get_session(session_id)
@@ -480,7 +477,7 @@ class Orchestrator:
                 wake_result = await harness.wake(session_id)
             finally:
                 self._active_harnesses.pop(session_id, None)
-                # Plan 2 / Task 7 — per-session SessionLLMClients
+                # per-session SessionLLMClients
                 # bundle.  Close its four connection pools so a
                 # long-running worker process doesn't accumulate one
                 # pool per processed session.
@@ -507,7 +504,7 @@ class Orchestrator:
                 )
                 await self._requeue_busy_session(session_id)
             elif rewake_pending:
-                # Plan 2 / Task 12 — tenant tuple required.
+                # tenant tuple required.
                 rewake_session = await self.session_store.get_session(
                     session_id,
                 )

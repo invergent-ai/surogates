@@ -114,7 +114,7 @@ except (ImportError, AttributeError):
 class SharedTelegramInbound:
     """Per-event tenant resolver for the shared Telegram adapter.
 
-    Plan 6 / Task 8.  Counterpart to
+    Counterpart to
     :class:`surogates.channels.slack.SharedSlackInbound` for the
     Telegram channel.  Identifier shape is the bot username (e.g.
     ``"@my_bot"``) -- Telegram exposes this per webhook update in

@@ -315,7 +315,7 @@ class ResourceLoader:
         user_id = tenant.user_id
 
         # Layer 1: platform skills.
-        # Plan 3 / Task 13 — the on-disk platform-skills directory
+        # the on-disk platform-skills directory
         # holds the shared built-ins baked into the worker image
         # (docx, pptx, subagent-task-worker, etc.).  When a bundle
         # is present the per-agent ``skills/`` prefix is layered ON
@@ -491,7 +491,7 @@ class ResourceLoader:
         )
 
         # Layer 1: platform sub-agents.
-        # Plan 3 / Task 14 — when a bundle is provided the platform
+        # when a bundle is provided the platform
         # layer comes from the bundle's agents/ prefix.
         if bundle is not None:
             platform = await self._load_agents_from_bundle(
@@ -703,14 +703,13 @@ class ResourceLoader:
     async def _load_skills_from_bundle(
         self, bundle: Any, *, source: str,
     ) -> list[SkillDef]:
-        """Plan 3 / Task 13 — read platform skills from the agent's
+        """read platform skills from the agent's
         Hub-backed bundle.
 
         Iterates ``bundle/skills/*/SKILL.md`` and constructs the same
         SkillDef objects the on-disk loader produces.  Layout
         mirrors the directory-based on-disk shape; the flat-legacy
-        layout is not supported in bundles (Plan 9 retires it from
-        disk too).
+        layout is not supported in bundles.
         """
         try:
             paths = await bundle.list("skills/")
@@ -753,7 +752,7 @@ class ResourceLoader:
     async def _load_agents_from_bundle(
         self, bundle: Any, *, source: str,
     ) -> list[AgentDef]:
-        """Plan 3 / Task 14 — read platform sub-agent definitions
+        """read platform sub-agent definitions
         from the agent's Hub-backed bundle.
 
         Iterates ``bundle/agents/*/AGENT.md`` and constructs the same
