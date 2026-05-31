@@ -235,10 +235,13 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     )
 
     # Per-user memory cache — storage backend is required.  Builder
-    # raises if ``settings.storage.bucket`` is empty.
+    # raises if ``settings.storage.bucket`` is empty.  Storage was
+    # wired earlier as ``app.state.storage`` (line ~132); the historic
+    # ``app.state.storage_backend`` name is a stale alias from an
+    # earlier rev that ``build_memory_cache`` still expects.
     memory_cache = build_memory_cache(
         settings=settings,
-        storage_backend=getattr(app.state, "storage_backend", None),
+        storage_backend=app.state.storage,
     )
 
     # per-agent MCP server registry cache.
