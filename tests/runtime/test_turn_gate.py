@@ -1,12 +1,12 @@
 """Tests for TurnConcurrencyGate.
 
-Plan 2 / Task 11.  Per-tenant counter limiting how many sessions can
+Per-tenant counter limiting how many sessions can
 be in-flight simultaneously for a given (org_id, agent_id).  The
 dispatcher dequeue path consults the gate before handing a session
 to a worker; over-limit sessions are requeued with backoff.
 
 The gate is a *concurrency* limit (live counter) — distinct from the
-PerTenantRateLimiter (Plan 1b Task 13) which is a request-rate
+PerTenantRateLimiter which is a request-rate
 limit (per-minute window).
 """
 

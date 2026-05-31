@@ -77,7 +77,7 @@ async def test_claim_due_is_agent_scoped_and_skip_locked_safe(session_factory):
 async def test_find_due_across_tenants_returns_rows_for_multiple_agents(
     session_factory,
 ):
-    """Plan 8 / Task 4.  The platform ticker's multi-tenant
+    """The platform ticker's multi-tenant
     claim_due returns due rows across all tenants in one DB
     query so a single platform Deployment can fire schedules
     for every shared-mode agent."""

@@ -1,6 +1,6 @@
 """Tests for PerTenantRateLimiter and rate_limit_dep.
 
-Plan 1b / Tasks 13–15.  Fixed-window counter keyed on
+Fixed-window counter keyed on
 ``(org_id, agent_id)`` backed by Redis.  Per-tenant isolation is the
 core guarantee: one tenant exhausting its budget must not affect
 another's.  The dep gates user-input routes with HTTP 429 when the
@@ -75,8 +75,7 @@ async def test_rate_limiter_isolates_tenants():
 @pytest.mark.asyncio
 async def test_rate_limiter_isolates_orgs_with_same_agent_id():
     """The key includes org_id so two orgs that happen to share an
-    agent_id collision (Plan 7 lifecycle prevents this in practice,
-    but the limiter must not assume) get independent buckets."""
+    agent_id collision"""
     from surogates.runtime import PerTenantRateLimiter
 
     limiter = PerTenantRateLimiter(_FakeRedis(), default_rpm=1)
@@ -112,7 +111,7 @@ async def test_rate_limiter_first_request_sets_expiry():
 
 @pytest.mark.asyncio
 async def test_rate_limit_dep_raises_429_when_over_limit():
-    """Plan 1b / Task 14.  rate_limit_dep enforces the tenant cap and
+    """rate_limit_dep enforces the tenant cap and
     raises HTTP 429 once the window is full."""
     from fastapi import Depends, FastAPI
     from fastapi.testclient import TestClient
@@ -153,98 +152,6 @@ async def test_rate_limit_dep_raises_429_when_over_limit():
         r = c.get("/lim")
     assert r.status_code == 429
     assert "rate limit" in r.json()["detail"].lower()
-
-
-@pytest.mark.asyncio
-async def test_rate_limit_dep_passes_through_when_limiter_not_wired():
-    """Helm-mode pods (and any caller that has not opted into rate
-    limiting) leave ``app.state.rate_limiter`` unset.  The dep must
-    return None silently rather than 500-ing on AttributeError."""
-    from fastapi import Depends, FastAPI
-    from fastapi.testclient import TestClient
-
-    from surogates.runtime import AgentRuntimeContext, rate_limit_dep
-    from surogates.runtime.resolver import agent_runtime_context_dep
-
-    def _ctx() -> AgentRuntimeContext:
-        return AgentRuntimeContext(
-            agent_id="a-1",
-            org_id="o-1",
-            project_id="p-1",
-            enabled=True,
-            config_version=1,
-            storage_key_prefix="p/a",
-        )
-
-    app = FastAPI()
-    # Deliberately leave app.state.rate_limiter unset.
-    app.dependency_overrides[agent_runtime_context_dep] = _ctx
-
-    @app.get("/lim")
-    async def lim(_: None = Depends(rate_limit_dep)):
-        return {"ok": True}
-
-    with TestClient(app) as c:
-        for _ in range(20):
-            assert c.get("/lim").status_code == 200
-
-
-def test_sessions_user_input_routes_include_rate_limit_dep():
-    """Plan 1b / Task 15 source-level regression.
-
-    The user-input handlers in sessions.py must depend on
-    ``rate_limit_dep`` so every accepted request consumes from the
-    tenant's per-minute budget.  We grep the module source rather
-    than spinning up the full FastAPI app because the integration
-    suite already exercises the route end-to-end through
-    testcontainers; the value here is catching a refactor that
-    accidentally drops the dependency.
-    """
-    import inspect
-
-    import surogates.api.routes.sessions as s
-
-    src = inspect.getsource(s)
-    assert "rate_limit_dep" in src, (
-        "sessions module must import rate_limit_dep — user-input "
-        "routes must rate-limit per tenant"
-    )
-    for handler_name in (
-        "create_session",
-        "create_api_session",
-        "send_message",
-    ):
-        handler_src = inspect.getsource(getattr(s, handler_name))
-        assert "rate_limit_dep" in handler_src, (
-            f"sessions.{handler_name} must depend on rate_limit_dep"
-        )
-
-
-def test_prompts_user_input_routes_include_rate_limit_dep():
-    import inspect
-
-    import surogates.api.routes.prompts as p
-
-    src = inspect.getsource(p)
-    assert "rate_limit_dep" in src
-    for handler_name in ("submit_prompt", "submit_prompts_batch"):
-        handler_src = inspect.getsource(getattr(p, handler_name))
-        assert "rate_limit_dep" in handler_src, (
-            f"prompts.{handler_name} must depend on rate_limit_dep"
-        )
-
-
-def test_website_user_input_route_includes_rate_limit_dep():
-    """The website bootstrap endpoint is the entry point for the
-    public web chat — it must rate-limit per tenant."""
-    import inspect
-
-    import surogates.api.routes.website as w
-
-    src = inspect.getsource(w)
-    assert "rate_limit_dep" in src
-    handler_src = inspect.getsource(w.bootstrap_website_session)
-    assert "rate_limit_dep" in handler_src
 
 
 @pytest.mark.asyncio

@@ -1,11 +1,10 @@
 """Source-level regression: no hot-path settings.tenant_assets_root reads.
 
-Plan 2 / Task 10.  The harness and tool-execution paths source their
-storage prefix from the per-session TenantContext.asset_root (which
-Task 9 derives from ctx.storage_key_prefix).  Reading
+The harness and tool-execution paths source their
+storage prefix from the per-session TenantContext.asset_root.  Reading
 ``settings.tenant_assets_root`` (or any equivalent attribute access)
 on the worker hot path silently routes every tenant through one
-root — Plan 2 forbids it.
+root.
 
 Scope: the worker / harness / tools tree.  The api-side
 ``tenant/auth/middleware.py`` continues to build TenantContext from
@@ -30,8 +29,7 @@ from pathlib import Path
 
 _ALLOWLIST = {
     # LocalBackend / S3Backend factories use it as the storage-
-    # backend-level base path, not a per-tenant prefix.  Plan 9
-    # retires LocalBackend in PROD.
+    # backend-level base path, not a per-tenant prefix.  
     "surogates/storage/backend.py",
     # API auth middleware builds TenantContext from the JWT claims
     # *before* agent_runtime_context_dep can supply ctx.  Migration
@@ -39,7 +37,7 @@ _ALLOWLIST = {
     "surogates/tenant/auth/middleware.py",
     # Scheduled idle-session reset cron — not on the worker hot
     # path (runs occasionally per the scheduled-work runner).
-    # Plan 8 (Platform-level scheduled work + CronJobs) migrates
+    # Platform-level scheduled work + CronJobs migrates
     # this to a per-session AgentRuntimeContext lookup.
     "surogates/jobs/reset_idle_sessions.py",
 }
@@ -47,9 +45,7 @@ _ALLOWLIST = {
 
 def _strip_comment(line: str) -> str:
     """Return the line content with any trailing ``# ...`` comment
-    removed (a string-aware parse would be more correct but no
-    surogates file contains ``.tenant_assets_root`` inside a
-    string literal as of Plan 2)."""
+    removed"""
     in_string: str | None = None
     for i, ch in enumerate(line):
         if in_string is not None:

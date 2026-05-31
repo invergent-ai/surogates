@@ -1,8 +1,8 @@
 """Tests for ``surogates.runtime.build_agent_runtime_context``.
 
-Plan 1 / Task 14.  Pure projection helper that turns the JSON payload
+Pure projection helper that turns the JSON payload
 from the management plane into an :class:`AgentRuntimeContext`.  Lives
-separate from the FastAPI dependency (Task 15) so it is unit-testable
+separate from the FastAPI dependency so it is unit-testable
 without an app context.
 """
 

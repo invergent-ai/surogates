@@ -1,4 +1,4 @@
-"""Plan 6 / Task 8.  Shared-mode TelegramAdapter resolves the
+"""Shared-mode TelegramAdapter resolves the
 inbound update's bot username -> agent via the
 ChannelRoutingCache + the per-tenant token via the CredentialVault.
 """

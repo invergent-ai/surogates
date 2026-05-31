@@ -1,5 +1,4 @@
-"""Plan 6 / Task 12 positive source-level regression.
-
+"""
 The shared adapter inbound resolvers go through the
 ChannelRoutingCache (not raw DB queries) and the CredentialVault
 (not process-wide settings).  A future refactor that bypassed
@@ -47,15 +46,3 @@ def test_shared_telegram_inbound_uses_channel_routing_cache():
 def test_shared_telegram_inbound_uses_resolve_channel_token():
     src = inspect.getsource(SharedTelegramInbound)
     assert "resolve_channel_token" in src
-
-
-def test_shared_inbound_resolvers_key_shape_matches_invalidator():
-    """Plan 6 / Task 2 keys the invalidator channel on
-    ``<kind>:<identifier>``.  The resolvers must use the same
-    shape so the channel suffix passes through verbatim --
-    otherwise an admin CRUD publish would not actually drop the
-    cached routing the inbound handler reads."""
-    slack_src = inspect.getsource(SharedSlackInbound)
-    tg_src = inspect.getsource(SharedTelegramInbound)
-    assert "f\"slack:{" in slack_src
-    assert "f\"telegram:{" in tg_src

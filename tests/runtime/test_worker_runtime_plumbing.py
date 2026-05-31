@@ -1,6 +1,6 @@
 """Tests for worker-side shared-runtime plumbing.
 
-Plan 2 / Task 1.  The worker must wire a PlatformClient +
+The worker must wire a PlatformClient +
 RuntimeConfigCache in shared mode exactly like the api's
 ``_install_shared_runtime_plumbing`` does — the harness_factory will
 pull AgentRuntimeContext through this cache per session.
@@ -97,7 +97,7 @@ class _FakeRedis:
 
 @pytest.mark.asyncio
 async def test_install_worker_runtime_plumbing_starts_invalidator_task():
-    """Plan 2 / Task 2.  The worker subscribes to the same Redis
+    """The worker subscribes to the same Redis
     invalidation channels as the api so admin changes propagate to
     in-flight sessions without restart."""
     from surogates.orchestrator.worker import (
@@ -124,7 +124,7 @@ async def test_install_worker_runtime_plumbing_starts_invalidator_task():
 async def test_install_worker_runtime_plumbing_wires_file_bundle_cache(
     monkeypatch,
 ):
-    """Plan 3 / Task 9 — worker bootstrap mirrors the api lifespan.
+    """worker bootstrap mirrors the api lifespan.
 
     Same fake-SDK monkeypatch as the api test so the wiring logic
     can be exercised regardless of CI install state."""
@@ -160,7 +160,7 @@ async def test_install_worker_runtime_plumbing_wires_file_bundle_cache(
 
 @pytest.mark.asyncio
 async def test_install_worker_runtime_plumbing_exposes_memory_cache_attr():
-    """Plan 4 / Task 6 — worker bootstrap exposes the memory_cache
+    """worker bootstrap exposes the memory_cache
     state key (None when storage is unconfigured)."""
     from surogates.orchestrator.worker import (
         _install_worker_runtime_plumbing,

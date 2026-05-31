@@ -53,8 +53,7 @@ def _fake_liteparse_raising(exc: Exception):
 @pytest.mark.asyncio
 async def test_text_path_unchanged_after_refactor(tmp_path: Path) -> None:
     """Reading a .py file must return the same JSON shape and content as
-    before the refactor.  Acts as a regression guard for Task 1.
-    """
+    before the refactor. """
     src = tmp_path / "hello.py"
     src.write_text("a = 1\nb = 2\nc = 3\n", encoding="utf-8")
     result_json = await _read_file_handler({"path": str(src)})

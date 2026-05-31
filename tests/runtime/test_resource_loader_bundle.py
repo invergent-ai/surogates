@@ -1,6 +1,6 @@
 """Tests for ResourceLoader bundle overlay.
 
-Plan 3 / Tasks 13+14.  load_skills(tenant, db_session=None,
+load_skills(tenant, db_session=None,
 bundle=None) — when bundle is provided, layer 1 (platform skills)
 reads come from the bundle's skills/ prefix instead of
 /etc/surogates/skills/.

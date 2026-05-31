@@ -1,9 +1,8 @@
 """Tests for resolve_channel_token.
 
-Plan 6 / Task 6.  Per-tenant bot tokens live in the credential
+Per-tenant bot tokens live in the credential
 vault; the adapter resolves them per inbound event via the
-canonical CredentialVault.resolve_ref entry point (Plan 2 Task
-16's source-level regression keeps this single).
+canonical CredentialVault.resolve_ref entry point.
 """
 
 from __future__ import annotations
@@ -33,8 +32,7 @@ async def test_resolve_channel_token_slack():
         org_id="o-1",
     )
     assert token == "xoxb-real"
-    # The call MUST go through resolve_ref (Plan 2 Task 16
-    # source-level regression).
+    # The call MUST go through resolve_ref 
     assert vault.calls == [
         ("vault://slack_bot_token_A0123ABCD", "o-1", None),
     ]

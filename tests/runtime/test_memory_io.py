@@ -1,6 +1,6 @@
 """Tests for read_user_memory / write_user_memory.
 
-Plan 4 / Tasks 7+8.  Thin async wrappers around the storage
+Thin async wrappers around the storage
 backend that encode/decode the envelope and surface the version
 to the caller.  read returns (content, version) or None for a
 missing key; write returns the new version.
@@ -56,7 +56,7 @@ async def test_read_user_memory_missing_returns_none():
 
 @pytest.mark.asyncio
 async def test_read_user_memory_corrupted_returns_none():
-    """Plan 4 / Task 9.  A corrupted on-R2 object (e.g. from a
+    """A corrupted on-R2 object (e.g. from a
     botched manual migration) is treated as 'start fresh' rather
     than crashing session bootstrap."""
     from surogates.runtime.memory_io import read_user_memory
@@ -88,9 +88,9 @@ async def test_write_user_memory_writes_envelope_and_increments_version():
 
 @pytest.mark.asyncio
 async def test_write_user_memory_runs_security_scan():
-    """Plan 4 / Task 9.  Memory content lands in the LLM's system
+    """Memory content lands in the LLM's system
     prompt; the write path must run the same injection scan as
-    SOUL.md / AGENT.md (Plan 3 Task 10).  A flagged payload writes
+    SOUL.md / AGENT.md.  A flagged payload writes
     a sanitised marker instead of the raw content so a compromised
     tool can't smuggle 'ignore previous instructions' into the
     user's memory."""

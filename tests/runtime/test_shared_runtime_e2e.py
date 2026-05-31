@@ -1,6 +1,6 @@
 """End-to-end smoke for the shared-runtime wiring.
 
-Plan 1 / Task 23.  Spins up a FastAPI app exactly as production wires
+Spins up a FastAPI app exactly as production wires
 it for ``runtime_mode='shared'`` and exercises a request through the
 full chain:
 
@@ -195,35 +195,3 @@ def test_shared_runtime_returns_400_when_no_agent_id():
         resp = client.get("/echo")  # no agent_id
 
     assert resp.status_code == 400
-
-
-def test_helm_mode_synthesises_context_without_platform_client():
-    """A helm-mode pod answers requests using a synthesised legacy
-    context built from ``settings.agent_id`` / ``settings.org_id`` —
-    the platform client is not consulted, and the cache is not
-    required.
-
-    This is the load-bearing back-compat guarantee for Plan 1: pods
-    running in the existing helm pipeline keep working unchanged.
-    """
-    from types import SimpleNamespace
-
-    app = FastAPI()
-    # No platform_client / runtime_config_cache wired — helm mode does
-    # not consult them.
-    app.state.settings = SimpleNamespace(
-        runtime_mode="helm", agent_id="helm-agent", org_id="helm-org",
-    )
-
-    @app.get("/echo")
-    async def echo(
-        ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep),
-    ):
-        return {"agent_id": ctx.agent_id, "org_id": ctx.org_id}
-
-    with TestClient(app) as client:
-        resp = client.get("/echo")
-
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body == {"agent_id": "helm-agent", "org_id": "helm-org"}

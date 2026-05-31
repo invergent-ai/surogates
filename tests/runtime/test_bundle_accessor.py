@@ -1,10 +1,10 @@
 """Tests for AgentFileBundle.
 
-Plan 3 / Task 4.  Frozen handle on (agent_id, hub_ref, version)
+Frozen handle on (agent_id, hub_ref, version)
 with a small read-only surface the harness's prompt builder and
 skill loader call.
 
-The bundle is constructed by the FileBundleCache (Plan 3 Task 6);
+The bundle is constructed by the FileBundleCache;
 callers never instantiate it directly.  Frozen so a careless
 harness mutation can't swap the underlying ref mid-session.
 """

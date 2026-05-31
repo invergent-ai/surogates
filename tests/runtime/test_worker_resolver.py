@@ -1,6 +1,6 @@
 """Tests for resolve_runtime_context_for_session.
 
-Plan 2 / Task 3.  The worker's harness_factory needs to project a
+The worker's harness_factory needs to project a
 DB session row into an AgentRuntimeContext using the same cache the
 api uses.  This module is the worker-side bridge — pure async
 function so the harness factory can call it without knowing about

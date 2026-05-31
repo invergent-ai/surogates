@@ -1,6 +1,6 @@
 """Tests for MCPCallSandbox.
 
-Plan 5 / Task 9.  Async context manager that spawns a fresh
+Async context manager that spawns a fresh
 subprocess per MCP call with an explicit, vault-resolved env-var
 allow-list — the parent process's environment is NOT inherited.
 """

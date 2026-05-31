@@ -1,7 +1,6 @@
 """Cross-tenant isolation smoke test.
 
-Plan 2 completion check / Plan 1b post-review item.  Runs two
-sessions for two different tenants through Plan 2's per-session
+Runs twosessions for two different tenants through the per-session
 SessionLLMClients construction and TurnConcurrencyGate counter and
 asserts no shared mutable state:
 
@@ -18,8 +17,6 @@ exercises the real CredentialVault DB round-trip + real Redis INCR.
 The unit tier already proves the per-call surface in isolation
 (test_session_llm.py + test_turn_gate.py); this test catches a
 wire-level regression that mocking would miss.
-
-Plan 1b's completion checklist promised this test for Plan 2.
 """
 
 from __future__ import annotations
@@ -48,7 +45,7 @@ async def vault(session_factory):
 async def test_two_tenants_no_credential_or_storage_leak(
     vault, redis_client, session_factory,
 ):
-    """End-to-end Plan 2 isolation contract for two tenants on the
+    """End-to-end isolation contract for two tenants on the
     same worker process state."""
     from .conftest import create_org
 
@@ -105,8 +102,7 @@ async def test_two_tenants_no_credential_or_storage_leak(
         assert bundle_b.main.client.api_key == "sk-globex"
         assert bundle_a.main.client is not bundle_b.main.client
 
-        # 2 — storage prefixes are distinct.  This is the Plan 2
-        # Task 9 contract: asset_root is derived from
+        # 2 — storage prefixes are distinct. asset_root is derived from
         # ctx.storage_key_prefix, never from a process-wide setting.
         assert ctx_a.storage_key_prefix != ctx_b.storage_key_prefix
         assert str(org_a) in ctx_a.storage_key_prefix

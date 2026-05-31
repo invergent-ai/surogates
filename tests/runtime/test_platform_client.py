@@ -1,10 +1,10 @@
 """Tests for ``surogates.runtime.PlatformClient``.
 
-Plan 1 / Task 12.  Thin httpx wrapper that reads per-agent runtime
+Thin httpx wrapper that reads per-agent runtime
 configuration from the management plane's
 ``/api/agents/{id}/runtime-config`` endpoint.  One process-wide
 instance held on ``app.state.platform_client``; consumers go through
-the cache layer (Task 13) rather than hitting the network on every
+the cache layer rather than hitting the network on every
 call.
 """
 
@@ -125,7 +125,7 @@ async def test_get_runtime_config_500_raises_http_error():
 
 @pytest.mark.asyncio
 async def test_get_agent_id_for_slug_200():
-    """Plan 1b / Task 10.  Happy path resolves a slug to agent_id."""
+    """Happy path resolves a slug to agent_id."""
     from surogates.runtime import PlatformClient
 
     def handler(request: httpx.Request) -> httpx.Response:

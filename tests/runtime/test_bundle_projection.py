@@ -1,6 +1,6 @@
 """Tests for build_agent_runtime_context's bundle-field projection.
 
-Plan 3 / Task 2.  The runtime-config payload carries optional
+The runtime-config payload carries optional
 bundle_hub_ref / bundle_version; the projection plumbs them onto
 the AgentRuntimeContext.
 """
@@ -39,8 +39,6 @@ def test_build_extracts_bundle_fields_when_present():
 
 
 def test_build_defaults_bundle_fields_to_none_when_absent():
-    """Plan 1's payload didn't include these fields; payloads from
-    older surogate-ops versions must still project cleanly."""
     ctx = build_agent_runtime_context(_base_payload())
     assert ctx.bundle_hub_ref is None
     assert ctx.bundle_version is None

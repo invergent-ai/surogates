@@ -1,7 +1,7 @@
 """Source-level regression: ``scheduled_work.py`` must not read
 process-wide ``settings.{agent_id,org_id}``.
 
-Plan 1b / Task 4.  Last surogates api route to read the legacy
+Last surogates api route to read the legacy
 process-wide settings.  After this migration,
 ``grep -rn 'settings\\.(agent_id|org_id)' surogates/api/routes/``
 returns zero matches outside docstrings.
@@ -28,8 +28,7 @@ def test_scheduled_work_routes_do_not_read_process_wide_settings():
 
 
 def test_all_surogates_api_routes_are_clean():
-    """Cross-route regression: now that every Plan 1 + 1b migration is
-    in, no api route reads settings.{agent_id,org_id} at runtime."""
+    """Cross-route regression: no api route reads settings.{agent_id,org_id} at runtime."""
     routes_dir = Path("surogates/api/routes")
     offenders: list[str] = []
     for path in sorted(routes_dir.glob("*.py")):
@@ -39,7 +38,7 @@ def test_all_surogates_api_routes_are_clean():
         if re.search(r"settings\.(agent_id|org_id)", code):
             offenders.append(str(path))
     assert offenders == [], (
-        "Plan 1 + 1b api migration regression — these route modules "
+        "Api migration regression — these route modules "
         "still read settings.{agent_id,org_id} at runtime: "
         f"{offenders}"
     )

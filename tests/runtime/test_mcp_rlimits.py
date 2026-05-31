@@ -1,6 +1,6 @@
 """Tests for the apply_rlimits helper.
 
-Plan 5 / Task 10.  RLIMIT_AS (virtual memory) and RLIMIT_CPU
+RLIMIT_AS (virtual memory) and RLIMIT_CPU
 (CPU seconds) get applied in the subprocess's preexec_fn so an
 OOM-bomb or fork-bomb tool cannot take down the proxy pod.
 """
@@ -15,7 +15,7 @@ def test_apply_rlimits_sets_memory_cap_via_subprocess():
     the cap took effect — running it in the parent is unsafe because
     setrlimit lowers the hard cap, which cannot be raised again
     (CAP_SYS_RESOURCE is unprivileged).  preexec_fn is the actual
-    use site (MCPCallSandbox / Task 9) so the subprocess path is
+    use site so the subprocess path is
     the meaningful regression."""
     import subprocess
     import sys

@@ -1,4 +1,4 @@
-"""Plan 8 / Task 7.  CLI entry tests.
+"""CLI entry tests.
 
 The K8s Deployment runs ``python -m surogates.scheduled.platform_ticker``
 which dispatches to :func:`main`.  Tests use the dependency-

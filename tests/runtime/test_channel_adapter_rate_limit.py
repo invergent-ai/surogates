@@ -1,4 +1,4 @@
-"""Plan 6 / Task 9.  PerTenantRateLimiter gates inbound channel
+"""PerTenantRateLimiter gates inbound channel
 events per (org_id, agent_id) so a noisy tenant cannot starve
 other tenants of adapter capacity."""
 

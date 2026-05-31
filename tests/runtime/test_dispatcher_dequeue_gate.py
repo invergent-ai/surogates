@@ -1,6 +1,6 @@
 """Tests for the dispatcher's per-tenant dequeue gate.
 
-Plan 2 / Task 13.  When the dispatcher pops a session off the shared
+When the dispatcher pops a session off the shared
 queue, it acquires the tenant's TurnConcurrencyGate slot before
 handing the session to a worker.  Over-the-cap sessions are
 requeued with backoff so a noisy tenant cannot drain the pool.

@@ -1,6 +1,6 @@
 """Tests for load_soul_md against a bundle.
 
-Plan 3 / Task 10.  Signature change: load_soul_md(bundle) replaces
+Signature change: load_soul_md(bundle) replaces
 load_soul_md(asset_root).  When bundle is None the function
 returns None so callers can gracefully degrade (an agent without
 a bundle simply has no SOUL.md).

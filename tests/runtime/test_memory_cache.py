@@ -1,9 +1,9 @@
 """Tests for MemoryCache L1.
 
-Plan 4 / Task 5.  Same TTL + per-key-lock + double-checked-locking
+Same TTL + per-key-lock + double-checked-locking
 shape as RuntimeConfigCache / FirebaseConfigCache /
 SlugResolverCache / FileBundleCache.  Key is ``"<org_id>:<user_id>"``
-verbatim so the invalidator (Plan 4 Task 2) can pass the channel
+verbatim so the invalidator can pass the channel
 identifier through without a parser.
 
 Loader exceptions are NOT memoised — a transient R2 failure on

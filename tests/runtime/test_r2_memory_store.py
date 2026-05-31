@@ -1,6 +1,6 @@
 """Tests for R2MemoryStore.
 
-Plan 4 / Task 10.  Async sibling of the legacy disk-based
+Async sibling of the legacy disk-based
 MemoryStore.  load_from_r2() is async and called once at session
 start (populates an in-memory working set); reads
 (format_for_system_prompt / get_entries) are sync so PromptBuilder
@@ -79,7 +79,7 @@ async def test_r2_memory_store_format_for_system_prompt_includes_entries():
 
 @pytest.mark.asyncio
 async def test_r2_memory_store_calls_on_write_after_persist():
-    """Plan 4 / Task 12.  The on_write callback fires after a
+    """The on_write callback fires after a
     successful persist so the harness can publish the invalidation
     message AND emit the audit event in one place."""
     from surogates.memory.r2_store import R2MemoryStore

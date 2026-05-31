@@ -1,11 +1,8 @@
 """Tests for ChannelRoutingCache.
 
-Plan 6 / Task 1.  Per-(channel_kind, channel_identifier) cache of
+Per-(channel_kind, channel_identifier) cache of
 the routing record (org_id, agent_id, api_web_url) the inbound
-handler needs.  Same TTL + per-key-lock + double-checked-locking
-shape as Plan 5's MCPServerRegistryCache; key shape is the bare
-``"<kind>:<identifier>"`` string (passed through verbatim from
-the invalidator channel ``channel_routing_changed:<kind>:<id>``).
+handler needs.
 """
 
 from __future__ import annotations
@@ -38,7 +35,7 @@ async def test_channel_routing_cache_hits_within_ttl():
 @pytest.mark.asyncio
 async def test_channel_routing_cache_negative_memoised_until_ttl():
     """A lookup that resolves to None (no routing configured for
-    this identifier) IS memoised — Plan 1b's SlugResolverCache
+    this identifier) IS memoised — the SlugResolverCache
     established this convention so a malformed inbound event
     storm doesn't hammer the platform endpoint."""
     from surogates.runtime import ChannelRoutingCache

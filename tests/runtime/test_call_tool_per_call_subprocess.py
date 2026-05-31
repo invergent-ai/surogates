@@ -1,4 +1,4 @@
-"""Plan 5 / Task 11 source-level regression.
+"""
 
 The call_tool route spawns a fresh MCPCallSandbox per call instead
 of reusing the long-lived MCPServerTask.session.  Source-level
@@ -28,7 +28,7 @@ def test_call_tool_constructs_mcp_call_sandbox():
 
 
 def test_call_tool_emits_policy_mcp_call():
-    """Plan 5 / Task 12.  The call_tool route emits POLICY_MCP_CALL
+    """The call_tool route emits POLICY_MCP_CALL
     with the per-request agent_id + the call outcome (success /
     timeout / rlimit / error) so compliance can answer 'which agent
     invoked tool X on server Y, when?' from the audit log alone."""
@@ -42,7 +42,7 @@ def test_call_tool_emits_policy_mcp_call():
 
 
 # ---------------------------------------------------------------------------
-# Plan 5 review follow-ups: outcome classification + HTTP fallback
+# outcome classification + HTTP fallback
 # ---------------------------------------------------------------------------
 
 
@@ -77,9 +77,7 @@ import pytest  # noqa: E402
 async def test_execute_call_http_transport_falls_back_to_pool():
     """Review fix: HTTP / SSE MCP servers have no subprocess to
     isolate, so the call_tool path falls back to the legacy long-
-    lived session via pool.call_tool.  Without this, every HTTP
-    MCP server returned a structured error after Plan 5 -- which
-    is a regression for any existing tenant configuration."""
+    lived session via pool.call_tool."""
     from surogates.mcp_proxy import routes
 
     pool = _RecordingPool(result='{"ok": true}')

@@ -1,6 +1,6 @@
 """Tests for SlugResolverCache.
 
-Plan 1b / Task 11.  Long-TTL (30s) cache mapping slug → agent_id.
+Long-TTL (30s) cache mapping slug → agent_id.
 Stores ``None`` entries too so a reserved-subdomain miss does not
 re-query the management plane on every Host-header probe.
 """
@@ -140,8 +140,6 @@ async def test_slug_cache_loader_exception_not_memoised():
 
 
 def test_slug_cache_channel_registered_in_invalidation_channels():
-    """Wiring smoke test: Plan 1b Task 7 already pre-routed the
-    slug channel; assert here so a future refactor cannot drop it."""
     from surogates.runtime import INVALIDATION_CHANNELS
 
     assert "agent.slug_changed:" in INVALIDATION_CHANNELS

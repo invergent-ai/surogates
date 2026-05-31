@@ -1,6 +1,6 @@
 """Tests for vault://-style credential references.
 
-Plan 2 / Task 4.  AgentRuntimeContext carries every API key as a
+AgentRuntimeContext carries every API key as a
 ``vault://<credential_id>`` reference, never the raw value.  This
 keeps secrets off the runtime-config payload (which travels over
 HTTP to the worker) and means rotation lands by updating the vault

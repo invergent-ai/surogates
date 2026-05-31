@@ -1,6 +1,6 @@
 """Tests for SessionLLMClients.
 
-Plan 2 / Task 5.  Per-session bundle holding the four AsyncOpenAI
+Per-session bundle holding the four AsyncOpenAI
 instances + the model strings for main / summary / vision / advisor.
 Immutable so the harness can pass the bundle around without worrying
 about concurrent mutation; aclose() lifecycle so connection pools
@@ -152,7 +152,7 @@ async def test_build_session_llm_clients_main_required():
 async def test_build_session_llm_clients_closes_partial_bundle_on_vault_failure(
     monkeypatch,
 ):
-    """Plan 2 post-review: if vault.resolve_ref raises after main has
+    """if vault.resolve_ref raises after main has
     been instantiated, the partially-built AsyncOpenAI instances must
     be aclose()d before re-raising the error.  Otherwise every failed
     session start leaks a connection pool per resolved slot, and a

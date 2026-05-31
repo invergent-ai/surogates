@@ -121,7 +121,7 @@ def test_materialize_for_cache_different_modified_produces_different_path(
 
 
 # ---------------------------------------------------------------------------
-# Task 4 — _try_inline_attachment unit tests
+# _try_inline_attachment unit tests
 # ---------------------------------------------------------------------------
 
 

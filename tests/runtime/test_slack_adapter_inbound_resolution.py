@@ -1,4 +1,4 @@
-"""Plan 6 / Task 7.  Shared-mode SlackAdapter resolves the
+"""Shared-mode SlackAdapter resolves the
 inbound event's app_id -> agent via the ChannelRoutingCache
 + the per-tenant token via the CredentialVault.
 """
@@ -54,7 +54,7 @@ async def test_resolve_inbound_uses_cache_and_vault():
     assert token == "xoxb-real"
     assert cache.gets == ["slack:A0123ABCD"]
     # The token resolution went through the canonical vault
-    # entry point (Plan 2 Task 16 source-level regression).
+    # entry point.
     assert vault.calls == [
         ("vault://slack_bot_token_A0123ABCD", "o-1"),
     ]

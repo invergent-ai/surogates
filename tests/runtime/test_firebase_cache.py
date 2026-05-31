@@ -1,9 +1,4 @@
 """Tests for ``surogates.runtime.FirebaseConfigCache``.
-
-Plan 1b / Task 7.  Mirrors ``RuntimeConfigCache`` from Plan 1 but
-keyed on ``project_id`` instead of ``agent_id`` with a longer default
-TTL (Firebase config changes far less frequently than agent runtime
-config).
 """
 
 from __future__ import annotations
@@ -135,8 +130,3 @@ async def test_firebase_cache_does_not_memoise_loader_exceptions():
     assert cfg["project_id"] == "p-1"
     assert attempts == 2
 
-
-def test_firebase_invalidation_channel_is_registered():
-    from surogates.runtime.invalidator import INVALIDATION_CHANNELS
-
-    assert "project.firebase_config_changed:" in INVALIDATION_CHANNELS

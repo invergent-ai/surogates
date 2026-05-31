@@ -1,9 +1,8 @@
 """Tests for ``surogates.runtime.RuntimeConfigCache``.
 
-Plan 1 / Task 13.  In-process TTL cache fronting the PlatformClient.
+In-process TTL cache fronting the PlatformClient.
 The cache is a pure cache — the platform PG is the source of truth.
-Entries are evicted by TTL or by explicit ``invalidate(agent_id)``
-(driven by Redis pub/sub in Task 17).
+Entries are evicted by TTL or by explicit ``invalidate(agent_id)``.
 """
 
 from __future__ import annotations

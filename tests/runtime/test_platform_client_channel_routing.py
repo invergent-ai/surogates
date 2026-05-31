@@ -1,4 +1,4 @@
-"""Plan 6 / Task 3.  PlatformClient method that powers the
+"""PlatformClient method that powers the
 ChannelRoutingCache loader.
 
 Tests the HTTP shape (200/404/401) the cache relies on:

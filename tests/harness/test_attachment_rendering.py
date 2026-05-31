@@ -142,7 +142,7 @@ def test_rebuild_messages_leaves_user_message_unchanged_when_no_attachments() ->
 
 
 # ---------------------------------------------------------------------------
-# Task 8 — revised _attachments_note
+# revised _attachments_note
 # ---------------------------------------------------------------------------
 
 

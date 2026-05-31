@@ -1,12 +1,7 @@
-"""Plan 8 / Task 3 integration test.
-
+"""
 Three RedisLeaderLock instances race on the same key.  Exactly
 one acquires.  Killing the holder (release) lets the next
 contender win within the TTL window.
-
-Uses the same _FakeRedis as Task 1 so the test stays at the
-unit tier; the real-Redis equivalent is the operations smoke
-test that runs against a kind cluster (out of scope for Plan 8).
 """
 
 from __future__ import annotations
@@ -37,7 +32,7 @@ async def test_three_replicas_only_one_acquires():
 
 @pytest.mark.asyncio
 async def test_replica_kill_lets_next_contender_win():
-    """Plan 8 risk #13 mitigation: killing the holder mid-tick
+    """killing the holder mid-tick
     must let the next contender win within the TTL window.
 
     We simulate "kill" as a clean release here; the actual
@@ -80,8 +75,7 @@ async def test_holder_heartbeat_blocks_contenders():
 
 @pytest.mark.asyncio
 async def test_stale_release_after_lease_loss_is_safe():
-    """Plan 8 risk #13 mitigation, expressed as a test.
-
+    """
     Scenario: replica-a's tick takes longer than the TTL.  The
     lease expires; replica-b acquires.  Replica-a finally
     finishes its tick and calls release().  The release MUST

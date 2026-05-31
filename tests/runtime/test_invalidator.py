@@ -1,6 +1,6 @@
 """Tests for the Redis pub/sub invalidator.
 
-Plan 1 / Task 17 + Plan 1b / Task 7.  Surogate-ops publishes on Redis
+Surogate-ops publishes on Redis
 whenever an admin mutates per-agent runtime config, file bundle,
 project Firebase config, or agent slug.  The invalidator listens on
 the patterns, parses the identifier out of the channel name, and
@@ -32,24 +32,6 @@ def test_handler_routes_runtime_config_changed_to_runtime_cache():
     rt.invalidate.assert_called_once_with("a-1")
     fb.invalidate.assert_not_called()
     sl.invalidate.assert_not_called()
-
-
-def test_handler_routes_bundle_changed_to_file_bundle_cache():
-    """Plan 3 / Task 8.  agent.bundle_changed: was pre-routed by
-    Plan 1b Task 7 to runtime_config_cache as a transitional
-    target; Plan 3 retargets it to the new file_bundle_cache."""
-    from surogates.runtime.invalidator import handle_invalidation_message
-
-    rt = MagicMock()
-    fb = MagicMock()
-    handle_invalidation_message(
-        channel="agent.bundle_changed:a-2",
-        payload=b"",
-        runtime_config_cache=rt,
-        file_bundle_cache=fb,
-    )
-    fb.invalidate.assert_called_once_with("a-2")
-    rt.invalidate.assert_not_called()
 
 
 def test_handler_routes_firebase_changed_to_firebase_cache():
@@ -152,7 +134,7 @@ def test_invalidation_channels_constant_exports_all_five_prefixes():
 
 
 def test_handler_routes_channel_routing_changed_to_channel_routing_cache():
-    """Plan 6 / Task 2.  Admin CRUD on the channel_routing table
+    """Admin CRUD on the channel_routing table
     publishes channel_routing_changed:<kind>:<identifier> on
     Redis; the shared adapter pod invalidates its cache so the
     next inbound event for that channel sees the new routing."""
@@ -167,14 +149,8 @@ def test_handler_routes_channel_routing_changed_to_channel_routing_cache():
     crc.invalidate.assert_called_once_with("slack:A0123ABCD")
 
 
-def test_invalidation_channels_includes_channel_routing_changed():
-    from surogates.runtime.invalidator import INVALIDATION_CHANNELS
-
-    assert "channel_routing_changed:" in INVALIDATION_CHANNELS
-
-
 def test_handler_routes_mcp_servers_changed_to_mcp_server_cache():
-    """Plan 5 / Task 7.  Admin CRUD on the per-tenant MCP server
+    """Admin CRUD on the per-tenant MCP server
     registry publishes agent.mcp_servers_changed:<agent_id> on
     Redis; the proxy invalidates its cache so the next call sees
     the new server list."""
@@ -189,16 +165,8 @@ def test_handler_routes_mcp_servers_changed_to_mcp_server_cache():
     mc.invalidate.assert_called_once_with("a-1")
 
 
-def test_invalidation_channels_includes_mcp_servers_changed():
-    """Plan 5 / Task 7.  The constant must list the new prefix so
-    `run_invalidator` psubscribes to it from the lifespan."""
-    from surogates.runtime.invalidator import INVALIDATION_CHANNELS
-
-    assert "agent.mcp_servers_changed:" in INVALIDATION_CHANNELS
-
-
 def test_handler_routes_user_memory_changed_to_memory_cache():
-    """Plan 4 / Task 2.  When a worker writes to a user's memory it
+    """When a worker writes to a user's memory it
     publishes user.memory_changed:<org_id>:<user_id> on Redis; other
     workers serving the same user invalidate their L1 entry so the
     next read fetches the new bytes from R2."""

@@ -1,6 +1,6 @@
 """Tests for StorageSettings.memory_bucket.
 
-Plan 4 / Task 3.  Optional dedicated bucket for per-user memory
+Optional dedicated bucket for per-user memory
 (some deployments isolate memory in a separate R2 bucket for
 billing / replication policy).  Defaults to '' which the harness
 treats as 'reuse settings.storage.bucket'.

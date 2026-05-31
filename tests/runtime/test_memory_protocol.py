@@ -1,6 +1,6 @@
 """Tests for the memory R2 key layout + envelope shape.
 
-Plan 4 / Task 4.  The canonical R2 key for per-user memory is
+The canonical R2 key for per-user memory is
 ``users/<user_id>/memory.json`` (under the agent's
 ``ctx.storage_key_prefix``).  Memory contents land inside a JSON
 envelope so version + content travel together atomically — no

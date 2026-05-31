@@ -1,7 +1,7 @@
 """Tests for platform_cleanup + platform_idle_reset.
 
-Plan 8 / Tasks 10 + 11.  Both scripts share the iterate-agents
-+ run-per-agent shape; tests share fakes.
+Both scripts share the iterate-agents + run-per-agent shape; 
+tests share fakes.
 """
 
 from __future__ import annotations

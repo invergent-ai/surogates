@@ -1,6 +1,6 @@
 """Tests for shared-runtime plumbing on the FastAPI app.state.
 
-Plan 1 / Task 16.  Verifies the lifespan hook constructs / shuts down
+Verifies the lifespan hook constructs / shuts down
 the PlatformClient + RuntimeConfigCache exactly when
 ``runtime_mode='shared'`` and ``platform_api_url`` is configured.
 """
@@ -32,7 +32,7 @@ def _make_settings(
         hub=SimpleNamespace(
             endpoint=hub_endpoint, username="", password="",
         ),
-        # Plan 4 / Task 6 — storage namespace expected by
+        # storage namespace expected by
         # _maybe_build_memory_cache.  Empty bucket → cache stays
         # None and the harness falls back to disk MemoryStore.
         storage=SimpleNamespace(
@@ -87,13 +87,13 @@ async def test_install_shared_plumbing_wires_client_and_cache():
         assert isinstance(app.state.runtime_config_cache, RuntimeConfigCache)
         assert app.state.runtime_invalidator_task is not None
         assert not app.state.runtime_invalidator_task.done()
-        # Plan 1b / Task 11 — slug cache lands alongside the rest.
+        # slug cache lands alongside the rest.
         from surogates.runtime import PerTenantRateLimiter, SlugResolverCache
 
         assert isinstance(
             app.state.slug_resolver_cache, SlugResolverCache,
         )
-        # Plan 1b / Task 14 — rate limiter wired by lifespan.
+        # rate limiter wired by lifespan.
         assert isinstance(
             app.state.rate_limiter, PerTenantRateLimiter,
         )
@@ -103,7 +103,7 @@ async def test_install_shared_plumbing_wires_client_and_cache():
 
 @pytest.mark.asyncio
 async def test_install_shared_plumbing_wires_firebase_cache():
-    """Plan 1b / Task 8 regression: shared-mode lifespan now also
+    """shared-mode lifespan now also
     constructs a FirebaseConfigCache backed by PlatformClient and
     exposes it on app.state.firebase_config_cache.
     """
@@ -166,7 +166,7 @@ async def test_shutdown_closes_platform_client_if_present():
 
 @pytest.mark.asyncio
 async def test_install_shared_plumbing_wires_file_bundle_cache(monkeypatch):
-    """Plan 3 / Task 9 — shared-mode lifespan now also constructs
+    """shared-mode lifespan now also constructs
     a FileBundleCache backed by HubBundleClient when HubSettings
     is configured.
 
@@ -213,7 +213,7 @@ async def test_install_shared_plumbing_wires_file_bundle_cache(monkeypatch):
 async def test_install_shared_plumbing_file_bundle_cache_none_when_hub_disabled():
     """When SUROGATES_HUB_ENDPOINT is empty (legacy / on-prem mode),
     the cache stays None so the worker falls back to filesystem
-    reads (Plan 9 retires this path)."""
+    reads."""
     from surogates.api.app import (
         _install_shared_runtime_plumbing,
         _shutdown_shared_runtime_plumbing,
@@ -233,7 +233,7 @@ async def test_install_shared_plumbing_file_bundle_cache_none_when_hub_disabled(
 
 @pytest.mark.asyncio
 async def test_install_shared_plumbing_wires_memory_cache_attr():
-    """Plan 4 / Task 6 — shared-mode lifespan exposes a
+    """shared-mode lifespan exposes a
     memory_cache attribute on app.state.  Test settings leave the
     storage bucket empty so the cache stays None; another test
     monkeypatches storage to verify the wired branch."""

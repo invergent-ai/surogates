@@ -1,6 +1,6 @@
 """Tests for worker bootstrap branching on runtime_mode.
 
-Plan 1, Tasks 20–22.  Exercises only the parts of
+Exercises only the parts of
 ``orchestrator/worker.py`` that decide whether the SUROGATES_AGENT_ID
 guard fires, whether the per-session agent-id mismatch raises, and
 whether the harness factory closes over process-wide ids vs
@@ -8,8 +8,7 @@ per-session ids.
 
 The worker entrypoint is large and pulls in many integration pieces,
 so the tests here focus on the smallest decision points expressed as
-pure functions and module-level branches.  End-to-end smoke is
-Task 23.
+pure functions and module-level branches.
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ def _read_worker_source() -> str:
 
 def test_helm_mode_still_requires_agent_id_in_source():
     """Regression: the helm path must keep raising when agent_id is
-    unset.  Plan 1 only loosens this for shared mode."""
+    unset."""
     src = _read_worker_source()
     # The error message text is load-bearing — operators grep on it.
     assert "SUROGATES_AGENT_ID is not set" in src
@@ -63,7 +62,7 @@ def test_session_org_id_is_resolved_per_session_in_shared_mode():
     *session* org in shared mode, never from process-wide
     configured_org_id.
 
-    Plan 2 / Task 9 — asset_root no longer reads
+    asset_root no longer reads
     settings.tenant_assets_root inline; it sources from the
     AgentRuntimeContext.storage_key_prefix (helm mode's
     _legacy_helm_context populates the field from
@@ -77,7 +76,7 @@ def test_session_org_id_is_resolved_per_session_in_shared_mode():
     assert "UUID(str(session.org_id))" in src
     # The TenantContext uses session_org_id, not configured_org_id.
     assert "org_id=session_org_id" in src
-    # Plan 2 contract: asset_root comes from ctx.storage_key_prefix.
+    # asset_root comes from ctx.storage_key_prefix.
     assert "asset_root=ctx.storage_key_prefix" in src
     # Belt-and-suspenders: the old process-wide path is gone.
     assert (

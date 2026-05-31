@@ -30,7 +30,7 @@ def _make_session() -> SimpleNamespace:
 
 
 # ---------------------------------------------------------------------------
-# Task 2: conditional stale-timeout bump for reasoning models
+# conditional stale-timeout bump for reasoning models
 # ---------------------------------------------------------------------------
 
 
@@ -136,7 +136,7 @@ def _chunk(content=None, reasoning_content=None, finish_reason=None,
 
 
 # ---------------------------------------------------------------------------
-# Task 3: heartbeat emission from the watchdog
+# heartbeat emission from the watchdog
 # ---------------------------------------------------------------------------
 
 
@@ -190,7 +190,7 @@ async def test_watchdog_emits_heartbeat_during_silent_stream(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 4: in-stream runaway-reasoning detector
+# in-stream runaway-reasoning detector
 # ---------------------------------------------------------------------------
 
 
@@ -313,7 +313,7 @@ async def test_runaway_detector_silent_after_content_arrives(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 5: per-turn thinking-disabled flag on AgentHarness
+# per-turn thinking-disabled flag on AgentHarness
 # ---------------------------------------------------------------------------
 
 
@@ -376,7 +376,7 @@ async def test_thinking_gate_unchanged_when_flag_not_set(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 6: flag resets at user-turn boundary
+# flag resets at user-turn boundary
 # ---------------------------------------------------------------------------
 
 
@@ -399,7 +399,7 @@ def test_thinking_disabled_flag_resets_with_user_turn_count():
 
 
 # ---------------------------------------------------------------------------
-# Task 7: outer retry path re-issues runaway with thinking disabled
+# outer retry path re-issues runaway with thinking disabled
 # ---------------------------------------------------------------------------
 
 

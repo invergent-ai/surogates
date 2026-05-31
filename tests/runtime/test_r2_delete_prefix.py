@@ -1,11 +1,8 @@
 """Tests for delete_memory_prefix.
 
-Plan 7 / Task 5.  R2 memory prefix delete -- drops every object
+R2 memory prefix delete -- drops every object
 whose key starts with the agent's storage_key_prefix so a
 delete_agent cascade leaves no orphan memory on R2.
-
-Uses the same _FakeBackend pattern Plan 4 established for the
-memory_io tests.
 """
 
 from __future__ import annotations

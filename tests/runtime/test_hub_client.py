@@ -1,6 +1,6 @@
 """Tests for HubBundleClient — async wrapper over the Surogate Hub SDK.
 
-Plan 3 / Task 3.  Thin adapter that exposes read_bytes(path) +
+Thin adapter that exposes read_bytes(path) +
 list_paths(prefix) + aclose() so the FileBundleCache loader and the
 AgentFileBundle don't depend on the SDK's auto-generated shape
 directly.

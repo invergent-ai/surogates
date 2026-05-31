@@ -1,9 +1,7 @@
 """Tests for RedisLeaderLock.
 
-Plan 8 / Task 1.  SET NX EX primitive that the platform ticker
-(Task 5) uses to ensure only one replica fires at a time across
-N replicas.  Loss-of-lock detection (Task 2's heartbeat returning
-False) means the holder must stop dispatching mid-tick to avoid
+SET NX EX primitive that the platform ticker uses to ensure only one replica fires at a time across
+N replicas.  Loss-of-lock detection means the holder must stop dispatching mid-tick to avoid
 double-fire.
 """
 

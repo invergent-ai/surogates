@@ -1,6 +1,6 @@
 """Tests for MCPServerRegistryCache.
 
-Plan 5 / Task 6.  Per-(org_id, agent_id) cache of the MCP server
+Per-(org_id, agent_id) cache of the MCP server
 catalog the agent can call.  Same TTL + per-key-lock + double-
 checked-locking shape as RuntimeConfigCache /
 FirebaseConfigCache / SlugResolverCache / FileBundleCache /

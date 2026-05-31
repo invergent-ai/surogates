@@ -1,6 +1,6 @@
 """Tests for ``surogates.runtime.FirebaseConfig`` + PlatformClient method.
 
-Plan 1b / Task 6.  Pure-projection dataclass mirroring the management
+Pure-projection dataclass mirroring the management
 plane's FirebaseConfigResponse plus the PlatformClient method that
 fetches it.  Cache + lifespan wiring in Tasks 7-8.
 """

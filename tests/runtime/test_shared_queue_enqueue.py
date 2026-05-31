@@ -1,7 +1,7 @@
 """Tests for the shared work-queue enqueue contract.
 
-Plan 2 / Task 12.  Today: one Redis sorted-set per agent
-(``surogates:work_queue:<agent_id>``).  Plan 2: a single shared
+Today: one Redis sorted-set per agent
+(``surogates:work_queue:<agent_id>``).  a single shared
 sorted-set ``surogates:work_queue`` whose members encode
 ``<org_id>|<agent_id>|<session_id>`` so the dispatcher can extract
 the tenant for the gate check without a DB round-trip per dequeue.

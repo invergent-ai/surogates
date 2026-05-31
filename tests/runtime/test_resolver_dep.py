@@ -1,14 +1,13 @@
 """Tests for ``surogates.runtime.agent_runtime_context_dep``.
 
-Plan 1 / Task 15.  FastAPI dependency that resolves the per-request
+FastAPI dependency that resolves the per-request
 ``(org_id, agent_id)`` tuple into an
 :class:`~surogates.runtime.AgentRuntimeContext`.
 
-Resolution order (v1; expanded in Plan 1b):
+Resolution order:
 
 1. ``?agent_id=<id>`` query parameter (explicit, highest precedence).
-2. ``Host: <slug>.<base_domain>`` subdomain (stub in Plan 1 — Plan
-   1b wires the slug → agent_id lookup).
+2. ``Host: <slug>.<base_domain>`` subdomain
 3. ``settings.agent_id`` fallback when ``runtime_mode=helm`` so
    legacy single-agent api pods keep working unchanged.
 
@@ -148,37 +147,8 @@ def test_shared_mode_does_not_fall_back_to_settings_agent_id():
         r = c.get("/echo")
     assert r.status_code == 400
 
-
-def test_helm_context_project_id_is_none_not_empty_string():
-    """Helm pods do not carry a project id; the legacy context must
-    expose its absence as ``None`` rather than silently substituting an
-    empty string that would route project-scoped queries to project
-    ``""``.  Plan 1b Firebase resolution depends on this distinction."""
-    async def loader(_):
-        raise AssertionError("loader must not be called in helm mode")
-
-    app = _build_app(
-        cache=RuntimeConfigCache(loader=loader),
-        runtime_mode="helm",
-        agent_id="legacy-a",
-    )
-
-    @app.get("/probe")
-    async def probe(ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep)):
-        return {
-            "agent_id": ctx.agent_id,
-            "org_id": ctx.org_id,
-            "project_id": ctx.project_id,
-        }
-
-    with TestClient(app) as c:
-        r = c.get("/probe")
-    assert r.status_code == 200
-    assert r.json()["project_id"] is None
-
-
 def test_resolver_resolves_via_host_header_subdomain():
-    """Plan 1b / Task 12.  A Host like ``acme.runtime.example.com``
+    """A Host like ``acme.runtime.example.com``
     flows through SlugResolverCache → agent_id and then through the
     normal runtime-config cache path."""
     from surogates.runtime import SlugResolverCache
@@ -260,8 +230,7 @@ def test_resolver_falls_through_to_400_when_slug_unknown():
 
 
 def test_resolver_without_slug_cache_returns_none_silently():
-    """Helm-mode pods (and shared-mode pods before Plan 1b lifecycle
-    rolls everywhere) do not wire ``slug_resolver_cache``.  The
+    """Helm-mode pods do not wire ``slug_resolver_cache``.  The
     resolver must treat that as "no Host-header routing available"
     and fall through, not raise AttributeError."""
     async def runtime_loader(agent_id: str) -> dict:

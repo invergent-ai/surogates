@@ -1,6 +1,6 @@
 """Tests for ``surogates.runtime.AgentRuntimeContext``.
 
-Plan 1 / Task 11.  ``AgentRuntimeContext`` carries the per-session
+``AgentRuntimeContext`` carries the per-session
 agent configuration the shared surogates runtime resolves from the
 management plane's ``/api/agents/{id}/runtime-config`` endpoint.
 
@@ -95,7 +95,7 @@ def test_asset_root_derives_from_org_id():
     """``asset_root`` mirrors the legacy on-disk layout used by the
     helm-deployed tenant_assets PVC: ``/data/tenant-assets/{org_id}``.
 
-    Plan 4 will lift per-user mutable memory off this PVC and onto R2;
+    Lift per-user mutable memory off this PVC and onto R2;
     until then the convention stays so existing harness code paths
     (memory tools, skill loaders) keep working when they read this
     property.

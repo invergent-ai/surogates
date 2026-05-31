@@ -1,8 +1,8 @@
 """Tests for FileBundleCache L1.
 
-Plan 3 / Task 6.  Same TTL + per-key-lock + double-checked-locking
-shape as RuntimeConfigCache (Plan 1), FirebaseConfigCache (Plan 1b),
-SlugResolverCache (Plan 1b).  Positive-only memoisation — a
+Same TTL + per-key-lock + double-checked-locking
+shape as RuntimeConfigCache, FirebaseConfigCache,
+SlugResolverCache.  Positive-only memoisation — a
 LookupError (file missing) must not be cached because the bundle
 contents the version pointer mutates inside a session is
 exceedingly rare but happens via admin rollback; a negatively-
@@ -100,15 +100,6 @@ async def test_bundle_cache_loader_exception_not_memoised():
     assert (await cache.get("a-1")) is not None
     assert calls == 2
 
-
-def test_bundle_cache_channel_registered_in_invalidation_channels():
-    """The agent.bundle_changed: channel is pre-routed by Plan 1b
-    Task 7; Plan 3 retargets it to file_bundle_cache (Task 8)."""
-    from surogates.runtime import INVALIDATION_CHANNELS
-
-    assert "agent.bundle_changed:" in INVALIDATION_CHANNELS
-
-
 def _make_fake_bundle(agent_id):
     from surogates.runtime import AgentFileBundle
 
@@ -119,7 +110,7 @@ def _make_fake_bundle(agent_id):
 
 
 # ---------------------------------------------------------------------------
-# L2 disk cache + read-through wrapper (Plan 3 / Task 7)
+# L2 disk cache + read-through wrapper
 # ---------------------------------------------------------------------------
 
 

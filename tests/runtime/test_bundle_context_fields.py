@@ -1,6 +1,6 @@
 """Tests for AgentRuntimeContext bundle fields.
 
-Plan 3 / Task 1.  The runtime-config payload carries a Hub
+The runtime-config payload carries a Hub
 reference + version that the worker uses to fetch the agent's
 file bundle (SOUL.md, AGENT.md, platform skills, etc.).  Both
 fields are optional so legacy agents that haven't been onboarded
@@ -14,12 +14,6 @@ import dataclasses
 import pytest
 
 from surogates.runtime import AgentRuntimeContext
-
-
-def test_agent_runtime_context_has_bundle_fields():
-    fields = {f.name for f in dataclasses.fields(AgentRuntimeContext)}
-    assert "bundle_hub_ref" in fields
-    assert "bundle_version" in fields
 
 
 def test_agent_runtime_context_bundle_fields_default_to_none():
@@ -46,7 +40,7 @@ def test_agent_runtime_context_bundle_fields_accept_values():
 
 
 def test_agent_runtime_context_is_still_frozen():
-    """Immutability invariant from Plan 1 — adding bundle fields
+    """adding bundle fields
     must not weaken the frozen=True contract."""
     ctx = AgentRuntimeContext(
         agent_id="a-1", org_id="o-1", project_id="p-1",

@@ -1,6 +1,6 @@
 """Tests for PlatformTicker.
 
-Plan 8 / Task 5.  Acquires the leader lock, polls multi-tenant
+Acquires the leader lock, polls multi-tenant
 due rows, enqueues, sleeps, loops.  Loss-of-lock or shutdown
 signal exits cleanly.
 """

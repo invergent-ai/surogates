@@ -1,6 +1,6 @@
 """Tests for HubSettings.
 
-Plan 3 / Task 5.  Hub endpoint + auth come from env vars
+Hub endpoint + auth come from env vars
 (SUROGATES_HUB_*) — consistent with the rest of the surogates
 config surface.
 """
@@ -22,8 +22,7 @@ def test_hub_settings_reads_env_vars(monkeypatch):
 
 def test_hub_settings_defaults_empty(monkeypatch):
     """When SUROGATES_HUB_* vars are unset the worker treats Hub as
-    disabled and falls back to legacy filesystem reads (handled by
-    the FileBundleCache wiring in Task 9)."""
+    disabled and falls back to legacy filesystem reads."""
     for key in (
         "SUROGATES_HUB_ENDPOINT",
         "SUROGATES_HUB_USERNAME",
