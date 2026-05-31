@@ -706,7 +706,19 @@ async def run_worker(settings: Settings) -> None:
     # Worker-side shared-runtime plumbing.  Wires the
     # RuntimeConfigCache + FileBundleCache + MemoryCache that
     # harness_factory reads per session.
-    worker_state: dict = {"redis": redis_client}
+    #
+    # ``storage_backend`` MUST be on ``worker_state`` before
+    # ``_install_worker_runtime_plumbing`` runs, because
+    # ``build_memory_cache`` reads ``state.get("storage_backend")``
+    # at construction time and silently returns ``None`` when the
+    # backend is missing — which makes every harness_factory call
+    # fall through to the disk-backed ``MemoryStore`` and fail with
+    # ``Permission denied`` on containers without a writable working
+    # directory (Plan 4 R2-memory path requires this wiring).
+    worker_state: dict = {
+        "redis": redis_client,
+        "storage_backend": storage_backend,
+    }
     _install_worker_runtime_plumbing(worker_state, settings)
     _start_worker_invalidator(worker_state)
     runtime_config_cache = worker_state["runtime_config_cache"]
