@@ -146,19 +146,16 @@ async def auth_config(
         return AuthConfigResponse(
             self_registration_enabled=False, firebase=None,
         )
-    # FirebaseConfigCache returns the raw ``GET /api/projects/{id}/
-    # firebase-config`` JSON dict (see PlatformClient.get_firebase_config);
-    # access fields by key rather than attribute.
     return AuthConfigResponse(
         self_registration_enabled=True,
         firebase=FirebaseWebConfig(
-            api_key=fb["api_key"],
-            auth_domain=fb["auth_domain"],
-            project_id=fb["firebase_project_id"],
-            app_id=fb.get("app_id") or None,
-            messaging_sender_id=fb.get("messaging_sender_id") or None,
-            measurement_id=fb.get("measurement_id") or None,
-            enabled_providers=list(fb.get("enabled_providers") or ()),
+            api_key=fb.api_key,
+            auth_domain=fb.auth_domain,
+            project_id=fb.firebase_project_id,
+            app_id=fb.app_id or None,
+            messaging_sender_id=fb.messaging_sender_id or None,
+            measurement_id=fb.measurement_id or None,
+            enabled_providers=list(fb.enabled_providers),
         ),
     )
 
@@ -237,7 +234,7 @@ async def firebase_exchange(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Firebase auth is not configured.",
             )
-        fb_project_id = fb["firebase_project_id"]
+        fb_project_id = fb.firebase_project_id
         # Shared-mode self-registration is gated by the per-project
         # Firebase row existing at all — projects that haven't opted
         # in have no row and the LookupError above bails out.

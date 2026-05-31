@@ -182,6 +182,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     from surogates.runtime import (
         ChannelRoutingCache,
         FileBundleCache,
+        FirebaseConfig,
         FirebaseConfigCache,
         MCPServerRegistryCache,
         PerTenantRateLimiter,
@@ -216,8 +217,25 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         loader=client.get_runtime_config,
         ttl_seconds=1.0,
     )
+    # Project dict → FirebaseConfig dataclass at the loader edge so
+    # every callsite gets a typed object back from the cache.  The
+    # PlatformClient returns the raw JSON; FirebaseConfig mirrors the
+    # field shape one-to-one (Plan 1b / Task 6).
+    async def _load_firebase(project_id: str) -> FirebaseConfig:
+        payload = await client.get_firebase_config(project_id)
+        return FirebaseConfig(
+            project_id=payload["project_id"],
+            firebase_project_id=payload["firebase_project_id"],
+            api_key=payload["api_key"],
+            auth_domain=payload["auth_domain"],
+            enabled_providers=tuple(payload.get("enabled_providers") or ()),
+            app_id=payload.get("app_id"),
+            messaging_sender_id=payload.get("messaging_sender_id"),
+            measurement_id=payload.get("measurement_id"),
+        )
+
     firebase_cache = FirebaseConfigCache(
-        loader=client.get_firebase_config,
+        loader=_load_firebase,
         ttl_seconds=60.0,
     )
     slug_cache = SlugResolverCache(
