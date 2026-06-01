@@ -64,7 +64,19 @@ export interface NextActionStripResult {
 const _NEXT_ACTION_RE =
   /<next_action([^>]*)>([\s\S]*?)<\/next_action>\s*/gi;
 
-const _PARTIAL_NEXT_ACTION_FOOTER_RE = /(?:^|\n)\s*<next_action\b[\s\S]*$/i;
+// Hide a trailing, not-yet-complete footer while the model is still
+// streaming.  ``useSmoothStream`` reveals the opening tag one character
+// at a time, so the text passes through every prefix of
+// ``<next_action`` (``<``, ``<n``, … ``<next_actio``) before the full
+// word — and then the attributes/body — arrive.  Matching only the
+// complete word would let those prefixes flash in the rendered markdown
+// and vanish a frame later, so the nested-optional alternation accepts
+// any prefix of the literal token, and ``n[\s\S]*`` swallows everything
+// once the word is whole (attributes + partial body, closing tag not
+// yet seen).  Anchored to start-of-line so a stray ``<`` mid-sentence in
+// the answer prose is never mistaken for the footer.
+const _PARTIAL_NEXT_ACTION_FOOTER_RE =
+  /(?:^|\n)\s*<(?:n(?:e(?:x(?:t(?:_(?:a(?:c(?:t(?:i(?:o(?:n[\s\S]*)?)?)?)?)?)?)?)?)?)?)?$/i;
 
 const _ATTR_RE = /(\w+)="([^"]*)"/g;
 

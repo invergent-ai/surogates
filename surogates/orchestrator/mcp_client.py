@@ -158,10 +158,25 @@ class McpProxyClient:
             body: dict[str, Any] = {"name": tool_name, "arguments": args}
             if meta_payload:
                 body["meta"] = meta_payload
+
+            # The proxy's call_tool route depends on
+            # ``agent_runtime_context_dep`` which resolves the agent from
+            # ``?agent_id=<id>`` or a Host-header subdomain.  Workers
+            # talking directly to the proxy over an IP/hostname have no
+            # subdomain, so propagate the harness-threaded
+            # ``session.agent_id`` (see tool_exec.py:dispatch) as the
+            # query param.  Falling through without it yields 400 "no
+            # agent_id in request" — the symptom the platform copilot
+            # sessions hit before this guard.
+            agent_id = kwargs.get("agent_id")
+            params: dict[str, str] | None = (
+                {"agent_id": str(agent_id)} if agent_id else None
+            )
             try:
                 resp = await client.post(
                     "/mcp/v1/tools/call",
                     headers=headers,
+                    params=params,
                     json=body,
                 )
             except httpx.HTTPError as exc:

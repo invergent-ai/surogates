@@ -199,7 +199,8 @@ async def call_tool(
             org_id=auth.org_id,
             user_id=auth.user_id,
             server_config=server_config,
-            tool_name=original_tool,
+            clean_tool_name=body.name,
+            original_tool=original_tool,
             arguments=body.arguments,
             meta=body.meta,
         )
@@ -263,7 +264,8 @@ async def _execute_call(
     org_id: Any,
     user_id: Any,
     server_config: dict[str, Any],
-    tool_name: str,
+    clean_tool_name: str,
+    original_tool: str,
     arguments: dict[str, Any],
     meta: dict[str, Any] | None,
 ) -> tuple[str, str]:
@@ -293,11 +295,16 @@ async def _execute_call(
     transport = server_config.get("transport", "stdio")
     if transport != "stdio":
         # HTTP / SSE: no subprocess, no isolation problem; reuse the
-        # long-lived session.
+        # long-lived session.  ``pool.call_tool`` re-resolves through
+        # ``tool_index`` which is keyed by the clean (prefixed) name,
+        # so we pass ``clean_tool_name`` here even though we already
+        # resolved the target above -- the lookup is O(1) and the
+        # alternative is plumbing the resolved server object through
+        # a fourth function boundary.
         result = await pool.call_tool(
             org_id=org_id,
             user_id=user_id,
-            tool_name=tool_name,
+            tool_name=clean_tool_name,
             arguments=arguments,
             meta=meta,
         )
@@ -322,13 +329,17 @@ async def _execute_call(
 
     try:
         async with sandbox.mcp_session() as session:
+            # The stdio MCP server only knows its own tools by their
+            # original (unprefixed) names -- the ``mcp__<server>__``
+            # prefix is a proxy-side namespace marker, not part of the
+            # tool's MCP-protocol identity.
             if meta:
                 call_result = await session.call_tool(
-                    tool_name, arguments=arguments, meta=meta,
+                    original_tool, arguments=arguments, meta=meta,
                 )
             else:
                 call_result = await session.call_tool(
-                    tool_name, arguments=arguments,
+                    original_tool, arguments=arguments,
                 )
     except Exception as exc:  # noqa: BLE001 — translated to client error
         return (
