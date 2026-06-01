@@ -1098,6 +1098,12 @@ async def run_worker(settings: Settings) -> None:
             saga_enabled=settings.saga.enabled,
             saga_settings=settings.saga if settings.saga.enabled else None,
             log_policy_allowed=settings.governance.log_allowed,
+            summary_client=(
+                summary_slot.client if summary_slot is not None else None
+            ),
+            summary_model=(
+                summary_slot.model if summary_slot is not None else ""
+            ),
             vision_client=(
                 vision_slot.client if vision_slot is not None else None
             ),

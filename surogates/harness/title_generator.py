@@ -6,8 +6,6 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from surogates.config import load_settings
-from surogates.harness.auxiliary_client import build_summary_auxiliary_llm
 from surogates.session.models import Session
 
 logger = logging.getLogger(__name__)
@@ -140,9 +138,20 @@ async def maybe_generate_session_title(
     session: Session,
     messages: list[dict[str, Any]],
     model: str,
-    tenant: Any | None = None,
+    summary_client: Any | None = None,
+    summary_model: str = "",
 ) -> str | None:
-    """Generate and persist a title from the first user message."""
+    """Generate and persist a title from the first user message.
+
+    Runs against the agent's resolved ``llm_summary`` slot
+    (``summary_client`` / ``summary_model``) when present — the same
+    per-agent endpoint the context compressor and turn summarizer use.
+    Falls back to the main turn client only when the agent has no
+    summary slot configured.  It must NOT rebuild a client from the
+    static global ``Settings.llm.summary_*`` config: in shared-runtime
+    deployments those globals point at an endpoint that does not carry
+    the per-agent path, so every title call 404s and is silently lost.
+    """
     user_messages = [
         _content_as_text(message.get("content", ""))
         for message in messages
@@ -158,17 +167,8 @@ async def maybe_generate_session_title(
     if not first_user_message.strip():
         return None
 
-    title_client = llm_client
-    title_model = model
-    try:
-        summary_auxiliary = build_summary_auxiliary_llm(load_settings(), tenant)
-    except Exception as exc:
-        logger.warning("Summary model title client setup failed: %s", exc)
-        logger.debug("Summary model title client setup traceback", exc_info=True)
-        summary_auxiliary = None
-    if summary_auxiliary is not None:
-        title_client = summary_auxiliary.client
-        title_model = summary_auxiliary.model
+    title_client = summary_client or llm_client
+    title_model = summary_model or model
 
     title = await generate_session_title(
         llm_client=title_client,

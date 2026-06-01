@@ -1085,6 +1085,8 @@ class AgentHarness:
         default_model: str = "gpt-4o",
         session_factory: Any | None = None,
         log_policy_allowed: bool = False,
+        summary_client: AsyncOpenAI | None = None,
+        summary_model: str = "",
         vision_client: AsyncOpenAI | None = None,
         vision_model: str = "",
         advisor_client: AsyncOpenAI | None = None,
@@ -1122,6 +1124,14 @@ class AgentHarness:
         # vision substitution falls back to ``llm_client`` and the
         # configured ``llm.vision_model`` setting; when both are absent
         # the helper just strips images.
+        # Optional per-agent summary client — the resolved ``llm_summary``
+        # slot from the per-session bundle.  Used for cheap side work that
+        # must honour the agent's configured summary endpoint (session
+        # title generation), instead of the static global summary client
+        # built from ``Settings.llm.summary_*``.  When unset the title
+        # path falls back to the main turn client.
+        self._summary_client: AsyncOpenAI | None = summary_client
+        self._summary_model: str = summary_model or ""
         self._vision_client: AsyncOpenAI | None = vision_client
         self._vision_model: str = vision_model or ""
         self._advisor_client: AsyncOpenAI | None = advisor_client
@@ -5683,7 +5693,8 @@ class AgentHarness:
                 session=session,
                 messages=messages,
                 model=model,
-                tenant=self._tenant,
+                summary_client=self._summary_client,
+                summary_model=self._summary_model,
             )
             if title:
                 await self._store.emit_event(

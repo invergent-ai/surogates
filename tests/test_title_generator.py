@@ -214,16 +214,19 @@ async def test_maybe_generate_session_title_sets_title_for_first_message(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_maybe_generate_session_title_uses_summary_model_from_config(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    monkeypatch.setenv("SUROGATES_CONFIG", str(tmp_path / "missing-config.yaml"))
-    monkeypatch.setenv("SUROGATES_LLM_SUMMARY_MODEL", "summary-title-model")
-    aux_create = AsyncMock(return_value=_response("Summary Model Title"))
-    aux_client = SimpleNamespace(
+async def test_maybe_generate_session_title_uses_per_agent_summary_slot() -> None:
+    """The title runs against the agent's resolved ``llm_summary`` slot.
+
+    Regression cover for the shared-runtime bug where the title path
+    rebuilt a client from the static global ``Settings.llm.summary_*``
+    (whose ``summary_base_url`` pointed at a proxy ``/v1`` route that does
+    not exist per-agent) and 404'd on every call.  When a summary slot is
+    supplied it must be used verbatim — never the global config.
+    """
+    summary_create = AsyncMock(return_value=_response("Summary Slot Title"))
+    summary_client = SimpleNamespace(
         chat=SimpleNamespace(
-            completions=SimpleNamespace(create=aux_create)
+            completions=SimpleNamespace(create=summary_create)
         )
     )
     main_create = AsyncMock(return_value=_response("Main Model Title"))
@@ -232,9 +235,37 @@ async def test_maybe_generate_session_title_uses_summary_model_from_config(
             completions=SimpleNamespace(create=main_create)
         )
     )
-    monkeypatch.setattr(
-        "surogates.harness.auxiliary_client.AsyncOpenAI",
-        lambda **_kwargs: aux_client,
+    store = SimpleNamespace(update_session_title_if_empty=AsyncMock(return_value=True))
+    session = SimpleNamespace(id=uuid4(), title=None, model="gpt-4o")
+
+    title = await maybe_generate_session_title(
+        store=store,
+        llm_client=main_client,
+        session=session,
+        messages=[{"role": "user", "content": "summarize the report"}],
+        model="gpt-4o",
+        summary_client=summary_client,
+        summary_model="agent-summary-model",
+    )
+
+    assert title == "Summary Slot Title"
+    summary_create.assert_awaited_once()
+    main_create.assert_not_called()
+    assert summary_create.await_args.kwargs["model"] == "agent-summary-model"
+
+
+@pytest.mark.asyncio
+async def test_maybe_generate_session_title_falls_back_to_main_without_slot() -> None:
+    """No summary slot → the title runs against the main turn client.
+
+    The agent's main endpoint is per-agent-correct, so this is a safe
+    fallback (and still avoids the dead global summary endpoint).
+    """
+    main_create = AsyncMock(return_value=_response("Main Model Title"))
+    main_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=main_create)
+        )
     )
     store = SimpleNamespace(update_session_title_if_empty=AsyncMock(return_value=True))
     session = SimpleNamespace(id=uuid4(), title=None, model="gpt-4o")
@@ -247,10 +278,9 @@ async def test_maybe_generate_session_title_uses_summary_model_from_config(
         model="gpt-4o",
     )
 
-    assert title == "Summary Model Title"
-    aux_create.assert_awaited_once()
-    main_create.assert_not_called()
-    assert aux_create.await_args.kwargs["model"] == "summary-title-model"
+    assert title == "Main Model Title"
+    main_create.assert_awaited_once()
+    assert main_create.await_args.kwargs["model"] == "gpt-4o"
 
 
 @pytest.mark.asyncio
@@ -289,6 +319,8 @@ async def test_harness_title_hook_runs_in_background(monkeypatch) -> None:
     harness._store = SimpleNamespace(emit_event=AsyncMock(return_value=42))
     harness._llm = SimpleNamespace()
     harness._tenant = SimpleNamespace()
+    harness._summary_client = SimpleNamespace()
+    harness._summary_model = "agent-summary-model"
     harness._background_tasks = set()
 
     maybe_generate = AsyncMock(return_value="Build Sales Chart")
@@ -318,7 +350,8 @@ async def test_harness_title_hook_runs_in_background(monkeypatch) -> None:
         session=session,
         messages=messages,
         model="gpt-4o",
-        tenant=harness._tenant,
+        summary_client=harness._summary_client,
+        summary_model=harness._summary_model,
     )
     # A successful title write must emit SESSION_TITLE_UPDATED so the SSE
     # stream can patch the sidebar without an explicit refetch.
@@ -339,6 +372,8 @@ async def test_harness_title_hook_skips_event_when_no_title(monkeypatch) -> None
     harness._store = SimpleNamespace(emit_event=AsyncMock())
     harness._llm = SimpleNamespace()
     harness._tenant = SimpleNamespace()
+    harness._summary_client = None
+    harness._summary_model = ""
     harness._background_tasks = set()
 
     maybe_generate = AsyncMock(return_value=None)
@@ -436,7 +471,10 @@ async def test_wake_kicks_off_title_for_loop_command(monkeypatch) -> None:
     harness._streaming_enabled = True
     harness._memory_manager = None
     harness._tenant = SimpleNamespace(org_id=session.org_id, user_id=session.user_id)
+    harness._summary_client = None
+    harness._summary_model = ""
     harness._session_factory = None
+    harness._bundle = None
     harness._prompt = MagicMock()
     harness._background_tasks = set()
 
