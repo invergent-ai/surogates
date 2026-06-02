@@ -129,6 +129,18 @@ async def build_session_llm_clients(
         key = await vault.resolve_ref(
             endpoint.api_key_ref, org_id=ctx.org_id, user_id=user_id,
         )
+        # User-principal sessions fall back to the org-scoped credential
+        # when the user has no personal override.  Platform admission and
+        # BYO model keys are seeded org-scoped (``user_id IS NULL``), so a
+        # user-scoped lookup misses them; without this fallback the client
+        # is built with no key and ``AsyncOpenAI`` raises 'Missing
+        # credentials', failing every user-principal (webapp) session
+        # while service-account sessions keep working.  Mirrors the
+        # user->org fallback in ``mcp_proxy.loader``.
+        if key is None and user_id is not None:
+            key = await vault.resolve_ref(
+                endpoint.api_key_ref, org_id=ctx.org_id, user_id=None,
+            )
         client = AsyncOpenAI(api_key=key, base_url=endpoint.base_url)
         slot = ResolvedLLM(client=client, model=endpoint.model)
         resolved.append(slot)

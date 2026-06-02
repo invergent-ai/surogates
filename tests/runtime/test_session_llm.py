@@ -99,6 +99,99 @@ async def test_build_session_llm_clients_constructs_main_only():
         await bundle.aclose()
 
 
+class _RecordingOpenAI:
+    """Stand-in for ``AsyncOpenAI`` that records the api_key it was
+    built with (so tests don't depend on a real key / ambient
+    ``OPENAI_API_KEY`` env var) and supports aclose()."""
+
+    def __init__(self, *, api_key=None, base_url=None, **_k):
+        self.api_key = api_key
+        self.base_url = base_url
+
+    async def close(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_build_session_llm_clients_falls_back_to_org_scoped_key(monkeypatch):
+    """User-principal sessions (``user_id`` set) resolve the org-scoped
+    platform/BYO key when the user has no personal override.
+
+    The platform admission key is seeded org-scoped (``user_id IS
+    NULL``); resolving it with the session's ``user_id`` misses that
+    row, so without a user->org fallback the main client is built with
+    a ``None`` api_key and ``AsyncOpenAI`` raises 'Missing credentials',
+    failing every webapp (user-principal) session while service-account
+    sessions (``user_id is None``) keep working.  Regression for PROD
+    session 4309ac36.
+    """
+    monkeypatch.setattr(
+        "surogates.harness.session_llm.AsyncOpenAI", _RecordingOpenAI,
+        raising=False,
+    )
+    from surogates.harness.session_llm import build_session_llm_clients
+    from surogates.runtime import AgentRuntimeContext, LLMEndpoint
+
+    ctx = AgentRuntimeContext(
+        agent_id="a-1", org_id="o-1", project_id="p-1",
+        enabled=True, config_version=1, storage_key_prefix="p/a",
+        llm_main=LLMEndpoint(
+            model="gpt-4", base_url="https://api.example.com",
+            api_key_ref="vault://platform_admission_key",
+        ),
+    )
+
+    async def _resolve(_ref, *, org_id, user_id):
+        # Only an org-scoped credential exists (user has no override).
+        return "sk-org" if user_id is None else None
+
+    vault = AsyncMock()
+    vault.resolve_ref = AsyncMock(side_effect=_resolve)
+
+    bundle = await build_session_llm_clients(ctx, vault=vault, user_id="u-1")
+    try:
+        assert bundle.main.client.api_key == "sk-org"
+    finally:
+        await bundle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_build_session_llm_clients_prefers_user_scoped_key(monkeypatch):
+    """A user-scoped override wins over the org default and the org
+    fallback lookup is not issued when the user key resolves."""
+    monkeypatch.setattr(
+        "surogates.harness.session_llm.AsyncOpenAI", _RecordingOpenAI,
+        raising=False,
+    )
+    from surogates.harness.session_llm import build_session_llm_clients
+    from surogates.runtime import AgentRuntimeContext, LLMEndpoint
+
+    ctx = AgentRuntimeContext(
+        agent_id="a-1", org_id="o-1", project_id="p-1",
+        enabled=True, config_version=1, storage_key_prefix="p/a",
+        llm_main=LLMEndpoint(
+            model="gpt-4", base_url="https://api.example.com",
+            api_key_ref="vault://main-key",
+        ),
+    )
+
+    async def _resolve(_ref, *, org_id, user_id):
+        return "sk-user" if user_id == "u-1" else "sk-org"
+
+    vault = AsyncMock()
+    vault.resolve_ref = AsyncMock(side_effect=_resolve)
+
+    bundle = await build_session_llm_clients(ctx, vault=vault, user_id="u-1")
+    try:
+        assert bundle.main.client.api_key == "sk-user"
+        # User key resolved on the first call -> no org fallback lookup.
+        vault.resolve_ref.assert_awaited_once_with(
+            "vault://main-key", org_id="o-1", user_id="u-1",
+        )
+    finally:
+        await bundle.aclose()
+
+
 @pytest.mark.asyncio
 async def test_build_session_llm_clients_constructs_all_four_slots():
     from surogates.harness.session_llm import build_session_llm_clients
