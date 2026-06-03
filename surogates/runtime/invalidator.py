@@ -65,6 +65,16 @@ _CHANNEL_ROUTING: tuple[tuple[str, str], ...] = (
     # "telegram:@my_bot") and the ChannelRoutingCache keys on the
     # same shape so the channel suffix passes through verbatim.
     ("channel_routing_changed:", "channel_routing_cache"),
+    # global system-skills bundle bumped.  The ops
+    # `surogate-ops seed-builtin-skills` CLI publishes
+    # ``system_skills_changed:<new_tag>`` after a successful
+    # publish so every api / worker pod drops its cached
+    # SystemBundleCache snapshot.  The cache ignores the
+    # identifier (the next ``get()`` re-resolves the latest tag
+    # from Hub on its own) but the dispatcher requires the
+    # identifier suffix to be non-empty before it fires
+    # ``invalidate()``.
+    ("system_skills_changed:", "system_bundle_cache"),
 )
 
 INVALIDATION_CHANNELS: tuple[str, ...] = tuple(
@@ -83,6 +93,7 @@ def handle_invalidation_message(
     memory_cache: Any = None,
     mcp_server_cache: Any = None,
     channel_routing_cache: Any = None,
+    system_bundle_cache: Any = None,
 ) -> None:
     """Drop a single cache entry if the channel matches.
 
@@ -100,6 +111,7 @@ def handle_invalidation_message(
         "memory_cache": memory_cache,
         "mcp_server_cache": mcp_server_cache,
         "channel_routing_cache": channel_routing_cache,
+        "system_bundle_cache": system_bundle_cache,
     }
     for prefix, cache_kwarg in _CHANNEL_ROUTING:
         if channel.startswith(prefix):
@@ -120,6 +132,7 @@ async def run_invalidator(
     memory_cache: Any = None,
     mcp_server_cache: Any = None,
     channel_routing_cache: Any = None,
+    system_bundle_cache: Any = None,
 ) -> None:
     """Long-running listener for runtime-config / firebase / slug invalidations.
 
@@ -150,6 +163,7 @@ async def run_invalidator(
                 memory_cache=memory_cache,
                 mcp_server_cache=mcp_server_cache,
                 channel_routing_cache=channel_routing_cache,
+                system_bundle_cache=system_bundle_cache,
             )
     finally:
         try:

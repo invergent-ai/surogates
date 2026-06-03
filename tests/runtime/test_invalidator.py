@@ -131,6 +131,7 @@ def test_invalidation_channels_constant_exports_all_five_prefixes():
     assert "project.firebase_config_changed:" in INVALIDATION_CHANNELS
     assert "agent.slug_changed:" in INVALIDATION_CHANNELS
     assert "user.memory_changed:" in INVALIDATION_CHANNELS
+    assert "system_skills_changed:" in INVALIDATION_CHANNELS
 
 
 def test_handler_routes_channel_routing_changed_to_channel_routing_cache():
@@ -180,3 +181,38 @@ def test_handler_routes_user_memory_changed_to_memory_cache():
     )
     # The identifier is the everything-after-the-prefix string.
     mc.invalidate.assert_called_once_with("o-1:u-1")
+
+
+def test_handler_routes_system_skills_changed_to_system_bundle_cache():
+    """The ops CLI ``seed-builtin-skills`` publishes
+    ``system_skills_changed:<tag>`` after a successful publish so every
+    api / worker pod drops its cached ``SystemBundleCache`` snapshot.
+
+    The cache ignores the identifier (the next ``get()`` re-resolves
+    the latest tag from Hub anyway) but it must still be non-empty so
+    ``handle_invalidation_message`` treats the channel as a 'fire'
+    rather than an 'ignore'."""
+    from surogates.runtime.invalidator import handle_invalidation_message
+
+    sc = MagicMock()
+    handle_invalidation_message(
+        channel="system_skills_changed:v7",
+        payload=b"",
+        system_bundle_cache=sc,
+    )
+    sc.invalidate.assert_called_once_with("v7")
+
+
+def test_handler_ignores_empty_system_skills_identifier():
+    """An empty identifier on the system-skills channel is a bug at the
+    publisher; the handler must not silently invalidate on an empty
+    string because that would mask the publish-side bug."""
+    from surogates.runtime.invalidator import handle_invalidation_message
+
+    sc = MagicMock()
+    handle_invalidation_message(
+        channel="system_skills_changed:",
+        payload=b"",
+        system_bundle_cache=sc,
+    )
+    sc.invalidate.assert_not_called()
