@@ -150,6 +150,7 @@ type TimelineEntry =
   | { kind: "narration"; key: string; text: string; isStreaming: boolean }
   | { kind: "thinking"; key: string }
   | { kind: "skill_invoked"; key: string; skill: string; stagedAt: string | null }
+  | { kind: "browser_marker"; key: string; content: string; warning: boolean }
   | {
       kind: "artifact";
       key: string;
@@ -160,6 +161,45 @@ type TimelineEntry =
     };
 
 const WORKING_ON_IT_DELAY_MS = 250;
+
+/**
+ * ``ask_user_question`` is the one tool whose accompanying assistant
+ * ``content`` is a full user-facing message body (e.g. a proposed
+ * design the user must approve) rather than the throwaway preamble
+ * other tool calls emit.  Such turns must render their body in full —
+ * collapsing it to a one-line narration drops the very content the user
+ * is being asked to act on.
+ */
+function hasUserFacingAskContent(msg: ChatMessageType): boolean {
+  return !!msg.toolCalls?.some((tc) => tc.toolName === "ask_user_question");
+}
+
+/**
+ * Whether the thread is parked waiting on the user rather than working.
+ *
+ * The reducer keeps ``isRunning`` true while an ``ask_user_question``
+ * tool call is pending, but the agent has handed control back to the
+ * user — so the "Working on it…" indicator would be misleading.
+ *
+ * We scan backward from the end, skipping trailing system markers the
+ * reducer appends after the assistant turn (artifact.created,
+ * skill.invoked, browser.*) — a turn that emits ``create_artifact`` +
+ * ``ask_user_question`` lands its artifact marker as the literal tail,
+ * so a tail-only check would miss the still-pending ask. The first
+ * assistant turn we reach decides it; a ``user`` message after the ask
+ * means the user moved on, so it's no longer awaiting.
+ */
+function isAwaitingUserInput(messages: ChatMessageType[]): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "user") return false;
+    if (m.role !== "assistant") continue; // skip trailing system markers
+    return !!m.toolCalls?.some(
+      (tc) => tc.toolName === "ask_user_question" && tc.status === "running",
+    );
+  }
+  return false;
+}
 
 /**
  * Flatten an assistant message into a list of timeline entries
@@ -201,6 +241,17 @@ function messageToEntries(
         version,
       }];
     }
+    if (
+      msg.systemKind === "browser_marker"
+      || msg.systemKind === "browser_marker_warning"
+    ) {
+      return [{
+        kind: "browser_marker",
+        key: msg.id,
+        content: msg.content,
+        warning: msg.systemKind === "browser_marker_warning",
+      }];
+    }
     return [];
   }
 
@@ -227,12 +278,28 @@ function messageToEntries(
   }
 
   if (hasContent && hasToolCalls) {
-    entries.push({
-      kind: "narration",
-      key: `${msg.id}-narration`,
-      text: msg.content,
-      isStreaming: isStreaming && !effectiveHasContent,
-    });
+    if (hasUserFacingAskContent(msg)) {
+      // The body is the message the user must act on (the proposed
+      // design behind the question widget), not a preamble — render it
+      // in full above the tool calls instead of as a narration line.
+      // Not streamed: the body has fully arrived by the time the ask
+      // tool call lands, so a char-reveal would only spin a perpetual
+      // requestAnimationFrame loop while the turn is parked on the user.
+      entries.push({
+        kind: "text",
+        key: `${msg.id}-text`,
+        content: msg.content,
+        isStreaming: false,
+        msg,
+      });
+    } else {
+      entries.push({
+        kind: "narration",
+        key: `${msg.id}-narration`,
+        text: msg.content,
+        isStreaming: isStreaming && !effectiveHasContent,
+      });
+    }
   }
 
   if (hasToolCalls) {
@@ -450,6 +517,29 @@ function OrphanSystemMarker({
     );
   }
 
+  if (
+    message.systemKind === "browser_marker"
+    || message.systemKind === "browser_marker_warning"
+  ) {
+    const warning = message.systemKind === "browser_marker_warning";
+    return (
+      <div
+        className={cn(
+          "my-2 flex items-center gap-2 px-4 text-xs",
+          warning ? "text-amber-600" : "text-foreground/60",
+        )}
+        role={warning ? "alert" : "status"}
+      >
+        {warning ? (
+          <AlertTriangle className="size-3.5 shrink-0" aria-hidden />
+        ) : (
+          <span className="size-2 rounded-full bg-foreground/30" />
+        )}
+        <span className="truncate">{message.content}</span>
+      </div>
+    );
+  }
+
   if (message.systemKind === "error" && message.errorInfo) {
     return (
       <div className="mx-auto my-2 w-full max-w-4xl">
@@ -605,6 +695,36 @@ function TimelineEntryItem({
 
   if (entry.kind === "narration") {
     return <NarrationEntry entry={entry} step={step} />;
+  }
+
+  if (entry.kind === "browser_marker") {
+    return (
+      <TimelineItem step={step}>
+        <TimelineHeader>
+          <TimelineSeparator style={{ backgroundColor: "var(--color-border)" }} />
+          <TimelineIndicator
+            className={cn(
+              "size-2 border-none",
+              entry.warning ? "bg-amber-500" : "bg-foreground/30",
+            )}
+          />
+        </TimelineHeader>
+        <TimelineContent>
+          <div
+            className={cn(
+              "flex items-center gap-1.5 py-1 text-sm",
+              entry.warning ? "text-amber-600" : "text-foreground/60",
+            )}
+            role={entry.warning ? "alert" : "status"}
+          >
+            {entry.warning && (
+              <AlertTriangle className="size-3.5 shrink-0" aria-hidden />
+            )}
+            <span>{entry.content}</span>
+          </div>
+        </TimelineContent>
+      </TimelineItem>
+    );
   }
 
   if (entry.kind === "skill_invoked") {
@@ -1253,6 +1373,23 @@ export function IterationGroup({
   const summary = message.iterationSummary?.summary;
   const [open, setOpen] = useState(false);
 
+  // ask_user_question owns its iteration's rendering in BOTH states: the
+  // interactive widget while awaiting an answer (a shimmer label alone
+  // gives the user nothing to act on and the session stalls), and the
+  // read-only Q/A recap once answered (AskUserQuestionToolBlock renders
+  // its locked view) — instead of collapsing to a generic tool row that
+  // drops the question and the user's choice from the thread.
+  const askCall = (message.toolCalls ?? []).find(
+    (tc) => tc.toolName === "ask_user_question",
+  );
+  if (askCall) {
+    return (
+      <div className="px-1 py-0.5">
+        <AskUserQuestionToolBlock tc={askCall} />
+      </div>
+    );
+  }
+
   // 1. Live iteration: shimmer label only. "Live" means a tool is
   //    actively running, OR a text-only iteration is mid-stream.
   //    message.status === "streaming" alone is NOT a reliable signal —
@@ -1261,21 +1398,6 @@ export function IterationGroup({
   //    ends. Without this stricter check, completed iterations would
   //    stay in the shimmer state forever (user-reported bug).
   if (isIterationLive(message)) {
-    // An ask_user_question call is the one tool the user must
-    // interact with to make progress — a shimmer label alone gives
-    // them nothing to answer and the session stalls. Render the
-    // interactive block inline so they can respond without
-    // switching to Expert mode.
-    const askCall = (message.toolCalls ?? []).find(
-      (tc) => tc.toolName === "ask_user_question" && tc.status === "running",
-    );
-    if (askCall) {
-      return (
-        <div className="px-1 py-0.5">
-          <AskUserQuestionToolBlock tc={askCall} />
-        </div>
-      );
-    }
     const label = liveIterationLabel(message);
     return (
       <div className="py-0.5 text-sm">
@@ -1365,6 +1487,20 @@ function deriveFileArtifactsFromMessages(
   const seen = new Set<string>();
   const out: AgentChatTurnArtifactRef[] = [];
   for (const msg of messages) {
+    // Structured artifacts are derived from their ``artifact.created`` /
+    // ``artifact.updated`` system markers, not the ``create_artifact``
+    // tool call: the marker carries the ``artifact_id`` that
+    // TurnSummaryCard's resolveArtifactRef matches on (the tool call only
+    // knows the name, which would degrade the card to plain text). The
+    // marker is also folded into the same group the summary renders in.
+    if (msg.role === "system") {
+      if (msg.systemKind !== "artifact") continue;
+      const { artifactId, name } = unpackArtifactMeta(msg.systemMeta, msg.content);
+      if (!artifactId || seen.has(`artifact:${artifactId}`)) continue;
+      seen.add(`artifact:${artifactId}`);
+      out.push({ kind: "artifact", label: name, ref: artifactId });
+      continue;
+    }
     if (msg.role !== "assistant" || !msg.toolCalls) continue;
     for (const tc of msg.toolCalls) {
       const status = effectiveStatus(tc);
@@ -1391,16 +1527,6 @@ function deriveFileArtifactsFromMessages(
           ref: path,
         });
         continue;
-      }
-      if (tc.toolName === "create_artifact") {
-        const name = typeof args.name === "string" ? args.name : "";
-        if (!name || seen.has(`artifact:${name}`)) continue;
-        seen.add(`artifact:${name}`);
-        out.push({
-          kind: "artifact",
-          label: name,
-          ref: name,
-        });
       }
     }
   }
@@ -1474,15 +1600,26 @@ function SimpleAssistantGroup({
     if (fromHarness && fromHarness.artifacts.length > 0) {
       return fromHarness;
     }
+    // Synthetic file-artifact fallback surfaces file deliverables even
+    // when the model opted to hide the recap (``summaryPref === "hide"``):
+    // a download card is a strong, low-noise signal the user wants the
+    // artifact tray. The recap *text* still honours the preference, so a
+    // hidden turn carries the cards without the prose summary. Gated on
+    // turn completion so it matches what the harness would emit at end.
+    if (turnComplete) {
+      const derived = deriveFileArtifactsFromMessages(messages);
+      if (derived.length > 0) {
+        return {
+          turnId: fromHarness?.turnId ?? "",
+          recap: summaryPref === "show" ? (fromHarness?.recap ?? "") : "",
+          artifacts: derived,
+        };
+      }
+    }
+    // No artifacts to surface — honour the hide preference for the
+    // recap-only card.
     if (summaryPref === "hide") return null;
-    if (!turnComplete) return fromHarness;
-    const derived = deriveFileArtifactsFromMessages(messages);
-    if (derived.length === 0) return fromHarness;
-    return {
-      turnId: fromHarness?.turnId ?? "",
-      recap: fromHarness?.recap ?? "",
-      artifacts: derived,
-    };
+    return fromHarness;
   })();
 
   return (
@@ -1522,20 +1659,27 @@ function SimpleAssistantGroup({
             // assistant message had no narration to surface (typed
             // ``done`` footer, no prose preamble, or empty content).
             const rawContent = (message.content ?? "").trim();
-            const { action, inferredNarration } =
+            const { action, inferredNarration, cleaned } =
               stripAndParseNextAction(rawContent);
             const narrationLine = action
               ? action.body.trim().toLowerCase() === "done"
                 ? null
                 : action.body
               : inferredNarration;
+            // ``ask_user_question`` content is the full message the user
+            // must act on (the proposed design behind the widget), so
+            // render the whole body — collapsing it to a narration line
+            // would hide what they're approving.
+            const askBody = hasUserFacingAskContent(message) ? cleaned : null;
             return (
               <div key={message.id} className="space-y-2">
-                {narrationLine && (
+                {askBody ? (
+                  <MessageResponse>{askBody}</MessageResponse>
+                ) : narrationLine ? (
                   <p className="text-sm text-foreground">
                     {narrationLine}
                   </p>
-                )}
+                ) : null}
                 <IterationGroup
                   message={message}
                   sessionId={sessionId}
@@ -1616,14 +1760,16 @@ function AssistantGroup({
   entries = groupBrowserActivityEntries(entries);
   entries = groupWebSearchEntries(entries);
 
-  // Mark only the last text entry in this assistant group as the
-  // final user-facing answer. Each constituent message can contribute
-  // at most one text entry (messageToEntries only pushes text when
-  // there are no tool calls), but a group can merge several messages;
-  // we only want a single thumbs control per visual turn.
+  // Mark only the last answer text entry in this assistant group as the
+  // final user-facing answer (the thumbs control). A text-only message
+  // contributes one text entry; an ask_user_question turn also emits a
+  // text entry (its full body), but that body is a question prompt, not
+  // the turn's answer, so it must never receive the feedback control.
+  // A group can merge several messages; we want a single thumbs control
+  // per visual turn.
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
-    if (entry?.kind === "text") {
+    if (entry?.kind === "text" && !hasUserFacingAskContent(entry.msg)) {
       entries[i] = { ...entry, isFinalTurnText: true };
       break;
     }
@@ -1754,7 +1900,19 @@ export function ChatThread({
   onViewModeChange,
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
-  const showWorkingOnIt = useDelayedRunningIndicator(isRunning);
+  const awaitingInput = useMemo(() => isAwaitingUserInput(messages), [messages]);
+  // Suppress the running shimmer while parked on a pending
+  // ask_user_question — the agent is waiting on the user, not working.
+  const showWorkingOnIt =
+    useDelayedRunningIndicator(isRunning) && !awaitingInput;
+  // Disable the composer while parked on a pending ask_user_question:
+  // the user answers via the question widget, not the composer. Left
+  // active it would show Stop (isRunning stays true) and abort the
+  // session if the user typed an answer and pressed Enter.
+  const composerDisabled = disabled || awaitingInput;
+  const composerDisabledReason = awaitingInput
+    ? "Answer the question above to continue."
+    : disabledReason;
 
   // Pair ``create_artifact`` tool calls to their matching
   // ``artifact.created`` system messages by emission order across the
@@ -1895,20 +2053,20 @@ export function ChatThread({
             <RetryBanner indicator={retryIndicator} />
           </div>
         )}
-        {disabled && disabledReason ? (
+        {composerDisabled && composerDisabledReason ? (
           <div
             className="rounded border border-line bg-muted/40 px-3 py-2 text-sm text-foreground/60"
             role="status"
           >
-            {disabledReason}
+            {composerDisabledReason}
           </div>
         ) : (
           <ChatComposer
             onSend={onSend}
             onStop={onStop}
             isRunning={isRunning}
-            disabled={disabled}
-            disabledReason={disabledReason}
+            disabled={composerDisabled}
+            disabledReason={composerDisabledReason}
             tokenUsage={tokenUsage}
             onComposerError={onComposerError}
             showBrowser={showBrowser}

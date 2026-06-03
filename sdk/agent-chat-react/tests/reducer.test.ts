@@ -213,8 +213,12 @@ describe("applyAgentChatEvent", () => {
     expect(next.messages[0]?.toolCalls?.map((tc) => tc.id)).toEqual([
       "tc-ask",
     ]);
+    // On tool-call iterations the reducer keeps ``content`` separate
+    // from ``reasoning`` (see the NOTE in applyLlmResponse): the
+    // chain-of-thought stays in ``reasoning`` while the assistant's
+    // user-facing prose lands in ``content``. They must not be folded.
     expect(next.messages[0]?.reasoning).toContain("Need user input.");
-    expect(next.messages[0]?.reasoning).toContain(
+    expect(next.messages[0]?.content).toContain(
       "I need one decision before continuing.",
     );
   });
