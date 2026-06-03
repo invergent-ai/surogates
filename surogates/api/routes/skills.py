@@ -33,6 +33,7 @@ from surogates.api.routes._shared import (
     raise_validation,
     require_not_channel_principal,
     resolve_agent_bundle as _resolve_agent_bundle,
+    resolve_system_bundle as _resolve_system_bundle,
 )
 from surogates.storage.skill_staging import SkillStager, has_stageable_assets
 from surogates.storage.tenant import (
@@ -393,9 +394,13 @@ async def list_skills(
     loader = _resource_loader(request)
     session_factory = request.app.state.session_factory
     bundle = await _resolve_agent_bundle(request)
+    system_bundle = await _resolve_system_bundle(request)
     async with session_factory() as db_session:
         all_skills = await loader.load_skills(
-            tenant, db_session=db_session, bundle=bundle,
+            tenant,
+            db_session=db_session,
+            bundle=bundle,
+            system_bundle=system_bundle,
         )
 
     summaries: list[SkillSummary] = []
@@ -438,9 +443,13 @@ async def view_skill(
     loader = _resource_loader(request)
     session_factory = request.app.state.session_factory
     bundle = await _resolve_agent_bundle(request)
+    system_bundle = await _resolve_system_bundle(request)
     async with session_factory() as db_session:
         all_skills = await loader.load_skills(
-            tenant, db_session=db_session, bundle=bundle,
+            tenant,
+            db_session=db_session,
+            bundle=bundle,
+            system_bundle=system_bundle,
         )
 
     skill_def = next((s for s in all_skills if s.name == name), None)
@@ -543,9 +552,13 @@ async def read_skill_file(
     loader = _resource_loader(request)
     session_factory = request.app.state.session_factory
     bundle = await _resolve_agent_bundle(request)
+    system_bundle = await _resolve_system_bundle(request)
     async with session_factory() as db_session:
         all_skills = await loader.load_skills(
-            tenant, db_session=db_session, bundle=bundle,
+            tenant,
+            db_session=db_session,
+            bundle=bundle,
+            system_bundle=system_bundle,
         )
     skill_def = next((s for s in all_skills if s.name == name), None)
     if skill_def is None:
