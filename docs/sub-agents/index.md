@@ -119,7 +119,7 @@ Sub-agents merge from four layers, lowest → highest precedence:
 
 | Layer | Location | Managed by | Editable via |
 |---|---|---|---|
-| Platform | `/etc/surogates/agents/<name>/AGENT.md` | Platform operator (container image) | Immutable at runtime |
+| Platform bundle | per-agent Hub bundle, `agents/<name>/AGENT.md` | Org admin (sub-agent attached on the parent agent) | Bundle republish |
 | User bucket | `tenant-{org_id}/users/{user_id}/agents/<name>/AGENT.md` | End user | `POST /v1/agents` and the Web UI |
 | Org DB overlay | `agents` table, `user_id IS NULL` | Org admin | SQL / admin tooling (no public REST endpoint) |
 | User DB overlay | `agents` table, `user_id = <uid>` | Org admin | SQL / admin tooling |
@@ -266,42 +266,7 @@ Any worker can then pick up the child:
 
 On completion or failure, the harness emits `worker.complete` / `worker.failed` into the **parent's** event log (truncated result attached, ≤10 KB) and re-enqueues the parent so it wakes up and sees the result in its next turn.
 
-## 6. Governance Policy Profiles
-
-A sub-agent can declare an optional `policy_profile` that narrows the tenant's base governance policy for the duration of the child session. Profile composition is always tightening — a profile can never widen what the base permits.
-
-Place profiles at `agents/policies/<name>.yaml` in either the platform volume or the org shared bucket:
-
-```yaml
-# /etc/surogates/agents/policies/read_only.yaml
-allowed_tools:
-  - read_file
-  - search_files
-  - list_files
-  - web_search
-denied_tools:
-  - write_file
-  - patch
-  - terminal
-egress:
-  default_action: deny
-  rules:
-    - domain: docs.internal.example
-      ports: [443]
-      action: allow
-```
-
-Composition semantics:
-
-- **Allowed** = `base.allowed ∩ profile.allowed` (intersection — profile cannot add tools the base forbids)
-- **Denied** = `base.denied ∪ profile.denied` (union — profile cannot ungate tools the base denies)
-- **Egress default** = stricter of the two (`deny` always beats `allow`; unknown values fall back to `deny`)
-- **Egress rules** = base rules + profile rules (rules stack; profile cannot delete base rules)
-- **Enabled** = inherited from base; a disabled base stays disabled regardless of the profile
-
-The composed gate is **frozen** when produced — profiles cannot be mutated mid-session.
-
-## 7. Inheritance
+## 6. Inheritance
 
 What the child **shares** with the parent (no scoping, no duplication):
 
@@ -319,7 +284,7 @@ What the child **overrides**:
 - Iteration cap
 - Governance policy profile
 
-## 8. Observing Sub-Agents
+## 7. Observing Sub-Agents
 
 ### Session Tree Endpoints
 
@@ -346,7 +311,7 @@ Sub-agent lifecycle surfaces as events in the parent's log:
 
 Use the session event log to reconstruct any completed sub-agent interaction — the child's own event stream is still the source of truth for everything that happened inside it.
 
-## 9. Web UI
+## 8. Web UI
 
 **Library page** (`/agents`, sidebar → Sub-agents)
 

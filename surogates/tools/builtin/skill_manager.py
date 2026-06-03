@@ -258,12 +258,12 @@ def _user_skills_dir(tenant: Any) -> Path:
 
 
 def _find_skill(name: str, tenant: Any) -> dict[str, Any] | None:
-    """Find a skill by name across user, org-shared, and platform layers.
+    """Find a skill by name across user and org-shared filesystem layers.
 
-    Returns ``{"path": Path}`` or ``None``.
+    Returns ``{"path": Path}`` or ``None``.  Platform skills live in the
+    per-agent Surogate Hub bundle and are resolved through the bundle
+    accessor, not the workspace filesystem.
     """
-    from surogates.tools.loader import PLATFORM_SKILLS_DIR
-
     asset_root = Path(tenant.asset_root)
     org_id = str(tenant.org_id)
     user_id = str(tenant.user_id)
@@ -271,7 +271,6 @@ def _find_skill(name: str, tenant: Any) -> dict[str, Any] | None:
     search_dirs = [
         asset_root / org_id / "users" / user_id / "skills",
         asset_root / org_id / "shared" / "skills",
-        Path(PLATFORM_SKILLS_DIR),
     ]
 
     for skills_dir in search_dirs:

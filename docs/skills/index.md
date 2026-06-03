@@ -117,32 +117,39 @@ The following `metadata.hermes.*` keys are recognised:
 Skills are loaded from four layers. Higher layers override lower layers by name:
 
 ```
-Layer 1: Platform      /etc/surogates/skills/                              (lowest priority)
-Layer 2: User files    tenant-{org_id}/users/{user_id}/skills/
-Layer 3: Org (DB)      skills table, org-wide
-Layer 4: User (DB)     skills table, user-specific                         (highest priority)
+Layer 1: Platform bundle  per-agent Hub bundle, skills/<name>/SKILL.md       (lowest priority)
+Layer 2: User files       tenant-{org_id}/users/{user_id}/skills/
+Layer 3: Org (DB)         skills table, org-wide
+Layer 4: User (DB)         skills table, user-specific                       (highest priority)
 ```
 
 | Layer | Who manages it | How | Priority |
 |---|---|---|---|
-| Platform | Platform operator | Bakes `SKILL.md` files into the container image | Lowest |
+| Platform bundle | Org admin | Attaches a Hub-published skill to the agent; the ops bundle publisher copies the skill's Hub repo subtree under `skills/<name>/` in the agent's bundle | Lowest |
 | User files | End user | Through the agent's `skill_manage` tool during a session | |
 | Org (DB) | Org admin | `POST /v1/skills` via the API | |
 | User (DB) | Org admin | `POST /v1/skills` with `user_id` via the API | Highest |
 
 Org admin overrides are final -- an end user cannot override a skill that the org admin has set. This ensures the org admin retains control over what skills are available and how they behave. Setting `enabled: false` in a higher layer disables the skill entirely.
 
-### Directory Layout
+### Bundle Layout
 
-File-based skills (platform and user files) follow this directory structure:
+The per-agent Hub bundle (Layer 1) carries one subdirectory per attached skill, copied verbatim from that skill's source Hub repo:
 
 ```
-/etc/surogates/skills/                        # Platform (baked into container)
-  code_reviewer/
-    SKILL.md
-  security_audit/
-    SKILL.md
+agent-{agent_id}/                             # Hub repo for this agent
+  SOUL.md
+  skills/
+    code_reviewer/
+      SKILL.md
+      references/...
+    security_audit/
+      SKILL.md
+```
 
+User files (Layer 2) live on the workspace filesystem:
+
+```
 tenant-{org_id}/users/{user_id}/skills/       # User files (Garage bucket)
   my_custom_skill/
     SKILL.md

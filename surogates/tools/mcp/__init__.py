@@ -1,8 +1,7 @@
 """MCP (Model Context Protocol) integration.
 
-This package provides the client and proxy layers for connecting to
-external MCP servers, discovering their tools, and registering them
-into the Surogates ToolRegistry.
+This package provides the client layer used by the MCP proxy service to
+talk to upstream MCP servers, discover their tools, and resolve calls.
 
 The ``mcp`` Python package is an optional dependency.  When not installed,
 all public entry points degrade gracefully to no-ops.
@@ -19,11 +18,9 @@ from surogates.tools.mcp.client import (
     set_sampling_llm_caller,
     shutdown_mcp_servers,
 )
-from surogates.tools.mcp.proxy import MCPToolProxy
 
 __all__ = [
     "MCPServerTask",
-    "MCPToolProxy",
     "SamplingHandler",
     "discover_mcp_tools",
     "get_mcp_status",

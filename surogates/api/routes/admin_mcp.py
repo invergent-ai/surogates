@@ -1,8 +1,8 @@
 """Admin CRUD for MCP server registrations.
 
-Writes land in the ``mcp_servers`` table.  The MCP proxy merges DB rows
-with platform-volume configs (``/etc/surogates/mcp/``) — see
-:mod:`surogates.mcp_proxy.loader`.
+Writes land in the ``mcp_servers`` table — the only source of MCP
+server configs the proxy reads at discovery time
+(:mod:`surogates.mcp_proxy.loader`).
 
 Routes mount under ``/v1/admin/mcp-servers``.  ``admin`` permission is
 required for cross-org operations; users without ``admin`` may only

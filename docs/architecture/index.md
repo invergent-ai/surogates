@@ -275,7 +275,7 @@ operations go through the API server.
 
 | Data | Storage | Location | Accessed by |
 |---|---|---|---|
-| Platform skills | Container image | `/etc/surogates/skills/` | API server (filesystem) |
+| Platform skills | Surogate Hub | per-agent bundle, `skills/` prefix | API server + Worker (Hub SDK) |
 | Org/user skills + experts | Garage | `tenant-{org_id}` bucket | API server (S3 API) |
 | Memory | Garage | `tenant-{org_id}` bucket | API server (S3 API) |
 | Workspace files | Garage | `{agent_bucket}/sessions/{session_id}/` | Sandbox (s3fs-fuse), API server (S3 API) |

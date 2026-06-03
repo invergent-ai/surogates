@@ -203,76 +203,6 @@ class SkillStager:
                 yield
 
     # ------------------------------------------------------------------
-    # Staging from a filesystem source (platform skills)
-    # ------------------------------------------------------------------
-
-    async def stage_from_filesystem(
-        self,
-        session_id: UUID | str,
-        skill_name: str,
-        source_dir: Path,
-    ) -> str:
-        """Copy a platform skill's directory tree into the session workspace.
-
-        All regular files under *source_dir* are copied to
-        ``sessions/{session_id}/.skills/{skill_name}/<relpath>``.  A
-        ``.staged`` marker is written last to signal completion.
-
-        Returns the workspace-visible path where the skill is staged.
-
-        Concurrent callers for the same ``(session_id, skill_name)`` are
-        serialised via :meth:`_stage_lock`; all but the first find the
-        marker on re-check and skip the copy.
-        """
-        # Fast path: no lock needed when already staged.
-        if await self.is_staged(session_id, skill_name):
-            return self.workspace_path_for(session_id, skill_name)
-
-        if not source_dir.is_dir():
-            raise FileNotFoundError(f"Skill source directory not found: {source_dir}")
-
-        async with self._stage_lock(session_id, skill_name):
-            # Double-checked: another caller may have staged while we waited.
-            if await self.is_staged(session_id, skill_name):
-                return self.workspace_path_for(session_id, skill_name)
-
-            dest_prefix = self.staged_key_prefix(skill_name)
-
-            # Enumerate files in a thread — `rglob` walks the filesystem.
-            src_files = await asyncio.to_thread(
-                lambda: [
-                    p for p in sorted(source_dir.rglob("*")) if p.is_file()
-                ],
-            )
-
-            sem = asyncio.Semaphore(_STAGE_CONCURRENCY)
-
-            async def _copy_one(src_file: Path) -> None:
-                rel = src_file.relative_to(source_dir).as_posix()
-                async with sem:
-                    data = await asyncio.to_thread(src_file.read_bytes)
-                    await self._backend.write(
-                        self._storage_bucket,
-                        self._physical_key(
-                            session_id, f"{dest_prefix}/{rel}",
-                        ),
-                        data,
-                    )
-
-            await asyncio.gather(*(_copy_one(f) for f in src_files))
-
-            await self._backend.write(
-                self._storage_bucket,
-                self._physical_key(session_id, f"{dest_prefix}/{STAGING_MARKER}"),
-                b"",
-            )
-            logger.info(
-                "Staged platform skill '%s' (%d files) for session %s",
-                skill_name, len(src_files), session_id,
-            )
-            return self.workspace_path_for(session_id, skill_name)
-
-    # ------------------------------------------------------------------
     # Staging from object storage (user / org-shared file skills)
     # ------------------------------------------------------------------
 
@@ -290,8 +220,8 @@ class SkillStager:
         <relpath>``.  A ``.staged`` marker is written last.
 
         Concurrent callers for the same ``(session_id, skill_name)`` are
-        serialised — see :meth:`stage_from_filesystem` for the locking
-        contract.
+        serialised via :meth:`_stage_lock`; all but the first find the
+        marker on re-check and skip the copy.
         """
         # Fast path: no lock needed when already staged.
         if await self.is_staged(session_id, skill_name):

@@ -8,23 +8,12 @@ Every tool call passes through a policy check before execution. Policies are eva
 
 ### Allow-List Mode
 
-By default, only explicitly allowed tools can be called. The allow-list is configured per org:
+By default, only explicitly allowed tools can be called. The allow-list is composed at session start from:
 
-```yaml
-# Platform-level defaults (mounted as /etc/surogates/policies/)
-tools:
-  allow:
-    - terminal
-    - read_file
-    - write_file
-    - patch
-    - search_files
-    - list_files
-    - web_search
-    - memory
-    - skills_list
-    - skill_view
-```
+- the tenant's base governance policy (set via the org config / `GovernanceSettings`), and
+- the optional `allowed_tools` / `denied_tools` declared on the `AgentDef` row.
+
+The composed gate is **frozen** at session start; the agent cannot widen its own allow-list mid-session.
 
 ### Attribute-Based Access Control (ABAC)
 

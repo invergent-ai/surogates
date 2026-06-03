@@ -350,22 +350,16 @@ async def _load_attached_kbs(
 
 async def _load_prompt_catalogs(
     *,
-    settings: Settings,
     tenant: TenantContext,
     session_factory: Any,
     bundle: Any | None = None,
 ) -> tuple[list[Any], list[Any]]:
     """Load prompt-visible sub-agent and skill catalogs for a tenant.
 
-    When ``bundle`` is provided, layer 1
-    (platform skills + sub-agents) reads from the bundle instead of
-    the on-disk ``/etc/surogates/{skills,agents}/`` paths.  Layers
-    2-4 (user files + DB) are unchanged.
+    Layer 1 (platform skills + sub-agents) is served from the per-agent
+    Surogate Hub bundle; layers 2-4 are user files + org/user DB rows.
     """
-    resource_loader = ResourceLoader(
-        platform_skills_dir=getattr(settings, "platform_skills_dir", None),
-        platform_agents_dir=getattr(settings, "platform_agents_dir", None),
-    )
+    resource_loader = ResourceLoader()
 
     try:
         async with session_factory() as _db:
@@ -641,60 +635,26 @@ async def run_worker(settings: Settings) -> None:
         ", ".join(sorted(tool_registry.tool_names)),
     )
 
-    # 5b. MCP tools — two modes:
-    #   - Direct: worker connects to MCP servers in-process (dev mode)
-    #   - Proxied: worker delegates to the MCP proxy service (production)
-    from surogates.tools.mcp.proxy import MCPToolProxy
-
-    mcp_proxy = MCPToolProxy(tool_registry)
-    mcp_proxy_client: Any = None  # HTTP client for proxied mode
-
-    if settings.mcp_proxy_url:
-        # Production: MCP tools are called via the proxy service.
-        # Tool discovery happens at session start (per-tenant), not here.
-        from surogates.orchestrator.mcp_client import McpProxyClient
-
-        mcp_proxy_client = McpProxyClient(
-            base_url=settings.mcp_proxy_url,
-            registry=tool_registry,
+    # 5b. MCP tools — the worker delegates to the MCP proxy service,
+    # which reads the ``mcp_servers`` table per request and connects on
+    # behalf of the tenant.  Tool discovery happens at session start
+    # (per-tenant), not here.  ``mcp_proxy_url`` is required; missing it
+    # is a deployment misconfiguration and we surface that loudly
+    # rather than silently registering zero MCP tools.
+    if not settings.mcp_proxy_url:
+        raise RuntimeError(
+            "mcp_proxy_url is required; without it the worker registers "
+            "no MCP tools and every session sees only built-in harness "
+            "tools.  Set ``mcp_proxy_url`` in the worker config (see "
+            "k8s/surogates-runtime/production/30-runtime-configmap.yaml).",
         )
-        logger.info("MCP tools via proxy: %s", settings.mcp_proxy_url)
-    else:
-        # Dev mode: connect directly to MCP servers.
-        mcp_servers: dict[str, dict] = {}
-        try:
-            platform_loader = ResourceLoader(platform_mcp_dir=settings.platform_mcp_dir)
-            for server_def in platform_loader._load_mcp_from_dir(
-                settings.platform_mcp_dir
-            ):
-                mcp_servers[server_def.name] = {
-                    "transport": server_def.transport,
-                    "command": server_def.command,
-                    "args": server_def.args,
-                    "url": server_def.url,
-                    "env": server_def.env,
-                    "timeout": server_def.timeout,
-                    # Forward HTTP headers (Authorization bearer etc.) so
-                    # dev-mode connections to authenticated HTTP MCP
-                    # endpoints don't 401. In proxy-mode these come from
-                    # the credential vault; in dev-mode they are inlined
-                    # in ``servers.json``.
-                    "headers": server_def.headers,
-                }
-        except Exception:
-            logger.debug("No platform MCP configs found", exc_info=True)
+    from surogates.orchestrator.mcp_client import McpProxyClient
 
-        if mcp_servers:
-            registered_mcp = mcp_proxy.add_servers(mcp_servers)
-            if registered_mcp:
-                logger.info(
-                    "Registered %d MCP tools from %d servers: %s",
-                    len(registered_mcp),
-                    len(mcp_servers),
-                    ", ".join(sorted(registered_mcp)),
-                )
-        else:
-            logger.debug("No MCP servers configured")
+    mcp_proxy_client = McpProxyClient(
+        base_url=settings.mcp_proxy_url,
+        registry=tool_registry,
+    )
+    logger.info("MCP tools via proxy: %s", settings.mcp_proxy_url)
 
     # 6. LLM clients are per-session.  Every session gets a fresh
     # SessionLLMClients bundle built by ``build_session_llm_clients``
@@ -969,7 +929,6 @@ async def run_worker(settings: Settings) -> None:
         # Sub-Agents" block and use their presence to gate delegation
         # tool schemas.
         available_agents, available_skills = await _load_prompt_catalogs(
-            settings=settings,
             tenant=tenant,
             session_factory=session_factory,
             bundle=bundle,
@@ -1224,9 +1183,7 @@ async def run_worker(settings: Settings) -> None:
         await health_server.stop()
         await browser_pool.destroy_all()
         await sandbox_pool.destroy_all()
-        mcp_proxy.shutdown_all()
-        if mcp_proxy_client is not None:
-            await mcp_proxy_client.close()
+        await mcp_proxy_client.close()
         # Drain the worker-side runtime cache +
         # invalidator before tearing down the redis client.
         await _stop_worker_invalidator(worker_state)

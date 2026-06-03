@@ -28,15 +28,8 @@ def _make_tenant(asset_root: str) -> TenantContext:
     )
 
 
-def _loader(tmp_path: Path, agents_dir: Path | None = None) -> ResourceLoader:
-    return ResourceLoader(
-        platform_skills_dir=str(tmp_path / "skills_unused"),
-        platform_mcp_dir=str(tmp_path / "mcp_unused"),
-        platform_agents_dir=(
-            str(agents_dir) if agents_dir is not None
-            else str(tmp_path / "agents_unused")
-        ),
-    )
+def _loader() -> ResourceLoader:
+    return ResourceLoader()
 
 
 # =========================================================================
@@ -65,7 +58,7 @@ class TestLoadAgentsFromDir:
             encoding="utf-8",
         )
 
-        loader = _loader(tmp_path)
+        loader = _loader()
         agents = loader._load_agents_from_dir(str(agents_dir), "platform")
 
         assert len(agents) == 1
@@ -96,7 +89,7 @@ class TestLoadAgentsFromDir:
             encoding="utf-8",
         )
 
-        loader = _loader(tmp_path)
+        loader = _loader()
         agents = loader._load_agents_from_dir(str(agents_dir), "platform")
         assert len(agents) == 1
         assert agents[0].tools == ["read_file", "search_files", "web_search"]
@@ -109,7 +102,7 @@ class TestLoadAgentsFromDir:
             encoding="utf-8",
         )
 
-        loader = _loader(tmp_path)
+        loader = _loader()
         agents = loader._load_agents_from_dir(str(agents_dir), "platform")
         assert len(agents) == 1
         assert agents[0].name == "my-agent"
@@ -124,7 +117,7 @@ class TestLoadAgentsFromDir:
             encoding="utf-8",
         )
 
-        loader = _loader(tmp_path)
+        loader = _loader()
         agents = loader._load_agents_from_dir(str(agents_dir), "platform")
         assert len(agents) == 1
         assert agents[0].name == "db-reader"
@@ -137,7 +130,7 @@ class TestLoadAgentsFromDir:
             encoding="utf-8",
         )
 
-        loader = _loader(tmp_path)
+        loader = _loader()
         agents = loader._load_agents_from_dir(str(agents_dir), "platform")
         assert len(agents) == 1
         assert agents[0].category == "research"
@@ -150,7 +143,7 @@ class TestLoadAgentsFromDir:
             encoding="utf-8",
         )
 
-        loader = _loader(tmp_path)
+        loader = _loader()
         agents = loader._load_agents_from_dir(str(agents_dir), "platform")
         assert len(agents) == 1
         assert agents[0].enabled is False
@@ -163,7 +156,7 @@ class TestLoadAgentsFromDir:
             encoding="utf-8",
         )
 
-        loader = _loader(tmp_path)
+        loader = _loader()
         agents = loader._load_agents_from_dir(str(agents_dir), "platform")
         assert agents[0].max_iterations == 5
 
@@ -175,7 +168,7 @@ class TestLoadAgentsFromDir:
             encoding="utf-8",
         )
 
-        loader = _loader(tmp_path)
+        loader = _loader()
         agents = loader._load_agents_from_dir(str(agents_dir), "platform")
         assert agents[0].max_iterations is None
 
@@ -192,7 +185,7 @@ class TestLoadAgentsFromDir:
             encoding="utf-8",
         )
 
-        loader = _loader(tmp_path)
+        loader = _loader()
         agents = loader._load_agents_from_dir(str(agents_dir), "platform")
         names = {a.name for a in agents}
         assert "valid" in names
@@ -201,7 +194,7 @@ class TestLoadAgentsFromDir:
     def test_empty_directory_returns_empty(self, tmp_path: Path):
         empty_dir = tmp_path / "empty_agents"
         empty_dir.mkdir()
-        loader = _loader(tmp_path)
+        loader = _loader()
         assert loader._load_agents_from_dir(str(empty_dir), "platform") == []
 
     def test_empty_tools_does_not_become_literal_none_entry(self, tmp_path: Path):
@@ -215,7 +208,7 @@ class TestLoadAgentsFromDir:
             encoding="utf-8",
         )
 
-        loader = _loader(tmp_path)
+        loader = _loader()
         agents = loader._load_agents_from_dir(str(agents_dir), "platform")
         assert agents[0].tools is None
 
@@ -229,7 +222,7 @@ class TestLoadAgentsFromDir:
             encoding="utf-8",
         )
 
-        loader = _loader(tmp_path)
+        loader = _loader()
         agents = loader._load_agents_from_dir(str(agents_dir), "platform")
         assert agents[0].enabled is False
 
@@ -252,7 +245,7 @@ class TestLoadAgentsFromDir:
             encoding="utf-8",
         )
 
-        loader = _loader(tmp_path)
+        loader = _loader()
         with caplog.at_level(logging.WARNING, logger="surogates.tools.loader"):
             agents = loader._load_agents_from_dir(str(agents_dir), "platform")
 
@@ -266,147 +259,10 @@ class TestLoadAgentsFromDir:
         assert agents[0].max_iterations is None
 
     def test_nonexistent_directory_returns_empty(self, tmp_path: Path):
-        loader = _loader(tmp_path)
+        loader = _loader()
         assert loader._load_agents_from_dir(
             str(tmp_path / "nope"), "platform",
         ) == []
-
-
-# =========================================================================
-# resolve_platform_agent_dir
-# =========================================================================
-
-
-class TestResolvePlatformAgentDir:
-
-    def test_direct_layout(self, tmp_path: Path):
-        agents_dir = tmp_path / "agents"
-        (agents_dir / "foo").mkdir(parents=True)
-        (agents_dir / "foo" / "AGENT.md").write_text("x", encoding="utf-8")
-
-        loader = _loader(tmp_path, agents_dir=agents_dir)
-        result = loader.resolve_platform_agent_dir("foo")
-        assert result == agents_dir / "foo"
-
-    def test_nested_layout(self, tmp_path: Path):
-        agents_dir = tmp_path / "agents"
-        (agents_dir / "research" / "bar").mkdir(parents=True)
-        (agents_dir / "research" / "bar" / "AGENT.md").write_text("x", encoding="utf-8")
-
-        loader = _loader(tmp_path, agents_dir=agents_dir)
-        result = loader.resolve_platform_agent_dir("bar")
-        assert result == agents_dir / "research" / "bar"
-
-    def test_missing_returns_none(self, tmp_path: Path):
-        loader = _loader(tmp_path)
-        assert loader.resolve_platform_agent_dir("nope") is None
-
-
-# =========================================================================
-# Merge precedence (filesystem layers only -- DB covered in integration)
-# =========================================================================
-
-
-class TestLoadAgentsMergePrecedence:
-    """User > org > platform precedence for the filesystem-only code path."""
-
-    @pytest.mark.asyncio
-    async def test_user_overrides_org_and_platform(self, tmp_path: Path):
-        org_id = "00000000-0000-0000-0000-000000000001"
-        user_id = "00000000-0000-0000-0000-000000000002"
-
-        # Platform agent
-        platform_dir = tmp_path / "platform_agents"
-        (platform_dir / "shared").mkdir(parents=True)
-        (platform_dir / "shared" / "AGENT.md").write_text(
-            "---\nname: shared\ndescription: platform version\n---\nPlatform body\n",
-            encoding="utf-8",
-        )
-
-        # Org agent (same name)
-        org_dir = tmp_path / "assets" / org_id / "shared" / "agents" / "shared"
-        org_dir.mkdir(parents=True)
-        (org_dir / "AGENT.md").write_text(
-            "---\nname: shared\ndescription: org version\n---\nOrg body\n",
-            encoding="utf-8",
-        )
-
-        # User agent (same name)
-        user_dir = (
-            tmp_path / "assets" / org_id / "users" / user_id / "agents" / "shared"
-        )
-        user_dir.mkdir(parents=True)
-        (user_dir / "AGENT.md").write_text(
-            "---\nname: shared\ndescription: user version\n---\nUser body\n",
-            encoding="utf-8",
-        )
-
-        loader = ResourceLoader(
-            platform_skills_dir=str(tmp_path / "skills"),
-            platform_mcp_dir=str(tmp_path / "mcp"),
-            platform_agents_dir=str(platform_dir),
-        )
-
-        tenant = _make_tenant(str(tmp_path / "assets"))
-        agents = await loader.load_agents(tenant)
-
-        shared = [a for a in agents if a.name == "shared"]
-        assert len(shared) == 1
-        assert shared[0].description == "user version"
-        assert shared[0].source == AGENT_SOURCE_USER
-
-    @pytest.mark.asyncio
-    async def test_platform_only_when_no_tenant_files(self, tmp_path: Path):
-        platform_dir = tmp_path / "platform_agents"
-        (platform_dir / "only-me").mkdir(parents=True)
-        (platform_dir / "only-me" / "AGENT.md").write_text(
-            "---\nname: only-me\ndescription: platform\n---\nBody\n",
-            encoding="utf-8",
-        )
-
-        loader = ResourceLoader(
-            platform_skills_dir=str(tmp_path / "skills"),
-            platform_mcp_dir=str(tmp_path / "mcp"),
-            platform_agents_dir=str(platform_dir),
-        )
-
-        tenant = _make_tenant(str(tmp_path / "assets"))
-        agents = await loader.load_agents(tenant)
-
-        assert len(agents) == 1
-        assert agents[0].name == "only-me"
-        assert agents[0].source == AGENT_SOURCE_PLATFORM
-
-    @pytest.mark.asyncio
-    async def test_org_overrides_platform_when_no_user(self, tmp_path: Path):
-        org_id = "00000000-0000-0000-0000-000000000001"
-
-        platform_dir = tmp_path / "platform_agents"
-        (platform_dir / "x").mkdir(parents=True)
-        (platform_dir / "x" / "AGENT.md").write_text(
-            "---\nname: x\ndescription: platform\n---\nP\n",
-            encoding="utf-8",
-        )
-
-        org_dir = tmp_path / "assets" / org_id / "shared" / "agents" / "x"
-        org_dir.mkdir(parents=True)
-        (org_dir / "AGENT.md").write_text(
-            "---\nname: x\ndescription: org\n---\nO\n",
-            encoding="utf-8",
-        )
-
-        loader = ResourceLoader(
-            platform_skills_dir=str(tmp_path / "skills"),
-            platform_mcp_dir=str(tmp_path / "mcp"),
-            platform_agents_dir=str(platform_dir),
-        )
-
-        tenant = _make_tenant(str(tmp_path / "assets"))
-        agents = await loader.load_agents(tenant)
-
-        assert len(agents) == 1
-        assert agents[0].description == "org"
-        assert agents[0].source == AGENT_SOURCE_ORG
 
 
 # =========================================================================
