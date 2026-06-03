@@ -353,11 +353,15 @@ async def _load_prompt_catalogs(
     tenant: TenantContext,
     session_factory: Any,
     bundle: Any | None = None,
+    system_bundle: Any | None = None,
 ) -> tuple[list[Any], list[Any]]:
     """Load prompt-visible sub-agent and skill catalogs for a tenant.
 
-    Layer 1 (platform skills + sub-agents) is served from the per-agent
-    Surogate Hub bundle; layers 2-4 are user files + org/user DB rows.
+    Skill catalog Layer 1 is the merge of the shared
+    ``platform/system-skills`` bundle and the per-agent bundle; layers
+    2-4 are user files + org/user DB rows.  Sub-agents do not have a
+    system-bundle layer today (no operational pressure to share them),
+    so only ``bundle`` is threaded through ``load_agents``.
     """
     resource_loader = ResourceLoader()
 
@@ -382,6 +386,7 @@ async def _load_prompt_catalogs(
                 tenant,
                 db_session=_db,
                 bundle=bundle,
+                system_bundle=system_bundle,
             )
     except Exception:
         logger.debug(
@@ -406,6 +411,7 @@ def _install_worker_runtime_plumbing(state: dict, settings) -> None:
     from surogates.api.app import (
         build_file_bundle_cache,
         build_memory_cache,
+        build_system_bundle_cache,
     )
     from surogates.runtime import PlatformClient, RuntimeConfigCache
 
@@ -431,6 +437,12 @@ def _install_worker_runtime_plumbing(state: dict, settings) -> None:
         settings=settings,
         storage_backend=state.get("storage_backend"),
     )
+    # Shared system-skills bundle.  One snapshot per worker process,
+    # invalidated by the Redis ``system_skills_changed:`` channel
+    # routed in ``_start_worker_invalidator``.
+    state["system_bundle_cache"] = build_system_bundle_cache(
+        settings=settings,
+    )
 
 
 async def _shutdown_worker_runtime_plumbing(state: dict) -> None:
@@ -445,6 +457,7 @@ async def _shutdown_worker_runtime_plumbing(state: dict) -> None:
     state["runtime_config_cache"] = None
     state["file_bundle_cache"] = None
     state["memory_cache"] = None
+    state["system_bundle_cache"] = None
 
 
 def _start_worker_invalidator(state: dict) -> None:
@@ -470,6 +483,7 @@ def _start_worker_invalidator(state: dict) -> None:
             runtime_config_cache=cache,
             file_bundle_cache=state.get("file_bundle_cache"),
             memory_cache=state.get("memory_cache"),
+            system_bundle_cache=state.get("system_bundle_cache"),
         ),
         name="surogates-worker-runtime-invalidator",
     )
@@ -922,6 +936,18 @@ async def run_worker(settings: Settings) -> None:
             except LookupError:
                 bundle = None
 
+        # Resolve the shared system-skills bundle once per session.
+        # ``None`` when the system-skills repo has no v* tag yet — the
+        # loader treats that as 'no Layer 1a' and the rest of the
+        # layers still resolve.
+        system_bundle = None
+        system_bundle_cache = worker_state.get("system_bundle_cache")
+        if system_bundle_cache is not None:
+            try:
+                system_bundle = await system_bundle_cache.get()
+            except LookupError:
+                system_bundle = None
+
         # Load prompt-visible catalogs.  Expert skill definitions may still
         # exist in storage, but PromptBuilder hides them from executor prompts
         # now that strategic advice is handled by the harness advisor.
@@ -932,6 +958,7 @@ async def run_worker(settings: Settings) -> None:
             tenant=tenant,
             session_factory=session_factory,
             bundle=bundle,
+            system_bundle=system_bundle,
         )
 
         # Knowledge bases attached to this agent. Empty list when
