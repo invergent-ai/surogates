@@ -181,6 +181,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         PlatformClient,
         RuntimeConfigCache,
         SlugResolverCache,
+        SystemBundleCache,
         run_invalidator,
     )
 
@@ -234,6 +235,15 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         settings=settings, runtime_config_cache=cache,
     )
 
+    # Shared system-skills bundle cache — one snapshot per cluster
+    # (not per-agent).  Lazily resolves the latest v* tag on first
+    # ``get()``; the seed-builtin-skills CLI fires
+    # ``system_skills_changed:<tag>`` on Redis to drop the cache
+    # whenever the catalog changes.
+    system_bundle_cache: SystemBundleCache = build_system_bundle_cache(
+        settings=settings,
+    )
+
     # Per-user memory cache — storage backend is required.  Builder
     # raises if ``settings.storage.bucket`` is empty.  Storage was
     # wired earlier as ``app.state.storage`` (line ~132); the historic
@@ -269,6 +279,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     app.state.memory_cache = memory_cache
     app.state.mcp_server_cache = mcp_server_cache
     app.state.channel_routing_cache = channel_routing_cache
+    app.state.system_bundle_cache = system_bundle_cache
     app.state.runtime_invalidator_task = asyncio.create_task(
         run_invalidator(
             app.state.redis,
@@ -279,6 +290,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
             memory_cache=memory_cache,
             mcp_server_cache=mcp_server_cache,
             channel_routing_cache=channel_routing_cache,
+            system_bundle_cache=system_bundle_cache,
         ),
         name="surogates-runtime-invalidator",
     )
@@ -437,6 +449,129 @@ def build_file_bundle_cache(*, settings, runtime_config_cache):
     )
 
 
+def build_system_bundle_cache(*, settings):
+    """Construct a :class:`SystemBundleCache` for ``platform/system-skills``.
+
+    Same Hub-endpoint precondition as :func:`build_file_bundle_cache`.
+    The latest ``v*`` tag is resolved lazily on first ``get()`` so a
+    Hub outage at boot does NOT block the api / worker startup —
+    sessions that need skills will fail fast at session-start instead
+    of preventing the process from starting at all.
+
+    The hub client is wrapped in the same ``_L2ReadThroughHub`` /
+    ``_L2DiskCache`` pair the per-agent bundle uses so a worker
+    restart does not have to re-pull every system-skill file from
+    Hub.  The L2 cache keys on the literal repo id
+    (``platform/system-skills``) instead of an ``agent_id``.
+    """
+    from surogates.runtime import (
+        AgentFileBundle,
+        HubBundleClient,
+        SYSTEM_SKILLS_REPO,
+        SystemBundleCache,
+    )
+    from surogates.runtime.bundle_accessor import _BundleSpec
+    from surogates.runtime.bundle_cache import (
+        _L2DiskCache,
+        _L2ReadThroughHub,
+    )
+
+    hub_settings = getattr(settings, "hub", None)
+    if hub_settings is None or not hub_settings.endpoint:
+        raise RuntimeError(
+            "System bundle cache requires ``settings.hub.endpoint``; "
+            "Hub is mandatory in shared mode",
+        )
+
+    from pathlib import Path
+
+    from surogate_hub_sdk import (
+        ApiClient, Configuration, ObjectsApi, TagsApi,
+    )
+
+    sdk_config = Configuration(
+        host=hub_settings.endpoint,
+        username=hub_settings.username,
+        password=hub_settings.password,
+    )
+    # Local dev clusters issue self-signed certs for the Hub ingress.
+    # Mirror build_file_bundle_cache: the platform side already
+    # disables verification, so we match it for parity.
+    sdk_config.verify_ssl = False
+    api_client = ApiClient(sdk_config)
+    objects_api = ObjectsApi(api_client)
+    tags_api = TagsApi(api_client)
+    l2 = _L2DiskCache(
+        root=Path.home() / ".surogate" / "bundle-cache",
+    )
+    spec = _BundleSpec.parse(SYSTEM_SKILLS_REPO)
+
+    async def _resolve_latest_tag() -> str:
+        """Return the largest ``v\\d+`` tag id on
+        ``platform/system-skills``.
+
+        Raises :class:`LookupError` when the repo has no ``v*`` tag
+        yet — the operator must run ``surogate-ops seed-builtin-skills``
+        before any session that depends on system skills can resolve
+        Layer 1a.
+        """
+        import asyncio
+
+        # 1000 tags would mean the catalog has been published 1000
+        # times — far above realistic operational cadence.  Use
+        # ``amount=1000`` and warn if pagination is present so we
+        # spot drift early.
+        page = await asyncio.to_thread(
+            tags_api.list_tags,
+            user=spec.user,
+            repository=spec.repository,
+            amount=1000,
+        )
+        best = -1
+        best_label: str | None = None
+        for ref in getattr(page, "results", None) or []:
+            label = getattr(ref, "id", "") or ""
+            if not label.startswith("v"):
+                continue
+            try:
+                n = int(label[1:])
+            except ValueError:
+                continue
+            if n > best:
+                best, best_label = n, label
+        if best_label is None:
+            raise LookupError(
+                f"{SYSTEM_SKILLS_REPO} has no v* tag yet; run "
+                "`surogate-ops seed-builtin-skills` first.",
+            )
+        pagination = getattr(page, "pagination", None)
+        if pagination is not None and getattr(pagination, "has_more", False):
+            logger.warning(
+                "platform/system-skills tag list is paginated "
+                "(>1000 v* tags) — pick a higher amount or paginate.",
+            )
+        return best_label
+
+    async def _loader():
+        version = await _resolve_latest_tag()
+        hub_client = HubBundleClient(
+            objects_api=objects_api,
+            user=spec.user,
+            repository=spec.repository,
+        )
+        read_through = _L2ReadThroughHub(
+            agent_id=SYSTEM_SKILLS_REPO, hub=hub_client, l2=l2,
+        )
+        return AgentFileBundle(
+            agent_id=SYSTEM_SKILLS_REPO,  # informational only
+            hub_ref=SYSTEM_SKILLS_REPO,
+            version=version,
+            client=read_through,
+        )
+
+    return SystemBundleCache(loader=_loader)
+
+
 async def _shutdown_shared_runtime_plumbing(app: FastAPI) -> None:
     task = getattr(app.state, "runtime_invalidator_task", None)
     if task is not None:
@@ -468,6 +603,8 @@ async def _shutdown_shared_runtime_plumbing(app: FastAPI) -> None:
         app.state.mcp_server_cache = None
     if hasattr(app.state, "channel_routing_cache"):
         app.state.channel_routing_cache = None
+    if hasattr(app.state, "system_bundle_cache"):
+        app.state.system_bundle_cache = None
 
 
 def create_app() -> FastAPI:

@@ -1,17 +1,19 @@
-"""Resource loader for skills, tools, and MCP server configurations.
+"""Resource loader for skills and sub-agent definitions.
 
-Merges resources from four layers with increasing precedence:
+Merges resources from three layers with increasing precedence:
 
-1. **Platform** -- baked into the container image at well-known paths.
+1. **Platform bundle** -- the per-agent bundle fetched from Surogate Hub
+   (skills/ + agents/ prefixes), passed in by the caller.
 2. **User files** -- stored under the tenant's per-user asset root
    (managed by end users via the agent's ``skill_manage`` tool).
-3. **Org DB** -- ``skills`` / ``mcp_servers`` table rows where
-   ``user_id IS NULL`` (managed by org admin via API).
-4. **User DB** -- ``skills`` / ``mcp_servers`` table rows where
-   ``user_id`` matches (managed by org admin via API).
+3. **Org DB** -- ``skills`` table rows where ``user_id IS NULL``
+   (managed by org admin via API).
+4. **User DB** -- ``skills`` table rows where ``user_id`` matches
+   (managed by org admin via API).
 
 Org admin overrides (DB layers) are final -- end users cannot override
-them via bucket files.
+them via bucket files.  MCP servers are not loaded here; the MCP proxy
+reads the ``mcp_servers`` table directly.
 """
 
 from __future__ import annotations
@@ -34,11 +36,6 @@ class MCPTransport(str, Enum):
     HTTP = "http"
 
 logger = logging.getLogger(__name__)
-
-# Well-known platform volume paths (overridable via constructor).
-PLATFORM_SKILLS_DIR = "/etc/surogates/skills"
-PLATFORM_MCP_DIR = "/etc/surogates/mcp"
-PLATFORM_AGENTS_DIR = "/etc/surogates/agents"
 
 
 # ------------------------------------------------------------------
@@ -165,115 +162,24 @@ class AgentDef:
     tags: list[str] | None = None  # metadata tags
 
 
-@dataclass(slots=True)
-class MCPServerDef:
-    """Configuration for a single MCP server."""
-
-    name: str
-    transport: MCPTransport = MCPTransport.STDIO
-    command: str | None = None
-    args: list[str] = field(default_factory=list)
-    url: str | None = None
-    env: dict[str, str] = field(default_factory=dict)
-    timeout: int = 120
-    # HTTP transport: extra headers sent on every request to the MCP
-    # server (e.g. ``{"Authorization": "Bearer ..."}``). Ignored for
-    # stdio. The MCP proxy in production resolves ``credential_refs``
-    # against the credential vault and produces these headers; in
-    # dev-mode (no proxy) we accept them inline so a single-process
-    # Surogates instance can still talk to authenticated HTTP MCP
-    # endpoints.
-    headers: dict[str, str] = field(default_factory=dict)
-    # Names of vault credentials whose decrypted values get injected as
-    # env vars (stdio) or HTTP Authorization headers (http) at connect
-    # time. Each entry is either a plain string (legacy "credential
-    # name") or a dict with ``name`` plus optional placement directives
-    # — see ``mcp_proxy.loader._resolve_credentials``. Carried through
-    # the platform-config path so the proxy's loader can pop them off
-    # and resolve via the encrypted vault instead of trusting whatever
-    # the JSON file says verbatim.
-    credential_refs: list[Any] = field(default_factory=list)
-
-
 # ------------------------------------------------------------------
 # Loader
 # ------------------------------------------------------------------
 
 
 class ResourceLoader:
-    """Loads skills, MCP server configs, and sub-agent types from platform
-    volumes and tenant asset roots.
+    """Loads skills and sub-agent definitions from the per-agent bundle,
+    tenant asset roots, and the surogates DB."""
 
-    Parameters
-    ----------
-    platform_skills_dir:
-        Path to the platform-level skills directory.
-    platform_mcp_dir:
-        Path to the platform-level MCP config directory.
-    platform_agents_dir:
-        Path to the platform-level sub-agent types directory.
-    """
-
-    def __init__(
-        self,
-        platform_skills_dir: str | None = None,
-        platform_mcp_dir: str | None = None,
-        platform_agents_dir: str | None = None,
-    ) -> None:
-        # Resolve defaults lazily so runtime monkey-patching of the module
-        # constants (used by tests) takes effect.
-        self._platform_skills_dir = (
-            platform_skills_dir if platform_skills_dir is not None
-            else PLATFORM_SKILLS_DIR
-        )
-        self._platform_mcp_dir = (
-            platform_mcp_dir if platform_mcp_dir is not None
-            else PLATFORM_MCP_DIR
-        )
-        self._platform_agents_dir = (
-            platform_agents_dir if platform_agents_dir is not None
-            else PLATFORM_AGENTS_DIR
-        )
+    def __init__(self) -> None:
+        # Stateless — kept as a class for namespacing and DI in tests.
+        pass
 
     @classmethod
     def from_settings(cls, settings: Any | None) -> "ResourceLoader":
-        """Build a loader from a settings object that may carry platform-dir overrides.
-
-        Reads ``platform_skills_dir``, ``platform_mcp_dir``, and
-        ``platform_agents_dir`` attributes when present; missing or None
-        attributes fall through to the module-level defaults.  ``None``
-        settings yields a loader configured with all defaults — convenient
-        for paths where settings could not be loaded.
-        """
-        return cls(
-            platform_skills_dir=getattr(settings, "platform_skills_dir", None),
-            platform_mcp_dir=getattr(settings, "platform_mcp_dir", None),
-            platform_agents_dir=getattr(settings, "platform_agents_dir", None),
-        )
-
-    # ------------------------------------------------------------------
-    # Platform skill directory resolution
-    # ------------------------------------------------------------------
-
-    def resolve_platform_skill_dir(self, name: str) -> Path | None:
-        """Return the on-disk directory for a platform skill, or ``None``.
-
-        Searches ``{platform_skills_dir}/{name}/SKILL.md`` and
-        ``{platform_skills_dir}/{category}/{name}/SKILL.md`` layouts.
-        """
-        root = Path(self._platform_skills_dir)
-        if not root.is_dir():
-            return None
-        direct = root / name / "SKILL.md"
-        if direct.is_file():
-            return direct.parent
-        for sub in root.iterdir():
-            if not sub.is_dir() or sub.name in EXCLUDED_SKILL_DIRS:
-                continue
-            candidate = sub / name / "SKILL.md"
-            if candidate.is_file():
-                return candidate.parent
-        return None
+        """Construct a loader.  Kept for call-site stability after the
+        platform-directory settings were retired; ``settings`` is unused."""
+        return cls()
 
     # ------------------------------------------------------------------
     # Skills
@@ -284,26 +190,27 @@ class ResourceLoader:
         tenant: Any,
         db_session: Any | None = None,
         bundle: Any | None = None,
+        system_bundle: Any | None = None,
     ) -> list[SkillDef]:
-        """Merge skills from all four layers.
+        """Merge skills from the system bundle, per-agent bundle, user
+        files, and DB layers.
 
         Layer precedence (lowest → highest):
 
-        1. Platform filesystem (``/etc/surogates/skills/``)
-        2. User bucket files (``tenant-{org}/users/{user}/skills/``)
-        3. Org-wide DB rows (``skills`` table, ``user_id IS NULL``)
-        4. User-specific DB rows (``skills`` table, ``user_id = ?``)
+        1a. System bundle (``platform/system-skills``, shared across
+            every agent in the cluster — same snapshot, no per-agent
+            copy)
+        1b. Per-agent bundle (``skills/`` prefix in the agent's Hub
+            bundle, populated by org admins via the ops attach UI)
+        2.  User bucket files (``tenant-{org}/users/{user}/skills/``)
+        3.  Org-wide DB rows (``skills`` table, ``user_id IS NULL``)
+        4.  User-specific DB rows (``skills`` table, ``user_id = ?``)
 
-        Org admin overrides (DB layers) are final.
-
-        Parameters
-        ----------
-        tenant:
-            A :class:`~surogates.tenant.context.TenantContext` instance.
-        db_session:
-            An optional ``AsyncSession``.  When provided, layers 3 and 4
-            are loaded from the database.  When ``None`` the method falls
-            back to the legacy 3-layer filesystem merge.
+        Org admin overrides (DB layers) are final.  Per-agent (1b)
+        shadows system (1a) by name because the per-agent bundle is
+        passed last to ``_merge`` — see the design doc
+        ``docs/superpowers/specs/2026-06-03-system-skills-shared-bundle-design.md``
+        for the override semantics rationale.
         """
         asset_root = Path(tenant.asset_root)
         org_id = str(tenant.org_id)
@@ -314,27 +221,31 @@ class ResourceLoader:
         # string.
         user_id = tenant.user_id
 
-        # Layer 1: platform skills.
-        # the on-disk platform-skills directory
-        # holds the shared built-ins baked into the worker image
-        # (docx, pptx, subagent-task-worker, etc.).  When a bundle
-        # is present the per-agent ``skills/`` prefix is layered ON
-        # TOP of the disk catalogue so tenant-attached skills extend
-        # rather than replace the shared built-ins.  ``_merge`` keeps
-        # later layers (user files, DB) winning on name collision so
-        # a tenant can still override a bundle entry — and a bundle
-        # entry still overrides the matching disk built-in.
-        disk_platform = await asyncio.to_thread(
-            self._load_skills_from_dir,
-            self._platform_skills_dir, SKILL_SOURCE_PLATFORM,
-        )
-        if bundle is not None:
-            bundle_platform = await self._load_skills_from_bundle(
-                bundle, source=SKILL_SOURCE_PLATFORM,
+        # Layer 1a: shared system-skills bundle (one snapshot for the
+        # whole cluster, served at the repo root).
+        if system_bundle is not None:
+            system = await self._load_skills_from_bundle(
+                system_bundle,
+                source=SKILL_SOURCE_PLATFORM,
+                root_prefix="",
             )
-            platform = self._merge(disk_platform, bundle_platform)
         else:
-            platform = disk_platform
+            system = []
+
+        # Layer 1b: per-agent bundle (org-attached skills under
+        # ``skills/`` in the agent's bundle repo).
+        if bundle is not None:
+            per_agent = await self._load_skills_from_bundle(
+                bundle,
+                source=SKILL_SOURCE_PLATFORM,
+                root_prefix="skills/",
+            )
+        else:
+            per_agent = []
+
+        # Per-agent wins over system on name collision because
+        # ``_merge`` keeps the last entry seen for a given name.
+        platform = self._merge(system, per_agent)
 
         # Layer 2: user bucket files
         if user_id is not None:
@@ -363,12 +274,9 @@ class ResourceLoader:
                 user_db = []
             return self._merge(platform, user_files, org_db, user_db)
 
-        # Fallback: legacy 3-layer filesystem merge (no DB).
-        org_skills_dir = str(asset_root / org_id / "shared" / "skills")
-        org_files = await asyncio.to_thread(
-            self._load_skills_from_dir, org_skills_dir, SKILL_SOURCE_ORG,
-        )
-        return self._merge(platform, org_files, user_files)
+        # Fallback for the tests / paths that don't pass a session: just
+        # the bundle + user-file merge.
+        return self._merge(platform, user_files)
 
     # ------------------------------------------------------------------
     # Conditional skill filtering
@@ -399,61 +307,8 @@ class ResourceLoader:
         return filtered
 
     # ------------------------------------------------------------------
-    # MCP servers
-    # ------------------------------------------------------------------
-
-    def load_mcp_servers(self, tenant: Any) -> list[MCPServerDef]:
-        """Merge MCP server configs from platform + org shared + user layers.
-
-        Parameters
-        ----------
-        tenant:
-            A :class:`~surogates.tenant.context.TenantContext` instance.
-
-        Returns
-        -------
-        list[MCPServerDef]
-            Deduplicated by name.  User layer wins over org, which wins
-            over platform.
-        """
-        asset_root = Path(tenant.asset_root)
-        org_id = str(tenant.org_id)
-        user_id = str(tenant.user_id)
-
-        org_mcp_dir = str(asset_root / org_id / "shared" / "mcp")
-        user_mcp_dir = str(
-            asset_root / org_id / "users" / user_id / "mcp"
-        )
-
-        platform = self._load_mcp_from_dir(self._platform_mcp_dir)
-        org = self._load_mcp_from_dir(org_mcp_dir)
-        user = self._load_mcp_from_dir(user_mcp_dir)
-
-        return self._merge(platform, org, user)
-
-    # ------------------------------------------------------------------
     # Sub-agent types
     # ------------------------------------------------------------------
-
-    def resolve_platform_agent_dir(self, name: str) -> Path | None:
-        """Return the on-disk directory for a platform sub-agent, or ``None``.
-
-        Searches ``{platform_agents_dir}/{name}/AGENT.md`` and
-        ``{platform_agents_dir}/{category}/{name}/AGENT.md`` layouts.
-        """
-        root = Path(self._platform_agents_dir)
-        if not root.is_dir():
-            return None
-        direct = root / name / "AGENT.md"
-        if direct.is_file():
-            return direct.parent
-        for sub in root.iterdir():
-            if not sub.is_dir() or sub.name in EXCLUDED_AGENT_DIRS:
-                continue
-            candidate = sub / name / "AGENT.md"
-            if candidate.is_file():
-                return candidate.parent
-        return None
 
     async def load_agents(
         self,
@@ -461,26 +316,17 @@ class ResourceLoader:
         db_session: Any | None = None,
         bundle: Any | None = None,
     ) -> list[AgentDef]:
-        """Merge sub-agent types from all four layers.
+        """Merge sub-agent types from the bundle, user files, and DB.
 
         Layer precedence (lowest → highest):
 
-        1. Platform filesystem (``/etc/surogates/agents/``)
+        1. Platform bundle (``agents/`` prefix in the per-agent bundle)
         2. User bucket files (``tenant-{org}/users/{user}/agents/``)
         3. Org-wide DB rows (``agents`` table, ``user_id IS NULL``)
         4. User-specific DB rows (``agents`` table, ``user_id = ?``)
 
         Org admin overrides (DB layers) are final -- end users cannot
         override them via bucket files.
-
-        Parameters
-        ----------
-        tenant:
-            A :class:`~surogates.tenant.context.TenantContext` instance.
-        db_session:
-            An optional ``AsyncSession``.  When provided, layers 3 and 4
-            are loaded from the database.  When ``None`` the method
-            falls back to the legacy 3-layer filesystem merge.
         """
         asset_root = Path(tenant.asset_root)
         org_id = str(tenant.org_id)
@@ -490,17 +336,13 @@ class ResourceLoader:
             asset_root / org_id / "users" / user_id / "agents"
         )
 
-        # Layer 1: platform sub-agents.
-        # when a bundle is provided the platform
-        # layer comes from the bundle's agents/ prefix.
+        # Layer 1: bundle sub-agents (per-agent, served from Surogate Hub).
         if bundle is not None:
             platform = await self._load_agents_from_bundle(
                 bundle, source=AGENT_SOURCE_PLATFORM,
             )
         else:
-            platform = self._load_agents_from_dir(
-                self._platform_agents_dir, AGENT_SOURCE_PLATFORM,
-            )
+            platform = []
 
         # Layer 2: user bucket files
         user_files = self._load_agents_from_dir(
@@ -520,100 +362,8 @@ class ResourceLoader:
             )
             return self._merge(platform, user_files, org_db, user_db)
 
-        # Fallback: legacy 3-layer filesystem merge (no DB).
-        org_agents_dir = str(asset_root / org_id / "shared" / "agents")
-        org_files = self._load_agents_from_dir(
-            org_agents_dir, AGENT_SOURCE_ORG,
-        )
-        return self._merge(platform, org_files, user_files)
-
-    def load_policy_profile(
-        self,
-        tenant: Any,
-        name: str,
-    ) -> dict[str, Any] | None:
-        """Load a named policy profile as a raw config dict.
-
-        Profiles are YAML or JSON files stored under
-        ``agents/policies/<name>.{yaml,yml,json}`` at the platform and org
-        layers.  The profile schema mirrors the top-level governance config:
-
-        * ``allowed_tools: list[str]``  -- narrows the base allowlist
-        * ``denied_tools: list[str]``   -- additive denylist
-        * ``egress``: see :meth:`GovernanceGate.from_config` -- appended to
-          the base egress rules
-        * ``enabled: bool``             -- rarely used; overrides base
-
-        Precedence: platform < org.  When a key exists in both layers the
-        org value wins (mirrors the ``from_config`` merge semantics).
-        Returns ``None`` when no matching profile file exists.
-        """
-        layers: list[dict[str, Any]] = []
-
-        platform_file = _find_policy_profile_file(
-            Path(self._platform_agents_dir) / "policies", name,
-        )
-        if platform_file is not None:
-            try:
-                data = _load_data_file(platform_file)
-                if isinstance(data, dict):
-                    layers.append(data)
-            except Exception:
-                logger.exception(
-                    "Failed to load platform policy profile %s", platform_file,
-                )
-
-        asset_root = Path(tenant.asset_root)
-        org_id = str(tenant.org_id)
-        org_policies_dir = (
-            asset_root / org_id / "shared" / "agents" / "policies"
-        )
-        org_file = _find_policy_profile_file(org_policies_dir, name)
-        if org_file is not None:
-            try:
-                data = _load_data_file(org_file)
-                if isinstance(data, dict):
-                    layers.append(data)
-            except Exception:
-                logger.exception(
-                    "Failed to load org policy profile %s", org_file,
-                )
-
-        if not layers:
-            return None
-
-        # Merge: last layer wins for scalar fields; tool lists are unioned.
-        merged: dict[str, Any] = {}
-        allowed: set[str] = set()
-        denied: set[str] = set()
-        egress_rules: list[dict[str, Any]] = []
-        egress_default: str | None = None
-        for layer in layers:
-            for key, value in layer.items():
-                if key == "allowed_tools" and isinstance(value, list):
-                    allowed.update(value)
-                elif key == "denied_tools" and isinstance(value, list):
-                    denied.update(value)
-                elif key == "egress" and isinstance(value, dict):
-                    rules = value.get("rules")
-                    if isinstance(rules, list):
-                        egress_rules.extend(rules)
-                    if "default_action" in value:
-                        egress_default = value.get("default_action")
-                else:
-                    merged[key] = value
-        if allowed:
-            merged["allowed_tools"] = sorted(allowed)
-        if denied:
-            merged["denied_tools"] = sorted(denied)
-        if egress_rules or egress_default:
-            egress: dict[str, Any] = {}
-            if egress_rules:
-                egress["rules"] = egress_rules
-            if egress_default:
-                egress["default_action"] = egress_default
-            merged["egress"] = egress
-        return merged
+        # Fallback for the tests / paths that don't pass a session.
+        return self._merge(platform, user_files)
 
     # ------------------------------------------------------------------
     # Skills parsing
@@ -701,21 +451,31 @@ class ResourceLoader:
         return skills
 
     async def _load_skills_from_bundle(
-        self, bundle: Any, *, source: str,
+        self,
+        bundle: Any,
+        *,
+        source: str,
+        root_prefix: str = "skills/",
     ) -> list[SkillDef]:
-        """read platform skills from the agent's
-        Hub-backed bundle.
+        """Read platform skills from a Hub-backed bundle.
 
-        Iterates ``bundle/skills/*/SKILL.md`` and constructs the same
-        SkillDef objects the on-disk loader produces.  Layout
-        mirrors the directory-based on-disk shape; the flat-legacy
-        layout is not supported in bundles.
+        ``root_prefix`` selects where in the bundle the skill catalog
+        lives.  Per-agent bundles store skills under ``skills/<name>/``
+        (default).  The shared system-skills bundle
+        (``platform/system-skills``) stores them at the repo root, so
+        callers pass ``""``.
+
+        Iterates ``<root_prefix><name>/SKILL.md`` and builds the same
+        :class:`SkillDef` objects the on-disk loader produces.  A Hub
+        failure on ``list`` does not propagate — Layer 1 falls back to
+        an empty list so the rest of the layers still resolve.
         """
         try:
-            paths = await bundle.list("skills/")
+            paths = await bundle.list(root_prefix)
         except Exception:
             logger.exception(
-                "Failed to list bundle skills/; falling back to empty layer 1",
+                "Failed to list bundle '%s'; falling back to empty Layer 1",
+                root_prefix or "<root>",
             )
             return []
 
@@ -724,8 +484,8 @@ class ResourceLoader:
         for path in paths:
             if not path.endswith("/SKILL.md"):
                 continue
-            # bundle/skills/<dir>/SKILL.md → <dir>
-            inner = path[len("skills/"):-len("/SKILL.md")]
+            # ``<root_prefix><dir>/SKILL.md`` → ``<dir>``
+            inner = path[len(root_prefix):-len("/SKILL.md")]
             if not inner:
                 continue
             try:
@@ -852,62 +612,6 @@ class ResourceLoader:
                 logger.exception("Failed to load agent from %s", entry)
 
         return agents
-
-    # ------------------------------------------------------------------
-    # MCP config parsing
-    # ------------------------------------------------------------------
-
-    def _load_mcp_from_dir(self, path: str) -> list[MCPServerDef]:
-        """Load MCP server definitions from *path*.
-
-        Supports two layouts:
-
-        * A single ``servers.json`` (or ``servers.yaml`` / ``servers.yml``)
-          containing a mapping of server name to config.
-        * Individual ``.json`` / ``.yaml`` / ``.yml`` files, each
-          containing a single server config with a ``name`` key.
-        """
-        directory = Path(path)
-        if not directory.is_dir():
-            return []
-
-        servers: list[MCPServerDef] = []
-
-        # Try consolidated file first.
-        for consolidated_name in ("servers.json", "servers.yaml", "servers.yml"):
-            consolidated = directory / consolidated_name
-            if consolidated.is_file():
-                try:
-                    data = _load_data_file(consolidated)
-                    if isinstance(data, dict):
-                        for server_name, server_cfg in data.items():
-                            if isinstance(server_cfg, dict):
-                                servers.append(
-                                    _parse_mcp_server(server_name, server_cfg)
-                                )
-                    return servers
-                except Exception:
-                    logger.exception(
-                        "Failed to load consolidated MCP config %s",
-                        consolidated,
-                    )
-                    return []
-
-        # Fall back to individual files.
-        for entry in sorted(directory.iterdir()):
-            if not entry.is_file():
-                continue
-            if entry.suffix not in (".json", ".yaml", ".yml"):
-                continue
-            try:
-                data = _load_data_file(entry)
-                if isinstance(data, dict):
-                    server_name = data.get("name", entry.stem)
-                    servers.append(_parse_mcp_server(server_name, data))
-            except Exception:
-                logger.exception("Failed to load MCP config from %s", entry)
-
-        return servers
 
     # ------------------------------------------------------------------
     # DB loading
@@ -1471,51 +1175,6 @@ def _parse_yaml_or_simple(text: str) -> dict[str, Any]:
             key, _, value = line.partition(":")
             result_simple[key.strip()] = value.strip()
     return result_simple
-
-
-def _load_data_file(path: Path) -> Any:
-    """Load a JSON or YAML file and return the parsed data."""
-    text = path.read_text(encoding="utf-8")
-    if path.suffix in (".yaml", ".yml"):
-        return _parse_yaml_data(text)
-    return json.loads(text)
-
-
-def _find_policy_profile_file(directory: Path, name: str) -> Path | None:
-    """Find ``<name>.{yaml,yml,json}`` under *directory* or ``None``."""
-    if not directory.is_dir():
-        return None
-    for suffix in (".yaml", ".yml", ".json"):
-        candidate = directory / f"{name}{suffix}"
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def _parse_yaml_data(text: str) -> Any:
-    """Parse YAML text, falling back to JSON if PyYAML is unavailable."""
-    try:
-        import yaml  # type: ignore[import-untyped]
-
-        return yaml.safe_load(text)
-    except ImportError:
-        logger.debug("PyYAML not available; attempting JSON parse")
-        return json.loads(text)
-
-
-def _parse_mcp_server(name: str, cfg: dict[str, Any]) -> MCPServerDef:
-    """Build an :class:`MCPServerDef` from a raw config dict."""
-    return MCPServerDef(
-        name=name,
-        transport=MCPTransport(cfg.get("transport", MCPTransport.STDIO.value)),
-        command=cfg.get("command"),
-        args=cfg.get("args", []),
-        url=cfg.get("url"),
-        env=cfg.get("env", {}),
-        timeout=cfg.get("timeout", 120),
-        headers=dict(cfg.get("headers") or {}),
-        credential_refs=list(cfg.get("credential_refs") or []),
-    )
 
 
 def update_frontmatter_field(content: str, key: str, value: str) -> str:

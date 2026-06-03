@@ -80,16 +80,6 @@ ENV PATH="/opt/venv/bin:$PATH" \
 RUN groupadd --gid 1000 surogates \
     && useradd --uid 1000 --gid surogates --create-home surogates
 
-# ── Config mount points ─────────────────────────────────────────────
-RUN mkdir -p /etc/surogates/policies \
-             /etc/surogates/skills \
-    && chown -R surogates:surogates /etc/surogates
-
-# ── Built-in platform skills ────────────────────────────────────────
-# Keep the API skill catalogue in sync with the worker image so
-# skills_list/skill_view and staging can resolve built-in platform skills.
-COPY skills/ /etc/surogates/skills/
-
 USER surogates
 
 ENTRYPOINT ["tini", "--"]

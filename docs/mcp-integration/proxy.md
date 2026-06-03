@@ -37,30 +37,9 @@ Save the output — you'll need it for both the MCP proxy and any process that s
 
 ## 2. Register an MCP Server
 
-MCP servers can be configured in three ways, merged with platform < org < user precedence.
+MCP servers are registered in the surogates `mcp_servers` table. Org-wide and user-specific rows are merged at discovery time, with user-specific rows winning by name. There is no on-disk fallback — every registration goes through the admin API.
 
-### Option A: Platform Config (filesystem)
-
-Create a JSON file at `/etc/surogates/mcp/servers.json` (mounted from a ConfigMap in K8s):
-
-```json
-{
-  "filesystem": {
-    "transport": "stdio",
-    "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
-    "timeout": 120
-  },
-  "github": {
-    "transport": "stdio",
-    "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-github"],
-    "credential_refs": ["GITHUB_TOKEN"]
-  }
-}
-```
-
-### Option B: Database (via Admin API)
+### Register via Admin API
 
 Register an MCP server for an org:
 
@@ -222,7 +201,6 @@ curl http://localhost:8001/health
 | `SUROGATES_ENCRYPTION_KEY`         | (empty)                | Fernet key for credential vault          |
 | `SUROGATES_IDLE_CONNECTION_TIMEOUT`| `300`                  | Seconds before idle MCP connections close |
 | `SUROGATES_MAX_CONNECTIONS_PER_ORG`| `50`                   | Max concurrent MCP connections per org   |
-| `SUROGATES_PLATFORM_MCP_DIR`      | `/etc/surogates/mcp`  | Platform MCP config directory            |
 | `SUROGATES_DB_URL`                 | —                      | PostgreSQL connection string             |
 | `SUROGATES_REDIS_URL`             | —                      | Redis connection string                  |
 | `SUROGATES_JWT_SECRET`            | —                      | JWT signing secret                       |
@@ -233,7 +211,7 @@ curl http://localhost:8001/health
 | -------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `401 Invalid token`                    | The sandbox JWT has expired or the `SUROGATES_JWT_SECRET` doesn't match between proxy and worker  |
 | `403 Expected a sandbox token`         | The token's `type` claim is not `"sandbox"` — ensure the worker is minting sandbox tokens         |
-| `404 No MCP servers configured`        | No servers in platform volume or DB for this org/user — check `/etc/surogates/mcp/` and DB       |
+| `404 No MCP servers configured`        | No rows for this org/user in `mcp_servers` — register via the admin API and retry                |
 | `credential not found` warnings        | The `credential_refs` name doesn't match any entry in the `credentials` table for this org        |
 | MCP server connection failures         | Check that the MCP server command (e.g. `npx`) is available in the proxy container's `PATH`       |
 | Sandbox can't reach proxy              | Verify the `sandbox-networkpolicy.yaml` allows egress to `component: mcp-proxy` on port 8001      |

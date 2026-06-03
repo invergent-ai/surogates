@@ -56,99 +56,6 @@ class TestHasStageableAssets:
 
 
 # =========================================================================
-# stage_from_filesystem (platform skills)
-# =========================================================================
-
-
-class TestStageFromFilesystem:
-    async def test_copies_all_files_preserving_layout(
-        self, stager: SkillStager, tmp_path: Path, backend: LocalBackend,
-    ):
-        # Build a fake platform skill directory.
-        skill_src = tmp_path / "src" / "pptx_builder"
-        (skill_src / "scripts").mkdir(parents=True)
-        (skill_src / "assets").mkdir(parents=True)
-        (skill_src / "SKILL.md").write_text("---\nname: pptx_builder\n---\nbody")
-        (skill_src / "scripts" / "build.py").write_text("print('hi')")
-        (skill_src / "assets" / "template.pptx").write_bytes(b"\x00\x01binary")
-
-        session_id = uuid4()
-        await backend.create_bucket(STORAGE_BUCKET)
-
-        staged_at = await stager.stage_from_filesystem(
-            session_id=session_id,
-            skill_name="pptx_builder",
-            source_dir=skill_src,
-        )
-
-        # staged_at points to the LocalBackend bucket dir + .skills prefix
-        assert staged_at.endswith("/.skills/pptx_builder/")
-        assert STORAGE_BUCKET in staged_at
-        assert f"{session_id}" in staged_at
-
-        # All files are present in the session workspace.
-        keys = await backend.list_keys(
-            STORAGE_BUCKET, prefix=f"{session_id}/.skills/",
-        )
-        assert session_workspace_key(session_id, ".skills/pptx_builder/SKILL.md") in keys
-        assert session_workspace_key(session_id, ".skills/pptx_builder/scripts/build.py") in keys
-        assert session_workspace_key(session_id, ".skills/pptx_builder/assets/template.pptx") in keys
-        assert session_workspace_key(session_id, ".skills/pptx_builder/.staged") in keys
-
-        # Binary content is preserved bit-for-bit.
-        data = await backend.read(
-            STORAGE_BUCKET,
-            session_workspace_key(
-                session_id, ".skills/pptx_builder/assets/template.pptx",
-            ),
-        )
-        assert data == b"\x00\x01binary"
-
-    async def test_idempotent(
-        self, stager: SkillStager, tmp_path: Path, backend: LocalBackend,
-    ):
-        skill_src = tmp_path / "src" / "my_skill"
-        skill_src.mkdir(parents=True)
-        (skill_src / "SKILL.md").write_text("body")
-        (skill_src / "script.py").write_text("v1")
-
-        session_id = uuid4()
-        await backend.create_bucket(STORAGE_BUCKET)
-
-        first = await stager.stage_from_filesystem(
-            session_id=session_id, skill_name="my_skill", source_dir=skill_src,
-        )
-
-        # Modify the source after the first stage — a second stage should
-        # see the marker and short-circuit.
-        (skill_src / "script.py").write_text("v2")
-
-        second = await stager.stage_from_filesystem(
-            session_id=session_id, skill_name="my_skill", source_dir=skill_src,
-        )
-
-        assert first == second
-        data = await backend.read(
-            STORAGE_BUCKET,
-            session_workspace_key(session_id, ".skills/my_skill/script.py"),
-        )
-        assert data == b"v1"  # still the first version
-
-    async def test_missing_source_raises(
-        self, stager: SkillStager, backend: LocalBackend,
-    ):
-        session_id = uuid4()
-        await backend.create_bucket(STORAGE_BUCKET)
-
-        with pytest.raises(FileNotFoundError):
-            await stager.stage_from_filesystem(
-                session_id=session_id,
-                skill_name="nope",
-                source_dir=Path("/nonexistent/path"),
-            )
-
-
-# =========================================================================
 # stage_from_tenant_bucket
 # =========================================================================
 
@@ -240,9 +147,9 @@ class TestIsStaged:
 
         session_id = uuid4()
         await backend.create_bucket(STORAGE_BUCKET)
-        await stager.stage_from_filesystem(
-            session_id=session_id, skill_name="k", source_dir=skill_src,
-        )
+        # Drop the marker file the stager writes at the end of a copy.
+        marker_key = f"{session_id}/.skills/k/.staged"
+        await backend.write(STORAGE_BUCKET, marker_key, b"")
         assert await stager.is_staged(session_id, "k") is True
 
 
@@ -297,68 +204,6 @@ class _MockRequest:
 
 class TestStageSkillForSessionHelper:
     """Verifies surogates.api.routes.skills._stage_skill_for_session."""
-
-    async def test_platform_skill_is_staged(
-        self, tmp_path: Path, backend: LocalBackend,
-    ):
-        from surogates.api.routes.skills import _stage_skill_for_session
-        from surogates.tools.loader import PLATFORM_SKILLS_DIR, ResourceLoader
-
-        # Build a platform skill tree under a temporary platform dir.
-        platform_dir = tmp_path / "platform-skills"
-        skill_dir = platform_dir / "pptx_builder"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text("---\nname: pptx_builder\n---\nbody")
-        (skill_dir / "scripts").mkdir()
-        (skill_dir / "scripts" / "build.py").write_text("x=1")
-        (skill_dir / "assets").mkdir()
-        (skill_dir / "assets" / "template.pptx").write_bytes(b"\x00\x01")
-
-        # Patch PLATFORM_SKILLS_DIR on ResourceLoader.resolve_platform_skill_dir
-        # by constructing a ResourceLoader with a custom dir.
-        # _stage_skill_for_session builds its own ResourceLoader with the
-        # default path — so monkey-patch PLATFORM_SKILLS_DIR.
-        import surogates.tools.loader as loader_mod
-        original = loader_mod.PLATFORM_SKILLS_DIR
-        loader_mod.PLATFORM_SKILLS_DIR = str(platform_dir)
-        try:
-            session_id = uuid4()
-            await backend.create_bucket(STORAGE_BUCKET)
-
-            # Fake SkillDef — minimum needed fields.
-            class _DummySkill:
-                name = "pptx_builder"
-                source = loader_mod.SKILL_SOURCE_PLATFORM
-
-            # Tenant value is only used for user/org paths; irrelevant here
-            # but must expose .org_id.
-            class _DummyTenant:
-                org_id = uuid4()
-                user_id = uuid4()
-
-            request = _MockRequest(backend)
-            staged_at = await _stage_skill_for_session(
-                request=request,  # type: ignore[arg-type]
-                tenant=_DummyTenant(),  # type: ignore[arg-type]
-                skill_def=_DummySkill(),
-                session_id=session_id,
-                linked_files=["scripts/build.py", "assets/template.pptx"],
-            )
-
-            assert staged_at is not None
-            assert staged_at.endswith("/.skills/pptx_builder/")
-
-            keys = await backend.list_keys(
-                STORAGE_BUCKET, prefix=f"{session_id}/.skills/",
-            )
-            assert session_workspace_key(
-                session_id, ".skills/pptx_builder/scripts/build.py",
-            ) in keys
-            assert session_workspace_key(
-                session_id, ".skills/pptx_builder/assets/template.pptx",
-            ) in keys
-        finally:
-            loader_mod.PLATFORM_SKILLS_DIR = original
 
     async def test_returns_none_when_no_stageable_assets(
         self, backend: LocalBackend,
@@ -553,60 +398,6 @@ class TestConcurrentStaging:
     covered by the lock-key test below.
     """
 
-    async def test_concurrent_filesystem_stage_copies_once(
-        self, tmp_path: Path,
-    ):
-        """Two concurrent stage_from_filesystem calls → one copy.
-
-        We wrap the backend's ``write`` so we can count how many times
-        the body of the staging loop executes.  With double-checked
-        locking only one caller should copy; the other should find the
-        marker and short-circuit.
-        """
-        backend = LocalBackend(base_path=str(tmp_path / "storage"))
-        stager = SkillStager(backend=backend, storage_bucket=STORAGE_BUCKET)
-
-        skill_src = tmp_path / "src" / "concurrent_skill"
-        skill_src.mkdir(parents=True)
-        (skill_src / "SKILL.md").write_text("body")
-        (skill_src / "scripts").mkdir()
-        (skill_src / "scripts" / "a.py").write_text("a=1")
-
-        session_id = uuid4()
-        await backend.create_bucket(STORAGE_BUCKET)
-
-        # Count writes that look like content writes (ignore the marker
-        # which both winners and losers would never produce twice because
-        # the loser short-circuits before the marker write).
-        content_writes = 0
-        original_write = backend.write
-
-        async def counting_write(bucket, key, data):
-            nonlocal content_writes
-            if ".skills/concurrent_skill/" in key and not key.endswith(STAGING_MARKER):
-                content_writes += 1
-            await original_write(bucket, key, data)
-
-        backend.write = counting_write  # type: ignore[method-assign]
-
-        # Launch two concurrent stage operations.
-        import asyncio as _asyncio
-        results = await _asyncio.gather(
-            stager.stage_from_filesystem(session_id, "concurrent_skill", skill_src),
-            stager.stage_from_filesystem(session_id, "concurrent_skill", skill_src),
-        )
-
-        # Both calls return the same staged_at path.
-        assert results[0] == results[1]
-
-        # Only one caller performed the copy — content files were written
-        # exactly once, not twice.
-        expected_files = 2  # SKILL.md + scripts/a.py
-        assert content_writes == expected_files, (
-            f"Expected {expected_files} content writes (single copy), "
-            f"got {content_writes} — concurrent callers both wrote"
-        )
-
     async def test_concurrent_tenant_bucket_stage_copies_once(
         self, tmp_path: Path,
     ):
@@ -693,15 +484,17 @@ class TestRedisLockIsUsedWhenProvided:
             backend=backend, storage_bucket=STORAGE_BUCKET, redis=_FakeRedis(),
         )
 
-        skill_src = tmp_path / "src" / "k"
-        skill_src.mkdir(parents=True)
-        (skill_src / "SKILL.md").write_text("b")
-        (skill_src / "a.py").write_text("a")
+        tenant = "tenant-redis-lock"
+        await backend.create_bucket(tenant)
+        await backend.write_text(tenant, "shared/skills/k/SKILL.md", "b")
+        await backend.write_text(tenant, "shared/skills/k/a.py", "a")
 
         session_id = uuid4()
         await backend.create_bucket(STORAGE_BUCKET)
 
-        await stager.stage_from_filesystem(session_id, "k", skill_src)
+        await stager.stage_from_tenant_bucket(
+            session_id, "k", tenant, "shared/skills/k",
+        )
 
         assert len(recorded_keys) == 1
         assert recorded_keys[0] == f"surogates:skill-stage:{session_id}:k"

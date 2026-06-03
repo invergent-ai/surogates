@@ -4,10 +4,11 @@ Provides endpoints for listing, viewing, creating, editing, patching,
 and deleting skills and their supporting files.  All endpoints are
 tenant-scoped via ``TenantContext``.
 
-Skills are stored on a ``StorageBackend`` (local filesystem in dev,
-MinIO/S3 in production).  Platform skills (baked into the container
-image at ``/etc/surogates/skills/``) are read-only and included in
-list/view responses.
+User and org-shared skills are stored on a ``StorageBackend`` (local
+filesystem in dev, S3 in production).  Platform skills come from the
+per-agent Surogate Hub bundle (``skills/<name>/...``) and are
+read-only — they are included in list/view responses via the bundle
+accessor, not the filesystem.
 
 ``GET /skills/{name}`` and ``GET /skills/{name}/file`` accept an
 optional ``session_id`` query parameter.  When supplied, the skill's
@@ -32,6 +33,7 @@ from surogates.api.routes._shared import (
     raise_validation,
     require_not_channel_principal,
     resolve_agent_bundle as _resolve_agent_bundle,
+    resolve_system_bundle as _resolve_system_bundle,
 )
 from surogates.storage.skill_staging import SkillStager, has_stageable_assets
 from surogates.storage.tenant import (
@@ -278,26 +280,18 @@ async def _stage_skill_for_session(
     stager = _get_skill_stager(request, storage_key_prefix=storage_key_prefix)
 
     if skill_def.source == SKILL_SOURCE_PLATFORM:
-        loader = _resource_loader(request)
-        source_dir = loader.resolve_platform_skill_dir(skill_def.name)
-        if source_dir is not None:
-            return await stager.stage_from_filesystem(
-                session_id=session_id,
-                skill_name=skill_def.name,
-                source_dir=source_dir,
+        if bundle is None:
+            logger.warning(
+                "Cannot stage platform skill '%s': no bundle available "
+                "(agent has no hub_ref configured)",
+                skill_def.name,
             )
-        if bundle is not None:
-            return await stager.stage_from_bundle(
-                session_id=session_id,
-                skill_name=skill_def.name,
-                bundle=bundle,
-            )
-        logger.warning(
-            "Cannot stage platform skill '%s': no on-disk source dir "
-            "and no bundle available",
-            skill_def.name,
+            return None
+        return await stager.stage_from_bundle(
+            session_id=session_id,
+            skill_name=skill_def.name,
+            bundle=bundle,
         )
-        return None
 
     if skill_def.source in (SKILL_SOURCE_USER, SKILL_SOURCE_ORG):
         ts = _get_tenant_storage(request, tenant)
@@ -400,9 +394,13 @@ async def list_skills(
     loader = _resource_loader(request)
     session_factory = request.app.state.session_factory
     bundle = await _resolve_agent_bundle(request)
+    system_bundle = await _resolve_system_bundle(request)
     async with session_factory() as db_session:
         all_skills = await loader.load_skills(
-            tenant, db_session=db_session, bundle=bundle,
+            tenant,
+            db_session=db_session,
+            bundle=bundle,
+            system_bundle=system_bundle,
         )
 
     summaries: list[SkillSummary] = []
@@ -445,9 +443,13 @@ async def view_skill(
     loader = _resource_loader(request)
     session_factory = request.app.state.session_factory
     bundle = await _resolve_agent_bundle(request)
+    system_bundle = await _resolve_system_bundle(request)
     async with session_factory() as db_session:
         all_skills = await loader.load_skills(
-            tenant, db_session=db_session, bundle=bundle,
+            tenant,
+            db_session=db_session,
+            bundle=bundle,
+            system_bundle=system_bundle,
         )
 
     skill_def = next((s for s in all_skills if s.name == name), None)
@@ -474,26 +476,17 @@ async def view_skill(
         if existing:
             files = await ts.list_skill_files(existing["key_prefix"])
             detail.linked_files = [f for f in files if f != "SKILL.md"]
-    elif skill_def.source == SKILL_SOURCE_PLATFORM:
-        source_dir = loader.resolve_platform_skill_dir(name)
-        if source_dir is not None:
-            # Built-in platform skill on disk.
-            detail.linked_files = [
-                f.relative_to(source_dir).as_posix()
-                for f in sorted(source_dir.rglob("*"))
-                if f.is_file() and f.name != "SKILL.md"
-            ]
-        elif bundle is not None:
-            # Bundle-backed platform skill: enumerate the bundle's
-            # ``skills/{name}/`` prefix.  SKILL.md is excluded so the
-            # list mirrors what the disk variant returns.
-            prefix = f"skills/{name}/"
-            bundle_paths = await bundle.list(prefix)
-            detail.linked_files = sorted(
-                p[len(prefix):] for p in bundle_paths
-                if p.startswith(prefix) and not p.endswith("/SKILL.md")
-                and p != prefix
-            )
+    elif skill_def.source == SKILL_SOURCE_PLATFORM and bundle is not None:
+        # Bundle-backed platform skill: enumerate the bundle's
+        # ``skills/{name}/`` prefix.  SKILL.md is excluded so the list
+        # contains only the auxiliary files that get auto-staged.
+        prefix = f"skills/{name}/"
+        bundle_paths = await bundle.list(prefix)
+        detail.linked_files = sorted(
+            p[len(prefix):] for p in bundle_paths
+            if p.startswith(prefix) and not p.endswith("/SKILL.md")
+            and p != prefix
+        )
 
     # Auto-stage the skill tree when a session is specified and there are
     # files beyond SKILL.md itself.  Authorize first: the session must
@@ -531,14 +524,14 @@ async def read_skill_file(
     workspace path instead of returning a placeholder.  Text files are
     always returned inline regardless of ``session_id``.
 
-    Platform skills (filesystem-backed) are supported in addition to
+    Platform skills (bundle-backed) are supported in addition to
     tenant-bucket-backed user/org skills.
     """
     # Reads aren't constrained to references/templates/scripts/assets —
     # the listing endpoint advertises any non-SKILL.md file (including
     # root-level docs like editing.md, LICENSE.txt). Only block path
-    # traversal here; tenant-bucket reads concatenate prefix + path, and
-    # the platform branch additionally re-checks via _is_within below.
+    # traversal here; both branches concatenate prefix + path so a
+    # ``../`` segment is the only escape worth filtering at this layer.
     if ".." in Path(path).parts:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -559,9 +552,13 @@ async def read_skill_file(
     loader = _resource_loader(request)
     session_factory = request.app.state.session_factory
     bundle = await _resolve_agent_bundle(request)
+    system_bundle = await _resolve_system_bundle(request)
     async with session_factory() as db_session:
         all_skills = await loader.load_skills(
-            tenant, db_session=db_session, bundle=bundle,
+            tenant,
+            db_session=db_session,
+            bundle=bundle,
+            system_bundle=system_bundle,
         )
     skill_def = next((s for s in all_skills if s.name == name), None)
     if skill_def is None:
@@ -595,25 +592,27 @@ async def read_skill_file(
             ),
         }
 
-    # Platform skills live on the filesystem — read them directly.
+    # Platform skills come from the per-agent Surogate Hub bundle.
     if skill_def.source == SKILL_SOURCE_PLATFORM:
-        source_dir = loader.resolve_platform_skill_dir(name)
-        if source_dir is None:
-            raise HTTPException(status_code=404, detail=f"Skill '{name}' source not found.")
-        target = source_dir / path
-        if not target.is_file() or not _is_within(target, source_dir):
+        if bundle is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Skill '{name}' source not found (no bundle).",
+            )
+        bundle_path = f"skills/{name}/{path}"
+        try:
+            content = await bundle.read_text(bundle_path)
+        except LookupError:
             raise HTTPException(
                 status_code=404,
                 detail=f"File '{path}' not found in skill '{name}'.",
             )
-        try:
-            content = target.read_text(encoding="utf-8")
-            return {"file_path": path, "content": content, "binary": False}
         except UnicodeDecodeError:
             redirect = await _redirect_to_staged(skill_def)
             if redirect is not None:
                 return redirect
             return {"file_path": path, "content": "[Binary file]", "binary": True}
+        return {"file_path": path, "content": content, "binary": False}
 
     # Tenant-bucket-backed skills (user / org-shared).
     ts = _get_tenant_storage(request, tenant)
@@ -632,17 +631,6 @@ async def read_skill_file(
         if redirect is not None:
             return redirect
         return {"file_path": path, "content": "[Binary file]", "binary": True}
-
-
-def _is_within(child: Any, parent: Any) -> bool:
-    """Return True if resolved *child* is inside resolved *parent*.
-
-    Guards the platform-skill file reader against path-traversal inputs.
-    """
-    try:
-        return child.resolve().is_relative_to(parent.resolve())
-    except (OSError, ValueError):
-        return False
 
 
 @write_router.post("/skills", response_model=SkillActionResponse, status_code=status.HTTP_201_CREATED)

@@ -94,37 +94,16 @@ See the **[MCP Proxy](proxy.md)** page for the full setup guide, including crede
 
 ## MCP Server Configuration
 
-MCP servers are configured at three layers with last-wins precedence:
+MCP servers are registered in the surogates `mcp_servers` table.  Two scopes:
 
-| Layer | Location | Managed by |
+| Scope | Row | Managed by |
 |---|---|---|
-| **Platform** | `/etc/surogates/mcp/servers.json` | Platform operator |
-| **Org** | `tenant-{org_id}/shared/mcp/servers.json` | Org admin |
-| **User** | `tenant-{org_id}/users/{user_id}/mcp/servers.json` | Individual user |
+| **Org-wide** | `org_id=<org>, user_id=NULL` | Org admin via the ops API / Studio UI |
+| **User-specific** | `org_id=<org>, user_id=<user>` | Org admin via the ops API |
 
-The `ResourceLoader` merges all three layers. User-level servers can override or disable org/platform servers by name.
+User-specific rows override org-wide rows with the same name. The MCP proxy reads from this table on every tenant's first tool-discovery call (per (org_id, user_id) tenant pool entry) — see [MCP Proxy](proxy.md).
 
-**Example platform MCP config:**
-
-```json
-{
-  "servers": {
-    "github": {
-      "transport": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
-      "env": {"GITHUB_TOKEN_REF": "github_token"},
-      "enabled": true
-    },
-    "filesystem": {
-      "transport": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
-      "enabled": true
-    }
-  }
-}
-```
+Each row carries `transport` (`stdio` or `http`), `command`/`args`/`env` (stdio), or `url` (http), an optional `credential_refs` array pointing at vault entries, and a `timeout`. Secrets must never be inlined in `env` — use `credential_refs` so the proxy resolves them via the encrypted credential vault at connect time.
 
 ## MCP Security Scanning
 

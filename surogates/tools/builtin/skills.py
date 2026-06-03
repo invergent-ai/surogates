@@ -596,21 +596,17 @@ def _resolve_skill_dir(
 ) -> Path | None:
     """Find the on-disk directory for a skill by name.
 
-    Searches user, org-shared, and platform layers in precedence order.
+    Searches user and org-shared workspace layers in precedence order.
+    Platform skills live in the per-agent Surogate Hub bundle and are
+    resolved via the bundle accessor, not the workspace filesystem.
     """
-    from surogates.tools.loader import PLATFORM_SKILLS_DIR
-
     asset_root = Path(tenant.asset_root)
     org_id = str(tenant.org_id)
     user_id = str(tenant.user_id)
-    platform_skills_dir = getattr(settings, "platform_skills_dir", None)
-    if not platform_skills_dir:
-        platform_skills_dir = PLATFORM_SKILLS_DIR
 
     search_dirs = [
         asset_root / org_id / "users" / user_id / "skills",
         asset_root / org_id / "shared" / "skills",
-        Path(platform_skills_dir),
     ]
 
     for skills_dir in search_dirs:

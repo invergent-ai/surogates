@@ -115,3 +115,36 @@ async def resolve_agent_bundle(request: Request):
             agent_id, exc_info=True,
         )
         return None
+
+
+async def resolve_system_bundle(request):
+    """Return the shared system-skills bundle or ``None``.
+
+    Mirror of :func:`resolve_agent_bundle` for the cluster-wide
+    ``platform/system-skills`` bundle.  Catalogue routes
+    (``/v1/skills``) call both so admin / Studio see the same
+    catalog the runtime will assemble at session-start.
+
+    Never raises; degrades to ``None`` when:
+
+    * ``system_bundle_cache`` is not wired on ``app.state`` (older
+      deploys that haven't picked up the wiring yet),
+    * ``platform/system-skills`` has no published ``v*`` tag (boot
+      before the operator has run ``seed-builtin-skills``),
+    * the Hub network round-trip fails — the route still renders
+      whatever the per-agent bundle and DB layers can produce.
+    """
+    cache = getattr(request.app.state, "system_bundle_cache", None)
+    if cache is None:
+        return None
+    try:
+        return await cache.get()
+    except LookupError:
+        return None
+    except Exception:  # noqa: BLE001 — Hub network failure
+        logger.warning(
+            "system bundle resolver: Hub round-trip failed; "
+            "catalog route will render without Layer 1a",
+            exc_info=True,
+        )
+        return None

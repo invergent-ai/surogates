@@ -509,7 +509,6 @@ class WebsiteSettings(BaseSettings):
 class GovernanceSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_GOVERNANCE_"}
 
-    platform_policy_path: str = "/etc/surogates/policies"
     enabled: bool = True
     transparency: TransparencySettings = Field(default_factory=TransparencySettings)
 
@@ -680,10 +679,10 @@ class Settings(BaseSettings):
     website: WebsiteSettings = Field(default_factory=WebsiteSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
 
-    # Paths — each individually configurable, each a separate K8s volume mount
-    platform_skills_dir: str = "/etc/surogates/skills"
-    platform_mcp_dir: str = "/etc/surogates/mcp"
-    platform_agents_dir: str = "/etc/surogates/agents"
+    # Tenant asset root.  Used by the per-session sandbox pods to mount
+    # workspace volumes; the platform itself no longer reads filesystem
+    # catalogs for skills / agents / MCP — those come from the Surogate
+    # Hub bundle (skills + sub-agents) and the surogates DB (MCP).
     tenant_assets_root: str = "/data/tenant-assets"
 
     # Platform (surogate-ops) API base URL + bearer token used to

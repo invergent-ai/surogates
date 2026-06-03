@@ -88,19 +88,12 @@ RUN groupadd --gid 1000 surogates \
 # no network by default (tools use their own HTTP clients, not shell).
 COPY images/worker/srt-settings.json /etc/surogates/srt-settings.json
 
-# ── Config mount points ─────────────────────────────────────────────
-# These directories are populated via K8s ConfigMap/Secret mounts.
-RUN mkdir -p /etc/surogates/policies \
-             /etc/surogates/skills \
-             /etc/surogates/tools \
-             /etc/surogates/mcp \
-             /data/tenant-assets \
+# ── Tenant assets mount point ───────────────────────────────────────
+# Populated via the workspace volume; per-session sandboxes mount their
+# slice of this directory.  Platform skills / agents / MCP configs are
+# served via the Surogate Hub bundle + DB, not from the image.
+RUN mkdir -p /data/tenant-assets \
     && chown -R surogates:surogates /data/tenant-assets
-
-# ── Built-in platform skills ────────────────────────────────────────
-# Default skills ship with the agent image. Tenant/org/user skills can
-# still override these through the normal resource-loader precedence.
-COPY skills/ /etc/surogates/skills/
 
 USER surogates
 WORKDIR /opt/surogates

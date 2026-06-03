@@ -6,12 +6,12 @@ when a coordinator spawns a worker with ``agent_type=<name>``.  Types
 are merged from four layers by
 :class:`~surogates.tools.loader.ResourceLoader`:
 
-1. Platform filesystem (``/etc/surogates/agents/``)
+1. Platform bundle (``agents/`` prefix in the per-agent Surogate Hub bundle)
 2. User bucket files (``tenant-{org}/users/{user}/agents/``)
 3. Org-wide DB rows (``agents`` table, ``user_id IS NULL``)
 4. User-specific DB rows (``agents`` table)
 
-This route handles the bucket-backed layers (2) by writing AGENT.md
+This route handles the bucket-backed layer (2) by writing AGENT.md
 files into the tenant bucket via :class:`TenantStorage`.  Platform
 agents are read-only and surface in ``GET /agents`` without a
 corresponding POST/PUT/DELETE path.  DB-overlay management is handled
