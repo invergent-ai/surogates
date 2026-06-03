@@ -190,17 +190,27 @@ class ResourceLoader:
         tenant: Any,
         db_session: Any | None = None,
         bundle: Any | None = None,
+        system_bundle: Any | None = None,
     ) -> list[SkillDef]:
-        """Merge skills from the bundle, user files, and DB layers.
+        """Merge skills from the system bundle, per-agent bundle, user
+        files, and DB layers.
 
         Layer precedence (lowest → highest):
 
-        1. Platform bundle (``skills/`` prefix in the per-agent bundle)
-        2. User bucket files (``tenant-{org}/users/{user}/skills/``)
-        3. Org-wide DB rows (``skills`` table, ``user_id IS NULL``)
-        4. User-specific DB rows (``skills`` table, ``user_id = ?``)
+        1a. System bundle (``platform/system-skills``, shared across
+            every agent in the cluster — same snapshot, no per-agent
+            copy)
+        1b. Per-agent bundle (``skills/`` prefix in the agent's Hub
+            bundle, populated by org admins via the ops attach UI)
+        2.  User bucket files (``tenant-{org}/users/{user}/skills/``)
+        3.  Org-wide DB rows (``skills`` table, ``user_id IS NULL``)
+        4.  User-specific DB rows (``skills`` table, ``user_id = ?``)
 
-        Org admin overrides (DB layers) are final.
+        Org admin overrides (DB layers) are final.  Per-agent (1b)
+        shadows system (1a) by name because the per-agent bundle is
+        passed last to ``_merge`` — see the design doc
+        ``docs/superpowers/specs/2026-06-03-system-skills-shared-bundle-design.md``
+        for the override semantics rationale.
         """
         asset_root = Path(tenant.asset_root)
         org_id = str(tenant.org_id)
@@ -211,13 +221,31 @@ class ResourceLoader:
         # string.
         user_id = tenant.user_id
 
-        # Layer 1: bundle skills (per-agent, served from Surogate Hub).
-        if bundle is not None:
-            platform = await self._load_skills_from_bundle(
-                bundle, source=SKILL_SOURCE_PLATFORM,
+        # Layer 1a: shared system-skills bundle (one snapshot for the
+        # whole cluster, served at the repo root).
+        if system_bundle is not None:
+            system = await self._load_skills_from_bundle(
+                system_bundle,
+                source=SKILL_SOURCE_PLATFORM,
+                root_prefix="",
             )
         else:
-            platform = []
+            system = []
+
+        # Layer 1b: per-agent bundle (org-attached skills under
+        # ``skills/`` in the agent's bundle repo).
+        if bundle is not None:
+            per_agent = await self._load_skills_from_bundle(
+                bundle,
+                source=SKILL_SOURCE_PLATFORM,
+                root_prefix="skills/",
+            )
+        else:
+            per_agent = []
+
+        # Per-agent wins over system on name collision because
+        # ``_merge`` keeps the last entry seen for a given name.
+        platform = self._merge(system, per_agent)
 
         # Layer 2: user bucket files
         if user_id is not None:

@@ -175,5 +175,122 @@ async def test_load_skills_from_bundle_skips_directory_marker() -> None:
 
 
 # ---------------------------------------------------------------------------
-# load_skills(bundle=..., system_bundle=...) — covered in T4 task
+# load_skills(bundle=..., system_bundle=...) — Layer 1 merge
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_load_skills_merges_system_then_per_agent() -> None:
+    """Layer 1 is ``_merge(system, per_agent)``.  Last-arg-wins-by-name
+    semantics mean an org-attached skill with the same name as a
+    system one shadows the system version — matching the spec's
+    override rule (admin can shadow, cannot remove)."""
+
+    system = _FakeBundle(
+        {
+            "brainstorming/SKILL.md": _skill_md("brainstorming", "system"),
+            "writing-plans/SKILL.md": _skill_md("writing-plans", "system"),
+        }
+    )
+    per_agent = _FakeBundle(
+        {
+            # Same name as a system skill — should win.
+            "skills/brainstorming/SKILL.md": _skill_md(
+                "brainstorming", "agent-override",
+            ),
+            # Brand-new skill — only the per-agent bundle has it.
+            "skills/extra/SKILL.md": _skill_md("extra", "agent-only"),
+        }
+    )
+    loader = ResourceLoader()
+
+    skills = await loader.load_skills(
+        _tenant(),
+        db_session=None,
+        bundle=per_agent,
+        system_bundle=system,
+    )
+
+    by_name = {s.name: s.description for s in skills}
+    assert by_name["brainstorming"] == "agent-override"
+    assert by_name["writing-plans"] == "system"
+    assert by_name["extra"] == "agent-only"
+
+
+@pytest.mark.asyncio
+async def test_load_skills_system_bundle_only() -> None:
+    """Agents that have not had a per-agent bundle published yet still
+    see system skills — Layer 1 collapses to the system bundle alone."""
+
+    system = _FakeBundle(
+        {"brainstorming/SKILL.md": _skill_md("brainstorming", "system")},
+    )
+    loader = ResourceLoader()
+
+    skills = await loader.load_skills(
+        _tenant(),
+        db_session=None,
+        bundle=None,
+        system_bundle=system,
+    )
+
+    assert [s.name for s in skills] == ["brainstorming"]
+    assert all(s.source == SKILL_SOURCE_PLATFORM for s in skills)
+
+
+@pytest.mark.asyncio
+async def test_load_skills_per_agent_only() -> None:
+    """The flip side: no system bundle published yet means the older
+    behaviour (per-agent only) is preserved verbatim."""
+
+    per_agent = _FakeBundle(
+        {"skills/foo/SKILL.md": _skill_md("foo", "agent-attached")},
+    )
+    loader = ResourceLoader()
+
+    skills = await loader.load_skills(
+        _tenant(),
+        db_session=None,
+        bundle=per_agent,
+        system_bundle=None,
+    )
+
+    assert [s.name for s in skills] == ["foo"]
+
+
+@pytest.mark.asyncio
+async def test_load_skills_no_bundles_returns_empty() -> None:
+    """Boot path: when neither bundle is wired the loader yields an
+    empty Layer 1 rather than crashing.  Layers 2-4 are independent
+    and exercised in ``test_loader_agents.py``."""
+
+    loader = ResourceLoader()
+
+    skills = await loader.load_skills(
+        _tenant(),
+        db_session=None,
+        bundle=None,
+        system_bundle=None,
+    )
+
+    assert skills == []
+
+
+@pytest.mark.asyncio
+async def test_load_skills_system_bundle_kwarg_is_keyword_only_default_none() -> None:
+    """``system_bundle`` defaults to ``None`` so older call sites that
+    only pass ``bundle=`` keep working — important for the test suite
+    and any code path that hasn't been updated yet."""
+
+    per_agent = _FakeBundle(
+        {"skills/foo/SKILL.md": _skill_md("foo", "agent-attached")},
+    )
+    loader = ResourceLoader()
+
+    # No ``system_bundle`` kwarg at all — must not raise and must
+    # produce the same result as passing ``system_bundle=None``.
+    skills = await loader.load_skills(
+        _tenant(), db_session=None, bundle=per_agent,
+    )
+
+    assert [s.name for s in skills] == ["foo"]
