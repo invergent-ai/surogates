@@ -275,7 +275,8 @@ operations go through the API server.
 
 | Data | Storage | Location | Accessed by |
 |---|---|---|---|
-| Platform skills | Surogate Hub | per-agent bundle, `skills/` prefix | API server + Worker (Hub SDK) |
+| System skills | Surogate Hub | `platform/system-skills` (one repo, every agent) | API server + Worker (Hub SDK, `SystemBundleCache`) |
+| Per-agent platform skills | Surogate Hub | per-agent bundle, `skills/` prefix | API server + Worker (Hub SDK) |
 | Org/user skills + experts | Garage | `tenant-{org_id}` bucket | API server (S3 API) |
 | Memory | Garage | `tenant-{org_id}` bucket | API server (S3 API) |
 | Workspace files | Garage | `{agent_bucket}/sessions/{session_id}/` | Sandbox (s3fs-fuse), API server (S3 API) |
@@ -288,6 +289,6 @@ operations go through the API server.
 
 **Why not one bucket per tenant?** The sandbox runs untrusted LLM-generated code. If it has credentials for the full tenant bucket, a prompt injection can access other sessions' data.
 
-**Why not database for skills/memory?** Skills have binary supporting files. Platform skills are baked into the container image. Workspace files are large and binary. The file-shaped layout keeps assets human-readable and versionable.
+**Why not database for skills/memory?** Skills have binary supporting files. Platform skills live in Hub repos and are versioned via tags (`v1`, `v2`, ...); the system bundle is published by `surogate-ops seed-builtin-skills`, the per-agent bundle is populated by the ops bundle publisher. Workspace files are large and binary. The file-shaped layout keeps assets human-readable and versionable.
 
 See [Storage](../storage/index.md) for detailed bucket layout and lifecycle.

@@ -117,24 +117,49 @@ The following `metadata.hermes.*` keys are recognised:
 Skills are loaded from four layers. Higher layers override lower layers by name:
 
 ```
-Layer 1: Platform bundle  per-agent Hub bundle, skills/<name>/SKILL.md       (lowest priority)
-Layer 2: User files       tenant-{org_id}/users/{user_id}/skills/
-Layer 3: Org (DB)         skills table, org-wide
-Layer 4: User (DB)         skills table, user-specific                       (highest priority)
+Layer 1a: System bundle    platform/system-skills Hub repo, <name>/SKILL.md    (lowest priority)
+Layer 1b: Per-agent bundle per-agent Hub bundle, skills/<name>/SKILL.md
+Layer 2:  User files        tenant-{org_id}/users/{user_id}/skills/
+Layer 3:  Org (DB)          skills table, org-wide
+Layer 4:  User (DB)         skills table, user-specific                       (highest priority)
 ```
 
 | Layer | Who manages it | How | Priority |
 |---|---|---|---|
-| Platform bundle | Org admin | Attaches a Hub-published skill to the agent; the ops bundle publisher copies the skill's Hub repo subtree under `skills/<name>/` in the agent's bundle | Lowest |
+| System bundle | Platform operator | `surogate-ops seed-builtin-skills` syncs a local skills tree to `platform/system-skills` on Hub; every shared-runtime agent reads from the same snapshot | Lowest |
+| Per-agent bundle | Org admin | Attaches a Hub-published skill to a specific agent; the ops bundle publisher copies the skill's Hub repo subtree under `skills/<name>/` in the agent's bundle | |
 | User files | End user | Through the agent's `skill_manage` tool during a session | |
 | Org (DB) | Org admin | `POST /v1/skills` via the API | |
 | User (DB) | Org admin | `POST /v1/skills` with `user_id` via the API | Highest |
 
 Org admin overrides are final -- an end user cannot override a skill that the org admin has set. This ensures the org admin retains control over what skills are available and how they behave. Setting `enabled: false` in a higher layer disables the skill entirely.
 
+### Layer 1a vs 1b: system vs per-agent
+
+The two Layer 1 bundles solve different problems:
+
+- **System bundle (`platform/system-skills`)** — one Hub repo shared by every shared-runtime agent in the cluster. Each `SystemBundleCache` holds a single snapshot; the runtime resolves the largest `v*` tag at session start. Used for built-ins every agent should have (brainstorming, executing-plans, docx, pptx, ...). Edited via the `surogate-ops seed-builtin-skills` CLI, not the admin API.
+- **Per-agent bundle** — the agent's own Hub repo (`agent-{agent_id}`). Populated by org admins via the ops attach UI; the bundle publisher copies each attached skill's Hub repo subtree under `skills/<name>/`. Lets a customer ship skills only their own agents see.
+
+An org-attached skill with the same name as a system skill **shadows** the system version for that agent. The system row is never removed from the catalog — an admin who needs a smaller skill set authors a tenant-scoped variant with the same name and attaches it.
+
 ### Bundle Layout
 
-The per-agent Hub bundle (Layer 1) carries one subdirectory per attached skill, copied verbatim from that skill's source Hub repo:
+The system-skills repo (Layer 1a) is the catalog itself — root-level directories are skills, no nested `skills/`:
+
+```
+platform/system-skills/                       # Hub repo, tagged v1, v2, ...
+  brainstorming/
+    SKILL.md
+    references/...
+  executing-plans/
+    SKILL.md
+  docx/
+    SKILL.md
+    scripts/...
+```
+
+The per-agent Hub bundle (Layer 1b) carries one subdirectory per attached skill, copied verbatim from that skill's source Hub repo, plus the agent's `SOUL.md`:
 
 ```
 agent-{agent_id}/                             # Hub repo for this agent
