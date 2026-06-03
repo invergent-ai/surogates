@@ -423,21 +423,31 @@ class ResourceLoader:
         return skills
 
     async def _load_skills_from_bundle(
-        self, bundle: Any, *, source: str,
+        self,
+        bundle: Any,
+        *,
+        source: str,
+        root_prefix: str = "skills/",
     ) -> list[SkillDef]:
-        """read platform skills from the agent's
-        Hub-backed bundle.
+        """Read platform skills from a Hub-backed bundle.
 
-        Iterates ``bundle/skills/*/SKILL.md`` and constructs the same
-        SkillDef objects the on-disk loader produces.  Layout
-        mirrors the directory-based on-disk shape; the flat-legacy
-        layout is not supported in bundles.
+        ``root_prefix`` selects where in the bundle the skill catalog
+        lives.  Per-agent bundles store skills under ``skills/<name>/``
+        (default).  The shared system-skills bundle
+        (``platform/system-skills``) stores them at the repo root, so
+        callers pass ``""``.
+
+        Iterates ``<root_prefix><name>/SKILL.md`` and builds the same
+        :class:`SkillDef` objects the on-disk loader produces.  A Hub
+        failure on ``list`` does not propagate — Layer 1 falls back to
+        an empty list so the rest of the layers still resolve.
         """
         try:
-            paths = await bundle.list("skills/")
+            paths = await bundle.list(root_prefix)
         except Exception:
             logger.exception(
-                "Failed to list bundle skills/; falling back to empty layer 1",
+                "Failed to list bundle '%s'; falling back to empty Layer 1",
+                root_prefix or "<root>",
             )
             return []
 
@@ -446,8 +456,8 @@ class ResourceLoader:
         for path in paths:
             if not path.endswith("/SKILL.md"):
                 continue
-            # bundle/skills/<dir>/SKILL.md → <dir>
-            inner = path[len("skills/"):-len("/SKILL.md")]
+            # ``<root_prefix><dir>/SKILL.md`` → ``<dir>``
+            inner = path[len(root_prefix):-len("/SKILL.md")]
             if not inner:
                 continue
             try:
