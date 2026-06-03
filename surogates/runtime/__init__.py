@@ -31,6 +31,10 @@ from surogates.runtime.resolver import (
     build_agent_runtime_context,
 )
 from surogates.runtime.slug_cache import SlugResolverCache
+from surogates.runtime.system_bundle_cache import (
+    SYSTEM_SKILLS_REPO,
+    SystemBundleCache,
+)
 from surogates.runtime.turn_gate import TurnConcurrencyGate, TurnGateBusy
 from surogates.runtime.worker_resolver import (
     AgentDisabledError,
@@ -55,7 +59,9 @@ __all__ = [
     "PlatformClient",
     "RedisLeaderLock",
     "RuntimeConfigCache",
+    "SYSTEM_SKILLS_REPO",
     "SlugResolverCache",
+    "SystemBundleCache",
     "TurnConcurrencyGate",
     "TurnGateBusy",
     "agent_runtime_context_dep",
