@@ -5,7 +5,7 @@ import { ChatThread } from "./components/chat/chat-thread";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { WorkspacePanel } from "./components/workspace/workspace-panel";
 import { cn } from "./lib/utils";
-import { isScheduledRunSession } from "./lib/sessions";
+import { readOnlyReasonForSession } from "./lib/sessions";
 import { useAgentChatRuntime } from "./runtime/use-agent-chat-runtime";
 import type {
   AgentChatAdapter,
@@ -84,11 +84,9 @@ export function AgentChat({
   useEffect(() => {
     setShowWorkspace(runtime.viewMode === "expert");
   }, [runtime.viewMode]);
-  const isReadOnlySession = isScheduledRunSession(runtime.session);
-  const effectiveDisabled = disabled || isReadOnlySession;
-  const disabledReason = isReadOnlySession
-    ? "Scheduled run is read-only"
-    : undefined;
+  const readOnly = readOnlyReasonForSession(runtime.session);
+  const effectiveDisabled = disabled || readOnly.readOnly;
+  const disabledReason = readOnly.reason;
   const browserState = runtime.state.browser;
   // A "closed" browser state is functionally the same as no browser — the
   // BrowserPane would otherwise render an empty "preview unavailable" panel.
