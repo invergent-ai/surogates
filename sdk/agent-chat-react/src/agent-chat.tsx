@@ -28,6 +28,15 @@ export interface AgentChatProps {
    * their toast system; the SDK does not surface these on its own.
    */
   onComposerError?: (err: ChatComposerError) => void;
+  /**
+   * Per-agent capability flag.  When true, the composer surfaces the
+   * ``/deep-research`` slash command in its builtin menu.  Off by
+   * default; the host (Studio) reads it from the agent record and
+   * passes it through.  Wired this way (not via the runtime) because
+   * the SDK has no notion of the agent's settings -- the host owns
+   * that domain.
+   */
+  deepResearchEnabled?: boolean;
 }
 
 // CSS variable controlling the desktop right-stack width. Inlined as a style
@@ -45,6 +54,7 @@ export function AgentChat({
   onMessagesChange,
   disabled,
   onComposerError,
+  deepResearchEnabled = false,
 }: AgentChatProps) {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   // On phones the chat and workspace panes don't fit side-by-side. A
@@ -225,6 +235,7 @@ export function AgentChat({
               canShowWorkspace={workspaceAvailable}
               viewMode={runtime.viewMode}
               onViewModeChange={runtime.setViewMode}
+              deepResearchEnabled={deepResearchEnabled}
             />
           </div>
           {rightStackVisible && (

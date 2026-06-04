@@ -121,6 +121,10 @@ interface ChatThreadProps {
   // hides the toggle and the thread defaults to Simple internally.
   viewMode?: "simple" | "expert";
   onViewModeChange?: (mode: "simple" | "expert") => void;
+
+  // When true, the composer's slash menu includes ``/deep-research``.
+  // Forwarded as-is to ChatComposer.
+  deepResearchEnabled?: boolean;
 }
 
 // ── Timeline item types ──────────────────────────────────────────────
@@ -1898,6 +1902,7 @@ export function ChatThread({
   canShowWorkspace = false,
   viewMode = "simple",
   onViewModeChange,
+  deepResearchEnabled = false,
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
   const awaitingInput = useMemo(() => isAwaitingUserInput(messages), [messages]);
@@ -2077,6 +2082,7 @@ export function ChatThread({
             canShowWorkspace={canShowWorkspace}
             viewMode={viewMode}
             onViewModeChange={onViewModeChange}
+            deepResearchEnabled={deepResearchEnabled}
           />
         )}
       </div>
