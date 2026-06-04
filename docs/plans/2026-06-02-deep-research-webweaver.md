@@ -21,8 +21,8 @@ Updated before each commit. `[x]` done · `[~]` in progress · `[ ]` not started
 - [x] Task 5a — Planner + writer `AGENT.md` files packaged with the ops wheel
 - [x] Task 5b — `Agent.deep_research_enabled` column + API surface
 - [x] Task 5c — Bundle publisher conditionally uploads the planner/writer subtree
-- [~] Task 5d — Studio: "Capabilities" section in Identity tab with the toggle *(in progress)*
-- [ ] Task 6 — Manual end-to-end smoke (planner → writer)
+- [x] Task 5d — Studio: "Capabilities" section in Identity tab with the toggle
+- [ ] Task 6 — Manual end-to-end smoke (planner → writer) *(user-driven verification)*
 - [ ] Task 7 — Collect research sources in runtime state
 - [ ] Task 8 — Citation text component (`[S#]` linkification)
 - [ ] Task 9 — Research tool renderers (outline + memory)
