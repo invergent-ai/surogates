@@ -2087,6 +2087,7 @@ class AgentHarness:
                     saga=saga,
                     log_policy_allowed=self._log_policy_allowed,
                     tool_guardrails=tool_guardrails,
+                    bundle=self._bundle,
                 )
 
             def _reset_streaming_executor() -> Callable[[dict[str, Any]], None]:
@@ -2726,6 +2727,7 @@ class AgentHarness:
                     vision_model=self._vision_model,
                     saga=saga,
                     log_policy_allowed=self._log_policy_allowed,
+                    bundle=self._bundle,
                 )
 
             dynamic_loop_wait_done = self._dynamic_loop_wait_succeeded(

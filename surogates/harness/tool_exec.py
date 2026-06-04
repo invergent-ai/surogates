@@ -600,6 +600,7 @@ async def execute_tool_calls(
     saga: SagaOrchestrator | None = None,
     log_policy_allowed: bool = False,
     tool_guardrails: ToolGuardrails | None = None,
+    bundle: Any | None = None,
 ) -> list[dict]:
     """Execute tool calls, choosing parallel vs sequential.
 
@@ -649,6 +650,7 @@ async def execute_tool_calls(
             vision_model=vision_model,
             tool_guardrails=tool_guardrails,
             log_policy_allowed=log_policy_allowed,
+            bundle=bundle,
         )
     return await execute_tool_calls_sequential(
         tool_calls,
@@ -675,6 +677,7 @@ async def execute_tool_calls(
         saga=saga,
         log_policy_allowed=log_policy_allowed,
         tool_guardrails=tool_guardrails,
+        bundle=bundle,
     )
 
 
@@ -704,6 +707,7 @@ async def execute_tool_calls_sequential(
     saga: SagaOrchestrator | None = None,
     log_policy_allowed: bool = False,
     tool_guardrails: ToolGuardrails | None = None,
+    bundle: Any | None = None,
 ) -> list[dict]:
     """Execute tool calls one at a time, emitting events for each."""
     results: list[dict] = []
@@ -754,6 +758,7 @@ async def execute_tool_calls_sequential(
             vision_model=vision_model,
             saga=saga,
             log_policy_allowed=log_policy_allowed,
+            bundle=bundle,
         )
         if tool_guardrails is not None:
             after = tool_guardrails.after_call(
@@ -800,6 +805,7 @@ async def execute_tool_calls_concurrent(
     vision_model: str = "",
     tool_guardrails: ToolGuardrails | None = None,
     log_policy_allowed: bool = False,
+    bundle: Any | None = None,
 ) -> list[dict]:
     """Execute tool calls concurrently using asyncio.gather.
 
@@ -857,6 +863,7 @@ async def execute_tool_calls_concurrent(
                 vision_model=vision_model,
                 _parent_trace=parent_trace,
                 log_policy_allowed=log_policy_allowed,
+                bundle=bundle,
             )
 
     # Pre-pass: apply ``before_call`` sequentially so guardrail blocking
@@ -955,6 +962,7 @@ async def execute_single_tool(
     _parent_trace: Any | None = None,
     saga: SagaOrchestrator | None = None,
     log_policy_allowed: bool = False,
+    bundle: Any | None = None,
 ) -> dict:
     """Execute a single tool call: emit events, dispatch, return result message.
 
@@ -1312,6 +1320,7 @@ async def execute_single_tool(
                 tool_call_id=tool_call_id,
                 lease_token=lease.lease_token,
                 session_config=session.config,
+                bundle=bundle,
             )
     except KeyError:
         tool_failed = True

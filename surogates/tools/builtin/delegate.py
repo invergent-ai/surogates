@@ -237,6 +237,7 @@ async def _delegate_handler(
     budget = kwargs.get("budget")
     session_factory = kwargs.get("session_factory")
     memory_manager = kwargs.get("memory_manager")
+    bundle = kwargs.get("bundle")
 
     if session_store is None:
         return json.dumps({"error": "session_store not available for delegation"})
@@ -281,6 +282,7 @@ async def _delegate_handler(
             tenant=tenant,
             session_factory=session_factory,
             memory_manager=memory_manager,
+            bundle=bundle,
         )
         for task in tasks
     ], return_exceptions=False)
@@ -304,6 +306,7 @@ async def _run_single_delegation(
     tenant: Any,
     session_factory: Any,
     memory_manager: Any,
+    bundle: Any | None = None,
 ) -> str:
     """Spawn one child, poll it, emit lifecycle events, and return its result."""
     goal: str = task["goal"]
@@ -319,7 +322,9 @@ async def _run_single_delegation(
     if agent_type:
         from surogates.harness.agent_resolver import resolve_agent_by_name
         agent_def = await resolve_agent_by_name(
-            agent_type, tenant, session_factory=session_factory,
+            agent_type, tenant,
+            session_factory=session_factory,
+            bundle=bundle,
         )
         if agent_def is None:
             return json.dumps({
