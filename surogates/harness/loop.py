@@ -630,6 +630,16 @@ def _should_notify_parent_on_completion(session: Any) -> bool:
 # Default TTL (seconds) for lease acquisition and renewal.
 _LEASE_TTL_SECONDS: int = 60
 
+# Per-call ceiling for any pre-wake step that touches Hub (bundle
+# list / read_text via ``resolve_agent_def``).  Without this an
+# unhealthy Hub silently strands sessions: the worker hangs in the
+# pre-wake setup, the lease never gets acquired, the orphan sweeper
+# re-enqueues every 60s, and the next pickup hangs on the same call.
+# Surfacing as a ``TimeoutError`` turns the next failure into a
+# visible ``harness.crash`` (category=timeout) instead of an invisible
+# zombie loop.
+_PRE_WAKE_HUB_TIMEOUT_SECONDS: float = 30.0
+
 # Renewal cadence.  Time-based (not iteration-based) so a long-running
 # iteration (e.g. slow LLM call, streaming fallback) cannot let the lease
 # expire and get stolen by another worker.  Must be well under
@@ -1494,65 +1504,100 @@ class AgentHarness:
         if env_streaming in ("0", "false", "no"):
             self._streaming_enabled = False
 
-        # Connection health: proactively clean up dead connections before
-        # making any LLM requests.
+        # State declared up front so the except/finally blocks below can
+        # reference them defensively: a crash in the pre-wake setup
+        # leaves session/lease/renewal_task as None and we must not
+        # blow up the cleanup path.
+        session: Session | None = None
+        lease: Any | None = None
+        renewal_task: asyncio.Task[None] | None = None
+
         try:
-            await cleanup_dead_connections(self._llm)
-        except Exception:
-            logger.debug("Connection health cleanup failed", exc_info=True)
+            # Connection health: proactively clean up dead connections
+            # before making any LLM requests.  Wrapped in its own
+            # try because a stale-connection sweep failure should not
+            # abort the wake.
+            try:
+                await cleanup_dead_connections(self._llm)
+            except Exception:
+                logger.debug(
+                    "Connection health cleanup failed", exc_info=True,
+                )
 
-        # 1. Fetch session metadata.
-        session = await self._store.get_session(session_id)
-
-        # Bail out if the session was already paused/completed/failed before
-        # this wake cycle — prevents re-running a session the user stopped.
-        if session.status in ("paused", "completed", "failed"):
-            logger.info(
-                "Session %s: status is '%s', skipping wake",
-                session_id,
-                session.status,
-            )
-            return
-
-        # Resolve the sub-agent type (if any) and hydrate session config
-        # with its presets.  Mutation is scoped to this wake cycle only —
-        # the DB row is not modified.  The resolved def is also pushed to
-        # the prompt builder so the identity section reflects the active
-        # agent type.
-        active_agent_def = await resolve_agent_def(
-            session, self._tenant,
-            session_factory=self._session_factory,
-            bundle=self._bundle,
-        )
-        if active_agent_def is not None:
-            apply_agent_def_to_session(session, active_agent_def)
-        self._prompt.set_agent_def(active_agent_def)
-
-        # Honour per-session streaming config.
-        if not session.config.get("streaming", True):
-            self._streaming_enabled = False
-
-        # 2. Acquire exclusive lease -- return silently if another worker holds it.
-        lease = await self._store.try_acquire_lease(
-            session_id, self._worker_id, ttl_seconds=_LEASE_TTL_SECONDS,
-        )
-        if lease is None:
+            # 1. Fetch session metadata.
             logger.debug(
-                "Session %s: lease held by another worker, skipping",
-                session_id,
+                "wake step=fetch_session session=%s", session_id,
             )
-            return "lease_held"
+            session = await self._store.get_session(session_id)
 
-        # Start the background lease renewal task alongside the main loop.
-        # Cancelled in the ``finally`` block below so the lease renews
-        # regardless of how long any single iteration takes.
-        renewal_task = asyncio.create_task(
-            self._renew_lease_forever(session_id, lease.lease_token),
-            name=f"lease-renewal-{session_id}",
-        )
+            # Bail out if the session was already paused/completed/failed
+            # before this wake cycle -- prevents re-running a session
+            # the user stopped.
+            if session.status in ("paused", "completed", "failed"):
+                logger.info(
+                    "Session %s: status is '%s', skipping wake",
+                    session_id,
+                    session.status,
+                )
+                return
 
-        try:
+            # Resolve the sub-agent type (if any) and hydrate session
+            # config with its presets.  Wrapped in ``asyncio.wait_for``
+            # because this step touches Hub via the bundle
+            # (``bundle.list("agents/")`` + ``bundle.read_text(...)``);
+            # an unhealthy Hub used to silently strand sessions here
+            # with no event, no log, no recovery beyond the orphan
+            # sweeper re-enqueueing forever.  A timeout surfaces the
+            # next hang as a ``harness.crash`` event with
+            # ``error_category=timeout``.
+            logger.debug(
+                "wake step=resolve_agent_def session=%s timeout=%.0fs",
+                session_id, _PRE_WAKE_HUB_TIMEOUT_SECONDS,
+            )
+            active_agent_def = await asyncio.wait_for(
+                resolve_agent_def(
+                    session, self._tenant,
+                    session_factory=self._session_factory,
+                    bundle=self._bundle,
+                ),
+                timeout=_PRE_WAKE_HUB_TIMEOUT_SECONDS,
+            )
+            if active_agent_def is not None:
+                apply_agent_def_to_session(session, active_agent_def)
+            self._prompt.set_agent_def(active_agent_def)
+
+            # Honour per-session streaming config.
+            if not session.config.get("streaming", True):
+                self._streaming_enabled = False
+
+            # 2. Acquire exclusive lease -- return silently if another
+            # worker holds it.
+            logger.debug(
+                "wake step=try_acquire_lease session=%s", session_id,
+            )
+            lease = await self._store.try_acquire_lease(
+                session_id, self._worker_id, ttl_seconds=_LEASE_TTL_SECONDS,
+            )
+            if lease is None:
+                logger.debug(
+                    "Session %s: lease held by another worker, skipping",
+                    session_id,
+                )
+                return "lease_held"
+
+            # Start the background lease renewal task alongside the
+            # main loop.  Cancelled in the ``finally`` block below so
+            # the lease renews regardless of how long any single
+            # iteration takes.
+            renewal_task = asyncio.create_task(
+                self._renew_lease_forever(session_id, lease.lease_token),
+                name=f"lease-renewal-{session_id}",
+            )
+
             # 3. Retrieve the harness cursor and the full event history.
+            logger.debug(
+                "wake step=load_events session=%s", session_id,
+            )
             cursor = await self._store.get_harness_cursor(session_id)
             all_events = await self._store.get_events(session_id)
 
@@ -1746,8 +1791,13 @@ class AgentHarness:
                     "Failed to emit HARNESS_CRASH event for session %s",
                     session_id,
                 )
-            # Notify parent if this is a worker session.
-            if session.parent_id is not None:
+            # Notify parent if this is a worker session.  ``session`` is
+            # ``None`` when the crash happened in the pre-wake setup
+            # (e.g. a Hub timeout during ``resolve_agent_def``) -- the
+            # row wasn't even fetched.  Skip the parent notification in
+            # that case; the parent's delegation poll will time out
+            # normally and the next pickup retries the wake.
+            if session is not None and session.parent_id is not None:
                 from surogates.harness.worker_notify import notify_parent_on_failure
                 try:
                     await notify_parent_on_failure(
@@ -1764,12 +1814,16 @@ class AgentHarness:
                     logger.debug("Failed to notify parent on crash", exc_info=True)
             raise
         finally:
-            # Stop the background renewal task before touching the lease.
-            renewal_task.cancel()
-            try:
-                await renewal_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            # Stop the background renewal task before touching the
+            # lease.  ``None`` when the wake bailed before the lease
+            # was acquired (status=paused short-circuit, lease held
+            # by another worker, or a pre-wake crash).
+            if renewal_task is not None:
+                renewal_task.cancel()
+                try:
+                    await renewal_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
             # Best-effort drain of fire-and-forget background tasks (title
             # generation, etc.) so they don't get cancelled mid-LLM-call when
@@ -1778,13 +1832,17 @@ class AgentHarness:
             # cancelled so lease release isn't delayed by a hung task.
             await self._drain_background_tasks(session_id)
 
-            # 10. Always release the lease.
-            try:
-                await self._store.release_lease(session_id, lease.lease_token)
-            except Exception:
-                logger.warning(
-                    "Failed to release lease for session %s", session_id,
-                )
+            # Release the lease only if we acquired one.  Skipping when
+            # ``lease is None`` mirrors the renewal_task gate above.
+            if lease is not None:
+                try:
+                    await self._store.release_lease(
+                        session_id, lease.lease_token,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to release lease for session %s", session_id,
+                    )
 
     # ------------------------------------------------------------------
     # Core LLM loop
