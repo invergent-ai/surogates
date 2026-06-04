@@ -85,55 +85,6 @@ async def test_platform_cleanup_skips_agents_with_no_id():
 
 
 @pytest.mark.asyncio
-async def test_platform_idle_reset_iterates_and_collects_outcomes():
-    from surogates.jobs.platform_idle_reset import (
-        run_platform_idle_reset,
-    )
-
-    seen: list[str] = []
-
-    async def idle_reset(agent):
-        seen.append(agent["id"])
-        return {"reset_count": 2}
-
-    outcomes = await run_platform_idle_reset(
-        agent_iter=lambda: _yield_agents([
-            {"id": "a-1"}, {"id": "a-2"},
-        ]),
-        idle_reset_for_agent=idle_reset,
-    )
-
-    assert seen == ["a-1", "a-2"]
-    assert outcomes == {
-        "a-1": {"reset_count": 2},
-        "a-2": {"reset_count": 2},
-    }
-
-
-@pytest.mark.asyncio
-async def test_platform_idle_reset_per_agent_failure_isolated():
-    from surogates.jobs.platform_idle_reset import (
-        run_platform_idle_reset,
-    )
-
-    async def idle_reset(agent):
-        if agent["id"] == "a-2":
-            raise RuntimeError("sandbox down")
-        return {"reset_count": 1}
-
-    outcomes = await run_platform_idle_reset(
-        agent_iter=lambda: _yield_agents([
-            {"id": "a-1"}, {"id": "a-2"}, {"id": "a-3"},
-        ]),
-        idle_reset_for_agent=idle_reset,
-    )
-
-    assert outcomes["a-1"] == {"reset_count": 1}
-    assert "error" in outcomes["a-2"]
-    assert outcomes["a-3"] == {"reset_count": 1}
-
-
-@pytest.mark.asyncio
 async def test_platform_cleanup_main_uses_defaults_when_no_args():
     """main() with no kwargs uses the NotImplementedError-raising
     defaults; we don't exercise them (the Plan 8 follow-up

@@ -479,11 +479,9 @@ class WebsiteSettings(BaseSettings):
     # Visitor message cap.  Anonymous browser visitors warrant a
     # tighter ceiling than authenticated channels; this is the only
     # cap the route enforces today.  ``0`` means "no cap".  Token-cap
-    # and idle-policy knobs are deliberately not exposed here — the
-    # platform-wide :class:`SessionResetSettings` already covers idle
-    # for every channel, and there is no per-iteration token enforcer
-    # in the worker yet, so adding inert config fields would be
-    # misleading.
+    # and idle-policy knobs are deliberately not exposed here — there
+    # is no per-iteration token enforcer in the worker yet, so adding
+    # inert config fields would be misleading.
     session_message_cap: int = 0
 
 
@@ -498,39 +496,6 @@ class GovernanceSettings(BaseSettings):
     # enable when a complete governance decision trail is required for
     # compliance audit.
     log_allowed: bool = False
-
-
-class SessionResetSettings(BaseSettings):
-    """Session idle reset policy.
-
-    When a session has been inactive beyond the configured threshold, the
-    platform runs a temporary LLM agent that reviews the conversation
-    transcript and saves important facts to memory, then tears down the
-    sandbox pod.  The session itself (events, counters, cursor) is left
-    untouched — the user can come back and continue at any time.
-
-    Ported from Hermes ``SessionResetPolicy``.
-
-    Modes:
-    - ``"idle"``: Reset after *idle_minutes* of inactivity.
-    - ``"daily"``: Reset at a specific hour each day.
-    - ``"both"``: Whichever triggers first (daily boundary OR idle timeout).
-    - ``"none"``: Never auto-reset.
-    """
-
-    model_config = {"env_prefix": "SUROGATES_SESSION_RESET_"}
-
-    enabled: bool = False
-    mode: Literal["idle", "daily", "both", "none"] = "idle"
-    at_hour: int = 4
-    idle_minutes: int = 1440
-    flush_max_iterations: int = 8
-    flush_max_retries: int = 3
-    watcher_interval_seconds: int = 300
-    notify: bool = True
-    notify_exclude_channels: list[str] = Field(
-        default_factory=lambda: ["webhook"],
-    )
 
 
 class SagaSettings(BaseSettings):
@@ -596,7 +561,6 @@ class Settings(BaseSettings):
     governance: GovernanceSettings = Field(default_factory=GovernanceSettings)
     saga: SagaSettings = Field(default_factory=SagaSettings)
     outcomes: OutcomeSettings = Field(default_factory=OutcomeSettings)
-    session_reset: SessionResetSettings = Field(default_factory=SessionResetSettings)
     scheduled_sessions: ScheduledSessionSettings = Field(
         default_factory=ScheduledSessionSettings,
     )
