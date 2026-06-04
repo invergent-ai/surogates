@@ -19,8 +19,8 @@ Updated before each commit. `[x]` done · `[~]` in progress · `[ ]` not started
 - [x] Task 3 — `research_memory` / `research_outline` builtin tools
 - [x] Task 4 — Wire research tools into the builtin registry
 - [x] Task 5a — Planner + writer `AGENT.md` files packaged with the ops wheel
-- [~] Task 5b — `Agent.deep_research_enabled` column + API surface *(in progress)*
-- [ ] Task 5c — Bundle publisher conditionally uploads the planner/writer subtree
+- [x] Task 5b — `Agent.deep_research_enabled` column + API surface
+- [~] Task 5c — Bundle publisher conditionally uploads the planner/writer subtree *(in progress)*
 - [ ] Task 5d — Studio: "Capabilities" section in Identity tab with the toggle
 - [ ] Task 6 — Manual end-to-end smoke (planner → writer)
 - [ ] Task 7 — Collect research sources in runtime state
