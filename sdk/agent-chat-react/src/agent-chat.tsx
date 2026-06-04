@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AgentChatAdapterProvider } from "./adapter-context";
 import { BrowserPane } from "./components/browser/browser-pane";
 import { ChatThread } from "./components/chat/chat-thread";
@@ -90,6 +90,25 @@ export function AgentChat({
   const readOnly = readOnlyReasonForSession(runtime.session);
   const effectiveDisabled = disabled || readOnly.readOnly;
   const disabledReason = readOnly.reason;
+  // The TurnSummaryCard renders an LLM-generated recap of the just-
+  // completed turn.  Suppress it on:
+  //   * sub-agent sessions (already gated below) -- nobody is reading
+  //     the recap in those, the parent's LLM polls the final result.
+  //   * root sessions that orchestrate a deep-research workflow.  The
+  //     base agent's "turn" there is a single ``delegate_task`` call;
+  //     the final artifact IS the recap.  An extra summary card just
+  //     repeats the work in a less useful form.
+  const orchestratesDeepResearch = useMemo(
+    () => runtime.messages.some(
+      (m) => m.toolCalls?.some(
+        (tc) => tc.toolName === "delegate_task"
+          && delegateTaskTargets(tc.args).includes("deep-research"),
+      ),
+    ),
+    [runtime.messages],
+  );
+  const hideTurnSummary =
+    isSubAgentSession(runtime.session) || orchestratesDeepResearch;
   const browserState = runtime.state.browser;
   // A "closed" browser state is functionally the same as no browser — the
   // BrowserPane would otherwise render an empty "preview unavailable" panel.
@@ -232,7 +251,7 @@ export function AgentChat({
               onViewModeChange={runtime.setViewMode}
               deepResearchEnabled={deepResearchEnabled}
               researchSources={runtime.researchSources}
-              hideTurnSummary={isSubAgentSession(runtime.session)}
+              hideTurnSummary={hideTurnSummary}
             />
           </div>
           {rightStackVisible && (
@@ -299,4 +318,31 @@ export function AgentChat({
       </TooltipProvider>
     </AgentChatAdapterProvider>
   );
+}
+
+// Extract every ``agent_type`` referenced by a ``delegate_task`` tool
+// call's serialized args (either ``goal``+``agent_type`` or the
+// batched ``goals: [...]`` form).  Returns ``[]`` when the args are
+// not valid JSON so a partial-streamed tool call doesn't crash the
+// memoised deep-research check.
+function delegateTaskTargets(rawArgs: string): string[] {
+  if (!rawArgs) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawArgs);
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== "object") return [];
+  const out: string[] = [];
+  const a = parsed as { agent_type?: unknown; goals?: unknown };
+  if (typeof a.agent_type === "string") out.push(a.agent_type);
+  if (Array.isArray(a.goals)) {
+    for (const g of a.goals) {
+      if (g && typeof g === "object" && typeof (g as { agent_type?: unknown }).agent_type === "string") {
+        out.push((g as { agent_type: string }).agent_type);
+      }
+    }
+  }
+  return out;
 }

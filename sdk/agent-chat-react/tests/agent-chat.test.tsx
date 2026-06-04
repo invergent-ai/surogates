@@ -1041,13 +1041,18 @@ describe("AgentChat", () => {
       await Promise.resolve();
     });
 
-    const textarea = container.querySelector("textarea");
-    const uploadButton = container.querySelector(
-      'button[aria-label="Upload files"]',
+    // The composer still renders a disabled textarea so the
+    // Simple/Advanced toggle stays accessible -- but the textarea is
+    // disabled, the upload "+" button is hidden, and the read-only
+    // reason is surfaced as the textarea placeholder.
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea");
+    const addButton = container.querySelector(
+      'button[aria-label="Add"]',
     ) as HTMLButtonElement | null;
 
-    expect(textarea).toBeNull();
-    expect(container.textContent).toContain("Scheduled run is read-only");
-    expect(uploadButton?.disabled).toBe(true);
+    expect(textarea).not.toBeNull();
+    expect(textarea?.disabled).toBe(true);
+    expect(textarea?.placeholder).toContain("Scheduled run is read-only");
+    expect(addButton).toBeNull();
   });
 });

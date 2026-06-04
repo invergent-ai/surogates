@@ -330,12 +330,18 @@ function ChatComposerInner({
     }
   }, [buttonMenuOpen, menuDismissed, textInput.value]);
 
-  // Slash typing shows the combined commands + skills menu.
+  // Slash typing shows the combined commands + skills menu. Only when
+  // the menu was opened by typing, though: a button-opened menu has
+  // already picked its scope (commands / skills / scheduled), and the
+  // controlled Commands input mirrors its query back into the textarea
+  // as `/<query>` — without this guard that mirror write would trip the
+  // leading-`/` check and silently widen a Commands search to "all",
+  // leaking skills into the results.
   useEffect(() => {
-    if (textInput.value.startsWith("/")) {
+    if (!buttonMenuOpen && textInput.value.startsWith("/")) {
       setMenuMode("all");
     }
-  }, [textInput.value]);
+  }, [buttonMenuOpen, textInput.value]);
 
   // Re-fetch app-provided skills each time the menu opens with skills in scope.
   useEffect(() => {
@@ -575,7 +581,7 @@ function ChatComposerInner({
       }}
     >
       <AttachmentPreviewStrip />
-      {viewMode === "expert" && (
+      {viewMode === "expert" && !disabled && (
         <div className="flex flex-wrap items-center justify-end gap-2 px-1 pb-2">
           <Button
             type="button"
@@ -642,6 +648,7 @@ function ChatComposerInner({
           </PromptInputBody>
           <PromptInputFooter>
             <PromptInputTools>
+              {!disabled && (
               <Popover open={addMenuOpen} onOpenChange={setAddMenuOpen}>
                 <PopoverTrigger asChild>
                   <PromptInputButton aria-label="Add">
@@ -684,6 +691,7 @@ function ChatComposerInner({
                   </Command>
                 </PopoverContent>
               </Popover>
+              )}
               {canShowBrowser && onToggleBrowser && (
                 <PromptInputButton
                   aria-label={
@@ -726,7 +734,7 @@ function ChatComposerInner({
                   <FolderIcon className="size-4" />
                 </PromptInputButton>
               )}
-              {tokenUsage && tokenUsage.contextWindow > 0 && (
+              {!disabled && tokenUsage && tokenUsage.contextWindow > 0 && (
                 <Context
                   usedTokens={tokenUsage.totalTokens}
                   maxTokens={tokenUsage.contextWindow}
@@ -831,11 +839,13 @@ function ChatComposerInner({
                   </button>
                 </div>
               )}
-              <PromptInputSubmit
-                status={status}
-                onStop={onStop}
-                className="md:size-8"
-              />
+              {!disabled && (
+                <PromptInputSubmit
+                  status={status}
+                  onStop={onStop}
+                  className="md:size-8"
+                />
+              )}
             </div>
           </PromptInputFooter>
         </PromptInput>

@@ -177,13 +177,18 @@ describe("Working-on-it indicator vs. awaiting user input", () => {
         viewMode="simple"
       />,
     );
-    // Composer is replaced by a hint pointing at the question widget.
-    expect(dom.textContent).toContain("Answer the question above to continue.");
+    // The composer still renders so the Simple/Advanced toggle stays
+    // reachable; the textarea is disabled and the read-only hint
+    // surfaces as its placeholder.
+    const textarea = dom.querySelector<HTMLTextAreaElement>("textarea");
+    expect(textarea).not.toBeNull();
+    expect(textarea?.disabled).toBe(true);
+    expect(textarea?.placeholder).toContain(
+      "Answer the question above to continue.",
+    );
     // The Stop/abort control is gone (it would otherwise abort the
     // session if the user typed an answer and submitted).
     expect(dom.querySelector('[aria-label="Stop"]')).toBeNull();
-    // The composer textarea is not rendered.
-    expect(dom.querySelector("textarea")).toBeNull();
   });
 
   it("still shows 'Working on it' when the running tool is NOT an ask", () => {

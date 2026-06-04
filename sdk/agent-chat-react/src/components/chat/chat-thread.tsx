@@ -2170,33 +2170,24 @@ export function ChatThread({
             <ResearchSourcesPanel sources={researchSources} />
           </div>
         )}
-        {composerDisabled && composerDisabledReason ? (
-          <div
-            className="rounded border border-line bg-muted/40 px-3 py-2 text-sm text-foreground/60"
-            role="status"
-          >
-            {composerDisabledReason}
-          </div>
-        ) : (
-          <ChatComposer
-            onSend={onSend}
-            onStop={onStop}
-            isRunning={isRunning}
-            disabled={composerDisabled}
-            disabledReason={composerDisabledReason}
-            tokenUsage={tokenUsage}
-            onComposerError={onComposerError}
-            showBrowser={showBrowser}
-            onToggleBrowser={onToggleBrowser}
-            showWorkspace={showWorkspace}
-            onToggleWorkspace={onToggleWorkspace}
-            canShowBrowser={canShowBrowser}
-            canShowWorkspace={canShowWorkspace}
-            viewMode={viewMode}
-            onViewModeChange={onViewModeChange}
-            deepResearchEnabled={deepResearchEnabled}
-          />
-        )}
+        <ChatComposer
+          onSend={onSend}
+          onStop={onStop}
+          isRunning={isRunning}
+          disabled={composerDisabled}
+          disabledReason={composerDisabledReason}
+          tokenUsage={tokenUsage}
+          onComposerError={onComposerError}
+          showBrowser={showBrowser}
+          onToggleBrowser={onToggleBrowser}
+          showWorkspace={showWorkspace}
+          onToggleWorkspace={onToggleWorkspace}
+          canShowBrowser={canShowBrowser}
+          canShowWorkspace={canShowWorkspace}
+          viewMode={viewMode}
+          onViewModeChange={onViewModeChange}
+          deepResearchEnabled={deepResearchEnabled}
+        />
       </div>
     </div>
   );
