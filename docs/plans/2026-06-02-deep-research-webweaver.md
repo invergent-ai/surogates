@@ -4,7 +4,7 @@
 
 **Goal:** Add a WebWeaver-style deep-research capability to the surogates agent platform — a *planner* agent that interleaves web search with a living outline and a cited evidence bank, and a *writer* agent that synthesizes a long, citation-grounded report section-by-section — surfaced in `agent-chat-react` with a live outline and a sources/citations panel.
 
-**Architecture:** Port the methodology from `/work/surogates/study/DeepResearch/WebAgent/WebWeaver` onto native surogates primitives. No DeepResearch code runs in production and no new model is served. Two new builtin tools (`research_memory`, `research_outline`) persist to the **shared tenant workspace** (the same `workspace_path` mechanism `file_ops` already uses), so a parent *planner* session and a child *writer* session — spawned via the existing `delegate_task` sub-agent path — share the evidence bank. The planner and writer are declared as platform `AGENT.md` sub-agent types backed by the existing base model. The final report is emitted through the existing `create_artifact` (markdown) path. The UI collects sources from `research_memory` tool results and renders an outline timeline entry, a sources panel, and `[S#]` citation chips.
+**Architecture:** Port the methodology from `/work/surogates/study/DeepResearch/WebAgent/WebWeaver` onto native surogates primitives. No DeepResearch code runs in production and no new model is served. Two new builtin tools (`research_memory`, `research_outline`) persist to the **shared tenant workspace** (the same `workspace_path` mechanism `file_ops` already uses), so a parent *planner* session and a child *writer* session — spawned via the existing `delegate_task` sub-agent path — share the evidence bank. The planner and writer are declared as `AGENT.md` sub-agent types packaged with the ops wheel; they reach an agent **opt-in only**: a new `deep_research_enabled` flag on `Agent` gates whether the ops bundle publisher uploads the two `agents/<name>/AGENT.md` files into that agent's Hub bundle. The toggle lives in Studio's agent settings page (Identity tab → Capabilities section). The final report is emitted through the existing `create_artifact` (markdown) path. The UI collects sources from `research_memory` tool results and renders an outline timeline entry, a sources panel, and `[S#]` citation chips.
 
 **Tech Stack:** Python 3.12 (surogates harness, pytest, `asyncio`), TypeScript/React 19 (`agent-chat-react`, vitest, tsup), existing surogates tool/registry/loader/artifact infrastructure.
 
@@ -18,7 +18,10 @@ Updated before each commit. `[x]` done · `[~]` in progress · `[ ]` not started
 - [ ] Task 2 — Living-outline pure logic
 - [ ] Task 3 — `research_memory` / `research_outline` builtin tools
 - [ ] Task 4 — Wire research tools into the builtin registry
-- [ ] Task 5 — Planner + writer `AGENT.md` sub-agent types + packaging
+- [ ] Task 5a — Planner + writer `AGENT.md` files packaged with the ops wheel
+- [ ] Task 5b — `Agent.deep_research_enabled` column + API surface
+- [ ] Task 5c — Bundle publisher conditionally uploads the planner/writer subtree
+- [ ] Task 5d — Studio: "Capabilities" section in Identity tab with the toggle
 - [ ] Task 6 — Manual end-to-end smoke (planner → writer)
 - [ ] Task 7 — Collect research sources in runtime state
 - [ ] Task 8 — Citation text component (`[S#]` linkification)
@@ -35,7 +38,7 @@ Verified facts about the existing code that this plan relies on:
 - **Tool contract** — `surogates/tools/registry.py`: handlers are `async def handler(arguments: dict, **kwargs) -> str`; registered via `registry.register(name, schema, handler, toolset=...)`. Each builtin module exposes `register(registry)`.
 - **Builtin registration** — `surogates/tools/runtime.py` `ToolRuntime.register_builtins()` imports a tuple of builtin modules and calls `mod.register(self.registry)` for each (around lines 50–96).
 - **Workspace file IO** — `surogates/tools/builtin/file_ops.py` handlers read `workspace_path = kwargs.get("workspace_path")` and do direct filesystem IO. The workspace is tenant-shared, so a child session sees what the parent wrote (`AgentDef` docstring in `surogates/tools/loader.py`: "The child inherits skills, MCP servers, experts, tenant memory, and workspace from the parent tenant.").
-- **Sub-agent types** — `AGENT.md` files under `PLATFORM_AGENTS_DIR` (`/etc/surogates/agents`), loaded by `surogates/tools/loader.py:ResourceLoader.resolve_platform_agent_dir(name)`. Recognised frontmatter keys: `name, description, tools, disallowed_tools, model, max_iterations, policy_profile, category, tags, enabled`.
+- **Sub-agent types** — after the 2026-06-03 cleanup, sub-agents resolve from four layers in `surogates/tools/loader.py:ResourceLoader.load_agents`: Layer 1 = per-agent Hub bundle (`agents/<name>/AGENT.md`), Layer 2 = user bucket files (`tenant-{org}/users/{user}/agents/`), Layers 3+4 = org/user DB rows. There is **no disk-Layer-1 anymore** (`/etc/surogates/agents`, `PLATFORM_AGENTS_DIR`, and `resolve_platform_agent_dir` were removed). Recognised AGENT.md frontmatter keys: `name, description, tools, disallowed_tools, model, max_iterations, policy_profile, category, tags, enabled`. The ops bundle publisher (`surogate_ops/core/hub/agent_bundles.py:publish_agent_bundle`) is the path that uploads `agents/<name>/...` into a per-agent bundle — today only for attached skills, extended in Task 5c to also upload the deep-research planner + writer when the agent's `deep_research_enabled` flag is set.
 - **Sub-agent spawn** — `delegate_task` (registered in `surogates/tasks/tools.py`, see also `surogates/tools/builtin/delegate.py`) and `spawn_worker` (`surogates/tools/builtin/coordinator.py`) both accept an `agent_type` argument that resolves an `AgentDef`.
 - **Artifacts** — `create_artifact` (`surogates/tools/builtin/artifact.py`, kind `markdown`) renders inline; the SDK already renders it via `src/components/chat/artifacts/artifact-markdown.tsx`.
 - **SDK dispatch** — `agent-chat-react/src/components/chat/tool-call-block.tsx` is a `switch (tc.toolName)`; `src/runtime/reducer.ts` `applyAgentChatEvent` is the state reducer; vitest is configured (`npm test`).
@@ -49,20 +52,34 @@ Design consequences:
 
 ## File Structure
 
-**Backend (`/work/surogates/surogates`)**
+**Backend — harness (`/work/surogates/surogates`)**
 
 - Create `surogates/research/__init__.py` — package marker.
 - Create `surogates/research/memory_bank.py` — pure logic: entry model, JSONL (de)serialization, `add` (assigns `S#`), `retrieve` (keyword scoring). No IO. One responsibility: evidence-bank data logic.
 - Create `surogates/research/outline.py` — pure logic for the living outline (normalize/format). Small; kept separate so the tool module stays thin.
 - Create `surogates/tools/builtin/research.py` — registers `research_memory` and `research_outline`; handlers do `workspace_path` file IO and call the `research/` logic.
 - Modify `surogates/tools/runtime.py` — add `research` to the builtin import tuple and `modules` registration list.
-- Create `surogates/platform_assets/agents/deep-research/AGENT.md` — planner sub-agent.
-- Create `surogates/platform_assets/agents/research-writer/AGENT.md` — writer sub-agent.
 - Test `tests/research/__init__.py`, `tests/research/test_memory_bank.py`, `tests/research/test_outline.py`.
 - Test `tests/test_research_tools.py` — tool handlers against a temp workspace.
-- Test `tests/research/test_agent_defs.py` — the two AGENT.md assets parse and declare the right tools.
 
-**Frontend (`/work/surogates/sdk/agent-chat-react`)**
+**Backend — ops (`/work/surogate-ops/surogate_ops`)**
+
+- Create `surogate_ops/features/__init__.py`, `surogate_ops/features/deep_research/__init__.py`, `surogate_ops/features/deep_research/agents/deep-research/AGENT.md`, `surogate_ops/features/deep_research/agents/research-writer/AGENT.md` — the planner + writer authored once, packaged in the ops wheel via `pyproject.toml` package-data.
+- Create `surogate_ops/features/deep_research/agents.py` — `iter_agent_files()` walks the packaged dir and returns `[(name, relpath, bytes), ...]` for the bundle publisher to upload.
+- Create an alembic migration under `surogate_ops/core/db/migrations/versions/` adding `agents.deep_research_enabled BOOLEAN NOT NULL DEFAULT FALSE`.
+- Modify `surogate_ops/core/db/models/operate.py:Agent` — add `deep_research_enabled: Mapped[bool] = mapped_column(...)`.
+- Modify `surogate_ops/server/models/agent.py` (Pydantic) — add `deep_research_enabled: bool = False` to the response model and the update request model.
+- Modify `surogate_ops/server/routes/agents.py` — surface the field on the GET/PATCH paths; calling `_republish_agent_bundle` already handles the bundle invalidation when the flag flips.
+- Modify `surogate_ops/core/hub/agent_bundles.py:publish_agent_bundle` — when `agent.deep_research_enabled` is True, walk `iter_agent_files()` and upload each file to `agents/<name>/<relpath>` in the bundle repo; add those paths to `keep_paths` so the prune pass doesn't delete them. When the flag is False, the existing prune already removes any stale `agents/deep-research/` or `agents/research-writer/` subtree on the next publish.
+- Test `tests/features/test_deep_research_agents.py` — `iter_agent_files()` returns both AGENT.md files; frontmatter parses; the writer has no web tools, the planner has no `create_artifact`.
+- Test `tests/core/hub/test_agent_bundles_deep_research.py` — `publish_agent_bundle` with `deep_research_enabled=True` uploads the two subtrees and keeps them under `keep_paths`; with `False` the prune pass deletes them.
+
+**Studio frontend (`/work/surogate-ops/frontend`)**
+
+- Modify `frontend/src/api/agents.ts` (or wherever `updateAgent` / the agent type live) — extend the `Agent` shape and the update payload with `deep_research_enabled: boolean`.
+- Modify `frontend/src/features/work/work-agent-settings-page.tsx` — add an `AgentCapabilitiesSection` component under the Identity tab next to `AgentSoulSection` with a single labeled toggle ("Deep research workflow"), wired to `updateAgent({deep_research_enabled})`. Show a short helper sentence ("Adds a planner + writer sub-agent that can research a topic and produce a cited report.").
+
+**Frontend SDK (`/work/surogates/sdk/agent-chat-react`)**
 
 - Modify `src/types.ts` — add `AgentChatResearchSource` type and `researchSources` to `AgentChatState`.
 - Modify `src/runtime/reducer.ts` — collect sources from `research_memory` tool results.
@@ -822,41 +839,52 @@ git commit -m "feat(research): register research tools in default runtime"
 
 ---
 
-### Task 5: Planner and writer `AGENT.md` sub-agent types
+### Task 5a: Planner and writer `AGENT.md` files packaged with the ops wheel
 
-**Files:**
-- Create: `surogates/platform_assets/agents/deep-research/AGENT.md`
-- Create: `surogates/platform_assets/agents/research-writer/AGENT.md`
-- Modify: `pyproject.toml`
-- Modify: `images/api/Dockerfile`
-- Modify: `images/worker/Dockerfile`
-- Test: `tests/research/test_agent_defs.py`
+The two `AGENT.md` files live in `surogate_ops/features/deep_research/agents/` and ride along with the ops wheel as package data. The bundle publisher (Task 5c) reads them at publish time and uploads them into the agent's Hub bundle under `agents/<name>/...`.
+
+**Files (in `/work/surogate-ops`):**
+- Create: `surogate_ops/features/__init__.py`
+- Create: `surogate_ops/features/deep_research/__init__.py`
+- Create: `surogate_ops/features/deep_research/agents/deep-research/AGENT.md`
+- Create: `surogate_ops/features/deep_research/agents/research-writer/AGENT.md`
+- Create: `surogate_ops/features/deep_research/agents.py` — `iter_agent_files()`
+- Modify: `pyproject.toml` — extend `[tool.setuptools.package-data]` so `*.md` under `surogate_ops/features/deep_research/agents/` ships in the wheel
+- Test: `tests/features/test_deep_research_agents.py`
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/research/test_agent_defs.py`:
+Create `tests/features/__init__.py` (empty), then `tests/features/test_deep_research_agents.py`:
 
 ```python
-"""The platform research AGENT.md assets must exist and parse correctly."""
+"""The packaged deep-research AGENT.md files parse and expose the right tools."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import yaml
 
-AGENTS_ROOT = Path(__file__).resolve().parents[2] / "surogates" / "platform_assets" / "agents"
+from surogate_ops.features.deep_research import agents as deep_research_agents
 
 
-def _frontmatter(path: Path) -> dict:
-    text = path.read_text(encoding="utf-8")
-    assert text.startswith("---\n"), f"{path} missing YAML frontmatter"
+def _frontmatter(text: str) -> dict:
+    assert text.startswith("---\n"), "missing YAML frontmatter"
     _, fm, _body = text.split("---\n", 2)
     return yaml.safe_load(fm)
 
 
-def test_planner_agent_def():
-    fm = _frontmatter(AGENTS_ROOT / "deep-research" / "AGENT.md")
+def test_iter_agent_files_returns_planner_and_writer():
+    rows = list(deep_research_agents.iter_agent_files())
+    names = sorted({name for (name, _rel, _bytes) in rows})
+    assert names == ["deep-research", "research-writer"]
+    # Every file is non-empty bytes.
+    assert all(isinstance(b, (bytes, bytearray)) and len(b) > 0
+               for (_n, _r, b) in rows)
+
+
+def test_planner_agent_def_tools():
+    blobs = {name: body for (name, rel, body) in deep_research_agents.iter_agent_files()
+             if rel == "AGENT.md"}
+    fm = _frontmatter(blobs["deep-research"].decode("utf-8"))
     assert fm["name"] == "deep-research"
     assert "research_memory" in fm["tools"]
     assert "research_outline" in fm["tools"]
@@ -866,8 +894,10 @@ def test_planner_agent_def():
     assert "create_artifact" not in fm["tools"]
 
 
-def test_writer_agent_def():
-    fm = _frontmatter(AGENTS_ROOT / "research-writer" / "AGENT.md")
+def test_writer_agent_def_tools():
+    blobs = {name: body for (name, rel, body) in deep_research_agents.iter_agent_files()
+             if rel == "AGENT.md"}
+    fm = _frontmatter(blobs["research-writer"].decode("utf-8"))
     assert fm["name"] == "research-writer"
     assert "research_memory" in fm["tools"]
     assert "create_artifact" in fm["tools"]
@@ -878,12 +908,14 @@ def test_writer_agent_def():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /work/surogates && python -m pytest tests/research/test_agent_defs.py -v`
-Expected: FAIL — files do not exist.
+Run: `cd /work/surogate-ops && python -m pytest tests/features/test_deep_research_agents.py -v`
+Expected: FAIL — module / files do not exist.
 
-- [ ] **Step 3: Create the AGENT.md assets**
+- [ ] **Step 3: Create the AGENT.md files and the discovery helper**
 
-Create `surogates/platform_assets/agents/deep-research/AGENT.md`:
+Create `surogate_ops/features/__init__.py` and `surogate_ops/features/deep_research/__init__.py` (both empty).
+
+Create `surogate_ops/features/deep_research/agents/deep-research/AGENT.md`:
 
 ```markdown
 ---
@@ -942,7 +974,7 @@ Be rigorous and objective. Prefer primary and authoritative sources. Note
 disagreements between sources rather than silently picking one.
 ```
 
-Create `surogates/platform_assets/agents/research-writer/AGENT.md`:
+Create `surogate_ops/features/deep_research/agents/research-writer/AGENT.md`:
 
 ```markdown
 ---
@@ -984,65 +1016,587 @@ balanced coverage of the sub-questions, and faithful, accurate citations. Do not
 include claims the evidence bank does not support.
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+Create `surogate_ops/features/deep_research/agents.py`:
 
-Run: `cd /work/surogates && python -m pytest tests/research/test_agent_defs.py -v`
-Expected: PASS (2 passed)
+```python
+"""Discovery helper for the deep-research AGENT.md files.
 
-- [ ] **Step 5: Package and deploy platform agents**
+The two files are authored under ``agents/<name>/AGENT.md`` and ride along
+with the ops wheel as package data.  The bundle publisher (see
+``surogate_ops.core.hub.agent_bundles.publish_agent_bundle``) walks the
+output of :func:`iter_agent_files` when ``agent.deep_research_enabled`` is
+True and uploads each file into the per-agent Hub bundle.
+"""
 
-The loader reads platform agents from `PLATFORM_AGENTS_DIR` (`/etc/surogates/agents`, see `surogates/tools/loader.py`). API pods need the files for `GET /agents`; worker pods need the same files so `delegate_task(agent_type="research-writer")` can resolve the writer.
+from __future__ import annotations
 
-In `pyproject.toml`, extend the existing package-data entry:
+from importlib import resources
+from typing import Iterator
+
+_AGENTS_PKG = "surogate_ops.features.deep_research.agents"
+
+
+def iter_agent_files() -> Iterator[tuple[str, str, bytes]]:
+    """Yield ``(agent_name, relpath, content)`` for every packaged file.
+
+    ``agent_name`` is the directory name (``deep-research`` /
+    ``research-writer``); ``relpath`` is the path under that directory
+    using forward slashes (always ``AGENT.md`` today, room for
+    ``references/``/``scripts/`` subtrees in the future).
+    """
+    root = resources.files(_AGENTS_PKG)
+    for entry in root.iterdir():
+        if not entry.is_dir():
+            continue
+        name = entry.name
+        for sub in _walk(entry):
+            rel = str(sub.relative_to(entry)).replace("\\", "/")
+            yield name, rel, sub.read_bytes()
+
+
+def _walk(node):
+    if node.is_file():
+        yield node
+        return
+    for child in node.iterdir():
+        yield from _walk(child)
+```
+
+- [ ] **Step 4: Ship the AGENT.md files in the wheel**
+
+In `pyproject.toml`, extend `[tool.setuptools.package-data]` so the wheel includes the two `AGENT.md` files. Use the existing entry shape — add a glob for the new tree:
 
 ```toml
-surogates = ["web/dist/**/*", "harness/prompts/**/*.md", "platform_assets/agents/**/*.md"]
+[tool.setuptools.package-data]
+surogate_ops = [
+    "features/deep_research/agents/**/*.md",
+    # ... keep any existing entries
+]
 ```
 
-In `images/api/Dockerfile`, add `/etc/surogates/agents` to the existing `RUN mkdir -p /etc/surogates/policies ...` block and copy the assets near the existing skills copy:
+- [ ] **Step 5: Run test to verify it passes**
 
-```dockerfile
-RUN mkdir -p /etc/surogates/policies \
-             /etc/surogates/skills \
-             /etc/surogates/agents \
-    && chown -R surogates:surogates /etc/surogates
-
-COPY skills/ /etc/surogates/skills/
-COPY surogates/platform_assets/agents/ /etc/surogates/agents/
-```
-
-In `images/worker/Dockerfile`, add the same directory and copy line:
-
-```dockerfile
-RUN mkdir -p /etc/surogates/policies \
-             /etc/surogates/skills \
-             /etc/surogates/tools \
-             /etc/surogates/mcp \
-             /etc/surogates/agents \
-    && chown -R surogates:surogates /etc/surogates
-
-COPY skills/ /etc/surogates/skills/
-COPY surogates/platform_assets/agents/ /etc/surogates/agents/
-```
-
-Run: `cd /work/surogates && python -m build --wheel`
-Expected: the wheel builds and includes `surogates/platform_assets/agents/deep-research/AGENT.md` and `surogates/platform_assets/agents/research-writer/AGENT.md`.
+Run: `cd /work/surogate-ops && python -m pytest tests/features/test_deep_research_agents.py -v`
+Expected: PASS (3 passed)
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /work/surogates
-git add surogates/platform_assets/agents/deep-research/AGENT.md \
-        surogates/platform_assets/agents/research-writer/AGENT.md \
-        pyproject.toml images/api/Dockerfile images/worker/Dockerfile \
-        tests/research/test_agent_defs.py
-git commit -m "feat(research): add deep-research planner and research-writer agent types"
+cd /work/surogate-ops
+git add surogate_ops/features/__init__.py \
+        surogate_ops/features/deep_research/__init__.py \
+        surogate_ops/features/deep_research/agents/deep-research/AGENT.md \
+        surogate_ops/features/deep_research/agents/research-writer/AGENT.md \
+        surogate_ops/features/deep_research/agents.py \
+        pyproject.toml \
+        tests/features/__init__.py \
+        tests/features/test_deep_research_agents.py
+git commit -m "feat(deep-research): package planner + writer AGENT.md in the ops wheel"
 ```
 
-- [ ] **Step 7: Run the full backend research test suite**
+---
 
-Run: `cd /work/surogates && python -m pytest tests/research tests/test_research_tools.py tests/test_research_registration.py -v`
-Expected: all PASS.
+### Task 5b: `Agent.deep_research_enabled` column + API surface
+
+The flag is the only knob the studio toggle writes; the bundle publisher (Task 5c) reads it.
+
+**Files (in `/work/surogate-ops`):**
+- Modify: `surogate_ops/core/db/models/operate.py` — add `deep_research_enabled` column to `Agent`
+- Create: `surogate_ops/core/db/migrations/versions/<rev>_agent_deep_research_enabled.py`
+- Modify: `surogate_ops/server/models/agent.py` — Pydantic response/update models
+- Modify: `surogate_ops/server/routes/agents.py` — GET surfaces the field; PATCH accepts it and calls `_republish_agent_bundle` when the value changes (the publisher hook is already wired for skill attaches; reuse it)
+- Test: `tests/server/routes/test_agent_deep_research_flag.py`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/server/routes/test_agent_deep_research_flag.py`:
+
+```python
+"""PATCH /api/agents/{id} accepts deep_research_enabled and republishes."""
+
+from __future__ import annotations
+
+import pytest
+from unittest.mock import AsyncMock, patch
+
+
+@pytest.mark.asyncio
+async def test_patch_sets_flag_and_republishes(agent_factory, async_client):
+    agent = await agent_factory(deep_research_enabled=False)
+
+    with patch(
+        "surogate_ops.server.routes.agents._republish_agent_bundle",
+        new=AsyncMock(),
+    ) as mock_republish:
+        resp = await async_client.patch(
+            f"/api/agents/{agent.id}",
+            json={"deep_research_enabled": True},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["deep_research_enabled"] is True
+    mock_republish.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_patch_noop_when_flag_unchanged(agent_factory, async_client):
+    agent = await agent_factory(deep_research_enabled=True)
+
+    with patch(
+        "surogate_ops.server.routes.agents._republish_agent_bundle",
+        new=AsyncMock(),
+    ) as mock_republish:
+        resp = await async_client.patch(
+            f"/api/agents/{agent.id}",
+            json={"deep_research_enabled": True},
+        )
+
+    assert resp.status_code == 200
+    # Flag didn't change → no bundle work.
+    mock_republish.assert_not_awaited()
+```
+
+(The `agent_factory` and `async_client` fixtures already exist in the ops test suite.)
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd /work/surogate-ops && python -m pytest tests/server/routes/test_agent_deep_research_flag.py -v`
+Expected: FAIL — `deep_research_enabled` not a column / not in Pydantic schema.
+
+- [ ] **Step 3: ORM column + alembic migration**
+
+In `surogate_ops/core/db/models/operate.py`, in the `Agent` model:
+
+```python
+    deep_research_enabled: Mapped[bool] = mapped_column(
+        sa.Boolean,
+        nullable=False,
+        server_default=sa.text("false"),
+        default=False,
+    )
+```
+
+Generate the migration:
+
+```bash
+cd /work/surogate-ops
+surogate-ops migrate revision -m "agent_deep_research_enabled"
+```
+
+Edit the generated migration so `upgrade()` adds the column and `downgrade()` drops it:
+
+```python
+def upgrade() -> None:
+    op.add_column(
+        "agents",
+        sa.Column(
+            "deep_research_enabled",
+            sa.Boolean(),
+            server_default=sa.text("false"),
+            nullable=False,
+        ),
+    )
+
+
+def downgrade() -> None:
+    op.drop_column("agents", "deep_research_enabled")
+```
+
+Apply locally:
+
+```bash
+surogate-ops migrate upgrade
+```
+
+- [ ] **Step 4: Pydantic models**
+
+In `surogate_ops/server/models/agent.py`, add to the response model and the update request:
+
+```python
+class AgentResponse(BaseModel):
+    # ... existing fields
+    deep_research_enabled: bool = False
+
+
+class AgentUpdateRequest(BaseModel):
+    # ... existing fields (all Optional[...])
+    deep_research_enabled: Optional[bool] = None
+```
+
+- [ ] **Step 5: Route plumbing**
+
+In `surogate_ops/server/routes/agents.py`, in the agent GET serializer add `deep_research_enabled=agent.deep_research_enabled` to the response builder. In the PATCH handler, read the optional `deep_research_enabled` field; when it differs from the current value, update `agent.deep_research_enabled` and call the existing `_republish_agent_bundle` helper (which the skill-attach hook already uses — same invalidator semantics).
+
+- [ ] **Step 6: Run test to verify it passes**
+
+Run: `cd /work/surogate-ops && python -m pytest tests/server/routes/test_agent_deep_research_flag.py -v`
+Expected: PASS
+
+- [ ] **Step 7: Commit**
+
+```bash
+cd /work/surogate-ops
+git add surogate_ops/core/db/models/operate.py \
+        surogate_ops/core/db/migrations/versions/*_agent_deep_research_enabled.py \
+        surogate_ops/server/models/agent.py \
+        surogate_ops/server/routes/agents.py \
+        tests/server/routes/test_agent_deep_research_flag.py
+git commit -m "feat(agents): add deep_research_enabled column + PATCH plumbing"
+```
+
+---
+
+### Task 5c: Bundle publisher conditionally uploads the planner/writer subtree
+
+The publisher already copies attached skills into the agent's Hub bundle under `skills/<name>/`. Extend it: when `agent.deep_research_enabled`, also upload the packaged AGENT.md files under `agents/<name>/AGENT.md`. When the flag flips to False, the existing prune pass deletes those subtrees on the next publish (the same way detaching a skill prunes its tree).
+
+**Files (in `/work/surogate-ops`):**
+- Modify: `surogate_ops/core/hub/agent_bundles.py:publish_agent_bundle` — add an "agents/" upload pass gated on the flag; include the names under a new `desired_agent_dirs` set the prune step considers alongside the existing skills set
+- Test: `tests/core/hub/test_agent_bundles_deep_research.py`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/core/hub/test_agent_bundles_deep_research.py`:
+
+```python
+"""publish_agent_bundle conditionally uploads the deep-research AGENT.md files."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from surogate_ops.core.hub import agent_bundles
+
+
+@pytest.mark.asyncio
+async def test_publish_uploads_planner_writer_when_flag_set(monkeypatch):
+    agent = SimpleNamespace(
+        id="agent-1",
+        name="researcher",
+        project_id="proj-1",
+        soul_md="",
+        deep_research_enabled=True,
+    )
+
+    uploaded: list[str] = []
+
+    async def _upload(client, repo, branch, path, content):
+        uploaded.append(path)
+        return MagicMock()
+
+    # Stub every hub call the publisher touches; only assertions
+    # we care about are which paths land in upload_object.
+    monkeypatch.setattr(agent_bundles, "_load_attached_skills",
+                        AsyncMock(return_value=[]))
+    monkeypatch.setattr(agent_bundles, "ensure_agent_bundle_repo",
+                        AsyncMock(return_value="proj-1/agent-1"))
+    monkeypatch.setattr(agent_bundles.surogate_hub, "upload_object", _upload)
+    monkeypatch.setattr(agent_bundles.surogate_hub, "iter_objects",
+                        _empty_async_iter)
+    monkeypatch.setattr(agent_bundles, "_prune_stale_paths",
+                        AsyncMock(return_value=0))
+    monkeypatch.setattr(agent_bundles.surogate_hub, "commit",
+                        AsyncMock(return_value="commit-sha"))
+    monkeypatch.setattr(agent_bundles, "_next_version_tag",
+                        AsyncMock(return_value="v1"))
+    monkeypatch.setattr(agent_bundles.surogate_hub, "create_tag",
+                        AsyncMock(return_value="v1"))
+
+    await agent_bundles.publish_agent_bundle(
+        MagicMock(),
+        session=MagicMock(),
+        config=MagicMock(),
+        agent=agent,
+        hub_user="ops-admin",
+    )
+
+    assert "agents/deep-research/AGENT.md" in uploaded
+    assert "agents/research-writer/AGENT.md" in uploaded
+
+
+@pytest.mark.asyncio
+async def test_publish_does_not_upload_agents_when_flag_unset(monkeypatch):
+    agent = SimpleNamespace(
+        id="agent-1",
+        name="researcher",
+        project_id="proj-1",
+        soul_md="",
+        deep_research_enabled=False,
+    )
+
+    uploaded: list[str] = []
+
+    async def _upload(client, repo, branch, path, content):
+        uploaded.append(path)
+        return MagicMock()
+
+    monkeypatch.setattr(agent_bundles, "_load_attached_skills",
+                        AsyncMock(return_value=[]))
+    monkeypatch.setattr(agent_bundles, "ensure_agent_bundle_repo",
+                        AsyncMock(return_value="proj-1/agent-1"))
+    monkeypatch.setattr(agent_bundles.surogate_hub, "upload_object", _upload)
+    monkeypatch.setattr(agent_bundles.surogate_hub, "iter_objects",
+                        _empty_async_iter)
+    monkeypatch.setattr(agent_bundles, "_prune_stale_paths",
+                        AsyncMock(return_value=0))
+    monkeypatch.setattr(agent_bundles.surogate_hub, "commit",
+                        AsyncMock(return_value="commit-sha"))
+    monkeypatch.setattr(agent_bundles, "_next_version_tag",
+                        AsyncMock(return_value="v1"))
+    monkeypatch.setattr(agent_bundles.surogate_hub, "create_tag",
+                        AsyncMock(return_value="v1"))
+
+    await agent_bundles.publish_agent_bundle(
+        MagicMock(),
+        session=MagicMock(),
+        config=MagicMock(),
+        agent=agent,
+        hub_user="ops-admin",
+    )
+
+    assert not any(p.startswith("agents/") for p in uploaded)
+
+
+async def _empty_async_iter(*args, **kwargs):
+    if False:
+        yield  # pragma: no cover
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd /work/surogate-ops && python -m pytest tests/core/hub/test_agent_bundles_deep_research.py -v`
+Expected: FAIL — publisher doesn't upload `agents/...` paths.
+
+- [ ] **Step 3: Extend the publisher**
+
+In `surogate_ops/core/hub/agent_bundles.py`, add a module-level constant near `SKILLS_PREFIX = "skills/"`:
+
+```python
+AGENTS_PREFIX = "agents/"
+```
+
+In `publish_agent_bundle`, after the existing skill-copy loop, add:
+
+```python
+    # Deep-research opt-in: upload the packaged planner + writer
+    # AGENT.md files under agents/<name>/.  When the flag flips back
+    # to False the prune pass below deletes the subtrees on the next
+    # publish, same as detaching a skill.
+    if getattr(agent, "deep_research_enabled", False):
+        from surogate_ops.features.deep_research import (
+            agents as deep_research_agents,
+        )
+
+        for name, relpath, content in deep_research_agents.iter_agent_files():
+            dest_path = f"{AGENTS_PREFIX}{name}/{relpath}"
+            uploaded = await surogate_hub.upload_object(
+                api_client, bundle_repo, AGENT_BUNDLE_BRANCH,
+                dest_path, content,
+            )
+            if uploaded is None:
+                raise RuntimeError(
+                    f"Failed to stage {dest_path} in {bundle_repo}",
+                )
+            keep_paths.add(dest_path)
+```
+
+And in the rescan loop that determines `keep_paths` for prune, mirror the existing `skills/` branch for `agents/`:
+
+```python
+        if path.startswith(AGENTS_PREFIX):
+            # Same shape as the skills/ branch: only keep entries
+            # whose top-level name matches a currently-active agent
+            # subtree (deep-research / research-writer when the flag
+            # is set; nothing otherwise).
+            inner = path[len(AGENTS_PREFIX):]
+            top = inner.split("/", 1)[0] if inner else ""
+            if getattr(agent, "deep_research_enabled", False) \
+                    and top in {"deep-research", "research-writer"}:
+                keep_paths.add(path)
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `cd /work/surogate-ops && python -m pytest tests/core/hub/test_agent_bundles_deep_research.py -v`
+Expected: PASS (2 passed)
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /work/surogate-ops
+git add surogate_ops/core/hub/agent_bundles.py \
+        tests/core/hub/test_agent_bundles_deep_research.py
+git commit -m "feat(bundle): upload planner+writer AGENT.md when deep_research_enabled"
+```
+
+---
+
+### Task 5d: Studio toggle in `work-agent-settings-page.tsx`
+
+A new "Capabilities" section in the Identity tab next to `AgentSoulSection`. Single labeled switch wired to `updateAgent({deep_research_enabled})`. Hide the section for system agents (the platform copilot doesn't get user-facing capability toggles).
+
+**Files (in `/work/surogate-ops/frontend`):**
+- Modify: `frontend/src/features/agents/index.ts` (or wherever the `Agent` TS type lives) — add `deepResearchEnabled: boolean` to the `Agent` type, and accept it in the `UpdateAgentPayload`/`patchAgent` body shape
+- Modify: `frontend/src/api/agents.ts` — map `deep_research_enabled` ↔ `deepResearchEnabled` in the wire-to-domain transformer
+- Modify: `frontend/src/features/work/work-agent-settings-page.tsx` — add `AgentCapabilitiesSection`, render it in the Identity tab
+- Test: `frontend/src/features/work/agent-capabilities-section.test.tsx` (vitest + RTL)
+
+- [ ] **Step 1: Write the failing test**
+
+Create `frontend/src/features/work/agent-capabilities-section.test.tsx`:
+
+```typescript
+import { describe, expect, it, vi } from "vitest";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { AgentCapabilitiesSection } from "./work-agent-settings-page";
+
+describe("AgentCapabilitiesSection", () => {
+  it("shows the deep-research toggle reflecting agent state", () => {
+    const agent = { id: "a", deepResearchEnabled: false } as any;
+    render(<AgentCapabilitiesSection agent={agent} onUpdate={vi.fn()} />);
+    const toggle = screen.getByRole("switch", { name: /deep research/i });
+    expect(toggle).not.toBeChecked();
+  });
+
+  it("calls onUpdate with the new flag when toggled", async () => {
+    const agent = { id: "a", deepResearchEnabled: false } as any;
+    const onUpdate = vi.fn().mockResolvedValue({});
+    render(<AgentCapabilitiesSection agent={agent} onUpdate={onUpdate} />);
+    await userEvent.click(screen.getByRole("switch", { name: /deep research/i }));
+    expect(onUpdate).toHaveBeenCalledWith({ deep_research_enabled: true });
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd /work/surogate-ops/frontend && npm test -- agent-capabilities-section`
+Expected: FAIL — component not exported.
+
+- [ ] **Step 3: Add the section component**
+
+In `frontend/src/features/work/work-agent-settings-page.tsx`, add a new exported component near `AgentSoulSection`:
+
+```typescript
+export function AgentCapabilitiesSection({
+  agent,
+  onUpdate,
+}: {
+  agent: Agent;
+  onUpdate: (patch: Record<string, unknown>) => Promise<unknown>;
+}) {
+  const [enabled, setEnabled] = useState(!!agent.deepResearchEnabled);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setEnabled(!!agent.deepResearchEnabled);
+  }, [agent.id, agent.deepResearchEnabled]);
+
+  const handleToggle = async (next: boolean) => {
+    const previous = enabled;
+    setEnabled(next);
+    setSaving(true);
+    try {
+      const ok = await onUpdate({ deep_research_enabled: next });
+      if (!ok) {
+        setEnabled(previous);
+        toast.error("Failed to update deep-research capability");
+      } else {
+        toast.success(next ? "Deep research enabled" : "Deep research disabled");
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="rounded-lg border border-border bg-card p-4 md:p-5 space-y-4">
+      <div>
+        <h2 className="font-display text-sm font-semibold">Capabilities</h2>
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          Optional workflows that can be turned on per agent. Toggling
+          republishes this agent's bundle so live sessions pick the change up
+          on their next turn.
+        </p>
+      </div>
+
+      <label className="flex items-start gap-3">
+        <Switch
+          role="switch"
+          aria-label="Deep research workflow"
+          checked={enabled}
+          disabled={saving}
+          onCheckedChange={handleToggle}
+        />
+        <span className="flex flex-col">
+          <span className="text-sm font-medium">Deep research workflow</span>
+          <span className="text-[11px] text-muted-foreground">
+            Adds a planner + writer sub-agent that researches a topic across the
+            web and produces a cited markdown report.
+          </span>
+        </span>
+      </label>
+    </section>
+  );
+}
+```
+
+Add to the Identity tab block (around line 537–559 in the current file) so the section renders below `AgentSoulSection`:
+
+```typescript
+                  {effectiveTabId === "identity" && (
+                    <div className="space-y-5">
+                      {/* ... existing delete button + AgentIdentitySection + AgentSoulSection */}
+                      {!agent.isSystemAgent && (
+                        <AgentCapabilitiesSection
+                          key={`capabilities-${agent.id}`}
+                          agent={agent}
+                          onUpdate={(patch) => patchAgent(agent.id, patch)}
+                        />
+                      )}
+                    </div>
+                  )}
+```
+
+Add `Switch` to the shadcn imports at the top of the file if it isn't already imported (it ships with the project's ui kit; if not, replace with `Checkbox` and keep the test's role query the same).
+
+- [ ] **Step 4: Thread `deepResearchEnabled` through the agent API/store**
+
+In whichever file defines the `Agent` TS shape (`frontend/src/features/agents/index.ts` or similar), add:
+
+```typescript
+export interface Agent {
+  // ... existing fields
+  deepResearchEnabled: boolean;
+}
+```
+
+In the wire-to-domain transformer (`frontend/src/api/agents.ts`), map `deep_research_enabled` ↔ `deepResearchEnabled` in both directions.
+
+- [ ] **Step 5: Run test to verify it passes**
+
+Run: `cd /work/surogate-ops/frontend && npm test -- agent-capabilities-section`
+Expected: PASS
+
+- [ ] **Step 6: Typecheck + build**
+
+Run: `cd /work/surogate-ops/frontend && npm run typecheck`
+Expected: no errors.
+
+- [ ] **Step 7: Commit**
+
+```bash
+cd /work/surogate-ops/frontend
+git add src/features/work/work-agent-settings-page.tsx \
+        src/features/work/agent-capabilities-section.test.tsx \
+        src/features/agents/index.ts src/api/agents.ts
+git commit -m "feat(studio): per-agent deep-research toggle on the Identity tab"
+```
 
 ---
 
@@ -1050,9 +1604,13 @@ Expected: all PASS.
 
 **Files:** none (verification only)
 
-- [ ] **Step 1: Start a local server and a session**
+- [ ] **Step 1: Enable the workflow on a test agent**
 
-Follow the project's local-dev path (`surogate-ops server`, local k3d). In a chat session, send:
+Open Studio → the test agent's settings → Identity tab → Capabilities section → toggle **Deep research workflow** on. Wait for the toast confirmation. Behind the scenes the ops server calls `_republish_agent_bundle`, which uploads `agents/deep-research/AGENT.md` and `agents/research-writer/AGENT.md` to the agent's Hub bundle, bumps the version, and publishes the invalidator. Inspect the bundle on Hub (or `kubectl exec` into the surogate-server pod and run `psql ... 'SELECT config FROM agent_runtime_config WHERE agent_id = ?'`) to confirm `bundle_version` ticked.
+
+- [ ] **Step 2: Start a local server and a session**
+
+Follow the project's local-dev path (`surogate-ops server`, local k3d). In a chat session against the test agent, send:
 `Use the deep-research agent to research: "What are the leading approaches to long-context retrieval in LLM agents in 2025, and their trade-offs?"`
 
 - [ ] **Step 2: Observe planner behavior**
@@ -1641,11 +2199,12 @@ These are deferred items surfaced by Tasks 6 and 11; each becomes its own task/p
 
 **Spec coverage** (against the four locked decisions):
 
-- *WebWeaver dual-agent (planner + writer, memory bank, dynamic outline, section-by-section writing)* → Tasks 1–5 (bank logic, outline logic, tools, planner AGENT.md, writer AGENT.md). ✓
-- *Sub-agent type + memory tool integration depth* → planner/writer `AGENT.md` (Task 5), `research_memory`/`research_outline` tools (Task 3), spawned via existing `delegate_task`. ✓
+- *WebWeaver dual-agent (planner + writer, memory bank, dynamic outline, section-by-section writing)* → Tasks 1–4 (bank logic, outline logic, tools, registry) and Task 5a (planner + writer AGENT.md packaged with the ops wheel). ✓
+- *Sub-agent type + memory tool integration depth* → planner/writer `AGENT.md` (Task 5a), `research_memory`/`research_outline` tools (Task 3), spawned via existing `delegate_task`. ✓
 - *Existing base model* → no model serving; `AGENT.md` omits a `model:` override, inheriting the session's base model. ✓
 - *Outline + citations panel UI* → outline renderer (Task 9), sources/citations panel + `[S#]` chips (Tasks 8, 10). ✓
+- *Per-agent opt-in (post-2026-06-03 cleanup adaptation)* → Task 5b adds `Agent.deep_research_enabled` + PATCH plumbing, Task 5c wires the bundle publisher to upload `agents/<name>/AGENT.md` only when the flag is set, Task 5d surfaces a toggle in the Studio Identity tab. ✓
 
-**Placeholder scan:** Every code step contains complete, runnable code. Repo-specific constructor/helper names have been resolved against the current checkout (`ToolRuntime(registry).register_builtins()`, `createInitialAgentChatState` from `reducer.ts`, and `parseArgs` from `shared.ts`). No deferred-work placeholders remain.
+**Placeholder scan:** Every code step contains complete, runnable code. Repo-specific constructor/helper names have been resolved against the current checkout (`ToolRuntime(registry).register_builtins()`, `createInitialAgentChatState` from `reducer.ts`, `parseArgs` from `shared.ts`, and `_republish_agent_bundle` from `surogate_ops/server/routes/agents.py`). No deferred-work placeholders remain.
 
-**Type consistency:** `MemoryEntry(source_id, url, title, summary, evidence)` is used identically across `memory_bank.py`, `research.py`, and tests. The tool JSON contract (`success`, `source_id`, `url`, `title`, `sources[]`, `outline`, `sections[]`) is consistent between `research.py` handlers and both the backend tests and the frontend reducer/renderers. The TS `AgentChatResearchSource{ sourceId, url, title }` is consistent across `types.ts`, reducer, runtime API, panel, and `CitationText`. Tool names `research_memory` / `research_outline` match between backend registration, AGENT.md `tools:` lists, and the SDK dispatch `case`s.
+**Type consistency:** `MemoryEntry(source_id, url, title, summary, evidence)` is used identically across `memory_bank.py`, `research.py`, and tests. The tool JSON contract (`success`, `source_id`, `url`, `title`, `sources[]`, `outline`, `sections[]`) is consistent between `research.py` handlers and both the backend tests and the frontend reducer/renderers. The TS `AgentChatResearchSource{ sourceId, url, title }` is consistent across `types.ts`, reducer, runtime API, panel, and `CitationText`. The flag name `deep_research_enabled` (snake-case on the wire) ↔ `deepResearchEnabled` (camel-case in TS) is consistent across the alembic migration, ORM column, Pydantic models, PATCH route, bundle publisher, frontend types/transformer, and the Studio toggle. Tool names `research_memory` / `research_outline` match between backend registration, AGENT.md `tools:` lists, and the SDK dispatch `case`s.
