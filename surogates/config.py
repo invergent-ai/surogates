@@ -492,7 +492,6 @@ class WebsiteSettings(BaseSettings):
 class GovernanceSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_GOVERNANCE_"}
 
-    enabled: bool = True
     transparency: TransparencySettings = Field(default_factory=TransparencySettings)
 
     # When True, every allowed tool call also emits a ``policy.allowed``
@@ -563,56 +562,7 @@ class ScheduledSessionSettings(BaseSettings):
 
     model_config = {"env_prefix": "SUROGATES_SCHEDULED_SESSIONS_"}
 
-    enabled: bool = True
     tick_interval_seconds: int = 60
-
-
-class AuthSettings(BaseSettings):
-    """Runtime auth toggle + BYO Firebase web config.
-
-    All values are injected by the deployment manifests and reflect
-    the parent project's Firebase configuration plus the per-agent
-    ``self_registration_enabled`` switch. They are *public* Firebase
-    web config — no secrets, so they ship as plain env vars.
-    """
-
-    model_config = {"env_prefix": "SUROGATES_AUTH_"}
-
-    self_registration_enabled: bool = False
-    firebase_project_id: str = ""
-    firebase_api_key: str = ""
-    firebase_auth_domain: str = ""
-    # Comma-separated providers — env vars only carry strings, so the
-    # provider set is joined on ``,`` at injection time.
-    firebase_enabled_providers: str = ""
-    firebase_app_id: str = ""
-    firebase_messaging_sender_id: str = ""
-    firebase_measurement_id: str = ""
-
-    @property
-    def providers(self) -> tuple[str, ...]:
-        """Parsed list of supported providers from the env var string.
-
-        Unknown providers are dropped — the chart may emit forward-
-        compatible names (e.g. "twitter") that this server doesn't
-        implement yet; we don't want them to crash the auth pipeline.
-        """
-        allowed = {"google", "github", "password"}
-        raw = (
-            p.strip()
-            for p in self.firebase_enabled_providers.split(",")
-            if p.strip()
-        )
-        return tuple(p for p in raw if p in allowed)
-
-    @property
-    def firebase_configured(self) -> bool:
-        """True when the chart shipped a usable Firebase config."""
-        return bool(
-            self.firebase_project_id
-            and self.firebase_api_key
-            and self.firebase_auth_domain
-        )
 
 
 class HubSettings(BaseSettings):
@@ -656,7 +606,6 @@ class Settings(BaseSettings):
     slack: SlackSettings = Field(default_factory=SlackSettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
     website: WebsiteSettings = Field(default_factory=WebsiteSettings)
-    auth: AuthSettings = Field(default_factory=AuthSettings)
 
     # Tenant asset root.  Used by the per-session sandbox pods to mount
     # workspace volumes; the platform itself no longer reads filesystem
