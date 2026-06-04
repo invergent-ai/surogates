@@ -668,6 +668,35 @@ class Orchestrator:
                     },
                 )
                 await self.session_store.release_stale_lease(session.id)
+                # Compensate the TurnConcurrencyGate.  A session that
+                # reaches the orphan sweeper got there because its
+                # previous owner died WITHOUT running the dispatcher's
+                # finally branch -- which is the only path that
+                # ``release()``s the gate slot.  Left unhandled, every
+                # debugger-stop / OOM / pod-eviction leaks one slot
+                # per in-flight session for this (org, agent); a few
+                # cycles of that drives the counter to its cap and
+                # every subsequent dequeue is rejected, leaving fresh
+                # sessions stuck in an endless re-enqueue loop with
+                # no diagnostic anywhere.
+                #
+                # Floor-at-zero in ``TurnGate.release()`` protects
+                # against double-release if this recovery races a
+                # late-arriving finally on the original owner (the
+                # owner is by definition gone at this point, but the
+                # floor keeps us honest).
+                if self._turn_gate is not None:
+                    try:
+                        await self._turn_gate.release(
+                            str(session.org_id), session.agent_id,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to release turn gate slot for "
+                            "recovered session %s (org=%s agent=%s)",
+                            session.id, session.org_id, session.agent_id,
+                            exc_info=True,
+                        )
                 await enqueue_session(
                     self.redis,
                     org_id=str(session.org_id),
