@@ -18,8 +18,8 @@ Updated before each commit. `[x]` done · `[~]` in progress · `[ ]` not started
 - [x] Task 2 — Living-outline pure logic
 - [x] Task 3 — `research_memory` / `research_outline` builtin tools
 - [x] Task 4 — Wire research tools into the builtin registry
-- [~] Task 5a — Planner + writer `AGENT.md` files packaged with the ops wheel *(in progress)*
-- [ ] Task 5b — `Agent.deep_research_enabled` column + API surface
+- [x] Task 5a — Planner + writer `AGENT.md` files packaged with the ops wheel
+- [~] Task 5b — `Agent.deep_research_enabled` column + API surface *(in progress)*
 - [ ] Task 5c — Bundle publisher conditionally uploads the planner/writer subtree
 - [ ] Task 5d — Studio: "Capabilities" section in Identity tab with the toggle
 - [ ] Task 6 — Manual end-to-end smoke (planner → writer)
@@ -64,8 +64,8 @@ Design consequences:
 
 **Backend — ops (`/work/surogate-ops/surogate_ops`)**
 
-- Create `surogate_ops/features/__init__.py`, `surogate_ops/features/deep_research/__init__.py`, `surogate_ops/features/deep_research/agents/deep-research/AGENT.md`, `surogate_ops/features/deep_research/agents/research-writer/AGENT.md` — the planner + writer authored once, packaged in the ops wheel via `pyproject.toml` package-data.
-- Create `surogate_ops/features/deep_research/agents.py` — `iter_agent_files()` walks the packaged dir and returns `[(name, relpath, bytes), ...]` for the bundle publisher to upload.
+- Create `surogate_ops/features/__init__.py`, `surogate_ops/features/deep_research/__init__.py`, `surogate_ops/features/deep_research/agents/__init__.py`, `surogate_ops/features/deep_research/agents/deep-research/AGENT.md`, `surogate_ops/features/deep_research/agents/research-writer/AGENT.md` — the planner + writer authored once, packaged in the ops wheel via `pyproject.toml` package-data. The `agents/` sub-package needs its own `__init__.py` so Python resolves `surogate_ops.features.deep_research.agents` to the directory rather than to a sibling module of the same name.
+- Create `surogate_ops/features/deep_research/discovery.py` — `iter_agent_files()` walks the packaged dir and returns `[(name, relpath, bytes), ...]` for the bundle publisher to upload. (Named `discovery.py` rather than `agents.py` because Python forbids a sibling sub-package and module sharing the same name.)
 - Create an alembic migration under `surogate_ops/core/db/migrations/versions/` adding `agents.deep_research_enabled BOOLEAN NOT NULL DEFAULT FALSE`.
 - Modify `surogate_ops/core/db/models/operate.py:Agent` — add `deep_research_enabled: Mapped[bool] = mapped_column(...)`.
 - Modify `surogate_ops/server/models/agent.py` (Pydantic) — add `deep_research_enabled: bool = False` to the response model and the update request model.
