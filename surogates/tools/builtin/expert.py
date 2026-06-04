@@ -19,7 +19,11 @@ import logging
 from typing import Any
 
 from surogates.tools.builtin.expert_service import ExpertConsultationService
-from surogates.tools.loader import SkillDef
+from surogates.tools.loader import (
+    EXPERT_STATUS_ACTIVE,
+    EXPERT_STATUS_DRAFT,
+    SkillDef,
+)
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -116,19 +120,20 @@ async def _consult_expert_handler(
 
     session_id = UUID(str(session_id_str))
 
-    if not loaded_skills:
-        try:
-            from surogates.tools.builtin.skills import _load_all_skills
+    # Resolve the expert.  In the shared-runtime (API-mediated) deployment
+    # per-agent bundle experts are only visible to the bundle-aware API
+    # server, so we must resolve through ``api_client`` -- the same path
+    # ``skills_list``/``skill_view`` already take.  The worker-local loader
+    # is bundle-blind and would report the expert as "not found".
+    api_client = kwargs.get("api_client")
+    if api_client is not None:
+        expert, available = await _resolve_expert_via_api(api_client, expert_name)
+    else:
+        expert, available = await _resolve_expert_local(
+            expert_name, loaded_skills, kwargs,
+        )
 
-            loaded_skills = await _load_all_skills(**kwargs)
-        except Exception:
-            logger.debug("Failed to load experts for consult_expert", exc_info=True)
-            loaded_skills = []
-
-    # Resolve the expert from loaded skills.
-    expert = _find_expert(expert_name, loaded_skills)
     if expert is None:
-        available = [s.name for s in loaded_skills if s.is_active_expert]
         return json.dumps({
             "error": f"Expert '{expert_name}' not found or not active.",
             "available_experts": available,
@@ -156,3 +161,89 @@ def _find_expert(name: str, skills: list[SkillDef]) -> SkillDef | None:
         if skill.name == name and skill.is_active_expert:
             return skill
     return None
+
+
+async def _resolve_expert_local(
+    expert_name: str,
+    loaded_skills: list[SkillDef],
+    kwargs: dict[str, Any],
+) -> tuple[SkillDef | None, list[str]]:
+    """Resolve an expert from the worker-local skill layers (embedded mode).
+
+    Returns ``(expert_or_None, available_active_expert_names)``.
+    """
+    if not loaded_skills:
+        try:
+            from surogates.tools.builtin.skills import _load_all_skills
+
+            loaded_skills = await _load_all_skills(**kwargs)
+        except Exception:
+            logger.debug("Failed to load experts for consult_expert", exc_info=True)
+            loaded_skills = []
+    expert = _find_expert(expert_name, loaded_skills)
+    available = [s.name for s in loaded_skills if s.is_active_expert]
+    return expert, available
+
+
+async def _resolve_expert_via_api(
+    api_client: Any,
+    expert_name: str,
+) -> tuple[SkillDef | None, list[str]]:
+    """Resolve an expert through the bundle-aware API server.
+
+    Returns ``(expert_or_None, available_active_expert_names)``.  The
+    detail endpoint sees the per-agent bundle, so experts attached to the
+    agent (``source: platform``) resolve here even though they never reach
+    the worker's local loader.
+    """
+    detail: dict[str, Any] | None = None
+    try:
+        detail = await api_client.get_skill(expert_name)
+    except Exception:
+        logger.debug(
+            "api_client.get_skill failed for expert=%s", expert_name, exc_info=True,
+        )
+    if detail:
+        candidate = _skill_def_from_detail(detail)
+        if candidate is not None and candidate.is_active_expert:
+            return candidate, []
+    return None, await _active_experts_via_api(api_client)
+
+
+async def _active_experts_via_api(api_client: Any) -> list[str]:
+    """Return the names of active experts from the bundle-aware catalog."""
+    try:
+        catalog = json.loads(await api_client.list_skills())
+    except Exception:
+        logger.debug("api_client.list_skills failed", exc_info=True)
+        return []
+    return [
+        s.get("name")
+        for s in catalog.get("skills", [])
+        if s.get("type") == "expert"
+        and s.get("expert_status") == EXPERT_STATUS_ACTIVE
+        and s.get("name")
+    ]
+
+
+def _skill_def_from_detail(detail: dict[str, Any]) -> SkillDef | None:
+    """Reconstruct a :class:`SkillDef` from a ``/v1/skills/{name}`` payload."""
+    name = detail.get("name")
+    if not name:
+        return None
+    max_iter = detail.get("expert_max_iterations")
+    return SkillDef(
+        name=name,
+        description=detail.get("description") or "",
+        content=detail.get("content") or "",
+        source=detail.get("source") or "platform",
+        type=detail.get("type") or "skill",
+        category=detail.get("category"),
+        trigger=detail.get("trigger"),
+        expert_model=detail.get("expert_model"),
+        expert_endpoint=detail.get("expert_endpoint"),
+        expert_adapter=detail.get("expert_adapter"),
+        expert_tools=detail.get("expert_tools"),
+        expert_max_iterations=int(max_iter) if max_iter is not None else 10,
+        expert_status=detail.get("expert_status") or EXPERT_STATUS_DRAFT,
+    )

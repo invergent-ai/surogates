@@ -571,6 +571,100 @@ class TestConsultExpertHandler:
         assert "not found" in data["error"].lower()
 
     @pytest.mark.asyncio
+    async def test_resolves_expert_via_api_client_when_bundle_blind(self, monkeypatch):
+        """Shared-runtime regression: a per-agent *bundle* expert is invisible to
+        the worker-local loader, so consult_expert must resolve it through the
+        bundle-aware ``api_client`` (the same path skills_list already uses)."""
+        from surogates.tools.builtin import expert as expert_mod
+        from surogates.tools.builtin.expert import _consult_expert_handler
+        from surogates.tools.builtin.expert_service import ExpertConsultationResult
+
+        class FakeAPIClient:
+            async def get_skill(self, name):
+                assert name == "ytdclassifier"
+                return {
+                    "name": "ytdclassifier",
+                    "description": "Classifies YTD requests",
+                    "content": "Expert instructions.",
+                    "type": "expert",
+                    "source": "platform",
+                    "expert_status": "active",
+                    "expert_model": "surogate/Qwen3.5-2B-Libra-YTD",
+                    "expert_endpoint": "http://expert:8000/v1",
+                    "expert_tools": ["read_file"],
+                    "expert_max_iterations": 8,
+                }
+
+        captured: dict = {}
+
+        class FakeService:
+            def __init__(self, **kwargs):
+                captured["init"] = kwargs
+
+            async def consult(self, *, expert, task, context=None):
+                captured["expert"] = expert
+                captured["task"] = task
+                return ExpertConsultationResult(
+                    expert=expert.name, success=True, content='{"ok": true}',
+                )
+
+        monkeypatch.setattr(expert_mod, "ExpertConsultationService", FakeService)
+
+        result = await _consult_expert_handler(
+            {"expert": "ytdclassifier", "task": "classify this"},
+            tenant=MagicMock(),
+            session_id="00000000-0000-0000-0000-000000000001",
+            tool_registry=MagicMock(),
+            session_store=AsyncMock(),
+            api_client=FakeAPIClient(),
+            loaded_skills=[],  # worker-local loader is bundle-blind
+        )
+
+        assert result == '{"ok": true}'
+        expert = captured["expert"]
+        assert expert.name == "ytdclassifier"
+        assert expert.is_active_expert is True
+        assert expert.expert_endpoint == "http://expert:8000/v1"
+        assert expert.expert_tools == ["read_file"]
+        assert expert.expert_max_iterations == 8
+
+    @pytest.mark.asyncio
+    async def test_api_client_not_found_lists_available_experts(self, monkeypatch):
+        """When the named expert is missing, available_experts comes from the
+        bundle-aware catalog, not the empty worker-local list."""
+        from surogates.tools.builtin.expert import _consult_expert_handler
+
+        class FakeAPIClient:
+            async def get_skill(self, name):
+                return None  # not in the catalog
+
+            async def list_skills(self, category=None):
+                return json.dumps({
+                    "success": True,
+                    "skills": [
+                        {"name": "ytdclassifier", "type": "expert",
+                         "expert_status": "active"},
+                        {"name": "draft_one", "type": "expert",
+                         "expert_status": "draft"},
+                        {"name": "xlsx", "type": "skill"},
+                    ],
+                })
+
+        result = await _consult_expert_handler(
+            {"expert": "nonexistent", "task": "do it"},
+            tenant=MagicMock(),
+            session_id="00000000-0000-0000-0000-000000000001",
+            tool_registry=MagicMock(),
+            session_store=AsyncMock(),
+            api_client=FakeAPIClient(),
+            loaded_skills=[],
+        )
+        data = json.loads(result)
+        assert "not found" in data["error"].lower()
+        # Only the active expert is surfaced as available.
+        assert data["available_experts"] == ["ytdclassifier"]
+
+    @pytest.mark.asyncio
     async def test_expert_no_endpoint(self, active_expert: SkillDef):
         from surogates.tools.builtin.expert import _consult_expert_handler
 
