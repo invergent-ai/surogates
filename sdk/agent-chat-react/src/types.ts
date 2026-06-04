@@ -452,6 +452,14 @@ export interface AgentChatBrowserControlResponse {
   ownerUserId: string;
 }
 
+/** One source the planner curated with research_memory(add). */
+export interface AgentChatResearchSource {
+  /** Stable identifier — citations in the report refer to this (e.g. "S3"). */
+  sourceId: string;
+  url: string;
+  title: string;
+}
+
 export interface AgentChatState {
   messages: AgentChatMessage[];
   isRunning: boolean;
@@ -469,6 +477,9 @@ export interface AgentChatState {
   // Persisted per-user via AgentChatAdapter.getChatViewMode /
   // setChatViewMode with a localStorage fallback.
   viewMode: AgentChatViewMode;
+  /** Sources collected from successful research_memory(add) tool
+   *  results.  Deduped by sourceId on insertion. */
+  researchSources: AgentChatResearchSource[];
 }
 
 export type AgentChatViewMode = "simple" | "expert";
@@ -791,6 +802,10 @@ export interface AgentChatRuntimeApi {
   viewMode: AgentChatViewMode;
   /** Update the chat view mode + persist via adapter / localStorage. */
   setViewMode(mode: AgentChatViewMode): void;
+  /** Sources collected from ``research_memory(add)`` tool results.
+   *  Hosts render the sources/citations panel from this array; the
+   *  ``CitationText`` helper resolves ``[S#]`` markers against it. */
+  researchSources: AgentChatResearchSource[];
 }
 
 export type IterationSummary = AgentChatIterationSummary;
