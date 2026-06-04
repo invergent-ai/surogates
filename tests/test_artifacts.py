@@ -655,31 +655,66 @@ class TestCreateArtifactHandler:
 # =========================================================================
 
 
+class _StubSandboxPool:
+    """Minimal sandbox-pool shim that fakes ``research_memory(action="list")``.
+
+    The validator dispatches that one tool through the sandbox to read
+    the bank as the writer sees it; this stub returns whatever source
+    set the test supplies, or raises to simulate a sandbox-side
+    failure.
+    """
+
+    def __init__(self, *, sources: list[dict[str, Any]] | None = None,
+                 raise_on_execute: Exception | None = None) -> None:
+        self._sources = sources or []
+        self._raise = raise_on_execute
+        self.calls: list[tuple[str, str, str]] = []
+
+    async def execute(self, owner: str, tool_name: str, args_str: str) -> str:
+        self.calls.append((owner, tool_name, args_str))
+        if self._raise is not None:
+            raise self._raise
+        if tool_name != "research_memory":
+            return json.dumps({
+                "success": False,
+                "error": f"Unknown tool: {tool_name}",
+            })
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            return json.dumps({"success": False, "error": "bad json"})
+        if args.get("action") != "list":
+            return json.dumps({"success": False, "error": "wrong action"})
+        return json.dumps({"success": True, "sources": self._sources})
+
+
 class TestCitationValidator:
-    """Markdown artifacts cannot cite ``[S#]`` ids that are not stored
-    in the research_memory bank.  The reconciliation is part of the
-    deep-research planner+writer contract; the validator is the
-    last-line guarantee that a bad outline doesn't produce a bad
-    artifact in the user's session."""
+    """Markdown artifacts cannot cite ``[S#]`` ids that are not in
+    the research_memory bank.  The bank file lives INSIDE the sandbox
+    (research_memory is sandbox-routed by default) so the validator
+    must read it through the sandbox -- the worker host has no
+    visibility into ``/workspace/.research/memory.jsonl``.
+
+    An earlier version of these tests wrote the bank file to a
+    ``tmp_path`` and handed the path to the handler as
+    ``workspace_path``.  That passed by construction without ever
+    exercising the cross-tier read: in production the validator was
+    rejecting every citation because the host couldn't see the file.
+    These rewrites stub the sandbox pool so the validator's actual
+    code path is the one under test.
+    """
 
     @staticmethod
-    def _write_bank(tmp_path, entries: list[dict[str, Any]]) -> str:
-        """Write a memory.jsonl with the given entries and return the
-        workspace root (matching how the research_memory tool lays it
-        out under ``{workspace}/.research/memory.jsonl``).
-        """
-        research_dir = tmp_path / ".research"
-        research_dir.mkdir(parents=True, exist_ok=True)
-        lines = [json.dumps(e) for e in entries]
-        (research_dir / "memory.jsonl").write_text(
-            "\n".join(lines) + ("\n" if lines else ""),
-            encoding="utf-8",
-        )
-        return str(tmp_path)
+    def _session_config_with_root(root: str = "root-1") -> dict[str, Any]:
+        # The validator derives the sandbox owner from
+        # ``sandbox_root_session_id`` (sub-agents inherit the root from
+        # the parent so all three of base / planner / writer hit the
+        # same backing sandbox).
+        return {"sandbox_root_session_id": root}
 
-    async def test_markdown_without_citations_passes(self, tmp_path):
+    async def test_markdown_without_citations_passes(self):
         client = _StubAPIClient()
-        workspace = self._write_bank(tmp_path, [])
+        sandbox = _StubSandboxPool(sources=[])
         out = await _create_artifact_handler(
             {
                 "name": "notes",
@@ -687,61 +722,58 @@ class TestCitationValidator:
                 "spec": {"content": "# Notes\n\nNo citations here."},
             },
             api_client=client,
-            workspace_path=workspace,
+            sandbox_pool=sandbox,
+            session_config=self._session_config_with_root(),
         )
         # No ``[S#]`` chips, so the validator no-ops and the call
-        # forwards to the API client.
+        # forwards to the API client without even touching the sandbox.
         assert json.loads(out)["success"] is True
         assert len(client.calls) == 1
+        assert sandbox.calls == []
 
-    async def test_markdown_with_resolved_citations_passes(self, tmp_path):
+    async def test_markdown_with_resolved_citations_passes(self):
         client = _StubAPIClient()
-        workspace = self._write_bank(
-            tmp_path,
-            [
-                {"source_id": "S1", "url": "u1", "title": "t1",
-                 "summary": "", "evidence": []},
-                {"source_id": "S2", "url": "u2", "title": "t2",
-                 "summary": "", "evidence": []},
-            ],
-        )
+        sandbox = _StubSandboxPool(sources=[
+            {"source_id": "S1", "url": "u1", "title": "t1",
+             "summary": "", "evidence": []},
+            {"source_id": "S2", "url": "u2", "title": "t2",
+             "summary": "", "evidence": []},
+        ])
         out = await _create_artifact_handler(
             {
                 "name": "report",
                 "kind": "markdown",
                 "spec": {
-                    "content": (
-                        "# Report\n\nFinding [S1].  Detail [S2].\n"
-                    ),
+                    "content": "# Report\n\nFinding [S1].  Detail [S2].\n",
                 },
             },
             api_client=client,
-            workspace_path=workspace,
+            sandbox_pool=sandbox,
+            session_config=self._session_config_with_root(),
         )
         assert json.loads(out)["success"] is True
         assert len(client.calls) == 1
+        # The validator dispatched research_memory through the sandbox.
+        assert len(sandbox.calls) == 1
+        assert sandbox.calls[0][1] == "research_memory"
 
-    async def test_dangling_citation_rejected(self, tmp_path):
+    async def test_dangling_citation_rejected(self):
         client = _StubAPIClient()
-        workspace = self._write_bank(
-            tmp_path,
-            [
-                {"source_id": "S1", "url": "u1", "title": "t1",
-                 "summary": "", "evidence": []},
-            ],
-        )
+        sandbox = _StubSandboxPool(sources=[
+            {"source_id": "S1", "url": "u1", "title": "t1",
+             "summary": "", "evidence": []},
+        ])
         out = await _create_artifact_handler(
             {
                 "name": "report",
                 "kind": "markdown",
                 "spec": {
-                    "content": (
-                        "# Report\n\nFinding [S1].  Bogus [S99].\n"
-                    ),
+                    "content": "# Report\n\nFinding [S1].  Bogus [S99].\n",
                 },
             },
             api_client=client,
-            workspace_path=workspace,
+            sandbox_pool=sandbox,
+            session_config=self._session_config_with_root(),
         )
         data = json.loads(out)
         assert data["success"] is False
@@ -752,17 +784,12 @@ class TestCitationValidator:
         # not land.
         assert client.calls == []
 
-    async def test_grouped_citation_chips_split_into_individual_ids(
-        self, tmp_path,
-    ):
+    async def test_grouped_citation_chips_split_into_individual_ids(self):
         client = _StubAPIClient()
-        workspace = self._write_bank(
-            tmp_path,
-            [
-                {"source_id": "S1", "url": "u1", "title": "t1",
-                 "summary": "", "evidence": []},
-            ],
-        )
+        sandbox = _StubSandboxPool(sources=[
+            {"source_id": "S1", "url": "u1", "title": "t1",
+             "summary": "", "evidence": []},
+        ])
         out = await _create_artifact_handler(
             {
                 "name": "report",
@@ -773,21 +800,20 @@ class TestCitationValidator:
                 },
             },
             api_client=client,
-            workspace_path=workspace,
+            sandbox_pool=sandbox,
+            session_config=self._session_config_with_root(),
         )
         data = json.loads(out)
         assert data["success"] is False
-        # Both missing ids surface; the present one does not.
         assert "S2" in data["error"]
         assert "S3" in data["error"]
 
-    async def test_validator_skipped_for_non_markdown_kinds(self, tmp_path):
+    async def test_validator_skipped_for_non_markdown_kinds(self):
         # A chart artifact with the literal text ``[S1]`` in a label
         # must NOT trigger the citation validator -- it's only meant
         # for markdown reports.
         client = _StubAPIClient()
-        # Deliberately do not write a bank; if the validator runs at
-        # all the empty bank will reject.
+        sandbox = _StubSandboxPool(sources=[])
         out = await _create_artifact_handler(
             {
                 "name": "x",
@@ -803,16 +829,18 @@ class TestCitationValidator:
                 },
             },
             api_client=client,
-            workspace_path=str(tmp_path),
+            sandbox_pool=sandbox,
+            session_config=self._session_config_with_root(),
         )
         assert json.loads(out)["success"] is True
+        # Non-markdown kinds short-circuit before touching the sandbox.
+        assert sandbox.calls == []
 
-    async def test_validator_skipped_when_workspace_unavailable(
-        self, tmp_path,
-    ):
-        # Anonymous / harness-test sessions may not have a workspace.
-        # Without one we cannot read the bank, so the validator must
-        # opt out rather than reject every citation as dangling.
+    async def test_fails_open_when_sandbox_is_unavailable(self):
+        # No sandbox pool wired (anonymous / harness-test sessions).
+        # The previous fail-closed behaviour was the bug -- it
+        # produced "all 15 source IDs missing" rejections in
+        # production because the host couldn't read the bank.
         client = _StubAPIClient()
         out = await _create_artifact_handler(
             {
@@ -821,9 +849,35 @@ class TestCitationValidator:
                 "spec": {"content": "# Report\n\nFinding [S1]."},
             },
             api_client=client,
-            # No workspace_path kwarg.
+            session_config=self._session_config_with_root(),
+            # No sandbox_pool kwarg.
+        )
+        # Validator inconclusive -> let the artifact through.
+        assert json.loads(out)["success"] is True
+
+    async def test_fails_open_when_sandbox_execute_raises(self):
+        # Transient sandbox failures (pod restart, network blip) must
+        # NOT translate into spurious citation rejections.  Same
+        # rationale as the no-sandbox case: rejecting an artifact
+        # because the validator couldn't reach the bank punishes the
+        # writer for an infrastructure failure.
+        client = _StubAPIClient()
+        sandbox = _StubSandboxPool(
+            raise_on_execute=RuntimeError("pod restarting"),
+        )
+        out = await _create_artifact_handler(
+            {
+                "name": "report",
+                "kind": "markdown",
+                "spec": {"content": "# Report\n\nFinding [S1]."},
+            },
+            api_client=client,
+            sandbox_pool=sandbox,
+            session_config=self._session_config_with_root(),
         )
         assert json.loads(out)["success"] is True
+        # Validator tried the sandbox once and gave up -- did not loop.
+        assert len(sandbox.calls) == 1
 
 
 # =========================================================================

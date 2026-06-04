@@ -52,30 +52,87 @@ def _extract_cited_source_ids(content: str) -> list[str]:
     return cited
 
 
-def _validate_citations(workspace_path: str, content: str) -> str | None:
+async def _fetch_bank_source_ids_from_sandbox(
+    sandbox_pool: Any, sandbox_owner: str,
+) -> set[str] | None:
+    """Read the research bank source IDs from the sandbox.
+
+    The ``research_memory`` tool runs INSIDE the sandbox (default
+    routing) so its ``memory.jsonl`` file lives at the sandbox's
+    ``/workspace/.research/memory.jsonl`` -- the worker host does not
+    see that path.  Dispatching ``research_memory(action="list")``
+    through the sandbox is the only way to read the same view the
+    writer sees.
+
+    Returns ``None`` when the sandbox lookup fails for any reason
+    (no pool, dispatch error, malformed payload).  Caller treats
+    ``None`` as "validator inconclusive -- let the artifact through"
+    rather than rejecting every citation, because a sandbox-side
+    failure here would otherwise turn into the silent "all S# missing"
+    rejection that motivated this rewrite.
+    """
+    if sandbox_pool is None or not sandbox_owner:
+        return None
+    try:
+        raw = await sandbox_pool.execute(
+            sandbox_owner, "research_memory",
+            json.dumps({"action": "list"}),
+        )
+    except Exception:
+        return None
+    if not isinstance(raw, str):
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict) or not payload.get("success"):
+        return None
+    sources = payload.get("sources")
+    if not isinstance(sources, list):
+        return None
+    ids: set[str] = set()
+    for entry in sources:
+        if isinstance(entry, dict):
+            sid = entry.get("source_id")
+            if isinstance(sid, str):
+                ids.add(sid)
+    return ids
+
+
+async def _validate_citations(
+    content: str,
+    *,
+    sandbox_pool: Any,
+    sandbox_owner: str,
+) -> str | None:
     """Reject markdown bodies that cite source IDs not in the bank.
 
-    Returns ``None`` when every citation resolves (or when the markdown
-    contains none), and a structured error JSON string when at least
-    one citation is dangling.  A missing or unreadable memory file
-    counts as "no sources stored" so a body that cites anything fails
-    -- silently approving a body with citations when the bank is
-    missing would let bad reports through.
+    Returns ``None`` when the markdown has no citations, when every
+    citation resolves, or when the validator cannot inspect the bank
+    (no sandbox wired, dispatch failure, malformed payload).  The
+    final case fails OPEN: rejecting an artifact because the validator
+    couldn't reach the bank punishes the writer for an infrastructure
+    failure it has no way to fix.  The previous fail-closed behaviour
+    is what produced "15 source IDs missing from memory bank" when in
+    fact all 15 were present -- the host-side read couldn't see them.
+
+    Returns a structured error JSON string only when at least one
+    cited ID is genuinely absent from the bank as the sandbox sees it.
     """
     cited = _extract_cited_source_ids(content)
     if not cited:
         return None
 
-    path = os.path.join(workspace_path, _RESEARCH_DIR, _MEMORY_FILE)
-    bank_ids: set[str] = set()
-    if os.path.exists(path):
-        try:
-            with open(path, encoding="utf-8") as fh:
-                bank_ids = {e.source_id for e in parse_jsonl(fh.read())}
-        except OSError:
-            # Surface the dangling citations the same way as a missing
-            # bank rather than masking a transient read error.
-            bank_ids = set()
+    bank_ids = await _fetch_bank_source_ids_from_sandbox(
+        sandbox_pool, sandbox_owner,
+    )
+    if bank_ids is None:
+        # Validator inconclusive -- let the artifact through rather
+        # than rejecting on a sandbox-side failure.  Writer's
+        # AGENT.md and planner's reconcile pass are the primary
+        # safeguards; Guard 3 is a backstop, not the sole defence.
+        return None
 
     missing = [sid for sid in cited if sid not in bank_ids]
     if not missing:
@@ -393,10 +450,34 @@ async def _create_artifact_handler(
     # bad report landing in the user's session.  Other markdown
     # artifacts (skill notes, scratch docs, freeform reports) won't
     # contain ``[S#]`` chips at all so the validator no-ops.
-    workspace_path = kwargs.get("workspace_path")
-    if kind == "markdown" and workspace_path:
-        citation_error = _validate_citations(
-            workspace_path, spec.get("content", ""),
+    #
+    # The bank file (``{workspace}/.research/memory.jsonl``) lives
+    # INSIDE the sandbox -- ``research_memory`` is sandbox-routed by
+    # default -- so the validator must consult the sandbox, not the
+    # host filesystem.  An earlier version of this guard checked
+    # ``os.path.exists`` on the host and consequently rejected every
+    # citation as missing because the path doesn't exist on the
+    # worker side; see ``_validate_citations`` for the fail-open
+    # contract on a sandbox-side failure.
+    if kind == "markdown":
+        sandbox_pool = kwargs.get("sandbox_pool")
+        sandbox_owner = ""
+        session_config = kwargs.get("session_config") or {}
+        # ``session_config["sandbox_owner"]`` would be ideal but we
+        # currently derive the owner from the (root) session id, which
+        # is what ``sandbox_session_key`` returns elsewhere.  The
+        # research bank lives in the sandbox keyed by the *root*
+        # session, so use ``sandbox_root_session_id`` when present
+        # (sub-agent sessions inherit it from their parent).
+        sandbox_owner = (
+            session_config.get("sandbox_root_session_id")
+            or kwargs.get("session_id")
+            or ""
+        )
+        citation_error = await _validate_citations(
+            spec.get("content", ""),
+            sandbox_pool=sandbox_pool,
+            sandbox_owner=str(sandbox_owner),
         )
         if citation_error is not None:
             return citation_error
