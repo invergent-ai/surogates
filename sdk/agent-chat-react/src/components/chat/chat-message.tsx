@@ -1,7 +1,7 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-import { memo } from "react";
+import { memo, useLayoutEffect, useRef, useState } from "react";
 import {
   File as FileIcon,
   FileArchive,
@@ -13,6 +13,7 @@ import {
   FileVideo,
 } from "lucide-react";
 import { Message, MessageContent } from "../ai-elements/message";
+import { cn } from "../../lib/utils";
 import type {
   AgentChatDisplayAttachment,
   ChatMessage as ChatMessageType,
@@ -23,6 +24,13 @@ interface ChatMessageProps {
   onFileSelect?: (path: string) => void;
 }
 
+// Visible height for a clamped user message before the "Show more"
+// reveal.  Keep small enough that a multi-paragraph delegation goal
+// (planner prompts can run thousands of characters) does not push the
+// rest of the thread off-screen, but tall enough that ordinary
+// single-question prompts never collapse.
+const COLLAPSED_MAX_HEIGHT_PX = 160;
+
 // Renders user messages only. Assistant and system messages go through
 // chat-thread's AssistantGroup / OrphanSystemMarker instead.
 export const ChatMessage = memo(function ChatMessage({
@@ -32,7 +40,7 @@ export const ChatMessage = memo(function ChatMessage({
   return (
     <Message from="user">
       <MessageContent>
-        {message.content}
+        <CollapsibleMessageBody content={message.content} />
         {message.images && message.images.length > 0 && (
           <div className="flex flex-wrap gap-2 mt-2">
             {message.images.map((img, i) => (
@@ -65,6 +73,69 @@ export const ChatMessage = memo(function ChatMessage({
     </Message>
   );
 });
+
+// ── Collapsible message body ────────────────────────────────────────
+//
+// Caps the rendered text height at ``COLLAPSED_MAX_HEIGHT_PX`` until
+// the user explicitly expands.  Long delegated prompts (planner goals
+// + context can be thousands of characters) would otherwise dominate
+// the chat with no recourse short of scrolling past them every render.
+
+function CollapsibleMessageBody({ content }: { content: string }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [overflowing, setOverflowing] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  // Measure after layout so the rendered text height is final.  We
+  // remeasure when the content string changes (streaming user inputs
+  // are not a thing today, but the SSE ``user.message`` event can
+  // replace an optimistic stub with the confirmed body) and on every
+  // window resize (line-wrap shifts the height threshold).
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => {
+      // ``scrollHeight`` reports the full content height regardless
+      // of the ``max-h`` cap, ``clientHeight`` is the visible area.
+      setOverflowing(el.scrollHeight > el.clientHeight + 1);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [content]);
+
+  return (
+    <div>
+      <div
+        ref={ref}
+        // ``whitespace-pre-wrap`` preserves the user's newlines (a
+        // delegated goal + context comes through as one string with
+        // ``\n\n`` separators).  The cap only applies while
+        // collapsed; once expanded the body grows to fit.
+        className={cn(
+          "whitespace-pre-wrap wrap-break-word",
+          !expanded && "overflow-hidden",
+        )}
+        style={!expanded ? { maxHeight: COLLAPSED_MAX_HEIGHT_PX } : undefined}
+      >
+        {content}
+      </div>
+      {(overflowing || expanded) && (
+        <button
+          type="button"
+          onClick={() => setExpanded((prev) => !prev)}
+          className={cn(
+            "mt-1 text-xs font-medium text-primary",
+            "hover:underline focus:outline-none focus-visible:underline",
+          )}
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      )}
+    </div>
+  );
+}
 
 // ── Attachment chip ──────────────────────────────────────────────────
 
