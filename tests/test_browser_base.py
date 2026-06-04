@@ -29,15 +29,16 @@ def test_browser_settings_defaults(monkeypatch) -> None:
     assert s.rest_port_base == 30000
     assert s.cdp_port_base == 31000
     assert s.live_view_port_base == 32000
-    assert s.live_view_mode == "novnc"
     assert s.k8s_s3fs_image == "ghcr.io/invergent-ai/surogates-s3fs:latest"
     assert s.k8s_s3_endpoint == ""
     assert s.pod_ready_timeout == 60
-    assert s.active_deadline_seconds == 3600
-    assert s.cpu == "1"
-    assert s.memory == "2Gi"
-    assert s.cpu_limit == "2"
-    assert s.memory_limit == "4Gi"
+    # cpu/memory/cpu_limit/memory_limit/active_deadline_seconds/live_view_mode
+    # were removed from BrowserSettings: they were never wired into the pod
+    # spec (which uses BrowserSpec's own defaults).
+    assert not hasattr(s, "cpu")
+    assert not hasattr(s, "memory")
+    assert not hasattr(s, "active_deadline_seconds")
+    assert not hasattr(s, "live_view_mode")
 
 
 def test_browser_settings_env_override(monkeypatch) -> None:

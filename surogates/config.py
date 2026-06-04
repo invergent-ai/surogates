@@ -235,7 +235,6 @@ class WorkerSettings(BaseSettings):
 
     concurrency: int = 50
     poll_timeout: int = 5
-    workspace_path: str = "/tmp/surogates/workspaces"
     api_base_url: str = "http://localhost:8000"
     use_api_for_harness_tools: bool = True
     # Emit iteration.summary / turn.summary events from the harness so
@@ -255,17 +254,8 @@ class LLMSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_LLM_"}
 
     model: str = "gpt-4o"
-    provider: str = ""  # "openai", "anthropic", "openrouter", etc.
     base_url: str = ""  # custom endpoint (e.g. vLLM, Ollama)
     api_key: str = ""  # provider API key
-    
-    # Fallback chain — list of dicts with provider/model/api_key/base_url
-    # Configured via config.yaml only (too complex for env vars)
-    fallback_providers: list[dict[str, Any]] = Field(default_factory=list)
-
-    # Credential pool — list of dicts with api_key/base_url/label/priority
-    # Configured via config.yaml only
-    credential_pool: list[dict[str, Any]] = Field(default_factory=list)
 
     # Per-model metadata overrides.  Keyed by model id; values are dicts
     # accepting ``context_window`` and ``max_output_tokens``.  Takes
@@ -312,7 +302,6 @@ class SandboxSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_SANDBOX_"}
 
     backend: Literal["process", "kubernetes"] = "process"
-    runtime_url: str = "http://sandbox-runtime:8080"
     default_timeout: int = 300
     # Defaults match :class:`surogates.sandbox.base.SandboxSpec` so the
     # ``default_sandbox_spec`` factory yields identical values when no
@@ -350,7 +339,6 @@ class BrowserSettings(BaseSettings):
     rest_port_base: int = 30000
     cdp_port_base: int = 31000
     live_view_port_base: int = 32000
-    live_view_mode: Literal["novnc", "webrtc"] = "novnc"
     k8s_namespace: str = "surogates"
     k8s_service_account: str = "surogates-browser"
     k8s_cluster_domain: str = "cluster.local"
@@ -358,11 +346,6 @@ class BrowserSettings(BaseSettings):
     k8s_s3_endpoint: str = ""
     pod_ready_timeout: int = 60
     endpoint_probe_timeout: int = 30
-    active_deadline_seconds: int = 3600
-    cpu: str = "1"
-    memory: str = "2Gi"
-    cpu_limit: str = "2"
-    memory_limit: str = "4Gi"
 
     # Fleet-backend settings (only used when backend == "fleet").
     # ``fleet_endpoint`` is the surogate-ops /api/browser-fleet base URL
@@ -572,8 +555,6 @@ class OutcomeSettings(BaseSettings):
     max_iterations: int = 20
     max_parse_failures: int = 3
     evaluator_model: str = ""
-    evaluator_base_url: str = ""
-    evaluator_api_key: str = ""
     evaluator_response_max_chars: int = 16384
 
 
@@ -584,8 +565,6 @@ class ScheduledSessionSettings(BaseSettings):
 
     enabled: bool = True
     tick_interval_seconds: int = 60
-    claim_limit: int = 10
-    claim_lease_seconds: int = 120
 
 
 class AuthSettings(BaseSettings):
