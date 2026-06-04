@@ -509,14 +509,26 @@ async def _run_single_delegation(
             excluded_tools.append(t)
 
     # Toolset intersection: child's allowlist must be ⊆ parent's
-    # allowlist. Without this, an agent_type preset could grant the
-    # child tools the parent itself doesn't have.
-    if parent_allowed:
-        parent_set = set(parent_allowed)
-        if allowed_tools is None:
-            allowed_tools = list(parent_allowed)
-        else:
-            allowed_tools = [t for t in allowed_tools if t in parent_set]
+    # allowlist -- UNLESS the child is using an admin-defined
+    # agent_def, in which case the agent_def's tools list is
+    # authoritative for what the sub-agent needs.  Intersection used
+    # to silently drop tools the agent_def explicitly required (e.g.
+    # the research-writer's create_artifact was being stripped because
+    # the planner -- a peer sub-agent -- doesn't have it in its own
+    # allowlist).  Symptom in the wild: the writer literally cannot
+    # create the report artifact, so it falls back to
+    # ask_user_question and stalls the workflow.
+    #
+    # Platform-level denials still propagate via excluded_tools
+    # (parent's exclusions are inherited above) and via
+    # _DELEGATION_ALWAYS_BLOCKED_TOOLS below, so this carve-out
+    # cannot be used to escape governance.
+    if parent_allowed and allowed_tools is None:
+        # Ad-hoc delegation with no agent_def -- inherit parent's
+        # allowlist unchanged.  Without an admin contract there's
+        # no other source of truth for what the child should have.
+        allowed_tools = list(parent_allowed)
+    # When ``allowed_tools`` came from the agent_def, leave it alone.
 
     # Hardcoded blocklist: tools that should never run in a delegated
     # child regardless of preset or parent config.

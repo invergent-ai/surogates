@@ -2825,10 +2825,27 @@ class AgentHarness(
     def _ensure_always_available_tools(
         self,
         tool_filter: set[str] | None,
+        *,
+        explicit_allowed: bool = False,
     ) -> set[str] | None:
-        """Keep platform control-plane tools available after filtering."""
+        """Keep platform control-plane tools available after filtering.
+
+        When *explicit_allowed* is True the caller's allowlist came
+        from an admin-defined ``allowed_tools`` config (typically an
+        AgentDef's ``tools`` list).  Respect that contract: do not
+        force-add ``ask_user_question`` to an allowlist that
+        deliberately omits it.  Symptom in the wild: the
+        research-writer sub-agent's AGENT.md lists only
+        ``[research_memory, create_artifact]`` so the writer cannot
+        ask the user clarifying questions.  Force-adding
+        ``ask_user_question`` defeated that contract and the writer
+        stalled the workflow asking format questions instead of
+        producing the report.
+        """
         if tool_filter is None:
             return None
+        if explicit_allowed:
+            return tool_filter
         if "ask_user_question" not in self._tools.tool_names:
             return tool_filter
         updated = set(tool_filter)
@@ -2890,13 +2907,17 @@ class AgentHarness(
                 tool_filter.discard("loop_wait")
                 if "loop_complete" in self._tools.tool_names:
                     tool_filter.add("loop_complete")
-            return self._ensure_always_available_tools(tool_filter)
+            return self._ensure_always_available_tools(
+                tool_filter, explicit_allowed=explicit_allowed,
+            )
 
         if tool_filter is not None and not explicit_allowed:
             tool_filter = set(tool_filter)
             tool_filter.discard("loop_wait")
             tool_filter.discard("loop_complete")
-        return self._ensure_always_available_tools(tool_filter)
+        return self._ensure_always_available_tools(
+            tool_filter, explicit_allowed=explicit_allowed,
+        )
 
     @staticmethod
     def _dynamic_loop_wait_succeeded(

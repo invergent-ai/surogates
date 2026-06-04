@@ -482,11 +482,21 @@ async def test_stale_detection_emits_event_on_idle_child(
 
 
 @pytest.mark.asyncio
-async def test_parent_allowlist_constrains_child_preset(
+async def test_agent_def_tools_are_authoritative_over_parent_allowlist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Parent can only use read_file and write_file. The agent_type preset
-    # would normally grant exec_shell, but intersection must drop it.
+    """When the child has an admin-defined agent_def, its ``tools`` list
+    is authoritative -- the parent's runtime allowlist no longer
+    intersects it away.  Otherwise admin-defined sub-agents silently
+    lose tools they explicitly require (e.g. the research-writer's
+    ``create_artifact`` getting stripped because the planner -- a
+    peer sub-agent -- doesn't have it).  Platform-level denials still
+    propagate via excluded_tools and _DELEGATION_ALWAYS_BLOCKED_TOOLS;
+    the carve-out is scoped to admin-authored agent_def tool lists.
+    """
+    # Parent has a narrow allowlist.  The engineer agent_def wants a
+    # different tool set; under the old intersection logic that would
+    # get whittled down.  Now the agent_def wins.
     parent = _parent_session(allowed_tools=["read_file", "write_file"])
     store = FakeStore(parent, child_events=_complete_response_events("ok"))
     captured = _install_stub_child_session(monkeypatch, store)
@@ -505,9 +515,16 @@ async def test_parent_allowlist_constrains_child_preset(
     )
 
     allowed = captured["config"]["allowed_tools"]
+    # Child receives exactly what the agent_def specifies.
     assert "read_file" in allowed
-    assert "exec_shell" not in allowed
-    assert "write_file" not in allowed  # not in preset
+    assert "exec_shell" in allowed, (
+        "exec_shell is required by the engineer agent_def; "
+        "intersection with parent.allowed_tools must not strip it"
+    )
+    # write_file is in the parent's allowlist but NOT in the
+    # agent_def's tools -- the agent_def is authoritative, so the
+    # child does not inherit it.
+    assert "write_file" not in allowed
 
 
 @pytest.mark.asyncio

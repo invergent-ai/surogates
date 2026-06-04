@@ -259,7 +259,17 @@ def _chat_response(content: str, *, model: str = "test-model") -> SimpleNamespac
 class TestDynamicLoopToolPolicy:
     """Dynamic loop sessions expose loop_wait but not scheduler creation tools."""
 
-    def test_explicit_allowed_tools_still_include_ask_user_question(self) -> None:
+    def test_explicit_allowed_tools_honours_omission_of_ask_user_question(
+        self,
+    ) -> None:
+        """An explicit ``allowed_tools`` is admin-authored contract --
+        it must be honoured verbatim.  ``_ensure_always_available_tools``
+        used to force-add ``ask_user_question`` to every allowlist,
+        which silently defeated AgentDef contracts (e.g. the
+        research-writer's ``[research_memory, create_artifact]``
+        gained an ask_user_question the writer then used to stall the
+        workflow asking format questions instead of producing the
+        report).  Explicit lists are now respected."""
         from surogates.tools.registry import ToolRegistry, ToolSchema
 
         reg = ToolRegistry()
@@ -274,7 +284,31 @@ class TestDynamicLoopToolPolicy:
 
         tool_names = harness._tool_filter_for_session(session)
 
-        assert tool_names == {"ask_user_question", "web_search"}
+        assert tool_names == {"web_search"}
+
+    def test_implicit_filter_still_adds_ask_user_question(self) -> None:
+        """When the session has NO explicit allowlist, the
+        always-available behaviour stays: an interactive session
+        needs ask_user_question to be able to surface a clarifying
+        prompt to the user, and there's no admin contract to honour."""
+        from surogates.tools.registry import ToolRegistry, ToolSchema
+
+        reg = ToolRegistry()
+        for name in ("ask_user_question", "web_search", "read_file"):
+            reg.register(
+                name,
+                ToolSchema(name=name, description="test", parameters={}),
+                lambda _: "{}",
+            )
+        harness = _make_harness(tool_registry=reg)
+        # No allowed_tools / excluded_tools -- the implicit
+        # "everything except worker-excluded" filter applies.
+        session = _session_with_config({})
+
+        tool_names = harness._tool_filter_for_session(session)
+
+        assert tool_names is not None
+        assert "ask_user_question" in tool_names
 
     def test_excluded_tools_cannot_remove_ask_user_question(self) -> None:
         from surogates.tools.registry import ToolRegistry, ToolSchema
