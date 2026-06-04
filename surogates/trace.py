@@ -30,16 +30,8 @@ __all__ = [
     "set_trace",
     "new_trace",
     "new_span",
-    "trace_headers",
     "from_headers",
 ]
-
-# W3C Trace Context version.
-_TRACE_VERSION = "00"
-
-# Trace flag: sampled.
-_TRACE_FLAGS = "01"
-
 
 def _random_trace_id() -> str:
     """Generate a 128-bit random trace ID as a 32-character hex string."""
@@ -125,20 +117,6 @@ def new_span(parent: TraceContext | None = None) -> TraceContext:
 # ------------------------------------------------------------------
 # W3C Trace Context header helpers
 # ------------------------------------------------------------------
-
-
-def trace_headers(ctx: TraceContext | None = None) -> dict[str, str]:
-    """Return a ``traceparent`` header dict for outbound HTTP requests.
-
-    Format: ``{version}-{trace_id}-{span_id}-{flags}``
-    See https://www.w3.org/TR/trace-context/
-    """
-    ctx = ctx or get_trace()
-    if ctx is None:
-        return {}
-    return {
-        "traceparent": f"{_TRACE_VERSION}-{ctx.trace_id}-{ctx.span_id}-{_TRACE_FLAGS}",
-    }
 
 
 def from_headers(headers: Mapping[str, str]) -> TraceContext | None:

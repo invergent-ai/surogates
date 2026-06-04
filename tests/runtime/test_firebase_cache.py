@@ -62,26 +62,6 @@ async def test_firebase_cache_invalidate_drops_entry():
 
 
 @pytest.mark.asyncio
-async def test_firebase_cache_invalidate_all():
-    from surogates.runtime import FirebaseConfigCache
-
-    fetches = 0
-
-    async def loader(_):
-        nonlocal fetches
-        fetches += 1
-        return {}
-
-    cache = FirebaseConfigCache(loader=loader, ttl_seconds=10)
-    await cache.get("p-1")
-    await cache.get("p-2")
-    cache.invalidate_all()
-    await cache.get("p-1")
-    await cache.get("p-2")
-    assert fetches == 4
-
-
-@pytest.mark.asyncio
 async def test_firebase_cache_dedupes_concurrent_misses():
     from surogates.runtime import FirebaseConfigCache
 

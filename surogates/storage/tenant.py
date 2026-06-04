@@ -306,38 +306,6 @@ class TenantStorage:
         """Check if a supporting file exists."""
         return await self._backend.exists(self._bucket, f"{key_prefix}/{file_path}")
 
-    # ── Skills listing (all layers) ─────────────────────────────────
-
-    async def list_all_skills(self) -> list[dict[str, Any]]:
-        """List all skills across user and org-shared layers.
-
-        Returns a list of dicts with ``name``, ``key_prefix``, ``layer``.
-        Does NOT include platform skills (those are on the container filesystem).
-        Service-account sessions see the shared layer only.
-        """
-        skills: dict[str, dict[str, Any]] = {}
-
-        # User layer (highest precedence).  Empty for service-account
-        # contexts, which collapses this block to a no-op loop.
-        for name, key_prefix in await self._iter_user_skills():
-            if name not in skills:
-                skills[name] = {
-                    "name": name, "key_prefix": key_prefix, "layer": "user",
-                }
-
-        # Org-shared layer
-        shared_prefix = self._tk("shared/skills/")
-        shared_keys = await self._backend.list_keys(self._bucket, prefix=shared_prefix)
-        for key in shared_keys:
-            if key.endswith("/SKILL.md"):
-                parts = key.split("/")
-                name = parts[-2]
-                if name not in skills:  # user layer takes precedence
-                    prefix = "/".join(parts[:-1])
-                    skills[name] = {"name": name, "key_prefix": prefix, "layer": "org"}
-
-        return list(skills.values())
-
     # ── Sub-agent types ─────────────────────────────────────────────
 
     def _shared_agent_key(self, name: str, category: str | None = None) -> str:
@@ -472,31 +440,3 @@ class TenantStorage:
 
         return list(agents.values())
 
-    # ── Memory ──────────────────────────────────────────────────────
-
-    def _memory_key(self, filename: str) -> str:
-        """Build key for a memory file.
-
-        Service-account sessions (no user scope) route to
-        ``shared/memory/{filename}`` — org-wide memory that persists
-        across every SA-submitted session for the tenant.
-
-        Shared-bucket mode prepends ``tenants/{org_id}/`` so different
-        tenants don't collide on the same per-tenant relative path.
-        """
-        if self._user_id is None:
-            return f"{self._tenant_prefix}shared/memory/{filename}"
-        return f"{self._tenant_prefix}users/{self._user_id}/memory/{filename}"
-
-    async def read_memory_file(self, filename: str) -> str | None:
-        """Read MEMORY.md or USER.md.  Returns None if not found."""
-        key = self._memory_key(filename)
-        try:
-            return await self._backend.read_text(self._bucket, key)
-        except KeyError:
-            return None
-
-    async def write_memory_file(self, filename: str, content: str) -> None:
-        """Write MEMORY.md or USER.md."""
-        key = self._memory_key(filename)
-        await self._backend.write_text(self._bucket, key, content)

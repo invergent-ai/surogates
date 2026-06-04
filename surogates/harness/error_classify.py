@@ -29,11 +29,7 @@ from surogates.harness.error_classifier import (
     classify_api_error,
 )
 
-__all__ = ["ErrorCategory", "ErrorInfo", "classify_harness_error"]
-
-# Categories are stored on events and read by the frontend; treat the
-# set as a stable contract.
-ErrorCategory = str  # one of the values in _CATEGORY_TITLES below
+__all__ = ["ErrorInfo", "classify_harness_error"]
 
 # Fixed, user-facing title for each category.  Displayed in the UI error
 # bubble as the primary line.

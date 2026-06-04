@@ -70,38 +70,6 @@ class DatabaseAuthProvider:
             display_name=user.display_name,
         )
 
-    async def get_user_info(self, user_id: str) -> AuthResult:
-        """Look up a user by ``external_id`` (falls back to primary key)."""
-        async with self._session_factory() as session:
-            # Try external_id first, then primary key.
-            stmt = (
-                select(User)
-                .where(User.org_id == self._org_id, User.external_id == user_id)
-            )
-            result = await session.execute(stmt)
-            user: User | None = result.scalar_one_or_none()
-
-            if user is None:
-                # Fallback: treat user_id as the UUID primary key.
-                try:
-                    pk = UUID(user_id)
-                except ValueError:
-                    return AuthResult(authenticated=False, error="User not found.")
-
-                stmt = select(User).where(User.org_id == self._org_id, User.id == pk)
-                result = await session.execute(stmt)
-                user = result.scalar_one_or_none()
-
-        if user is None:
-            return AuthResult(authenticated=False, error="User not found.")
-
-        return AuthResult(
-            authenticated=True,
-            user_id=str(user.id),
-            email=user.email,
-            display_name=user.display_name,
-        )
-
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------

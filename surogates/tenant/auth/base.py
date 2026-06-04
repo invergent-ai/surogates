@@ -41,13 +41,3 @@ class AuthProvider(Protocol):
         database provider).
         """
         ...  # pragma: no cover
-
-    async def get_user_info(self, user_id: str) -> AuthResult:
-        """Retrieve profile information for the given *user_id*.
-
-        *user_id* is the external-provider identifier (column
-        ``users.external_id`` in the database provider's case, or the
-        primary key UUID cast to string when there is no separate
-        external id).
-        """
-        ...  # pragma: no cover

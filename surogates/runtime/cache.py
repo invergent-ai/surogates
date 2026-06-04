@@ -74,10 +74,6 @@ class RuntimeConfigCache:
         """
         self._entries.pop(agent_id, None)
 
-    def invalidate_all(self) -> None:
-        """Drop every entry — used on pod shutdown for a clean restart."""
-        self._entries.clear()
-
     async def _lock(self, agent_id: str) -> asyncio.Lock:
         async with self._global:
             lock = self._locks.get(agent_id)

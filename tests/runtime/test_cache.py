@@ -77,26 +77,6 @@ async def test_cache_invalidate_unknown_key_is_noop():
 
 
 @pytest.mark.asyncio
-async def test_cache_invalidate_all_drops_every_entry():
-    from surogates.runtime import RuntimeConfigCache
-
-    fetches = 0
-
-    async def loader(agent_id):
-        nonlocal fetches
-        fetches += 1
-        return {"agent_id": agent_id}
-
-    cache = RuntimeConfigCache(loader=loader, ttl_seconds=10)
-    await cache.get("a-1")
-    await cache.get("a-2")
-    cache.invalidate_all()
-    await cache.get("a-1")
-    await cache.get("a-2")
-    assert fetches == 4
-
-
-@pytest.mark.asyncio
 async def test_cache_dedupes_concurrent_misses_for_same_key():
     """Two concurrent ``get('a-1')`` calls with empty cache must result
     in exactly one loader invocation — the second waits on the first.

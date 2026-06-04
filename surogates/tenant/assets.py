@@ -82,11 +82,3 @@ class TenantAssetManager:
         return str(
             self._base / str(org_id) / "users" / str(user_id) / "skills"
         )
-
-    def mcp_config_path(self, org_id: UUID, user_id: UUID | None = None) -> str:
-        """Return the path to the MCP configuration directory."""
-        if user_id is None:
-            return str(self._base / str(org_id) / "shared" / "mcp")
-        return str(
-            self._base / str(org_id) / "users" / str(user_id) / "mcp"
-        )

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import logging
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -222,10 +221,3 @@ def redact_sensitive_data(data: Any) -> Any:
     if isinstance(data, tuple):
         return tuple(redact_sensitive_data(value) for value in data)
     return copy.deepcopy(data)
-
-
-class RedactingFormatter(logging.Formatter):
-    """Formatter wrapper that redacts the fully formatted log line."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        return str(redact_sensitive_text(super().format(record)))
