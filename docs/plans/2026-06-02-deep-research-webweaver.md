@@ -15,8 +15,8 @@
 Updated before each commit. `[x]` done · `[~]` in progress · `[ ]` not started.
 
 - [x] Task 1 — Research memory-bank pure logic
-- [~] Task 2 — Living-outline pure logic *(in progress)*
-- [ ] Task 3 — `research_memory` / `research_outline` builtin tools
+- [x] Task 2 — Living-outline pure logic
+- [~] Task 3 — `research_memory` / `research_outline` builtin tools *(in progress)*
 - [ ] Task 4 — Wire research tools into the builtin registry
 - [ ] Task 5a — Planner + writer `AGENT.md` files packaged with the ops wheel
 - [ ] Task 5b — `Agent.deep_research_enabled` column + API surface
