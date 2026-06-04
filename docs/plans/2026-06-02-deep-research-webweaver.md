@@ -26,7 +26,7 @@ Updated before each commit. `[x]` done · `[~]` in progress · `[ ]` not started
 - [x] Task 7 — Collect research sources in runtime state
 - [x] Task 8 — Citation text component (`[S#]` linkification)
 - [x] Task 9 — Research tool renderers (outline + memory)
-- [ ] Task 10 — Sources/citations panel
+- [x] Task 10 — Sources/citations panel
 - [ ] Task 11 — Frontend visual verification
 
 ---
