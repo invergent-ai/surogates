@@ -1036,8 +1036,18 @@ function extractToolDetail(tc: ToolCallInfo): string | null {
     case "web_search":
     case "web_crawl":
       return stringArg("query");
-    case "web_extract":
-      return stringArg("url");
+    case "web_extract": {
+      const url = stringArg("url");
+      if (!url) return null;
+      // Hostname is much more readable in a one-line chip than the
+      // full URL; falls back to the raw value for unparseable inputs
+      // (file://, data:, etc.).
+      try {
+        return new URL(url).hostname.replace(/^www\./, "");
+      } catch {
+        return truncate(url, 40);
+      }
+    }
     case "skill_view":
     case "skill_manage":
       return stringArg("name") ?? stringArg("skill");
@@ -1047,6 +1057,48 @@ function extractToolDetail(tc: ToolCallInfo): string | null {
       return stringArg("name") ?? stringArg("task") ?? stringArg("title");
     case "memory":
       return stringArg("action") ?? stringArg("key");
+    case "research_memory": {
+      // ``add`` carries url+title; ``retrieve`` carries query; ``list``
+      // carries nothing useful.  The Simple-mode row prefers a human
+      // anchor over the raw action verb.
+      const action = stringArg("action");
+      if (action === "add") {
+        const title = stringArg("title");
+        if (title) return truncate(title, 60);
+        const url = stringArg("url");
+        if (url) {
+          try {
+            return new URL(url).hostname.replace(/^www\./, "");
+          } catch {
+            return truncate(url, 40);
+          }
+        }
+        return null;
+      }
+      if (action === "retrieve") {
+        return stringArg("query");
+      }
+      return action;
+    }
+    case "research_outline": {
+      const action = stringArg("action");
+      if (action === "set") {
+        // Count level-2+ markdown headings in the outline so the row
+        // surfaces "set outline (10 sections)" rather than the bare
+        // tool name.  Mirrors ``outline_sections`` on the Python side.
+        const outline = stringArg("outline");
+        if (outline) {
+          const sections = outline
+            .split(/\r?\n/)
+            .filter((line) => /^#{2,6}\s+\S/.test(line)).length;
+          if (sections > 0) {
+            return `${sections} ${sections === 1 ? "section" : "sections"}`;
+          }
+        }
+        return "outline";
+      }
+      return action;
+    }
     default:
       return null;
   }
@@ -1185,6 +1237,8 @@ const _TOOL_ROW_ICON: Record<string, LucideIcon> = {
   create_artifact: FileTextIcon,
   memory: PenLineIcon,
   todo: ListIcon,
+  research_memory: BookOpenIcon,
+  research_outline: ListIcon,
 };
 
 function _toolRowIcon(toolName: string): LucideIcon {
@@ -1240,6 +1294,37 @@ function _toolRowLabel(tc: ToolCallInfo): string {
       return detail ? `Memory ${detail}` : "Updated memory";
     case "todo":
       return detail ? `Todo ${detail}` : "Updated todo list";
+    case "research_memory": {
+      // ``detail`` already encodes the action's anchor (title /
+      // hostname for add, query for retrieve, raw verb otherwise);
+      // wrap it in the verb-first prose the rest of the row family
+      // uses.
+      const args = parseArgs<{ action?: string }>(tc.args);
+      const action = args?.action;
+      if (action === "add") {
+        return detail ? `Stored source "${detail}"` : "Stored a source";
+      }
+      if (action === "retrieve") {
+        return detail
+          ? `Retrieved sources for "${detail}"`
+          : "Retrieved sources";
+      }
+      if (action === "list") {
+        return "Listed sources";
+      }
+      return "Updated research memory";
+    }
+    case "research_outline": {
+      const args = parseArgs<{ action?: string }>(tc.args);
+      const action = args?.action;
+      if (action === "set") {
+        return detail ? `Updated outline (${detail})` : "Updated outline";
+      }
+      if (action === "get") {
+        return "Read outline";
+      }
+      return "Touched outline";
+    }
     default:
       return cancelledToolLabel(tc.toolName);
   }
