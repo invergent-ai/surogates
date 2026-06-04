@@ -55,6 +55,33 @@ describe("applyAgentChatEvent", () => {
     expect(next.messages[0]?.status).toBe("complete");
   });
 
+  it("does not duplicate reasoning after llm.delta streamed it then llm.thinking re-sent it", () => {
+    // The harness streams reasoning as incremental llm.delta(reasoning)
+    // chunks AND emits one terminal llm.thinking carrying the complete
+    // text. Both reach the same streaming message on the live path; the
+    // reducer must not store the reasoning twice.
+    const reasoning =
+      "The user wants me to delegate this. Let me use delegate_task.\n";
+    let state = createInitialAgentChatState();
+    for (const chunk of ["The user wants me ", "to delegate this. ", "Let me use delegate_task.\n"]) {
+      state = applyAgentChatEvent(state, {
+        type: "llm.delta",
+        eventId: 10,
+        data: { reasoning: chunk, turn_id: "t1", iteration_index: 0 },
+      });
+    }
+    expect(state.messages[0]?.reasoning).toBe(reasoning);
+
+    const next = applyAgentChatEvent(state, {
+      type: "llm.thinking",
+      eventId: 11,
+      data: { reasoning, turn_id: "t1", iteration_index: 0 },
+    });
+
+    expect(next.messages).toHaveLength(1);
+    expect(next.messages[0]?.reasoning).toBe(reasoning);
+  });
+
   it("keeps running true across harness.crash and exposes retry indicator", () => {
     const running = applyAgentChatEvent(createInitialAgentChatState(), {
       type: "llm.request",

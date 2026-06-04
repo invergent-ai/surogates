@@ -617,9 +617,16 @@ function applyLlmThinking(
       iterationIndex,
     });
   } else {
+    // llm.thinking carries the COMPLETE reasoning snapshot for the
+    // iteration; the same text was already streamed incrementally via
+    // llm.delta(reasoning=…) and accumulated into prev.reasoning on the
+    // live path. appendText dedups (skips when the snapshot is already
+    // present) so the text isn't doubled — mirrors how content avoids
+    // the same delta + terminal-snapshot double. On replay the server
+    // drops llm.delta, so prev has no reasoning yet and this sets it once.
     messages[idx] = {
       ...prev,
-      reasoning: (prev.reasoning ?? "") + reasoningText,
+      reasoning: appendText(prev.reasoning, reasoningText),
       turnId: turnId ?? prev.turnId,
       iterationIndex: iterationIndex ?? prev.iterationIndex,
     };
