@@ -13,8 +13,10 @@ from typing import Any
 import pytest
 
 from surogates.harness.slash_skill import (
+    build_deep_research_message,
     build_expanded_message,
     expand_slash_skill,
+    parse_deep_research_command,
     parse_slash_command,
 )
 
@@ -59,6 +61,12 @@ class TestParseSlashCommand:
 
     def test_returns_none_for_goal(self) -> None:
         assert parse_slash_command("/goal fix tests") is None
+
+    def test_returns_none_for_deep_research(self) -> None:
+        # /deep-research is a harness-handled builtin; the slash-skill
+        # expander must not try to resolve it against the skill catalog.
+        assert parse_slash_command("/deep-research my topic") is None
+        assert parse_slash_command("/deep-research") is None
 
     def test_returns_none_when_no_leading_slash(self) -> None:
         assert parse_slash_command("arxiv cuda") is None
@@ -123,6 +131,75 @@ class TestBuildExpandedMessage:
 # ---------------------------------------------------------------------------
 # expand_slash_skill
 # ---------------------------------------------------------------------------
+
+
+class TestParseDeepResearchCommand:
+    def test_bare_command_returns_empty_string(self) -> None:
+        # Bare ``/deep-research`` is "handled with empty topic"
+        # (loop builds an ask-for-a-topic message).  Use ``is not None``
+        # to distinguish from the "not a deep-research command" sentinel.
+        assert parse_deep_research_command("/deep-research") == ""
+
+    def test_command_with_topic(self) -> None:
+        assert parse_deep_research_command(
+            "/deep-research long-context retrieval"
+        ) == "long-context retrieval"
+
+    def test_outer_whitespace_tolerated(self) -> None:
+        # Composer can prepend a newline if attachments rendered above
+        # the slash; strip the outer whitespace before matching.
+        assert parse_deep_research_command(
+            "  /deep-research foo  "
+        ) == "foo"
+
+    def test_topic_inner_whitespace_trimmed(self) -> None:
+        assert parse_deep_research_command(
+            "/deep-research   foo   "
+        ) == "foo"
+
+    def test_returns_none_for_unrelated_text(self) -> None:
+        assert parse_deep_research_command("hello") is None
+        assert parse_deep_research_command("/clear") is None
+        assert parse_deep_research_command("/loop 5m foo") is None
+
+    def test_returns_none_for_prefix_collision(self) -> None:
+        # ``/deep-researchsomething`` is NOT a deep-research command --
+        # it must fall through to the regular slash-skill path so the
+        # user sees a "skill not found" outcome rather than triggering
+        # a delegation with a malformed topic.
+        assert parse_deep_research_command(
+            "/deep-researchsomething"
+        ) is None
+        assert parse_deep_research_command(
+            "/deep-research-foo bar"
+        ) is None
+
+
+class TestBuildDeepResearchMessage:
+    def test_includes_topic_and_delegation_directive(self) -> None:
+        msg = build_deep_research_message(
+            topic="impact of long-context models on retrieval",
+        )
+        # The rewrite must name the sub-agent and the dispatcher tool so
+        # the LLM's only obvious next move is the right delegate_task.
+        assert "deep-research" in msg
+        assert "delegate_task" in msg
+        assert "Topic: impact of long-context models on retrieval" in msg
+
+    def test_strips_topic_whitespace(self) -> None:
+        msg = build_deep_research_message(topic="   foo   ")
+        assert "Topic: foo" in msg
+
+    def test_empty_topic_asks_for_one(self) -> None:
+        # Empty args should not produce a delegation with an empty topic;
+        # instead the LLM is told to ask the user.
+        msg = build_deep_research_message(topic="")
+        assert "ask the user" in msg.lower()
+        assert "Topic:" not in msg
+
+    def test_whitespace_only_topic_treated_as_empty(self) -> None:
+        msg = build_deep_research_message(topic="   \t  ")
+        assert "ask the user" in msg.lower()
 
 
 class _FakeRegistry:

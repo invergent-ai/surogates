@@ -87,7 +87,11 @@ from surogates.harness.sanitize import (
     deduplicate_tool_calls,
     strip_budget_warnings,
 )
-from surogates.harness.slash_skill import expand_slash_skill
+from surogates.harness.slash_skill import (
+    build_deep_research_message,
+    expand_slash_skill,
+    parse_deep_research_command,
+)
 from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
 from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.structured_output import generate_structured
@@ -1591,11 +1595,29 @@ class AgentHarness:
                     )
                 return
 
-            # 10b. Eager /<skill> or /<expert> expansion.
+            # 10b. /deep-research <topic> -- rewrite the user message to
+            # a deterministic delegation directive so the base LLM hands
+            # the topic to the ``deep-research`` sub-agent via
+            # delegate_task rather than running the research itself.
+            # No early return: the rewritten message flows into step 11
+            # so the LLM still runs this turn.
+            deep_research_topic = parse_deep_research_command(
+                last_user_content,
+            )
+            if deep_research_topic is not None:
+                if last_user is not None:
+                    last_user["content"] = build_deep_research_message(
+                        topic=deep_research_topic,
+                    )
+                # The rewritten directive is the planning structure;
+                # skip the SELF-DISCOVER / thinking-gate scaffold.
+                self._skip_pre_llm_scaffold_for_turn = True
+
+            # 10c. Eager /<skill> or /<expert> expansion.
             # See slash_skill.expand_slash_skill. ``kind`` distinguishes
             # the two paths so we don't double-emit a skill.invoked when
             # the service already emitted expert.delegation.
-            if last_user_content.startswith("/"):
+            elif last_user_content.startswith("/"):
                 expansion = await expand_slash_skill(
                     text=last_user_content,
                     tools=self._tools,
