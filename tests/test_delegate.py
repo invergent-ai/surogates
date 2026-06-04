@@ -511,6 +511,82 @@ async def test_parent_allowlist_constrains_child_preset(
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_agent_type_keeps_delegate_task_at_default_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a sub-agent whose AGENT.md lists ``delegate_task`` in
+    its tools is an orchestrator by definition (e.g. ``deep-research``,
+    which uses delegate_task to hand off to ``research-writer``).  The
+    default role on ``delegate_task`` is ``leaf``, and the leaf-role
+    strip used to unconditionally remove ``delegate_task`` from the
+    child's allowlist -- which left a planner literally unable to spawn
+    its writer and silently turned the workflow into a no-op.  The fix
+    treats the agent_def's tool list as authoritative: if it advertises
+    delegate_task, leaf-role strip is skipped.
+    """
+    parent = _parent_session()
+    store = FakeStore(parent, child_events=_complete_response_events("ok"))
+    captured = _install_stub_child_session(monkeypatch, store)
+    _install_stub_agent_resolver(
+        monkeypatch,
+        agent_def=_StubAgentDef(
+            tools=[
+                "web_search", "web_extract", "research_memory",
+                "research_outline", "delegate_task", "ask_user_question",
+            ],
+        ),
+    )
+
+    await _delegate_handler(
+        # Default role; the LLM dispatch is the realistic case (no
+        # ``role`` kwarg sent by the model).
+        {"goal": "research X", "agent_type": "deep-research"},
+        session_store=store,
+        redis=None,
+        tenant=object(),
+        session_id=str(parent.id),
+        budget=IterationBudget(max_total=10),
+    )
+
+    allowed = captured["config"]["allowed_tools"]
+    assert "delegate_task" in allowed, (
+        "deep-research's AGENT.md lists delegate_task; leaf-strip "
+        "must NOT remove it (it's the hand-off mechanism)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_leaf_role_still_strips_delegate_when_agent_def_silent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Counter-test for the orchestrator carve-out: a leaf agent_def
+    that does NOT advertise delegate_task still has it stripped.  Keeps
+    the original guardrail intact for regular leaf workers."""
+    parent = _parent_session()
+    store = FakeStore(parent, child_events=_complete_response_events("ok"))
+    captured = _install_stub_child_session(monkeypatch, store)
+    _install_stub_agent_resolver(
+        monkeypatch,
+        agent_def=_StubAgentDef(tools=["read_file", "write_file"]),
+    )
+
+    await _delegate_handler(
+        {"goal": "x", "agent_type": "engineer"},
+        session_store=store,
+        redis=None,
+        tenant=object(),
+        session_id=str(parent.id),
+        budget=IterationBudget(max_total=10),
+    )
+
+    allowed = captured["config"]["allowed_tools"]
+    assert "delegate_task" not in allowed, (
+        "engineer agent_def doesn't list delegate_task; leaf-role "
+        "strip should still remove it from the child"
+    )
+
+
+@pytest.mark.asyncio
 async def test_delegate_forwards_bundle_to_agent_resolver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -527,8 +527,21 @@ async def _run_single_delegation(
         elif t not in excluded_tools:
             excluded_tools.append(t)
 
-    # Leaf role: strip delegate_task.
-    if role == "leaf":
+    # Leaf role: strip delegate_task -- UNLESS the agent_def itself
+    # lists delegate_task as required.  Some agent types are orchestrators
+    # by definition (e.g. ``deep-research``, which uses delegate_task
+    # to hand off to ``research-writer``); stripping the tool there
+    # turns a structural workflow into a runtime failure where the
+    # planner literally cannot reach the writer and falls back to
+    # writing prose in-place.  Treat the agent_def's tool list as
+    # authoritative: if it advertises delegate_task, the agent is an
+    # orchestrator no matter what the caller passed for ``role``.
+    agent_def_requires_delegate = (
+        agent_def is not None
+        and agent_def.tools is not None
+        and "delegate_task" in agent_def.tools
+    )
+    if role == "leaf" and not agent_def_requires_delegate:
         if allowed_tools is not None:
             allowed_tools = [t for t in allowed_tools if t != "delegate_task"]
         elif "delegate_task" not in excluded_tools:
