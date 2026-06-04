@@ -126,11 +126,11 @@ function CollapsibleMessageBody({ content }: { content: string }) {
           type="button"
           onClick={() => setExpanded((prev) => !prev)}
           className={cn(
-            "mt-1 text-xs font-medium text-primary",
+            "mt-2 text-xs font-bold text-primary",
             "hover:underline focus:outline-none focus-visible:underline",
           )}
         >
-          {expanded ? "Show less" : "Show more"}
+          {expanded ? "Show less..." : "Show more..."}
         </button>
       )}
     </div>
