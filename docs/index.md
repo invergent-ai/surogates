@@ -100,6 +100,14 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - Event vocabulary (`worker.complete` extended with `task_id`, plus `task.blocked` / `task.failed`)
 - **Missions** (rubric-judged, long-running objectives): `/mission` slash command, evaluator triggers, verifier-task pattern, mission dashboard, pause/resume/cancel
 
+### [11b. Deep Research](deep-research/index.md)
+- Two-agent workflow (planner + writer) for citation-grounded long-form reports
+- Opt-in per agent (`Settings → Identity → Capabilities → Deep research workflow`)
+- `/deep-research <topic>` slash command (single-shot, no retry, no batch fan-out)
+- `research_memory` + `research_outline` tools (shared `.research/` workspace dir)
+- `create_artifact` Guard 3 (rejects markdown bodies with dangling `[S#]` citations)
+- Operational guardrails: 15-min delegation timeout, planner self-recursion blocked, sub-agent sessions read-only
+
 ### [12. Experts](experts/index.md)
 - What is an expert? (task-specialized model as a skill)
 - Define an expert (`SKILL.md` with type: expert)
