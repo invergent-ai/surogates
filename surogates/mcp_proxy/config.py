@@ -40,7 +40,6 @@ class McpProxySettings(BaseSettings):
     max_connections_per_org: int = 50   # max concurrent MCP connections per org
 
     # Security
-    jwt_secret: str = "change-me-in-production"
     encryption_key: str = ""  # Fernet key for credential vault
 
     log_level: str = "INFO"

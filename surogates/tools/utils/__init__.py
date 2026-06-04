@@ -40,22 +40,8 @@ from surogates.tools.utils.env_passthrough import (
     reset_config_cache,
 )
 from surogates.tools.utils.fuzzy_match import fuzzy_find_and_replace
-from surogates.tools.utils.patch_parser import (
-    Hunk,
-    HunkLine,
-    OperationType,
-    PatchOperation,
-    apply_v4a_operations,
-    parse_v4a_patch,
-)
 from surogates.tools.utils.checkpoint_manager import CheckpointManager, format_checkpoint_list
 from surogates.tools.utils.url_safety import is_always_blocked_url, is_safe_url
-from surogates.tools.utils.website_policy import (
-    WebsitePolicyError,
-    check_website_access,
-    invalidate_cache,
-    load_website_blocklist,
-)
 
 __all__ = [
     # ansi_strip
@@ -71,21 +57,9 @@ __all__ = [
     "reset_config_cache",
     # fuzzy_match
     "fuzzy_find_and_replace",
-    # patch_parser
-    "Hunk",
-    "HunkLine",
-    "OperationType",
-    "PatchOperation",
-    "apply_v4a_operations",
-    "parse_v4a_patch",
     # url_safety
     "is_always_blocked_url",
     "is_safe_url",
-    # website_policy
-    "WebsitePolicyError",
-    "check_website_access",
-    "invalidate_cache",
-    "load_website_blocklist",
     # checkpoint_manager
     "CheckpointManager",
     "format_checkpoint_list",
