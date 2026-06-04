@@ -651,6 +651,182 @@ class TestCreateArtifactHandler:
 
 
 # =========================================================================
+# Research citation validator (Guard 3)
+# =========================================================================
+
+
+class TestCitationValidator:
+    """Markdown artifacts cannot cite ``[S#]`` ids that are not stored
+    in the research_memory bank.  The reconciliation is part of the
+    deep-research planner+writer contract; the validator is the
+    last-line guarantee that a bad outline doesn't produce a bad
+    artifact in the user's session."""
+
+    @staticmethod
+    def _write_bank(tmp_path, entries: list[dict[str, Any]]) -> str:
+        """Write a memory.jsonl with the given entries and return the
+        workspace root (matching how the research_memory tool lays it
+        out under ``{workspace}/.research/memory.jsonl``).
+        """
+        research_dir = tmp_path / ".research"
+        research_dir.mkdir(parents=True, exist_ok=True)
+        lines = [json.dumps(e) for e in entries]
+        (research_dir / "memory.jsonl").write_text(
+            "\n".join(lines) + ("\n" if lines else ""),
+            encoding="utf-8",
+        )
+        return str(tmp_path)
+
+    async def test_markdown_without_citations_passes(self, tmp_path):
+        client = _StubAPIClient()
+        workspace = self._write_bank(tmp_path, [])
+        out = await _create_artifact_handler(
+            {
+                "name": "notes",
+                "kind": "markdown",
+                "spec": {"content": "# Notes\n\nNo citations here."},
+            },
+            api_client=client,
+            workspace_path=workspace,
+        )
+        # No ``[S#]`` chips, so the validator no-ops and the call
+        # forwards to the API client.
+        assert json.loads(out)["success"] is True
+        assert len(client.calls) == 1
+
+    async def test_markdown_with_resolved_citations_passes(self, tmp_path):
+        client = _StubAPIClient()
+        workspace = self._write_bank(
+            tmp_path,
+            [
+                {"source_id": "S1", "url": "u1", "title": "t1",
+                 "summary": "", "evidence": []},
+                {"source_id": "S2", "url": "u2", "title": "t2",
+                 "summary": "", "evidence": []},
+            ],
+        )
+        out = await _create_artifact_handler(
+            {
+                "name": "report",
+                "kind": "markdown",
+                "spec": {
+                    "content": (
+                        "# Report\n\nFinding [S1].  Detail [S2].\n"
+                    ),
+                },
+            },
+            api_client=client,
+            workspace_path=workspace,
+        )
+        assert json.loads(out)["success"] is True
+        assert len(client.calls) == 1
+
+    async def test_dangling_citation_rejected(self, tmp_path):
+        client = _StubAPIClient()
+        workspace = self._write_bank(
+            tmp_path,
+            [
+                {"source_id": "S1", "url": "u1", "title": "t1",
+                 "summary": "", "evidence": []},
+            ],
+        )
+        out = await _create_artifact_handler(
+            {
+                "name": "report",
+                "kind": "markdown",
+                "spec": {
+                    "content": (
+                        "# Report\n\nFinding [S1].  Bogus [S99].\n"
+                    ),
+                },
+            },
+            api_client=client,
+            workspace_path=workspace,
+        )
+        data = json.loads(out)
+        assert data["success"] is False
+        assert "S99" in data["error"]
+        # Resolving citation should not appear in the missing list.
+        assert "S1" not in data["error"]
+        # The API client was never called -- the bad artifact does
+        # not land.
+        assert client.calls == []
+
+    async def test_grouped_citation_chips_split_into_individual_ids(
+        self, tmp_path,
+    ):
+        client = _StubAPIClient()
+        workspace = self._write_bank(
+            tmp_path,
+            [
+                {"source_id": "S1", "url": "u1", "title": "t1",
+                 "summary": "", "evidence": []},
+            ],
+        )
+        out = await _create_artifact_handler(
+            {
+                "name": "report",
+                "kind": "markdown",
+                "spec": {
+                    # Grouped citation: [S1, S2, S3] is three refs.
+                    "content": "# Report\n\nFinding [S1, S2, S3].\n",
+                },
+            },
+            api_client=client,
+            workspace_path=workspace,
+        )
+        data = json.loads(out)
+        assert data["success"] is False
+        # Both missing ids surface; the present one does not.
+        assert "S2" in data["error"]
+        assert "S3" in data["error"]
+
+    async def test_validator_skipped_for_non_markdown_kinds(self, tmp_path):
+        # A chart artifact with the literal text ``[S1]`` in a label
+        # must NOT trigger the citation validator -- it's only meant
+        # for markdown reports.
+        client = _StubAPIClient()
+        # Deliberately do not write a bank; if the validator runs at
+        # all the empty bank will reject.
+        out = await _create_artifact_handler(
+            {
+                "name": "x",
+                "kind": "chart",
+                "spec": {
+                    "chart_js": {
+                        "type": "bar",
+                        "data": {
+                            "labels": ["[S1] label"],
+                            "datasets": [{"data": [1]}],
+                        },
+                    },
+                },
+            },
+            api_client=client,
+            workspace_path=str(tmp_path),
+        )
+        assert json.loads(out)["success"] is True
+
+    async def test_validator_skipped_when_workspace_unavailable(
+        self, tmp_path,
+    ):
+        # Anonymous / harness-test sessions may not have a workspace.
+        # Without one we cannot read the bank, so the validator must
+        # opt out rather than reject every citation as dangling.
+        client = _StubAPIClient()
+        out = await _create_artifact_handler(
+            {
+                "name": "report",
+                "kind": "markdown",
+                "spec": {"content": "# Report\n\nFinding [S1]."},
+            },
+            api_client=client,
+            # No workspace_path kwarg.
+        )
+        assert json.loads(out)["success"] is True
+
+
+# =========================================================================
 # Fenced-artifact promoter
 # =========================================================================
 

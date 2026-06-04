@@ -14,12 +14,82 @@ pydantic JSON dump the API would otherwise return.
 from __future__ import annotations
 
 import json
+import os
+import re
 from typing import Any
 
 from pydantic import ValidationError
 
 from surogates.artifacts.models import ArtifactKind, ArtifactSpec
+from surogates.research.memory_bank import parse_jsonl
 from surogates.tools.registry import ToolRegistry, ToolSchema
+
+# Citation chips written by the research-writer take the form ``[S3]``
+# or grouped ``[S3, S5, S12]``.  We accept both layouts.  Each chip
+# yields one or more ``source_id`` references whose target must exist
+# in ``{workspace}/.research/memory.jsonl``; missing IDs are a
+# planner/writer reconciliation bug and rejected here so the bad
+# artifact never lands in the user's session.
+_CITATION_RE = re.compile(r"\[(S\d+(?:\s*,\s*S\d+)*)\]")
+_RESEARCH_DIR = ".research"
+_MEMORY_FILE = "memory.jsonl"
+
+
+def _extract_cited_source_ids(content: str) -> list[str]:
+    """Return every ``S#`` referenced by ``[S#]`` chips in *content*.
+
+    Order is preserved (first-occurrence) and duplicates are dropped so
+    the rejection message lists each missing id once.
+    """
+    seen: set[str] = set()
+    cited: list[str] = []
+    for match in _CITATION_RE.finditer(content):
+        for part in match.group(1).split(","):
+            sid = part.strip()
+            if sid and sid not in seen:
+                seen.add(sid)
+                cited.append(sid)
+    return cited
+
+
+def _validate_citations(workspace_path: str, content: str) -> str | None:
+    """Reject markdown bodies that cite source IDs not in the bank.
+
+    Returns ``None`` when every citation resolves (or when the markdown
+    contains none), and a structured error JSON string when at least
+    one citation is dangling.  A missing or unreadable memory file
+    counts as "no sources stored" so a body that cites anything fails
+    -- silently approving a body with citations when the bank is
+    missing would let bad reports through.
+    """
+    cited = _extract_cited_source_ids(content)
+    if not cited:
+        return None
+
+    path = os.path.join(workspace_path, _RESEARCH_DIR, _MEMORY_FILE)
+    bank_ids: set[str] = set()
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                bank_ids = {e.source_id for e in parse_jsonl(fh.read())}
+        except OSError:
+            # Surface the dangling citations the same way as a missing
+            # bank rather than masking a transient read error.
+            bank_ids = set()
+
+    missing = [sid for sid in cited if sid not in bank_ids]
+    if not missing:
+        return None
+    return _error(
+        "Markdown body cites source IDs that are not in the research "
+        f"memory bank: {missing}. Either drop those claims, rewrite "
+        f"without the citation, or store the missing sources via "
+        f"research_memory(action=\"add\") before retrying.",
+        hint=(
+            "Run research_memory(action=\"list\") to see which "
+            "source IDs are valid."
+        ),
+    )
 
 
 def register(registry: ToolRegistry) -> None:
@@ -315,5 +385,20 @@ async def _create_artifact_handler(
         return _format_validation_error(exc, kind)
     except ValueError as exc:
         return _error(str(exc), hint=f"Expected shape: {_SHAPE_EXAMPLE_BY_KIND[kind]}")
+
+    # Guard 3 — research citation discipline.  Markdown artifacts
+    # produced by the deep-research writer must cite source IDs that
+    # exist in the bank; any ``[S#]`` that doesn't resolve means the
+    # planner+writer reconciliation step failed and we don't want the
+    # bad report landing in the user's session.  Other markdown
+    # artifacts (skill notes, scratch docs, freeform reports) won't
+    # contain ``[S#]`` chips at all so the validator no-ops.
+    workspace_path = kwargs.get("workspace_path")
+    if kind == "markdown" and workspace_path:
+        citation_error = _validate_citations(
+            workspace_path, spec.get("content", ""),
+        )
+        if citation_error is not None:
+            return citation_error
 
     return await api_client.create_artifact(name=name, kind=kind, spec=spec)
