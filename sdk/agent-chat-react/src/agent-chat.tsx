@@ -3,6 +3,7 @@ import { AgentChatAdapterProvider } from "./adapter-context";
 import { BrowserPane } from "./components/browser/browser-pane";
 import { ChatThread } from "./components/chat/chat-thread";
 import { TooltipProvider } from "./components/ui/tooltip";
+import { ResearchSourcesPanel } from "./components/research/research-sources-panel";
 import { WorkspacePanel } from "./components/workspace/workspace-panel";
 import { cn } from "./lib/utils";
 import { isScheduledRunSession } from "./lib/sessions";
@@ -27,6 +28,15 @@ export interface AgentChatProps {
    * their toast system; the SDK does not surface these on its own.
    */
   onComposerError?: (err: ChatComposerError) => void;
+  /**
+   * Per-agent capability flag.  When true, the composer surfaces the
+   * ``/deep-research`` slash command in its builtin menu.  Off by
+   * default; the host (Studio) reads it from the agent record and
+   * passes it through.  Wired this way (not via the runtime) because
+   * the SDK has no notion of the agent's settings -- the host owns
+   * that domain.
+   */
+  deepResearchEnabled?: boolean;
 }
 
 // CSS variable controlling the desktop right-stack width. Inlined as a style
@@ -44,6 +54,7 @@ export function AgentChat({
   onMessagesChange,
   disabled,
   onComposerError,
+  deepResearchEnabled = false,
 }: AgentChatProps) {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   // On phones the chat and workspace panes don't fit side-by-side. A
@@ -87,7 +98,12 @@ export function AgentChat({
   const browserVisible = browserAvailable && showBrowser;
   const workspaceAvailable = !!sessionId;
   const workspaceVisible = workspaceAvailable && showWorkspace;
-  const rightStackVisible = browserVisible || workspaceVisible;
+  // The sources panel auto-appears the first time the planner adds a
+  // source; it stays visible for the rest of the session.  No host-
+  // facing toggle: the panel takes up minimal space when present and
+  // the absence of sources naturally hides it.
+  const sourcesVisible = runtime.researchSources.length > 0;
+  const rightStackVisible = browserVisible || workspaceVisible || sourcesVisible;
   const bothPanesVisible = browserVisible && workspaceVisible;
 
   useEffect(() => {
@@ -219,6 +235,7 @@ export function AgentChat({
               canShowWorkspace={workspaceAvailable}
               viewMode={runtime.viewMode}
               onViewModeChange={runtime.setViewMode}
+              deepResearchEnabled={deepResearchEnabled}
             />
           </div>
           {rightStackVisible && (
@@ -277,6 +294,22 @@ export function AgentChat({
                     disabled={effectiveDisabled}
                     fillParent={bothPanesVisible}
                   />
+                </div>
+              )}
+              {sourcesVisible && (
+                <div
+                  data-testid="research-sources-panel-frame"
+                  className={cn(
+                    "min-h-0 w-full overflow-auto",
+                    // When other panes share the stack the sources
+                    // panel takes a fixed minimum so the source rows
+                    // stay readable; otherwise it fills the column.
+                    browserVisible || workspaceVisible
+                      ? "max-h-1/3 border-t border-line"
+                      : "h-full",
+                  )}
+                >
+                  <ResearchSourcesPanel sources={runtime.researchSources} />
                 </div>
               )}
             </div>

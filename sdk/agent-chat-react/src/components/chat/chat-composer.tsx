@@ -136,6 +136,15 @@ interface ChatComposerProps {
   // Simple/Expert toggle is rendered in the tools row.
   viewMode?: "simple" | "expert";
   onViewModeChange?: (mode: "simple" | "expert") => void;
+
+  // ── Per-agent capabilities ───────────────────────────────────────
+  // When true, the composer surfaces the ``/deep-research`` slash
+  // command in its builtin menu.  Gated because the deep-research
+  // sub-agents are only present in the published bundle when the
+  // agent has the workflow toggled on; offering the command without
+  // the bundle would dispatch a delegate_task to a missing agent
+  // type.
+  deepResearchEnabled?: boolean;
 }
 
 // ── Outer wrapper (provides controlled text state) ───────────────────
@@ -295,6 +304,7 @@ function ChatComposerInner({
   onToggleWorkspace,
   canShowBrowser = false,
   canShowWorkspace = false,
+  deepResearchEnabled = false,
   viewMode = "simple",
   onViewModeChange,
 }: ChatComposerProps) {
@@ -337,24 +347,36 @@ function ChatComposerInner({
   }, [adapter, showSlashMenu, menuMode]);
 
   const builtinCommands = useMemo<SlashCommand[]>(
-    () => [
-      { value: "/clear", label: "/clear", description: "Clear conversation" },
-      { value: "/compress", label: "/compress", description: "Compress context" },
-      { value: "/goal", label: "/goal", description: "Define an outcome goal" },
-      { value: "/goal status", label: "/goal status", description: "Show outcome goal status" },
-      { value: "/goal pause", label: "/goal pause", description: "Pause automatic goal continuation" },
-      { value: "/goal resume", label: "/goal resume", description: "Resume a paused goal" },
-      { value: "/goal clear", label: "/goal clear", description: "Clear the current goal" },
-      { value: "/mission ", label: "/mission", description: "Start an orchestrated rubric-judged mission" },
-      { value: "/mission status", label: "/mission status", description: "Show current mission status" },
-      { value: "/mission pause", label: "/mission pause", description: "Pause the mission evaluator" },
-      { value: "/mission resume", label: "/mission resume", description: "Resume a paused mission" },
-      { value: "/mission cancel", label: "/mission cancel", description: "Cancel the mission" },
-      { value: "/loop", label: "/loop", description: "Schedule recurring prompt" },
-      { value: "/loop list", label: "/loop list", description: "List active loops" },
-      { value: "/loop cancel", label: "/loop cancel", description: "Cancel a loop by ID" },
-    ],
-    [],
+    () => {
+      const base: SlashCommand[] = [
+        { value: "/clear", label: "/clear", description: "Clear conversation" },
+        { value: "/compress", label: "/compress", description: "Compress context" },
+        { value: "/goal", label: "/goal", description: "Define an outcome goal" },
+        { value: "/goal status", label: "/goal status", description: "Show outcome goal status" },
+        { value: "/goal pause", label: "/goal pause", description: "Pause automatic goal continuation" },
+        { value: "/goal resume", label: "/goal resume", description: "Resume a paused goal" },
+        { value: "/goal clear", label: "/goal clear", description: "Clear the current goal" },
+        { value: "/mission ", label: "/mission", description: "Start an orchestrated rubric-judged mission" },
+        { value: "/mission status", label: "/mission status", description: "Show current mission status" },
+        { value: "/mission pause", label: "/mission pause", description: "Pause the mission evaluator" },
+        { value: "/mission resume", label: "/mission resume", description: "Resume a paused mission" },
+        { value: "/mission cancel", label: "/mission cancel", description: "Cancel the mission" },
+        { value: "/loop", label: "/loop", description: "Schedule recurring prompt" },
+        { value: "/loop list", label: "/loop list", description: "List active loops" },
+        { value: "/loop cancel", label: "/loop cancel", description: "Cancel a loop by ID" },
+      ];
+      if (deepResearchEnabled) {
+        // Trailing space so the user lands on the topic, not the
+        // command name -- same pattern as "/mission ".
+        base.push({
+          value: "/deep-research ",
+          label: "/deep-research",
+          description: "Delegate a topic to the deep-research workflow",
+        });
+      }
+      return base;
+    },
+    [deepResearchEnabled],
   );
 
   const scheduledExamples = useMemo<SlashCommand[]>(

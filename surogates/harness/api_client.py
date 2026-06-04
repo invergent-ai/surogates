@@ -150,6 +150,23 @@ class HarnessAPIClient:
             data = await self._get(f"/v1/skills/{name}", params=params or None)
         return json.dumps({"success": True, **data}, ensure_ascii=False)
 
+    async def get_skill(self, name: str) -> dict[str, Any] | None:
+        """Fetch a skill's full detail as a structured dict (bundle-aware).
+
+        Unlike :meth:`view_skill` (which returns a JSON *string* for a
+        tool result), this returns the parsed ``/v1/skills/{name}``
+        payload so callers can resolve programmatically -- e.g.
+        ``consult_expert`` reconstructing a :class:`SkillDef` for an
+        expert that lives in the per-agent bundle.  Returns ``None`` when
+        the skill does not exist (HTTP 404).
+        """
+        try:
+            return await self._get(f"/v1/skills/{name}")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+
     async def create_skill(
         self,
         name: str,

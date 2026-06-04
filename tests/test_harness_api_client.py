@@ -148,6 +148,38 @@ class TestViewSkill:
         assert "session_id" not in captured[0].url.params
 
 
+class TestGetSkill:
+    async def test_returns_parsed_detail(self, client_with_transport):
+        client, handlers = client_with_transport
+        handlers.append((
+            "GET", "/v1/skills/ytdclassifier", 200,
+            {
+                "name": "ytdclassifier",
+                "description": "Classifies YTD requests",
+                "content": "Expert instructions.",
+                "type": "expert",
+                "source": "platform",
+                "expert_status": "active",
+                "expert_model": "surogate/Qwen3.5-2B-Libra-YTD",
+                "expert_endpoint": "http://expert:8000/v1",
+                "expert_tools": ["read_file"],
+                "expert_max_iterations": 8,
+            },
+        ))
+        detail = await client.get_skill("ytdclassifier")
+        assert detail is not None
+        assert detail["name"] == "ytdclassifier"
+        assert detail["type"] == "expert"
+        assert detail["expert_status"] == "active"
+        assert detail["expert_endpoint"] == "http://expert:8000/v1"
+
+    async def test_returns_none_on_404(self, client_with_transport):
+        client, handlers = client_with_transport
+        # No handler registered for this path -> mock transport returns 404.
+        detail = await client.get_skill("missing")
+        assert detail is None
+
+
 class TestCreateSkill:
     async def test_create(self, client_with_transport):
         client, handlers = client_with_transport

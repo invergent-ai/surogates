@@ -141,6 +141,7 @@ class StreamingToolExecutor:
         saga: SagaOrchestrator | None = None,
         log_policy_allowed: bool = False,
         tool_guardrails: Any | None = None,
+        bundle: Any | None = None,
     ) -> None:
         self._session = session
         self._lease = lease
@@ -165,6 +166,7 @@ class StreamingToolExecutor:
         self._vision_model = vision_model
         self._saga = saga
         self._tool_guardrails = tool_guardrails
+        self._bundle = bundle
 
         self._tracked: list[TrackedTool] = []
         self._sibling_aborted: bool = False
@@ -351,6 +353,7 @@ class StreamingToolExecutor:
                 vision_model=self._vision_model,
                 saga=self._saga,
                 log_policy_allowed=self._log_policy_allowed,
+                bundle=self._bundle,
             )
             tool.result = result
             tool.errored = _is_error_result(result)

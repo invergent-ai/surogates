@@ -279,6 +279,7 @@ async def _spawn_worker_handler(
     parent_session_id_str = kwargs.get("session_id")
     budget = kwargs.get("budget")
     session_factory = kwargs.get("session_factory")
+    bundle = kwargs.get("bundle")
 
     if session_store is None:
         return json.dumps({"error": "session_store not available"})
@@ -305,7 +306,9 @@ async def _spawn_worker_handler(
     if agent_type:
         from surogates.harness.agent_resolver import resolve_agent_by_name
         agent_def = await resolve_agent_by_name(
-            agent_type, tenant, session_factory=session_factory,
+            agent_type, tenant,
+            session_factory=session_factory,
+            bundle=bundle,
         )
         if agent_def is None:
             return json.dumps({

@@ -530,6 +530,7 @@ export function useAgentChatRuntime({
     markSendError,
     viewMode: state.viewMode,
     setViewMode,
+    researchSources: state.researchSources,
   };
 }
 

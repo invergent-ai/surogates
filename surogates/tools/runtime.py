@@ -59,6 +59,7 @@ class ToolRuntime:
             kb_tools,
             loop_control,
             memory,
+            research,
             session_search,
             skill_manager,
             skills,
@@ -71,6 +72,7 @@ class ToolRuntime:
 
         modules = [
             memory,
+            research,
             skills,
             skill_manager,
             vision,

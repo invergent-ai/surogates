@@ -401,6 +401,32 @@ class TestBuiltinMemoryProvider:
         provider.initialize()
         assert store.memory_entries == ["loaded entry"]
 
+    def test_initialize_noop_when_store_has_no_load_from_disk(self):
+        # Regression: R2MemoryStore is pre-loaded by the worker's
+        # ``load_from_r2()`` before the manager is constructed and has no
+        # sync ``load_from_disk`` method.  initialize() must duck-type
+        # the call rather than AttributeError out of every R2-backed
+        # session.
+        class _NoLoadStore:
+            pass
+
+        provider = BuiltinMemoryProvider(_NoLoadStore())  # type: ignore[arg-type]
+        # Must not raise.
+        provider.initialize()
+
+    def test_initialize_calls_loader_when_present(self):
+        # Counter-test: stores that *do* expose ``load_from_disk`` still
+        # have it called exactly once.
+        calls: list[int] = []
+
+        class _LoadableStore:
+            def load_from_disk(self) -> None:
+                calls.append(1)
+
+        provider = BuiltinMemoryProvider(_LoadableStore())  # type: ignore[arg-type]
+        provider.initialize()
+        assert calls == [1]
+
     def test_name(self, tmp_path: Path):
         store = MemoryStore(memory_dir=tmp_path / "mem")
         provider = BuiltinMemoryProvider(store)

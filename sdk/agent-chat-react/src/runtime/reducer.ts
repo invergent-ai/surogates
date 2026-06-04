@@ -42,6 +42,7 @@ export function createInitialAgentChatState(
     workspaceRefreshKey: 0,
     browser: null,
     viewMode: options.viewMode ?? "simple",
+    researchSources: [],
   };
 }
 
@@ -151,13 +152,17 @@ export function applyAgentChatEvent(
       const messages = applyToolResult(nextState.messages, event.data);
       const mutatesWorkspace =
         toolName !== null && WORKSPACE_MUTATING_TOOLS.has(toolName);
-      return {
+      const withResult: AgentChatState = {
         ...nextState,
         messages,
         workspaceRefreshKey: mutatesWorkspace
           ? nextState.workspaceRefreshKey + 1
           : nextState.workspaceRefreshKey,
       };
+      // research_memory(add) is the only event that surfaces a new
+      // source for the citations/sources panel.  Other research tool
+      // calls (retrieve, list, set, get) pass through unchanged.
+      return collectResearchSource(withResult, toolName, event.data);
     }
 
     case "harness.wake":
@@ -1156,6 +1161,55 @@ function findToolNameById(
     if (tc) return tc.toolName;
   }
   return null;
+}
+
+/**
+ * Append a research source to the runtime state when a successful
+ * ``research_memory(add)`` tool result arrives.  Other tool results
+ * pass through unchanged.
+ *
+ * Dedup is by ``sourceId``: the harness already returns the same
+ * ``source_id`` for a duplicate URL (see
+ * ``surogates.research.memory_bank.add_entry``), so a second add of
+ * the same URL is a no-op here.  We also dedup defensively in case a
+ * pubsub-driven event arrives twice.
+ */
+function collectResearchSource(
+  state: AgentChatState,
+  toolName: string | null,
+  data: Record<string, unknown>,
+): AgentChatState {
+  if (toolName !== "research_memory") return state;
+  const rawResult = data.content ?? data.result;
+  const resultText = typeof rawResult === "string"
+    ? rawResult
+    : JSON.stringify(rawResult ?? {});
+  let parsed: {
+    success?: boolean;
+    source_id?: string;
+    url?: string;
+    title?: string;
+  };
+  try {
+    parsed = JSON.parse(resultText);
+  } catch {
+    return state;
+  }
+  if (!parsed.success || !parsed.source_id || !parsed.url) return state;
+  if (state.researchSources.some((s) => s.sourceId === parsed.source_id)) {
+    return state;
+  }
+  return {
+    ...state,
+    researchSources: [
+      ...state.researchSources,
+      {
+        sourceId: parsed.source_id,
+        url: parsed.url,
+        title: parsed.title ?? "",
+      },
+    ],
+  };
 }
 
 function findLatestConsultExpertCall(

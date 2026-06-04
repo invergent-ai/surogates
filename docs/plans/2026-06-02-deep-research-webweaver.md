@@ -14,19 +14,19 @@
 
 Updated before each commit. `[x]` done · `[~]` in progress · `[ ]` not started.
 
-- [ ] Task 1 — Research memory-bank pure logic
-- [ ] Task 2 — Living-outline pure logic
-- [ ] Task 3 — `research_memory` / `research_outline` builtin tools
-- [ ] Task 4 — Wire research tools into the builtin registry
-- [ ] Task 5a — Planner + writer `AGENT.md` files packaged with the ops wheel
-- [ ] Task 5b — `Agent.deep_research_enabled` column + API surface
-- [ ] Task 5c — Bundle publisher conditionally uploads the planner/writer subtree
-- [ ] Task 5d — Studio: "Capabilities" section in Identity tab with the toggle
-- [ ] Task 6 — Manual end-to-end smoke (planner → writer)
-- [ ] Task 7 — Collect research sources in runtime state
-- [ ] Task 8 — Citation text component (`[S#]` linkification)
-- [ ] Task 9 — Research tool renderers (outline + memory)
-- [ ] Task 10 — Sources/citations panel
+- [x] Task 1 — Research memory-bank pure logic
+- [x] Task 2 — Living-outline pure logic
+- [x] Task 3 — `research_memory` / `research_outline` builtin tools
+- [x] Task 4 — Wire research tools into the builtin registry
+- [x] Task 5a — Planner + writer `AGENT.md` files packaged with the ops wheel
+- [x] Task 5b — `Agent.deep_research_enabled` column + API surface
+- [x] Task 5c — Bundle publisher conditionally uploads the planner/writer subtree
+- [x] Task 5d — Studio: "Capabilities" section in Identity tab with the toggle
+- [ ] Task 6 — Manual end-to-end smoke (planner → writer) *(user-driven verification)*
+- [x] Task 7 — Collect research sources in runtime state
+- [x] Task 8 — Citation text component (`[S#]` linkification)
+- [x] Task 9 — Research tool renderers (outline + memory)
+- [x] Task 10 — Sources/citations panel
 - [ ] Task 11 — Frontend visual verification
 
 ---
@@ -64,8 +64,8 @@ Design consequences:
 
 **Backend — ops (`/work/surogate-ops/surogate_ops`)**
 
-- Create `surogate_ops/features/__init__.py`, `surogate_ops/features/deep_research/__init__.py`, `surogate_ops/features/deep_research/agents/deep-research/AGENT.md`, `surogate_ops/features/deep_research/agents/research-writer/AGENT.md` — the planner + writer authored once, packaged in the ops wheel via `pyproject.toml` package-data.
-- Create `surogate_ops/features/deep_research/agents.py` — `iter_agent_files()` walks the packaged dir and returns `[(name, relpath, bytes), ...]` for the bundle publisher to upload.
+- Create `surogate_ops/features/__init__.py`, `surogate_ops/features/deep_research/__init__.py`, `surogate_ops/features/deep_research/agents/__init__.py`, `surogate_ops/features/deep_research/agents/deep-research/AGENT.md`, `surogate_ops/features/deep_research/agents/research-writer/AGENT.md` — the planner + writer authored once, packaged in the ops wheel via `pyproject.toml` package-data. The `agents/` sub-package needs its own `__init__.py` so Python resolves `surogate_ops.features.deep_research.agents` to the directory rather than to a sibling module of the same name.
+- Create `surogate_ops/features/deep_research/discovery.py` — `iter_agent_files()` walks the packaged dir and returns `[(name, relpath, bytes), ...]` for the bundle publisher to upload. (Named `discovery.py` rather than `agents.py` because Python forbids a sibling sub-package and module sharing the same name.)
 - Create an alembic migration under `surogate_ops/core/db/migrations/versions/` adding `agents.deep_research_enabled BOOLEAN NOT NULL DEFAULT FALSE`.
 - Modify `surogate_ops/core/db/models/operate.py:Agent` — add `deep_research_enabled: Mapped[bool] = mapped_column(...)`.
 - Modify `surogate_ops/server/models/agent.py` (Pydantic) — add `deep_research_enabled: bool = False` to the response model and the update request model.
@@ -76,7 +76,9 @@ Design consequences:
 
 **Studio frontend (`/work/surogate-ops/frontend`)**
 
-- Modify `frontend/src/api/agents.ts` (or wherever `updateAgent` / the agent type live) — extend the `Agent` shape and the update payload with `deep_research_enabled: boolean`.
+- Modify `frontend/src/api/agents.ts` — add `deep_research_enabled` to `AgentResponse` and `AgentUpdateRequest`.
+- Modify `frontend/src/features/agents/agents-data.ts` — add `deepResearchEnabled: boolean` to the domain `Agent` type.
+- Modify `frontend/src/stores/agents-slice.ts` — map `AgentResponse.deep_research_enabled` to `Agent.deepResearchEnabled` in `toAgent`.
 - Modify `frontend/src/features/work/work-agent-settings-page.tsx` — add an `AgentCapabilitiesSection` component under the Identity tab next to `AgentSoulSection` with a single labeled toggle ("Deep research workflow"), wired to `updateAgent({deep_research_enabled})`. Show a short helper sentence ("Adds a planner + writer sub-agent that can research a topic and produce a cited report.").
 
 **Frontend SDK (`/work/surogates/sdk/agent-chat-react`)**
@@ -799,26 +801,56 @@ Expected: FAIL — `research_memory`/`research_outline` not in `tool_names`.
 
 - [ ] **Step 3: Add `research` to the builtin import tuple**
 
-In `surogates/tools/runtime.py`, add `research` to both the import block inside `register_builtins` and the `modules = [...]` list. Keep it near the other harness-local builtin modules:
+In `surogates/tools/runtime.py`, replace the builtin import block inside `register_builtins` with this block (same current order, with `research` added after `memory`):
 
 ```python
         from surogates.tools.builtin import (
             artifact,
-            # existing modules omitted here for brevity
+            ask_user_question,
+            browser,
+            coordinator,
+            cron,
+            delegate,
+            expert,
+            file_ops,
+            kb_tools,
+            loop_control,
             memory,
             research,
             session_search,
+            skill_manager,
+            skills,
             terminal,  # also registers the 'process' tool
             todo,
+            vision,
+            web_search,
         )
 ```
+
+Then replace the `modules = [...]` list with this list:
 
 ```python
         modules = [
             memory,
-            research,
             skills,
-            # keep the rest of the existing modules in their current order
+            skill_manager,
+            vision,
+            web_search,
+            browser,
+            file_ops,
+            kb_tools,
+            loop_control,
+            delegate,
+            expert,
+            terminal,  # also registers the 'process' tool
+            session_search,
+            todo,
+            research,
+            ask_user_question,
+            cron,
+            coordinator,
+            artifact,
+            task_tools,  # spawn_task, unblock_task, cancel_task, worker_block/complete/context
         ]
 ```
 
@@ -1440,20 +1472,21 @@ git commit -m "feat(bundle): upload planner+writer AGENT.md when deep_research_e
 A new "Capabilities" section in the Identity tab next to `AgentSoulSection`. Single labeled switch wired to `updateAgent({deep_research_enabled})`. Hide the section for system agents (the platform copilot doesn't get user-facing capability toggles).
 
 **Files (in `/work/surogate-ops/frontend`):**
-- Modify: `frontend/src/features/agents/index.ts` (or wherever the `Agent` TS type lives) — add `deepResearchEnabled: boolean` to the `Agent` type, and accept it in the `UpdateAgentPayload`/`patchAgent` body shape
-- Modify: `frontend/src/api/agents.ts` — map `deep_research_enabled` ↔ `deepResearchEnabled` in the wire-to-domain transformer
+- Modify: `frontend/src/api/agents.ts` — add `deep_research_enabled` to the wire `AgentResponse` and `AgentUpdateRequest` shapes
+- Modify: `frontend/src/features/agents/agents-data.ts` — add `deepResearchEnabled: boolean` to the domain `Agent` type
+- Modify: `frontend/src/stores/agents-slice.ts` — map `AgentResponse.deep_research_enabled` to `Agent.deepResearchEnabled` in `toAgent`
 - Modify: `frontend/src/features/work/work-agent-settings-page.tsx` — add `AgentCapabilitiesSection`, render it in the Identity tab
-- Test: `frontend/src/features/work/agent-capabilities-section.test.tsx` (vitest + RTL)
+- Test: `frontend/src/features/work/__tests__/agent-capabilities-section.test.tsx` (vitest + RTL)
 
 - [ ] **Step 1: Write the failing test**
 
-Create `frontend/src/features/work/agent-capabilities-section.test.tsx`:
+Create `frontend/src/features/work/__tests__/agent-capabilities-section.test.tsx`:
 
 ```typescript
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { AgentCapabilitiesSection } from "./work-agent-settings-page";
+import { AgentCapabilitiesSection } from "../work-agent-settings-page";
 
 describe("AgentCapabilitiesSection", () => {
   it("shows the deep-research toggle reflecting agent state", () => {
@@ -1480,7 +1513,14 @@ Expected: FAIL — component not exported.
 
 - [ ] **Step 3: Add the section component**
 
-In `frontend/src/features/work/work-agent-settings-page.tsx`, add a new exported component near `AgentSoulSection`:
+In `frontend/src/features/work/work-agent-settings-page.tsx`, add these imports:
+
+```typescript
+import type { AgentUpdateRequest } from "@/api/agents";
+import { Switch } from "@/components/ui/switch";
+```
+
+Then add a new exported component near `AgentSoulSection`:
 
 ```typescript
 export function AgentCapabilitiesSection({
@@ -1488,7 +1528,7 @@ export function AgentCapabilitiesSection({
   onUpdate,
 }: {
   agent: Agent;
-  onUpdate: (patch: Record<string, unknown>) => Promise<unknown>;
+  onUpdate: (patch: AgentUpdateRequest) => Promise<unknown>;
 }) {
   const [enabled, setEnabled] = useState(!!agent.deepResearchEnabled);
   const [saving, setSaving] = useState(false);
@@ -1546,12 +1586,30 @@ export function AgentCapabilitiesSection({
 }
 ```
 
-Add to the Identity tab block (around line 537–559 in the current file) so the section renders below `AgentSoulSection`:
+Add the section to the Identity tab block so it renders below `AgentSoulSection`:
 
 ```typescript
                   {effectiveTabId === "identity" && (
                     <div className="space-y-5">
-                      {/* ... existing delete button + AgentIdentitySection + AgentSoulSection */}
+                      {!agent.isSystemAgent && (
+                        <div className="flex justify-end">
+                          <Button
+                            variant="destructive"
+                            size="xs"
+                            onClick={() => setShowDeleteConfirm(true)}
+                          >
+                            Delete
+                          </Button>
+                        </div>
+                      )}
+                      <AgentIdentitySection
+                        key={`identity-${agent.id}`}
+                        agent={agent}
+                      />
+                      <AgentSoulSection
+                        key={`soul-${agent.id}`}
+                        agent={agent}
+                      />
                       {!agent.isSystemAgent && (
                         <AgentCapabilitiesSection
                           key={`capabilities-${agent.id}`}
@@ -1563,20 +1621,33 @@ Add to the Identity tab block (around line 537–559 in the current file) so the
                   )}
 ```
 
-Add `Switch` to the shadcn imports at the top of the file if it isn't already imported (it ships with the project's ui kit; if not, replace with `Checkbox` and keep the test's role query the same).
-
 - [ ] **Step 4: Thread `deepResearchEnabled` through the agent API/store**
 
-In whichever file defines the `Agent` TS shape (`frontend/src/features/agents/index.ts` or similar), add:
+In `frontend/src/api/agents.ts`, add the response field and PATCH field:
+
+```typescript
+export interface AgentResponse {
+  deep_research_enabled: boolean;
+}
+
+export interface AgentUpdateRequest {
+  deep_research_enabled?: boolean;
+}
+```
+
+In `frontend/src/features/agents/agents-data.ts`, add the domain field near `selfRegistrationEnabled`:
 
 ```typescript
 export interface Agent {
-  // ... existing fields
   deepResearchEnabled: boolean;
 }
 ```
 
-In the wire-to-domain transformer (`frontend/src/api/agents.ts`), map `deep_research_enabled` ↔ `deepResearchEnabled` in both directions.
+In `frontend/src/stores/agents-slice.ts`, update `toAgent`:
+
+```typescript
+    deepResearchEnabled: Boolean(a.deep_research_enabled),
+```
 
 - [ ] **Step 5: Run test to verify it passes**
 
@@ -1593,8 +1664,10 @@ Expected: no errors.
 ```bash
 cd /work/surogate-ops/frontend
 git add src/features/work/work-agent-settings-page.tsx \
-        src/features/work/agent-capabilities-section.test.tsx \
-        src/features/agents/index.ts src/api/agents.ts
+        src/features/work/__tests__/agent-capabilities-section.test.tsx \
+        src/features/agents/agents-data.ts \
+        src/stores/agents-slice.ts \
+        src/api/agents.ts
 git commit -m "feat(studio): per-agent deep-research toggle on the Identity tab"
 ```
 
@@ -1812,7 +1885,7 @@ Create `src/components/research/citation-text.test.tsx`:
 
 ```typescript
 import { describe, expect, it } from "vitest";
-import { splitCitations } from "./citation-text";
+import { linkCitationMarkdown, splitCitations } from "./citation-text";
 
 describe("splitCitations", () => {
   it("splits plain text with no citations into one text segment", () => {
@@ -1835,6 +1908,12 @@ describe("splitCitations", () => {
       { kind: "cite", value: "S2" },
       { kind: "cite", value: "S3" },
     ]);
+  });
+
+  it("turns citations into markdown links without dropping markdown", () => {
+    expect(linkCitationMarkdown("## H\nSee [S1] and [S2, S3].")).toBe(
+      "## H\nSee [S1](#source-S1) and [S2](#source-S2) [S3](#source-S3).",
+    );
   });
 });
 ```
@@ -1884,6 +1963,18 @@ export function splitCitations(text: string): CitationSegment[] {
   return segments;
 }
 
+export function linkCitationMarkdown(text: string): string {
+  return text.replace(CITATION_RE, (_match, group: string) =>
+    group
+      .split(",")
+      .map((id) => {
+        const sourceId = id.trim();
+        return `[${sourceId}](#source-${sourceId})`;
+      })
+      .join(" ")
+  );
+}
+
 export function CitationText({
   text,
   sources,
@@ -1919,7 +2010,7 @@ export function CitationText({
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd /work/surogates/sdk/agent-chat-react && npm test -- citation-text`
-Expected: PASS (3 passed)
+Expected: PASS (4 passed)
 
 - [ ] **Step 5: Commit**
 
@@ -2045,6 +2136,9 @@ git commit -m "feat(agent-chat): render research_outline and research_memory too
 - Create: `src/components/research/research-sources-panel.tsx`
 - Modify: `src/runtime/use-agent-chat-runtime.ts` (expose `researchSources`)
 - Modify: `src/agent-chat.tsx` (wire the panel)
+- Modify: `src/components/chat/chat-thread.tsx` (render citation-aware assistant final text)
+- Modify: `src/components/chat/artifacts/artifact-block.tsx` (thread research source context into markdown artifacts)
+- Modify: `src/components/chat/artifacts/artifact-markdown.tsx` (render citation-aware markdown content)
 - Modify: `src/index.ts` (exports)
 
 - [ ] **Step 1: Expose `researchSources` on the runtime API**
@@ -2123,17 +2217,67 @@ function hostname(url: string): string {
 }
 ```
 
-- [ ] **Step 3: Wire the panel into `AgentChat`**
+- [ ] **Step 3: Wire the panel and citation links into `AgentChat`**
 
-In `src/agent-chat.tsx`, render `ResearchSourcesPanel` in the right-stack area next to the existing workspace/browser panes, gated on `runtime.researchSources.length > 0` (follow the existing pattern that conditionally shows `WorkspacePanel`/`BrowserPane`). Pass `sources={runtime.researchSources}`. Make the citation chip `onCitationClick` (Task 8) scroll to `#source-<id>`:
+In `src/agent-chat.tsx`, render `ResearchSourcesPanel` in the right-stack area next to the existing workspace/browser panes, gated on `runtime.researchSources.length > 0` (follow the existing pattern that conditionally shows `WorkspacePanel`/`BrowserPane`). Pass `sources={runtime.researchSources}` and thread the sources into `ChatThread`:
 
 ```typescript
-const scrollToSource = (id: string) => {
-  document.getElementById(`source-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
-};
+            <ChatThread
+              // existing props...
+              researchSources={runtime.researchSources}
+            />
 ```
 
-Wire `scrollToSource` through to wherever the markdown report renders citations (the report artifact / final assistant text), using the `CitationText` component for any assistant text that contains `[S#]` while `researchSources.length > 0`.
+In `src/components/chat/chat-thread.tsx`, import `linkCitationMarkdown`, add this prop to `ChatThreadProps`, and thread `researchSources` to `TextEntry` (Expert-mode timeline final text) and `SimpleFinalAnswer` (Simple-mode final text):
+
+```typescript
+  researchSources?: AgentChatResearchSource[];
+```
+
+When a rendered assistant text block has research sources, keep using `MessageResponse` and transform only the citation markers into same-page markdown links:
+
+```typescript
+      <MessageResponse>
+        {researchSources.length > 0 ? linkCitationMarkdown(cleaned) : cleaned}
+      </MessageResponse>
+```
+
+This preserves headings, lists, code blocks, and other markdown while making `[S#]` jump to `#source-S#`.
+
+In `src/components/chat/artifacts/artifact-markdown.tsx`, extend `ArtifactMarkdown`:
+
+```typescript
+import { linkCitationMarkdown } from "../../research/citation-text";
+
+export function ArtifactMarkdown({
+  spec,
+  researchSources = [],
+}: {
+  spec: MarkdownArtifactSpec;
+  researchSources?: AgentChatResearchSource[];
+}) {
+  const content = spec.content ?? "";
+  return (
+    <MessageResponse>
+      {researchSources.length > 0 ? linkCitationMarkdown(content) : content}
+    </MessageResponse>
+  );
+}
+```
+
+In `src/components/chat/artifacts/artifact-block.tsx`, add matching optional props to `ArtifactBlock` and pass them into the markdown branch:
+
+```typescript
+    case "markdown":
+      return (
+        <ArtifactMarkdown
+          spec={payload.spec}
+          researchSources={researchSources}
+        />
+      );
+```
+
+Then pass the same props from the existing `ArtifactBlock` call site in `chat-thread.tsx`.
 
 - [ ] **Step 4: Export new public API**
 
@@ -2207,4 +2351,4 @@ These are deferred items surfaced by Tasks 6 and 11; each becomes its own task/p
 
 **Placeholder scan:** Every code step contains complete, runnable code. Repo-specific constructor/helper names have been resolved against the current checkout (`ToolRuntime(registry).register_builtins()`, `createInitialAgentChatState` from `reducer.ts`, `parseArgs` from `shared.ts`, and `_republish_agent_bundle` from `surogate_ops/server/routes/agents.py`). No deferred-work placeholders remain.
 
-**Type consistency:** `MemoryEntry(source_id, url, title, summary, evidence)` is used identically across `memory_bank.py`, `research.py`, and tests. The tool JSON contract (`success`, `source_id`, `url`, `title`, `sources[]`, `outline`, `sections[]`) is consistent between `research.py` handlers and both the backend tests and the frontend reducer/renderers. The TS `AgentChatResearchSource{ sourceId, url, title }` is consistent across `types.ts`, reducer, runtime API, panel, and `CitationText`. The flag name `deep_research_enabled` (snake-case on the wire) ↔ `deepResearchEnabled` (camel-case in TS) is consistent across the alembic migration, ORM column, Pydantic models, PATCH route, bundle publisher, frontend types/transformer, and the Studio toggle. Tool names `research_memory` / `research_outline` match between backend registration, AGENT.md `tools:` lists, and the SDK dispatch `case`s.
+**Type consistency:** `MemoryEntry(source_id, url, title, summary, evidence)` is used identically across `memory_bank.py`, `research.py`, and tests. The tool JSON contract (`success`, `source_id`, `url`, `title`, `sources[]`, `outline`, `sections[]`) is consistent between `research.py` handlers and both the backend tests and the frontend reducer/renderers. The TS `AgentChatResearchSource{ sourceId, url, title }` is consistent across `types.ts`, reducer, runtime API, panel, and `CitationText`. The flag name `deep_research_enabled` (snake-case on the API wire and PATCH body) ↔ `deepResearchEnabled` (camel-case in the Studio domain `Agent`) is consistent across the alembic migration, ORM column, Pydantic models, PATCH route, bundle publisher, `frontend/src/api/agents.ts`, `frontend/src/features/agents/agents-data.ts`, `frontend/src/stores/agents-slice.ts`, and the Studio toggle. Tool names `research_memory` / `research_outline` match between backend registration, AGENT.md `tools:` lists, and the SDK dispatch `case`s.

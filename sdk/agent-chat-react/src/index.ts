@@ -20,6 +20,12 @@ export {
   missionTaskBucket,
 } from "./components/missions/mission-derive";
 export type { MissionTaskBucket } from "./components/missions/mission-derive";
+export { ResearchSourcesPanel } from "./components/research/research-sources-panel";
+export {
+  CitationText,
+  splitCitations,
+} from "./components/research/citation-text";
+export type { CitationSegment } from "./components/research/citation-text";
 export { ScheduledWorkPanel } from "./components/scheduled/scheduled-work-panel";
 export { SessionTreePanel } from "./components/sessions/session-tree-panel";
 export type { AgentChatProps } from "./agent-chat";
@@ -60,6 +66,7 @@ export type {
   AgentChatDisplayAttachment,
   AgentChatImageAttachment,
   AgentChatPendingAttachment,
+  AgentChatResearchSource,
   AgentChatEventStream,
   AgentChatEventType,
   AgentChatExpertFeedbackRating,

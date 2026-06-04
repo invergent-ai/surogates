@@ -129,11 +129,22 @@ class _StubAgentDef:
 
 def _install_stub_agent_resolver(
     monkeypatch: pytest.MonkeyPatch, *, agent_def: _StubAgentDef,
+    captured_kwargs: dict[str, Any] | None = None,
 ) -> None:
-    """Patch resolve_agent_by_name so agent_type="x" returns the given def."""
+    """Patch resolve_agent_by_name so agent_type="x" returns the given def.
+
+    When *captured_kwargs* is provided, the resolver call's kwargs are
+    written into it so tests can assert that the harness threads the
+    bundle through to the resolver -- without that, ``delegate_task``
+    cannot find sub-agents that only exist in the per-agent Hub bundle
+    (the deep-research workflow regression that prompted this thread).
+    """
     import surogates.harness.agent_resolver as resolver_module
 
-    async def _stub(name, tenant, *, session_factory=None):  # noqa: ARG001
+    async def _stub(name, tenant, *, session_factory=None, bundle=None):  # noqa: ARG001
+        if captured_kwargs is not None:
+            captured_kwargs["bundle"] = bundle
+            captured_kwargs["session_factory"] = session_factory
         return agent_def
 
     monkeypatch.setattr(resolver_module, "resolve_agent_by_name", _stub)
@@ -494,6 +505,40 @@ async def test_parent_allowlist_constrains_child_preset(
     assert "read_file" in allowed
     assert "exec_shell" not in allowed
     assert "write_file" not in allowed  # not in preset
+
+
+@pytest.mark.asyncio
+async def test_delegate_forwards_bundle_to_agent_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: ``delegate_task`` with ``agent_type=<name>`` resolves
+    the sub-agent through the tenant catalog *plus the per-agent Hub
+    bundle*; the deep-research planner and writer only exist in the
+    bundle, so without the bundle being threaded through the resolver
+    returns ``None`` and the LLM sees ``Unknown or disabled agent_type``.
+    """
+    parent = _parent_session()
+    store = FakeStore(parent, child_events=_complete_response_events("ok"))
+    _install_stub_child_session(monkeypatch, store)
+    captured: dict[str, Any] = {}
+    _install_stub_agent_resolver(
+        monkeypatch,
+        agent_def=_StubAgentDef(),
+        captured_kwargs=captured,
+    )
+
+    sentinel_bundle = object()
+    await _delegate_handler(
+        {"goal": "x", "agent_type": "deep-research"},
+        session_store=store,
+        redis=None,
+        tenant=object(),
+        session_id=str(parent.id),
+        budget=IterationBudget(max_total=10),
+        bundle=sentinel_bundle,
+    )
+
+    assert captured.get("bundle") is sentinel_bundle
 
 
 @pytest.mark.asyncio

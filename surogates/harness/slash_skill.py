@@ -32,6 +32,7 @@ _SLASH_COMMAND_RE: Final = re.compile(
 _BUILTIN_SLASH_COMMANDS: Final[frozenset[str]] = frozenset({
     "clear",
     "compress",
+    "deep-research",
     "goal",
     "loop",
     "mission",
@@ -75,6 +76,56 @@ def build_expanded_message(*, name: str, args: str, skill_body: str) -> str:
     if args:
         lines.extend(["", f"User request: {args}"])
     return "\n".join(lines)
+
+
+def parse_deep_research_command(text: str) -> str | None:
+    """Return the topic when *text* is ``/deep-research`` (with or without args).
+
+    Returns ``""`` for a bare ``/deep-research`` (no topic), the trimmed
+    args for ``/deep-research <topic>``, and ``None`` for anything else.
+    Callers branch on ``is not None`` to decide whether to rewrite.
+    Leading/trailing whitespace on the overall text is tolerated so
+    composer-prefixed messages still match.
+    """
+    stripped = text.strip()
+    if stripped == "/deep-research":
+        return ""
+    if stripped.startswith("/deep-research "):
+        return stripped[len("/deep-research "):].strip()
+    return None
+
+
+def build_deep_research_message(*, topic: str) -> str:
+    """Rewrite ``/deep-research <topic>`` into a delegation directive.
+
+    The base agent's system prompt advertises a ``deep-research`` sub-agent
+    when the agent has the deep-research workflow enabled (its AGENT.md is
+    in the published bundle).  This builder produces an unambiguous
+    instruction so the LLM picks the planner via ``delegate_task`` instead
+    of doing the research itself.
+
+    A missing topic ("/deep-research" alone) is still rewritten -- the
+    LLM is told to ask the user for a topic; this matches the UX of
+    other slash commands where empty args degrade to a prompt rather
+    than a silent no-op.
+    """
+    topic = topic.strip()
+    if not topic:
+        return (
+            "The user invoked `/deep-research` without a topic. "
+            "Ask the user what they would like researched, then once "
+            "they reply, delegate the topic to the `deep-research` "
+            "sub-agent via `delegate_task`."
+        )
+    return (
+        "The user invoked the `/deep-research` workflow.\n\n"
+        "Delegate the following topic to the `deep-research` sub-agent "
+        "via `delegate_task` (agent_type=\"deep-research\").  Do not "
+        "attempt to research it yourself -- the sub-agent is responsible "
+        "for planning, web search, evidence curation, and handing off to "
+        "the `research-writer` sub-agent for the final report.\n\n"
+        f"Topic: {topic}"
+    )
 
 
 def build_expert_expanded_message(

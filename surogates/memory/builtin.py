@@ -92,8 +92,19 @@ class BuiltinMemoryProvider(MemoryProvider):
         return True
 
     def initialize(self, session_id: str = "", **kwargs) -> None:
-        """Load memory from disk."""
-        self._store.load_from_disk()
+        """Load memory if the underlying store needs an eager sync load.
+
+        Duck-typed because two stores share this provider: the legacy
+        :class:`MemoryStore` populates via a sync ``load_from_disk()``
+        we own here, while :class:`R2MemoryStore` is already loaded by
+        the worker via an async ``load_from_r2()`` before the manager
+        is constructed -- so there's nothing left to do on initialize.
+        Calling ``load_from_disk()`` blindly on the R2 store would
+        ``AttributeError`` out of every session.
+        """
+        loader = getattr(self._store, "load_from_disk", None)
+        if loader is not None:
+            loader()
 
     def system_prompt_block(self) -> str:
         """Return MEMORY.md and USER.md content for the system prompt.
