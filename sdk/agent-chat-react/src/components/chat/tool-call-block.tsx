@@ -22,6 +22,7 @@ import { MemoryToolBlock } from "./tools/memory-tool";
 import { SkillManageToolBlock } from "./tools/skill-manage-tool";
 import { CoordinatorToolBlock } from "./tools/coordinator-tools";
 import { DefaultToolBlock } from "./tools/default-tool";
+import { ResearchMemoryBlock, ResearchOutlineBlock } from "./tools/research-tool";
 
 export function ToolCallBlock({
   tc,
@@ -100,6 +101,12 @@ export function ToolCallBlock({
 
     case "memory":
       return <MemoryToolBlock tc={tc} />;
+
+    case "research_outline":
+      return <ResearchOutlineBlock tc={tc} />;
+
+    case "research_memory":
+      return <ResearchMemoryBlock tc={tc} />;
 
     case "spawn_worker":
     case "send_worker_message":
