@@ -441,6 +441,61 @@ def _last_assistant_message_excerpt(
     return ""
 
 
+# Reminder injected when the deep-research planner ends a turn with
+# no tool calls AND has never actually delegated to research-writer.
+# Phrased to push the model toward emitting the call rather than
+# narrating it again -- repeating the same "hand off to the writer"
+# language would let the same failure mode recur.
+DEEP_RESEARCH_NO_DELEGATE_NUDGE: str = (
+    "You stopped without emitting a `delegate_task` tool call.  Your "
+    "outline and evidence bank are ready, but the writer was never "
+    "spawned, so the user has no report.\n\n"
+    "Prose like \"Now handing off to the writer\" or a `<next_action>` "
+    "block DOES NOT trigger the delegation -- only an actual "
+    "`delegate_task` tool call does.\n\n"
+    "Emit `delegate_task(agent_type=\"research-writer\", goal=<full "
+    "outline>, context=<original question + bank reminder>)` as your "
+    "next tool call.  If you legitimately cannot hand off (e.g. the "
+    "bank is empty), say so plainly and stop -- do not narrate a "
+    "handoff that isn't happening."
+)
+
+
+def _is_deep_research_planner(session: Session) -> bool:
+    """True iff the session is running as the deep-research planner."""
+    if session is None:
+        return False
+    config = session.config or {}
+    return config.get("agent_type") == "deep-research"
+
+
+def _planner_already_delegated_to_writer(
+    all_events: list[Any] | None,
+) -> bool:
+    """Return True when the event log shows a successful
+    ``delegate_task(agent_type="research-writer")`` call on this
+    session, so the orphan-completion nudge does not fire on a
+    planner that already did its job."""
+    if not all_events:
+        return False
+    for event in all_events:
+        if getattr(event, "type", None) != EventType.TOOL_CALL.value:
+            continue
+        data = getattr(event, "data", None) or {}
+        if data.get("name") != "delegate_task":
+            continue
+        # ``delegate_task`` can carry either a single ``agent_type`` or
+        # a ``goals`` array whose items each carry their own
+        # ``agent_type``; honor both shapes.
+        args = data.get("arguments") or {}
+        if args.get("agent_type") == "research-writer":
+            return True
+        for item in args.get("goals") or []:
+            if isinstance(item, dict) and item.get("agent_type") == "research-writer":
+                return True
+    return False
+
+
 def _prior_next_action_complexity(
     messages: list[dict[str, Any]],
 ) -> str | None:
@@ -1813,6 +1868,17 @@ class AgentHarness:
         thinking_prefill_retries = 0  # retries for thinking-only responses
         incomplete_scratchpad_retries = 0  # retries for unclosed REASONING_SCRATCHPAD
         empty_response_retries = 0  # retries for empty LLM responses (no content, no tools, no reasoning)
+        # One-shot safety net for the deep-research planner.  Fires when
+        # the planner ends a turn with no tool calls AND has never
+        # called ``delegate_task(agent_type="research-writer")`` in any
+        # prior turn -- the model described the handoff in prose but
+        # forgot to emit the actual tool call.  We inject a synthetic
+        # user message reminding it that prose is not a tool call and
+        # continue the loop one more time; if it still doesn't delegate
+        # we let the session complete.  Tracked here (not via an event
+        # marker) because the second-chance turn happens within the
+        # same wake -- no re-enqueue, no re-rebuild of events.
+        deep_research_delegate_nudge_fired = False
         content_with_tools_cache = ContentWithToolsCache()
         tool_guardrails = ToolGuardrails(
             ToolGuardrailConfig.from_mapping(
@@ -2546,6 +2612,47 @@ class AgentHarness:
                         session.id,
                     )
                     return
+
+                # One-shot deep-research orphan-completion guard.  The
+                # planner is supposed to end its work by calling
+                # ``delegate_task(agent_type="research-writer")``.  In
+                # the wild we have seen the model describe the handoff
+                # in prose without emitting the tool call -- it stops,
+                # the harness completes the session, and the report is
+                # never written.  Re-prompt once with an explicit
+                # reminder; if it still doesn't delegate, fall through
+                # to the normal completion path.
+                if (
+                    not deep_research_delegate_nudge_fired
+                    and _is_deep_research_planner(session)
+                    and not _planner_already_delegated_to_writer(all_events)
+                ):
+                    deep_research_delegate_nudge_fired = True
+                    try:
+                        await self._store.emit_event(
+                            session.id, EventType.USER_MESSAGE,
+                            {
+                                "content": DEEP_RESEARCH_NO_DELEGATE_NUDGE,
+                                "synthetic": "deep_research_no_delegate_nudge",
+                            },
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to persist deep-research nudge event for "
+                            "session %s; in-memory nudge still applied",
+                            session.id,
+                        )
+                    messages.append({
+                        "role": "user",
+                        "content": DEEP_RESEARCH_NO_DELEGATE_NUDGE,
+                    })
+                    self._budget.refund()
+                    logger.info(
+                        "Session %s: deep-research planner stopped without "
+                        "delegating; injecting one-shot nudge",
+                        session.id,
+                    )
+                    continue
 
                 # Text-only iteration: kick off the iteration-summary
                 # task before _complete_session so the drain in A8 can
