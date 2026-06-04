@@ -39,6 +39,7 @@ import { parseTerminalResult } from "./tools/terminal-tool";
 import { statusColorClass, effectiveStatus, toolErrorSummary, parseArgs } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
 import { ChatComposer } from "./chat-composer";
+import { ResearchSourcesPanel } from "../research/research-sources-panel";
 import { TurnFeedback } from "./turn-feedback";
 import { useSmoothStream } from "./use-smooth-stream";
 import { stripAndParseNextAction } from "../../lib/next-action";
@@ -69,6 +70,7 @@ import {
 import type {
   AgentChatImageAttachment,
   AgentChatPendingAttachment,
+  AgentChatResearchSource,
   AgentChatTurnArtifactRef,
   ChatMessage as ChatMessageType,
   RetryIndicator,
@@ -125,6 +127,11 @@ interface ChatThreadProps {
   // When true, the composer's slash menu includes ``/deep-research``.
   // Forwarded as-is to ChatComposer.
   deepResearchEnabled?: boolean;
+
+  // Curated research sources from the active deep-research workflow.
+  // When non-empty an expandable "Sources" strip renders above the
+  // composer; ``[S#]`` citation chips deep-link to entries here.
+  researchSources?: AgentChatResearchSource[];
 }
 
 // ── Timeline item types ──────────────────────────────────────────────
@@ -1903,6 +1910,7 @@ export function ChatThread({
   viewMode = "simple",
   onViewModeChange,
   deepResearchEnabled = false,
+  researchSources = [],
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
   const awaitingInput = useMemo(() => isAwaitingUserInput(messages), [messages]);
@@ -2056,6 +2064,11 @@ export function ChatThread({
         {retryIndicator && (
           <div className="mb-2">
             <RetryBanner indicator={retryIndicator} />
+          </div>
+        )}
+        {researchSources.length > 0 && (
+          <div className="mb-2">
+            <ResearchSourcesPanel sources={researchSources} />
           </div>
         )}
         {composerDisabled && composerDisabledReason ? (

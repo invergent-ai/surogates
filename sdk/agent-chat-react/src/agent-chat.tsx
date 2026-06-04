@@ -3,7 +3,6 @@ import { AgentChatAdapterProvider } from "./adapter-context";
 import { BrowserPane } from "./components/browser/browser-pane";
 import { ChatThread } from "./components/chat/chat-thread";
 import { TooltipProvider } from "./components/ui/tooltip";
-import { ResearchSourcesPanel } from "./components/research/research-sources-panel";
 import { WorkspacePanel } from "./components/workspace/workspace-panel";
 import { cn } from "./lib/utils";
 import { isScheduledRunSession } from "./lib/sessions";
@@ -98,12 +97,7 @@ export function AgentChat({
   const browserVisible = browserAvailable && showBrowser;
   const workspaceAvailable = !!sessionId;
   const workspaceVisible = workspaceAvailable && showWorkspace;
-  // The sources panel auto-appears the first time the planner adds a
-  // source; it stays visible for the rest of the session.  No host-
-  // facing toggle: the panel takes up minimal space when present and
-  // the absence of sources naturally hides it.
-  const sourcesVisible = runtime.researchSources.length > 0;
-  const rightStackVisible = browserVisible || workspaceVisible || sourcesVisible;
+  const rightStackVisible = browserVisible || workspaceVisible;
   const bothPanesVisible = browserVisible && workspaceVisible;
 
   useEffect(() => {
@@ -236,6 +230,7 @@ export function AgentChat({
               viewMode={runtime.viewMode}
               onViewModeChange={runtime.setViewMode}
               deepResearchEnabled={deepResearchEnabled}
+              researchSources={runtime.researchSources}
             />
           </div>
           {rightStackVisible && (
@@ -294,22 +289,6 @@ export function AgentChat({
                     disabled={effectiveDisabled}
                     fillParent={bothPanesVisible}
                   />
-                </div>
-              )}
-              {sourcesVisible && (
-                <div
-                  data-testid="research-sources-panel-frame"
-                  className={cn(
-                    "min-h-0 w-full overflow-auto",
-                    // When other panes share the stack the sources
-                    // panel takes a fixed minimum so the source rows
-                    // stay readable; otherwise it fills the column.
-                    browserVisible || workspaceVisible
-                      ? "max-h-1/3 border-t border-line"
-                      : "h-full",
-                  )}
-                >
-                  <ResearchSourcesPanel sources={runtime.researchSources} />
                 </div>
               )}
             </div>
