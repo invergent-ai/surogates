@@ -713,6 +713,22 @@ async def run_worker(settings: Settings) -> None:
     worker_id = settings.worker_id or f"worker-{id(asyncio.get_event_loop()):x}"
     settings.worker_id = worker_id
 
+    # Construct the TurnConcurrencyGate before the harness_factory
+    # closure so harnesses can hold a reference and release/re-acquire
+    # their slot during idle waits (e.g. delegate_task polling a child).
+    # Without this, a parent that's just sleeping waiting for its
+    # child still counts against the per-tenant cap, and a deep
+    # delegation chain can saturate the gate on a single user prompt.
+    from surogates.config import SHARED_WORK_QUEUE_KEY  # noqa: F401  -- consumed at orchestrator construction below
+    from surogates.runtime import TurnConcurrencyGate
+
+    turn_gate = TurnConcurrencyGate(
+        redis_client,
+        default_max=getattr(
+            settings.worker, "max_concurrent_turns_default", 10,
+        ),
+    )
+
     # 7. Harness factory -- creates a fully-wired AgentHarness for a given session.
     async def harness_factory(session_id: UUID) -> AgentHarness:
         """Build an AgentHarness with all dependencies injected.
@@ -1112,6 +1128,11 @@ async def run_worker(settings: Settings) -> None:
             # PromptBuilder catalog load; threading it here avoids a
             # second file_bundle_cache lookup per session.
             bundle=bundle,
+            # Share the turn gate so the harness can release the
+            # slot while idle-waiting for a delegated child.  This
+            # closes the per-tenant cap leak that used to choke
+            # deep-research and other fan-out workflows.
+            turn_gate=turn_gate,
         )
         # Stash the bundle so the dispatcher can
         # aclose its four connection pools at session retirement.
@@ -1121,17 +1142,9 @@ async def run_worker(settings: Settings) -> None:
         return harness
 
     # 8. Orchestrator — consumes from the shared work queue.
-    # Per-tenant isolation is enforced by the
-    # TurnConcurrencyGate the dispatcher consults on every dequeue.
-    from surogates.config import SHARED_WORK_QUEUE_KEY
-    from surogates.runtime import TurnConcurrencyGate
-
-    turn_gate = TurnConcurrencyGate(
-        redis_client,
-        default_max=getattr(
-            settings.worker, "max_concurrent_turns_default", 10,
-        ),
-    )
+    # Per-tenant isolation is enforced by the ``turn_gate`` built
+    # above and shared with both the dispatcher (acquire on dequeue)
+    # and every harness (release/re-acquire around idle waits).
 
     # Build the tenant-for-task callable used by ``tasks_tick`` to spawn
     # child sessions on behalf of subagent tasks. The tick runs as a

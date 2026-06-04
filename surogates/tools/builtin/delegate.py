@@ -51,6 +51,45 @@ _POLL_INTERVAL_SECONDS: float = 1.0
 _CHILD_MAX_ITERATIONS: int = 30
 _MAX_DELEGATION_DEPTH: int = 2
 
+# Cap on how long the parent waits to re-acquire its
+# TurnConcurrencyGate slot when ``_run_single_delegation`` returns.
+# In the common case the slot is free immediately (the parent's own
+# release a moment ago opened one).  Genuine cap saturation by other
+# tenants is rare; if we can't get a slot within this window we
+# proceed without one and let the dispatcher's outer release fall on
+# the floor-at-zero guard.  Slight under-count is acceptable;
+# blocking the parent forever would expire the lease and produce an
+# orphan re-enqueue cycle, which is a much worse failure mode.
+_REACQUIRE_TIMEOUT_SECONDS: float = 30.0
+_REACQUIRE_BACKOFF_SECONDS: float = 0.5
+
+
+async def _reacquire_gate_with_backoff(
+    turn_gate: Any, org_id: str, agent_id: str,
+) -> bool:
+    """Re-acquire the parent's gate slot, retrying briefly if at cap.
+
+    Returns ``True`` on success.  ``False`` after
+    ``_REACQUIRE_TIMEOUT_SECONDS`` of failed attempts -- caller logs
+    and proceeds without (the dispatcher's outer release floors at
+    zero, so we don't drive the counter negative).
+    """
+    if turn_gate is None:
+        return False
+    deadline = time.monotonic() + _REACQUIRE_TIMEOUT_SECONDS
+    while True:
+        try:
+            if await turn_gate.try_acquire(org_id, agent_id):
+                return True
+        except Exception:
+            logger.debug(
+                "Transient try_acquire failure during re-acquire "
+                "(org=%s agent=%s)", org_id, agent_id, exc_info=True,
+            )
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(_REACQUIRE_BACKOFF_SECONDS)
+
 # Agent types that must not be delegated to recursively or in a
 # batched fan-out.  These workflows are expensive (they themselves
 # spawn sub-agents and run multi-round web extraction); allowing a
@@ -254,6 +293,7 @@ async def _delegate_handler(
     session_factory = kwargs.get("session_factory")
     memory_manager = kwargs.get("memory_manager")
     bundle = kwargs.get("bundle")
+    turn_gate = kwargs.get("turn_gate")
 
     if session_store is None:
         return json.dumps({"error": "session_store not available for delegation"})
@@ -325,21 +365,63 @@ async def _delegate_handler(
     remaining = budget.remaining if budget else _CHILD_MAX_ITERATIONS
     per_child_budget = max(1, remaining // max(1, len(tasks)))
 
-    results = await asyncio.gather(*[
-        _run_single_delegation(
-            task=task,
-            parent_session=parent_session,
-            child_depth=child_depth,
-            child_iteration_cap=min(_CHILD_MAX_ITERATIONS, per_child_budget),
-            session_store=session_store,
-            redis=redis,
-            tenant=tenant,
-            session_factory=session_factory,
-            memory_manager=memory_manager,
-            bundle=bundle,
-        )
-        for task in tasks
-    ], return_exceptions=False)
+    # Release the parent's TurnConcurrencyGate slot for the duration
+    # of the delegation: the parent is about to spend up to 15 minutes
+    # idle inside _poll_child_completion waiting for the child, NOT
+    # consuming worker CPU.  Counting it as 1 slot during that window
+    # is a category error -- the gate is meant to track active work,
+    # not sleeping waiters.  With this release, a deep delegation
+    # chain stops self-saturating its own per-tenant cap.
+    #
+    # Re-acquire is best-effort: if the cap is genuinely saturated on
+    # exit, we proceed without and let the dispatcher's outer release
+    # fall on the floor-at-zero guard.  Slight under-count is
+    # acceptable (cap is a guideline, not a correctness constraint);
+    # blocking the parent forever waiting for a slot would be a much
+    # worse failure mode (lease expiry, orphan re-enqueue cycle).
+    parent_org_id = str(parent_session.org_id)
+    parent_agent_id = parent_session.agent_id
+    released_slot = False
+    if turn_gate is not None:
+        try:
+            await turn_gate.release(parent_org_id, parent_agent_id)
+            released_slot = True
+        except Exception:
+            logger.warning(
+                "delegate_task: failed to release parent gate slot "
+                "(org=%s agent=%s); proceeding without",
+                parent_org_id, parent_agent_id, exc_info=True,
+            )
+
+    try:
+        results = await asyncio.gather(*[
+            _run_single_delegation(
+                task=task,
+                parent_session=parent_session,
+                child_depth=child_depth,
+                child_iteration_cap=min(_CHILD_MAX_ITERATIONS, per_child_budget),
+                session_store=session_store,
+                redis=redis,
+                tenant=tenant,
+                session_factory=session_factory,
+                memory_manager=memory_manager,
+                bundle=bundle,
+            )
+            for task in tasks
+        ], return_exceptions=False)
+    finally:
+        if released_slot:
+            try:
+                await _reacquire_gate_with_backoff(
+                    turn_gate, parent_org_id, parent_agent_id,
+                )
+            except Exception:
+                logger.warning(
+                    "delegate_task: failed to re-acquire parent gate "
+                    "slot (org=%s agent=%s); the dispatcher's release "
+                    "will rely on the floor-at-zero guard",
+                    parent_org_id, parent_agent_id, exc_info=True,
+                )
 
     if batch_mode:
         return json.dumps([

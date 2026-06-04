@@ -601,6 +601,7 @@ async def execute_tool_calls(
     log_policy_allowed: bool = False,
     tool_guardrails: ToolGuardrails | None = None,
     bundle: Any | None = None,
+    turn_gate: Any | None = None,
 ) -> list[dict]:
     """Execute tool calls, choosing parallel vs sequential.
 
@@ -651,6 +652,7 @@ async def execute_tool_calls(
             tool_guardrails=tool_guardrails,
             log_policy_allowed=log_policy_allowed,
             bundle=bundle,
+            turn_gate=turn_gate,
         )
     return await execute_tool_calls_sequential(
         tool_calls,
@@ -678,6 +680,7 @@ async def execute_tool_calls(
         log_policy_allowed=log_policy_allowed,
         tool_guardrails=tool_guardrails,
         bundle=bundle,
+        turn_gate=turn_gate,
     )
 
 
@@ -708,6 +711,7 @@ async def execute_tool_calls_sequential(
     log_policy_allowed: bool = False,
     tool_guardrails: ToolGuardrails | None = None,
     bundle: Any | None = None,
+    turn_gate: Any | None = None,
 ) -> list[dict]:
     """Execute tool calls one at a time, emitting events for each."""
     results: list[dict] = []
@@ -759,6 +763,7 @@ async def execute_tool_calls_sequential(
             saga=saga,
             log_policy_allowed=log_policy_allowed,
             bundle=bundle,
+            turn_gate=turn_gate,
         )
         if tool_guardrails is not None:
             after = tool_guardrails.after_call(
@@ -806,6 +811,7 @@ async def execute_tool_calls_concurrent(
     tool_guardrails: ToolGuardrails | None = None,
     log_policy_allowed: bool = False,
     bundle: Any | None = None,
+    turn_gate: Any | None = None,
 ) -> list[dict]:
     """Execute tool calls concurrently using asyncio.gather.
 
@@ -864,6 +870,7 @@ async def execute_tool_calls_concurrent(
                 _parent_trace=parent_trace,
                 log_policy_allowed=log_policy_allowed,
                 bundle=bundle,
+                turn_gate=turn_gate,
             )
 
     # Pre-pass: apply ``before_call`` sequentially so guardrail blocking
@@ -963,6 +970,7 @@ async def execute_single_tool(
     saga: SagaOrchestrator | None = None,
     log_policy_allowed: bool = False,
     bundle: Any | None = None,
+    turn_gate: Any | None = None,
 ) -> dict:
     """Execute a single tool call: emit events, dispatch, return result message.
 
@@ -1321,6 +1329,7 @@ async def execute_single_tool(
                 lease_token=lease.lease_token,
                 session_config=session.config,
                 bundle=bundle,
+                turn_gate=turn_gate,
             )
     except KeyError:
         tool_failed = True

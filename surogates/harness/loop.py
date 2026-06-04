@@ -322,6 +322,7 @@ class AgentHarness(
         advisor_max_tokens: int = 700,
         turn_summarizer: Any | None = None,
         bundle: Any | None = None,
+        turn_gate: Any | None = None,
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
@@ -343,6 +344,16 @@ class AgentHarness(
         # builder, future skill staging).  ``None`` for agents
         # whose first publish hasn't landed yet.
         self._bundle: Any | None = bundle
+
+        # Per-tenant TurnConcurrencyGate.  Wired through the tool
+        # executor's kwargs so handlers that block on something
+        # external (delegate_task polling a child, future
+        # long-running waits) can ``release()`` their slot while
+        # idle and ``try_acquire()`` it back before the parent
+        # resumes producing work.  Optional -- standalone harness
+        # tests don't construct one and the tools no-op when it's
+        # absent.
+        self._turn_gate: Any | None = turn_gate
 
         # Optional dedicated vision client.  When the active LLM does not
         # support image input, ``_prepare_messages_for_model_vision_support``
@@ -1370,6 +1381,7 @@ class AgentHarness(
                     log_policy_allowed=self._log_policy_allowed,
                     tool_guardrails=tool_guardrails,
                     bundle=self._bundle,
+                    turn_gate=self._turn_gate,
                 )
 
             def _reset_streaming_executor() -> Callable[[dict[str, Any]], None]:
@@ -2051,6 +2063,7 @@ class AgentHarness(
                     saga=saga,
                     log_policy_allowed=self._log_policy_allowed,
                     bundle=self._bundle,
+                    turn_gate=self._turn_gate,
                 )
 
             dynamic_loop_wait_done = self._dynamic_loop_wait_succeeded(
