@@ -5,7 +5,10 @@ import { ChatThread } from "./components/chat/chat-thread";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { WorkspacePanel } from "./components/workspace/workspace-panel";
 import { cn } from "./lib/utils";
-import { readOnlyReasonForSession } from "./lib/sessions";
+import {
+  isSubAgentSession,
+  readOnlyReasonForSession,
+} from "./lib/sessions";
 import { useAgentChatRuntime } from "./runtime/use-agent-chat-runtime";
 import type {
   AgentChatAdapter,
@@ -229,6 +232,7 @@ export function AgentChat({
               onViewModeChange={runtime.setViewMode}
               deepResearchEnabled={deepResearchEnabled}
               researchSources={runtime.researchSources}
+              hideTurnSummary={isSubAgentSession(runtime.session)}
             />
           </div>
           {rightStackVisible && (

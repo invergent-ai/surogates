@@ -132,6 +132,13 @@ interface ChatThreadProps {
   // When non-empty an expandable "Sources" strip renders above the
   // composer; ``[S#]`` citation chips deep-link to entries here.
   researchSources?: AgentChatResearchSource[];
+
+  // When true the per-turn recap card is suppressed.  Sub-agent
+  // sessions (delegation / worker / task children) are consumed by
+  // their parent's LLM, not by a human reader -- the recap card just
+  // takes screen real estate without serving anyone.  Set by
+  // ``AgentChat`` from the existing ``isSubAgentSession`` helper.
+  hideTurnSummary?: boolean;
 }
 
 // ── Timeline item types ──────────────────────────────────────────────
@@ -1560,6 +1567,7 @@ function SimpleAssistantGroup({
   artifactFallbacks,
   onFileSelect,
   onRetry,
+  hideTurnSummary = false,
 }: {
   messages: ChatMessageType[];
   isRunning: boolean;
@@ -1567,6 +1575,7 @@ function SimpleAssistantGroup({
   artifactFallbacks: Record<string, string>;
   onFileSelect?: (path: string) => void;
   onRetry?: () => Promise<void>;
+  hideTurnSummary?: boolean;
 }) {
   const assistantMessages = messages.filter((m) => m.role === "assistant");
   const tail = assistantMessages[assistantMessages.length - 1];
@@ -1708,7 +1717,7 @@ function SimpleAssistantGroup({
             tail={tail}
           />
         )}
-        {effectiveTurnSummary && (
+        {effectiveTurnSummary && !hideTurnSummary && (
           <TurnSummaryCard
             summary={effectiveTurnSummary}
             sessionId={sessionId}
@@ -1738,6 +1747,7 @@ function AssistantGroup({
   onFileSelect,
   onRetry,
   viewMode = "simple",
+  hideTurnSummary = false,
 }: {
   messages: ChatMessageType[];
   lastGlobalIndex: number;
@@ -1748,6 +1758,7 @@ function AssistantGroup({
   onFileSelect?: (path: string) => void;
   onRetry?: () => Promise<void>;
   viewMode?: "simple" | "expert";
+  hideTurnSummary?: boolean;
 }) {
   if (viewMode === "simple") {
     return (
@@ -1758,6 +1769,7 @@ function AssistantGroup({
         artifactFallbacks={artifactFallbacks}
         onFileSelect={onFileSelect}
         onRetry={onRetry}
+        hideTurnSummary={hideTurnSummary}
       />
     );
   }
@@ -1911,6 +1923,7 @@ export function ChatThread({
   onViewModeChange,
   deepResearchEnabled = false,
   researchSources = [],
+  hideTurnSummary = false,
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
   const awaitingInput = useMemo(() => isAwaitingUserInput(messages), [messages]);
@@ -2050,6 +2063,7 @@ export function ChatThread({
                     onFileSelect={onFileSelect}
                     onRetry={groupRetry}
                     viewMode={viewMode}
+                    hideTurnSummary={hideTurnSummary}
                   />
                 );
               })}

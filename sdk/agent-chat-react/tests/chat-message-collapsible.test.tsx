@@ -35,8 +35,8 @@ class FakeResizeObserver {
   disconnect(): void {}
   unobserve(): void {}
 }
-(globalThis as { ResizeObserver?: typeof FakeResizeObserver }).ResizeObserver =
-  FakeResizeObserver;
+(globalThis as unknown as { ResizeObserver: typeof FakeResizeObserver })
+  .ResizeObserver = FakeResizeObserver;
 
 function makeMessage(content: string): AgentChatMessage {
   return {
