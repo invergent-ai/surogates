@@ -41,10 +41,26 @@ from surogates.tools.registry import ToolRegistry, ToolSchema
 
 logger = logging.getLogger(__name__)
 
-_DELEGATION_TIMEOUT_SECONDS: int = 300
+# 60-minute ceiling so multi-step workflows (deep-research planner +
+# writer hand-off, multi-source web extraction, long sandboxed runs)
+# can complete without the parent treating an in-progress child as a
+# failure.  Anything longer than this is treated as the child being
+# wedged and the parent reclaims its iteration budget.
+_DELEGATION_TIMEOUT_SECONDS: int = 3600
 _POLL_INTERVAL_SECONDS: float = 1.0
 _CHILD_MAX_ITERATIONS: int = 30
 _MAX_DELEGATION_DEPTH: int = 2
+
+# Agent types that must not be delegated to recursively or in a
+# batched fan-out.  These workflows are expensive (they themselves
+# spawn sub-agents and run multi-round web extraction); allowing a
+# parent that is *already* one of them to delegate to another, or
+# letting a single ``delegate_task`` call spawn N of them in parallel,
+# turns one user prompt into a runaway fleet of long-running sessions
+# that each burn the full timeout.
+_NON_RECURSIVE_AGENT_TYPES: frozenset[str] = frozenset({
+    "deep-research",
+})
 
 # Children spend most time waiting for the LLM (idle) or running a tool.
 # Idle stalls are more suspicious than tool stalls — tools like web fetch
@@ -266,6 +282,44 @@ async def _delegate_handler(
             ),
         })
     child_depth = parent_depth + 1
+
+    # Guard against runaway fan-out / recursion of expensive workflows
+    # like deep-research.  Two distinct cases:
+    #
+    #   (c) parent IS already running as one of these agent types and
+    #       tries to delegate to the *same* type -- a planner spawning
+    #       another planner.  Even within the depth cap this multiplies
+    #       work and burns the timeout on every node.
+    #
+    #   (d) a single ``delegate_task`` call fans the same expensive
+    #       agent type out across N goals in parallel.  One user prompt
+    #       producing four ~15-minute children is exactly the failure
+    #       mode that motivated this guard.
+    parent_agent_type = parent_config.get("agent_type") or ""
+    non_recursive_in_batch = [
+        t["agent_type"] for t in tasks
+        if t["agent_type"] in _NON_RECURSIVE_AGENT_TYPES
+    ]
+    if parent_agent_type in _NON_RECURSIVE_AGENT_TYPES:
+        for t in tasks:
+            if t["agent_type"] == parent_agent_type:
+                return json.dumps({
+                    "error": (
+                        f"agent_type {parent_agent_type!r} cannot "
+                        f"delegate to itself; finish the current "
+                        f"workflow or hand off to a different agent "
+                        f"type."
+                    ),
+                })
+    if len(tasks) > 1 and non_recursive_in_batch:
+        return json.dumps({
+            "error": (
+                "batch ``goals`` may not include agent_type "
+                f"{sorted(set(non_recursive_in_batch))} -- these "
+                "workflows must be delegated one at a time so they do "
+                "not fan out into a runaway fleet."
+            ),
+        })
 
     # Split remaining budget evenly across children when batched.
     remaining = budget.remaining if budget else _CHILD_MAX_ITERATIONS

@@ -104,6 +104,16 @@ def build_deep_research_message(*, topic: str) -> str:
     instruction so the LLM picks the planner via ``delegate_task`` instead
     of doing the research itself.
 
+    The directive also explicitly forbids the two failure modes that
+    used to turn one prompt into a runaway fleet:
+
+      * retrying ``delegate_task`` on a timeout or error result (the
+        model's default "try harder" behaviour decomposes the goal
+        and spawns more children, each burning the full timeout);
+
+      * batching multiple ``goals`` into a single call (one call
+        producing N concurrent planners multiplies the same problem).
+
     A missing topic ("/deep-research" alone) is still rewritten -- the
     LLM is told to ask the user for a topic; this matches the UX of
     other slash commands where empty args degrade to a prompt rather
@@ -115,15 +125,24 @@ def build_deep_research_message(*, topic: str) -> str:
             "The user invoked `/deep-research` without a topic. "
             "Ask the user what they would like researched, then once "
             "they reply, delegate the topic to the `deep-research` "
-            "sub-agent via `delegate_task`."
+            "sub-agent via `delegate_task` using a SINGLE call with "
+            "one `goal` (not batched `goals`).  If that one delegation "
+            "fails or times out, report the failure to the user "
+            "verbatim and stop -- do NOT retry."
         )
     return (
         "The user invoked the `/deep-research` workflow.\n\n"
-        "Delegate the following topic to the `deep-research` sub-agent "
-        "via `delegate_task` (agent_type=\"deep-research\").  Do not "
-        "attempt to research it yourself -- the sub-agent is responsible "
-        "for planning, web search, evidence curation, and handing off to "
-        "the `research-writer` sub-agent for the final report.\n\n"
+        "Call `delegate_task` EXACTLY ONCE with "
+        "`agent_type=\"deep-research\"` and a single `goal` carrying "
+        "the topic below.  Do not batch multiple `goals`, do not "
+        "split the topic into sub-tasks, do not attempt to research "
+        "it yourself -- the sub-agent is responsible for planning, "
+        "web search, evidence curation, and handing off to the "
+        "`research-writer` sub-agent for the final report.\n\n"
+        "If the delegation returns an error or times out, report the "
+        "failure verbatim to the user and stop.  Do NOT retry, do NOT "
+        "decompose the topic into smaller deep-research calls -- "
+        "another attempt would just burn the same budget again.\n\n"
         f"Topic: {topic}"
     )
 

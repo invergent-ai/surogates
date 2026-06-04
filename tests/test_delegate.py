@@ -31,6 +31,7 @@ def _parent_session(
     delegation_depth: int = 0,
     allowed_tools: list[str] | None = None,
     excluded_tools: list[str] | None = None,
+    agent_type: str | None = None,
 ) -> Session:
     now = datetime.now(timezone.utc)
     config: dict[str, Any] = {
@@ -44,6 +45,8 @@ def _parent_session(
         config["allowed_tools"] = allowed_tools
     if excluded_tools is not None:
         config["excluded_tools"] = excluded_tools
+    if agent_type is not None:
+        config["agent_type"] = agent_type
     return Session(
         id=uuid4(),
         user_id=uuid4(),
@@ -539,6 +542,93 @@ async def test_delegate_forwards_bundle_to_agent_resolver(
     )
 
     assert captured.get("bundle") is sentinel_bundle
+
+
+@pytest.mark.asyncio
+async def test_deep_research_cannot_delegate_to_deep_research(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (c): a planner already running as ``deep-research``
+    must not be able to spawn another ``deep-research`` child.  Even
+    within the depth cap this multiplies work and burns the timeout on
+    every node -- the failure mode that produced the 4-planner runaway
+    fleet we just untangled.
+    """
+    parent = _parent_session(agent_type="deep-research")
+    store = FakeStore(parent, child_events=_complete_response_events("ok"))
+    # Resolver is patched so a *resolution* miss can't be the reason for
+    # the rejection -- the guard must trigger BEFORE the child is spawned.
+    _install_stub_agent_resolver(
+        monkeypatch, agent_def=_StubAgentDef(),
+    )
+    # If the guard is missing the handler will try to create a child;
+    # patching create_child_session keeps that path inert if reached.
+    captured_create = _install_stub_child_session(monkeypatch, store)
+
+    result_json = await _delegate_handler(
+        {"goal": "more research", "agent_type": "deep-research"},
+        session_store=store,
+        redis=None,
+        tenant=object(),
+        session_id=str(parent.id),
+        budget=IterationBudget(max_total=10),
+    )
+
+    parsed = json.loads(result_json)
+    assert "error" in parsed
+    assert "cannot delegate to itself" in parsed["error"]
+    # No child config was captured -- the guard fired before spawn.
+    assert "config" not in captured_create
+
+
+@pytest.mark.asyncio
+async def test_batch_goals_rejects_deep_research_fanout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (d): a single ``delegate_task`` with ``goals=[...]``
+    targeting ``agent_type=deep-research`` must be rejected.  One call
+    producing three concurrent deep-research planners is exactly the
+    fan-out pattern that turned one user prompt into a runaway fleet.
+    """
+    parent = _parent_session()
+    store = FakeStore(parent, child_events=_complete_response_events("ok"))
+    _install_stub_agent_resolver(
+        monkeypatch, agent_def=_StubAgentDef(),
+    )
+    captured_create = _install_stub_child_session(monkeypatch, store)
+
+    result_json = await _delegate_handler(
+        {
+            "goals": [
+                {"goal": "topic A", "agent_type": "deep-research"},
+                {"goal": "topic B", "agent_type": "deep-research"},
+                {"goal": "topic C", "agent_type": "deep-research"},
+            ],
+        },
+        session_store=store,
+        redis=None,
+        tenant=object(),
+        session_id=str(parent.id),
+        budget=IterationBudget(max_total=10),
+    )
+
+    parsed = json.loads(result_json)
+    assert "error" in parsed
+    assert "deep-research" in parsed["error"]
+    assert "one at a time" in parsed["error"]
+    # Counter-check: a single-goal call with the same agent_type must
+    # still go through -- the guard targets fan-out, not the agent type
+    # in isolation.
+    captured_create.clear()
+    await _delegate_handler(
+        {"goal": "topic A", "agent_type": "deep-research"},
+        session_store=store,
+        redis=None,
+        tenant=object(),
+        session_id=str(parent.id),
+        budget=IterationBudget(max_total=10),
+    )
+    assert "config" in captured_create
 
 
 @pytest.mark.asyncio
