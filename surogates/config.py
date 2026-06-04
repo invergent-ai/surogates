@@ -371,8 +371,6 @@ class TransparencySettings(BaseSettings):
 
     enabled: bool = False
     level: str = "basic"  # "none", "basic", "enhanced", "full"
-    require_confirmation: bool = True
-    emotion_recognition: bool = False
 
 
 class StorageSettings(BaseSettings):

@@ -5,8 +5,6 @@
 export interface TransparencyConfig {
   enabled: boolean;
   level?: "none" | "basic" | "enhanced" | "full";
-  require_confirmation?: boolean;
-  emotion_recognition?: boolean;
 }
 
 let _cached: TransparencyConfig | null = null;
