@@ -141,8 +141,20 @@ async def _load_db_configs(
         return {}
 
     # ``UUID`` is imported at module scope (loader.py:34). ctx.mcp_server_ids
-    # are strings; McpServer.id is a UUID column.
-    id_values = [UUID(str(i)) for i in allowed_ids]
+    # are strings; McpServer.id is a UUID column.  A malformed id is a
+    # corrupt runtime config, not a reason to 500 the whole discovery —
+    # skip it (and log) and scope to the valid ones.
+    id_values: list[UUID] = []
+    for raw in allowed_ids:
+        try:
+            id_values.append(UUID(str(raw)))
+        except (ValueError, TypeError, AttributeError):
+            logger.warning(
+                "Ignoring malformed MCP server id in agent allow-list: %r",
+                raw,
+            )
+    if not id_values:
+        return {}
 
     configs: dict[str, dict[str, Any]] = {}
 

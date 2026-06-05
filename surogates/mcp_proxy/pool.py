@@ -140,6 +140,10 @@ class ConnectionPool:
         self._max_per_org = max_per_org
         self._entries: dict[tuple[UUID, UUID, str], PoolEntry] = {}
         self._locks: dict[tuple[UUID, UUID, str], asyncio.Lock] = {}
+        # Background agent-eviction tasks. Held so they are not garbage-
+        # collected mid-flight (CPython only keeps weak refs to tasks);
+        # each removes itself via a done-callback.
+        self._invalidation_tasks: set[asyncio.Task] = set()
         self._eviction_task: asyncio.Task | None = None
         self._governance_enabled = governance_enabled
         self._audit_store = audit_store
@@ -163,6 +167,16 @@ class ConnectionPool:
                 await self._eviction_task
             except asyncio.CancelledError:
                 pass
+
+        # Drain any in-flight agent-invalidation teardowns before we
+        # clear shared state out from under them.
+        for task in list(self._invalidation_tasks):
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._invalidation_tasks.clear()
 
         for entry in list(self._entries.values()):
             await self._disconnect_entry(entry)
@@ -635,7 +649,9 @@ class ConnectionPool:
             if entry is not None:
                 entries.append(entry)
         for entry in entries:
-            asyncio.create_task(self._disconnect_entry(entry))
+            task = asyncio.create_task(self._disconnect_entry(entry))
+            self._invalidation_tasks.add(task)
+            task.add_done_callback(self._invalidation_tasks.discard)
 
     async def _evict_idle(self) -> None:
         """Background loop that evicts idle tenant connections."""
