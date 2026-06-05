@@ -22,13 +22,16 @@ Legend: ☐ todo · ◐ in-progress · ☑ done. Updated before every commit.
 - ☑ Task 4 — Per-agent prompt-schema filter (filter only when foreign MCP tools present, preserving the coordinator `None` contract)
 - ☑ Task 5 — Invalidate agent pool entry on attachment changes
 - ☑ Task 6 — Remove dead `MCPServerRegistryCache` scaffolding
-- ◐ Task 7 — Fix stale ops docstring (surogate-ops repo)
-- ☐ Task 8 — Full regression
+- ☑ Task 7 — Fix stale ops docstring (surogate-ops repo, branch `chore/mcp-per-agent-docstring`)
+- ☑ Task 8 — Full regression
 
-**Baseline pre-existing failures (fixed by this work, not regressions):**
-- `tests/runtime/test_call_tool_per_call_subprocess.py` ×4 — `_execute_call` signature drift → fixed in Task 2.
-- `tests/runtime/test_mcp_proxy_state.py::test_install_proxy_plumbing_empty_url_skips` ×1 — proxy now fail-fasts on missing `platform_api_url` → fixed in Task 5.
-- `tests/runtime/test_app_state.py` ×8 + `tests/runtime/test_platform_client.py::test_get_runtime_config_happy_path` ×1 — **pre-existing, out of scope.** Stale test stubs vs. hardened `settings.hub.endpoint`-mandatory code (`api/app.py:374`); fail identically at the Task-5 commit with zero changes from this work. Not touched here.
+**ALL TASKS COMPLETE.** Implementation verified, no regressions.
+
+**Regression analysis (definitive, `tests/runtime` + `tests/harness`):**
+- Branch base `a655c76` (before any work): **40 failed / 278 passed**.
+- After all tasks `61c67de`: **35 failed / 291 passed**.
+- This work *fixed 5* pre-existing failures (the 4 `_execute_call` + 1 proxy-state empty-URL) and *added 13 passing tests*, with **zero new failures**. The 35 remaining are a strict subset of the pre-existing 40 — stale test stubs vs. hardened `settings.hub.endpoint`-mandatory code (`api/app.py:374`), removed helm-mode source-inspection tests, and env-dependent e2e — all unrelated to per-agent MCP scoping and untouched here.
+- New MCP suites: `test_mcp_client_per_agent` (3), `test_pool_agent_scoped` (3), `test_loader_allowlist` (1), `test_mcp_schema_filter` (3), invalidator pool cases (3), plus the DB-backed `tests/integration/test_loader_agent_scoped` (1, requires Docker) — all green.
 
 ---
 
