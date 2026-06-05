@@ -458,6 +458,48 @@ class ScheduledSessionStore:
             )
             await db.commit()
 
+    async def mark_run_failed(
+        self,
+        schedule: ScheduledSession,
+        *,
+        error: str,
+    ) -> None:
+        """Release a claimed schedule whose run could not be created.
+
+        Clears the lock and reschedules so the row fires again instead of
+        staying stuck locked: cron schedules advance to their next cron
+        instant; dynamic loops use the fallback delay (and record the
+        reason in ``schedule``).  The error is stored on ``last_error``.
+        """
+        now = _utcnow()
+        is_dynamic = schedule.schedule.get("kind") == "dynamic_loop"
+        next_run_at = (
+            now + timedelta(seconds=DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS)
+            if is_dynamic
+            else _parsed_schedule(schedule).next_after(now)
+        )
+        values: dict[str, Any] = {
+            "last_error": error[:2000],
+            "locked_by": None,
+            "locked_until": None,
+            "next_run_at": next_run_at,
+            "updated_at": func.now(),
+        }
+        if is_dynamic:
+            values["schedule"] = {
+                **schedule.schedule,
+                "last_delay_seconds": DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS,
+                "last_delay_reason": "Run creation failed; using fallback delay.",
+                "last_delay_set_at": now.isoformat(),
+            }
+        async with self._sf() as db:
+            await db.execute(
+                update(ScheduledSessionRow)
+                .where(ScheduledSessionRow.id == schedule.id)
+                .values(**values)
+            )
+            await db.commit()
+
     async def mark_dynamic_run_finished(
         self,
         *,
@@ -571,22 +613,30 @@ class ScheduledSessionStore:
     async def recover_stalled_dynamic_loops(
         self,
         *,
-        agent_id: str,
+        agent_id: str | None = None,
         stale_seconds: int = DYNAMIC_LOOP_STALE_RUN_SECONDS,
         limit: int = 100,
     ) -> list[ScheduledSession]:
+        """Reschedule dynamic loops whose run reached a terminal state
+        without rescheduling (the run never called ``loop_wait`` ->
+        ``mark_dynamic_run_finished``), using the fallback delay.
+
+        ``agent_id=None`` sweeps across all tenants (platform ticker);
+        passing an ``agent_id`` scopes to one tenant.
+        """
         now = _utcnow()
         reason = (
             "Previous dynamic loop run stalled; using the fallback delay."
         )
+        agent_filter = "" if agent_id is None else "AND s.agent_id = :agent_id"
         query = text(
-            """
+            f"""
             WITH stalled AS (
                 SELECT s.id
                 FROM scheduled_sessions s
                 JOIN sessions run_session ON run_session.id = s.last_session_id
-                WHERE s.agent_id = :agent_id
-                  AND s.status = 'active'
+                WHERE s.status = 'active'
+                  {agent_filter}
                   AND s.next_run_at IS NULL
                   AND s.last_session_id IS NOT NULL
                   AND s.schedule->>'kind' = 'dynamic_loop'
@@ -612,18 +662,17 @@ class ScheduledSessionStore:
             RETURNING s.*
             """
         )
+        params: dict[str, Any] = {
+            "stale_seconds": int(stale_seconds),
+            "limit": int(limit),
+            "delay_seconds": DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS,
+            "reason": reason,
+            "set_at": now.isoformat(),
+        }
+        if agent_id is not None:
+            params["agent_id"] = agent_id
         async with self._sf() as db:
-            result = await db.execute(
-                query,
-                {
-                    "agent_id": agent_id,
-                    "stale_seconds": int(stale_seconds),
-                    "limit": int(limit),
-                    "delay_seconds": DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS,
-                    "reason": reason,
-                    "set_at": now.isoformat(),
-                },
-            )
+            result = await db.execute(query, params)
             rows = [ScheduledSession.model_validate(dict(row._mapping)) for row in result]
             await db.commit()
         return rows
@@ -631,20 +680,28 @@ class ScheduledSessionStore:
     async def find_retryable_stalled_dynamic_loop_runs(
         self,
         *,
-        agent_id: str,
+        agent_id: str | None = None,
         stale_seconds: int = DYNAMIC_LOOP_STALE_RUN_SECONDS,
         limit: int = 100,
     ) -> list[ScheduledSession]:
+        """Dynamic loops whose run row is still ``active`` but whose
+        worker lease has lapsed and which hasn't progressed for
+        ``stale_seconds`` — i.e. the worker died mid-run.  The run is
+        re-enqueued (by the caller) rather than rescheduled.
+
+        ``agent_id=None`` sweeps across all tenants.
+        """
+        agent_filter = "" if agent_id is None else "AND s.agent_id = :agent_id"
         query = text(
-            """
+            f"""
             SELECT s.*
             FROM scheduled_sessions s
             JOIN sessions run_session ON run_session.id = s.last_session_id
             LEFT JOIN session_leases active_lease
                 ON active_lease.session_id = run_session.id
                AND active_lease.expires_at > now()
-            WHERE s.agent_id = :agent_id
-              AND s.status = 'active'
+            WHERE s.status = 'active'
+              {agent_filter}
               AND s.next_run_at IS NULL
               AND s.last_session_id IS NOT NULL
               AND s.schedule->>'kind' = 'dynamic_loop'
@@ -657,15 +714,14 @@ class ScheduledSessionStore:
             LIMIT :limit
             """
         )
+        params: dict[str, Any] = {
+            "stale_seconds": int(stale_seconds),
+            "limit": int(limit),
+        }
+        if agent_id is not None:
+            params["agent_id"] = agent_id
         async with self._sf() as db:
-            result = await db.execute(
-                query,
-                {
-                    "agent_id": agent_id,
-                    "stale_seconds": int(stale_seconds),
-                    "limit": int(limit),
-                },
-            )
+            result = await db.execute(query, params)
             rows = [ScheduledSession.model_validate(dict(row._mapping)) for row in result]
         return rows
 

@@ -40,7 +40,8 @@ from surogates.runtime.leader_lock import RedisLeaderLock
 logger = logging.getLogger(__name__)
 
 
-EnqueueFn = Callable[..., Awaitable[None]]
+RunOneFn = Callable[[Any], Awaitable[None]]
+RecoverFn = Callable[[], Awaitable[None]]
 
 
 class PlatformTicker:
@@ -49,15 +50,26 @@ class PlatformTicker:
         *,
         lock: Any,
         store: Any,
-        enqueue: EnqueueFn,
+        run_one: RunOneFn,
         tick_interval_seconds: float,
         worker_id: str,
+        recover: RecoverFn | None = None,
         claim_limit: int = 100,
         claim_lease_seconds: int = 30,
     ) -> None:
         self._lock = lock
         self._store = store
-        self._enqueue = enqueue
+        # ``run_one`` materializes a run session for one claimed schedule
+        # row (create the session, emit its prompt, enqueue the *session*
+        # id, and advance the schedule via ``mark_run_created``).  Without
+        # it the ticker would enqueue the schedule row id itself, which no
+        # session exists for — the dispatcher then fails every tick with
+        # SessionNotFoundError and no loop run is ever produced.
+        self._run_one = run_one
+        # ``recover`` (optional) requeues/recovers stalled dynamic loops
+        # across tenants once per tick.  Best-effort: a failure is logged
+        # and does not abort the tick.
+        self._recover = recover
         self._tick_interval = tick_interval_seconds
         self._worker_id = worker_id
         self._claim_limit = claim_limit
@@ -104,13 +116,22 @@ class PlatformTicker:
             )
             return
 
+        # Recover stalled dynamic loops before claiming new work.  Runs
+        # under the lock; best-effort so a recovery error never drops the
+        # rest of the tick.
+        if self._recover is not None:
+            try:
+                await self._recover()
+            except Exception:  # noqa: BLE001 — best-effort
+                logger.exception("platform_ticker recovery sweep failed")
+
         rows = await self._store.find_due_across_tenants(
             worker_id=self._worker_id,
             limit=self._claim_limit,
             lease_seconds=self._claim_lease_seconds,
         )
 
-        # Heartbeat again before enqueue so a slow DB read
+        # Heartbeat again before materialization so a slow DB read
         # cannot push us past the TTL boundary.
         if not await self._lock.heartbeat():
             logger.warning(
@@ -121,11 +142,25 @@ class PlatformTicker:
             return
 
         for row in rows:
-            await self._enqueue(
-                org_id=_field(row, "org_id"),
-                agent_id=_field(row, "agent_id"),
-                session_id=_field(row, "id"),
-            )
+            try:
+                await self._run_one(row)
+            except Exception as exc:  # noqa: BLE001 — one bad row
+                # Record the failure so the schedule releases its claim
+                # and reschedules; one row's failure must not abort the
+                # rest of the tick.
+                logger.exception(
+                    "platform_ticker failed to materialize run for "
+                    "schedule %s",
+                    _field(row, "id"),
+                )
+                try:
+                    await self._store.mark_run_failed(row, error=str(exc))
+                except Exception:  # noqa: BLE001 — best-effort
+                    logger.exception(
+                        "platform_ticker could not mark schedule %s "
+                        "as failed",
+                        _field(row, "id"),
+                    )
 
     async def _sleep_or_stop(self) -> None:
         try:
@@ -149,7 +184,10 @@ async def main(
     settings: Any,
     redis_factory: Callable[[str], Awaitable[Any]] | None = None,
     store_factory: Callable[[Any], Awaitable[Any]] | None = None,
-    enqueue: EnqueueFn | None = None,
+    session_store_factory: Callable[[Any], Awaitable[Any]] | None = None,
+    storage_factory: Callable[[Any], Awaitable[Any]] | None = None,
+    run_one: RunOneFn | None = None,
+    recover: RecoverFn | None = None,
     install_signal_handlers: bool = True,
 ) -> None:
     """CLI entry for ``python -m surogates.scheduled.platform_ticker``.
@@ -157,19 +195,24 @@ async def main(
     Wires:
 
     * Redis client from ``settings.redis.url``
-    * :class:`ScheduledSessionStore` from ``settings.db``
-    * ``enqueue_session`` closure bound to the Redis client
+    * :class:`ScheduledSessionStore` + :class:`SessionStore` sharing one
+      engine/session_factory built from ``settings.db``
+    * Workspace storage backend from ``settings``
+    * ``run_one`` = :func:`materialize_scheduled_run` bound to the above
+      (creates the run session, emits its prompt, enqueues the session
+      id, advances the schedule)
+    * ``recover`` = :func:`recover_stalled_loops` bound to the store
     * :class:`RedisLeaderLock` with ``holder_id``
       ``{worker_id}-{pid}`` so a restart of the same K8s pod
       acquires a fresh holder identity (avoids the
       release-checks-identity edge where a restarted pod's
       release would no-op against itself)
 
-    Dependency-injection seams (``redis_factory``,
-    ``store_factory``, ``enqueue``) let tests substitute fakes
-    without standing up real Redis + Postgres.  Production
-    callers pass None and the defaults wire the real
-    implementations.
+    Dependency-injection seams (``redis_factory``, ``store_factory``,
+    ``session_store_factory``, ``storage_factory``, ``run_one``,
+    ``recover``) let tests substitute fakes without standing up real
+    Redis + Postgres.  Production callers pass None and the defaults wire
+    the real implementations.
     """
     import os
     import signal
@@ -179,26 +222,55 @@ async def main(
             from redis.asyncio import Redis
             return Redis.from_url(url, decode_responses=False)
         redis_factory = _real_redis
-    if store_factory is None:
-        async def _real_store(s):  # pragma: no cover - prod path
+
+    # Build the engine/session_factory lazily and share it between the
+    # scheduled store and the session store so the ticker uses one pool.
+    _shared: dict[str, Any] = {}
+
+    def _session_factory():  # pragma: no cover - prod path
+        if "sf" not in _shared:
             from surogates.db.engine import (
                 async_engine_from_settings, async_session_factory,
             )
+            _shared["sf"] = async_session_factory(
+                async_engine_from_settings(settings.db),
+            )
+        return _shared["sf"]
+
+    if store_factory is None:
+        async def _real_store(s):  # pragma: no cover - prod path
             from surogates.scheduled.store import ScheduledSessionStore
-            engine = async_engine_from_settings(s.db)
-            return ScheduledSessionStore(async_session_factory(engine))
+            return ScheduledSessionStore(_session_factory())
         store_factory = _real_store
 
     redis = await redis_factory(settings.redis.url)
     store = await store_factory(settings)
 
-    if enqueue is None:
-        from surogates.config import enqueue_session as _enq
+    if run_one is None:
+        if session_store_factory is None:
+            async def _real_session_store(s):  # pragma: no cover - prod path
+                from surogates.session.store import SessionStore
+                return SessionStore(_session_factory(), redis=redis)
+            session_store_factory = _real_session_store
+        if storage_factory is None:
+            async def _real_storage(s):  # pragma: no cover - prod path
+                from surogates.storage.backend import create_backend
+                return create_backend(s)
+            storage_factory = _real_storage
 
-        async def enqueue(*, org_id, agent_id, session_id, priority=0):
-            await _enq(
-                redis, org_id=org_id, agent_id=agent_id,
-                session_id=session_id, priority=priority,
+        session_store = await session_store_factory(settings)
+        storage = await storage_factory(settings)
+
+        from surogates.scheduled.materialize import materialize_scheduled_run
+
+        async def run_one(row):  # pragma: no cover - prod path
+            await materialize_scheduled_run(
+                row,
+                session_store=session_store,
+                scheduled_store=store,
+                storage=storage,
+                settings=settings,
+                redis=redis,
             )
 
     sched = settings.scheduled_sessions
@@ -209,6 +281,15 @@ async def main(
     tick_interval = float(
         getattr(sched, "tick_interval_seconds", 5),
     )
+    claim_limit = int(getattr(sched, "claim_limit", 100))
+
+    if recover is None:
+        from surogates.scheduled.materialize import recover_stalled_loops
+
+        async def recover():  # pragma: no cover - prod path
+            await recover_stalled_loops(
+                scheduled_store=store, redis=redis, limit=claim_limit,
+            )
 
     worker_id = getattr(settings, "worker_id", "platform-ticker")
     holder_id = f"{worker_id}-{os.getpid()}"
@@ -217,8 +298,9 @@ async def main(
         redis, key=lock_key, ttl_seconds=lock_ttl, holder_id=holder_id,
     )
     ticker = PlatformTicker(
-        lock=lock, store=store, enqueue=enqueue,
+        lock=lock, store=store, run_one=run_one, recover=recover,
         tick_interval_seconds=tick_interval, worker_id=worker_id,
+        claim_limit=claim_limit,
     )
 
     if install_signal_handlers:
