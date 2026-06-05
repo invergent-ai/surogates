@@ -74,23 +74,17 @@ async def test_install_proxy_plumbing_wires_runtime_cache_and_limiter():
 
 
 @pytest.mark.asyncio
-async def test_install_proxy_plumbing_empty_url_skips():
-    """Shared mode + empty platform_api_url logs and stays None so
-    a misconfigured pod still boots (the routes 503 / 429 on the
-    first request instead of crashing at startup)."""
-    from surogates.mcp_proxy.app import (
-        _install_shared_runtime_plumbing_for_proxy,
-        _shutdown_shared_runtime_plumbing_for_proxy,
-    )
+async def test_install_proxy_plumbing_empty_url_raises():
+    """The proxy needs platform_api_url to resolve AgentRuntimeContext.
+
+    Missing it fails at startup instead of booting a pod whose MCP routes
+    cannot resolve agent context.
+    """
+    from surogates.mcp_proxy.app import _install_shared_runtime_plumbing_for_proxy
 
     app = FastAPI()
     app.state.redis = _FakeRedis()
-    _install_shared_runtime_plumbing_for_proxy(
-        app, _make_settings(platform_api_url=""),
-    )
-    try:
-        assert app.state.platform_client is None
-        assert app.state.runtime_config_cache is None
-        assert app.state.rate_limiter is None
-    finally:
-        await _shutdown_shared_runtime_plumbing_for_proxy(app)
+    with pytest.raises(RuntimeError, match="SUROGATES_PLATFORM_API_URL"):
+        _install_shared_runtime_plumbing_for_proxy(
+            app, _make_settings(platform_api_url=""),
+        )

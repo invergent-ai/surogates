@@ -323,9 +323,14 @@ class AgentHarness(
         turn_summarizer: Any | None = None,
         bundle: Any | None = None,
         turn_gate: Any | None = None,
+        mcp_tool_names: frozenset[str] | None = None,
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
+        # MCP tool names discovered for THIS session's agent via the
+        # proxy.  The registry is process-wide; this scopes the
+        # model-visible schema set to the agent's own MCP tools.
+        self._mcp_tool_names: frozenset[str] = frozenset(mcp_tool_names or ())
         self._llm = llm_client
         self._tenant = tenant
         self._worker_id = worker_id
@@ -1853,7 +1858,7 @@ class AgentHarness(
                 if (
                     not deep_research_delegate_nudge_fired
                     and _is_deep_research_planner(session)
-                    and not _planner_already_delegated_to_writer(all_events)
+                    and not _planner_already_delegated_to_writer(messages)
                 ):
                     deep_research_delegate_nudge_fired = True
                     try:
@@ -2852,6 +2857,47 @@ class AgentHarness(
         updated.add("ask_user_question")
         return updated
 
+    def _apply_mcp_schema_filter(
+        self, tool_filter: set[str] | None, *, explicit_allowed: bool,
+    ) -> set[str] | None:
+        """Restrict model-visible MCP tool schemas to this agent's set.
+
+        The worker shares one ``ToolRegistry`` across every agent it
+        serves, so the registry can accumulate ``mcp__*`` tools
+        discovered for *other* agents.  ``self._mcp_tool_names`` is the
+        set discovered for this session's agent.
+
+        When the registry holds no foreign ``mcp__*`` tools there is
+        nothing to hide, so the caller's filter is returned verbatim —
+        including ``None`` (the "no filter applied" contract that
+        non-strict coordinator sessions rely on).  Only when a foreign
+        MCP tool is present do we materialise and filter:
+
+        * ``None`` is expanded to the full registry so the foreign
+          ``mcp__*`` tools can be subtracted.
+        * Without an explicit ``allowed_tools`` config, this agent's full
+          discovered MCP set is advertised.
+        * With an explicit ``allowed_tools`` config, only the ``mcp__*``
+          entries that are BOTH allowed and discovered survive.
+        """
+        all_names = set(self._tools.tool_names)
+        foreign_mcp = {
+            t for t in all_names
+            if t.startswith("mcp__") and t not in self._mcp_tool_names
+        }
+        if not foreign_mcp:
+            return tool_filter
+
+        base = all_names if tool_filter is None else set(tool_filter)
+        non_mcp = {t for t in base if not t.startswith("mcp__")}
+        if explicit_allowed:
+            mcp_allowed = {
+                t for t in base if t.startswith("mcp__")
+            } & self._mcp_tool_names
+        else:
+            mcp_allowed = self._mcp_tool_names & all_names
+        return non_mcp | mcp_allowed
+
     def _tool_filter_for_session(self, session: Session) -> set[str] | None:
         """Return the tool allow-list for a session."""
         config = session.config or {}
@@ -2907,6 +2953,9 @@ class AgentHarness(
                 tool_filter.discard("loop_wait")
                 if "loop_complete" in self._tools.tool_names:
                     tool_filter.add("loop_complete")
+            tool_filter = self._apply_mcp_schema_filter(
+                tool_filter, explicit_allowed=explicit_allowed,
+            )
             return self._ensure_always_available_tools(
                 tool_filter, explicit_allowed=explicit_allowed,
             )
@@ -2915,6 +2964,9 @@ class AgentHarness(
             tool_filter = set(tool_filter)
             tool_filter.discard("loop_wait")
             tool_filter.discard("loop_complete")
+        tool_filter = self._apply_mcp_schema_filter(
+            tool_filter, explicit_allowed=explicit_allowed,
+        )
         return self._ensure_always_available_tools(
             tool_filter, explicit_allowed=explicit_allowed,
         )

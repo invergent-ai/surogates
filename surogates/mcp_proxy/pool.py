@@ -38,14 +38,21 @@ from surogates.tools.mcp.client import (
 logger = logging.getLogger(__name__)
 
 
-def _tenant_prefix(org_id: UUID, user_id: UUID) -> str:
-    """Build the server-name prefix that makes module-level entries unique."""
-    return f"{org_id}_{user_id}"
+def _tenant_prefix(org_id: UUID, user_id: UUID, agent_id: str) -> str:
+    """Build the server-name prefix that makes module-level entries unique.
+
+    Includes ``agent_id`` so two agents under the same ``(org, user)``
+    never share a long-lived upstream connection in the module-level
+    ``_servers`` dict — each agent connects only to its attached servers.
+    """
+    return f"{org_id}_{user_id}_{agent_id}"
 
 
-def _prefixed_name(org_id: UUID, user_id: UUID, server_name: str) -> str:
-    """Full tenant-scoped server name used as key in the global _servers dict."""
-    return f"{_tenant_prefix(org_id, user_id)}__{server_name}"
+def _prefixed_name(
+    org_id: UUID, user_id: UUID, agent_id: str, server_name: str,
+) -> str:
+    """Full agent-scoped server name used as key in the global _servers dict."""
+    return f"{_tenant_prefix(org_id, user_id, agent_id)}__{server_name}"
 
 
 def _flatten_openai_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -83,6 +90,7 @@ class PoolEntry:
 
     org_id: UUID
     user_id: UUID
+    agent_id: str
     server_names: list[str]  # original (unprefixed) server names
     tool_schemas: list[dict[str, Any]] = field(default_factory=list)
     # Reverse index: clean tool name -> (prefixed server key, original MCP tool name)
@@ -130,8 +138,12 @@ class ConnectionPool:
     ) -> None:
         self._idle_timeout = idle_timeout
         self._max_per_org = max_per_org
-        self._entries: dict[tuple[UUID, UUID], PoolEntry] = {}
-        self._locks: dict[tuple[UUID, UUID], asyncio.Lock] = {}
+        self._entries: dict[tuple[UUID, UUID, str], PoolEntry] = {}
+        self._locks: dict[tuple[UUID, UUID, str], asyncio.Lock] = {}
+        # Background agent-eviction tasks. Held so they are not garbage-
+        # collected mid-flight (CPython only keeps weak refs to tasks);
+        # each removes itself via a done-callback.
+        self._invalidation_tasks: set[asyncio.Task] = set()
         self._eviction_task: asyncio.Task | None = None
         self._governance_enabled = governance_enabled
         self._audit_store = audit_store
@@ -156,6 +168,16 @@ class ConnectionPool:
             except asyncio.CancelledError:
                 pass
 
+        # Drain any in-flight agent-invalidation teardowns before we
+        # clear shared state out from under them.
+        for task in list(self._invalidation_tasks):
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._invalidation_tasks.clear()
+
         for entry in list(self._entries.values()):
             await self._disconnect_entry(entry)
         self._entries.clear()
@@ -166,17 +188,17 @@ class ConnectionPool:
     # ------------------------------------------------------------------
 
     def get_cached_schemas(
-        self, org_id: UUID, user_id: UUID,
+        self, org_id: UUID, user_id: UUID, agent_id: str,
     ) -> list[dict[str, Any]] | None:
-        """Return cached tool schemas if the tenant is connected, else None."""
-        entry = self._entries.get((org_id, user_id))
+        """Return cached tool schemas if the agent is connected, else None."""
+        entry = self._entries.get((org_id, user_id, agent_id))
         if entry is None:
             return None
         entry.last_used = time.monotonic()
         return entry.tool_schemas
 
     def resolve_call_target(
-        self, org_id: UUID, user_id: UUID, tool_name: str,
+        self, org_id: UUID, user_id: UUID, agent_id: str, tool_name: str,
     ) -> tuple[str, str, dict[str, Any]] | None:
         """Resolve a clean tool name to the per-call subprocess parameters.
 
@@ -188,7 +210,7 @@ class ConnectionPool:
         reaching into the module-level ``_servers`` dict for the
         long-lived session.
         """
-        entry = self._entries.get((org_id, user_id))
+        entry = self._entries.get((org_id, user_id, agent_id))
         if entry is None:
             return None
         entry.last_used = time.monotonic()
@@ -196,10 +218,10 @@ class ConnectionPool:
         if routing is None:
             return None
         server_key, original_tool = routing
-        # Strip the tenant prefix from the server key to recover the
+        # Strip the agent prefix from the server key to recover the
         # config dict key (server_configs is indexed by the original
         # unprefixed name).
-        expected_prefix = f"{_tenant_prefix(org_id, user_id)}__"
+        expected_prefix = f"{_tenant_prefix(org_id, user_id, agent_id)}__"
         if server_key.startswith(expected_prefix):
             original_server = server_key[len(expected_prefix):]
         else:
@@ -217,6 +239,7 @@ class ConnectionPool:
         self,
         org_id: UUID,
         user_id: UUID,
+        agent_id: str,
         configs: dict[str, dict[str, Any]],
         *,
         is_service_account: bool = False,
@@ -230,7 +253,7 @@ class ConnectionPool:
         rather than a real ``users.id``; downstream audit writes use
         ``user_id=None`` in that case to avoid FK violations.
         """
-        key = (org_id, user_id)
+        key = (org_id, user_id, agent_id)
         lock = self._locks.setdefault(key, asyncio.Lock())
 
         async with lock:
@@ -243,7 +266,7 @@ class ConnectionPool:
             prefixed: dict[str, dict[str, Any]] = {}
             original_names: list[str] = []
             for name, cfg in configs.items():
-                pname = _prefixed_name(org_id, user_id, name)
+                pname = _prefixed_name(org_id, user_id, agent_id, name)
                 prefixed[pname] = cfg
                 original_names.append(name)
 
@@ -270,7 +293,7 @@ class ConnectionPool:
 
             # Build clean schemas and reverse tool index.
             tenant_pfx = sanitize_mcp_name_component(
-                _tenant_prefix(org_id, user_id),
+                _tenant_prefix(org_id, user_id, agent_id),
             )
             clean_schemas: list[dict[str, Any]] = []
             tool_index: dict[str, tuple[str, str]] = {}
@@ -313,8 +336,8 @@ class ConnectionPool:
                 if tenant_governance is not None:
                     original_server = ""
                     if owning_server_key is not None:
-                        # Strip the tenant prefix back off the server key.
-                        expected_prefix = f"{_tenant_prefix(org_id, user_id)}__"
+                        # Strip the agent prefix back off the server key.
+                        expected_prefix = f"{_tenant_prefix(org_id, user_id, agent_id)}__"
                         if owning_server_key.startswith(expected_prefix):
                             original_server = owning_server_key[len(expected_prefix):]
                         else:
@@ -338,6 +361,7 @@ class ConnectionPool:
             entry = PoolEntry(
                 org_id=org_id,
                 user_id=user_id,
+                agent_id=agent_id,
                 server_names=original_names,
                 tool_schemas=clean_schemas,
                 tool_index=tool_index,
@@ -350,8 +374,10 @@ class ConnectionPool:
             self._entries[key] = entry
 
             logger.info(
-                "Connected %d MCP server(s) for org=%s user=%s (%d tools)",
-                len(original_names), org_id, user_id, len(clean_schemas),
+                "Connected %d MCP server(s) for org=%s user=%s agent=%s "
+                "(%d tools)",
+                len(original_names), org_id, user_id, agent_id,
+                len(clean_schemas),
             )
             return clean_schemas
 
@@ -457,6 +483,7 @@ class ConnectionPool:
         self,
         org_id: UUID,
         user_id: UUID,
+        agent_id: str,
         tool_name: str,
         arguments: dict[str, Any],
         meta: dict[str, Any] | None = None,
@@ -468,7 +495,7 @@ class ConnectionPool:
         ``_meta`` channel so platform servers can scope calls by chat
         user / project without an extra round-trip.
         """
-        key = (org_id, user_id)
+        key = (org_id, user_id, agent_id)
         entry = self._entries.get(key)
         if entry is None:
             return json.dumps({"error": "No MCP connections for this tenant."})
@@ -588,7 +615,9 @@ class ConnectionPool:
         servers_to_shutdown = []
         with _lock:
             for name in entry.server_names:
-                prefixed = _prefixed_name(entry.org_id, entry.user_id, name)
+                prefixed = _prefixed_name(
+                    entry.org_id, entry.user_id, entry.agent_id, name,
+                )
                 server = _servers.pop(prefixed, None)
                 if server is not None:
                     servers_to_shutdown.append(server)
@@ -602,6 +631,28 @@ class ConnectionPool:
                     exc_info=True,
                 )
 
+    def invalidate_agent(self, agent_id: str) -> None:
+        """Immediately evict every pool entry for *agent_id*.
+
+        Called from the Redis invalidator when the agent's MCP
+        attachments or runtime config change, so a detached server stops
+        being callable at once rather than at the idle-eviction TTL.
+        Synchronous removal from ``_entries`` is the security boundary;
+        the upstream-connection teardown is best-effort cleanup
+        scheduled on the running loop.
+        """
+        keys = [k for k in self._entries if k[2] == agent_id]
+        entries: list[PoolEntry] = []
+        for key in keys:
+            entry = self._entries.pop(key, None)
+            self._locks.pop(key, None)
+            if entry is not None:
+                entries.append(entry)
+        for entry in entries:
+            task = asyncio.create_task(self._disconnect_entry(entry))
+            self._invalidation_tasks.add(task)
+            task.add_done_callback(self._invalidation_tasks.discard)
+
     async def _evict_idle(self) -> None:
         """Background loop that evicts idle tenant connections."""
         while True:
@@ -611,7 +662,7 @@ class ConnectionPool:
                 return
 
             now = time.monotonic()
-            evicted: list[tuple[UUID, UUID]] = []
+            evicted: list[tuple[UUID, UUID, str]] = []
 
             for key, entry in list(self._entries.items()):
                 if now - entry.last_used > self._idle_timeout:
@@ -622,6 +673,6 @@ class ConnectionPool:
                 self._entries.pop(key, None)
                 self._locks.pop(key, None)
                 logger.info(
-                    "Evicted idle MCP connections for org=%s user=%s",
-                    key[0], key[1],
+                    "Evicted idle MCP connections for org=%s user=%s agent=%s",
+                    key[0], key[1], key[2],
                 )

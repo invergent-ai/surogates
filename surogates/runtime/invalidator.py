@@ -50,16 +50,11 @@ _CHANNEL_ROUTING: tuple[tuple[str, str], ...] = (
     # colon-joined string so the channel identifier passes through
     # without a parser.
     ("user.memory_changed:", "memory_cache"),
-    # admin CRUD on the per-tenant MCP server
-    # registry publishes here.  Identifier is just the agent_id
-    # (no org_id prefix) because admins reference agents by id;
-    # the MCPServerRegistryCache's get() composes the full
-    # "<org_id>:<agent_id>" key from the caller's context, so the
-    # invalidate() side keys on agent_id verbatim — which means a
-    # rare cross-org collision in agent_id would over-invalidate,
-    # not under-invalidate.  Agent ids are UUIDs in PROD; collision
-    # probability is negligible.
-    ("agent.mcp_servers_changed:", "mcp_server_cache"),
+    # admin attach/detach of MCP servers on an agent.  Identifier is
+    # the agent_id.  Refreshes the runtime config (so ctx.mcp_server_ids
+    # updates) and evicts the agent's proxy pool entry (see
+    # _POOL_INVALIDATION_PREFIXES below).
+    ("agent.mcp_servers_changed:", "runtime_config_cache"),
     # channel routing rows mutated.  Identifier
     # shape is "<kind>:<identifier>" (e.g. "slack:A0123ABCD" or
     # "telegram:@my_bot") and the ChannelRoutingCache keys on the
@@ -77,6 +72,15 @@ _CHANNEL_ROUTING: tuple[tuple[str, str], ...] = (
     ("system_skills_changed:", "system_bundle_cache"),
 )
 
+# Channels whose identifier is an agent_id and that must also evict the
+# MCP proxy's per-agent connection pool entry, so a detached server stops
+# being callable at once rather than at the idle TTL.
+_POOL_INVALIDATION_PREFIXES: frozenset[str] = frozenset({
+    "agent.runtime_config_changed:",
+    "agent.mcp_servers_changed:",
+})
+
+
 INVALIDATION_CHANNELS: tuple[str, ...] = tuple(
     prefix for prefix, _ in _CHANNEL_ROUTING
 )
@@ -91,7 +95,7 @@ def handle_invalidation_message(
     slug_cache: Any = None,
     file_bundle_cache: Any = None,
     memory_cache: Any = None,
-    mcp_server_cache: Any = None,
+    mcp_pool: Any = None,
     channel_routing_cache: Any = None,
     system_bundle_cache: Any = None,
 ) -> None:
@@ -109,16 +113,19 @@ def handle_invalidation_message(
         "slug_cache": slug_cache,
         "file_bundle_cache": file_bundle_cache,
         "memory_cache": memory_cache,
-        "mcp_server_cache": mcp_server_cache,
         "channel_routing_cache": channel_routing_cache,
         "system_bundle_cache": system_bundle_cache,
     }
     for prefix, cache_kwarg in _CHANNEL_ROUTING:
         if channel.startswith(prefix):
             identifier = channel[len(prefix):]
+            if not identifier:
+                return
             cache = caches.get(cache_kwarg)
-            if identifier and cache is not None:
+            if cache is not None:
                 cache.invalidate(identifier)
+            if mcp_pool is not None and prefix in _POOL_INVALIDATION_PREFIXES:
+                mcp_pool.invalidate_agent(identifier)
             return
 
 
@@ -130,7 +137,7 @@ async def run_invalidator(
     slug_cache: Any = None,
     file_bundle_cache: Any = None,
     memory_cache: Any = None,
-    mcp_server_cache: Any = None,
+    mcp_pool: Any = None,
     channel_routing_cache: Any = None,
     system_bundle_cache: Any = None,
 ) -> None:
@@ -161,7 +168,7 @@ async def run_invalidator(
                 slug_cache=slug_cache,
                 file_bundle_cache=file_bundle_cache,
                 memory_cache=memory_cache,
-                mcp_server_cache=mcp_server_cache,
+                mcp_pool=mcp_pool,
                 channel_routing_cache=channel_routing_cache,
                 system_bundle_cache=system_bundle_cache,
             )

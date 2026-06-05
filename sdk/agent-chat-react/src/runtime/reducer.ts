@@ -109,6 +109,12 @@ export function applyAgentChatEvent(
             kind: event.data.kind,
             version: event.data.version,
             size: event.data.size,
+            // Propagated artifacts (a delegated child's report
+            // surfacing on the parent's chat thread) carry this
+            // field; without it the ArtifactBlock fetches via the
+            // chat's own session id and 404s because the spec lives
+            // under the writer's S3 prefix, not the parent's.
+            originating_session_id: event.data.originating_session_id,
           },
         },
       ]);

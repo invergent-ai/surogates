@@ -86,8 +86,10 @@ async def test_execute_call_http_transport_falls_back_to_pool():
         pool=pool,
         org_id="o-1",
         user_id="u-1",
+        agent_id="agent-A",
         server_config=_make_server_config("http"),
-        tool_name="ping",
+        clean_tool_name="ping",
+        original_tool="ping",
         arguments={"x": 1},
         meta={"chat_user_id": "c-1"},
     )
@@ -95,8 +97,9 @@ async def test_execute_call_http_transport_falls_back_to_pool():
     assert result_text == '{"ok": true}'
     assert outcome == routes._OUTCOME_SUCCESS
     assert pool.calls == [{
-        "org_id": "o-1", "user_id": "u-1", "tool_name": "ping",
-        "arguments": {"x": 1}, "meta": {"chat_user_id": "c-1"},
+        "org_id": "o-1", "user_id": "u-1", "agent_id": "agent-A",
+        "tool_name": "ping", "arguments": {"x": 1},
+        "meta": {"chat_user_id": "c-1"},
     }]
 
 
@@ -114,7 +117,9 @@ async def test_execute_call_http_transport_propagates_tool_error():
         org_id="o-1",
         user_id="u-1",
         server_config=_make_server_config("http"),
-        tool_name="ping",
+        agent_id="agent-A",
+        clean_tool_name="ping",
+        original_tool="ping",
         arguments={},
         meta=None,
     )
@@ -137,7 +142,9 @@ async def test_execute_call_stdio_missing_command_returns_transport_error():
         org_id="o-1",
         user_id="u-1",
         server_config={"transport": "stdio"},  # no command
-        tool_name="ping",
+        agent_id="agent-A",
+        clean_tool_name="ping",
+        original_tool="ping",
         arguments={},
         meta=None,
     )
@@ -166,7 +173,9 @@ async def test_execute_call_stdio_spawn_failure_returns_transport_error():
             "args": [],
             "env": {},
         },
-        tool_name="ping",
+        agent_id="agent-A",
+        clean_tool_name="ping",
+        original_tool="ping",
         arguments={},
         meta=None,
     )

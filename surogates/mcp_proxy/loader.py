@@ -50,6 +50,7 @@ async def load_mcp_configs(
     vault: CredentialVault,
     audit_store: AuditStore | None = None,
     *,
+    allowed_ids: frozenset[str],
     is_service_account: bool = False,
     agent_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
@@ -69,8 +70,9 @@ async def load_mcp_configs(
     ``None`` resolution proceeds silently (useful in tests and local
     dev).
     """
-    # DB configs (org-wide + user-specific).
-    merged = await _load_db_configs(session_factory, org_id, user_id)
+    # Per-agent allow-list scopes WHICH servers load; user_id still
+    # drives per-caller credential resolution below.
+    merged = await _load_db_configs(session_factory, org_id, allowed_ids)
 
     # 4. Resolve credential_refs in parallel across all servers.
     resolve_tasks = []
@@ -121,15 +123,38 @@ async def _resolve_credentials_safe(
 async def _load_db_configs(
     session_factory: async_sessionmaker[AsyncSession],
     org_id: UUID,
-    user_id: UUID,
+    allowed_ids: frozenset[str],
 ) -> dict[str, dict[str, Any]]:
-    """Load MCP server configs from the database.
+    """Load the agent's attached MCP server configs from the database.
 
-    Single query fetches org-wide (user_id IS NULL) and user-specific
-    rows.  User-specific configs overwrite org-wide configs with the
-    same name.
+    Strict per-agent scoping: only servers whose id is in *allowed_ids*
+    (the agent's ``mcp_server_ids`` from its runtime config) are
+    returned.  An empty allow-list short-circuits to ``{}`` — an agent
+    with no attached servers gets no MCP tools.  ``org_id`` is retained
+    as a defense-in-depth bound.
+
+    When two attached rows share a ``name`` (an org row + a user row),
+    the user-specific row wins (``nulls_first`` ordering means it is
+    applied last); ties beyond that resolve by stable ``id`` order.
     """
-    from sqlalchemy import or_
+    if not allowed_ids:
+        return {}
+
+    # ``UUID`` is imported at module scope (loader.py:34). ctx.mcp_server_ids
+    # are strings; McpServer.id is a UUID column.  A malformed id is a
+    # corrupt runtime config, not a reason to 500 the whole discovery —
+    # skip it (and log) and scope to the valid ones.
+    id_values: list[UUID] = []
+    for raw in allowed_ids:
+        try:
+            id_values.append(UUID(str(raw)))
+        except (ValueError, TypeError, AttributeError):
+            logger.warning(
+                "Ignoring malformed MCP server id in agent allow-list: %r",
+                raw,
+            )
+    if not id_values:
+        return {}
 
     configs: dict[str, dict[str, Any]] = {}
 
@@ -137,13 +162,16 @@ async def _load_db_configs(
         result = await db.execute(
             select(McpServer)
             .where(McpServer.org_id == org_id)
-            .where(or_(McpServer.user_id.is_(None), McpServer.user_id == user_id))
+            .where(McpServer.id.in_(id_values))
             .where(McpServer.enabled.is_(True))
-            .order_by(McpServer.user_id.asc().nulls_first())
+            .order_by(
+                McpServer.user_id.asc().nulls_first(),
+                McpServer.id.asc(),
+            )
         )
         for row in result.scalars().all():
-            # User-specific rows come after org-wide (nulls first),
-            # so they naturally overwrite.
+            # Deterministic precedence: org-wide (nulls first) then
+            # user-specific overwrite by name, then stable id order.
             configs[row.name] = _row_to_config(row)
 
     return configs

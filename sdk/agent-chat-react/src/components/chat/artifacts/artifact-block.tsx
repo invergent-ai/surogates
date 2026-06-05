@@ -186,7 +186,7 @@ function ArtifactBody({
   }
   switch (payload.kind) {
     case "markdown":
-      return <ArtifactMarkdown spec={payload.spec} />;
+      return <ArtifactMarkdown spec={payload.spec} fill={fill} />;
     case "table":
       return <ArtifactTable spec={payload.spec} />;
     case "chart":

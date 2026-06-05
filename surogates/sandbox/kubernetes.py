@@ -315,6 +315,10 @@ class K8sSandbox:
                 org_id=uuid.UUID(spec.env.get("ORG_ID", "00000000-0000-0000-0000-000000000000")),
                 user_id=uuid.UUID(spec.env.get("USER_ID", "00000000-0000-0000-0000-000000000000")),
                 session_id=uuid.UUID(sandbox_id),
+                # Binds the sandbox token to its agent so the proxy can
+                # reject a spoofed ``?agent_id=``.  Absent → unbound (the
+                # proxy trusts the query param, as before).
+                agent_id=spec.env.get("SUROGATES_AGENT_ID") or None,
             )
             env_vars.append(client.V1EnvVar(
                 name="MCP_PROXY_TOKEN", value=sandbox_token,

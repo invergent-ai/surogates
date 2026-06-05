@@ -80,7 +80,8 @@ async def _ensure_tenant_connected(
     auth: ProxyAuthContext,
     request: Request,
     *,
-    agent_id: str | None = None,
+    agent_id: str,
+    allowed_ids: frozenset[str],
 ) -> list[dict[str, Any]]:
     """Load MCP configs and ensure the tenant is connected.
 
@@ -94,7 +95,7 @@ async def _ensure_tenant_connected(
     ``list_tools`` is a metadata probe with no agent in scope and
     passes ``None``.
     """
-    cached = pool.get_cached_schemas(auth.org_id, auth.user_id)
+    cached = pool.get_cached_schemas(auth.org_id, auth.user_id, agent_id)
     if cached is not None:
         return cached
 
@@ -104,6 +105,7 @@ async def _ensure_tenant_connected(
         session_factory=request.app.state.session_factory,
         vault=request.app.state.vault,
         audit_store=getattr(request.app.state, "audit_store", None),
+        allowed_ids=allowed_ids,
         is_service_account=auth.is_service_account,
         agent_id=agent_id,
     )
@@ -114,9 +116,26 @@ async def _ensure_tenant_connected(
     return await pool.ensure_connected(
         org_id=auth.org_id,
         user_id=auth.user_id,
+        agent_id=agent_id,
         configs=configs,
         is_service_account=auth.is_service_account,
     )
+
+
+def _bind_agent(auth: ProxyAuthContext, ctx: AgentRuntimeContext) -> None:
+    """Reject a request whose ``?agent_id=`` disagrees with the signed
+    ``agent_id`` claim in the sandbox token.
+
+    Enforced only when the token carries the claim — tokens minted before
+    the claim existed (or without an agent in scope) are trusted on the
+    query param alone, so this is a backward-compatible defense-in-depth
+    layer on top of the per-agent enforcement in the loader and pool.
+    """
+    if auth.agent_id is not None and auth.agent_id != ctx.agent_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Token agent_id does not match the requested agent.",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -128,10 +147,16 @@ async def _ensure_tenant_connected(
 async def list_tools(
     request: Request,
     auth: ProxyAuthContext = Depends(get_proxy_auth),
+    ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> ToolListResponse:
-    """Discover available MCP tools for the authenticated tenant."""
+    """Discover the MCP tools available to the requesting agent."""
+    _bind_agent(auth, ctx)
     pool: ConnectionPool = request.app.state.pool
-    schemas = await _ensure_tenant_connected(pool, auth, request)
+    schemas = await _ensure_tenant_connected(
+        pool, auth, request,
+        agent_id=ctx.agent_id,
+        allowed_ids=frozenset(ctx.mcp_server_ids),
+    )
 
     return ToolListResponse(
         tools=[
@@ -162,6 +187,7 @@ async def call_tool(
     caches the schemas; per-call cost is one stdio handshake (~50-
     100ms) plus the actual upstream call.
     """
+    _bind_agent(auth, ctx)
     pool: ConnectionPool = request.app.state.pool
 
     # Lazy-connect on first call for this tenant — populates the
@@ -169,7 +195,9 @@ async def call_tool(
     # longer used for the call itself (that goes through the per-
     # call MCPCallSandbox below).
     schemas = await _ensure_tenant_connected(
-        pool, auth, request, agent_id=ctx.agent_id,
+        pool, auth, request,
+        agent_id=ctx.agent_id,
+        allowed_ids=frozenset(ctx.mcp_server_ids),
     )
     if not schemas:
         raise HTTPException(
@@ -178,7 +206,7 @@ async def call_tool(
         )
 
     target = pool.resolve_call_target(
-        auth.org_id, auth.user_id, body.name,
+        auth.org_id, auth.user_id, ctx.agent_id, body.name,
     )
     if target is None:
         return ToolCallResponse(
@@ -198,6 +226,7 @@ async def call_tool(
             pool=pool,
             org_id=auth.org_id,
             user_id=auth.user_id,
+            agent_id=ctx.agent_id,
             server_config=server_config,
             clean_tool_name=body.name,
             original_tool=original_tool,
@@ -262,6 +291,7 @@ async def _execute_call(
     pool: ConnectionPool,
     org_id: Any,
     user_id: Any,
+    agent_id: str,
     server_config: dict[str, Any],
     clean_tool_name: str,
     original_tool: str,
@@ -303,6 +333,7 @@ async def _execute_call(
         result = await pool.call_tool(
             org_id=org_id,
             user_id=user_id,
+            agent_id=agent_id,
             tool_name=clean_tool_name,
             arguments=arguments,
             meta=meta,
