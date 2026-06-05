@@ -131,9 +131,18 @@ All paths under `/work/surogates/surogates/` unless noted.
   strict proxy enforcement alone prevents unauthorized calls, but without this
   prompt-schema filter an agent can still see stale MCP tool schemas from a
   previous session.
-- **JWT is intentionally NOT changed.** `agent_runtime_context_dep` resolves
-  `agent_id` from the `?agent_id=` query param, so neither
-  `tenant/auth/jwt.py` nor `mcp_proxy/auth.py` needs a new claim.
+- **JWT (initial scope): not changed.** `agent_runtime_context_dep` resolves
+  `agent_id` from the `?agent_id=` query param, so the core enforcement
+  needs no new claim — the foundation works on the query param alone.
+- **JWT (post-review hardening):** an **optional** signed `agent_id` claim was
+  later added to `create_sandbox_token` and surfaced on `ProxyAuthContext`.
+  The proxy routes bind the per-request `?agent_id=` to it (`403` on
+  mismatch) so a caller cannot reach a different agent's MCP servers than its
+  token was minted for. This is defense-in-depth *on top of* the loader/pool
+  enforcement; tokens minted without the claim stay trusted on the query
+  param (backward-compatible). Touches `tenant/auth/jwt.py`, `mcp_proxy/auth.py`,
+  `mcp_proxy/routes.py` (`_bind_agent`), and the three mint sites
+  (`orchestrator/mcp_client.py` ×2, `sandbox/kubernetes.py`).
 
 ### Enforcement
 - **`mcp_proxy/routes.py`** —
