@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from surogates.harness.expert_routing import parse_next_action_complexity
-from surogates.session.events import EventType
 
 if TYPE_CHECKING:
     from surogates.session.models import Session
@@ -35,29 +34,54 @@ def _is_deep_research_planner(session: Session) -> bool:
 
 
 def _planner_already_delegated_to_writer(
-    all_events: list[Any] | None,
+    messages: list[dict[str, Any]] | None,
 ) -> bool:
-    """Return True when the event log shows a successful
-    ``delegate_task(agent_type="research-writer")`` call on this
-    session, so the orphan-completion nudge does not fire on a
-    planner that already did its job."""
-    if not all_events:
+    """Return True when the in-memory message list shows a prior
+    ``delegate_task(agent_type="research-writer")`` call on this turn
+    so the orphan-completion nudge does not fire on a planner that
+    already did its job.
+
+    Reads ``messages`` (not the wake's ``all_events`` snapshot)
+    because ``all_events`` is captured ONCE at wake start and does
+    not include tool calls emitted during the current wake.  A
+    planner that just finished a successful delegate_task earlier
+    this same wake would otherwise look like one that never
+    delegated -- triggering the nudge and a duplicate writer spawn.
+    """
+    if not messages:
         return False
-    for event in all_events:
-        if getattr(event, "type", None) != EventType.TOOL_CALL.value:
+    import json as _json
+    for message in messages:
+        if message.get("role") != "assistant":
             continue
-        data = getattr(event, "data", None) or {}
-        if data.get("name") != "delegate_task":
-            continue
-        # ``delegate_task`` can carry either a single ``agent_type`` or
-        # a ``goals`` array whose items each carry their own
-        # ``agent_type``; honor both shapes.
-        args = data.get("arguments") or {}
-        if args.get("agent_type") == "research-writer":
-            return True
-        for item in args.get("goals") or []:
-            if isinstance(item, dict) and item.get("agent_type") == "research-writer":
+        tool_calls = message.get("tool_calls") or []
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            fn = call.get("function") or {}
+            if fn.get("name") != "delegate_task":
+                continue
+            raw_args = fn.get("arguments")
+            if isinstance(raw_args, str):
+                try:
+                    args = _json.loads(raw_args) if raw_args else {}
+                except _json.JSONDecodeError:
+                    continue
+            elif isinstance(raw_args, dict):
+                args = raw_args
+            else:
+                continue
+            # ``delegate_task`` carries either a scalar ``agent_type`` or
+            # a ``goals`` array whose items each have their own
+            # ``agent_type``.  Honor both shapes.
+            if args.get("agent_type") == "research-writer":
                 return True
+            for item in args.get("goals") or []:
+                if (
+                    isinstance(item, dict)
+                    and item.get("agent_type") == "research-writer"
+                ):
+                    return True
     return False
 
 

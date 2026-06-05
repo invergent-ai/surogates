@@ -1853,7 +1853,7 @@ class AgentHarness(
                 if (
                     not deep_research_delegate_nudge_fired
                     and _is_deep_research_planner(session)
-                    and not _planner_already_delegated_to_writer(all_events)
+                    and not _planner_already_delegated_to_writer(messages)
                 ):
                     deep_research_delegate_nudge_fired = True
                     try:

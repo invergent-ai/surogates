@@ -8,9 +8,21 @@
 # case and re-prompts once; these tests pin the two predicates the
 # guard uses (``_is_deep_research_planner`` + ``_planner_already_
 # delegated_to_writer``) so the rule can't drift silently.
+#
+# Note on the ``_planner_already_delegated_to_writer`` shape: the
+# function reads the harness loop's in-memory ``messages`` list (not
+# the wake's ``all_events`` snapshot).  The snapshot is captured ONCE
+# at wake start and does not include tool calls emitted later in the
+# same wake -- which produced a real bug in production where a planner
+# that just successfully delegated and got a "report complete" reply
+# would be nudged to delegate again, spawning a duplicate writer.
+# These tests use the OpenAI message shape that the harness actually
+# accumulates: ``{"role": "assistant", "tool_calls": [{"function":
+# {"name": ..., "arguments": "<json string>"}}]}``.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,13 +31,6 @@ from surogates.harness.loop import (
     _planner_already_delegated_to_writer,
     DEEP_RESEARCH_NO_DELEGATE_NUDGE,
 )
-from surogates.session.events import EventType
-
-
-@dataclass
-class _FakeEvent:
-    type: str
-    data: dict[str, Any]
 
 
 @dataclass
@@ -67,73 +72,131 @@ class TestIsDeepResearchPlanner:
 # ---------------------------------------------------------------------------
 
 
-def _tool_call(name: str, arguments: dict[str, Any]) -> _FakeEvent:
-    return _FakeEvent(
-        type=EventType.TOOL_CALL.value,
-        data={"name": name, "arguments": arguments},
-    )
+def _assistant_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Build an OpenAI-shape assistant message carrying one tool call.
+
+    Arguments are serialized to a JSON string to match what the
+    provider returns and what the harness pushes into ``messages``.
+    """
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": "call_test",
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": json.dumps(arguments),
+            },
+        }],
+    }
 
 
 class TestPlannerAlreadyDelegatedToWriter:
-    def test_empty_event_log_returns_false(self) -> None:
+    def test_empty_message_list_returns_false(self) -> None:
         assert _planner_already_delegated_to_writer([]) is False
         assert _planner_already_delegated_to_writer(None) is False
 
     def test_matches_single_goal_delegation(self) -> None:
-        events = [
-            _tool_call("delegate_task", {
+        messages = [
+            _assistant_tool_call("delegate_task", {
                 "agent_type": "research-writer",
                 "goal": "write the report",
             }),
         ]
-        assert _planner_already_delegated_to_writer(events) is True
+        assert _planner_already_delegated_to_writer(messages) is True
 
     def test_matches_batched_goals_delegation(self) -> None:
         # The batched form puts agent_type inside each goals[] item
         # rather than at the top level.  Both shapes must satisfy the
         # check; a writer-targeting delegation in either form counts
         # as "the planner already did its job".
-        events = [
-            _tool_call("delegate_task", {
+        messages = [
+            _assistant_tool_call("delegate_task", {
                 "goals": [
                     {"goal": "write", "agent_type": "research-writer"},
                 ],
             }),
         ]
-        assert _planner_already_delegated_to_writer(events) is True
+        assert _planner_already_delegated_to_writer(messages) is True
+
+    def test_accepts_dict_arguments_in_addition_to_json_string(self) -> None:
+        # Some code paths push a parsed-dict arguments object onto
+        # messages (e.g. when the harness reconstructs a tool call
+        # without re-serializing).  Honour both shapes so a future
+        # refactor doesn't silently invalidate the check.
+        messages = [{
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call_x",
+                "type": "function",
+                "function": {
+                    "name": "delegate_task",
+                    "arguments": {"agent_type": "research-writer"},
+                },
+            }],
+        }]
+        assert _planner_already_delegated_to_writer(messages) is True
 
     def test_rejects_delegation_to_other_agent_type(self) -> None:
         # A planner that delegated to a *different* sub-agent (e.g.
         # ``code-reviewer``) still hasn't done the research-writer
         # handoff, so the orphan nudge should still fire.
-        events = [
-            _tool_call("delegate_task", {
+        messages = [
+            _assistant_tool_call("delegate_task", {
                 "agent_type": "code-reviewer",
                 "goal": "review",
             }),
         ]
-        assert _planner_already_delegated_to_writer(events) is False
+        assert _planner_already_delegated_to_writer(messages) is False
 
     def test_rejects_other_tool_calls(self) -> None:
-        events = [
-            _tool_call("research_memory", {"action": "add"}),
-            _tool_call("web_search", {"query": "x"}),
-            _tool_call("research_outline", {"action": "set"}),
+        messages = [
+            _assistant_tool_call("research_memory", {"action": "add"}),
+            _assistant_tool_call("web_search", {"query": "x"}),
+            _assistant_tool_call("research_outline", {"action": "set"}),
         ]
-        assert _planner_already_delegated_to_writer(events) is False
+        assert _planner_already_delegated_to_writer(messages) is False
 
-    def test_ignores_non_tool_call_events(self) -> None:
-        # A user.message event named delegate_task in some odd payload
-        # must not satisfy the check -- the predicate is strictly
-        # about TOOL_CALL events.
-        events = [
-            _FakeEvent(
-                type=EventType.USER_MESSAGE.value,
-                data={"name": "delegate_task",
-                      "arguments": {"agent_type": "research-writer"}},
-            ),
+    def test_ignores_non_assistant_messages(self) -> None:
+        # A user message whose payload happens to mention
+        # ``delegate_task`` must not satisfy the check -- the
+        # predicate is strictly about assistant-emitted tool calls.
+        messages = [
+            {"role": "user", "content": "please delegate to research-writer"},
+            {"role": "system", "content": "delegate_task is your hand-off tool"},
         ]
-        assert _planner_already_delegated_to_writer(events) is False
+        assert _planner_already_delegated_to_writer(messages) is False
+
+    def test_ignores_assistant_messages_without_tool_calls(self) -> None:
+        # An assistant turn that mentioned the writer in prose but
+        # didn't emit the tool call must NOT count as delegation --
+        # that's exactly the failure mode the nudge is designed to
+        # catch.
+        messages = [{
+            "role": "assistant",
+            "content": "Now handing off to the research-writer.",
+        }]
+        assert _planner_already_delegated_to_writer(messages) is False
+
+    def test_tolerates_malformed_arguments_json(self) -> None:
+        # A truncated/streamed tool call whose arguments string is
+        # incomplete JSON must not throw; it just doesn't satisfy the
+        # check.
+        messages = [{
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call_y",
+                "type": "function",
+                "function": {
+                    "name": "delegate_task",
+                    "arguments": '{"agent_type": "research-writer',
+                },
+            }],
+        }]
+        assert _planner_already_delegated_to_writer(messages) is False
 
 
 # ---------------------------------------------------------------------------
