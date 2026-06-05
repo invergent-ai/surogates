@@ -80,7 +80,7 @@ async def _ensure_tenant_connected(
     auth: ProxyAuthContext,
     request: Request,
     *,
-    agent_id: str | None = None,
+    agent_id: str,
 ) -> list[dict[str, Any]]:
     """Load MCP configs and ensure the tenant is connected.
 
@@ -94,7 +94,7 @@ async def _ensure_tenant_connected(
     ``list_tools`` is a metadata probe with no agent in scope and
     passes ``None``.
     """
-    cached = pool.get_cached_schemas(auth.org_id, auth.user_id)
+    cached = pool.get_cached_schemas(auth.org_id, auth.user_id, agent_id)
     if cached is not None:
         return cached
 
@@ -114,6 +114,7 @@ async def _ensure_tenant_connected(
     return await pool.ensure_connected(
         org_id=auth.org_id,
         user_id=auth.user_id,
+        agent_id=agent_id,
         configs=configs,
         is_service_account=auth.is_service_account,
     )
@@ -181,7 +182,7 @@ async def call_tool(
         )
 
     target = pool.resolve_call_target(
-        auth.org_id, auth.user_id, body.name,
+        auth.org_id, auth.user_id, ctx.agent_id, body.name,
     )
     if target is None:
         return ToolCallResponse(
@@ -201,6 +202,7 @@ async def call_tool(
             pool=pool,
             org_id=auth.org_id,
             user_id=auth.user_id,
+            agent_id=ctx.agent_id,
             server_config=server_config,
             clean_tool_name=body.name,
             original_tool=original_tool,
@@ -265,6 +267,7 @@ async def _execute_call(
     pool: ConnectionPool,
     org_id: Any,
     user_id: Any,
+    agent_id: str,
     server_config: dict[str, Any],
     clean_tool_name: str,
     original_tool: str,
@@ -306,6 +309,7 @@ async def _execute_call(
         result = await pool.call_tool(
             org_id=org_id,
             user_id=user_id,
+            agent_id=agent_id,
             tool_name=clean_tool_name,
             arguments=arguments,
             meta=meta,
