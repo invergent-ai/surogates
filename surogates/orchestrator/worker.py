@@ -783,16 +783,19 @@ async def run_worker(settings: Settings) -> None:
         # lifetime are cheap. Falls back silently if the proxy is
         # unreachable — built-in tools still work; only the
         # platform/copilot MCP tools go missing in that case.
+        discovered_mcp_tools: set[str] = set()
         if mcp_proxy_client is not None:
             try:
                 principal_user_id = session.user_id or session.service_account_id
                 if principal_user_id is not None:
-                    await mcp_proxy_client.discover_and_register(
-                        org_id=session_org_id,
-                        user_id=principal_user_id,
-                        session_id=session.id,
-                        agent_id=ctx.agent_id,
-                        is_service_account=session.user_id is None,
+                    discovered_mcp_tools = set(
+                        await mcp_proxy_client.discover_and_register(
+                            org_id=session_org_id,
+                            user_id=principal_user_id,
+                            session_id=session.id,
+                            agent_id=ctx.agent_id,
+                            is_service_account=session.user_id is None,
+                        )
                     )
             except Exception:
                 logger.warning(
@@ -1134,6 +1137,10 @@ async def run_worker(settings: Settings) -> None:
             # closes the per-tenant cap leak that used to choke
             # deep-research and other fan-out workflows.
             turn_gate=turn_gate,
+            # Per-agent MCP tool set discovered above; the harness uses
+            # it to filter the shared registry's prompt schemas down to
+            # this agent's own MCP tools.
+            mcp_tool_names=frozenset(discovered_mcp_tools),
         )
         # Stash the bundle so the dispatcher can
         # aclose its four connection pools at session retirement.
