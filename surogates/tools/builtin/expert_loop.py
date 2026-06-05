@@ -100,9 +100,15 @@ async def run_expert_loop(
         {"role": "user", "content": user_content},
     ]
 
-    # Create a client for the expert's endpoint.
+    # Create a client for the expert's endpoint.  ``resolve_model_endpoint``
+    # (ops) emits a relative ops-proxy path (e.g. ``/proxy/services/...``) for
+    # dstack-served expert models; absolutize it against the worker's LLM
+    # proxy origin so the OpenAI SDK gets a valid base_url.
+    from surogates.config import load_settings
+
+    llm_base_url = getattr(load_settings().llm, "base_url", None)
     client = AsyncOpenAI(
-        base_url=expert.expert_endpoint,
+        base_url=_absolute_endpoint(expert.expert_endpoint, llm_base_url),
         api_key=_resolve_api_key(tenant, expert),
     )
 
@@ -176,6 +182,27 @@ async def run_expert_loop(
 
     finally:
         await client.close()
+
+
+def _absolute_endpoint(endpoint: str, llm_base_url: str | None) -> str:
+    """Resolve a relative ops-proxy expert endpoint to an absolute URL.
+
+    ``resolve_model_endpoint`` (ops) emits a relative path like
+    ``/proxy/services/default/<run>`` for dstack-served expert models.  The
+    OpenAI SDK requires an absolute ``base_url``, so resolve such paths against
+    the *origin* (scheme://host[:port]) of the worker's configured LLM
+    ``base_url`` -- the same ops proxy the main turn already reaches.  Absolute
+    endpoints (self-hosted vLLM, etc.) and unparseable bases pass through
+    unchanged.
+    """
+    if not endpoint or not endpoint.startswith("/"):
+        return endpoint
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(llm_base_url or "")
+    if not parts.scheme or not parts.netloc:
+        return endpoint
+    return f"{parts.scheme}://{parts.netloc}{endpoint}"
 
 
 def _build_expert_system_prompt(expert: SkillDef) -> str:

@@ -720,6 +720,86 @@ class TestExpertLoop:
         assert exc.expert_name == "sql_writer"
         assert exc.max_iterations == 10
 
+    def test_absolute_endpoint_absolutizes_relative_proxy_path(self):
+        """A relative ops-proxy endpoint resolves against the worker's LLM origin.
+
+        ``resolve_model_endpoint`` (ops) emits a relative path like
+        ``/proxy/services/default/<run>`` for dstack-served expert models, but
+        the OpenAI SDK needs an absolute base_url.
+        """
+        from surogates.tools.builtin.expert_loop import _absolute_endpoint
+
+        out = _absolute_endpoint(
+            "/proxy/services/default/r6b689116",
+            "http://surogate-proxy.surogate.svc:8889/v1",
+        )
+        assert out == (
+            "http://surogate-proxy.surogate.svc:8889/proxy/services/default/r6b689116"
+        )
+
+    def test_absolute_endpoint_passes_through_absolute_url(self):
+        from surogates.tools.builtin.expert_loop import _absolute_endpoint
+
+        out = _absolute_endpoint(
+            "http://expert:8000/v1", "http://surogate-proxy.surogate.svc:8889/v1",
+        )
+        assert out == "http://expert:8000/v1"
+
+    def test_absolute_endpoint_returns_relative_when_base_unusable(self):
+        from surogates.tools.builtin.expert_loop import _absolute_endpoint
+
+        # No usable origin to resolve against -> leave the path untouched
+        # rather than fabricate a wrong URL.
+        assert _absolute_endpoint("/proxy/x", "") == "/proxy/x"
+        assert _absolute_endpoint("/proxy/x", None) == "/proxy/x"
+
+    @pytest.mark.asyncio
+    async def test_run_expert_loop_builds_client_with_absolute_endpoint(self, monkeypatch):
+        """End-to-end: a relative expert endpoint becomes an absolute base_url."""
+        from surogates.tools.builtin import expert_loop as el
+
+        captured: dict = {}
+
+        class _FakeCompletions:
+            async def create(self, **_kwargs):
+                msg = SimpleNamespace(content="done", tool_calls=None)
+                return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+        class _FakeClient:
+            def __init__(self, *, base_url, api_key):
+                captured["base_url"] = base_url
+                self.chat = SimpleNamespace(completions=_FakeCompletions())
+
+            async def close(self):
+                pass
+
+        monkeypatch.setattr("openai.AsyncOpenAI", _FakeClient)
+        monkeypatch.setattr(
+            "surogates.config.load_settings",
+            lambda: SimpleNamespace(
+                llm=SimpleNamespace(base_url="http://surogate-proxy.surogate.svc:8889/v1"),
+            ),
+        )
+
+        expert = SkillDef(
+            name="ytdclassifier", description="Classifies YTD", content="body",
+            source="org", type="expert", expert_status="active",
+            expert_model="surogate/Qwen3.5-2B-Libra-YTD",
+            expert_endpoint="/proxy/services/default/r6b689116",
+        )
+
+        result, iterations = await el.run_expert_loop(
+            expert=expert, task="classify", context=None,
+            tool_router=MagicMock(), tool_registry=MagicMock(),
+            tenant=SimpleNamespace(org_config={}), session_id=uuid4(),
+        )
+
+        assert result == "done"
+        assert iterations == 1
+        assert captured["base_url"] == (
+            "http://surogate-proxy.surogate.svc:8889/proxy/services/default/r6b689116"
+        )
+
     def test_build_expert_system_prompt(self):
         from surogates.tools.builtin.expert_loop import _build_expert_system_prompt
 
