@@ -774,18 +774,22 @@ class TestExpertLoop:
                 pass
 
         monkeypatch.setattr("openai.AsyncOpenAI", _FakeClient)
+        # The dstack service proxy path is served by the platform SERVER
+        # (platform_api_url), NOT the LLM proxy (llm.base_url).  The relative
+        # endpoint must resolve against the server origin.
         monkeypatch.setattr(
             "surogates.config.load_settings",
             lambda: SimpleNamespace(
+                platform_api_url="http://surogate-server.surogate.svc:8888",
                 llm=SimpleNamespace(base_url="http://surogate-proxy.surogate.svc:8889/v1"),
             ),
         )
 
         expert = SkillDef(
-            name="ytdclassifier", description="Classifies YTD", content="body",
+            name="ytd", description="Classifies YTD", content="body",
             source="org", type="expert", expert_status="active",
-            expert_model="surogate/Qwen3.5-2B-Libra-YTD",
-            expert_endpoint="/proxy/services/default/r6b689116",
+            expert_model="qwen3-5-2b-libra-ytd-8fd2",
+            expert_endpoint="/proxy/services/default/r6b689116/v1",
         )
 
         result, iterations = await el.run_expert_loop(
@@ -797,7 +801,7 @@ class TestExpertLoop:
         assert result == "done"
         assert iterations == 1
         assert captured["base_url"] == (
-            "http://surogate-proxy.surogate.svc:8889/proxy/services/default/r6b689116"
+            "http://surogate-server.surogate.svc:8888/proxy/services/default/r6b689116/v1"
         )
 
     def test_build_expert_system_prompt(self):

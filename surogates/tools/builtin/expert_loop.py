@@ -101,14 +101,15 @@ async def run_expert_loop(
     ]
 
     # Create a client for the expert's endpoint.  ``resolve_model_endpoint``
-    # (ops) emits a relative ops-proxy path (e.g. ``/proxy/services/...``) for
-    # dstack-served expert models; absolutize it against the worker's LLM
-    # proxy origin so the OpenAI SDK gets a valid base_url.
+    # (ops) emits a relative path like ``/proxy/services/default/<run>`` for
+    # dstack-served expert models.  That path is served by the platform SERVER
+    # (``platform_api_url``) -- NOT the LLM proxy (``llm.base_url``) -- so
+    # absolutize against the server origin or the request 404s.
     from surogates.config import load_settings
 
-    llm_base_url = getattr(load_settings().llm, "base_url", None)
+    server_base_url = getattr(load_settings(), "platform_api_url", None)
     client = AsyncOpenAI(
-        base_url=_absolute_endpoint(expert.expert_endpoint, llm_base_url),
+        base_url=_absolute_endpoint(expert.expert_endpoint, server_base_url),
         api_key=_resolve_api_key(tenant, expert),
     )
 
