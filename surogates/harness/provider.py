@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 from enum import Enum
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -54,71 +53,3 @@ def detect_api_mode(
         return APIMode.CHAT_COMPLETIONS
 
     return APIMode.CHAT_COMPLETIONS
-
-
-# ---------------------------------------------------------------------------
-# Message format converters (Phase 2 stubs)
-# ---------------------------------------------------------------------------
-
-
-def openai_to_anthropic_messages(messages: list[dict]) -> list[dict]:
-    """Convert OpenAI-format messages to Anthropic Messages API format.
-
-    OpenAI:     ``{"role": "user", "content": "hello"}``
-    Anthropic:  same but system is separate, tool results have different format.
-
-    Phase 2 implementation will handle:
-    - Extracting system messages (they go in a separate ``system`` param)
-    - Converting tool_use / tool_result to Anthropic's content block format
-    - Handling multi-part content (text + images)
-    """
-    # Phase 2 stub -- returns messages unmodified for now.
-    converted: list[dict] = []
-    for msg in messages:
-        if msg.get("role") == "system":
-            # Phase 2: system messages extracted separately.
-            continue
-        converted.append(msg)
-    return converted
-
-
-def anthropic_to_openai_response(response: Any) -> dict:
-    """Convert Anthropic response to OpenAI ChatCompletion format.
-
-    Phase 2 implementation will map:
-    - ``response.content`` blocks -> ``message.content`` + ``message.tool_calls``
-    - ``response.usage`` -> ``usage`` with prompt_tokens / completion_tokens
-    - ``response.stop_reason`` -> ``finish_reason``
-    """
-    # Phase 2 stub -- returns a minimal dict.
-    return {
-        "role": "assistant",
-        "content": str(response),
-    }
-
-
-async def call_anthropic_messages(
-    client: Any,  # anthropic.AsyncAnthropic (Phase 2)
-    model: str,
-    messages: list[dict],
-    system: str,
-    tools: list[dict] | None = None,
-    *,
-    stream: bool = False,
-    max_tokens: int = 4096,
-    temperature: float = 0.7,
-    extra_kwargs: dict | None = None,
-) -> tuple[dict, dict]:
-    """Call the Anthropic Messages API.
-
-    Converts OpenAI-format messages to Anthropic format, calls the API,
-    and converts the response back to OpenAI format so the rest of the
-    harness doesn't need to know which API was used.
-
-    Phase 2 implementation.  Currently raises ``NotImplementedError``.
-    """
-    raise NotImplementedError(
-        "Native Anthropic Messages API support is not yet implemented. "
-        "Use chat_completions mode (via OpenRouter or compatible proxy) "
-        "for Claude models in Phase 1."
-    )

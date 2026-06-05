@@ -133,27 +133,3 @@ def credential_access_event(
         "found": found,
         "timestamp": time.time(),
     }
-
-
-def copilot_action_event(
-    action: str,
-    target_id: str,
-    extras: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Build the data payload for a ``policy.copilot_action`` entry.
-
-    Emitted when the surogate-ops platform copilot performs a
-    side-effecting action on behalf of the chat user (e.g. starts a
-    training run, deploys a model). ``action`` is the copilot tool
-    name; ``target_id`` is the resource the action operated on.
-
-    ``extras`` may carry tool-specific metadata (e.g. ``dataset_id``
-    for ``start_training``). Reserved keys (``action``, ``target_id``)
-    cannot be overridden via ``extras`` — the explicit kwargs win.
-    """
-    payload: dict[str, Any] = {}
-    if extras:
-        payload.update(extras)
-    payload["action"] = action
-    payload["target_id"] = target_id
-    return payload

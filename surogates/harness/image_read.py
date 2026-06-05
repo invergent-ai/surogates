@@ -64,11 +64,6 @@ class _ImageCache:
 _CACHE = _ImageCache()
 
 
-def image_cache() -> _ImageCache:
-    """Process-wide image cache singleton."""
-    return _CACHE
-
-
 def _build_key(path: str, kwargs: dict[str, Any]) -> tuple | None:
     """Build a cache key for ``path``.
 

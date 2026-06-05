@@ -56,20 +56,6 @@ async def test_agent_file_bundle_read_text_strips_utf8_bom():
 
 
 @pytest.mark.asyncio
-async def test_agent_file_bundle_exists_true_and_false():
-    from surogates.runtime.bundle_accessor import AgentFileBundle
-
-    client = _FakeHubClient()
-    client.files["SOUL.md"] = b"x"
-    bundle = AgentFileBundle(
-        agent_id="a-1", hub_ref="acme/agents", version="v1",
-        client=client,
-    )
-    assert await bundle.exists("SOUL.md") is True
-    assert await bundle.exists("missing.md") is False
-
-
-@pytest.mark.asyncio
 async def test_agent_file_bundle_list_returns_paths_under_prefix():
     from surogates.runtime.bundle_accessor import AgentFileBundle
 

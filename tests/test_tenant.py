@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import time
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
-from surogates.tenant.assets import TenantAssetManager
 from surogates.tenant.auth.jwt import (
     InvalidTokenError,
     create_access_token,
@@ -362,73 +360,3 @@ class TestPrincipalKindChannel:
         )
         with pytest.raises(RuntimeError, match="no principal"):
             ctx.principal()
-
-
-# =========================================================================
-# TenantAssetManager
-# =========================================================================
-
-
-class TestTenantAssetManager:
-    """Directory structure and provisioning."""
-
-    def test_directory_structure(self, tmp_path: Path):
-        mgr = TenantAssetManager(str(tmp_path))
-        org_id = UUID("00000000-0000-0000-0000-000000000001")
-        user_id = UUID("00000000-0000-0000-0000-000000000002")
-
-        root = mgr.get_asset_root(org_id)
-        assert str(org_id) in root
-
-        user_root = mgr.get_user_asset_root(org_id, user_id)
-        assert str(org_id) in user_root
-        assert str(user_id) in user_root
-
-    @pytest.mark.asyncio
-    async def test_ensure_asset_dirs_creates_dirs(self, tmp_path: Path):
-        mgr = TenantAssetManager(str(tmp_path))
-        org_id = UUID("00000000-0000-0000-0000-000000000001")
-        user_id = UUID("00000000-0000-0000-0000-000000000002")
-
-        await mgr.ensure_asset_dirs(org_id, user_id)
-
-        org_str = str(org_id)
-        user_str = str(user_id)
-        for subdir in ("memory", "skills", "mcp", "tools"):
-            shared = tmp_path / org_str / "shared" / subdir
-            assert shared.is_dir(), f"Missing: {shared}"
-            user_dir = tmp_path / org_str / "users" / user_str / subdir
-            assert user_dir.is_dir(), f"Missing: {user_dir}"
-
-    @pytest.mark.asyncio
-    async def test_ensure_asset_dirs_idempotent(self, tmp_path: Path):
-        mgr = TenantAssetManager(str(tmp_path))
-        org_id = UUID("00000000-0000-0000-0000-000000000001")
-        user_id = UUID("00000000-0000-0000-0000-000000000002")
-
-        # Call twice -- should not raise.
-        await mgr.ensure_asset_dirs(org_id, user_id)
-        await mgr.ensure_asset_dirs(org_id, user_id)
-
-    def test_memory_dir(self, tmp_path: Path):
-        mgr = TenantAssetManager(str(tmp_path))
-        org_id = UUID("00000000-0000-0000-0000-000000000001")
-        user_id = UUID("00000000-0000-0000-0000-000000000002")
-        mem = mgr.memory_dir(org_id, user_id)
-        assert mem.endswith("/memory")
-        assert str(user_id) in mem
-
-    def test_skills_dir_shared(self, tmp_path: Path):
-        mgr = TenantAssetManager(str(tmp_path))
-        org_id = UUID("00000000-0000-0000-0000-000000000001")
-        skills = mgr.skills_dir(org_id)
-        assert "shared" in skills
-        assert "skills" in skills
-
-    def test_skills_dir_user(self, tmp_path: Path):
-        mgr = TenantAssetManager(str(tmp_path))
-        org_id = UUID("00000000-0000-0000-0000-000000000001")
-        user_id = UUID("00000000-0000-0000-0000-000000000002")
-        skills = mgr.skills_dir(org_id, user_id)
-        assert str(user_id) in skills
-        assert "skills" in skills

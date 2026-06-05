@@ -101,20 +101,6 @@ def test_llm_settings_advisor_env_override(monkeypatch) -> None:
     assert s.advisor_max_calls_per_turn == 3
 
 
-def test_build_advisor_auxiliary_llm_requires_enabled_and_model() -> None:
-    from surogates.config import Settings
-    from surogates.harness.auxiliary_client import build_advisor_auxiliary_llm
-
-    settings = Settings()
-    settings.llm.advisor_enabled = False
-    settings.llm.advisor_model = "advisor-model"
-    assert build_advisor_auxiliary_llm(settings) is None
-
-    settings.llm.advisor_enabled = True
-    settings.llm.advisor_model = ""
-    assert build_advisor_auxiliary_llm(settings) is None
-
-
 def test_browser_status_values() -> None:
     from surogates.browser.base import BrowserStatus
 

@@ -11,11 +11,11 @@ import pytest
 @pytest.fixture(autouse=True)
 def clear_image_cache():
     """Each test starts with a clean image cache to avoid cross-test bleed."""
-    from surogates.harness.image_read import image_cache
+    from surogates.harness.image_read import _CACHE
 
-    image_cache().clear()
+    _CACHE.clear()
     yield
-    image_cache().clear()
+    _CACHE.clear()
 
 
 @pytest.mark.asyncio
