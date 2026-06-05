@@ -740,6 +740,67 @@ class TestExpertLoop:
         assert exc.expert_name == "sql_writer"
         assert exc.max_iterations == 10
 
+    def test_generation_kwargs_splits_standard_and_extra_body(self):
+        from surogates.tools.builtin.expert_loop import _generation_kwargs
+
+        kwargs, extra = _generation_kwargs(
+            {"temperature": 0, "top_p": 0.9, "max_tokens": 512,
+             "top_k": 40, "repetition_penalty": 1.1}
+        )
+        assert kwargs == {"temperature": 0, "top_p": 0.9, "max_tokens": 512}
+        assert extra == {"top_k": 40, "repetition_penalty": 1.1}
+
+    def test_generation_kwargs_omits_unset(self):
+        from surogates.tools.builtin.expert_loop import _generation_kwargs
+
+        kwargs, extra = _generation_kwargs({"temperature": 0.2})
+        assert kwargs == {"temperature": 0.2}
+        assert extra == {}
+
+    def test_generation_kwargs_none(self):
+        from surogates.tools.builtin.expert_loop import _generation_kwargs
+
+        assert _generation_kwargs(None) == ({}, {})
+
+    @pytest.mark.asyncio
+    async def test_run_expert_loop_applies_generation_params(self, monkeypatch):
+        from surogates.tools.builtin import expert_loop as el
+
+        captured: dict = {}
+
+        class _FakeCompletions:
+            async def create(self, **kwargs):
+                captured.update(kwargs)
+                msg = SimpleNamespace(content="done", tool_calls=None)
+                return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+        class _FakeClient:
+            def __init__(self, *, base_url, api_key):
+                self.chat = SimpleNamespace(completions=_FakeCompletions())
+            async def close(self):
+                pass
+
+        monkeypatch.setattr("openai.AsyncOpenAI", _FakeClient)
+        monkeypatch.setattr(
+            "surogates.config.load_settings",
+            lambda: SimpleNamespace(platform_api_url="http://srv:8888"),
+        )
+
+        expert = SkillDef(
+            name="ytd", description="c", content="b", source="org",
+            type="expert", expert_status="active",
+            expert_model="m", expert_endpoint="http://e:8000/v1",
+            expert_generation={"temperature": 0, "top_k": 40},
+        )
+        result, _ = await el.run_expert_loop(
+            expert=expert, task="t", context=None,
+            tool_router=MagicMock(), tool_registry=MagicMock(),
+            tenant=SimpleNamespace(org_config={}), session_id=uuid4(),
+        )
+        assert result == "done"
+        assert captured["temperature"] == 0
+        assert captured["extra_body"] == {"top_k": 40}
+
     def test_absolute_endpoint_absolutizes_relative_proxy_path(self):
         """A relative ops-proxy endpoint resolves against the worker's LLM origin.
 
