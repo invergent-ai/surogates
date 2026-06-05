@@ -35,5 +35,17 @@ export function ArtifactMarkdown({
   // pushing the rest of the conversation off-screen.  The
   // ``Maximize2`` toolbar button on ArtifactCard opens the full
   // dialog where ``fill=true`` lets the body grow to 95vh.
-  return <ScrollArea className="max-h-112">{body}</ScrollArea>;
+  //
+  // Radix's ScrollArea relies on a defined height on its Root for
+  // the Viewport's ``height: 100%`` to resolve -- a bare ``max-h``
+  // resolves to ``auto`` and the Viewport's content escapes the
+  // card visually (you can see assistant prose underneath bleeding
+  // through it).  Wrap in a fixed-height flex column with
+  // ``flex-1 min-h-0`` on the ScrollArea so the height contract is
+  // a real pixel value, not a hopeful percentage.
+  return (
+    <div className="flex h-112 flex-col">
+      <ScrollArea className="flex-1 min-h-0">{body}</ScrollArea>
+    </div>
+  );
 }
