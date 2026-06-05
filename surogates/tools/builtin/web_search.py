@@ -248,7 +248,6 @@ async def _tavily_request(endpoint: str, payload: dict) -> dict:
             "Get your API key at https://app.tavily.com/home"
         )
     url = f"{_TAVILY_BASE_URL}/{endpoint.lstrip('/')}"
-    logger.info("Tavily %s request to %s", endpoint, url)
     async with httpx.AsyncClient() as client:
         response = await client.post(
             url,
@@ -325,7 +324,6 @@ async def _tavily_search(query: str, limit: int = _DEFAULT_SEARCH_LIMIT) -> dict
     Sends a POST to ``/search`` with ``max_results`` capped at
     ``_MAX_SEARCH_LIMIT``.
     """
-    logger.info("Tavily search: '%s' (limit: %d)", query, limit)
     raw = await _tavily_request("search", {
         "query": query,
         "max_results": min(limit, _MAX_SEARCH_LIMIT),
@@ -341,7 +339,6 @@ async def _tavily_extract(urls: List[str]) -> List[Dict[str, Any]]:
     Returns a list of document dicts matching the standard shape
     ``{url, title, content, raw_content, metadata}``.
     """
-    logger.info("Tavily extract: %d URL(s)", len(urls))
     raw = await _tavily_request("extract", {
         "urls": urls,
         "include_images": False,
@@ -373,7 +370,6 @@ async def _exa_request(
         "Content-Type": "application/json",
         "x-exa-integration": "surogates-agent",
     }
-    logger.info("Exa %s request to %s", endpoint, url)
     async with httpx.AsyncClient() as client:
         if method.upper() == "POST":
             response = await client.post(url, json=payload, headers=headers, timeout=60)
@@ -430,7 +426,6 @@ async def _exa_search(query: str, limit: int = _DEFAULT_SEARCH_LIMIT) -> dict:
     Sends a POST to ``/search`` with ``num_results`` capped at
     ``_MAX_SEARCH_LIMIT``.  Requests highlights for richer descriptions.
     """
-    logger.info("Exa search: '%s' (limit=%d)", query, limit)
     raw = await _exa_request("search", {
         "query": query,
         "num_results": min(limit, _MAX_SEARCH_LIMIT),
@@ -447,7 +442,6 @@ async def _exa_extract(urls: List[str]) -> List[Dict[str, Any]]:
     Returns a list of document dicts matching the standard shape
     ``{url, title, content, raw_content, metadata}``.
     """
-    logger.info("Exa extract: %d URL(s)", len(urls))
     raw = await _exa_request("contents", {
         "ids": urls,
         "text": True,
@@ -577,7 +571,6 @@ async def _web_search_handler(
             response_data = await _tavily_search(query, limit)
 
         results_count = len(response_data.get("data", {}).get("web", []))
-        logger.info("Found %d search results", results_count)
         return _format_search_json(response_data)
 
     except httpx.HTTPStatusError as exc:
@@ -631,7 +624,6 @@ async def _web_extract_handler(
             # Default: tavily
             documents = await _tavily_extract(urls)
 
-        logger.info("Extracted content from %d page(s)", len(documents))
         return _build_extract_result(documents, process_content=True)
 
     except httpx.HTTPStatusError as exc:
@@ -681,10 +673,8 @@ async def _web_crawl_handler(
     # Ensure URL has protocol
     if not url.startswith(("http://", "https://")):
         url = f"https://{url}"
-        logger.info("Added https:// prefix to URL: %s", url)
 
     try:
-        logger.info("Tavily crawl: %s (depth=%s)", url, depth)
         payload: Dict[str, Any] = {
             "url": url,
             "limit": 20,
@@ -696,7 +686,6 @@ async def _web_crawl_handler(
         raw = await _tavily_request("crawl", payload)
         documents = _normalize_tavily_documents(raw, fallback_url=url)
 
-        logger.info("Crawled %d page(s)", len(documents))
         return _build_extract_result(documents, process_content=True)
 
     except httpx.HTTPStatusError as exc:
