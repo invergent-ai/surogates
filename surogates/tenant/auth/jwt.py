@@ -180,12 +180,19 @@ def create_sandbox_token(
     session_id: UUID,
     expires_minutes: int = 60,
     *,
+    agent_id: str | None = None,
     is_service_account: bool = False,
 ) -> str:
     """Create a short-lived token for sandbox-to-MCP-proxy authentication.
 
     Carries the session context (org, user, session) so the MCP proxy
     can scope MCP server access and credential resolution.
+
+    When ``agent_id`` is supplied it is embedded as a signed claim so the
+    MCP proxy can bind the per-request ``?agent_id=`` to the token — a
+    caller cannot then request a different agent's MCP servers than the
+    one its token was minted for.  Omitted (``None``) keeps the token
+    backward-compatible: the proxy falls back to the query param alone.
 
     ``is_service_account`` flags sessions whose ``user_id`` claim is
     actually a ``service_accounts.id`` (because ``sessions.user_id`` was
@@ -203,6 +210,8 @@ def create_sandbox_token(
         "iat": now,
         "exp": now + expires_minutes * 60,
     }
+    if agent_id is not None:
+        payload["agent_id"] = agent_id
     if is_service_account:
         payload["is_service_account"] = True
     return jwt.encode(payload, _get_secret(), algorithm=_ALGORITHM)

@@ -122,6 +122,22 @@ async def _ensure_tenant_connected(
     )
 
 
+def _bind_agent(auth: ProxyAuthContext, ctx: AgentRuntimeContext) -> None:
+    """Reject a request whose ``?agent_id=`` disagrees with the signed
+    ``agent_id`` claim in the sandbox token.
+
+    Enforced only when the token carries the claim — tokens minted before
+    the claim existed (or without an agent in scope) are trusted on the
+    query param alone, so this is a backward-compatible defense-in-depth
+    layer on top of the per-agent enforcement in the loader and pool.
+    """
+    if auth.agent_id is not None and auth.agent_id != ctx.agent_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Token agent_id does not match the requested agent.",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -134,6 +150,7 @@ async def list_tools(
     ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> ToolListResponse:
     """Discover the MCP tools available to the requesting agent."""
+    _bind_agent(auth, ctx)
     pool: ConnectionPool = request.app.state.pool
     schemas = await _ensure_tenant_connected(
         pool, auth, request,
@@ -170,6 +187,7 @@ async def call_tool(
     caches the schemas; per-call cost is one stdio handshake (~50-
     100ms) plus the actual upstream call.
     """
+    _bind_agent(auth, ctx)
     pool: ConnectionPool = request.app.state.pool
 
     # Lazy-connect on first call for this tenant — populates the

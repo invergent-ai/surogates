@@ -30,6 +30,11 @@ class ProxyAuthContext:
     # uses this to suppress FK writes to ``users.id`` (e.g. ``audit_log``)
     # while keeping the same UUID for tenant pool scoping.
     is_service_account: bool = False
+    # Optional signed ``agent_id`` claim.  When present the routes bind
+    # the per-request ``?agent_id=`` to it so a caller cannot reach a
+    # different agent's MCP servers than its token was minted for.  ``None``
+    # for tokens minted before this claim existed (query param trusted).
+    agent_id: str | None = None
 
 
 async def get_proxy_auth(request: Request) -> ProxyAuthContext:
@@ -71,4 +76,5 @@ async def get_proxy_auth(request: Request) -> ProxyAuthContext:
         user_id=UUID(payload["user_id"]),
         session_id=UUID(session_id_str),
         is_service_account=bool(payload.get("is_service_account", False)),
+        agent_id=payload.get("agent_id"),
     )

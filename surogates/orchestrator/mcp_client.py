@@ -65,6 +65,7 @@ class McpProxyClient:
         """
         token = create_sandbox_token(
             org_id, user_id, session_id,
+            agent_id=agent_id,
             is_service_account=is_service_account,
         )
         headers = {"Authorization": f"Bearer {token}"}
@@ -140,10 +141,14 @@ class McpProxyClient:
                 return json.dumps({
                     "error": "MCP proxy handler has no principal id",
                 })
+            # Bind the token to this agent so the proxy can reject a
+            # ``?agent_id=`` that disagrees with the minted identity.
+            handler_agent_id = kwargs.get("agent_id")
             token = create_sandbox_token(
                 tenant.org_id,
                 principal_user_id,
                 session_id,
+                agent_id=str(handler_agent_id) if handler_agent_id else None,
                 is_service_account=tenant.user_id is None,
             )
             headers = {"Authorization": f"Bearer {token}"}
@@ -183,10 +188,11 @@ class McpProxyClient:
             # ``session.agent_id`` (see tool_exec.py:dispatch) as the
             # query param.  Falling through without it yields 400 "no
             # agent_id in request" — the symptom the platform copilot
-            # sessions hit before this guard.
-            agent_id = kwargs.get("agent_id")
+            # sessions hit before this guard.  Reuse the same id the
+            # token was bound to so the query param and the JWT claim
+            # always agree.
             params: dict[str, str] | None = (
-                {"agent_id": str(agent_id)} if agent_id else None
+                {"agent_id": str(handler_agent_id)} if handler_agent_id else None
             )
             try:
                 resp = await client.post(
