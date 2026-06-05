@@ -91,6 +91,10 @@ class TestSkillDefExpertFields:
         assert s.is_expert is False
         assert s.is_active_expert is False
 
+    def test_expert_generation_default_none(self):
+        s = SkillDef(name="t", description="d", content="c", source="org")
+        assert s.expert_generation is None
+
 
 # =========================================================================
 # Frontmatter parsing of expert fields
@@ -215,6 +219,22 @@ class TestExpertFrontmatterParsing:
         assert "type" not in parsed  # Not set for regular skills
         assert "expert_model" not in parsed
         assert "expert_endpoint" not in parsed
+
+    def test_parse_generation_block(self):
+        text = (
+            "---\nname: ytd\n"
+            "description: classifier\n"
+            "type: expert\n"
+            "generation:\n"
+            "  temperature: 0\n"
+            "  top_k: 40\n"
+            "  repetition_penalty: 1.1\n"
+            "---\nBody\n"
+        )
+        parsed = _parse_skill_frontmatter(text, "fallback")
+        assert parsed["expert_generation"] == {
+            "temperature": 0, "top_k": 40, "repetition_penalty": 1.1,
+        }
 
 
 # =========================================================================
