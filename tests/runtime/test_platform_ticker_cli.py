@@ -2,7 +2,7 @@
 
 The K8s Deployment runs ``python -m surogates.scheduled.platform_ticker``
 which dispatches to :func:`main`.  Tests use the dependency-
-injection seams (redis_factory, store_factory, enqueue) so no
+injection seams (redis_factory, store_factory, run_one) so no
 real Redis or Postgres is needed.
 """
 
@@ -61,15 +61,15 @@ def _make_settings(*, tick_interval=0.01):
 
 
 @pytest.mark.asyncio
-async def test_main_wires_lock_store_enqueue_and_runs():
-    """main() builds the lock + store + enqueue and runs the
+async def test_main_wires_lock_store_run_one_and_runs():
+    """main() builds the lock + store + run_one and runs the
     ticker.  We use the DI seams so no real Redis or DB is
     needed."""
     from surogates.scheduled import platform_ticker as mod
 
     fake_redis = _FakeRedis()
     fake_store = _FakeStore()
-    enqueued: list = []
+    ran: list = []
 
     async def redis_factory(url):
         assert url == "redis://stub"
@@ -78,8 +78,8 @@ async def test_main_wires_lock_store_enqueue_and_runs():
     async def store_factory(settings):
         return fake_store
 
-    async def enqueue(**kwargs):
-        enqueued.append(kwargs)
+    async def run_one(row):
+        ran.append(row)
 
     settings = _make_settings()
 
@@ -100,7 +100,7 @@ async def test_main_wires_lock_store_enqueue_and_runs():
             settings=settings,
             redis_factory=redis_factory,
             store_factory=store_factory,
-            enqueue=enqueue,
+            run_one=run_one,
             install_signal_handlers=False,
         ))
         await asyncio.sleep(0.05)
@@ -135,7 +135,7 @@ async def test_main_uses_pid_in_holder_id():
     async def store_factory(settings):
         return _FakeStore()
 
-    async def enqueue(**_):
+    async def run_one(row):
         pass
 
     settings = _make_settings()
@@ -161,7 +161,7 @@ async def test_main_uses_pid_in_holder_id():
             settings=settings,
             redis_factory=redis_factory,
             store_factory=store_factory,
-            enqueue=enqueue,
+            run_one=run_one,
             install_signal_handlers=False,
         )
     finally:

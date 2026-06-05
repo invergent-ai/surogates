@@ -1,7 +1,8 @@
 """Tests for PlatformTicker.
 
-Acquires the leader lock, polls multi-tenant
-due rows, enqueues, sleeps, loops.  Loss-of-lock or shutdown
+Acquires the leader lock, polls multi-tenant due rows, materializes a
+run session per row (``run_one``), and periodically recovers stalled
+dynamic loops (``recover``).  Sleeps, loops.  Loss-of-lock or shutdown
 signal exits cleanly.
 """
 
@@ -40,6 +41,7 @@ class _StubStore:
     def __init__(self, due_rows: list[dict]) -> None:
         self.due_rows = due_rows
         self.calls = 0
+        self.failed: list[tuple] = []
 
     async def find_due_across_tenants(self, **_):
         self.calls += 1
@@ -47,9 +49,17 @@ class _StubStore:
             return list(self.due_rows)
         return []
 
+    async def mark_run_failed(self, schedule, *, error):
+        self.failed.append((schedule, error))
+
 
 @pytest.mark.asyncio
-async def test_ticker_enqueues_due_rows_when_leader():
+async def test_ticker_materializes_due_rows_when_leader():
+    """The leader claims due rows and runs ``run_one`` for each — the
+    materialization seam that creates the run session.  The old behaviour
+    (enqueueing the schedule row id directly onto the work queue) was the
+    bug: no session ever existed for that id, so the dispatcher failed
+    every tick with SessionNotFoundError."""
     from surogates.scheduled.platform_ticker import PlatformTicker
 
     lock = _StubLock(acquire_returns=True, heartbeat_returns=True)
@@ -57,16 +67,13 @@ async def test_ticker_enqueues_due_rows_when_leader():
         {"agent_id": "a-1", "org_id": "o-1", "id": "s-1"},
         {"agent_id": "a-2", "org_id": "o-2", "id": "s-2"},
     ])
-    enqueued: list[dict] = []
+    materialized: list = []
 
-    async def enqueue(*, org_id, agent_id, session_id, priority=0):
-        enqueued.append({
-            "org_id": org_id, "agent_id": agent_id,
-            "session_id": session_id,
-        })
+    async def run_one(row):
+        materialized.append(row)
 
     ticker = PlatformTicker(
-        lock=lock, store=store, enqueue=enqueue,
+        lock=lock, store=store, run_one=run_one,
         tick_interval_seconds=0.01, worker_id="ticker-a",
     )
     task = asyncio.create_task(ticker.run())
@@ -74,8 +81,103 @@ async def test_ticker_enqueues_due_rows_when_leader():
     ticker.request_stop()
     await task
 
-    assert len(enqueued) == 2
+    assert [r["id"] for r in materialized] == ["s-1", "s-2"]
     assert lock.released is True
+
+
+@pytest.mark.asyncio
+async def test_ticker_marks_run_failed_when_materialization_raises():
+    """A run that fails to materialize must be recorded via
+    ``mark_run_failed`` (which releases the claim + reschedules) so the
+    schedule retries instead of staying locked or silently lost.  One
+    bad row must not abort the rest of the tick."""
+    from surogates.scheduled.platform_ticker import PlatformTicker
+
+    lock = _StubLock()
+    store = _StubStore(due_rows=[
+        {"agent_id": "a-1", "org_id": "o-1", "id": "boom"},
+        {"agent_id": "a-2", "org_id": "o-2", "id": "ok"},
+    ])
+    materialized: list = []
+
+    async def run_one(row):
+        if row["id"] == "boom":
+            raise RuntimeError("kaboom")
+        materialized.append(row)
+
+    ticker = PlatformTicker(
+        lock=lock, store=store, run_one=run_one,
+        tick_interval_seconds=0.01, worker_id="ticker-f",
+    )
+    task = asyncio.create_task(ticker.run())
+    await asyncio.sleep(0.05)
+    ticker.request_stop()
+    await task
+
+    # The failing row was marked failed...
+    assert len(store.failed) == 1
+    failed_row, error = store.failed[0]
+    assert failed_row["id"] == "boom"
+    assert "kaboom" in error
+    # ...and the healthy row still ran.
+    assert [r["id"] for r in materialized] == ["ok"]
+
+
+@pytest.mark.asyncio
+async def test_ticker_runs_recovery_each_tick():
+    """When a ``recover`` callable is supplied it runs once per tick
+    (under the lock) to requeue/recover stalled dynamic loops."""
+    from surogates.scheduled.platform_ticker import PlatformTicker
+
+    lock = _StubLock()
+    store = _StubStore(due_rows=[])
+    recover_calls = 0
+
+    async def run_one(row):  # pragma: no cover - no due rows here
+        pass
+
+    async def recover():
+        nonlocal recover_calls
+        recover_calls += 1
+
+    ticker = PlatformTicker(
+        lock=lock, store=store, run_one=run_one, recover=recover,
+        tick_interval_seconds=0.01, worker_id="ticker-g",
+    )
+    task = asyncio.create_task(ticker.run())
+    await asyncio.sleep(0.05)
+    ticker.request_stop()
+    await task
+
+    assert recover_calls >= 1
+
+
+@pytest.mark.asyncio
+async def test_ticker_recovery_failure_does_not_abort_tick():
+    """A throwing ``recover`` must not stop due rows from being
+    materialized — recovery is best-effort."""
+    from surogates.scheduled.platform_ticker import PlatformTicker
+
+    lock = _StubLock()
+    store = _StubStore(due_rows=[{"agent_id": "a-1", "org_id": "o-1", "id": "s-1"}])
+    materialized: list = []
+
+    async def run_one(row):
+        materialized.append(row)
+
+    async def recover():
+        raise RuntimeError("recovery blew up")
+
+    ticker = PlatformTicker(
+        lock=lock, store=store, run_one=run_one, recover=recover,
+        tick_interval_seconds=0.01, worker_id="ticker-h",
+    )
+    task = asyncio.create_task(ticker.run())
+    await asyncio.sleep(0.05)
+    ticker.request_stop()
+    await task
+
+    assert [r["id"] for r in materialized] == ["s-1"]
 
 
 @pytest.mark.asyncio
@@ -90,13 +192,13 @@ async def test_ticker_does_not_dispatch_when_not_leader():
     store = _StubStore(due_rows=[
         {"agent_id": "a-1", "org_id": "o-1", "id": "s-1"},
     ])
-    enqueued: list = []
+    materialized: list = []
 
-    async def enqueue(**_):
-        enqueued.append({})
+    async def run_one(row):
+        materialized.append(row)
 
     ticker = PlatformTicker(
-        lock=lock, store=store, enqueue=enqueue,
+        lock=lock, store=store, run_one=run_one,
         tick_interval_seconds=0.01, worker_id="ticker-b",
     )
     task = asyncio.create_task(ticker.run())
@@ -104,7 +206,7 @@ async def test_ticker_does_not_dispatch_when_not_leader():
     ticker.request_stop()
     await task
 
-    assert enqueued == []
+    assert materialized == []
     assert store.calls == 0
 
 
@@ -133,13 +235,13 @@ async def test_ticker_stops_dispatching_on_loss_of_lock():
     store = _StubStore(due_rows=[
         {"agent_id": "a-1", "org_id": "o-1", "id": "s-1"},
     ])
-    enqueued: list = []
+    materialized: list = []
 
-    async def enqueue(**_):
-        enqueued.append({})
+    async def run_one(row):
+        materialized.append(row)
 
     ticker = PlatformTicker(
-        lock=lock, store=store, enqueue=enqueue,
+        lock=lock, store=store, run_one=run_one,
         tick_interval_seconds=0.01, worker_id="ticker-c",
     )
     task = asyncio.create_task(ticker.run())
@@ -147,7 +249,7 @@ async def test_ticker_stops_dispatching_on_loss_of_lock():
     ticker.request_stop()
     await task
 
-    assert enqueued == []
+    assert materialized == []
     assert lock.released is True
 
 
@@ -161,11 +263,11 @@ async def test_ticker_releases_lock_on_cancellation():
     lock = _StubLock()
     store = _StubStore(due_rows=[])
 
-    async def enqueue(**_):
+    async def run_one(row):  # pragma: no cover - no due rows
         pass
 
     ticker = PlatformTicker(
-        lock=lock, store=store, enqueue=enqueue,
+        lock=lock, store=store, run_one=run_one,
         tick_interval_seconds=0.5, worker_id="ticker-d",
     )
     task = asyncio.create_task(ticker.run())
@@ -179,8 +281,8 @@ async def test_ticker_releases_lock_on_cancellation():
 @pytest.mark.asyncio
 async def test_ticker_heartbeats_twice_per_tick():
     """The two heartbeat calls (one before the DB read, one
-    before enqueue) catch a slow DB read pushing us past the
-    TTL boundary -- if the DB took too long, the second
+    before materialization) catch a slow DB read pushing us past
+    the TTL boundary -- if the DB took too long, the second
     heartbeat returns False and we drop the rows for this
     tick rather than double-fire."""
     from surogates.scheduled.platform_ticker import PlatformTicker
@@ -190,11 +292,11 @@ async def test_ticker_heartbeats_twice_per_tick():
         {"agent_id": "a-1", "org_id": "o-1", "id": "s-1"},
     ])
 
-    async def enqueue(**_):
+    async def run_one(row):
         pass
 
     ticker = PlatformTicker(
-        lock=lock, store=store, enqueue=enqueue,
+        lock=lock, store=store, run_one=run_one,
         tick_interval_seconds=0.01, worker_id="ticker-e",
     )
     task = asyncio.create_task(ticker.run())
@@ -203,5 +305,5 @@ async def test_ticker_heartbeats_twice_per_tick():
     await task
 
     # At least 2 heartbeats fired (one before DB read, one
-    # before enqueue) per successful tick.
+    # before materialization) per successful tick.
     assert lock.heartbeat_calls >= 2
