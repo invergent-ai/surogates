@@ -1,7 +1,7 @@
 # Per-agent MCP server scoping — Design
 
 **Date:** 2026-06-05
-**Status:** Approved (pending spec review)
+**Status:** Approved (reviewed; implementation-ready)
 **Primary repo:** `/work/surogates` (harness) — one docstring fix in `/work/surogate-ops`
 
 ## Summary
@@ -74,6 +74,9 @@ The MCP proxy resolves servers only by `(org_id, user_id)` and never consults
    so an agent never connects to — or resolves credentials for — a server it
    isn't attached to. Least-privilege by construction at every layer.
 4. **Remove the dead scaffolding** (no-legacy-fallbacks rule).
+5. **No prompt-schema leakage.** Worker-local MCP handlers may stay registered
+   after discovery, but model-visible schemas are filtered per session to the
+   current agent's discovered MCP tool set.
 
 ## Architecture / data flow (after)
 
@@ -92,6 +95,12 @@ tools/call  (ctx.agent_id already present today)
    → same agent-keyed connect
    → resolve_call_target only ever sees the agent's servers       ← CHANGE
    → a non-attached server is structurally unreachable (no extra guard needed)
+
+worker registry / prompt schemas
+   → discovery response is tracked by agent_id                     ← ADD
+   → current session's MCP tool names are added to the session tool filter
+   → previously-discovered MCP tools for other agents are not advertised
+   → if a stale handler is invoked anyway, tools/call still enforces scope
 ```
 
 ## Component changes (file by file)
@@ -105,7 +114,23 @@ All paths under `/work/surogates/surogates/` unless noted.
   `agent_id` parameter and appends `?agent_id={agent_id}` to the
   `/mcp/v1/tools/list` POST. The per-call handler **already** appends
   `?agent_id=` (`mcp_client.py:171-173`, since `call_tool` 400s without it), so
-  this only brings the discovery/list path to parity with the call path.
+  this brings the discovery/list path to parity with the call path.
+  Replace the process-wide `_discovered: set[str]` with per-agent discovery
+  bookkeeping, e.g. `_discovered_by_agent: dict[str, set[str]]`, and return the
+  current agent's discovered MCP tool names on every call. The shared
+  `ToolRegistry` may keep handlers registered process-wide, but the prompt
+  schema surface must be session-filtered so tools discovered for agent A are
+  not advertised to agent B.
+- **`harness/loop.py` / session tool filtering** — plumb the current agent's
+  discovered MCP tool names into `_tool_filter_for_session` (or an equivalent
+  schema-filtering hook). For sessions without explicit `allowed_tools`, remove
+  `mcp__*` names from the broad worker registry set and add back only the
+  current agent's discovered names. For sessions with explicit `allowed_tools`,
+  intersect any `mcp__*` entries with the current agent's discovered names.
+  This is required because the worker owns one `ToolRegistry` across sessions;
+  strict proxy enforcement alone prevents unauthorized calls, but without this
+  prompt-schema filter an agent can still see stale MCP tool schemas from a
+  previous session.
 - **JWT is intentionally NOT changed.** `agent_runtime_context_dep` resolves
   `agent_id` from the `?agent_id=` query param, so neither
   `tenant/auth/jwt.py` nor `mcp_proxy/auth.py` needs a new claim.
@@ -125,22 +150,43 @@ All paths under `/work/surogates/surogates/` unless noted.
   - **Empty `allowed_ids` ⇒ return `{}`** (strict; short-circuit before the
     query).
   - `user_id` is still threaded through `load_mcp_configs` → `_resolve_credentials`
-    for **credential** resolution (unchanged); it is no longer an access gate.
+    for **caller credential** resolution (unchanged); it is no longer an access
+    gate for MCP server rows. In other words, attaching a user-owned MCP server
+    row to an agent controls server visibility, while credential refs still
+    resolve against the request principal's user/org vaults.
 - **`mcp_proxy/pool.py`** —
   - Pool **entry key** and **schema-cache key** become `(org_id, user_id, agent_id)`:
     `_entries`, `get_cached_schemas(...)`, `resolve_call_target(...)`, and the
     connect path all gain `agent_id`.
-  - **Tool-name prefix `_tenant_prefix(org_id, user_id)` is left unchanged**, so
-    exposed tool names stay stable. Two agents under one `(org, user)` that
-    attach the same server get identical prefixed names in *separate* entries —
-    no collision because the entries are isolated.
+  - Add an internal server key / prefix that includes `agent_id` for the
+    module-level `surogates.tools.mcp.client._servers` dict. Do **not** reuse
+    `_prefixed_name(org_id, user_id, server_name)` across agents, or two agents
+    under the same `(org, user)` can share the same long-lived upstream
+    connection key even though the pool entries are separate.
+  - **Exposed tool names remain unchanged** (`mcp__{server}__{tool}`). If the
+    internal key includes `agent_id`, strip the full internal prefix when
+    building `clean_schemas` and `tool_index`, so model-visible and
+    worker-visible tool names do not churn.
+  - `call_tool(...)` remains only for HTTP/SSE fallback, but it must also accept
+    and use `agent_id` because HTTP servers still rely on the long-lived pool
+    entry and reverse index.
 
 ### Cache invalidation
 - **`runtime/invalidator.py`** — on `agent.runtime_config_changed` /
   `agent.mcp_servers_changed`, in addition to evicting `runtime_config_cache`,
   **evict the agent's proxy pool entry + schema cache** so a detached server
-  stops being callable immediately (not at TTL). This repurposes the hook that
-  currently calls the dead `mcp_server_cache.invalidate()`.
+  stops being callable immediately (not at TTL).
+  - The current invalidator maps one channel prefix to one cache object; update
+    it to support multiple targets per channel or special-case these two agent
+    channels.
+  - Add a pool invalidation method, e.g. `ConnectionPool.invalidate_agent(agent_id)`,
+    that immediately removes matching `(org_id, user_id, agent_id)` entries from
+    `_entries` / `_locks` and then shuts down their module-level `_servers`
+    connections asynchronously. Immediate removal is the security boundary;
+    background shutdown is cleanup.
+  - `agent.mcp_servers_changed:<agent_id>` currently routes to the dead
+    `mcp_server_cache`; after deleting that cache, route it to
+    `runtime_config_cache.invalidate(agent_id)` plus `pool.invalidate_agent(agent_id)`.
 
 ### Dead-wiring removal (no-legacy-fallbacks)
 - Delete `runtime/mcp_server_cache.py` (`MCPServerRegistryCache`).
@@ -160,6 +206,10 @@ All paths under `/work/surogates/surogates/` unless noted.
 - **Strict.** No attachments ⇒ `tools/list` returns no MCP tools; `tools/call`
   returns `404 "No MCP servers configured for this tenant."` (existing
   message; now per-agent).
+- **No schema leakage.** A shared worker may retain already-registered MCP
+  handlers, but the tool schemas passed to the model are filtered to the
+  current agent's discovery result. An unauthorized stale handler invocation is
+  still rejected by the proxy call path.
 - **Least-privilege by construction.** Because every layer (load, connect,
   cache, route) is agent-scoped, `resolve_call_target` can only return a server
   in the agent's set; a non-attached server is unreachable without a bolt-on
@@ -172,22 +222,33 @@ All paths under `/work/surogates/surogates/` unless noted.
 - **Management plane.** Ops already maintains the join, `config.mcp_server_ids`,
   attach/detach endpoints, and the invalidation events. No ops logic change —
   only the one docstring fix above.
-- **Per-user MCP servers.** `user_id` remains ownership/credential metadata; it
-  is no longer an access gate. No new per-user surface is added.
+- **Per-user MCP servers.** `user_id` remains row ownership metadata, and
+  credential lookup still uses the caller's user/org vaults; it is no longer an
+  access gate for MCP server rows. No new per-user surface is added.
 - **CLAUDE.md staleness** (the deleted `agent_chart`/Helm references) — tracked
   separately; not part of this change.
 
 ## Testing strategy
 
 - **loader** — empty `allowed_ids` ⇒ `{}`; subset selection returns exactly the
-  attached rows; an id outside the org is not returned.
+  attached rows; an id outside the org is not returned; user-specific rows are
+  selected only by attached ID, not by caller `user_id`.
 - **pool** — two agents under one `(org, user)` with different `mcp_server_ids`
-  get disjoint schemas and connections; cache lookups keyed by agent.
+  get disjoint schemas and connections; cache lookups keyed by agent; internal
+  `_servers` keys include `agent_id` even when exposed tool names do not.
+- **worker registry** — after agent A discovers `mcp__a_server__tool`, agent B
+  with no MCP attachments does not see that schema in `Loop` tool schemas even
+  though the shared `ToolRegistry` still has the handler registered.
 - **call path** — an agent cannot call a server it isn't attached to (`404`);
-  can call one it is.
+  can call one it is; HTTP/SSE fallback resolves through the agent-keyed pool.
 - **invalidation** — detaching a server evicts the agent's pool entry; the tool
-  disappears from `tools/list` and calls `404` without a restart.
+  disappears from `tools/list`, the worker stops advertising the schema after
+  redis invalidation / rediscovery, and calls `404` without a restart.
 - **regression** — an agent attached to every project server behaves as before.
+- **test cleanup** — delete or replace `tests/runtime/test_mcp_server_cache.py`
+  and the `MCPServerRegistryCache` assertions in `tests/runtime/test_invalidator.py`
+  / `tests/runtime/test_mcp_proxy_state.py`; add focused tests for
+  `runtime_config_cache + pool.invalidate_agent` on the two agent channels.
 
 ## Risks & rollout
 
@@ -196,8 +257,10 @@ All paths under `/work/surogates/surogates/` unless noted.
   current `agent_mcp_servers` coverage against what agents actually use, and
   backfill attachments where needed.
 - **Name collisions** among an agent's own attached servers (an org row + a
-  user row sharing a `name`) are now selected by `id`; last-by-id wins. Rare
-  given the partial unique indexes; documented, not guarded.
+  user row sharing a `name`) are now possible because selection is by `id` but
+  config dictionaries and exposed tool names are still keyed by `name`.
+  Preserve deterministic precedence (`org-wide < user-specific`, then stable
+  `id` ordering); do not leave SQL row order to decide the winner.
 - **More upstream connections** overall (per-agent rather than per-tenant), each
   smaller and lazily established — accepted for the isolation guarantee.
 
