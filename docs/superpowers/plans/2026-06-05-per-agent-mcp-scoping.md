@@ -12,6 +12,25 @@
 
 ---
 
+## Progress
+
+Legend: ☐ todo · ◐ in-progress · ☑ done. Updated before every commit.
+
+- ☑ Task 1 — List-path identity (per-agent discovery + `?agent_id=`)
+- ◐ Task 2 — Agent-keyed connection pool
+- ☐ Task 3 — Loader per-agent allow-list filter
+- ☐ Task 4 — Per-agent prompt-schema filter
+- ☐ Task 5 — Invalidate agent pool entry on attachment changes
+- ☐ Task 6 — Remove dead `MCPServerRegistryCache` scaffolding
+- ☐ Task 7 — Fix stale ops docstring (surogate-ops repo)
+- ☐ Task 8 — Full regression
+
+**Baseline pre-existing failures (fixed by this work, not regressions):**
+- `tests/runtime/test_call_tool_per_call_subprocess.py` ×4 — `_execute_call` signature drift → fixed in Task 2.
+- `tests/runtime/test_mcp_proxy_state.py::test_install_proxy_plumbing_empty_url_skips` ×1 — proxy now fail-fasts on missing `platform_api_url` → fixed in Task 5.
+
+---
+
 ## Baseline (read before starting)
 
 The current branch is **not fully green**. These 4 tests already fail on `feat/per-agent-mcp-scoping` before any change, due to a pre-existing signature drift in `routes._execute_call` (`tool_name=` vs `clean_tool_name`/`original_tool`):
@@ -153,6 +172,38 @@ async def test_discover_tracks_each_agent_separately(monkeypatch):
     assert a == ["mcp__github__list_issues"]
     assert b == ["mcp__jira__search"]
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_successful_rediscovery_replaces_agent_tool_set(monkeypatch):
+    reg = ToolRegistry()
+    client = McpProxyClient(base_url="http://proxy", registry=reg)
+
+    responses = [
+        ["mcp__github__list_issues"],
+        [],
+    ]
+
+    async def fake_post(url, headers=None, params=None, json=None):
+        return _FakeResp(responses.pop(0))
+
+    monkeypatch.setattr(client._client, "post", fake_post)
+
+    first = await client.discover_and_register(
+        org_id=UUID(int=1), user_id=UUID(int=2), session_id=UUID(int=3),
+        agent_id="agent-A",
+    )
+    second = await client.discover_and_register(
+        org_id=UUID(int=1), user_id=UUID(int=2), session_id=UUID(int=4),
+        agent_id="agent-A",
+    )
+
+    assert first == ["mcp__github__list_issues"]
+    assert second == []
+    # The handler may remain registered process-wide; the per-agent
+    # discovery set is what controls prompt-schema visibility.
+    assert "mcp__github__list_issues" in reg.tool_names
+    await client.close()
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -223,12 +274,13 @@ Replace the whole `discover_and_register` method (currently `mcp_client.py:41-10
 
         data = resp.json()
         tools = data.get("tools", [])
+        current: set[str] = set()
 
         for tool in tools:
             name = tool.get("name", "")
             if not name:
                 continue
-            known.add(name)
+            current.add(name)
             # The registry is process-wide; another agent may have
             # already registered this exact tool name.  Registering is
             # idempotent, but skip the work when it is already present.
@@ -246,7 +298,8 @@ Replace the whole `discover_and_register` method (currently `mcp_client.py:41-10
                 toolset="mcp",
             )
 
-        registered = sorted(known)
+        self._discovered_by_agent[agent_id] = current
+        registered = sorted(current)
         if registered:
             logger.info(
                 "Agent %s has %d MCP tool(s) via proxy: %s",
@@ -312,7 +365,7 @@ In `surogates/orchestrator/worker.py`, replace the discovery call (lines 786-795
 - [ ] **Step 6: Run the test to verify it passes**
 
 Run: `uv run pytest tests/runtime/test_mcp_client_per_agent.py -q`
-Expected: PASS (2 passed).
+Expected: PASS (3 passed).
 
 - [ ] **Step 7: Commit**
 
@@ -1438,7 +1491,9 @@ When ops publishes `agent.runtime_config_changed:<id>` or `agent.mcp_servers_cha
 **Files:**
 - Modify: `surogates/runtime/invalidator.py`
 - Modify: `surogates/mcp_proxy/app.py`
+- Modify: `surogates/api/app.py` (remove the now-invalid `run_invalidator` kwarg)
 - Test: `tests/runtime/test_invalidator.py` (add cases)
+- Test: `tests/runtime/test_mcp_proxy_state.py` (update stale empty-URL expectation)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1549,6 +1604,11 @@ In `handle_invalidation_message`, replace the `mcp_server_cache: Any = None,` pa
 
 In `run_invalidator`, replace the `mcp_server_cache: Any = None,` parameter (`:133`) with `mcp_pool: Any = None,`, and in the `handle_invalidation_message(...)` forwarding call replace `mcp_server_cache=mcp_server_cache,` (`:164`) with `mcp_pool=mcp_pool,`.
 
+In `surogates/api/app.py`, remove `mcp_server_cache=mcp_server_cache,` from the
+`run_invalidator(...)` call. The API app has no `ConnectionPool`, and after the
+invalidator signature change this keyword would break API startup. Leave the
+dead cache build/state assignment in place for Task 6 to delete.
+
 Finally, delete the now-superseded legacy test in `tests/runtime/test_invalidator.py` (`:153-166`) — its channel now routes to the runtime-config cache + pool (covered by the Step 1 cases). Remove the whole function:
 
 ```python
@@ -1639,15 +1699,42 @@ In `_shutdown_shared_runtime_plumbing_for_proxy`, remove the dead state nulling 
 ```
 → (remove entirely)
 
-- [ ] **Step 5: Run the invalidator + proxy-state tests**
+- [ ] **Step 5: Update the stale proxy-state empty-URL test**
+
+The current proxy startup code raises on missing `platform_api_url`; the old
+test still expects a permissive skip. Replace
+`test_install_proxy_plumbing_empty_url_skips` in
+`tests/runtime/test_mcp_proxy_state.py` with:
+
+```python
+@pytest.mark.asyncio
+async def test_install_proxy_plumbing_empty_url_raises():
+    """The proxy needs platform_api_url to resolve AgentRuntimeContext.
+
+    Missing it fails at startup instead of booting a pod whose MCP routes
+    cannot resolve agent context.
+    """
+    from surogates.mcp_proxy.app import _install_shared_runtime_plumbing_for_proxy
+
+    app = FastAPI()
+    app.state.redis = _FakeRedis()
+    with pytest.raises(RuntimeError, match="SUROGATES_PLATFORM_API_URL"):
+        _install_shared_runtime_plumbing_for_proxy(
+            app, _make_settings(platform_api_url=""),
+        )
+```
+
+- [ ] **Step 6: Run the invalidator + proxy-state tests**
 
 Run: `uv run pytest tests/runtime/test_invalidator.py tests/runtime/test_mcp_proxy_state.py -q`
-Expected: PASS — the 3 new pool cases pass, the superseded legacy case is gone, and `test_mcp_proxy_state.py` still passes (it has no `mcp_server_cache` references and `mcp_pool` is resolved via `getattr`).
+Expected: PASS — the 3 new pool cases pass, the superseded legacy case is gone,
+and `test_mcp_proxy_state.py` matches the current fail-fast proxy startup
+behavior while still covering `mcp_pool` via `getattr`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add surogates/runtime/invalidator.py surogates/mcp_proxy/app.py tests/runtime/test_invalidator.py
+git add surogates/runtime/invalidator.py surogates/mcp_proxy/app.py surogates/api/app.py tests/runtime/test_invalidator.py tests/runtime/test_mcp_proxy_state.py
 git commit -m "feat(mcp): evict the agent's proxy pool entry on runtime-config/attachment changes"
 ```
 
@@ -1697,7 +1784,10 @@ Remove the `MCPServerRegistryCache,` name from the import at `api/app.py:179`. D
     )
 
 ```
-Delete `app.state.mcp_server_cache = mcp_server_cache` (`:280`) and `mcp_server_cache=mcp_server_cache,` from the `run_invalidator(...)` call (`:291`). Delete the `build_mcp_server_cache` function (`:347-362`). Delete the shutdown nulling (`:602-603`):
+Delete `app.state.mcp_server_cache = mcp_server_cache` (`:280`). The
+`run_invalidator(...)` keyword was already removed in Task 5. Delete the
+`build_mcp_server_cache` function (`:347-362`). Delete the shutdown nulling
+(`:602-603`):
 
 ```python
     if hasattr(app.state, "mcp_server_cache"):

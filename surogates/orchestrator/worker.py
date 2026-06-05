@@ -791,6 +791,7 @@ async def run_worker(settings: Settings) -> None:
                         org_id=session_org_id,
                         user_id=principal_user_id,
                         session_id=session.id,
+                        agent_id=ctx.agent_id,
                         is_service_account=session.user_id is None,
                     )
             except Exception:

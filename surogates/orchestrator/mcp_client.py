@@ -36,7 +36,10 @@ class McpProxyClient:
         self._base_url = base_url.rstrip("/")
         self._registry = registry
         self._client = httpx.AsyncClient(base_url=self._base_url, timeout=120)
-        self._discovered: set[str] = set()
+        # Discovery is tracked per agent because the worker shares one
+        # ToolRegistry across every agent it serves.  Maps agent_id ->
+        # the set of mcp__ tool names that agent may use.
+        self._discovered_by_agent: dict[str, set[str]] = {}
 
     async def discover_and_register(
         self,
@@ -44,11 +47,16 @@ class McpProxyClient:
         user_id: UUID,
         session_id: UUID,
         *,
+        agent_id: str,
         is_service_account: bool = False,
     ) -> list[str]:
-        """Discover MCP tools from the proxy and register them locally.
+        """Discover *agent_id*'s MCP tools via the proxy and register them.
 
-        Returns the list of registered tool names.
+        Returns the FULL set of MCP tool names available to *agent_id*
+        (not just names registered on this call), so the caller can
+        filter the shared ``ToolRegistry`` prompt-schema surface down to
+        this agent's tools.  The proxy scopes the result to the agent's
+        attached servers via the ``agent_id`` query param.
 
         ``is_service_account`` flags the principal so the proxy can skip
         ``users.id`` foreign keys (e.g. ``audit_log``); pass ``True``
@@ -60,26 +68,35 @@ class McpProxyClient:
             is_service_account=is_service_account,
         )
         headers = {"Authorization": f"Bearer {token}"}
+        known = self._discovered_by_agent.setdefault(agent_id, set())
 
-        resp = await self._client.post("/mcp/v1/tools/list", headers=headers)
+        resp = await self._client.post(
+            "/mcp/v1/tools/list",
+            headers=headers,
+            params={"agent_id": agent_id},
+        )
         if resp.status_code != 200:
             logger.warning(
-                "MCP proxy tool discovery failed: %d %s",
-                resp.status_code, resp.text[:200],
+                "MCP proxy tool discovery failed for agent %s: %d %s",
+                agent_id, resp.status_code, resp.text[:200],
             )
-            return []
+            return sorted(known)
 
         data = resp.json()
         tools = data.get("tools", [])
-        registered: list[str] = []
+        current: set[str] = set()
 
         for tool in tools:
             name = tool.get("name", "")
-            if not name or name in self._discovered:
+            if not name:
                 continue
-
+            current.add(name)
+            # The registry is process-wide; another agent may have
+            # already registered this exact tool name.  Registering is
+            # idempotent, but skip the work when it is already present.
+            if name in self._registry.tool_names:
+                continue
             handler = self._make_proxy_handler(name)
-
             self._registry.register(
                 name=name,
                 schema=ToolSchema(
@@ -90,15 +107,14 @@ class McpProxyClient:
                 handler=handler,
                 toolset="mcp",
             )
-            self._discovered.add(name)
-            registered.append(name)
 
+        self._discovered_by_agent[agent_id] = current
+        registered = sorted(current)
         if registered:
             logger.info(
-                "Registered %d MCP tools via proxy: %s",
-                len(registered), ", ".join(sorted(registered)),
+                "Agent %s has %d MCP tool(s) via proxy: %s",
+                agent_id, len(registered), ", ".join(registered),
             )
-
         return registered
 
     def _make_proxy_handler(self, tool_name: str):

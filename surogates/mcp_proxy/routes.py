@@ -128,10 +128,13 @@ async def _ensure_tenant_connected(
 async def list_tools(
     request: Request,
     auth: ProxyAuthContext = Depends(get_proxy_auth),
+    ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> ToolListResponse:
-    """Discover available MCP tools for the authenticated tenant."""
+    """Discover the MCP tools available to the requesting agent."""
     pool: ConnectionPool = request.app.state.pool
-    schemas = await _ensure_tenant_connected(pool, auth, request)
+    schemas = await _ensure_tenant_connected(
+        pool, auth, request, agent_id=ctx.agent_id,
+    )
 
     return ToolListResponse(
         tools=[
