@@ -6,7 +6,7 @@
 // messages.
 
 import { MessageResponse } from "../../ai-elements/message";
-import { ScrollArea } from "../../ui/scroll-area";
+import { cn } from "../../../lib/utils";
 import type { MarkdownArtifactSpec } from "../../../types";
 
 export function ArtifactMarkdown({
@@ -17,35 +17,30 @@ export function ArtifactMarkdown({
   /**
    * When true (full-screen dialog) the content grows to fill the
    * available vertical space and the parent handles scroll.
-   * When false (inline card) the body is capped at a fixed height
-   * and scrolls internally via the shared ``ScrollArea`` styling so
-   * a long report cannot dominate the chat thread.
+   * When false (inline card) the body is capped at ~28rem and
+   * scrolls internally so a long report cannot dominate the chat
+   * thread.
    */
   fill?: boolean;
 }) {
-  const body = (
-    <div className="px-4 py-3">
-      <MessageResponse>{spec.content ?? ""}</MessageResponse>
-    </div>
-  );
-
-  if (fill) return body;
-
-  // Inline-mode cap: ~28rem keeps the artifact visible without
-  // pushing the rest of the conversation off-screen.  The
-  // ``Maximize2`` toolbar button on ArtifactCard opens the full
-  // dialog where ``fill=true`` lets the body grow to 95vh.
-  //
-  // Radix's ScrollArea relies on a defined height on its Root for
-  // the Viewport's ``height: 100%`` to resolve -- a bare ``max-h``
-  // resolves to ``auto`` and the Viewport's content escapes the
-  // card visually (you can see assistant prose underneath bleeding
-  // through it).  Wrap in a fixed-height flex column with
-  // ``flex-1 min-h-0`` on the ScrollArea so the height contract is
-  // a real pixel value, not a hopeful percentage.
+  // Radix's ScrollArea expects a defined-height ancestor for the
+  // Viewport's ``height: 100%`` to resolve; with ``max-h`` alone the
+  // content visibly escapes the card and overlaps the assistant
+  // prose underneath.  A plain div with ``max-h`` + ``overflow-y-auto``
+  // sidesteps that entirely: the scrolling happens on the SAME
+  // element that carries the height cap, so there's no percentage
+  // resolution to fight with.  The browser's native scrollbar isn't
+  // as styled as the Radix one but it's correct, and short
+  // artifacts still collapse to their natural height (no forced
+  // 28rem dead space).
   return (
-    <div className="flex h-112 flex-col">
-      <ScrollArea className="flex-1 min-h-0">{body}</ScrollArea>
+    <div
+      className={cn(
+        "px-4 py-3",
+        !fill && "max-h-112 overflow-y-auto",
+      )}
+    >
+      <MessageResponse>{spec.content ?? ""}</MessageResponse>
     </div>
   );
 }
