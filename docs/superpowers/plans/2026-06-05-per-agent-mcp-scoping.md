@@ -18,8 +18,8 @@ Legend: ☐ todo · ◐ in-progress · ☑ done. Updated before every commit.
 
 - ☑ Task 1 — List-path identity (per-agent discovery + `?agent_id=`)
 - ☑ Task 2 — Agent-keyed connection pool
-- ◐ Task 3 — Loader per-agent allow-list filter
-- ☐ Task 4 — Per-agent prompt-schema filter
+- ☑ Task 3 — Loader per-agent allow-list filter
+- ◐ Task 4 — Per-agent prompt-schema filter
 - ☐ Task 5 — Invalidate agent pool entry on attachment changes
 - ☐ Task 6 — Remove dead `MCPServerRegistryCache` scaffolding
 - ☐ Task 7 — Fix stale ops docstring (surogate-ops repo)

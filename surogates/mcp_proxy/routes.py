@@ -81,6 +81,7 @@ async def _ensure_tenant_connected(
     request: Request,
     *,
     agent_id: str,
+    allowed_ids: frozenset[str],
 ) -> list[dict[str, Any]]:
     """Load MCP configs and ensure the tenant is connected.
 
@@ -104,6 +105,7 @@ async def _ensure_tenant_connected(
         session_factory=request.app.state.session_factory,
         vault=request.app.state.vault,
         audit_store=getattr(request.app.state, "audit_store", None),
+        allowed_ids=allowed_ids,
         is_service_account=auth.is_service_account,
         agent_id=agent_id,
     )
@@ -134,7 +136,9 @@ async def list_tools(
     """Discover the MCP tools available to the requesting agent."""
     pool: ConnectionPool = request.app.state.pool
     schemas = await _ensure_tenant_connected(
-        pool, auth, request, agent_id=ctx.agent_id,
+        pool, auth, request,
+        agent_id=ctx.agent_id,
+        allowed_ids=frozenset(ctx.mcp_server_ids),
     )
 
     return ToolListResponse(
@@ -173,7 +177,9 @@ async def call_tool(
     # longer used for the call itself (that goes through the per-
     # call MCPCallSandbox below).
     schemas = await _ensure_tenant_connected(
-        pool, auth, request, agent_id=ctx.agent_id,
+        pool, auth, request,
+        agent_id=ctx.agent_id,
+        allowed_ids=frozenset(ctx.mcp_server_ids),
     )
     if not schemas:
         raise HTTPException(
