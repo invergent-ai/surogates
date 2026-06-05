@@ -13,7 +13,6 @@ from surogates.harness.model_discovery import (
     ModelDiscoveryCache,
     _parse_entry,
     discover_model,
-    reset_discovery_cache,
 )
 from surogates.harness.model_metadata import (
     MODEL_CATALOG,
@@ -30,9 +29,9 @@ from surogates.harness.model_metadata import (
 @pytest.fixture(autouse=True)
 def _clear_discovery_cache():
     """Reset the module-level cache between tests to isolate mocks."""
-    reset_discovery_cache()
+    model_discovery._CACHE.reset()
     yield
-    reset_discovery_cache()
+    model_discovery._CACHE.reset()
 
 
 OPENROUTER_SAMPLE = {

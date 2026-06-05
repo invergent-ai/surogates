@@ -255,7 +255,6 @@ async def call_tool(
 _OUTCOME_SUCCESS = "success"
 _OUTCOME_TOOL_ERROR = "tool_error"  # tool ran, returned isError=True
 _OUTCOME_TRANSPORT_ERROR = "transport_error"  # never reached the tool
-_OUTCOME_UNSUPPORTED_TRANSPORT = "unsupported_transport"
 
 
 async def _execute_call(

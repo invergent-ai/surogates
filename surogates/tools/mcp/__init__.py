@@ -13,18 +13,12 @@ from surogates.tools.mcp.client import (
     MCPServerTask,
     SamplingHandler,
     discover_mcp_tools,
-    get_mcp_status,
     sanitize_mcp_name_component,
-    set_sampling_llm_caller,
-    shutdown_mcp_servers,
 )
 
 __all__ = [
     "MCPServerTask",
     "SamplingHandler",
     "discover_mcp_tools",
-    "get_mcp_status",
     "sanitize_mcp_name_component",
-    "set_sampling_llm_caller",
-    "shutdown_mcp_servers",
 ]

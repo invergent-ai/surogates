@@ -75,9 +75,6 @@ class FileBundleCache:
             # the rmtree in the background is fine.
             asyncio.create_task(self._l2.invalidate_agent(agent_id))
 
-    def invalidate_all(self) -> None:
-        self._entries.clear()
-
     async def _lock_for(self, agent_id: str) -> asyncio.Lock:
         async with self._global:
             lock = self._locks.get(agent_id)

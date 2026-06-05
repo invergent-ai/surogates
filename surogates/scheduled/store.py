@@ -458,41 +458,6 @@ class ScheduledSessionStore:
             )
             await db.commit()
 
-    async def mark_run_failed(
-        self,
-        schedule: ScheduledSession,
-        *,
-        error: str,
-    ) -> None:
-        now = _utcnow()
-        is_dynamic = schedule.schedule.get("kind") == "dynamic_loop"
-        next_run_at = (
-            now + timedelta(seconds=DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS)
-            if is_dynamic
-            else _parsed_schedule(schedule).next_after(now)
-        )
-        values: dict[str, Any] = {
-            "last_error": error[:2000],
-            "locked_by": None,
-            "locked_until": None,
-            "next_run_at": next_run_at,
-            "updated_at": func.now(),
-        }
-        if is_dynamic:
-            values["schedule"] = {
-                **schedule.schedule,
-                "last_delay_seconds": DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS,
-                "last_delay_reason": "Run creation failed; using fallback delay.",
-                "last_delay_set_at": now.isoformat(),
-            }
-        async with self._sf() as db:
-            await db.execute(
-                update(ScheduledSessionRow)
-                .where(ScheduledSessionRow.id == schedule.id)
-                .values(**values)
-            )
-            await db.commit()
-
     async def mark_dynamic_run_finished(
         self,
         *,

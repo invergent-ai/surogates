@@ -64,7 +64,3 @@ class BrowserRegistry:
 
     async def delete(self, session_id: str) -> None:
         await self._redis.hdel(REGISTRY_HASH_KEY, session_id)
-
-    async def list_session_ids(self) -> list[str]:
-        keys = await self._redis.hkeys(REGISTRY_HASH_KEY)
-        return [key.decode() if isinstance(key, bytes) else key for key in keys]

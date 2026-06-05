@@ -355,18 +355,6 @@ class MemoryStore:
         """Return the live entries for *target*."""
         return list(self._entries_for(target))
 
-    def get_usage(self, target: str) -> dict[str, Any]:
-        """Return usage stats for *target*."""
-        current = self._char_count(target)
-        limit = self._char_limit(target)
-        pct = min(100, int((current / limit) * 100)) if limit > 0 else 0
-        return {
-            "usage_chars": current,
-            "max_chars": limit,
-            "usage_pct": pct,
-            "entry_count": len(self._entries_for(target)),
-        }
-
     # -- Internal helpers ---------------------------------------------------
 
     def _path_for(self, target: str) -> Path:

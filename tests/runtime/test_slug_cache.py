@@ -67,31 +67,6 @@ async def test_slug_cache_invalidate():
 
 
 @pytest.mark.asyncio
-async def test_slug_cache_invalidate_all_clears_entries():
-    from surogates.runtime import SlugResolverCache
-
-    async def loader(slug: str) -> str | None:
-        return f"agent-{slug}"
-
-    cache = SlugResolverCache(loader=loader, ttl_seconds=10)
-    await cache.get("a")
-    await cache.get("b")
-    cache.invalidate_all()
-    # Internal — but the public contract is "next call rehits loader".
-    fetches = 0
-
-    async def counting(_slug: str) -> str | None:
-        nonlocal fetches
-        fetches += 1
-        return "v"
-
-    cache._loader = counting  # noqa: SLF001 — verifying observable refetch
-    await cache.get("a")
-    await cache.get("b")
-    assert fetches == 2
-
-
-@pytest.mark.asyncio
 async def test_slug_cache_concurrent_calls_dedup_single_loader_call():
     """Per-key lock prevents thundering-herd against the platform API.
 

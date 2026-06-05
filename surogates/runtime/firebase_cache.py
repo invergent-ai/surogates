@@ -70,10 +70,6 @@ class FirebaseConfigCache:
         """Drop the cache entry for ``project_id`` if present."""
         self._entries.pop(project_id, None)
 
-    def invalidate_all(self) -> None:
-        """Drop every entry — used on pod shutdown for a clean restart."""
-        self._entries.clear()
-
     async def _lock(self, project_id: str) -> asyncio.Lock:
         async with self._global:
             lock = self._locks.get(project_id)

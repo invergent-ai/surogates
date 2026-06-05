@@ -29,15 +29,16 @@ def test_browser_settings_defaults(monkeypatch) -> None:
     assert s.rest_port_base == 30000
     assert s.cdp_port_base == 31000
     assert s.live_view_port_base == 32000
-    assert s.live_view_mode == "novnc"
     assert s.k8s_s3fs_image == "ghcr.io/invergent-ai/surogates-s3fs:latest"
     assert s.k8s_s3_endpoint == ""
     assert s.pod_ready_timeout == 60
-    assert s.active_deadline_seconds == 3600
-    assert s.cpu == "1"
-    assert s.memory == "2Gi"
-    assert s.cpu_limit == "2"
-    assert s.memory_limit == "4Gi"
+    # cpu/memory/cpu_limit/memory_limit/active_deadline_seconds/live_view_mode
+    # were removed from BrowserSettings: they were never wired into the pod
+    # spec (which uses BrowserSpec's own defaults).
+    assert not hasattr(s, "cpu")
+    assert not hasattr(s, "memory")
+    assert not hasattr(s, "active_deadline_seconds")
+    assert not hasattr(s, "live_view_mode")
 
 
 def test_browser_settings_env_override(monkeypatch) -> None:
@@ -98,20 +99,6 @@ def test_llm_settings_advisor_env_override(monkeypatch) -> None:
     assert s.advisor_enabled is True
     assert s.advisor_model == "advisor-model"
     assert s.advisor_max_calls_per_turn == 3
-
-
-def test_build_advisor_auxiliary_llm_requires_enabled_and_model() -> None:
-    from surogates.config import Settings
-    from surogates.harness.auxiliary_client import build_advisor_auxiliary_llm
-
-    settings = Settings()
-    settings.llm.advisor_enabled = False
-    settings.llm.advisor_model = "advisor-model"
-    assert build_advisor_auxiliary_llm(settings) is None
-
-    settings.llm.advisor_enabled = True
-    settings.llm.advisor_model = ""
-    assert build_advisor_auxiliary_llm(settings) is None
 
 
 def test_browser_status_values() -> None:

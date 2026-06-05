@@ -76,20 +76,6 @@ class AgentFileBundle:
             data = data[len(_UTF8_BOM):]
         return data.decode(encoding)
 
-    async def exists(self, path: str) -> bool:
-        """True iff ``read_bytes(path)`` would succeed.
-
-        Implemented as a single ``read_bytes`` + LookupError catch
-        (instead of, e.g., a separate HEAD-equivalent API) because
-        the cache layer will short-circuit the round-trip on a
-        cached read — the cost is dominated by the cache hit.
-        """
-        try:
-            await self.read_bytes(path)
-        except LookupError:
-            return False
-        return True
-
     async def list(self, prefix: str = "") -> list[str]:
         """List object paths under ``prefix`` (sorted)."""
         paths = await self.client.list_paths(self.version, prefix=prefix)

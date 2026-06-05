@@ -261,16 +261,6 @@ class TestMemoryStoreUsage:
         entries = store.get_entries("memory")
         assert entries == ["a", "b"]
 
-    def test_get_usage(self, tmp_path: Path):
-        store = MemoryStore(memory_dir=tmp_path / "mem", memory_char_limit=1000)
-        store.load_from_disk()
-        store.add("memory", "hello")
-        usage = store.get_usage("memory")
-        assert usage["entry_count"] == 1
-        assert usage["usage_chars"] == 5
-        assert usage["max_chars"] == 1000
-        assert 0 <= usage["usage_pct"] <= 100
-
 
 class TestMemoryStoreAtomicIO:
     """Atomic write and concurrent safety."""

@@ -719,25 +719,6 @@ class SamplingHandler:
 _sampling_llm_caller: Optional[Any] = None
 
 
-def set_sampling_llm_caller(caller: Any) -> None:
-    """Register the LLM caller function used by sampling callbacks.
-
-    The caller must conform to::
-
-        def call_llm(
-            task: str,
-            model: str | None,
-            messages: list[dict],
-            temperature: float | None,
-            max_tokens: int,
-            tools: list[dict] | None,
-            timeout: float,
-        ) -> response
-    """
-    global _sampling_llm_caller
-    _sampling_llm_caller = caller
-
-
 # ---------------------------------------------------------------------------
 # Server task -- each MCP server lives in one long-lived asyncio Task
 # ---------------------------------------------------------------------------
@@ -2034,79 +2015,6 @@ def _existing_tool_names() -> List[str]:
             schema = _convert_mcp_schema(server.name, mcp_tool)
             names.append(schema["name"])
     return names
-
-
-def get_mcp_status() -> List[dict]:
-    """Return status of all connected MCP servers.
-
-    Returns a list of dicts with keys: name, transport, tools, connected.
-    """
-    result: List[dict] = []
-
-    with _lock:
-        active_servers = dict(_servers)
-
-    for name, server in active_servers.items():
-        transport = "http" if server._is_http() else "stdio"
-        if server.session is not None:
-            entry = {
-                "name": name,
-                "transport": transport,
-                "tools": len(server._registered_tool_names) if hasattr(server, "_registered_tool_names") else len(server._tools),
-                "connected": True,
-            }
-            if server._sampling:
-                entry["sampling"] = dict(server._sampling.metrics)
-            result.append(entry)
-        else:
-            result.append({
-                "name": name,
-                "transport": transport,
-                "tools": 0,
-                "connected": False,
-            })
-
-    return result
-
-
-def shutdown_mcp_servers():
-    """Close all MCP server connections and stop the background loop.
-
-    Each server Task is signalled to exit its ``async with`` block so that
-    the anyio cancel-scope cleanup happens in the same Task that opened it.
-    All servers are shut down in parallel via ``asyncio.gather``.
-    """
-    with _lock:
-        servers_snapshot = list(_servers.values())
-
-    # Fast path: nothing to shut down.
-    if not servers_snapshot:
-        _stop_mcp_loop()
-        return
-
-    async def _shutdown():
-        results = await asyncio.gather(
-            *(server.shutdown() for server in servers_snapshot),
-            return_exceptions=True,
-        )
-        for server, result in zip(servers_snapshot, results):
-            if isinstance(result, Exception):
-                logger.debug(
-                    "Error closing MCP server '%s': %s", server.name, result,
-                )
-        with _lock:
-            _servers.clear()
-
-    with _lock:
-        loop = _mcp_loop
-    if loop is not None and loop.is_running():
-        try:
-            future = asyncio.run_coroutine_threadsafe(_shutdown(), loop)
-            future.result(timeout=15)
-        except Exception as exc:
-            logger.debug("Error during MCP shutdown: %s", exc)
-
-    _stop_mcp_loop()
 
 
 def _kill_orphaned_mcp_children() -> None:

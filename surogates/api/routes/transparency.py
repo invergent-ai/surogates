@@ -28,6 +28,4 @@ async def transparency_config(request: Request) -> dict:
     return {
         "enabled": True,
         "level": t.level,
-        "require_confirmation": t.require_confirmation,
-        "emotion_recognition": t.emotion_recognition,
     }

@@ -169,9 +169,6 @@ class BrowserPool:
             except Exception:
                 logger.exception("Error destroying browser for session %s", session_id)
 
-    def get_slot(self, session_id: str) -> _Slot | None:
-        return self._mapping.get(session_id)
-
     async def _session_lock(self, session_id: str) -> asyncio.Lock:
         async with self._global_lock:
             lock = self._locks.get(session_id)

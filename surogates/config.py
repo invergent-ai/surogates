@@ -235,7 +235,6 @@ class WorkerSettings(BaseSettings):
 
     concurrency: int = 50
     poll_timeout: int = 5
-    workspace_path: str = "/tmp/surogates/workspaces"
     api_base_url: str = "http://localhost:8000"
     use_api_for_harness_tools: bool = True
     # Emit iteration.summary / turn.summary events from the harness so
@@ -255,17 +254,8 @@ class LLMSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_LLM_"}
 
     model: str = "gpt-4o"
-    provider: str = ""  # "openai", "anthropic", "openrouter", etc.
     base_url: str = ""  # custom endpoint (e.g. vLLM, Ollama)
     api_key: str = ""  # provider API key
-    
-    # Fallback chain — list of dicts with provider/model/api_key/base_url
-    # Configured via config.yaml only (too complex for env vars)
-    fallback_providers: list[dict[str, Any]] = Field(default_factory=list)
-
-    # Credential pool — list of dicts with api_key/base_url/label/priority
-    # Configured via config.yaml only
-    credential_pool: list[dict[str, Any]] = Field(default_factory=list)
 
     # Per-model metadata overrides.  Keyed by model id; values are dicts
     # accepting ``context_window`` and ``max_output_tokens``.  Takes
@@ -312,7 +302,6 @@ class SandboxSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_SANDBOX_"}
 
     backend: Literal["process", "kubernetes"] = "process"
-    runtime_url: str = "http://sandbox-runtime:8080"
     default_timeout: int = 300
     # Defaults match :class:`surogates.sandbox.base.SandboxSpec` so the
     # ``default_sandbox_spec`` factory yields identical values when no
@@ -350,7 +339,6 @@ class BrowserSettings(BaseSettings):
     rest_port_base: int = 30000
     cdp_port_base: int = 31000
     live_view_port_base: int = 32000
-    live_view_mode: Literal["novnc", "webrtc"] = "novnc"
     k8s_namespace: str = "surogates"
     k8s_service_account: str = "surogates-browser"
     k8s_cluster_domain: str = "cluster.local"
@@ -358,11 +346,6 @@ class BrowserSettings(BaseSettings):
     k8s_s3_endpoint: str = ""
     pod_ready_timeout: int = 60
     endpoint_probe_timeout: int = 30
-    active_deadline_seconds: int = 3600
-    cpu: str = "1"
-    memory: str = "2Gi"
-    cpu_limit: str = "2"
-    memory_limit: str = "4Gi"
 
     # Fleet-backend settings (only used when backend == "fleet").
     # ``fleet_endpoint`` is the surogate-ops /api/browser-fleet base URL
@@ -388,8 +371,6 @@ class TransparencySettings(BaseSettings):
 
     enabled: bool = False
     level: str = "basic"  # "none", "basic", "enhanced", "full"
-    require_confirmation: bool = True
-    emotion_recognition: bool = False
 
 
 class StorageSettings(BaseSettings):
@@ -498,18 +479,15 @@ class WebsiteSettings(BaseSettings):
     # Visitor message cap.  Anonymous browser visitors warrant a
     # tighter ceiling than authenticated channels; this is the only
     # cap the route enforces today.  ``0`` means "no cap".  Token-cap
-    # and idle-policy knobs are deliberately not exposed here — the
-    # platform-wide :class:`SessionResetSettings` already covers idle
-    # for every channel, and there is no per-iteration token enforcer
-    # in the worker yet, so adding inert config fields would be
-    # misleading.
+    # and idle-policy knobs are deliberately not exposed here — there
+    # is no per-iteration token enforcer in the worker yet, so adding
+    # inert config fields would be misleading.
     session_message_cap: int = 0
 
 
 class GovernanceSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_GOVERNANCE_"}
 
-    enabled: bool = True
     transparency: TransparencySettings = Field(default_factory=TransparencySettings)
 
     # When True, every allowed tool call also emits a ``policy.allowed``
@@ -518,39 +496,6 @@ class GovernanceSettings(BaseSettings):
     # enable when a complete governance decision trail is required for
     # compliance audit.
     log_allowed: bool = False
-
-
-class SessionResetSettings(BaseSettings):
-    """Session idle reset policy.
-
-    When a session has been inactive beyond the configured threshold, the
-    platform runs a temporary LLM agent that reviews the conversation
-    transcript and saves important facts to memory, then tears down the
-    sandbox pod.  The session itself (events, counters, cursor) is left
-    untouched — the user can come back and continue at any time.
-
-    Ported from Hermes ``SessionResetPolicy``.
-
-    Modes:
-    - ``"idle"``: Reset after *idle_minutes* of inactivity.
-    - ``"daily"``: Reset at a specific hour each day.
-    - ``"both"``: Whichever triggers first (daily boundary OR idle timeout).
-    - ``"none"``: Never auto-reset.
-    """
-
-    model_config = {"env_prefix": "SUROGATES_SESSION_RESET_"}
-
-    enabled: bool = False
-    mode: Literal["idle", "daily", "both", "none"] = "idle"
-    at_hour: int = 4
-    idle_minutes: int = 1440
-    flush_max_iterations: int = 8
-    flush_max_retries: int = 3
-    watcher_interval_seconds: int = 300
-    notify: bool = True
-    notify_exclude_channels: list[str] = Field(
-        default_factory=lambda: ["webhook"],
-    )
 
 
 class SagaSettings(BaseSettings):
@@ -572,8 +517,6 @@ class OutcomeSettings(BaseSettings):
     max_iterations: int = 20
     max_parse_failures: int = 3
     evaluator_model: str = ""
-    evaluator_base_url: str = ""
-    evaluator_api_key: str = ""
     evaluator_response_max_chars: int = 16384
 
 
@@ -582,58 +525,7 @@ class ScheduledSessionSettings(BaseSettings):
 
     model_config = {"env_prefix": "SUROGATES_SCHEDULED_SESSIONS_"}
 
-    enabled: bool = True
     tick_interval_seconds: int = 60
-    claim_limit: int = 10
-    claim_lease_seconds: int = 120
-
-
-class AuthSettings(BaseSettings):
-    """Runtime auth toggle + BYO Firebase web config.
-
-    All values are injected by the deployment manifests and reflect
-    the parent project's Firebase configuration plus the per-agent
-    ``self_registration_enabled`` switch. They are *public* Firebase
-    web config — no secrets, so they ship as plain env vars.
-    """
-
-    model_config = {"env_prefix": "SUROGATES_AUTH_"}
-
-    self_registration_enabled: bool = False
-    firebase_project_id: str = ""
-    firebase_api_key: str = ""
-    firebase_auth_domain: str = ""
-    # Comma-separated providers — env vars only carry strings, so the
-    # provider set is joined on ``,`` at injection time.
-    firebase_enabled_providers: str = ""
-    firebase_app_id: str = ""
-    firebase_messaging_sender_id: str = ""
-    firebase_measurement_id: str = ""
-
-    @property
-    def providers(self) -> tuple[str, ...]:
-        """Parsed list of supported providers from the env var string.
-
-        Unknown providers are dropped — the chart may emit forward-
-        compatible names (e.g. "twitter") that this server doesn't
-        implement yet; we don't want them to crash the auth pipeline.
-        """
-        allowed = {"google", "github", "password"}
-        raw = (
-            p.strip()
-            for p in self.firebase_enabled_providers.split(",")
-            if p.strip()
-        )
-        return tuple(p for p in raw if p in allowed)
-
-    @property
-    def firebase_configured(self) -> bool:
-        """True when the chart shipped a usable Firebase config."""
-        return bool(
-            self.firebase_project_id
-            and self.firebase_api_key
-            and self.firebase_auth_domain
-        )
 
 
 class HubSettings(BaseSettings):
@@ -669,7 +561,6 @@ class Settings(BaseSettings):
     governance: GovernanceSettings = Field(default_factory=GovernanceSettings)
     saga: SagaSettings = Field(default_factory=SagaSettings)
     outcomes: OutcomeSettings = Field(default_factory=OutcomeSettings)
-    session_reset: SessionResetSettings = Field(default_factory=SessionResetSettings)
     scheduled_sessions: ScheduledSessionSettings = Field(
         default_factory=ScheduledSessionSettings,
     )
@@ -677,7 +568,6 @@ class Settings(BaseSettings):
     slack: SlackSettings = Field(default_factory=SlackSettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
     website: WebsiteSettings = Field(default_factory=WebsiteSettings)
-    auth: AuthSettings = Field(default_factory=AuthSettings)
 
     # Tenant asset root.  Used by the per-session sandbox pods to mount
     # workspace volumes; the platform itself no longer reads filesystem

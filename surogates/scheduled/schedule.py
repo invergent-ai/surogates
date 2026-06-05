@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import hashlib
 import math
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
 
-DEFAULT_LOOP_INTERVAL = "10m"
 DEFAULT_LOOP_EXPIRY_DAYS = 3
 DYNAMIC_LOOP_EXPIRY_DAYS = 7
 DYNAMIC_LOOP_DISPLAY = "Dynamic loop (1 minute to 1 hour)"
@@ -254,17 +252,3 @@ def humanize_cron(cron: str) -> str:
     ):
         return f"Weekdays at {int(hour):02d}:00"
     return cron
-
-
-def apply_deterministic_jitter(
-    run_at: datetime,
-    schedule_id: str,
-    *,
-    period_seconds: int,
-) -> datetime:
-    cap = min(max(0, period_seconds // 10), 900)
-    if cap == 0:
-        return run_at
-    digest = hashlib.sha256(schedule_id.encode("utf-8")).hexdigest()
-    offset = int(digest[:8], 16) % (cap + 1)
-    return run_at + timedelta(seconds=offset)

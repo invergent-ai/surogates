@@ -2,14 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
-
 from surogates.harness.provider import (
     APIMode,
-    anthropic_to_openai_response,
-    call_anthropic_messages,
     detect_api_mode,
-    openai_to_anthropic_messages,
 )
 
 
@@ -70,62 +65,3 @@ class TestDetectAPIMode:
 
     def test_gemini_model(self) -> None:
         assert detect_api_mode("gemini-2.5-pro") == APIMode.CHAT_COMPLETIONS
-
-
-# ---------------------------------------------------------------------------
-# openai_to_anthropic_messages (Phase 2 stub)
-# ---------------------------------------------------------------------------
-
-
-class TestOpenAIToAnthropicMessages:
-    def test_filters_system_messages(self) -> None:
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "hi"},
-        ]
-        result = openai_to_anthropic_messages(messages)
-        roles = [m["role"] for m in result]
-        assert "system" not in roles
-        assert len(result) == 2
-
-    def test_preserves_user_and_assistant(self) -> None:
-        messages = [
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "hi"},
-        ]
-        result = openai_to_anthropic_messages(messages)
-        assert result == messages
-
-    def test_empty_messages(self) -> None:
-        assert openai_to_anthropic_messages([]) == []
-
-
-# ---------------------------------------------------------------------------
-# anthropic_to_openai_response (Phase 2 stub)
-# ---------------------------------------------------------------------------
-
-
-class TestAnthropicToOpenAIResponse:
-    def test_returns_dict(self) -> None:
-        result = anthropic_to_openai_response("some response")
-        assert isinstance(result, dict)
-        assert result["role"] == "assistant"
-        assert "content" in result
-
-
-# ---------------------------------------------------------------------------
-# call_anthropic_messages (Phase 2 stub)
-# ---------------------------------------------------------------------------
-
-
-class TestCallAnthropicMessages:
-    @pytest.mark.asyncio()
-    async def test_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError, match="not yet implemented"):
-            await call_anthropic_messages(
-                client=None,
-                model="claude-sonnet-4",
-                messages=[],
-                system="You are helpful.",
-            )

@@ -60,9 +60,6 @@ class MCPServerRegistryCache:
     def invalidate(self, key: str) -> None:
         self._entries.pop(key, None)
 
-    def invalidate_all(self) -> None:
-        self._entries.clear()
-
     async def _lock_for(self, key: str) -> asyncio.Lock:
         async with self._global:
             lock = self._locks.get(key)

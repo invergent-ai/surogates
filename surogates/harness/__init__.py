@@ -66,10 +66,7 @@ from surogates.harness.prompt_cache import (
 )
 from surogates.harness.provider import (
     APIMode,
-    anthropic_to_openai_response,
-    call_anthropic_messages,
     detect_api_mode,
-    openai_to_anthropic_messages,
 )
 from surogates.harness.reasoning import (
     THINK_RE,
@@ -140,10 +137,8 @@ __all__ = [
     "SUMMARY_PREFIX",
     "SubdirectoryHintTracker",
     "SystemPromptCache",
-    "anthropic_to_openai_response",
     "apply_cache_control",
     "build_cache_extra_body",
-    "call_anthropic_messages",
     "call_llm_non_streaming",
     "call_llm_streaming",
     "call_llm_streaming_inner",
@@ -189,7 +184,6 @@ __all__ = [
     "load_soul_md",
     "make_skipped_tool_result",
     "message_to_dict",
-    "openai_to_anthropic_messages",
     "paths_do_not_overlap",
     "probe_dead_connections",
     "reconstruct_message_from_deltas",

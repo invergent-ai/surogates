@@ -34,7 +34,7 @@ from surogates.harness.model_metadata import ModelInfo
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ModelDiscoveryCache", "discover_model", "reset_discovery_cache"]
+__all__ = ["ModelDiscoveryCache", "discover_model"]
 
 # Timeout for the one-shot ``/models`` fetch.  Provider endpoints are
 # usually fast but shouldn't block worker startup for more than a few
@@ -112,8 +112,8 @@ class ModelDiscoveryCache:
             return self._cache[key]
 
 
-# Module-level singleton.  Tests can clear it via
-# :func:`reset_discovery_cache` to isolate provider mocks.
+# Module-level singleton.  Tests can clear it via ``_CACHE.reset()`` to
+# isolate provider mocks.
 _CACHE = ModelDiscoveryCache()
 
 
@@ -122,11 +122,6 @@ def discover_model(
 ) -> ModelInfo | None:
     """Convenience accessor for the module-level discovery cache."""
     return _CACHE.lookup(model_id, base_url=base_url, api_key=api_key)
-
-
-def reset_discovery_cache() -> None:
-    """Clear the module-level cache.  Exposed for tests."""
-    _CACHE.reset()
 
 
 # ---------------------------------------------------------------------------
