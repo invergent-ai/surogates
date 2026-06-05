@@ -616,7 +616,13 @@ function cancelledToolLabel(toolName: string): string {
     ask_user_question: "Ask User Question",
     process: "Process",
     create_artifact: "Create artifact",
-    research_memory: "Research memory",
+    // ``Research memory`` reads as a noun ("memory of research") and
+    // makes the shimmer awkward ("Running Research memory…").  The
+    // one-liner renderer shows just ``Research`` as the label, so
+    // mirror that here so the live shimmer matches the row that
+    // replaces it on completion.
+    research_memory: "Research",
+    research_outline: "Research",
   };
   return map[toolName] ?? toolName;
 }
