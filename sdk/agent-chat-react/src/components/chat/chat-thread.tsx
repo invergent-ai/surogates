@@ -176,6 +176,13 @@ type TimelineEntry =
       name: string;
       artifactKind: ArtifactKind;
       version: number;
+      /**
+       * Set when the artifact was propagated up from a delegated
+       * child session.  ``ArtifactBlock`` uses it to fetch the spec
+       * from the session that actually owns the S3 prefix; the chat
+       * thread's own session id would 404 for a propagated artifact.
+       */
+      originatingSessionId: string | null;
     };
 
 const WORKING_ON_IT_DELAY_MS = 250;
@@ -247,9 +254,8 @@ function messageToEntries(
       }];
     }
     if (msg.systemKind === "artifact") {
-      const { artifactId, name, kind, version } = unpackArtifactMeta(
-        msg.systemMeta, msg.content,
-      );
+      const { artifactId, name, kind, version, originatingSessionId } =
+        unpackArtifactMeta(msg.systemMeta, msg.content);
       return [{
         kind: "artifact",
         key: msg.id,
@@ -257,6 +263,7 @@ function messageToEntries(
         name,
         artifactKind: kind,
         version,
+        originatingSessionId,
       }];
     }
     if (
@@ -485,13 +492,29 @@ function groupMessages(messages: ChatMessageType[]): MessageGroup[] {
 function unpackArtifactMeta(
   systemMeta: Record<string, unknown> | undefined,
   fallbackName: string,
-): { artifactId: string; name: string; kind: ArtifactKind; version: number } {
+): {
+  artifactId: string;
+  name: string;
+  kind: ArtifactKind;
+  version: number;
+  /**
+   * When the artifact was produced by a delegated child session and
+   * propagated up the chain, this is the session that actually owns
+   * the spec in S3.  The ArtifactBlock fetches via this id so the
+   * GET /api/sessions/{id}/artifacts/{artifact_id} route resolves
+   * (the chat's own session id would 404 because the spec lives
+   * under the writer's prefix, not the planner's or root's).
+   */
+  originatingSessionId: string | null;
+} {
   const meta = systemMeta ?? {};
   return {
     artifactId: (meta.artifact_id as string) ?? "",
     name: (meta.name as string) ?? fallbackName,
     kind: (meta.kind as ArtifactKind) ?? "markdown",
     version: (meta.version as number) ?? 1,
+    originatingSessionId:
+      (meta.originating_session_id as string | undefined) ?? null,
   };
 }
 
@@ -526,7 +549,7 @@ function OrphanSystemMarker({
     const unpacked = unpackArtifactMeta(message.systemMeta, message.content);
     return (
       <ArtifactBlock
-        sessionId={sessionId}
+        sessionId={unpacked.originatingSessionId ?? sessionId}
         artifactId={unpacked.artifactId}
         name={unpacked.name}
         kind={unpacked.kind}
@@ -574,25 +597,26 @@ function OrphanSystemMarker({
 function cancelledToolLabel(toolName: string): string {
   const map: Record<string, string> = {
     terminal: "Command",
-    execute_code: "Execute Code",
+    execute_code: "Execute code",
     read_file: "Read",
     write_file: "Write",
     patch: "Patch",
-    search_files: "Search Files",
-    list_files: "List Files",
-    web_search: "Web Search",
-    web_extract: "Web Fetch",
-    web_crawl: "Web Crawl",
-    session_search: "Session Search",
+    search_files: "Search files",
+    list_files: "List files",
+    web_search: "Web search",
+    web_extract: "Web fetch",
+    web_crawl: "Web crawl",
+    session_search: "Session search",
     memory: "Memory",
     todo: "Todo",
     skills_list: "Skills",
     skill_view: "Skill",
     consult_expert: "Expert",
-    delegate_task: "Delegate",
+    delegate_task: "Delegate task",
     ask_user_question: "Ask User Question",
     process: "Process",
-    create_artifact: "Artifact",
+    create_artifact: "Create artifact",
+    research_memory: "Research memory",
   };
   return map[toolName] ?? toolName;
 }
@@ -779,7 +803,7 @@ function TimelineEntryItem({
         <TimelineContent>
           {sessionId ? (
             <ArtifactBlock
-              sessionId={sessionId}
+              sessionId={entry.originatingSessionId ?? sessionId}
               artifactId={entry.artifactId}
               name={entry.name}
               kind={entry.artifactKind}

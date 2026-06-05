@@ -613,6 +613,27 @@ async def _run_single_delegation(
         if outcome["status"] == "complete":
             trace = _build_trace_from_events(outcome["events"])
             file_changes = _extract_file_changes(outcome["events"])
+
+            # Propagate any artifacts the child created up to the
+            # parent's chat thread.  The artifact spec lives under the
+            # child's session prefix in S3, so we re-emit
+            # ``artifact.created`` on the parent with
+            # ``originating_session_id`` set to whichever session
+            # actually owns the file.  The SDK uses that id to fetch
+            # the spec via ``GET /api/sessions/{originating_session_id}
+            # /artifacts/{artifact_id}`` instead of the chat's own
+            # session id.  Propagation cascades naturally up the
+            # delegation chain because the parent's own
+            # ``delegate_task`` handler will run the same scan on
+            # whichever events it gets back from THIS session,
+            # preserving the original ``originating_session_id``.
+            await _propagate_child_artifacts(
+                session_store=session_store,
+                parent_session_id=parent_session_id,
+                child_session_id=child_id,
+                child_events=outcome["events"],
+            )
+
             await session_store.emit_event(
                 parent_session_id,
                 EventType.DELEGATION_COMPLETE,
@@ -758,6 +779,54 @@ def _last_event_is_unmatched_tool_call(events: list[Any]) -> bool:
             if tool_call_id:
                 pending_tool_call_ids.discard(str(tool_call_id))
     return bool(pending_tool_call_ids)
+
+
+async def _propagate_child_artifacts(
+    *,
+    session_store: Any,
+    parent_session_id: Any,
+    child_session_id: Any,
+    child_events: list[Any],
+) -> None:
+    """Re-emit each child ``artifact.created`` event on the parent.
+
+    The artifact spec lives in S3 under the *originating* session's
+    workspace prefix (whichever session called ``create_artifact``).
+    The SDK fetches it via that session's id, so the propagated event
+    must carry an ``originating_session_id`` field pointing at the
+    real owner.  If the child already propagated artifacts from
+    further descendants (e.g. the deep-research planner forwarding
+    the writer's report), preserve their original
+    ``originating_session_id`` rather than reset it to the
+    intermediate session.
+
+    Errors are logged and swallowed -- a propagation failure must
+    not abort the delegation result that triggered it.
+    """
+    for event in child_events:
+        etype = getattr(event, "type", None)
+        if etype != EventType.ARTIFACT_CREATED.value:
+            continue
+        data = dict(getattr(event, "data", None) or {})
+        # Preserve the deepest known owner: a propagated event
+        # already carries this field; a freshly-created one does
+        # not, in which case we stamp it with the direct child.
+        if not data.get("originating_session_id"):
+            data["originating_session_id"] = str(child_session_id)
+        try:
+            await session_store.emit_event(
+                parent_session_id,
+                EventType.ARTIFACT_CREATED,
+                data,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to propagate artifact.created from "
+                "child=%s to parent=%s; the artifact still exists "
+                "on the child session but will not surface on the "
+                "parent's chat thread.",
+                child_session_id, parent_session_id, exc_info=True,
+            )
 
 
 def _build_trace_from_events(events: list[Any]) -> list[dict[str, Any]]:
