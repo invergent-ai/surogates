@@ -11,7 +11,6 @@ import { formatDistanceToNow } from "date-fns";
 import {
   ChevronDownIcon,
   ChevronRightIcon,
-  Loader2Icon,
   SquareIcon,
   Trash2Icon,
   UsersIcon,
@@ -141,10 +140,10 @@ function mergeTreeNodes(
   return Array.from(byId.values());
 }
 
-function pruneDeletedSessionNodes(
+function collectDeletedSessionIds(
   nodes: AgentChatSessionTreeNode[],
   deletedSessionId: string,
-): AgentChatSessionTreeNode[] {
+): Set<string> {
   const deletedIds = new Set([deletedSessionId]);
   let changed = true;
   while (changed) {
@@ -156,7 +155,7 @@ function pruneDeletedSessionNodes(
       }
     }
   }
-  return nodes.filter((node) => !deletedIds.has(node.id));
+  return deletedIds;
 }
 
 function formatSessionTime(value: string): string {
@@ -198,7 +197,6 @@ function TreeNodeRow({
   activeSessionId,
   canStop,
   canDelete,
-  deletingSessionId,
   onSelect,
   onStop,
   onDelete,
@@ -208,7 +206,6 @@ function TreeNodeRow({
   activeSessionId: string;
   canStop: boolean;
   canDelete: boolean;
-  deletingSessionId: string | null;
   onSelect: (sessionId: string) => void;
   onStop: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
@@ -289,25 +286,15 @@ function TreeNodeRow({
         {canDelete && (
           <button
             type="button"
-            className={cn(
-              "p-2 md:p-1 rounded hover:bg-destructive/10 hover:text-destructive disabled:pointer-events-none transition-all",
-              deletingSessionId === entry.id
-                ? "opacity-100"
-                : "opacity-60 md:opacity-50 md:group-hover:opacity-100 md:focus-visible:opacity-100",
-            )}
+            className="p-2 md:p-1 rounded opacity-60 md:opacity-50 md:group-hover:opacity-100 md:focus-visible:opacity-100 hover:bg-destructive/10 hover:text-destructive transition-all"
             onClick={(e) => {
               e.stopPropagation();
               onDelete(entry.id);
             }}
             aria-label="Delete session"
             title="Delete session"
-            disabled={deletingSessionId === entry.id}
           >
-            {deletingSessionId === entry.id ? (
-              <Loader2Icon className="w-3 h-3 animate-spin" />
-            ) : (
-              <Trash2Icon className="w-3 h-3" />
-            )}
+            <Trash2Icon className="w-3 h-3" />
           </button>
         )}
       </div>
@@ -320,7 +307,6 @@ function TreeNodeRow({
             activeSessionId={activeSessionId}
             canStop={canStop}
             canDelete={canDelete}
-            deletingSessionId={deletingSessionId}
             onSelect={onSelect}
             onStop={onStop}
             onDelete={onDelete}
@@ -346,12 +332,14 @@ export function SessionTreePanel({
   const [nodes, setNodes] = useState<AgentChatSessionTreeNode[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [hasEverLoaded, setHasEverLoaded] = useState(false);
-  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(
-    null,
-  );
 
   // Guard async setters from firing after unmount.
   const mounted = useRef(true);
+  // Sessions removed optimistically. The backend delete (and its cascade to
+  // child sessions) runs in the background and can lag, so refetch filters
+  // these ids out until the server stops returning them -- otherwise a poll
+  // would briefly resurrect a deleted parent's children as top-level rows.
+  const pendingDeleteIds = useRef<Set<string>>(new Set());
   // Monotonic fetch id. If a route change or newer poll starts while an
   // older request is in flight, only the newest response may update state.
   const requestId = useRef(0);
@@ -392,10 +380,26 @@ export function SessionTreePanel({
           sessionTreePromise,
         ]);
         if (!mounted.current || currentRequestId !== requestId.current) return;
-        const nextNodes = mergeTreeNodes([
+        let nextNodes = mergeTreeNodes([
           sessionList?.sessions.map(sessionToTreeNode) ?? [],
           sessionTree?.nodes ?? [],
         ]);
+        if (pendingDeleteIds.current.size > 0) {
+          const stillReturned = new Set<string>();
+          nextNodes = nextNodes.filter((node) => {
+            if (!pendingDeleteIds.current.has(node.id)) return true;
+            stillReturned.add(node.id);
+            return false;
+          });
+          // Once the server stops returning an optimistically-deleted id its
+          // delete (or cascade) has landed; drop it so the set can't grow
+          // unbounded across the session's lifetime.
+          for (const pendingId of pendingDeleteIds.current) {
+            if (!stillReturned.has(pendingId)) {
+              pendingDeleteIds.current.delete(pendingId);
+            }
+          }
+        }
         const fp = treeFingerprint(nextNodes);
         if (fp !== lastFingerprint.current) {
           lastFingerprint.current = fp;
@@ -437,6 +441,7 @@ export function SessionTreePanel({
       setNodes([]);
       setHasEverLoaded(false);
       lastFingerprint.current = "";
+      pendingDeleteIds.current.clear();
     }
     setError(null);
     void refetch();
@@ -482,24 +487,39 @@ export function SessionTreePanel({
 
   const handleDelete = useCallback(
     async (id: string) => {
-      if (!adapter.deleteSession || deletingSessionId) return;
-      setDeletingSessionId(id);
+      if (!adapter.deleteSession) return;
+      // Optimistic delete: drop the row and its whole subtree from the UI
+      // right away, then run the backend delete in the background. Without
+      // this the row lingered (spinner) until the request returned, and a
+      // poll landing mid-cascade promoted the deleted parent's children to
+      // top-level rows before they too vanished.
+      const deletedIds = collectDeletedSessionIds(nodes, id);
+      for (const deletedId of deletedIds) {
+        pendingDeleteIds.current.add(deletedId);
+      }
+      setNodes((current) => {
+        const next = current.filter((node) => !deletedIds.has(node.id));
+        lastFingerprint.current = treeFingerprint(next);
+        return next;
+      });
+      onSessionDelete?.(id);
       try {
         await adapter.deleteSession({ sessionId: id });
-        setNodes((current) => {
-          const next = pruneDeletedSessionNodes(current, id);
-          lastFingerprint.current = treeFingerprint(next);
-          return next;
-        });
-        onSessionDelete?.(id);
         await refetch({ silent: true });
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to delete session");
-      } finally {
-        if (mounted.current) setDeletingSessionId(null);
+        // The delete failed, so the sessions still exist server-side. Stop
+        // suppressing them and let refetch restore the rows rather than
+        // leaving the UI lying about what was deleted.
+        for (const deletedId of deletedIds) {
+          pendingDeleteIds.current.delete(deletedId);
+        }
+        if (mounted.current) {
+          setError(e instanceof Error ? e.message : "Failed to delete session");
+        }
+        await refetch({ silent: true });
       }
     },
-    [adapter, deletingSessionId, onSessionDelete, refetch],
+    [adapter, nodes, onSessionDelete, refetch],
   );
 
   // Hide the panel until the first fetch has completed so we don't
@@ -538,7 +558,6 @@ export function SessionTreePanel({
               activeSessionId={activeSessionId ?? ""}
               canStop={Boolean(adapter.stopSession)}
               canDelete={Boolean(adapter.deleteSession)}
-              deletingSessionId={deletingSessionId}
               onSelect={handleSelect}
               onStop={handleStop}
               onDelete={handleDelete}
