@@ -288,7 +288,6 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
             slug_cache=slug_cache,
             file_bundle_cache=file_bundle_cache,
             memory_cache=memory_cache,
-            mcp_server_cache=mcp_server_cache,
             channel_routing_cache=channel_routing_cache,
             system_bundle_cache=system_bundle_cache,
         ),

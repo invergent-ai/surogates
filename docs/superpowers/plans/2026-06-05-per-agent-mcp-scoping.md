@@ -20,8 +20,8 @@ Legend: ☐ todo · ◐ in-progress · ☑ done. Updated before every commit.
 - ☑ Task 2 — Agent-keyed connection pool
 - ☑ Task 3 — Loader per-agent allow-list filter
 - ☑ Task 4 — Per-agent prompt-schema filter (filter only when foreign MCP tools present, preserving the coordinator `None` contract)
-- ◐ Task 5 — Invalidate agent pool entry on attachment changes
-- ☐ Task 6 — Remove dead `MCPServerRegistryCache` scaffolding
+- ☑ Task 5 — Invalidate agent pool entry on attachment changes
+- ◐ Task 6 — Remove dead `MCPServerRegistryCache` scaffolding
 - ☐ Task 7 — Fix stale ops docstring (surogate-ops repo)
 - ☐ Task 8 — Full regression
 

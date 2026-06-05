@@ -150,22 +150,6 @@ def test_handler_routes_channel_routing_changed_to_channel_routing_cache():
     crc.invalidate.assert_called_once_with("slack:A0123ABCD")
 
 
-def test_handler_routes_mcp_servers_changed_to_mcp_server_cache():
-    """Admin CRUD on the per-tenant MCP server
-    registry publishes agent.mcp_servers_changed:<agent_id> on
-    Redis; the proxy invalidates its cache so the next call sees
-    the new server list."""
-    from surogates.runtime.invalidator import handle_invalidation_message
-
-    mc = MagicMock()
-    handle_invalidation_message(
-        channel="agent.mcp_servers_changed:a-1",
-        payload=b"",
-        mcp_server_cache=mc,
-    )
-    mc.invalidate.assert_called_once_with("a-1")
-
-
 def test_handler_routes_user_memory_changed_to_memory_cache():
     """When a worker writes to a user's memory it
     publishes user.memory_changed:<org_id>:<user_id> on Redis; other
@@ -216,3 +200,46 @@ def test_handler_ignores_empty_system_skills_identifier():
         system_bundle_cache=sc,
     )
     sc.invalidate.assert_not_called()
+
+
+def test_runtime_config_change_also_invalidates_pool():
+    from surogates.runtime.invalidator import handle_invalidation_message
+
+    rt = MagicMock()
+    pool = MagicMock()
+    handle_invalidation_message(
+        channel="agent.runtime_config_changed:agent-7",
+        payload=b"",
+        runtime_config_cache=rt,
+        mcp_pool=pool,
+    )
+    rt.invalidate.assert_called_once_with("agent-7")
+    pool.invalidate_agent.assert_called_once_with("agent-7")
+
+
+def test_mcp_servers_changed_invalidates_config_and_pool():
+    from surogates.runtime.invalidator import handle_invalidation_message
+
+    rt = MagicMock()
+    pool = MagicMock()
+    handle_invalidation_message(
+        channel="agent.mcp_servers_changed:agent-7",
+        payload=b"",
+        runtime_config_cache=rt,
+        mcp_pool=pool,
+    )
+    rt.invalidate.assert_called_once_with("agent-7")
+    pool.invalidate_agent.assert_called_once_with("agent-7")
+
+
+def test_pool_not_touched_for_non_agent_channels():
+    from surogates.runtime.invalidator import handle_invalidation_message
+
+    pool = MagicMock()
+    handle_invalidation_message(
+        channel="project.firebase_config_changed:p-1",
+        payload=b"",
+        firebase_cache=MagicMock(),
+        mcp_pool=pool,
+    )
+    pool.invalidate_agent.assert_not_called()
