@@ -5,9 +5,11 @@
 // - Session search
 // - Web search / crawl
 // - Vision analyze
+// - Research memory
 
-import { SearchIcon, EyeIcon } from "lucide-react";
+import { BookOpenIcon, EyeIcon, SearchIcon } from "lucide-react";
 import type { ToolCallInfo } from "../../../types";
+import { parseArgs } from "./shared";
 
 // ── Session search ──────────────────────────────────────────────────
 
@@ -99,6 +101,76 @@ export function MCPToolBlock({ tc }: { tc: ToolCallInfo }) {
       )}
     </div>
   );
+}
+
+// ── Research memory ─────────────────────────────────────────────────
+//
+// One per ``research_memory`` call.  Three actions, one shape: bold
+// "Research" label + muted action summary so a long deep-research
+// turn (planner racks up dozens of add/retrieve calls in a row)
+// stays scannable.  Failure path (``success: false``) falls back to
+// a generic label so the row still reads.
+
+interface ResearchMemoryArgs {
+  action?: string;
+  url?: string;
+  query?: string;
+}
+
+interface ResearchMemoryResult {
+  success?: boolean;
+  source_id?: string;
+  sources?: Array<{ source_id: string }>;
+}
+
+export function ResearchMemoryBlock({ tc }: { tc: ToolCallInfo }) {
+  const args = parseArgs<ResearchMemoryArgs>(tc.args) ?? {};
+  const result = tc.result
+    ? parseArgs<ResearchMemoryResult>(tc.result) ?? {}
+    : {};
+
+  let detail = "";
+  if (args.action === "add") {
+    const host = args.url ? hostname(args.url) : "";
+    const sid = result.source_id ?? "";
+    detail = sid
+      ? `recorded ${sid}${host ? ` · ${host}` : ""}`
+      : host
+        ? `recorded · ${host}`
+        : "recorded";
+  } else if (args.action === "retrieve") {
+    const n = result.sources?.length ?? 0;
+    detail = args.query
+      ? `${n} source${n === 1 ? "" : "s"} for "${truncate(args.query, 40)}"`
+      : `${n} source${n === 1 ? "" : "s"}`;
+  } else if (args.action === "list") {
+    const n = result.sources?.length ?? 0;
+    detail = `${n} source${n === 1 ? "" : "s"}`;
+  }
+
+  return (
+    <div className="flex items-center gap-2 text-sm py-0.5">
+      <BookOpenIcon className="size-3.5 text-muted-foreground/60 shrink-0" />
+      <span className="font-medium text-foreground">Research</span>
+      {detail && (
+        <span className="text-muted-foreground/70 truncate text-xs">
+          {detail}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function hostname(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+function truncate(s: string, n: number): string {
+  return s.length > n ? `${s.slice(0, n)}…` : s;
 }
 
 // ── Vision analyze ──────────────────────────────────────────────────

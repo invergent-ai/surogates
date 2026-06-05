@@ -1,12 +1,13 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// Renderers for the deep-research tools:
+// Renderer for the deep-research ``research_outline`` tool: a living
+// outline card showing the section list and a foldable view of the
+// persisted markdown.
 //
-//   * ``research_outline``: a living outline card showing the section
-//     list and a foldable view of the persisted markdown.
-//   * ``research_memory``: a compact one-liner that summarises the
-//     latest add/retrieve/list call.
+// ``research_memory`` is rendered as a compact one-liner alongside
+// the other lightweight tools -- see
+// ``./oneliner-tools.tsx::ResearchMemoryBlock``.
 
 import type { ToolCallInfo } from "../../../types";
 import { parseArgs } from "./shared";
@@ -50,63 +51,4 @@ export function ResearchOutlineBlock({ tc }: { tc: ToolCallInfo }) {
       )}
     </div>
   );
-}
-
-// ── research_memory ─────────────────────────────────────────────────
-
-interface MemoryArgs {
-  action?: string;
-  url?: string;
-  query?: string;
-}
-
-interface MemoryResult {
-  success?: boolean;
-  source_id?: string;
-  sources?: Array<{ source_id: string }>;
-}
-
-export function ResearchMemoryBlock({ tc }: { tc: ToolCallInfo }) {
-  const args = parseArgs<MemoryArgs>(tc.args) ?? {};
-  const result = tc.result
-    ? parseArgs<MemoryResult>(tc.result) ?? {}
-    : {};
-
-  let label: string;
-  if (args.action === "add") {
-    const host = args.url ? hostname(args.url) : "";
-    label = `Recorded source ${result.source_id ?? ""}${
-      host ? ` · ${host}` : ""
-    }`;
-  } else if (args.action === "retrieve") {
-    const n = result.sources?.length ?? 0;
-    label = `Retrieved ${n} source${n === 1 ? "" : "s"}${
-      args.query ? ` for "${truncate(args.query)}"` : ""
-    }`;
-  } else if (args.action === "list") {
-    const n = result.sources?.length ?? 0;
-    label = `Listed ${n} source${n === 1 ? "" : "s"}`;
-  } else {
-    label = "research_memory";
-  }
-
-  return (
-    <div className="text-xs text-muted-foreground">
-      <span className="font-semibold text-foreground">research</span> {label}
-    </div>
-  );
-}
-
-// ── helpers ─────────────────────────────────────────────────────────
-
-function hostname(url: string): string {
-  try {
-    return new URL(url).hostname.replace(/^www\./, "");
-  } catch {
-    return url;
-  }
-}
-
-function truncate(s: string, n = 40): string {
-  return s.length > n ? `${s.slice(0, n)}…` : s;
 }

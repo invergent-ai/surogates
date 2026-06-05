@@ -11,10 +11,8 @@ import { describe, expect, it } from "vitest";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 
-import {
-  ResearchMemoryBlock,
-  ResearchOutlineBlock,
-} from "../src/components/chat/tools/research-tool";
+import { ResearchOutlineBlock } from "../src/components/chat/tools/research-tool";
+import { ResearchMemoryBlock } from "../src/components/chat/tools/oneliner-tools";
 import type { ToolCallInfo } from "../src/types";
 
 (
@@ -43,6 +41,12 @@ function toolCall(overrides: Partial<ToolCallInfo>): ToolCallInfo {
 }
 
 describe("ResearchMemoryBlock", () => {
+  // The block lives alongside the other one-liners (SessionSearch,
+  // WebTool, VisionAnalyze) and follows their shape: a bold
+  // "Research" label + a muted action summary.  Tests assert the
+  // visible substrings (source id, count, hostname, query) without
+  // pinning the exact phrasing of the verb so a future tweak to
+  // "recorded" / "retrieved" wording does not require a test rewrite.
   it("renders an add result with source id and hostname", () => {
     const tc = toolCall({
       toolName: "research_memory",
@@ -57,7 +61,8 @@ describe("ResearchMemoryBlock", () => {
       }),
     });
     const out = render(createElement(ResearchMemoryBlock, { tc }));
-    expect(out.textContent).toContain("Recorded source S3");
+    expect(out.textContent).toContain("Research");
+    expect(out.textContent).toContain("S3");
     expect(out.textContent).toContain("example.com");
   });
 
@@ -77,7 +82,8 @@ describe("ResearchMemoryBlock", () => {
       }),
     });
     const out = render(createElement(ResearchMemoryBlock, { tc }));
-    expect(out.textContent).toContain("Retrieved 2 sources");
+    expect(out.textContent).toContain("Research");
+    expect(out.textContent).toContain("2 sources");
     expect(out.textContent).toContain("qubits");
   });
 
@@ -90,8 +96,8 @@ describe("ResearchMemoryBlock", () => {
       }),
     });
     const out = render(createElement(ResearchMemoryBlock, { tc }));
-    expect(out.textContent).toContain("Retrieved 1 source");
-    expect(out.textContent).not.toContain("Retrieved 1 sources");
+    expect(out.textContent).toContain("1 source");
+    expect(out.textContent).not.toContain("1 sources");
   });
 
   it("renders a list result with the source count", () => {
@@ -107,13 +113,16 @@ describe("ResearchMemoryBlock", () => {
       }),
     });
     const out = render(createElement(ResearchMemoryBlock, { tc }));
-    expect(out.textContent).toContain("Listed 3 sources");
+    expect(out.textContent).toContain("3 sources");
   });
 
-  it("falls back to the bare tool name when the args are malformed", () => {
+  it("renders the bare label when the args are malformed", () => {
+    // No action visible -> just the "Research" label sits there
+    // until the tool result arrives.  The label is the same row
+    // shape as the other one-liners so the timeline stays scannable.
     const tc = toolCall({ args: "not json" });
     const out = render(createElement(ResearchMemoryBlock, { tc }));
-    expect(out.textContent).toContain("research_memory");
+    expect(out.textContent).toContain("Research");
   });
 });
 

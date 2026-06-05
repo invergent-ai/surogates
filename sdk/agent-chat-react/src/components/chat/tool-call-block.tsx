@@ -9,7 +9,13 @@ import type { ToolCallInfo } from "../../types";
 import { TerminalToolBlock } from "./tools/terminal-tool";
 import { TodoToolBlock } from "./tools/todo-tool";
 import { ExecuteCodeToolBlock } from "./tools/execute-code-tool";
-import { SessionSearchBlock, WebToolBlock, VisionAnalyzeBlock, MCPToolBlock } from "./tools/oneliner-tools";
+import {
+  MCPToolBlock,
+  ResearchMemoryBlock,
+  SessionSearchBlock,
+  VisionAnalyzeBlock,
+  WebToolBlock,
+} from "./tools/oneliner-tools";
 import { WebExtractToolBlock } from "./tools/web-extract-tool";
 import { ReadFileBlock, WriteFileBlock, PatchBlock, SearchFilesBlock, ListFilesBlock } from "./tools/file-tools";
 import { ProcessToolBlock } from "./tools/process-tool";
@@ -22,7 +28,7 @@ import { MemoryToolBlock } from "./tools/memory-tool";
 import { SkillManageToolBlock } from "./tools/skill-manage-tool";
 import { CoordinatorToolBlock } from "./tools/coordinator-tools";
 import { DefaultToolBlock } from "./tools/default-tool";
-import { ResearchMemoryBlock, ResearchOutlineBlock } from "./tools/research-tool";
+import { ResearchOutlineBlock } from "./tools/research-tool";
 
 export function ToolCallBlock({
   tc,
