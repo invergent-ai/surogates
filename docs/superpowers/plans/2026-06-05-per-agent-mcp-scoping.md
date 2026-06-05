@@ -21,13 +21,14 @@ Legend: ☐ todo · ◐ in-progress · ☑ done. Updated before every commit.
 - ☑ Task 3 — Loader per-agent allow-list filter
 - ☑ Task 4 — Per-agent prompt-schema filter (filter only when foreign MCP tools present, preserving the coordinator `None` contract)
 - ☑ Task 5 — Invalidate agent pool entry on attachment changes
-- ◐ Task 6 — Remove dead `MCPServerRegistryCache` scaffolding
-- ☐ Task 7 — Fix stale ops docstring (surogate-ops repo)
+- ☑ Task 6 — Remove dead `MCPServerRegistryCache` scaffolding
+- ◐ Task 7 — Fix stale ops docstring (surogate-ops repo)
 - ☐ Task 8 — Full regression
 
 **Baseline pre-existing failures (fixed by this work, not regressions):**
 - `tests/runtime/test_call_tool_per_call_subprocess.py` ×4 — `_execute_call` signature drift → fixed in Task 2.
 - `tests/runtime/test_mcp_proxy_state.py::test_install_proxy_plumbing_empty_url_skips` ×1 — proxy now fail-fasts on missing `platform_api_url` → fixed in Task 5.
+- `tests/runtime/test_app_state.py` ×8 + `tests/runtime/test_platform_client.py::test_get_runtime_config_happy_path` ×1 — **pre-existing, out of scope.** Stale test stubs vs. hardened `settings.hub.endpoint`-mandatory code (`api/app.py:374`); fail identically at the Task-5 commit with zero changes from this work. Not touched here.
 
 ---
 

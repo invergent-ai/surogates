@@ -176,7 +176,6 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         FileBundleCache,
         FirebaseConfig,
         FirebaseConfigCache,
-        MCPServerRegistryCache,
         PerTenantRateLimiter,
         PlatformClient,
         RuntimeConfigCache,
@@ -254,11 +253,6 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
         storage_backend=app.state.storage,
     )
 
-    # per-agent MCP server registry cache.
-    mcp_server_cache = build_mcp_server_cache(
-        settings=settings, platform_client=client,
-    )
-
     # Channel routing cache.  Powers the shared adapter pod's
     # per-event tenant resolution.  In the api process the cache
     # is wired primarily so the invalidator subscribes to the
@@ -277,7 +271,6 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     app.state.rate_limiter = rate_limiter
     app.state.file_bundle_cache = file_bundle_cache
     app.state.memory_cache = memory_cache
-    app.state.mcp_server_cache = mcp_server_cache
     app.state.channel_routing_cache = channel_routing_cache
     app.state.system_bundle_cache = system_bundle_cache
     app.state.runtime_invalidator_task = asyncio.create_task(
@@ -341,24 +334,6 @@ def build_memory_cache(*, settings, storage_backend):
         return raw
 
     return MemoryCache(loader=_loader, ttl_seconds=5.0)
-
-
-def build_mcp_server_cache(*, settings, platform_client):
-    """Construct an :class:`MCPServerRegistryCache`.
-
-    The cache key is the bare ``agent_id`` so the invalidator
-    channel ``agent.mcp_servers_changed:<agent_id>`` routes its
-    identifier straight through to ``cache.invalidate``.  The
-    loader hits ``GET /api/agents/{agent_id}/mcp-servers`` on
-    surogate-ops, which returns the agent's effective MCP server
-    registry.
-    """
-    from surogates.runtime import MCPServerRegistryCache
-
-    async def _loader(agent_id: str) -> list[dict]:
-        return await platform_client.get_agent_mcp_servers(agent_id)
-
-    return MCPServerRegistryCache(loader=_loader, ttl_seconds=30.0)
 
 
 def build_channel_routing_cache(*, settings, platform_client):
@@ -598,8 +573,6 @@ async def _shutdown_shared_runtime_plumbing(app: FastAPI) -> None:
         app.state.file_bundle_cache = None
     if hasattr(app.state, "memory_cache"):
         app.state.memory_cache = None
-    if hasattr(app.state, "mcp_server_cache"):
-        app.state.mcp_server_cache = None
     if hasattr(app.state, "channel_routing_cache"):
         app.state.channel_routing_cache = None
     if hasattr(app.state, "system_bundle_cache"):
