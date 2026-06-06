@@ -1,0 +1,72 @@
+name: Update agent images
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types:
+      - completed
+  workflow_dispatch:
+
+jobs:
+  update-agent-images:
+    name: Update agent images on cluster nodes
+    # Run after a successful Release, or on manual dispatch.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: self-hosted
+    env:
+      REMOTE_SCRIPT: /root/update-agent-images.sh
+      NODE_HOSTS: ${{ secrets.NODE_HOSTS }}
+      MASTER_HOST: ${{ secrets.MASTER_HOST }}
+    steps:
+      - name: Write SSH identity file
+        run: |
+          install -m 700 -d "${RUNNER_TEMP}/.ssh"
+          printf '%s\n' "${{ secrets.SSH_KEY }}" > "${RUNNER_TEMP}/.ssh/id_node"
+          chmod 600 "${RUNNER_TEMP}/.ssh/id_node"
+
+      - name: Update agent images on cluster nodes
+        run: |
+          IDENTITY_FILE="${RUNNER_TEMP}/.ssh/id_node"
+
+          read -ra HOSTS <<< "${NODE_HOSTS}"
+
+          pids=()
+          hosts=()
+
+          for host in "${HOSTS[@]}"; do
+            (
+              echo "==> Running ${REMOTE_SCRIPT} on ${host}"
+              ssh \
+                -p 22022 \
+                -i "${IDENTITY_FILE}" \
+                -o BatchMode=yes \
+                -o StrictHostKeyChecking=accept-new \
+                "root@${host}" \
+                "bash ${REMOTE_SCRIPT}"
+            ) &
+
+            pids+=("$!")
+            hosts+=("${host}")
+          done
+
+          status=0
+
+          for i in "${!pids[@]}"; do
+            if wait "${pids[$i]}"; then
+              echo "==> Completed ${REMOTE_SCRIPT} on ${hosts[$i]}"
+            else
+              echo "==> Failed ${REMOTE_SCRIPT} on ${hosts[$i]}" >&2
+              status=1
+            fi
+          done
+
+          ssh -p 22022 -i "${IDENTITY_FILE}" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=accept-new \
+            "root@${MASTER_HOST}" "bash /root/restart-agent-pods.sh"
+
+          exit "${status}"
+
+      - name: Remove SSH identity file
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/.ssh/id_node"
