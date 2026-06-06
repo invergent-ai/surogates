@@ -24,6 +24,24 @@ logger = logging.getLogger(__name__)
 # Maximum characters for a single tool result in the expert's context.
 _MAX_TOOL_RESULT_CHARS: int = 20_000
 
+# Generation params that map onto standard OpenAI create() kwargs vs the ones
+# that are vLLM-only and must ride in ``extra_body``.
+_STANDARD_GEN_KEYS = ("temperature", "top_p", "max_tokens")
+_EXTRA_BODY_GEN_KEYS = ("top_k", "repetition_penalty")
+
+
+def _generation_kwargs(gen: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split expert generation params into (standard create kwargs, extra_body).
+
+    ``temperature``/``top_p``/``max_tokens`` are OpenAI-standard; ``top_k`` and
+    ``repetition_penalty`` are not, so they go in ``extra_body`` (vLLM reads them
+    there).  Unset (absent/None) keys are omitted entirely.
+    """
+    cfg = gen or {}
+    kwargs = {k: cfg[k] for k in _STANDARD_GEN_KEYS if cfg.get(k) is not None}
+    extra = {k: cfg[k] for k in _EXTRA_BODY_GEN_KEYS if cfg.get(k) is not None}
+    return kwargs, extra
+
 
 class ExpertBudgetExceeded(Exception):
     """Raised when an expert exhausts its iteration budget."""
@@ -113,13 +131,21 @@ async def run_expert_loop(
         api_key=_resolve_api_key(tenant, expert),
     )
 
+    gen_kwargs, gen_extra = _generation_kwargs(expert.expert_generation)
+
     try:
         for iteration in range(expert.expert_max_iterations):
             # Call the expert model.
             create_kwargs: dict[str, Any] = {
                 "model": expert.expert_model or "default",
                 "messages": messages,
+                **gen_kwargs,
             }
+            if gen_extra:
+                create_kwargs["extra_body"] = {
+                    **create_kwargs.get("extra_body", {}),
+                    **gen_extra,
+                }
             if tool_schemas:
                 create_kwargs["tools"] = tool_schemas
 

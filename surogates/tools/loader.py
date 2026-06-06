@@ -119,6 +119,7 @@ class SkillDef:
     expert_max_iterations: int = 10  # iteration budget for expert mini-loop
     expert_status: str = EXPERT_STATUS_DRAFT  # draft → collecting → active → retired
     expert_tools: list[str] | None = None  # tools the expert can use in its mini-loop
+    expert_generation: dict[str, Any] | None = None  # sampling params for the expert mini-loop
     category_description: str | None = None  # DESCRIPTION.md text for grouping
 
     @property
@@ -959,6 +960,7 @@ def _build_skill_def(
         expert_max_iterations=max_iter,
         expert_status=str(parsed.get("expert_status", EXPERT_STATUS_DRAFT)),
         expert_tools=parsed.get("expert_tools"),
+        expert_generation=parsed.get("expert_generation"),
     )
 
 
@@ -1054,6 +1056,13 @@ def _parse_skill_frontmatter(
                     result["expert_tools"] = [t.strip() for t in expert_tools.split(",")]
                 elif isinstance(expert_tools, list):
                     result["expert_tools"] = [str(t) for t in expert_tools]
+
+            # Expert generation params (sampling controls for the mini-loop).
+            gen = fm.get("generation")
+            if isinstance(gen, dict):
+                result["expert_generation"] = {
+                    k: v for k, v in gen.items() if v is not None
+                }
 
     return result
 
