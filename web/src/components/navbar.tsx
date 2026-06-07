@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 import {
+  ConnectionsPanel,
   MissionsPanel,
   ScheduledWorkPanel,
   SessionTreePanel,
@@ -236,6 +237,7 @@ export function SessionSidebar() {
             showExpandedBlock,
           )}
         >
+          <ConnectionsPanel adapter={surogatesWebChatAdapter} />
           <MissionsPanel
             adapter={surogatesWebChatAdapter}
             onMissionSelect={handleMissionSelect}
