@@ -188,5 +188,37 @@ class PlatformClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def mint_composio_session(
+        self, agent_id: str, user_id: str,
+    ) -> dict | None:
+        """Mint a per-end-user Composio Tool Router MCP server for an agent.
+
+        Returns the minted ``{transport, url, headers}`` config, or
+        ``None`` when the agent has no usable Composio toolkits (404) or
+        Composio is not configured on surogate-ops (503).  The returned
+        headers carry the Composio ``x-api-key`` — a runtime secret.
+        Keep it in memory only; never log it.
+
+        * :class:`PlatformAuthError` on 401 -- operations problem.
+        * ``httpx.HTTPStatusError`` on any other non-2xx.
+        """
+        try:
+            resp = await self._client.post(
+                f"/api/agents/agents/{agent_id}/composio/session",
+                json={"user_id": user_id},
+            )
+        except httpx.HTTPError as exc:
+            raise exc
+
+        if resp.status_code in (404, 503):
+            return None
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
     async def aclose(self) -> None:
         await self._client.aclose()
