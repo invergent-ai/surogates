@@ -1,6 +1,6 @@
 {
   "name": "@invergent/agent-chat-react",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Reusable React chat UI and runtime for Surogates agent sessions.",
   "license": "AGPL-3.0-only",
   "homepage": "https://github.com/invergent-ai/surogates/tree/master/sdk/agent-chat-react#readme",
