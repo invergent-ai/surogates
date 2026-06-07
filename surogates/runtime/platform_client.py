@@ -202,14 +202,10 @@ class PlatformClient:
         * :class:`PlatformAuthError` on 401 -- operations problem.
         * ``httpx.HTTPStatusError`` on any other non-2xx.
         """
-        try:
-            resp = await self._client.post(
-                f"/api/agents/agents/{agent_id}/composio/session",
-                json={"user_id": user_id},
-            )
-        except httpx.HTTPError as exc:
-            raise exc
-
+        resp = await self._client.post(
+            f"/api/agents/agents/{agent_id}/composio/session",
+            json={"user_id": user_id},
+        )
         if resp.status_code in (404, 503):
             return None
         if resp.status_code == 401:

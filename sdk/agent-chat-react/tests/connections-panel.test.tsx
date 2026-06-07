@@ -91,4 +91,25 @@ describe("ConnectionsPanel", () => {
     await flush();
     expect(container?.childNodes.length ?? 0).toBe(0);
   });
+
+  it("surfaces an error when authorize fails", async () => {
+    const a = adapter({
+      authorizeComposioToolkit: vi
+        .fn()
+        .mockRejectedValue(new Error("Project membership required")),
+    });
+    renderPanel(a);
+    await flush();
+
+    const btn = container?.querySelector("button");
+    await act(async () => {
+      btn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    const alert = container?.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain("Project membership required");
+    // The button is re-enabled so the user can retry.
+    expect(container?.querySelector("button")?.textContent).toContain("Connect");
+  });
 });

@@ -24,6 +24,7 @@ export function ConnectionsPanel({ agentId, adapter }: ConnectionsPanelProps) {
     typeof adapter.authorizeComposioToolkit === "function";
   const [rows, setRows] = useState<ToolkitRow[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!adapter.listComposioConnections) return;
@@ -45,12 +46,17 @@ export function ConnectionsPanel({ agentId, adapter }: ConnectionsPanelProps) {
   const connect = async (toolkit: string) => {
     if (!adapter.authorizeComposioToolkit) return;
     setBusy(toolkit);
+    setError(null);
     try {
       const { redirectUrl } = await adapter.authorizeComposioToolkit({
         agentId,
         toolkit,
       });
       if (redirectUrl) window.open(redirectUrl, "_blank", "noopener,noreferrer");
+    } catch (e) {
+      setError(
+        e instanceof Error ? e.message : "Failed to start the connection",
+      );
     } finally {
       setBusy(null);
     }
@@ -61,6 +67,11 @@ export function ConnectionsPanel({ agentId, adapter }: ConnectionsPanelProps) {
       <div className="text-xs font-semibold text-muted-foreground">
         Connections
       </div>
+      {error && (
+        <div className="text-xs text-red-500" role="alert">
+          {error}
+        </div>
+      )}
       {rows.map((r) => (
         <div
           key={r.toolkit}
