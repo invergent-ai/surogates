@@ -239,24 +239,27 @@ function ToolkitRow({
         <button
           type="button"
           aria-label={open ? "Collapse" : "Expand"}
+          aria-expanded={open}
           onClick={() => setOpen((v) => !v)}
-          className="text-muted-foreground/60"
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
         >
-          {open ? "▾" : "›"}
-        </button>
-        {broken || !row.logo ? (
-          <span className="inline-flex h-5 w-5 items-center justify-center rounded bg-muted text-[10px] font-semibold uppercase">
-            {name.charAt(0)}
+          <span className="text-muted-foreground/60">{open ? "▾" : "›"}</span>
+          {broken || !row.logo ? (
+            <span className="inline-flex h-5 w-5 items-center justify-center rounded bg-muted text-[10px] font-semibold uppercase">
+              {name.charAt(0)}
+            </span>
+          ) : (
+            <img
+              src={row.logo}
+              alt={name}
+              className="h-5 w-5 rounded object-contain"
+              onError={() => setBroken(true)}
+            />
+          )}
+          <span className="truncate text-sm font-medium text-foreground">
+            {name}
           </span>
-        ) : (
-          <img
-            src={row.logo}
-            alt={name}
-            className="h-5 w-5 rounded object-contain"
-            onError={() => setBroken(true)}
-          />
-        )}
-        <span className="text-sm font-medium text-foreground">{name}</span>
+        </button>
         <button
           type="button"
           disabled={busy}
