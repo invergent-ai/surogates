@@ -689,6 +689,7 @@ export interface AgentChatAdapter {
       logo?: string;
       category?: string;
       description?: string;
+      auth_mode?: string;
     }[];
   }>;
   authorizeComposioToolkit?(input: { agentId?: string; toolkit: string }): Promise<{

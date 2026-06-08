@@ -9,6 +9,7 @@ interface Row {
   logo?: string;
   category?: string;
   description?: string;
+  auth_mode?: string;
 }
 
 export interface IntegrationsPageProps {
@@ -280,7 +281,7 @@ function ToolkitRow({
         <div className="mt-2 pl-7 text-xs text-muted-foreground">
           {row.description && <p>{row.description}</p>}
           <span className="mt-1 inline-block rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
-            OAuth
+            {row.auth_mode === "api_key" ? "API Key" : "OAuth"}
           </span>
         </div>
       )}

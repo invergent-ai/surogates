@@ -10,6 +10,7 @@ export interface ComposioConnections {
     logo?: string;
     category?: string;
     description?: string;
+    auth_mode?: string;
   }[];
 }
 
