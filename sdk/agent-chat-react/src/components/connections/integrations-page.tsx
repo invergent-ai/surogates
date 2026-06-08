@@ -1,4 +1,9 @@
-import { ChevronDownIcon, ChevronRightIcon, Loader2Icon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  Loader2Icon,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentChatAdapter } from "../../types";
 
@@ -175,9 +180,10 @@ export function IntegrationsPage({ agentId, adapter, onBack }: IntegrationsPageP
       <button
         type="button"
         onClick={onBack}
-        className="flex w-fit items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+        className="flex w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
       >
-        ← Back
+        <ArrowLeftIcon className="h-4 w-4" />
+        Back
       </button>
       <div>
         <h1 className="text-2xl font-bold text-foreground">Integrations</h1>
@@ -199,7 +205,7 @@ export function IntegrationsPage({ agentId, adapter, onBack }: IntegrationsPageP
       )}
       {grouped.map(([category, items]) => (
         <section key={category} className="flex flex-col gap-2">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground/70">
+          <h2 className="text-base font-semibold uppercase tracking-wide text-muted-foreground/70">
             {category}
           </h2>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -249,7 +255,7 @@ function ToolkitRow({
             <ChevronRightIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
           )}
           {broken || !row.logo ? (
-            <span className="inline-flex h-5 w-5 items-center justify-center rounded bg-muted text-[10px] font-semibold uppercase">
+            <span className="inline-flex h-5 w-5 items-center justify-center rounded bg-muted text-sm font-semibold uppercase">
               {name.charAt(0)}
             </span>
           ) : (
@@ -260,7 +266,7 @@ function ToolkitRow({
               onError={() => setBroken(true)}
             />
           )}
-          <span className="truncate text-sm font-medium text-foreground">
+          <span className="truncate font-medium text-foreground">
             {name}
           </span>
         </button>
@@ -285,9 +291,9 @@ function ToolkitRow({
         </button>
       </div>
       {open && (
-        <div className="mt-2 pl-7 text-xs text-muted-foreground">
+        <div className="mt-2 pl-7 text-sm text-muted-foreground">
           {row.description && <p>{row.description}</p>}
-          <span className="mt-1 inline-block rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+          <span className="mt-1 inline-block rounded bg-primary/10 px-1.5 py-0.5 text-sm font-semibold text-primary">
             {row.auth_mode === "api_key" ? "API Key" : "OAuth"}
           </span>
         </div>
