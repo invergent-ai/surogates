@@ -16,8 +16,10 @@ export function formatFileSize(bytes: number): string {
  *
  * MCP tools are emitted as ``mcp__{server}__{tool}`` (the server segment
  * itself may contain ``__``; the tool is always the final segment). We drop
- * the ``mcp__`` prefix and the server segments, then title-case the tool:
- * ``mcp__composio_tool_router__COMPOSIO_SEARCH_TOOLS`` → ``Composio Search Tools``.
+ * the ``mcp__`` prefix and the server segments, then title-case the tool.
+ * The Composio Tool Router's meta-tools carry a ``COMPOSIO_`` prefix; we
+ * strip that too so the Composio brand never surfaces in the UI:
+ * ``mcp__composio_tool_router__COMPOSIO_SEARCH_TOOLS`` becomes ``Search Tools``.
  *
  * Used by both Simple and Expert chat views so a tool reads the same in
  * either mode rather than leaking the raw prefixed name.
@@ -25,7 +27,10 @@ export function formatFileSize(bytes: number): string {
 export function formatMcpToolLabel(toolName: string): string {
   const segments = toolName.replace(/^mcp__/, "").split("__");
   const tool = segments[segments.length - 1] ?? toolName;
-  return tool
+  // Hide the Composio brand: drop a leading ``COMPOSIO_`` from the tool slug
+  // (the router's meta-tools), but never reduce the label to nothing.
+  const branded = tool.replace(/^composio_/i, "");
+  return (branded || tool)
     .split("_")
     .filter(Boolean)
     .map((p) => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase())

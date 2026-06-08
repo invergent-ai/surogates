@@ -2,12 +2,18 @@ import { describe, expect, it } from "vitest";
 import { formatMcpToolLabel } from "../src/lib/format";
 
 describe("formatMcpToolLabel", () => {
-  it("strips the mcp__{server}__ prefix and title-cases the tool", () => {
+  it("strips the mcp prefix, the server, and the Composio brand", () => {
     expect(
       formatMcpToolLabel(
         "mcp__composio_tool_router__COMPOSIO_SEARCH_TOOLS",
       ),
-    ).toBe("Composio Search Tools");
+    ).toBe("Search Tools");
+  });
+
+  it("drops the COMPOSIO_ prefix from every meta-tool", () => {
+    expect(
+      formatMcpToolLabel("mcp__composio_tool_router__COMPOSIO_MANAGE_CONNECTIONS"),
+    ).toBe("Manage Connections");
   });
 
   it("keeps only the final segment when the server name contains __", () => {
