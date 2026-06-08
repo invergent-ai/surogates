@@ -42,6 +42,7 @@ import { ChatComposer } from "./chat-composer";
 import { ResearchSourcesPanel } from "../research/research-sources-panel";
 import { TurnFeedback } from "./turn-feedback";
 import { useSmoothStream } from "./use-smooth-stream";
+import { formatMcpToolLabel } from "../../lib/format";
 import { stripAndParseNextAction } from "../../lib/next-action";
 import { ArtifactBlock } from "./artifacts/artifact-block";
 import { ErrorMessage } from "./error-message";
@@ -624,7 +625,11 @@ function cancelledToolLabel(toolName: string): string {
     research_memory: "Research",
     research_outline: "Research",
   };
-  return map[toolName] ?? toolName;
+  if (map[toolName]) return map[toolName];
+  // MCP tools arrive as `mcp__{server}__{tool}`; show a clean label rather
+  // than the raw prefixed name (matches the Expert-mode MCP renderer).
+  if (toolName.startsWith("mcp__")) return formatMcpToolLabel(toolName);
+  return toolName;
 }
 
 function CancelledToolRow({ tc }: { tc: ToolCallInfo }) {

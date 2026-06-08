@@ -9,6 +9,7 @@
 
 import { BookOpenIcon, EyeIcon, SearchIcon } from "lucide-react";
 import type { ToolCallInfo } from "../../../types";
+import { formatMcpToolLabel } from "../../../lib/format";
 import { parseArgs } from "./shared";
 
 // ── Session search ──────────────────────────────────────────────────
@@ -66,14 +67,10 @@ export function WebToolBlock({ tc }: { tc: ToolCallInfo }) {
 // ── MCP tools ───────────────────────────────────────────────────────
 
 export function MCPToolBlock({ tc }: { tc: ToolCallInfo }) {
-  // Tool names are emitted as `mcp__{server}__{tool}`. Split on the
-  // double-underscore separator; the last segment is the tool name.
-  const segments = tc.toolName.replace(/^mcp__/, "").split("__");
-  const toolName = segments[segments.length - 1] ?? tc.toolName;
-  const label = toolName
-    .split("_")
-    .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
-    .join(" ");
+  // Tool names are emitted as `mcp__{server}__{tool}`; render a clean,
+  // title-cased label shared with the Simple-mode thread so the same tool
+  // reads identically in either view.
+  const label = formatMcpToolLabel(tc.toolName);
 
   let summary = "";
   try {
