@@ -3,7 +3,14 @@
 import { authFetch } from "./auth";
 
 export interface ComposioConnections {
-  toolkits: { toolkit: string; connected: boolean }[];
+  toolkits: {
+    toolkit: string;
+    connected: boolean;
+    name?: string;
+    logo?: string;
+    category?: string;
+    description?: string;
+  }[];
 }
 
 export async function listComposioConnections(): Promise<ComposioConnections> {
@@ -27,4 +34,15 @@ export async function authorizeComposioToolkit(
   }
   const j = (await r.json()) as { redirect_url: string; status: string };
   return { redirectUrl: j.redirect_url, status: j.status };
+}
+
+export async function disconnectComposioToolkit(toolkit: string): Promise<void> {
+  const r = await authFetch(
+    `/api/v1/composio/toolkits/${encodeURIComponent(toolkit)}/connection`,
+    { method: "DELETE" },
+  );
+  if (!r.ok) {
+    const e = (await r.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(e?.detail ?? "Failed to disconnect toolkit");
+  }
 }

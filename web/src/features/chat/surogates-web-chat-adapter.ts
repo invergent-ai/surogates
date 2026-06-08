@@ -322,6 +322,10 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     return composioApi.authorizeComposioToolkit(toolkit);
   },
 
+  async disconnectComposioToolkit({ toolkit }) {
+    await composioApi.disconnectComposioToolkit(toolkit);
+  },
+
   // ---- Missions --------------------------------------------------------
   async listMissions(input) {
     const response = await missionsApi.listMissions({
