@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 from uuid import UUID
 
@@ -102,6 +103,31 @@ async def load_mcp_configs(
 
 
 COMPOSIO_SERVER_NAME = "composio-tool-router"
+
+# Strip the Composio brand from anything the model reads (tool names +
+# descriptions advertised to the LLM) so the agent never echoes it back to
+# the end user. Three forms, in order:
+#   1. ``COMPOSIO_`` tool-slug prefix (e.g. COMPOSIO_SEARCH_TOOLS) — also
+#      rewrites the cross-references inside descriptions so they keep
+#      pointing at the (now debranded) tool names.
+#   2. ``composio_`` / ``composio-`` server-slug fragments (composio-tool-router).
+#   3. The capitalised brand word in prose ("Composio connects 500+ apps…").
+# Lowercase standalone ``composio`` is intentionally left alone so functional
+# URLs (connect.composio.dev) in tool *results* are never corrupted.
+_DEBRAND_PATTERNS = (
+    (re.compile(r"COMPOSIO_"), ""),
+    (re.compile(r"composio[_-]"), ""),
+    (re.compile(r"\bComposio\b ?"), ""),
+)
+
+
+def debrand_composio_text(text: str) -> str:
+    """Remove Composio branding from model-facing tool names / descriptions."""
+    if not text:
+        return text
+    for pattern, repl in _DEBRAND_PATTERNS:
+        text = pattern.sub(repl, text)
+    return text
 
 
 async def apply_composio_minting(

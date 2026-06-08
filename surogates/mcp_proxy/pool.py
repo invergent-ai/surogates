@@ -26,7 +26,10 @@ from surogates.audit import (
     rug_pull_event,
 )
 from surogates.governance.mcp_scanner import MCPGovernance, _fingerprint
-from surogates.mcp_proxy.loader import COMPOSIO_SERVER_NAME
+from surogates.mcp_proxy.loader import (
+    COMPOSIO_SERVER_NAME,
+    debrand_composio_text,
+)
 from surogates.tools.mcp.client import (
     _MCP_AVAILABLE,
     _lock,
@@ -365,6 +368,17 @@ class ConnectionPool:
                         is_service_account=is_service_account,
                     ):
                         continue  # unsafe or rug-pulled — exclude from advertised set
+
+                    # Debrand the Composio router's advertised name + description
+                    # so the model never reads (and then echoes) the brand. The
+                    # reverse-route below keeps using the real upstream tool name
+                    # (``original_tool``), so calls still reach Composio.
+                    if is_trusted_server:
+                        clean["name"] = debrand_composio_text(clean_name)
+                        clean["description"] = debrand_composio_text(
+                            clean.get("description", ""),
+                        )
+                        clean_name = clean["name"]
 
                 clean_schemas.append(clean)
                 if owning_server_key is not None:

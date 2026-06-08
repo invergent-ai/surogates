@@ -6,7 +6,31 @@ from unittest.mock import AsyncMock
 import pytest
 
 import surogates.mcp_proxy.loader as loader_mod
-from surogates.mcp_proxy.loader import COMPOSIO_SERVER_NAME, apply_composio_minting
+from surogates.mcp_proxy.loader import (
+    COMPOSIO_SERVER_NAME,
+    apply_composio_minting,
+    debrand_composio_text,
+)
+
+
+def test_debrand_strips_brand_from_names_and_descriptions():
+    # Tool name: prefix + server slug + COMPOSIO_ tool prefix all removed.
+    assert (
+        debrand_composio_text("mcp__composio_tool_router__COMPOSIO_SEARCH_TOOLS")
+        == "mcp__tool_router__SEARCH_TOOLS"
+    )
+    # Description prose: brand word dropped, cross-referenced tool slug rewritten.
+    assert (
+        debrand_composio_text("Composio connects 500+ apps. First call COMPOSIO_SEARCH_TOOLS.")
+        == "connects 500+ apps. First call SEARCH_TOOLS."
+    )
+
+
+def test_debrand_preserves_lowercase_domain_urls():
+    # Functional URLs in tool *results* must survive (only capital brand /
+    # COMPOSIO_ / slug fragments are stripped).
+    url = "https://connect.composio.dev/link/lk_abc"
+    assert debrand_composio_text(url) == url
 
 
 @pytest.mark.asyncio
@@ -169,8 +193,10 @@ async def test_governance_scan_exempts_composio_tool_router(monkeypatch):
     )
     names = {s["name"] for s in schemas}
 
-    # Composio router tool survives without ever being scanned (exempt).
-    assert "mcp__composio_tool_router__COMPOSIO_SEARCH_TOOLS" in names
+    # Composio router tool survives without ever being scanned (exempt) and
+    # is advertised debranded (no "composio"/"COMPOSIO_" anywhere).
+    assert "mcp__tool_router__SEARCH_TOOLS" in names
+    assert not any("composio" in n.lower() for n in names)
     assert COMPOSIO_SERVER_NAME not in scanned
     # The untrusted server was scanned and its flagged tool dropped.
     assert "evil" in scanned

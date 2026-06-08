@@ -18,7 +18,11 @@ from pydantic import BaseModel
 
 from surogates.audit import AuditStore, AuditType
 from surogates.mcp_proxy.auth import ProxyAuthContext, get_proxy_auth
-from surogates.mcp_proxy.loader import load_mcp_configs
+from surogates.mcp_proxy.loader import (
+    COMPOSIO_SERVER_NAME,
+    debrand_composio_text,
+    load_mcp_configs,
+)
 from surogates.mcp_proxy.pool import ConnectionPool
 from surogates.mcp_proxy.sandbox import MCPCallSandbox
 from surogates.runtime import (
@@ -266,6 +270,13 @@ async def call_tool(
                     "Failed to emit POLICY_MCP_CALL audit",
                     exc_info=True,
                 )
+
+    # Strip the Composio brand from the router's tool output too, so the
+    # model never reads (and echoes) it. ``debrand_composio_text`` leaves
+    # lowercase ``composio.dev`` URLs intact, so OAuth redirect links in
+    # connection-management results keep working.
+    if server_name == COMPOSIO_SERVER_NAME:
+        result_text = debrand_composio_text(result_text)
 
     envelope_error = _error_envelope_message(result_text)
     if envelope_error is not None:
