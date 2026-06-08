@@ -1,4 +1,4 @@
-import { Loader2Icon } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon, Loader2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentChatAdapter } from "../../types";
 
@@ -243,7 +243,11 @@ function ToolkitRow({
           onClick={() => setOpen((v) => !v)}
           className="flex min-w-0 flex-1 items-center gap-2 text-left"
         >
-          <span className="text-muted-foreground/60">{open ? "▾" : "›"}</span>
+          {open ? (
+            <ChevronDownIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRightIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+          )}
           {broken || !row.logo ? (
             <span className="inline-flex h-5 w-5 items-center justify-center rounded bg-muted text-[10px] font-semibold uppercase">
               {name.charAt(0)}
