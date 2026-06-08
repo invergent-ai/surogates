@@ -1,3 +1,4 @@
+import { LinkIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { AgentChatAdapter } from "../../types";
 
@@ -56,10 +57,11 @@ export function IntegrationsBand({
     <button
       type="button"
       onClick={onOpenIntegrations}
-      className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent/40 transition-colors"
+      className="mx-2 mb-2 flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-xs text-muted-foreground transition-colors hover:bg-accent/40"
     >
+      <LinkIcon className="h-3.5 w-3.5 shrink-0" />
       <span className="font-medium">Connect your integrations</span>
-      <span className="ml-auto flex items-center gap-1">
+      <span className="ml-auto flex items-center gap-1.5">
         {connected.map((r) => (
           <Logo key={r.toolkit} row={r} />
         ))}
