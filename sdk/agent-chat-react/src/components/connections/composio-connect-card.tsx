@@ -1,5 +1,6 @@
 import { PlugZapIcon } from "lucide-react";
 import { openOAuthPopup } from "../../lib/oauth-popup";
+import { Button } from "../ui/button";
 
 export interface ComposioConnectCardProps {
   /** The Composio hosted connect URL (connect.composio.dev/link/…). */
@@ -33,13 +34,14 @@ export function ComposioConnectCard({ url, label }: ComposioConnectCardProps) {
           Authorize your {name} account to continue.
         </span>
       </span>
-      <button
+      <Button
         type="button"
+        size="xs"
         onClick={() => openOAuthPopup(url)}
-        className="ml-auto shrink-0 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+        className="ml-auto shrink-0"
       >
         Connect
-      </button>
+      </Button>
     </span>
   );
 }
