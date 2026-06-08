@@ -99,6 +99,48 @@ describe("IntegrationsPage", () => {
     openSpy.mockRestore();
   });
 
+  it("polls after connect and closes the popup once connected", async () => {
+    vi.useFakeTimers();
+    try {
+      const closeSpy = vi.fn();
+      const popup = { closed: false, close: closeSpy } as unknown as Window;
+      vi.spyOn(window, "open").mockReturnValue(popup);
+      let connected = false;
+      const a = adapter({
+        listComposioConnections: vi.fn().mockImplementation(async () => ({
+          toolkits: [
+            {
+              toolkit: "gmail",
+              connected,
+              name: "Gmail",
+              logo: "https://l/gm",
+              category: "Email",
+            },
+          ],
+        })),
+      });
+      render(a);
+      await flush();
+
+      const btn = Array.from(container?.querySelectorAll("button") ?? []).find(
+        (b) => b.textContent?.trim() === "Connect",
+      );
+      await act(async () => {
+        btn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flush(); // authorize resolves, popup opened, poll scheduled
+
+      // The provider OAuth completes; the next poll sees it connected.
+      connected = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(closeSpy).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("disconnect calls the adapter and refreshes", async () => {
     const a = adapter();
     render(a);

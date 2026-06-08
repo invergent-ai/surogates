@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentChatAdapter } from "../../types";
 
 interface Row {
@@ -17,10 +17,14 @@ export interface IntegrationsPageProps {
 }
 
 /**
- * Open the provider OAuth URL in a centered popup window (not a new tab).
- * Falls back to a normal navigation if the popup is blocked.
+ * Open the provider OAuth URL in a centered popup window (not a new tab) and
+ * return the window handle so the caller can poll ``closed`` and ``close()``
+ * it once the connection completes. ``noopener`` is intentionally omitted —
+ * it would force ``window.open`` to return ``null`` (no handle); the popup
+ * only ever navigates to the trusted Composio connect domain.
+ * Returns ``null`` when the popup is blocked (caller falls back to a tab).
  */
-function openOAuthPopup(url: string): void {
+function openOAuthPopup(url: string): Window | null {
   const w = 600;
   const h = 720;
   const dualLeft = window.screenLeft ?? window.screenX ?? 0;
@@ -30,13 +34,19 @@ function openOAuthPopup(url: string): void {
     window.innerHeight || document.documentElement.clientHeight || h;
   const left = dualLeft + Math.max(0, (width - w) / 2);
   const top = dualTop + Math.max(0, (height - h) / 2);
-  const features = `popup=yes,width=${w},height=${h},left=${left},top=${top},noopener,noreferrer`;
+  const features = `popup=yes,width=${w},height=${h},left=${left},top=${top}`;
   const popup = window.open(url, "composio-oauth", features);
   if (!popup) {
     // Popup blocked — fall back so the flow still completes.
     window.open(url, "_blank", "noopener,noreferrer");
   }
+  return popup;
 }
+
+const POLL_INTERVAL_MS = 2000;
+const POLL_TIMEOUT_MS = 180_000;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function titleCase(slug: string): string {
   return slug
@@ -56,6 +66,15 @@ export function IntegrationsPage({ agentId, adapter, onBack }: IntegrationsPageP
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Lets the detached connection poll stop touching state after unmount.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const refresh = useCallback(async () => {
     if (!adapter.listComposioConnections) return;
@@ -85,6 +104,34 @@ export function IntegrationsPage({ agentId, adapter, onBack }: IntegrationsPageP
     return Array.from(byCat.entries());
   }, [rows, query]);
 
+  // Poll connection status until the toolkit reports connected, the popup is
+  // closed by the user, or we time out — then refresh the page so the row
+  // flips to Connected without a manual reload, and close the popup.
+  const waitForConnection = async (toolkit: string, popup: Window | null) => {
+    if (!adapter.listComposioConnections) return;
+    const deadline = Date.now() + POLL_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await sleep(POLL_INTERVAL_MS);
+      if (!mountedRef.current) return;
+      let toolkits: Row[] | null = null;
+      try {
+        const res = await adapter.listComposioConnections({ agentId });
+        toolkits = res.toolkits;
+        if (!mountedRef.current) return;
+        setRows(res.toolkits);
+      } catch {
+        // Transient error — keep polling.
+      }
+      const connected = toolkits?.find((t) => t.toolkit === toolkit)?.connected;
+      if (connected) {
+        popup?.close();
+        return;
+      }
+      // User closed the popup (we already refreshed above); stop polling.
+      if (popup?.closed) return;
+    }
+  };
+
   const connect = async (toolkit: string) => {
     if (!adapter.authorizeComposioToolkit) return;
     setBusy(toolkit);
@@ -94,7 +141,11 @@ export function IntegrationsPage({ agentId, adapter, onBack }: IntegrationsPageP
         agentId,
         toolkit,
       });
-      if (redirectUrl) openOAuthPopup(redirectUrl);
+      const popup = redirectUrl ? openOAuthPopup(redirectUrl) : null;
+      // Detached: poll in the background so the button frees up immediately
+      // and the row flips to Connected (with the popup auto-closed) as soon
+      // as the OAuth handshake completes — no manual refresh/close needed.
+      void waitForConnection(toolkit, popup);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to start the connection");
     } finally {
