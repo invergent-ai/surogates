@@ -75,7 +75,9 @@ describe("IntegrationsPage", () => {
 
   it("connect opens the redirect", async () => {
     const a = adapter();
-    const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
+    const openSpy = vi
+      .spyOn(window, "open")
+      .mockReturnValue({} as Window);
     render(a);
     await flush();
     const btn = Array.from(container?.querySelectorAll("button") ?? []).find(

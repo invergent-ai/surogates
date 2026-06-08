@@ -16,6 +16,28 @@ export interface IntegrationsPageProps {
   onBack: () => void;
 }
 
+/**
+ * Open the provider OAuth URL in a centered popup window (not a new tab).
+ * Falls back to a normal navigation if the popup is blocked.
+ */
+function openOAuthPopup(url: string): void {
+  const w = 600;
+  const h = 720;
+  const dualLeft = window.screenLeft ?? window.screenX ?? 0;
+  const dualTop = window.screenTop ?? window.screenY ?? 0;
+  const width = window.innerWidth || document.documentElement.clientWidth || w;
+  const height =
+    window.innerHeight || document.documentElement.clientHeight || h;
+  const left = dualLeft + Math.max(0, (width - w) / 2);
+  const top = dualTop + Math.max(0, (height - h) / 2);
+  const features = `popup=yes,width=${w},height=${h},left=${left},top=${top},noopener,noreferrer`;
+  const popup = window.open(url, "composio-oauth", features);
+  if (!popup) {
+    // Popup blocked — fall back so the flow still completes.
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
+
 function titleCase(slug: string): string {
   return slug
     .split(/[_-]/)
@@ -72,7 +94,7 @@ export function IntegrationsPage({ agentId, adapter, onBack }: IntegrationsPageP
         agentId,
         toolkit,
       });
-      if (redirectUrl) window.open(redirectUrl, "_blank", "noopener,noreferrer");
+      if (redirectUrl) openOAuthPopup(redirectUrl);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to start the connection");
     } finally {
