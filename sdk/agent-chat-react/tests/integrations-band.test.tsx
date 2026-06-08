@@ -40,7 +40,7 @@ function render(a: unknown, onOpen = vi.fn()) {
 }
 
 describe("IntegrationsBand", () => {
-  it("renders connected logos and the prompt, and fires onOpenIntegrations", async () => {
+  it("renders all toolkit logos and the prompt, and fires onOpenIntegrations", async () => {
     const onOpen = render(
       adapter([
         { toolkit: "github", connected: true, name: "GitHub", logo: "https://l/gh" },
@@ -49,8 +49,8 @@ describe("IntegrationsBand", () => {
     );
     await flush();
     expect(container?.textContent).toContain("Connect your integrations");
-    const imgs = container?.querySelectorAll("img") ?? [];
-    expect(imgs.length).toBe(1); // only connected (github)
+    const imgs = Array.from(container?.querySelectorAll("img") ?? []);
+    expect(imgs.length).toBe(2); // both shown — connected + unconnected
     container
       ?.querySelector("button")
       ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));

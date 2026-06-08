@@ -51,7 +51,9 @@ export function IntegrationsBand({
   // null = not loaded yet; [] = loaded, agent has no toolkits.
   if (!supported || rows === null || rows.length === 0) return null;
 
-  const connected = rows.filter((r) => r.connected).slice(0, MAX_LOGOS);
+  // Show every assigned toolkit's logo (connected ones full-colour,
+  // unconnected ones dimmed) so the strip always previews what's available.
+  const shown = rows.slice(0, MAX_LOGOS);
 
   return (
     <button
@@ -62,7 +64,7 @@ export function IntegrationsBand({
       <LinkIcon className="h-3.5 w-3.5 shrink-0" />
       <span className="font-medium">Connect your integrations</span>
       <span className="ml-auto flex items-center gap-1.5">
-        {connected.map((r) => (
+        {shown.map((r) => (
           <Logo key={r.toolkit} row={r} />
         ))}
         <ChevronRightIcon
