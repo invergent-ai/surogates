@@ -57,7 +57,7 @@ export function IntegrationsBand({
     <button
       type="button"
       onClick={onOpenIntegrations}
-      className="mx-2 mb-2 flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-xs text-muted-foreground transition-colors hover:bg-accent/40"
+      className="mt-2 flex w-full items-center gap-2 rounded-xl border border-border bg-card px-4 py-2.5 text-xs text-muted-foreground transition-colors hover:bg-accent/40"
     >
       <LinkIcon className="h-3.5 w-3.5 shrink-0" />
       <span className="font-medium">Connect your integrations</span>
