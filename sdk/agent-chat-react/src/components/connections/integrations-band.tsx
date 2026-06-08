@@ -1,4 +1,4 @@
-import { LinkIcon } from "lucide-react";
+import { ChevronRightIcon, LinkIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { AgentChatAdapter } from "../../types";
 
@@ -65,9 +65,10 @@ export function IntegrationsBand({
         {connected.map((r) => (
           <Logo key={r.toolkit} row={r} />
         ))}
-        <span aria-hidden className="text-muted-foreground/60">
-          ›
-        </span>
+        <ChevronRightIcon
+          aria-hidden
+          className="h-3.5 w-3.5 text-muted-foreground/60"
+        />
       </span>
     </button>
   );
