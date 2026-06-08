@@ -2171,8 +2171,8 @@ export function ChatThread({
     return (
       <div className="flex flex-1 flex-col items-center justify-center overflow-hidden bg-background px-3 text-base">
         <div className="w-full">
-          <h2 className="mb-5 text-center text-2xl font-bold text-foreground">
-            Start a conversation
+          <h2 className="mb-8 text-center text-2xl font-bold text-foreground">
+            What should we do ?
           </h2>
           {composerArea}
         </div>
