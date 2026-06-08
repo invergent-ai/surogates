@@ -2124,6 +2124,62 @@ export function ChatThread({
     return null;
   }, [messages]);
 
+  const composerArea = (
+    <div className="mx-auto w-full max-w-4xl px-3 sm:px-6 pb-3 sm:pb-5 pt-3">
+      {retryIndicator && (
+        <div className="mb-2">
+          <RetryBanner indicator={retryIndicator} />
+        </div>
+      )}
+      {researchSources.length > 0 && (
+        <div className="mb-2">
+          <ResearchSourcesPanel sources={researchSources} />
+        </div>
+      )}
+      <ChatComposer
+        onSend={onSend}
+        onStop={onStop}
+        isRunning={isRunning}
+        disabled={composerDisabled}
+        disabledReason={composerDisabledReason}
+        tokenUsage={tokenUsage}
+        onComposerError={onComposerError}
+        showBrowser={showBrowser}
+        onToggleBrowser={onToggleBrowser}
+        showWorkspace={showWorkspace}
+        onToggleWorkspace={onToggleWorkspace}
+        canShowBrowser={canShowBrowser}
+        canShowWorkspace={canShowWorkspace}
+        viewMode={viewMode}
+        onViewModeChange={onViewModeChange}
+        deepResearchEnabled={deepResearchEnabled}
+      />
+      {onOpenIntegrations && (
+        <IntegrationsBandSlot
+          agentId={agentId}
+          onOpenIntegrations={onOpenIntegrations}
+        />
+      )}
+    </div>
+  );
+
+  // Empty, ready-to-start session: center the title + composer vertically
+  // rather than pinning the composer to the bottom of a blank thread. Only
+  // when there's nothing to show (no history loading, not a disabled/read-only
+  // session) — otherwise fall through to the normal scroll-thread layout.
+  if (messages.length === 0 && !isLoadingHistory && !disabled) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center overflow-hidden bg-background px-3 text-base">
+        <div className="w-full">
+          <h2 className="mb-5 text-center text-2xl font-bold text-foreground">
+            Start a conversation
+          </h2>
+          {composerArea}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-1 flex-col overflow-hidden bg-background text-base">
       <Conversation className="relative flex-1 min-h-0">
@@ -2133,12 +2189,6 @@ export function ChatThread({
               icon={<MessageSquareIcon className="size-8 opacity-40" />}
               title="Loading conversation"
               description="Fetching the session history."
-            />
-          ) : messages.length === 0 && !disabled ? (
-            <ConversationEmptyState
-              icon={<MessageSquareIcon className="size-8 opacity-40" />}
-              title="Start a conversation"
-              description="Ask me anything — I can search, analyze, write code, and more."
             />
           ) : (
             <>
@@ -2204,42 +2254,7 @@ export function ChatThread({
         <ConversationScrollButton />
       </Conversation>
 
-      <div className="mx-auto w-full max-w-4xl px-3 sm:px-6 pb-3 sm:pb-5 pt-3">
-        {retryIndicator && (
-          <div className="mb-2">
-            <RetryBanner indicator={retryIndicator} />
-          </div>
-        )}
-        {researchSources.length > 0 && (
-          <div className="mb-2">
-            <ResearchSourcesPanel sources={researchSources} />
-          </div>
-        )}
-        <ChatComposer
-          onSend={onSend}
-          onStop={onStop}
-          isRunning={isRunning}
-          disabled={composerDisabled}
-          disabledReason={composerDisabledReason}
-          tokenUsage={tokenUsage}
-          onComposerError={onComposerError}
-          showBrowser={showBrowser}
-          onToggleBrowser={onToggleBrowser}
-          showWorkspace={showWorkspace}
-          onToggleWorkspace={onToggleWorkspace}
-          canShowBrowser={canShowBrowser}
-          canShowWorkspace={canShowWorkspace}
-          viewMode={viewMode}
-          onViewModeChange={onViewModeChange}
-          deepResearchEnabled={deepResearchEnabled}
-        />
-        {onOpenIntegrations && (
-          <IntegrationsBandSlot
-            agentId={agentId}
-            onOpenIntegrations={onOpenIntegrations}
-          />
-        )}
-      </div>
+      {composerArea}
     </div>
   );
 }
