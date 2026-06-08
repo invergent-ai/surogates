@@ -63,3 +63,23 @@ async def authorize_composio_toolkit(
         except Exception:  # noqa: BLE001 — best-effort detail passthrough
             pass
         raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
+
+
+@router.delete("/composio/toolkits/{toolkit}/connection")
+async def disconnect_composio_toolkit(
+    toolkit: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+    ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+) -> dict:
+    user_id = _require_end_user(tenant, ctx)
+    pc = request.app.state.platform_client
+    try:
+        return await pc.composio_disconnect(ctx.agent_id, user_id, toolkit)
+    except httpx.HTTPStatusError as exc:
+        detail = "composio disconnect failed"
+        try:
+            detail = exc.response.json().get("detail", detail)
+        except Exception:  # noqa: BLE001 — best-effort detail passthrough
+            pass
+        raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc

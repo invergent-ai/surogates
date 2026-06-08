@@ -258,5 +258,25 @@ class PlatformClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def composio_disconnect(
+        self, agent_id: str, user_id: str, toolkit: str,
+    ) -> dict:
+        """Remove the end-user's connected account for a toolkit.
+
+        Returns ``{"disconnected": <count>}``. Raises ``httpx.HTTPStatusError``
+        on 4xx/5xx except 401 which becomes :class:`PlatformAuthError`.
+        """
+        resp = await self._client.delete(
+            f"/api/agents/agents/{agent_id}/composio/connections/{toolkit}",
+            params={"user_id": user_id},
+        )
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
     async def aclose(self) -> None:
         await self._client.aclose()

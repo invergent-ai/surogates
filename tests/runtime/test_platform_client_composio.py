@@ -95,3 +95,27 @@ async def test_composio_authorize_posts_user_and_toolkit():
     assert seen["url"] == "http://ops.internal/api/agents/agents/agent-1/composio/authorize"
     assert seen["body"] == {"user_id": "u-9", "toolkit": "github"}
     assert out["redirect_url"] == "https://p/oauth"
+
+
+@pytest.mark.asyncio
+async def test_composio_disconnect_calls_delete():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["url"] = str(request.url)
+        return httpx.Response(200, json={"disconnected": 2})
+
+    client = PlatformClient(
+        base_url="http://ops.internal", token="t",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        out = await client.composio_disconnect("agent-1", "u-9", "gmail")
+    finally:
+        await client.aclose()
+    assert out == {"disconnected": 2}
+    assert seen["method"] == "DELETE"
+    assert seen["url"] == (
+        "http://ops.internal/api/agents/agents/agent-1/composio/connections/gmail?user_id=u-9"
+    )

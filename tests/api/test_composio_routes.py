@@ -31,6 +31,10 @@ class _FakePC:
         self.calls.append(("authorize", agent_id, user_id, toolkit))
         return {"redirect_url": "https://p/oauth", "connection_request_id": "cr_1", "status": "INITIATED"}
 
+    async def composio_disconnect(self, agent_id, user_id, toolkit):
+        self.calls.append(("disconnect", agent_id, user_id, toolkit))
+        return {"disconnected": 1}
+
 
 def _make_app(*, tenant, ctx, pc):
     app = FastAPI()
@@ -71,6 +75,16 @@ async def test_authorize_forwards_toolkit():
     assert r.status_code == 200, r.text
     assert r.json()["redirect_url"] == "https://p/oauth"
     assert pc.calls[0] == ("authorize", "agent-1", str(USER), "github")
+
+
+async def test_disconnect_route_forwards_to_platform_client():
+    pc = _FakePC()
+    app = _make_app(tenant=_tenant(), ctx=_ctx(), pc=pc)
+    async with _client(app) as client:
+        r = await client.request("DELETE", "/v1/composio/toolkits/gmail/connection")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"disconnected": 1}
+    assert pc.calls[0] == ("disconnect", "agent-1", str(USER), "gmail")
 
 
 async def test_rejects_when_no_tenant_user():
