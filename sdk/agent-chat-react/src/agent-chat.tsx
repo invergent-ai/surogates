@@ -39,6 +39,12 @@ export interface AgentChatProps {
    * that domain.
    */
   deepResearchEnabled?: boolean;
+  /**
+   * Called when the user clicks the integrations band under the composer.
+   * Hosts navigate to their Integrations route. When omitted, the band is
+   * not rendered.
+   */
+  onOpenIntegrations?: () => void;
 }
 
 // CSS variable controlling the desktop right-stack width. Inlined as a style
