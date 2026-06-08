@@ -1,4 +1,4 @@
-import { ChevronRightIcon, LinkIcon } from "lucide-react";
+import { ChevronRightIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { AgentChatAdapter } from "../../types";
 
@@ -56,12 +56,12 @@ export function IntegrationsBand({
   const shown = rows.slice(0, MAX_LOGOS);
 
   return (
+    <div className="px-5">
     <button
       type="button"
       onClick={onOpenIntegrations}
-      className="mt-2 flex w-full items-center gap-2 rounded-xl border border-border bg-card px-4 py-2.5 text-xs text-muted-foreground transition-colors hover:bg-accent/40"
+      className="flex w-full items-center gap-2 border border-border border-t-0 rounded-b-lg px-4 py-2.5 text-xs text-muted-foreground transition-colors hover:bg-accent/40 cursor-pointer"
     >
-      <LinkIcon className="h-3.5 w-3.5 shrink-0" />
       <span className="font-medium">Connect your integrations</span>
       <span className="ml-auto flex items-center gap-1.5">
         {shown.map((r) => (
@@ -73,6 +73,7 @@ export function IntegrationsBand({
         />
       </span>
     </button>
+    </div>
   );
 }
 
