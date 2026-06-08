@@ -39,6 +39,8 @@ import { parseTerminalResult } from "./tools/terminal-tool";
 import { statusColorClass, effectiveStatus, toolErrorSummary, parseArgs } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
 import { ChatComposer } from "./chat-composer";
+import { IntegrationsBand } from "../connections/integrations-band";
+import { useAgentChatAdapterContext } from "../../adapter-context";
 import { ResearchSourcesPanel } from "../research/research-sources-panel";
 import { TurnFeedback } from "./turn-feedback";
 import { useSmoothStream } from "./use-smooth-stream";
@@ -140,6 +142,12 @@ interface ChatThreadProps {
   // takes screen real estate without serving anyone.  Set by
   // ``AgentChat`` from the existing ``isSubAgentSession`` helper.
   hideTurnSummary?: boolean;
+
+  // Composio integrations band, rendered under the composer. The band
+  // opens the host's Integrations route via ``onOpenIntegrations``;
+  // ``agentId`` scopes the connection lookup. Both omitted -> no band.
+  agentId?: string;
+  onOpenIntegrations?: () => void;
 }
 
 // ── Timeline item types ──────────────────────────────────────────────
@@ -2044,6 +2052,8 @@ export function ChatThread({
   deepResearchEnabled = false,
   researchSources = [],
   hideTurnSummary = false,
+  agentId,
+  onOpenIntegrations,
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
   const awaitingInput = useMemo(() => isAwaitingUserInput(messages), [messages]);
@@ -2223,7 +2233,35 @@ export function ChatThread({
           onViewModeChange={onViewModeChange}
           deepResearchEnabled={deepResearchEnabled}
         />
+        {onOpenIntegrations && (
+          <IntegrationsBandSlot
+            agentId={agentId}
+            onOpenIntegrations={onOpenIntegrations}
+          />
+        )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Pulls the adapter from context so ChatThread can render the integrations
+ * band without receiving the adapter as a prop. Renders nothing unless the
+ * adapter supports the Composio methods (handled inside IntegrationsBand).
+ */
+function IntegrationsBandSlot({
+  agentId,
+  onOpenIntegrations,
+}: {
+  agentId?: string;
+  onOpenIntegrations: () => void;
+}) {
+  const { adapter } = useAgentChatAdapterContext();
+  return (
+    <IntegrationsBand
+      agentId={agentId}
+      adapter={adapter}
+      onOpenIntegrations={onOpenIntegrations}
+    />
   );
 }

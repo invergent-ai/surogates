@@ -8,8 +8,10 @@ export {
   useChatViewMode,
 } from "./runtime/use-agent-chat-runtime";
 export { MessageResponse } from "./components/ai-elements/message";
-export { ConnectionsPanel } from "./components/connections/connections-panel";
-export type { ConnectionsPanelProps } from "./components/connections/connections-panel";
+export { IntegrationsBand } from "./components/connections/integrations-band";
+export type { IntegrationsBandProps } from "./components/connections/integrations-band";
+export { IntegrationsPage } from "./components/connections/integrations-page";
+export type { IntegrationsPageProps } from "./components/connections/integrations-page";
 export { InboxPanel } from "./components/inbox/inbox-panel";
 export { useInboxUnreadCount } from "./components/inbox/use-inbox-unread-count";
 export { MissionDashboard } from "./components/missions/mission-dashboard";
