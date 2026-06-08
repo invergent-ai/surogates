@@ -8,6 +8,8 @@ export {
   useChatViewMode,
 } from "./runtime/use-agent-chat-runtime";
 export { MessageResponse } from "./components/ai-elements/message";
+export { ComposioConnectCard } from "./components/connections/composio-connect-card";
+export type { ComposioConnectCardProps } from "./components/connections/composio-connect-card";
 export { IntegrationsBand } from "./components/connections/integrations-band";
 export type { IntegrationsBandProps } from "./components/connections/integrations-band";
 export { IntegrationsPage } from "./components/connections/integrations-page";

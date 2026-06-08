@@ -18,7 +18,12 @@ import { math } from "@streamdown/math";
 import { mermaid } from "@streamdown/mermaid";
 import type { UIMessage } from "ai";
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
-import type { ComponentProps, HTMLAttributes, ReactElement } from "react";
+import type {
+  ComponentProps,
+  HTMLAttributes,
+  ReactElement,
+  ReactNode,
+} from "react";
 import {
   createContext,
   memo,
@@ -29,6 +34,8 @@ import {
   useState,
 } from "react";
 import { Streamdown } from "streamdown";
+import { ComposioConnectCard } from "../connections/composio-connect-card";
+import { isComposioConnectUrl } from "../../lib/oauth-popup";
 
 export type MessageProps = HTMLAttributes<HTMLDivElement> & {
   from: UIMessage["role"];
@@ -323,6 +330,32 @@ export type MessageResponseProps = ComponentProps<typeof Streamdown>;
 
 const streamdownPlugins = { cjk, code, math, mermaid };
 
+function anchorText(children: ReactNode): string {
+  if (typeof children === "string") return children;
+  if (Array.isArray(children)) {
+    return children.filter((c) => typeof c === "string").join("");
+  }
+  return "";
+}
+
+// Render Composio hosted connect links (``connect.composio.dev/link/…``) as a
+// tidy Connect card instead of a bare hyperlink; everything else is a normal
+// new-tab anchor.
+const streamdownComponents = {
+  a: ({ href, children, ...props }: ComponentProps<"a">) => {
+    if (isComposioConnectUrl(href)) {
+      return (
+        <ComposioConnectCard url={href as string} label={anchorText(children)} />
+      );
+    }
+    return (
+      <a href={href} target="_blank" rel="noreferrer" {...props}>
+        {children}
+      </a>
+    );
+  },
+};
+
 export const MessageResponse = memo(
   ({ className, ...props }: MessageResponseProps) => (
     <Streamdown
@@ -331,6 +364,7 @@ export const MessageResponse = memo(
         className
       )}
       plugins={streamdownPlugins}
+      components={streamdownComponents}
       {...props}
     />
   ),
