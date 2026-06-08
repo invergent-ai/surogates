@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 from uuid import UUID
 
@@ -53,6 +54,7 @@ async def load_mcp_configs(
     allowed_ids: frozenset[str],
     is_service_account: bool = False,
     agent_id: str | None = None,
+    platform_client: Any | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Load, merge, and credential-resolve MCP server configs.
 
@@ -91,6 +93,103 @@ async def load_mcp_configs(
     if resolve_tasks:
         await asyncio.gather(*resolve_tasks)
 
+    # Composio Tool Router servers are minted per end-user by ops, after
+    # (and independent of) vault credential resolution above.
+    merged = await apply_composio_minting(
+        merged, platform_client=platform_client, agent_id=agent_id, user_id=user_id,
+    )
+
+    return merged
+
+
+COMPOSIO_SERVER_NAME = "composio-tool-router"
+
+# Strip the Composio brand from anything the model reads (tool names +
+# descriptions advertised to the LLM) so the agent never echoes it back to
+# the end user. Three forms, in order:
+#   1. ``COMPOSIO_`` tool-slug prefix (e.g. COMPOSIO_SEARCH_TOOLS) — also
+#      rewrites the cross-references inside descriptions so they keep
+#      pointing at the (now debranded) tool names.
+#   2. ``composio_`` / ``composio-`` server-slug fragments (composio-tool-router).
+#   3. The capitalised brand word in prose ("Composio connects 500+ apps…").
+# Lowercase standalone ``composio`` is intentionally left alone so functional
+# URLs (connect.composio.dev) in tool *results* are never corrupted.
+_DEBRAND_PATTERNS = (
+    (re.compile(r"COMPOSIO_"), ""),
+    (re.compile(r"composio[_-]"), ""),
+    (re.compile(r"\bComposio\b ?"), ""),
+)
+
+
+def debrand_composio_text(text: str) -> str:
+    """Remove Composio branding from model-facing tool names / descriptions."""
+    if not text:
+        return text
+    for pattern, repl in _DEBRAND_PATTERNS:
+        text = pattern.sub(repl, text)
+    return text
+
+
+async def apply_composio_minting(
+    configs: dict[str, dict[str, Any]],
+    *,
+    platform_client: Any | None,
+    agent_id: str | None,
+    user_id: Any,
+) -> dict[str, dict[str, Any]]:
+    """Replace ``composio``-transport placeholders with one minted HTTP server.
+
+    Composio Tool Router URLs + headers are minted per end-user by ops
+    for this agent; they are NOT vault-backed, so this runs after
+    credential resolution and the returned headers are used verbatim.
+    The headers carry the Composio ``x-api-key`` — never log this dict.
+
+    Any number of ``composio`` placeholder rows (the agent's assigned
+    toolkits, already filtered to this agent by the caller) collapse into
+    a single ``composio-tool-router`` server.  A mint failure or an
+    unconfigured/empty result drops the placeholders and leaves the rest
+    of the tool set intact — a Composio outage never breaks other tools.
+    """
+    composio_names = [
+        name for name, cfg in configs.items()
+        if str(cfg.get("transport", "")).lower() == "composio"
+    ]
+    if not composio_names:
+        return configs
+
+    merged = {n: c for n, c in configs.items() if n not in composio_names}
+
+    if platform_client is None or not agent_id:
+        logger.warning(
+            "Composio placeholders present for agent %s but no platform "
+            "client to mint a session; skipping Composio tools", agent_id,
+        )
+        return merged
+
+    try:
+        minted = await platform_client.mint_composio_session(
+            str(agent_id), str(user_id),
+        )
+    except Exception:  # noqa: BLE001 — a Composio failure must not drop other tools
+        logger.warning(
+            "Failed to mint Composio session for agent %s; serving other "
+            "MCP tools without Composio", agent_id, exc_info=True,
+        )
+        return merged
+
+    if not minted or not minted.get("url"):
+        return merged
+
+    merged[COMPOSIO_SERVER_NAME] = {
+        "transport": str(minted.get("transport", "http") or "http"),
+        "url": str(minted["url"]),
+        "headers": dict(minted.get("headers", {}) or {}),
+        "command": None,
+        "args": [],
+        "env": {},
+        "timeout": minted.get("timeout", 120),
+        "credential_refs": [],
+    }
     return merged
 
 

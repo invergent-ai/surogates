@@ -679,6 +679,25 @@ export interface AgentChatAdapter {
     cascadeToWorkers?: boolean;
   }): Promise<void>;
 
+  // ---- Composio connections (end-user OAuth) ----
+  // Optional: the integrations band/page render only when present.
+  listComposioConnections?(input: { agentId?: string }): Promise<{
+    toolkits: {
+      toolkit: string;
+      connected: boolean;
+      name?: string;
+      logo?: string;
+      category?: string;
+      description?: string;
+      auth_mode?: string;
+    }[];
+  }>;
+  authorizeComposioToolkit?(input: { agentId?: string; toolkit: string }): Promise<{
+    redirectUrl: string;
+    status: string;
+  }>;
+  disconnectComposioToolkit?(input: { agentId?: string; toolkit: string }): Promise<void>;
+
   listInbox?(input?: AgentChatInboxListInput): Promise<AgentChatInboxList>;
   getInboxItem?(input: { itemId: number }): Promise<AgentChatInboxItem>;
   markInboxItemRead?(input: { itemId: number }): Promise<AgentChatInboxItem>;

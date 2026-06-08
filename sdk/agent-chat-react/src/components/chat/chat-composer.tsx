@@ -587,7 +587,7 @@ function ChatComposerInner({
             type="button"
             variant="secondary"
             size="sm"
-            className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent"
+            className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent cursor-pointer"
             onClick={() => {
               setMenuMode("commands");
               setMenuDismissed(false);
@@ -601,7 +601,7 @@ function ChatComposerInner({
             type="button"
             variant="secondary"
             size="sm"
-            className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent"
+            className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent cursor-pointer"
             onClick={() => {
               setMenuMode("skills");
               setMenuDismissed(false);
@@ -615,7 +615,7 @@ function ChatComposerInner({
             type="button"
             variant="secondary"
             size="sm"
-            className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent"
+            className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent cursor-pointer"
             onClick={() => {
               setMenuMode("scheduled");
               setMenuDismissed(false);

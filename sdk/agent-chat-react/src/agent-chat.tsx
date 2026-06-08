@@ -39,6 +39,12 @@ export interface AgentChatProps {
    * that domain.
    */
   deepResearchEnabled?: boolean;
+  /**
+   * Called when the user clicks the integrations band under the composer.
+   * Hosts navigate to their Integrations route. When omitted, the band is
+   * not rendered.
+   */
+  onOpenIntegrations?: () => void;
 }
 
 // CSS variable controlling the desktop right-stack width. Inlined as a style
@@ -57,6 +63,7 @@ export function AgentChat({
   disabled,
   onComposerError,
   deepResearchEnabled = false,
+  onOpenIntegrations,
 }: AgentChatProps) {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   // On phones the chat and workspace panes don't fit side-by-side. A
@@ -252,6 +259,8 @@ export function AgentChat({
               deepResearchEnabled={deepResearchEnabled}
               researchSources={runtime.researchSources}
               hideTurnSummary={hideTurnSummary}
+              agentId={agentId}
+              onOpenIntegrations={onOpenIntegrations}
             />
           </div>
           {rightStackVisible && (

@@ -18,7 +18,11 @@ from fastapi.testclient import TestClient
 
 from surogates.mcp_proxy.auth import ProxyAuthContext, get_proxy_auth
 from surogates.mcp_proxy.pool import ConnectionPool
-from surogates.mcp_proxy.routes import router
+from surogates.mcp_proxy.routes import (
+    _error_envelope_message,
+    _looks_like_error_envelope,
+    router,
+)
 from surogates.runtime import (
     AgentRuntimeContext,
     agent_runtime_context_dep,
@@ -76,3 +80,34 @@ def test_matching_claim_empty_allowlist_lists_no_tools():
     resp = client.post("/mcp/v1/tools/list", json={})
     assert resp.status_code == 200
     assert resp.json() == {"tools": []}
+
+
+# A successful tool payload that carries a falsy ``error`` field (the
+# Composio tool router returns ``{"data": ..., "error": null,
+# "successful": true}`` on EVERY successful call) must not be treated as a
+# failure envelope -- doing so reported the call as the literal string
+# "None" and discarded the real payload.
+def test_null_error_field_is_not_a_failure_envelope():
+    composio_success = (
+        '{"data": {"message": "All connections are active"}, '
+        '"error": null, "successful": true}'
+    )
+    assert _error_envelope_message(composio_success) is None
+    assert _looks_like_error_envelope(composio_success) is False
+
+
+def test_truthy_error_field_is_a_failure_envelope():
+    assert _error_envelope_message('{"error": "boom"}') == "boom"
+    assert _looks_like_error_envelope('{"error": "boom"}') is True
+
+
+def test_empty_error_string_is_not_a_failure_envelope():
+    # Falsy error values (empty string) are a success, like null.
+    assert _error_envelope_message('{"error": ""}') is None
+    assert _looks_like_error_envelope('{"error": ""}') is False
+
+
+def test_non_envelope_text_is_not_a_failure():
+    assert _error_envelope_message("plain text result") is None
+    assert _error_envelope_message('["a", "b"]') is None
+    assert _looks_like_error_envelope("not json {") is False

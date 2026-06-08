@@ -26,6 +26,10 @@ from surogates.audit import (
     rug_pull_event,
 )
 from surogates.governance.mcp_scanner import MCPGovernance, _fingerprint
+from surogates.mcp_proxy.loader import (
+    COMPOSIO_SERVER_NAME,
+    debrand_composio_text,
+)
 from surogates.tools.mcp.client import (
     _MCP_AVAILABLE,
     _lock,
@@ -343,7 +347,18 @@ class ConnectionPool:
                         else:
                             original_server = owning_server_key
 
-                    if not await self._scan_and_record(
+                    # The Composio Tool Router is a first-party, platform-minted
+                    # server (we create the session against backend.composio.dev
+                    # with our own API key). Its meta-tool descriptions
+                    # legitimately use imperative guidance ("you must …") and
+                    # remote-execution fields ("command"/"code_to_execute") that
+                    # trip the third-party tool-poisoning / description-injection
+                    # heuristics. Exempt it from the scan-drop so
+                    # COMPOSIO_SEARCH_TOOLS (and the bash/workbench executors)
+                    # reach the agent — without SEARCH_TOOLS the router cannot
+                    # discover or execute any app tool and is dead weight.
+                    is_trusted_server = original_server == COMPOSIO_SERVER_NAME
+                    if not is_trusted_server and not await self._scan_and_record(
                         governance=tenant_governance,
                         org_id=org_id,
                         user_id=user_id,
@@ -353,6 +368,17 @@ class ConnectionPool:
                         is_service_account=is_service_account,
                     ):
                         continue  # unsafe or rug-pulled — exclude from advertised set
+
+                    # Debrand the Composio router's advertised name + description
+                    # so the model never reads (and then echoes) the brand. The
+                    # reverse-route below keeps using the real upstream tool name
+                    # (``original_tool``), so calls still reach Composio.
+                    if is_trusted_server:
+                        clean["name"] = debrand_composio_text(clean_name)
+                        clean["description"] = debrand_composio_text(
+                            clean.get("description", ""),
+                        )
+                        clean_name = clean["name"]
 
                 clean_schemas.append(clean)
                 if owning_server_key is not None:
@@ -622,9 +648,26 @@ class ConnectionPool:
                 if server is not None:
                     servers_to_shutdown.append(server)
 
+        # ``server.shutdown()`` awaits ``self._task``, which was created on
+        # the dedicated ``_mcp_loop`` thread (HTTP/stdio sessions and their
+        # streams are bound to it).  Eviction / invalidation runs on a
+        # different loop, so awaiting the task directly raises "got Future
+        # attached to a different loop".  Bridge through ``_mcp_loop`` exactly
+        # as ``_execute_tool_call`` does for calls.
+        from surogates.tools.mcp import client as _mcp_client_module
+
         for server in servers_to_shutdown:
             try:
-                await server.shutdown()
+                loop = _mcp_client_module._mcp_loop  # type: ignore[attr-defined]
+                if loop is None or not loop.is_running():
+                    # No dedicated loop (unit tests build sessions inline on
+                    # the test loop); shut down directly.
+                    await server.shutdown()
+                else:
+                    future = asyncio.run_coroutine_threadsafe(
+                        server.shutdown(), loop,
+                    )
+                    await asyncio.wrap_future(future)
             except Exception:
                 logger.debug(
                     "Error shutting down MCP server %s", server.name,

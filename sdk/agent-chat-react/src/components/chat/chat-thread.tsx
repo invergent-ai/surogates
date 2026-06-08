@@ -39,9 +39,12 @@ import { parseTerminalResult } from "./tools/terminal-tool";
 import { statusColorClass, effectiveStatus, toolErrorSummary, parseArgs } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
 import { ChatComposer } from "./chat-composer";
+import { IntegrationsBand } from "../connections/integrations-band";
+import { useAgentChatAdapterContext } from "../../adapter-context";
 import { ResearchSourcesPanel } from "../research/research-sources-panel";
 import { TurnFeedback } from "./turn-feedback";
 import { useSmoothStream } from "./use-smooth-stream";
+import { formatMcpToolLabel } from "../../lib/format";
 import { stripAndParseNextAction } from "../../lib/next-action";
 import { ArtifactBlock } from "./artifacts/artifact-block";
 import { ErrorMessage } from "./error-message";
@@ -139,6 +142,12 @@ interface ChatThreadProps {
   // takes screen real estate without serving anyone.  Set by
   // ``AgentChat`` from the existing ``isSubAgentSession`` helper.
   hideTurnSummary?: boolean;
+
+  // Composio integrations band, rendered under the composer. The band
+  // opens the host's Integrations route via ``onOpenIntegrations``;
+  // ``agentId`` scopes the connection lookup. Both omitted -> no band.
+  agentId?: string;
+  onOpenIntegrations?: () => void;
 }
 
 // ── Timeline item types ──────────────────────────────────────────────
@@ -624,7 +633,11 @@ function cancelledToolLabel(toolName: string): string {
     research_memory: "Research",
     research_outline: "Research",
   };
-  return map[toolName] ?? toolName;
+  if (map[toolName]) return map[toolName];
+  // MCP tools arrive as `mcp__{server}__{tool}`; show a clean label rather
+  // than the raw prefixed name (matches the Expert-mode MCP renderer).
+  if (toolName.startsWith("mcp__")) return formatMcpToolLabel(toolName);
+  return toolName;
 }
 
 function CancelledToolRow({ tc }: { tc: ToolCallInfo }) {
@@ -2039,6 +2052,8 @@ export function ChatThread({
   deepResearchEnabled = false,
   researchSources = [],
   hideTurnSummary = false,
+  agentId,
+  onOpenIntegrations,
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
   const awaitingInput = useMemo(() => isAwaitingUserInput(messages), [messages]);
@@ -2109,6 +2124,62 @@ export function ChatThread({
     return null;
   }, [messages]);
 
+  const composerArea = (
+    <div className="mx-auto w-full max-w-4xl px-3 sm:px-6 pb-3 sm:pb-5 pt-3">
+      {retryIndicator && (
+        <div className="mb-2">
+          <RetryBanner indicator={retryIndicator} />
+        </div>
+      )}
+      {researchSources.length > 0 && (
+        <div className="mb-2">
+          <ResearchSourcesPanel sources={researchSources} />
+        </div>
+      )}
+      <ChatComposer
+        onSend={onSend}
+        onStop={onStop}
+        isRunning={isRunning}
+        disabled={composerDisabled}
+        disabledReason={composerDisabledReason}
+        tokenUsage={tokenUsage}
+        onComposerError={onComposerError}
+        showBrowser={showBrowser}
+        onToggleBrowser={onToggleBrowser}
+        showWorkspace={showWorkspace}
+        onToggleWorkspace={onToggleWorkspace}
+        canShowBrowser={canShowBrowser}
+        canShowWorkspace={canShowWorkspace}
+        viewMode={viewMode}
+        onViewModeChange={onViewModeChange}
+        deepResearchEnabled={deepResearchEnabled}
+      />
+      {onOpenIntegrations && (
+        <IntegrationsBandSlot
+          agentId={agentId}
+          onOpenIntegrations={onOpenIntegrations}
+        />
+      )}
+    </div>
+  );
+
+  // Empty, ready-to-start session: center the title + composer vertically
+  // rather than pinning the composer to the bottom of a blank thread. Only
+  // when there's nothing to show (no history loading, not a disabled/read-only
+  // session) — otherwise fall through to the normal scroll-thread layout.
+  if (messages.length === 0 && !isLoadingHistory && !disabled) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center overflow-hidden bg-background px-3 text-base">
+        <div className="w-full">
+          <h2 className="mb-8 text-center text-2xl font-bold text-foreground">
+            What should we do ?
+          </h2>
+          {composerArea}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-1 flex-col overflow-hidden bg-background text-base">
       <Conversation className="relative flex-1 min-h-0">
@@ -2118,12 +2189,6 @@ export function ChatThread({
               icon={<MessageSquareIcon className="size-8 opacity-40" />}
               title="Loading conversation"
               description="Fetching the session history."
-            />
-          ) : messages.length === 0 && !disabled ? (
-            <ConversationEmptyState
-              icon={<MessageSquareIcon className="size-8 opacity-40" />}
-              title="Start a conversation"
-              description="Ask me anything — I can search, analyze, write code, and more."
             />
           ) : (
             <>
@@ -2189,36 +2254,29 @@ export function ChatThread({
         <ConversationScrollButton />
       </Conversation>
 
-      <div className="mx-auto w-full max-w-4xl px-3 sm:px-6 pb-3 sm:pb-5 pt-3">
-        {retryIndicator && (
-          <div className="mb-2">
-            <RetryBanner indicator={retryIndicator} />
-          </div>
-        )}
-        {researchSources.length > 0 && (
-          <div className="mb-2">
-            <ResearchSourcesPanel sources={researchSources} />
-          </div>
-        )}
-        <ChatComposer
-          onSend={onSend}
-          onStop={onStop}
-          isRunning={isRunning}
-          disabled={composerDisabled}
-          disabledReason={composerDisabledReason}
-          tokenUsage={tokenUsage}
-          onComposerError={onComposerError}
-          showBrowser={showBrowser}
-          onToggleBrowser={onToggleBrowser}
-          showWorkspace={showWorkspace}
-          onToggleWorkspace={onToggleWorkspace}
-          canShowBrowser={canShowBrowser}
-          canShowWorkspace={canShowWorkspace}
-          viewMode={viewMode}
-          onViewModeChange={onViewModeChange}
-          deepResearchEnabled={deepResearchEnabled}
-        />
-      </div>
+      {composerArea}
     </div>
+  );
+}
+
+/**
+ * Pulls the adapter from context so ChatThread can render the integrations
+ * band without receiving the adapter as a prop. Renders nothing unless the
+ * adapter supports the Composio methods (handled inside IntegrationsBand).
+ */
+function IntegrationsBandSlot({
+  agentId,
+  onOpenIntegrations,
+}: {
+  agentId?: string;
+  onOpenIntegrations: () => void;
+}) {
+  const { adapter } = useAgentChatAdapterContext();
+  return (
+    <IntegrationsBand
+      agentId={agentId}
+      adapter={adapter}
+      onOpenIntegrations={onOpenIntegrations}
+    />
   );
 }

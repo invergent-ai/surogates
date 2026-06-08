@@ -18,7 +18,11 @@ from pydantic import BaseModel
 
 from surogates.audit import AuditStore, AuditType
 from surogates.mcp_proxy.auth import ProxyAuthContext, get_proxy_auth
-from surogates.mcp_proxy.loader import load_mcp_configs
+from surogates.mcp_proxy.loader import (
+    COMPOSIO_SERVER_NAME,
+    debrand_composio_text,
+    load_mcp_configs,
+)
 from surogates.mcp_proxy.pool import ConnectionPool
 from surogates.mcp_proxy.sandbox import MCPCallSandbox
 from surogates.runtime import (
@@ -108,6 +112,7 @@ async def _ensure_tenant_connected(
         allowed_ids=allowed_ids,
         is_service_account=auth.is_service_account,
         agent_id=agent_id,
+        platform_client=getattr(request.app.state, "platform_client", None),
     )
 
     if not configs:
@@ -266,14 +271,16 @@ async def call_tool(
                     exc_info=True,
                 )
 
-    try:
-        parsed = json.loads(result_text)
-        if isinstance(parsed, dict) and "error" in parsed:
-            return ToolCallResponse(
-                error=_sanitize_error(str(parsed["error"])),
-            )
-    except (json.JSONDecodeError, TypeError):
-        pass
+    # Strip the Composio brand from the router's tool output too, so the
+    # model never reads (and echoes) it. ``debrand_composio_text`` leaves
+    # lowercase ``composio.dev`` URLs intact, so OAuth redirect links in
+    # connection-management results keep working.
+    if server_name == COMPOSIO_SERVER_NAME:
+        result_text = debrand_composio_text(result_text)
+
+    envelope_error = _error_envelope_message(result_text)
+    if envelope_error is not None:
+        return ToolCallResponse(error=_sanitize_error(envelope_error))
 
     return ToolCallResponse(result=_sanitize_error(result_text))
 
@@ -405,16 +412,31 @@ async def _execute_call(
     return "\n".join(parts), _OUTCOME_SUCCESS
 
 
-def _looks_like_error_envelope(text: str) -> bool:
-    """Return True if *text* parses as ``{"error": ...}``.
+def _error_envelope_message(text: str) -> str | None:
+    """Return the failure message if *text* is a pool error envelope.
 
-    The legacy ``pool.call_tool`` returns the upstream output on
-    success or a JSON error envelope on failure (matching what
-    :func:`_execute_call` returns for the stdio path); inspecting
-    the envelope is the only signal that path gives us.
+    ``pool.call_tool`` / :func:`_execute_call` signal failure by returning
+    a JSON ``{"error": "<message>"}`` envelope and return the upstream
+    tool's raw output on success.  Crucially, many successful tool payloads
+    legitimately carry a *falsy* ``"error"`` field — Composio's tool router,
+    for example, returns ``{"data": ..., "error": null, "successful": true}``
+    on every successful call.  Keying off the mere presence of the field
+    therefore mis-reported every such success as the literal string
+    ``"None"`` and discarded the real payload, so only a *truthy* ``error``
+    value marks an actual failure.
+
+    Returns the stringified error message, or ``None`` when *text* is not a
+    failure envelope (not JSON, not a dict, or a falsy ``error``).
     """
     try:
         parsed = json.loads(text)
     except (json.JSONDecodeError, TypeError):
-        return False
-    return isinstance(parsed, dict) and "error" in parsed
+        return None
+    if isinstance(parsed, dict) and parsed.get("error"):
+        return str(parsed["error"])
+    return None
+
+
+def _looks_like_error_envelope(text: str) -> bool:
+    """Return True if *text* is a pool failure envelope (truthy ``error``)."""
+    return _error_envelope_message(text) is not None

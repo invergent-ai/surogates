@@ -1,3 +1,5 @@
 node_modules/**
 new-ui/**
 dist/**
+.env.local
+.env.*.local

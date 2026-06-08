@@ -1,4 +1,5 @@
 import { getArtifact } from "@/api/artifacts";
+import * as composioApi from "@/api/composio";
 import { refreshSession } from "@/api/auth";
 import { submitAskUserQuestionResponse as submitAskUserQuestionResponseApi } from "@/api/ask_user_question";
 import { submitTurnFeedback } from "@/api/feedback";
@@ -310,6 +311,19 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     if (token) url.searchParams.set("token", token);
     url.searchParams.set("pwd", "admin");
     return url.pathname + url.search;
+  },
+
+  // ---- Composio connections (end-user OAuth) --------------------------
+  async listComposioConnections() {
+    return composioApi.listComposioConnections();
+  },
+
+  async authorizeComposioToolkit({ toolkit }) {
+    return composioApi.authorizeComposioToolkit(toolkit);
+  },
+
+  async disconnectComposioToolkit({ toolkit }) {
+    await composioApi.disconnectComposioToolkit(toolkit);
   },
 
   // ---- Missions --------------------------------------------------------

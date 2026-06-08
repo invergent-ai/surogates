@@ -188,5 +188,95 @@ class PlatformClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def mint_composio_session(
+        self, agent_id: str, user_id: str,
+    ) -> dict | None:
+        """Mint a per-end-user Composio Tool Router MCP server for an agent.
+
+        Returns the minted ``{transport, url, headers}`` config, or
+        ``None`` when the agent has no usable Composio toolkits (404) or
+        Composio is not configured on surogate-ops (503).  The returned
+        headers carry the Composio ``x-api-key`` — a runtime secret.
+        Keep it in memory only; never log it.
+
+        * :class:`PlatformAuthError` on 401 -- operations problem.
+        * ``httpx.HTTPStatusError`` on any other non-2xx.
+        """
+        resp = await self._client.post(
+            f"/api/agents/agents/{agent_id}/composio/session",
+            json={"user_id": user_id},
+        )
+        if resp.status_code in (404, 503):
+            return None
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def composio_connections(self, agent_id: str, user_id: str) -> dict:
+        """Per-toolkit Composio connection status for an agent's end-user.
+
+        Returns ``{"toolkits": [{"toolkit": str, "connected": bool}, ...]}``.
+
+        * :class:`PlatformAuthError` on 401 -- operations problem.
+        * ``httpx.HTTPStatusError`` on any other non-2xx.
+        """
+        resp = await self._client.get(
+            f"/api/agents/agents/{agent_id}/composio/connections",
+            params={"user_id": user_id},
+        )
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def composio_authorize(
+        self, agent_id: str, user_id: str, toolkit: str,
+    ) -> dict:
+        """Initiate end-user OAuth for a toolkit; returns the Composio link.
+
+        Returns ``{"redirect_url", "connection_request_id", "status"}``.
+        Raises ``httpx.HTTPStatusError`` on 4xx/5xx (the api route maps the
+        status + detail through), except 401 which becomes
+        :class:`PlatformAuthError`.
+        """
+        resp = await self._client.post(
+            f"/api/agents/agents/{agent_id}/composio/authorize",
+            json={"user_id": user_id, "toolkit": toolkit},
+        )
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def composio_disconnect(
+        self, agent_id: str, user_id: str, toolkit: str,
+    ) -> dict:
+        """Remove the end-user's connected account for a toolkit.
+
+        Returns ``{"disconnected": <count>}``. Raises ``httpx.HTTPStatusError``
+        on 4xx/5xx except 401 which becomes :class:`PlatformAuthError`.
+        """
+        resp = await self._client.delete(
+            f"/api/agents/agents/{agent_id}/composio/connections/{toolkit}",
+            params={"user_id": user_id},
+        )
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
     async def aclose(self) -> None:
         await self._client.aclose()

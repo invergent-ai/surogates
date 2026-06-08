@@ -202,6 +202,7 @@ export function ChatPage() {
               onSessionChange={handleSessionChange}
               disabled={sessionDeclined}
               onMessagesChange={setChatMessages}
+              onOpenIntegrations={() => void navigate({ to: "/integrations" })}
             />
           </div>
         )}

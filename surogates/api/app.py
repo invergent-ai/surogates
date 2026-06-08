@@ -647,6 +647,7 @@ def create_app() -> FastAPI:
         ask_user_question,
         auth,
         browser,
+        composio,
         events,
         feedback,
         health,
@@ -683,6 +684,7 @@ def create_app() -> FastAPI:
     # the feedback + missions pattern above.
     app.include_router(skills.read_router, prefix="/v1/api", tags=["skills"])
     app.include_router(agents.router, prefix="/v1", tags=["agents"])
+    app.include_router(composio.router, prefix="/v1", tags=["composio"])
     app.include_router(memory.router, prefix="/v1", tags=["memory"])
     app.include_router(prompts.router, prefix="/v1", tags=["prompts"])
     app.include_router(scheduled_work.router, prefix="/v1", tags=["scheduled-work"])
