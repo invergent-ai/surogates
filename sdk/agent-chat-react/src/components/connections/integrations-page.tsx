@@ -1,3 +1,4 @@
+import { Loader2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentChatAdapter } from "../../types";
 
@@ -142,10 +143,11 @@ export function IntegrationsPage({ agentId, adapter, onBack }: IntegrationsPageP
         toolkit,
       });
       const popup = redirectUrl ? openOAuthPopup(redirectUrl) : null;
-      // Detached: poll in the background so the button frees up immediately
-      // and the row flips to Connected (with the popup auto-closed) as soon
-      // as the OAuth handshake completes — no manual refresh/close needed.
-      void waitForConnection(toolkit, popup);
+      // Keep the button in its loading state while we poll, so the row flips
+      // to Connected (with the popup auto-closed) as soon as the OAuth
+      // handshake completes — no manual refresh/close needed. Resolves early
+      // when the user closes the popup.
+      await waitForConnection(toolkit, popup);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to start the connection");
     } finally {
@@ -254,25 +256,25 @@ function ToolkitRow({
           />
         )}
         <span className="text-sm font-medium text-foreground">{name}</span>
-        {row.connected ? (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={onDisconnect}
-            className="ml-auto rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-accent disabled:opacity-50"
-          >
-            {busy ? "…" : "Disconnect"}
-          </button>
-        ) : (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={onConnect}
-            className="ml-auto rounded-md border border-border px-2 py-1 text-xs text-foreground hover:bg-accent disabled:opacity-50"
-          >
-            {busy ? "…" : "Connect"}
-          </button>
-        )}
+        <button
+          type="button"
+          disabled={busy}
+          onClick={row.connected ? onDisconnect : onConnect}
+          className={`ml-auto inline-flex min-w-[6rem] items-center justify-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent disabled:opacity-60 ${
+            row.connected ? "text-muted-foreground" : "text-foreground"
+          }`}
+        >
+          {busy ? (
+            <>
+              <Loader2Icon className="h-3.5 w-3.5 animate-spin" />
+              {row.connected ? "Disconnecting" : "Connecting"}
+            </>
+          ) : row.connected ? (
+            "Disconnect"
+          ) : (
+            "Connect"
+          )}
+        </button>
       </div>
       {open && (
         <div className="mt-2 pl-7 text-xs text-muted-foreground">
