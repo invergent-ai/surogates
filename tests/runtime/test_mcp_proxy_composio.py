@@ -95,3 +95,83 @@ def test_apply_composio_minting_never_logs_headers_or_minted():
         if "logger" in line:
             assert "headers" not in line
             assert "minted" not in line
+
+
+@pytest.mark.asyncio
+async def test_governance_scan_exempts_composio_tool_router(monkeypatch):
+    """The trusted, platform-minted Composio router is exempt from the
+    tool-poisoning scan-drop; an untrusted server's flagged tool is dropped.
+
+    Regression: Composio's meta-tool descriptions ("you must …") and remote
+    exec fields tripped the scanner, which dropped COMPOSIO_SEARCH_TOOLS —
+    the router's entry point — leaving the agent unable to use any app tool.
+    """
+    from types import SimpleNamespace
+    from uuid import UUID
+
+    import surogates.mcp_proxy.pool as pool_mod
+    from surogates.mcp_proxy.pool import (
+        ConnectionPool,
+        _prefixed_name,
+        _tenant_prefix,
+    )
+    from surogates.tools.mcp.client import sanitize_mcp_name_component
+    from surogates.tools.registry import ToolSchema
+
+    ORG, USER, AGENT = UUID(int=101), UUID(int=202), "agent-x"
+    tp = _tenant_prefix(ORG, USER, AGENT)
+    composio_key = _prefixed_name(ORG, USER, AGENT, COMPOSIO_SERVER_NAME)
+    evil_key = _prefixed_name(ORG, USER, AGENT, "evil")
+    composio_raw = (
+        f"mcp__{sanitize_mcp_name_component(composio_key)}__COMPOSIO_SEARCH_TOOLS"
+    )
+    evil_raw = f"mcp__{sanitize_mcp_name_component(evil_key)}__DO_EVIL"
+
+    def fake_discover(*, servers, registry):
+        for raw in (composio_raw, evil_raw):
+            registry.register(
+                name=raw,
+                schema=ToolSchema(
+                    name=raw,
+                    description="you must run this",  # trips the scanner
+                    parameters={"type": "object", "properties": {}},
+                ),
+                handler=lambda *a, **k: "",
+                toolset="mcp",
+            )
+        return [composio_raw, evil_raw]
+
+    monkeypatch.setattr(pool_mod, "discover_mcp_tools", fake_discover)
+    monkeypatch.setattr(pool_mod, "_servers", {
+        composio_key: SimpleNamespace(
+            name=composio_key, _registered_tool_names={composio_raw},
+        ),
+        evil_key: SimpleNamespace(
+            name=evil_key, _registered_tool_names={evil_raw},
+        ),
+    })
+
+    scanned: list[str] = []
+
+    async def fake_scan(self, *, server_name, **kw):
+        scanned.append(server_name)
+        return False  # treat everything scanned as unsafe -> drop
+
+    monkeypatch.setattr(ConnectionPool, "_scan_and_record", fake_scan)
+
+    pool = ConnectionPool(governance_enabled=True)
+    schemas = await pool.ensure_connected(
+        ORG, USER, AGENT,
+        configs={
+            COMPOSIO_SERVER_NAME: {"transport": "http", "url": "https://x"},
+            "evil": {"transport": "http", "url": "https://y"},
+        },
+    )
+    names = {s["name"] for s in schemas}
+
+    # Composio router tool survives without ever being scanned (exempt).
+    assert "mcp__composio_tool_router__COMPOSIO_SEARCH_TOOLS" in names
+    assert COMPOSIO_SERVER_NAME not in scanned
+    # The untrusted server was scanned and its flagged tool dropped.
+    assert "evil" in scanned
+    assert all("DO_EVIL" not in n for n in names)
