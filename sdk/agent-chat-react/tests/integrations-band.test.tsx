@@ -48,7 +48,7 @@ describe("IntegrationsBand", () => {
       ]),
     );
     await flush();
-    expect(container?.textContent).toContain("Connect your integrations");
+    expect(container?.textContent).toContain("Connect your accounts");
     const imgs = Array.from(container?.querySelectorAll("img") ?? []);
     expect(imgs.length).toBe(2); // both shown — connected + unconnected
     container

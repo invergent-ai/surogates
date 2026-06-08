@@ -19,7 +19,7 @@ const MAX_LOGOS = 10;
 
 /**
  * Thin strip under the composer. Shows up to ten connected toolkit logos and
- * a "Connect your integrations" prompt; the whole band opens the Integrations
+ * a "Connect your accounts" prompt; the whole band opens the Integrations
  * page. Renders nothing when the adapter lacks the Composio methods or the
  * agent has no assigned toolkits.
  */
@@ -62,7 +62,7 @@ export function IntegrationsBand({
       onClick={onOpenIntegrations}
       className="flex w-full items-center gap-2 border border-border border-t-0 rounded-b-lg px-4 py-2.5 text-xs text-muted-foreground transition-colors hover:bg-accent/40 cursor-pointer"
     >
-      <span className="font-medium">Connect your integrations</span>
+      <span className="font-medium">Connect your accounts</span>
       <span className="ml-auto flex items-center gap-1.5">
         {shown.map((r) => (
           <Logo key={r.toolkit} row={r} />
