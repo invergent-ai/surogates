@@ -569,6 +569,13 @@ export interface AgentChatSlashCommand {
    * specialist consultation from a body-inline skill.
    */
   isExpert?: boolean;
+  /**
+   * True when this entry is a platform built-in (e.g. docx, pdf, pptx,
+   * xlsx, kanban) baked into the worker image rather than an org/user
+   * skill. The composer hides these from the slash menu so it lists
+   * only the skills a tenant actually authored or attached.
+   */
+  isBuiltin?: boolean;
 }
 
 export interface AgentChatWorkspaceEntry {

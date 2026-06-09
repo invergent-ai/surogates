@@ -344,10 +344,12 @@ function ChatComposerInner({
   }, [buttonMenuOpen, textInput.value]);
 
   // Re-fetch app-provided skills each time the menu opens with skills in scope.
+  // Platform built-ins (docx, pdf, pptx, xlsx, kanban, …) are dropped here so
+  // the slash menu lists only the skills a tenant authored or attached.
   useEffect(() => {
     if (showSlashMenu && (menuMode === "skills" || menuMode === "all")) {
       adapter.listSlashCommands?.()
-        .then(setAdapterCommands)
+        .then((commands) => setAdapterCommands(commands.filter((c) => !c.isBuiltin)))
         .catch(() => { /* best-effort */ });
     }
   }, [adapter, showSlashMenu, menuMode]);
