@@ -15,6 +15,10 @@ export interface SkillSummary {
   category: string | null;
   trigger: string | null;
   source: SkillSource;
+  // True only for framework built-ins. ``source`` can't be used for
+  // this — org-attached per-agent skills are also ``"platform"``.
+  // Optional so older harness payloads (no field) read as not-builtin.
+  builtin?: boolean;
   expert_status: ExpertStatus | null;
   expert_endpoint: string | null;
   expert_model: string | null;

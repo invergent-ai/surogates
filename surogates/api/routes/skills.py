@@ -76,6 +76,11 @@ class SkillSummary(BaseModel):
     category: str | None = None
     trigger: str | None = None
     source: str = "platform"  # "platform", "org", or "user"
+    # True only for framework built-ins (the shared system-skills
+    # bundle). Org-attached per-agent skills also carry
+    # ``source="platform"``, so the slash menu keys "hide built-ins" on
+    # this flag, not on ``source``.
+    builtin: bool = False
     # Expert-specific fields (only present when type="expert").
     expert_status: str | None = None
     expert_endpoint: str | None = None
@@ -414,6 +419,7 @@ async def list_skills(
             category=skill.category,
             trigger=skill.trigger,
             source=normalize_source(skill.source),
+            builtin=skill.builtin,
         )
         if skill.is_expert:
             _populate_expert_summary(summary, skill=skill)

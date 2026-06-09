@@ -104,6 +104,12 @@ class SkillDef:
     description: str
     content: str  # The SKILL.md body (everything after the frontmatter)
     source: str  # "platform", "user", "org_db", "user_db"
+    # True only for framework system skills (Layer 1a, the shared
+    # ``platform/system-skills`` bundle). Org-attached per-agent bundle
+    # skills are ALSO ``source="platform"`` but are NOT built-ins, so
+    # ``source`` cannot be used to tell the two apart — consumers that
+    # want "framework built-in vs tenant-authored" must read this flag.
+    builtin: bool = False
     type: str = "skill"  # "skill" (prompt-based) or "expert" (model-backed)
     category: str | None = None  # subdirectory grouping
     tags: list[str] | None = None  # metadata tags
@@ -230,6 +236,12 @@ class ResourceLoader:
                 source=SKILL_SOURCE_PLATFORM,
                 root_prefix="",
             )
+            # Only the shared system bundle holds genuine framework
+            # built-ins; the per-agent bundle (Layer 1b) shares the
+            # ``platform`` source but is tenant-attached, so we mark
+            # built-in status here rather than deriving it from source.
+            for skill in system:
+                skill.builtin = True
         else:
             system = []
 

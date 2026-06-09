@@ -385,7 +385,7 @@ function skillToSlashCommand(skill: SkillSummary): AgentChatSlashCommand {
     value: trigger,
     label: trigger,
     description: skill.description,
-    isBuiltin: skill.source === "platform",
+    isBuiltin: skill.builtin === true,
   };
 }
 

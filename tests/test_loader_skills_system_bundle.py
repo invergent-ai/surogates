@@ -239,6 +239,50 @@ async def test_load_skills_system_bundle_only() -> None:
 
 
 @pytest.mark.asyncio
+async def test_builtin_flag_distinguishes_system_from_per_agent() -> None:
+    """``builtin`` marks ONLY framework system skills (Layer 1a).
+
+    Both layers share ``source="platform"``, so ``source`` cannot tell a
+    framework built-in from a tenant-attached per-agent skill — the slash
+    menu's "hide built-ins" must key on ``builtin`` instead.  On a name
+    collision the per-agent override wins and is NOT a built-in.
+    """
+
+    system = _FakeBundle(
+        {
+            "brainstorming/SKILL.md": _skill_md("brainstorming", "system"),
+            "writing-plans/SKILL.md": _skill_md("writing-plans", "system"),
+        }
+    )
+    per_agent = _FakeBundle(
+        {
+            "skills/writing-plans/SKILL.md": _skill_md(
+                "writing-plans", "agent-override",
+            ),
+            "skills/extra/SKILL.md": _skill_md("extra", "agent-only"),
+        }
+    )
+    loader = ResourceLoader()
+
+    skills = await loader.load_skills(
+        _tenant(),
+        db_session=None,
+        bundle=per_agent,
+        system_bundle=system,
+    )
+
+    by_name = {s.name: s for s in skills}
+    # System-only skill: a genuine built-in.
+    assert by_name["brainstorming"].builtin is True
+    # Org-attached only: NOT a built-in (even though source is platform).
+    assert by_name["extra"].builtin is False
+    assert by_name["extra"].source == SKILL_SOURCE_PLATFORM
+    # Override: per-agent shadows system, so it stops being a built-in.
+    assert by_name["writing-plans"].description == "agent-override"
+    assert by_name["writing-plans"].builtin is False
+
+
+@pytest.mark.asyncio
 async def test_load_skills_per_agent_only() -> None:
     """The flip side: no system bundle published yet means the older
     behaviour (per-agent only) is preserved verbatim."""
