@@ -48,6 +48,14 @@ class EventType(str, Enum):
     SANDBOX_RESULT = "sandbox.result"
     SANDBOX_DESTROY = "sandbox.destroy"
 
+    # Coding-agent (/code) run lifecycle.  STARTED carries the source
+    # user-event id for crash-recovery idempotency; PROGRESS is coalesced
+    # streamed output; RESULT is the final message + token usage.
+    # Credentials must NEVER appear in any of these payloads.
+    CODE_RUN_STARTED = "code.run_started"
+    CODE_RUN_PROGRESS = "code.run_progress"
+    CODE_RUN_RESULT = "code.run_result"
+
     # Session lifecycle
     SESSION_START = "session.start"
     SESSION_PAUSE = "session.pause"

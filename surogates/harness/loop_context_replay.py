@@ -187,6 +187,23 @@ class ContextReplayMixin:
                     "content": f"[Worker {worker_id} failed: {error}]",
                 })
 
+            # Coding-agent run result — surface the final message to the
+            # coordinator LLM so it can follow up on what /code did.  Progress
+            # events are UI-only (not replayed); STARTED is bookkeeping.
+            elif etype == EventType.CODE_RUN_RESULT.value:
+                agent = event.data.get("agent", "coding agent")
+                if event.data.get("error"):
+                    messages.append({
+                        "role": "user",
+                        "content": f"[/code {agent} failed: {event.data['error']}]",
+                    })
+                else:
+                    final = event.data.get("final_message", "")
+                    messages.append({
+                        "role": "user",
+                        "content": f"[/code {agent} finished]\n{final}",
+                    })
+
             # LLM_THINKING and LLM_DELTA are intentionally skipped.
 
         # Strip stale budget warnings from replayed tool results.
