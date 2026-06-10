@@ -270,7 +270,7 @@ describe("MissionsPanel", () => {
 
   it("invokes pauseMission and cancelMission via inline actions", async () => {
     const paused: string[] = [];
-    const cancelled: string[] = [];
+    const cancelled: { missionId: string; cascadeToWorkers?: boolean }[] = [];
     const adapter = createAdapter(
       [mission({ id: "m-1", description: "Mission alpha" })],
       {
@@ -278,7 +278,10 @@ describe("MissionsPanel", () => {
           paused.push(input.missionId);
         },
         async cancelMission(input) {
-          cancelled.push(input.missionId);
+          cancelled.push({
+            missionId: input.missionId,
+            cascadeToWorkers: input.cascadeToWorkers,
+          });
         },
       },
     );
@@ -311,7 +314,10 @@ describe("MissionsPanel", () => {
       cancelBtn?.click();
       await Promise.resolve();
     });
-    expect(cancelled).toEqual(["m-1"]);
+    // Cancel cascades so in-flight workers stop too.
+    expect(cancelled).toEqual([
+      { missionId: "m-1", cascadeToWorkers: true },
+    ]);
   });
 
   it("renders nothing when the adapter omits listMissions", async () => {

@@ -343,7 +343,9 @@ export function MissionsPanel({
       if (!adapter.cancelMission || busyMissionId) return;
       setBusyMissionId(missionId);
       try {
-        await adapter.cancelMission({ missionId });
+        // Cascade so cancelling the mission also stops its in-flight workers
+        // (otherwise sub-agent runs keep going long after cancellation).
+        await adapter.cancelMission({ missionId, cascadeToWorkers: true });
         setItems((current) => {
           const next = current.filter((m) => m.id !== missionId);
           lastFingerprint.current = fingerprint(next);
