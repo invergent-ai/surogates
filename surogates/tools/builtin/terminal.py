@@ -87,6 +87,14 @@ def _get_srt_settings_path(workspace_path: str) -> str:
                     "~/.gnupg",
                     "~/.kube",
                     "~/.docker",
+                    # /code run credentials live pod-local under /run/code and
+                    # in the vendor CLI config dirs.  Deny reads so code the
+                    # agent runs via the terminal can't exfiltrate the user's
+                    # coding-agent plan token.
+                    "/run/code",
+                    "auth.json",
+                    "$CODEX_HOME",
+                    "$CLAUDE_CONFIG_DIR",
                 ],
                 "allowWrite": [workspace_path],
                 "denyWrite": [
@@ -108,6 +116,10 @@ def _get_srt_settings_path(workspace_path: str) -> str:
                     "npmjs.org",
                     "*.npmjs.org",
                     "registry.npmjs.org",
+                    # Coding-agent (/code) vendor API endpoints.
+                    "api.anthropic.com",
+                    "api.openai.com",
+                    "chatgpt.com",
                 ],
                 "deniedDomains": [],
             },
