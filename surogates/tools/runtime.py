@@ -51,6 +51,7 @@ class ToolRuntime:
             artifact,
             ask_user_question,
             browser,
+            coding_agent,
             coordinator,
             cron,
             delegate,
@@ -90,6 +91,7 @@ class ToolRuntime:
             cron,
             coordinator,
             artifact,
+            coding_agent,  # run_coding_agent (Claude Code / Codex)
             task_tools,  # spawn_task, unblock_task, cancel_task, worker_block/complete/context
         ]
 
