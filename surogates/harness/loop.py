@@ -862,7 +862,9 @@ class AgentHarness(
                 return
 
             if last_user_content == "/code" or last_user_content.startswith("/code "):
-                await self._handle_code_command(session, last_user_content, lease)
+                await self._handle_code_command(
+                    session, last_user_content, lease, all_events,
+                )
                 return
 
             if last_user_content.startswith("/loop"):
