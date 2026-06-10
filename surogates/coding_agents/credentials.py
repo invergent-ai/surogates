@@ -62,3 +62,62 @@ class CredentialBundle:
             "auth_mode": self.auth_mode,
             "expires_at": self.expires_at,
         }
+
+
+def validate_pasted(provider: str, mode: str, value: str) -> CredentialBundle:
+    """Validate a pasted credential and build a bundle, or raise CredentialError."""
+    if provider not in PROVIDERS:
+        raise CredentialError(
+            f"Unknown provider {provider!r}; expected one of {', '.join(PROVIDERS)}."
+        )
+    if mode not in ("oauth", "api_key"):
+        raise CredentialError(f"Unknown mode {mode!r}; expected 'oauth' or 'api_key'.")
+
+    value = value.strip()
+    if not value:
+        raise CredentialError("Credential value is empty.")
+
+    if provider == "anthropic":
+        if mode == "oauth":
+            if not value.startswith("sk-ant-oat"):
+                raise CredentialError(
+                    "That does not look like a Claude setup-token. Run "
+                    "`claude setup-token` and paste the value starting with "
+                    "'sk-ant-oat'."
+                )
+            return CredentialBundle(
+                provider="anthropic",
+                auth_mode="oauth",
+                token_kind="setup_token",
+                oauth_token=value,
+            )
+        if not value.startswith("sk-ant-api"):
+            raise CredentialError("Anthropic API keys start with 'sk-ant-api'.")
+        return CredentialBundle(
+            provider="anthropic", auth_mode="api_key", api_key=value,
+        )
+
+    # provider == "openai"
+    if mode == "oauth":
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise CredentialError(
+                "Paste the full contents of ~/.codex/auth.json (valid JSON)."
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise CredentialError("auth.json must be a JSON object.")
+        token = (parsed.get("tokens") or {}).get("access_token")
+        if not token or not isinstance(token, str):
+            raise CredentialError(
+                "auth.json is missing tokens.access_token. Run `codex login` "
+                "first, then paste ~/.codex/auth.json."
+            )
+        return CredentialBundle(
+            provider="openai", auth_mode="oauth", auth_json=parsed,
+        )
+
+    # openai api_key
+    if not value.startswith("sk-") or value.startswith("sk-ant-"):
+        raise CredentialError("OpenAI API keys start with 'sk-'.")
+    return CredentialBundle(provider="openai", auth_mode="api_key", api_key=value)

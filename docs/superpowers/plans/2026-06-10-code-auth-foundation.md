@@ -13,8 +13,8 @@
 ## Progress
 
 - [x] Task 1: Package + `CredentialBundle` model
-- [ ] Task 2: `validate_pasted()` paste validator (in progress)
-- [ ] Task 3: `CodingAgentCredentials` vault wrapper
+- [x] Task 2: `validate_pasted()` paste validator
+- [ ] Task 3: `CodingAgentCredentials` vault wrapper (in progress)
 - [ ] Task 4: `/code` command parser
 - [ ] Task 5: Rendered chat messages
 - [ ] Task 6: `CodeCommandMixin` handler
