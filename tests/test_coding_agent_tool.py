@@ -112,6 +112,46 @@ async def test_handler_not_connected_returns_error():
     assert "not connected" in data["error"].lower()
 
 
+async def test_handler_cancels_on_interrupt(monkeypatch):
+    # A long run must stop when the session is interrupted (global signal),
+    # not poll the CLI to completion.
+    import surogates.tools.builtin.coding_agent as mod
+
+    monkeypatch.setattr(mod, "is_interrupted", lambda: True)
+
+    session = SimpleNamespace(id=uuid4(), config={}, agent_id="a")
+    store = _FakeStore(session)
+    tenant = SimpleNamespace(org_id=uuid4(), user_id=uuid4())
+    vault = _FakeVault({
+        "code_cred:anthropic": CredentialBundle(
+            provider="anthropic", auth_mode="api_key", api_key="sk-ant-api03-x",
+        ).to_json(),
+    })
+    calls = []
+
+    async def execute(owner, name, input_json):
+        action = json.loads(input_json)["action"]
+        calls.append(action)
+        if action == "launch":
+            return json.dumps({"ok": True, "run_id": "r", "pid": 1})
+        return json.dumps({"ok": True})
+
+    async def ensure(owner, spec):
+        return None
+
+    monkeypatch.setattr(mod, "_build_ensure", lambda sp, s, t, owner: _aw_none)
+
+    out = await _run_coding_agent_handler(
+        {"agent": "claude", "prompt": "long task"},
+        tenant=tenant, session_id=str(session.id), session_store=store,
+        sandbox_pool=SimpleNamespace(execute=execute, ensure=ensure),
+        credential_vault=vault,
+    )
+    # The run was cancelled (a cancel exec fired) and surfaced as an error.
+    assert "cancel" in calls
+    assert json.loads(out)["error"]
+
+
 async def test_handler_requires_prompt():
     out = await _run_coding_agent_handler(
         {"agent": "claude", "prompt": "  "},

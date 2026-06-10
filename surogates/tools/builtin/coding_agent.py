@@ -21,6 +21,7 @@ from surogates.coding_agents.command import AGENT_TO_PROVIDER
 from surogates.coding_agents.credentials import CodingAgentCredentials
 from surogates.coding_agents.run_core import execute_coding_run
 from surogates.tools.registry import ToolRegistry, ToolSchema
+from surogates.tools.utils.interrupt import is_interrupted
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,9 @@ async def _run_coding_agent_handler(arguments: dict[str, Any], **kwargs: Any) ->
         read_only=bool(arguments.get("read_only")),
         ensure_sandbox=_build_ensure(sandbox_pool, session, tenant, owner),
         execute=_execute,
-        should_cancel=lambda: False,
+        # Poll the global interrupt so a session/mission cancel stops the run
+        # promptly (kills the pod-side CLI) instead of polling to completion.
+        should_cancel=lambda: is_interrupted(),
     )
 
     if outcome.status == "not_connected":
