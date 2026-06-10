@@ -28,3 +28,18 @@ def test_dispatch_kwargs_include_credential_vault():
 
     src = inspect.getsource(te)
     assert "credential_vault=" in src
+
+
+def test_streaming_executor_accepts_credential_vault():
+    # The streaming executor is the path that dispatches side-effecting tools
+    # (run_coding_agent included) — it must accept and thread the vault, or the
+    # harness raises "unexpected keyword argument 'credential_vault'" at wake().
+    import inspect
+
+    from surogates.harness.streaming_executor import StreamingToolExecutor
+
+    params = inspect.signature(StreamingToolExecutor.__init__).parameters
+    assert "credential_vault" in params
+
+    src = inspect.getsource(StreamingToolExecutor)
+    assert "credential_vault=self._credential_vault" in src  # threaded to dispatch
