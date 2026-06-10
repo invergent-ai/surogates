@@ -18,8 +18,8 @@
 ## Progress
 
 - [x] Task 1: Extract `execute_coding_run` shared core + rewire the slash handler
-- [ ] Task 2: `run_coding_agent` tool (schema + handler + registration) (in progress)
-- [ ] Task 3: Make the tool dispatchable (HARNESS location) + toolset wiring
+- [x] Task 2: `run_coding_agent` tool (schema + handler + registration)
+- [ ] Task 3: Make the tool dispatchable (HARNESS location) + toolset wiring (in progress)
 - [ ] Task 4: Seed the three AgentDefs (claude-coder, codex-reviewer, code-orchestrator)
 - [ ] Task 5: Live dry-run on the dev cluster + capture demo artifacts
 
