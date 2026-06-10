@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
+from uuid import UUID
+
+if TYPE_CHECKING:
+    from surogates.tenant.credentials import CredentialVault
 
 PROVIDERS: Final[tuple[str, ...]] = ("anthropic", "openai")
 
@@ -121,3 +125,55 @@ def validate_pasted(provider: str, mode: str, value: str) -> CredentialBundle:
     if not value.startswith("sk-") or value.startswith("sk-ant-"):
         raise CredentialError("OpenAI API keys start with 'sk-'.")
     return CredentialBundle(provider="openai", auth_mode="api_key", api_key=value)
+
+
+class CodingAgentCredentials:
+    """Per-user coding-agent credential storage over the encrypted vault.
+
+    All reads pass the explicit ``user_id`` — there is deliberately **no**
+    org fallback, so one user's missing credential never resolves to an
+    org-scoped row (which would bill another principal's plan).
+    """
+
+    def __init__(self, vault: "CredentialVault") -> None:
+        self._vault = vault
+
+    async def store(
+        self, *, org_id: UUID, user_id: UUID, bundle: CredentialBundle,
+    ) -> None:
+        await self._vault.store(
+            org_id, CRED_NAME[bundle.provider], bundle.to_json(), user_id=user_id,
+        )
+
+    async def load(
+        self, *, org_id: UUID, user_id: UUID, provider: str,
+    ) -> CredentialBundle | None:
+        raw = await self._vault.retrieve(
+            org_id, CRED_NAME[provider], user_id=user_id,
+        )
+        return CredentialBundle.from_json(raw) if raw else None
+
+    async def delete(
+        self, *, org_id: UUID, user_id: UUID, provider: str,
+    ) -> bool:
+        return await self._vault.delete(
+            org_id, CRED_NAME[provider], user_id=user_id,
+        )
+
+    async def statuses(self, *, org_id: UUID, user_id: UUID) -> list[dict]:
+        out: list[dict] = []
+        for provider in PROVIDERS:
+            bundle = await self.load(
+                org_id=org_id, user_id=user_id, provider=provider,
+            )
+            out.append(
+                bundle.status()
+                if bundle is not None
+                else {
+                    "provider": provider,
+                    "connected": False,
+                    "auth_mode": None,
+                    "expires_at": None,
+                }
+            )
+        return out
