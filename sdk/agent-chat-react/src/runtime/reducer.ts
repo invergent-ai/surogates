@@ -229,6 +229,21 @@ export function applyAgentChatEvent(
         applyExpertFeedback(nextState.messages, event.type, event.data),
       );
 
+    case "code.run_started":
+      return applyCodeRunStarted(nextState, event);
+
+    case "code.run_progress":
+      return withMessages(
+        nextState,
+        applyCodeRunProgress(nextState.messages, event.data),
+      );
+
+    case "code.run_result":
+      return withMessages(
+        nextState,
+        applyCodeRunResult(nextState.messages, event.data),
+      );
+
     case "user.feedback":
       return withMessages(
         nextState,
@@ -977,6 +992,187 @@ function applyExpertDelegation(
     terminal: false,
     isRunning: true,
   };
+}
+
+/**
+ * Shape stored (JSON-stringified) on a ``code_run`` tool frame's
+ * ``result`` field. The CodeRunBlock renderer parses this back out.
+ */
+export interface CodeRunFrameState {
+  agent: string;
+  provider: string;
+  prompt: string;
+  output: string;
+  finalMessage: string;
+  error: string | null;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+const CODE_RUN_TOOL = "code_run";
+
+function codeRunFrameId(runId: string): string {
+  return `code-run-${runId}`;
+}
+
+function parseCodeRunState(raw: string | undefined): CodeRunFrameState {
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as Partial<CodeRunFrameState>;
+      return {
+        agent: parsed.agent ?? "",
+        provider: parsed.provider ?? "",
+        prompt: parsed.prompt ?? "",
+        output: parsed.output ?? "",
+        finalMessage: parsed.finalMessage ?? "",
+        error: parsed.error ?? null,
+        inputTokens: parsed.inputTokens ?? 0,
+        outputTokens: parsed.outputTokens ?? 0,
+      };
+    } catch {
+      // Fall through to the empty default.
+    }
+  }
+  return {
+    agent: "",
+    provider: "",
+    prompt: "",
+    output: "",
+    finalMessage: "",
+    error: null,
+    inputTokens: 0,
+    outputTokens: 0,
+  };
+}
+
+function findCodeRunFrame(
+  messages: AgentChatMessage[],
+  runId: string,
+): { msgIdx: number; toolId: string } | null {
+  const toolId = codeRunFrameId(runId);
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const tc = messages[i]?.toolCalls?.find((c) => c.id === toolId);
+    if (tc) return { msgIdx: i, toolId };
+  }
+  return null;
+}
+
+function applyCodeRunStarted(
+  state: AgentChatState,
+  event: AgentChatRuntimeEvent,
+): AgentChatState {
+  const runId = stringValue(event.data.run_id);
+  if (!runId) return state;
+
+  // Idempotent: a replay of the same run_id should not stack frames.
+  if (findCodeRunFrame(state.messages, runId)) {
+    return { ...state, terminal: false, isRunning: true };
+  }
+
+  const agent = stringValue(event.data.agent);
+  const provider = stringValue(event.data.provider);
+  const prompt = stringValue(event.data.prompt);
+
+  const messages = [...state.messages];
+  const assistantIdx = findLastAssistantIndex(messages);
+  let assistant = assistantIdx >= 0 ? messages[assistantIdx] : null;
+  const userAfterAssistant =
+    assistantIdx >= 0 && hasUserAfterIndex(messages, assistantIdx);
+
+  if (!assistant || assistant.status === "complete" || userAfterAssistant) {
+    assistant = {
+      id: `evt-${event.eventId}-code-run`,
+      role: "assistant",
+      content: "",
+      createdAt: new Date(),
+      status: "streaming",
+    };
+    messages.push(assistant);
+  } else {
+    assistant = { ...assistant };
+    messages[assistantIdx] = assistant;
+  }
+
+  const frameState: CodeRunFrameState = {
+    agent,
+    provider,
+    prompt,
+    output: "",
+    finalMessage: "",
+    error: null,
+    inputTokens: 0,
+    outputTokens: 0,
+  };
+  const toolCall: AgentChatToolCallInfo = {
+    id: codeRunFrameId(runId),
+    toolName: CODE_RUN_TOOL,
+    args: JSON.stringify({ agent, provider, prompt }),
+    status: "running",
+    result: JSON.stringify(frameState),
+  };
+  assistant.toolCalls = [...(assistant.toolCalls ?? []), toolCall];
+
+  return { ...state, messages, terminal: false, isRunning: true };
+}
+
+function applyCodeRunProgress(
+  messages: AgentChatMessage[],
+  data: Record<string, unknown>,
+): AgentChatMessage[] {
+  const runId = stringValue(data.run_id);
+  if (!runId) return messages;
+  const match = findCodeRunFrame(messages, runId);
+  if (!match) return messages;
+  const chunk = stringValue(data.chunk);
+  if (!chunk) return messages;
+
+  const next = [...messages];
+  const msg = next[match.msgIdx]!;
+  next[match.msgIdx] = {
+    ...msg,
+    toolCalls: msg.toolCalls?.map((tc) => {
+      if (tc.id !== match.toolId) return tc;
+      const frame = parseCodeRunState(tc.result);
+      frame.output += chunk;
+      return { ...tc, result: JSON.stringify(frame) };
+    }),
+  };
+  return next;
+}
+
+function applyCodeRunResult(
+  messages: AgentChatMessage[],
+  data: Record<string, unknown>,
+): AgentChatMessage[] {
+  const runId = stringValue(data.run_id);
+  if (!runId) return messages;
+  const match = findCodeRunFrame(messages, runId);
+  if (!match) return messages;
+
+  const error = optionalStringValue(data.error) ?? null;
+  const finalMessage = stringValue(data.final_message);
+  const inputTokens = numberValue(data.input_tokens);
+  const outputTokens = numberValue(data.output_tokens);
+
+  const next = [...messages];
+  const msg = next[match.msgIdx]!;
+  next[match.msgIdx] = {
+    ...msg,
+    toolCalls: msg.toolCalls?.map((tc) => {
+      if (tc.id !== match.toolId) return tc;
+      const frame = parseCodeRunState(tc.result);
+      frame.finalMessage = finalMessage;
+      frame.error = error;
+      frame.inputTokens = inputTokens;
+      frame.outputTokens = outputTokens;
+      return {
+        ...tc,
+        status: error ? "error" : "complete",
+        result: JSON.stringify(frame),
+      };
+    }),
+  };
+  return next;
 }
 
 function applyExpertFailure(
