@@ -87,11 +87,11 @@ def _get_srt_settings_path(workspace_path: str) -> str:
                     "~/.gnupg",
                     "~/.kube",
                     "~/.docker",
-                    # /code run credentials live pod-local under /run/code and
-                    # in the vendor CLI config dirs.  Deny reads so code the
-                    # agent runs via the terminal can't exfiltrate the user's
-                    # coding-agent plan token.
-                    "/run/code",
+                    # /code run credentials live pod-local under
+                    # /tmp/.code-runs and in the vendor CLI config dirs.  Deny
+                    # reads so code the agent runs via the terminal can't
+                    # exfiltrate the user's coding-agent plan token.
+                    "/tmp/.code-runs",
                     "auth.json",
                     "$CODEX_HOME",
                     "$CLAUDE_CONFIG_DIR",

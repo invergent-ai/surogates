@@ -24,7 +24,10 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-CODE_RUN_DIR = "/run/code"
+# Pod-local, off the s3fs ``/workspace`` mount, and writable by the non-root
+# sandbox user (UID 1000).  ``/run`` is root-owned, so credential dirs live
+# under ``/tmp`` with 0700 perms instead.
+CODE_RUN_DIR = "/tmp/.code-runs"
 
 # Provider env vars scrubbed from the child by default so a stray value in the
 # pod environment can't override the user's injected credential.  ``claude``
@@ -54,6 +57,12 @@ def launch(payload: dict[str, Any], *, base: str = CODE_RUN_DIR) -> dict[str, An
 
     run_dir = _run_dir(run_id, base)
     run_dir.mkdir(parents=True, exist_ok=True)
+    # Restrict the run dir so only the owner can read the injected credential
+    # (mkdir mode is masked by umask, so chmod explicitly).
+    try:
+        os.chmod(run_dir, 0o700)
+    except OSError:
+        pass
     log_path = run_dir / "run.log"
     pid_path = run_dir / "pid"
 
@@ -66,7 +75,12 @@ def launch(payload: dict[str, Any], *, base: str = CODE_RUN_DIR) -> dict[str, An
     if codex_auth_json is not None:
         codex_home = run_dir / "codex"
         codex_home.mkdir(parents=True, exist_ok=True)
-        (codex_home / "auth.json").write_text(codex_auth_json)
+        auth_path = codex_home / "auth.json"
+        auth_path.write_text(codex_auth_json)
+        try:
+            os.chmod(auth_path, 0o600)
+        except OSError:
+            pass
         child_env["CODEX_HOME"] = str(codex_home)
 
     child_env.update(env_overrides)

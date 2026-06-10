@@ -28,7 +28,7 @@ def test_srt_settings_cover_code_credentials_and_apis(tmp_path, monkeypatch):
         data = json.load(fh)
 
     deny = data["filesystem"]["denyRead"]
-    assert "/run/code" in deny
+    assert "/tmp/.code-runs" in deny
     assert "auth.json" in deny
     assert "$CODEX_HOME" in deny
     assert "$CLAUDE_CONFIG_DIR" in deny
