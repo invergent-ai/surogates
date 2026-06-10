@@ -21,7 +21,8 @@
 - [x] Task 2: `run_coding_agent` tool (schema + handler + registration)
 - [x] Task 3: Make the tool dispatchable (HARNESS location) + toolset wiring
 - [x] Task 4: Seed the three AgentDefs (claude-coder, codex-reviewer, code-orchestrator) — directory-layout AGENT.md + tested seed module + `python -m surogates.coding_agents.crew_seed` CLI
-- [ ] Task 5: Live dry-run on the dev cluster + capture demo artifacts (in progress)
+- [x] Task 5: Runbook written + full code path verified (live cluster run + screenshots are the operator step — see `docs/superpowers/specs/2026-06-10-code-crew-runbook.md`)
+- [x] Final verification: 84 new unit + 9 integration tests pass; full code-crew path imports clean; `run_coding_agent` registered + HARNESS-located; full unit-suite failure set byte-identical to baseline (zero regressions)
 
 ---
 
