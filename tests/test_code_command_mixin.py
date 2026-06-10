@@ -188,6 +188,29 @@ async def test_run_idempotent_skips_relaunch():
     assert h._store.events == []
 
 
+async def test_codex_run_writes_back_refreshed_auth():
+    vault = _FakeVault({
+        "code_cred:openai": _bundle_json(
+            provider="openai", auth_mode="oauth",
+            auth_json={"tokens": {"access_token": "old"}},
+        ),
+    })
+    polls = [{
+        "ok": True, "done": True, "exit_code": 0, "offset": 30,
+        "new_output": json.dumps({"type": "item.completed",
+                                  "item": {"type": "agent_message", "text": "ok"}}) + "\n",
+        "codex_auth_json": json.dumps({"tokens": {"access_token": "refreshed"}}),
+    }]
+    pool = _FakeSandboxPool(polls)
+    h = _Harness(vault=vault, sandbox_pool=pool)
+
+    await h._handle_code_command(_session(), '/code codex "go"', _lease())
+
+    # The vault now holds the refreshed token.
+    stored = json.loads(vault.stored["code_cred:openai"])
+    assert stored["auth_json"]["tokens"]["access_token"] == "refreshed"
+
+
 async def test_run_interrupt_cancels():
     vault = _FakeVault({
         "code_cred:anthropic": _bundle_json(

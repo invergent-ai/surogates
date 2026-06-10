@@ -200,6 +200,11 @@ class CodeCommandMixin:
             sleep=_async_sleep,
         )
 
+        # Codex refreshes its auth.json in-pod; persist the new copy so the
+        # vault stays fresh and the user isn't forced to re-paste.
+        if cmd.provider == "openai" and result.updated_codex_auth_json:
+            await self._writeback_codex_auth(creds, result.updated_codex_auth_json)
+
         await self._emit_code_result(
             session, run_id, cmd.agent, lease,
             final_message=result.final_message,
@@ -207,6 +212,28 @@ class CodeCommandMixin:
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
         )
+
+    async def _writeback_codex_auth(self, creds, auth_json_raw: str) -> None:
+        """Re-store a refreshed codex ``auth.json`` into the vault."""
+        from surogates.coding_agents.credentials import CredentialBundle
+
+        try:
+            parsed = json.loads(auth_json_raw)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if not isinstance(parsed, dict):
+            return
+        bundle = CredentialBundle(
+            provider="openai", auth_mode="oauth", auth_json=parsed,
+        )
+        try:
+            await creds.store(
+                org_id=self._tenant.org_id,
+                user_id=self._tenant.user_id,
+                bundle=bundle,
+            )
+        except Exception as exc:  # write-back is best-effort
+            logger.warning("Codex auth write-back failed: %s", exc)
 
     async def _ensure_code_sandbox(self, session, sandbox_owner: str) -> None:
         from surogates.harness.tool_exec import _build_session_sandbox_spec

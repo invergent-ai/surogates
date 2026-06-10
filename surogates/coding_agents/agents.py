@@ -43,6 +43,10 @@ class CodeResult:
     input_tokens: int = 0
     output_tokens: int = 0
     error: str | None = None
+    # Codex refreshes its own ``auth.json`` in-pod; when it changed, the
+    # updated contents are surfaced here so the worker can re-store the
+    # bundle and keep the vault copy fresh (spec §6.2/§11.4).
+    updated_codex_auth_json: str | None = None
 
 
 def build_invocation(

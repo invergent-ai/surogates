@@ -193,9 +193,9 @@ def poll(payload: dict[str, Any], *, base: str = CODE_RUN_DIR) -> dict[str, Any]
             done = True
             exit_code = None  # died without recording an exit code
 
+    codex_auth_json: str | None = None
     if done:
-        # Read any final bytes the marker race may have left, then clean up
-        # the pod-local credential directory.
+        # Read any final bytes the marker race may have left.
         if log_path.exists():
             with open(log_path, "rb") as fh:
                 fh.seek(new_offset)
@@ -203,15 +203,26 @@ def poll(payload: dict[str, Any], *, base: str = CODE_RUN_DIR) -> dict[str, Any]
                 if tail:
                     new_output += tail.decode("utf-8", errors="replace")
                     new_offset += len(tail)
+        # Read codex's (possibly refreshed) auth.json back before cleanup so
+        # the worker can persist it to the vault.
+        codex_auth_path = run_dir / "codex" / "auth.json"
+        if codex_auth_path.exists():
+            try:
+                codex_auth_json = codex_auth_path.read_text()
+            except OSError:
+                codex_auth_json = None
         _cleanup(run_dir)
 
-    return {
+    result = {
         "ok": True,
         "done": done,
         "new_output": new_output,
         "offset": new_offset,
         "exit_code": exit_code,
     }
+    if codex_auth_json is not None:
+        result["codex_auth_json"] = codex_auth_json
+    return result
 
 
 def _read_exit_code(run_dir: Path) -> int | None:

@@ -189,3 +189,28 @@ async def test_codex_auth_json_forwarded_to_launch():
     )
     launch_payload = sandbox.calls[0][1]
     assert launch_payload["codex_auth_json"] == '{"tokens":{"access_token":"t"}}'
+
+
+async def test_codex_auth_writeback_surfaced_in_result():
+    polls = [{
+        "ok": True, "done": True, "exit_code": 0, "offset": 30,
+        "new_output": json.dumps({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "ok"},
+        }) + "\n",
+        "codex_auth_json": '{"tokens":{"access_token":"refreshed"}}',
+    }]
+    sandbox = _FakeSandbox(polls)
+    result = await run_code_agent(
+        run_id="run-6",
+        agent="codex",
+        invocation=CodeInvocation(argv=["codex", "exec"], stdin=None),
+        env={},
+        codex_auth_json='{"tokens":{"access_token":"old"}}',
+        execute=sandbox.execute,
+        emit_progress=lambda chunk: _noop_sleep(0),
+        should_cancel=lambda: False,
+        sleep=_noop_sleep,
+        config=RunnerConfig(poll_interval=0.0),
+    )
+    assert result.updated_codex_auth_json == '{"tokens":{"access_token":"refreshed"}}'

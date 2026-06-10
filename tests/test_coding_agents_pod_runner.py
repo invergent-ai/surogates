@@ -105,6 +105,28 @@ def test_cancel_kills_running_process(tmp_path):
     assert res2["done"] is True
 
 
+def test_codex_auth_read_back_on_completion(tmp_path):
+    base = str(tmp_path)
+    # A codex run whose CLI rewrites auth.json with a refreshed token.
+    pod_runner.launch(
+        {
+            "run_id": "rb1",
+            "argv": [
+                "python3", "-c",
+                "import os,pathlib; p=pathlib.Path(os.environ['CODEX_HOME'],'auth.json'); "
+                "p.write_text('{\"tokens\":{\"access_token\":\"refreshed\"}}')",
+            ],
+            "stdin": None,
+            "env": {},
+            "codex_auth_json": '{"tokens":{"access_token":"original"}}',
+        },
+        base=base,
+    )
+    res, _out = _wait_done("rb1", base)
+    assert res["done"] is True
+    assert "refreshed" in res.get("codex_auth_json", "")
+
+
 def test_poll_unknown_run_is_done_with_error(tmp_path):
     res = pod_runner.poll({"run_id": "missing", "offset": 0}, base=str(tmp_path))
     assert res["done"] is True

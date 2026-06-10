@@ -100,6 +100,7 @@ async def run_code_agent(
     transcript: list[str] = []
     offset = 0
     started = now()
+    updated_codex_auth: str | None = None
 
     while True:
         if should_cancel():
@@ -131,6 +132,7 @@ async def run_code_agent(
 
         if poll.get("done"):
             exit_code = poll.get("exit_code")
+            updated_codex_auth = poll.get("codex_auth_json")
             break
 
         await sleep(cfg.poll_interval)
@@ -138,4 +140,5 @@ async def run_code_agent(
     result = parse_stream(agent, "".join(transcript))
     if result.error and exit_code not in (0, None):
         result.error = f"{agent} exited with code {exit_code}: {result.error}"
+    result.updated_codex_auth_json = updated_codex_auth
     return result
