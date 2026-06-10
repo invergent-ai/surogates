@@ -44,7 +44,10 @@ _OUTCOME_EVENT_KINDS: frozenset[str] = frozenset({
 })
 
 
-def classify_attempt_outcome(events: list[Any]) -> tuple[TaskAttemptOutcome, Any]:
+def classify_attempt_outcome(
+    events: list[Any],
+    session_status: str | None = None,
+) -> tuple[TaskAttemptOutcome, Any]:
     """Inspect a worker Session's event log and classify the attempt.
 
     Returns ``(outcome, last_relevant_event)`` where ``last_relevant_event``
@@ -54,6 +57,14 @@ def classify_attempt_outcome(events: list[Any]) -> tuple[TaskAttemptOutcome, Any
     event wins.  Tasks normally have at most one outcome event, but if
     the harness retried internally and emitted two, the latest reflects
     the final state of the attempt.
+
+    ``session_status`` is the worker session's terminal status.  A worker
+    that ended its session *cleanly* (``"completed"``) is a completed
+    attempt even when it never called the ``worker_complete`` tool — the
+    documented "natural completion" path (`docs/tasks/index.md`): the
+    result is auto-extracted from the worker's final assistant message.
+    Without this, a successful worker that simply ends its turn is
+    misclassified as CRASHED and pointlessly retried.
     """
     for event in reversed(events):
         kind = getattr(event, "kind", None) or getattr(event, "type", None)
@@ -62,7 +73,22 @@ def classify_attempt_outcome(events: list[Any]) -> tuple[TaskAttemptOutcome, Any
                 return TaskAttemptOutcome.COMPLETED, event
             if kind == EventType.TASK_BLOCKED.value:
                 return TaskAttemptOutcome.BLOCKED, event
+
+    # No explicit outcome event.  A cleanly-ended session is still a
+    # completed attempt (auto-extract the result from the last response).
+    if session_status == "completed":
+        return TaskAttemptOutcome.COMPLETED, _last_llm_response(events)
+
     return TaskAttemptOutcome.CRASHED, None
+
+
+def _last_llm_response(events: list[Any]) -> Any | None:
+    """Return the most recent ``LLM_RESPONSE`` event, or None."""
+    for event in reversed(events):
+        kind = getattr(event, "kind", None) or getattr(event, "type", None)
+        if kind == EventType.LLM_RESPONSE.value:
+            return event
+    return None
 
 
 async def fetch_prior_attempt_summaries(
@@ -176,5 +202,15 @@ def extract_result_from_completion_event(event: Any) -> str | None:
             return None
     if not isinstance(raw, dict):
         return None
+    # WORKER_COMPLETE payload carries an explicit ``result``.
     val = raw.get("result")
-    return str(val) if val is not None else None
+    if val is not None:
+        return str(val)
+    # Natural completion: the event is the worker's final LLM_RESPONSE —
+    # use its assistant message content as the result.
+    message = raw.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, str) and content:
+            return content
+    return None
