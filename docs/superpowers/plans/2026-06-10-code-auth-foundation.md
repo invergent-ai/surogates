@@ -18,8 +18,8 @@
 - [x] Task 4: `/code` command parser
 - [x] Task 5: Rendered chat messages
 - [x] Task 6: `CodeCommandMixin` handler
-- [ ] Task 7: Credential REST routes + mount (in progress)
-- [ ] Task 8: Wire `/code` into the harness + injection-screen exemption
+- [x] Task 7: Credential REST routes + mount
+- [ ] Task 8: Wire `/code` into the harness + injection-screen exemption (in progress)
 - [ ] Final verification (unit + integration + import smoke)
 
 **Conventions in this repo (read before starting):**
@@ -1060,6 +1060,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import pytest_asyncio
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -1075,7 +1076,10 @@ from .conftest import create_org, create_user
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
-@pytest.fixture
+# loop_scope="session" is required: the engine/session_factory fixtures run on
+# the session event loop; a function-scoped async fixture would talk to asyncpg
+# from a different loop and fail with "transaction is in error state".
+@pytest_asyncio.fixture(loop_scope="session")
 async def client(session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
