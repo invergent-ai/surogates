@@ -20,7 +20,7 @@
 - [x] Task 6: `CodeCommandMixin` handler
 - [x] Task 7: Credential REST routes + mount
 - [x] Task 8: Wire `/code` into the harness + injection-screen exemption
-- [ ] Final verification (unit + integration + import smoke) (in progress)
+- [x] Final verification (unit + integration + import smoke) — 32 unit + 7 integration tests pass; `surogates.api.app` imports clean; full unit-suite failure set is byte-identical to the pre-feature baseline (87 pre-existing failures, none introduced)
 
 **Conventions in this repo (read before starting):**
 - Run unit tests: `.venv/bin/python -m pytest tests/<file> -v` from `/work/surogates`.
@@ -1506,17 +1506,17 @@ git commit -m "feat(code): dispatch /code in the harness and exempt it from inje
 
 ## Final Verification
 
-- [ ] **Run the full new unit suite:**
+- [x] **Run the full new unit suite:**
 
 Run: `.venv/bin/python -m pytest tests/test_coding_agents_credentials.py tests/test_coding_agents_command.py tests/test_coding_agents_messages.py tests/test_code_command_mixin.py tests/test_code_command_wiring.py -v`
 Expected: all PASS.
 
-- [ ] **Run the integration suite (needs Docker):**
+- [x] **Run the integration suite (needs Docker):**
 
 Run: `.venv/bin/python -m pytest tests/integration/test_coding_agents_credentials.py tests/integration/test_coding_agents_routes.py -v`
 Expected: all PASS.
 
-- [ ] **Smoke the API import:**
+- [x] **Smoke the API import:**
 
 Run: `.venv/bin/python -c "import surogates.api.app; print('ok')"`
 Expected: `ok`.
