@@ -82,29 +82,39 @@ Three AgentDefs (`name`, system prompt, tool filter, model):
   `run_coding_agent(agent='claude', …)`. Report changed files + how you verified."
 - **`codex-reviewer`** — tool filter allows `run_coding_agent`; prompt: "Review
   the implementation in `/workspace` and run its tests by calling
-  `run_coding_agent(agent='codex', …)`. If you find issues, `worker_block` with a
-  `review-required:` reason describing them; otherwise `worker_complete`."
+  `run_coding_agent(agent='codex', …)`. `worker_complete` with the findings —
+  list each issue and the test results — in your `summary`/`metadata` so the
+  downstream fix card can act on them. (Do not block; this is a fixed chain.)"
 - **`code-orchestrator`** — `spawn_task`/`unblock_task`/`cancel_task` enabled,
   implementation tools stripped, runs `subagent-task-orchestrator`. Its
   "# Available Sub-Agents" roster lists `claude-coder` and `codex-reviewer`.
 
 Sub-agents inherit the parent's workspace, skills, and connected coding plans.
 
-## 5. Orchestration Flow (existing machinery)
+## 5. Orchestration Flow — fixed 4-card chain
 
-The orchestrator decomposes a build goal into:
+The orchestrator lays out a **fixed, pre-wired DAG** of four cards up front
+(predictable on screen — chosen over a dynamic review/fix loop for a live
+showcase):
 
 ```
 implement (claude-coder)
-  → review (codex-reviewer, parents=[implement])      # runs tests, blocks on issues
-  → fix (claude-coder, parents=[review])              # only if review blocked
-  → verify (codex-reviewer, parents=[fix])
+  → review  (codex-reviewer, parents=[implement])   # runs tests, reports findings
+  → fix     (claude-coder,   parents=[review])      # reads review result, applies fixes
+  → verify  (codex-reviewer, parents=[fix])         # final re-test, completes green
 ```
 
-The review→fix loop is the task layer's native `worker_block`/`unblock_task`
-cycle: `codex-reviewer` blocks with `review-required: …`; the orchestrator spawns
-a `fix` card carrying that context to `claude-coder`; on the next review the
-findings are resolved. No new control-flow code.
+The `fix` card receives the `review` card's result (the task layer passes parent
+`result`/`result_metadata` to a child via `worker_context`), so Claude fixes the
+exact issues Codex reported. All four cards are created at decomposition time
+with explicit `parents=[...]`; no `worker_block`/`unblock_task`, no dynamic
+re-spawning. Each card completes with `worker_complete`.
+
+**Single review/fix round.** This fixed chain does one review→fix pass. The demo
+task is chosen to have a known rough edge so the `fix` card always has real work
+(see §6). If a deeper, multi-round loop is wanted later, switch `codex-reviewer`
+to `worker_block('review-required: …')` and let the orchestrator re-spawn — the
+dynamic variant the platform already supports — but that is out of scope here.
 
 ## 6. The Demo
 
@@ -112,10 +122,11 @@ findings are resolved. No new control-flow code.
 2. User gives `code-orchestrator` one goal: *"Build a working URL-shortener
    (small Flask API + one HTML page) in the workspace — implemented, reviewed,
    and tested."*
-3. On screen: the board fills — `implement` → in-progress (`CodeRunBlock` streams
-   Claude writing files) → `review` picks up (`CodeRunBlock` of Codex running the
-   tests, then a block with findings) → `fix` routes back to Claude → `verify`
-   goes green → board complete, working app in `/workspace`.
+3. On screen: all four cards appear up front, then light up left to right —
+   `implement` in-progress (`CodeRunBlock` streams Claude writing files) →
+   `review` (`CodeRunBlock` of Codex running the tests and reporting findings) →
+   `fix` (Claude applies Codex's findings) → `verify` (Codex re-tests) goes green
+   → board complete, working app in `/workspace`.
 
 The visible artifacts — cards flowing across lanes, two distinct `CodeRunBlock`s,
 the shared workspace tree filling up, a green board — are the showcase.
