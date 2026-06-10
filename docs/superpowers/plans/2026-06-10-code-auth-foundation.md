@@ -16,8 +16,8 @@
 - [x] Task 2: `validate_pasted()` paste validator
 - [x] Task 3: `CodingAgentCredentials` vault wrapper
 - [x] Task 4: `/code` command parser
-- [ ] Task 5: Rendered chat messages (in progress)
-- [ ] Task 6: `CodeCommandMixin` handler
+- [x] Task 5: Rendered chat messages
+- [ ] Task 6: `CodeCommandMixin` handler (in progress)
 - [ ] Task 7: Credential REST routes + mount
 - [ ] Task 8: Wire `/code` into the harness + injection-screen exemption
 - [ ] Final verification (unit + integration + import smoke)
