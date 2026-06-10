@@ -124,6 +124,7 @@ Existing modules touched:
 | `api/app.py` | Mount the new router. |
 | `sdk/agent-chat-react/*` | Adapter methods, composer entries, paste-to-connect UI, run renderer, event types. |
 | `images/sandbox/Dockerfile` | Install `@anthropic-ai/claude-code` + `@openai/codex`. |
+| `images/worker/srt-settings.json`, `harness/context_files.py`, `scheduled/prompt_guard.py` | Extend secret-read deny patterns to cover `/run/code`, `auth.json`, `CODEX_HOME`, and `CLAUDE_CONFIG_DIR`. |
 | k8s NetworkPolicy | Allow sandbox-pod egress to `api.anthropic.com` + `api.openai.com`. |
 
 ## 5. Auth Foundation (capture A)
@@ -219,11 +220,15 @@ The worker handler (which has vault access) orchestrates each run:
    long-lived.)
 2. Place the credential in a **pod-local** directory (e.g. `/run/code/...`, on the
    pod writable layer, **not** the s3fs `/workspace` mount):
-   - **claude OAuth:** export `CLAUDE_CODE_OAUTH_TOKEN=<token>` **inline in the
-     exec command** (pod-level `SandboxSpec.env` is stripped by the terminal
-     allowlist, so inline is required). API-key mode: `ANTHROPIC_API_KEY` inline.
+   - **claude OAuth:** export `CLAUDE_CODE_OAUTH_TOKEN=<token>` from a pod-local
+     launcher script or equivalent run-local env injection (pod-level
+     `SandboxSpec.env` is stripped by the terminal allowlist, so the runner must
+     inject credentials at process-launch time). API-key mode:
+     `ANTHROPIC_API_KEY` through the same launch path. **Do not put secrets in
+     logged command strings or shell history.**
    - **codex OAuth:** write the pasted `auth.json` to `CODEX_HOME/auth.json`
-     (pod-local), set `CODEX_HOME` inline. API-key mode: `OPENAI_API_KEY` inline.
+     (pod-local), set `CODEX_HOME` through the same launch path. API-key mode:
+     `OPENAI_API_KEY` through the launch path.
 3. **Env hygiene:** before spawning, scrub conflicting provider vars from the
    child env. `claude`'s precedence is `ANTHROPIC_API_KEY` > `CLAUDE_CODE_OAUTH_TOKEN`,
    so a stray `ANTHROPIC_API_KEY` in the pod would silently override the user's
@@ -241,9 +246,19 @@ sandbox" invariant. Two consequences are called out for security review (§11):
 the Claude token is **long-lived** (a 1-year `setup-token` at rest in the pod for
 the run's duration is higher-value than a short access token), and the codex
 `auth.json` carries a refresh token (sanctioned by OpenAI's documented `auth.json`
-portability). Mitigations: pod-local dir off S3, inline-env/file only (never
-`SandboxSpec.env`), deleted after the run, and the terminal denylist already
-blocks `.credentials.json`-style reads by the model's shell tools.
+portability). Mitigations: pod-local dir off S3, process-launch env/file only
+(never `SandboxSpec.env`), no plaintext secrets in command logs, deletion after
+each run, and explicit deny patterns for `/run/code`, `auth.json`, `CODEX_HOME`,
+and `CLAUDE_CONFIG_DIR` in the terminal/runtime policy plus prompt/context guards.
+
+Before launch, run an empirical isolation preflight for both vendor CLIs: ask the
+agent to print its environment, inspect `CODEX_HOME`, read `/run/code`, and spawn
+a shell subprocess. If either CLI exposes subscription credentials to its own tool
+subprocesses, subscription mode is not shippable as v1 without a stronger
+isolation boundary (for example a brokered credential helper or a provider-backed
+safe mode). The deny patterns reduce accidental leakage through Surogates tools;
+they are not a substitute for proving the vendor CLI does not hand its auth
+material to code it executes.
 
 ### 6.3 Beating the sandbox ceilings
 
@@ -252,8 +267,10 @@ and the cross-pod background-process manager is unreliable. The runner therefore
 self-supervises (this is the exact workaround the sandbox study recommended):
 
 1. One exec spawns the CLI detached: `nohup <cmd> > /run/code/run-<id>.log 2>&1 &`
-   (writes its PID to a file). The runner uses the sandbox exec path directly, not
-   the `terminal` tool, so it fully controls the command env.
+   (writes its PID to a file). `<cmd>` should be a generated pod-local launcher
+   path, not a shell string containing credentials. The runner uses the sandbox
+   exec path directly, not the `terminal` tool, so it fully controls the command
+   env.
 2. A poll loop issues **short** (<305 s) exec reads that tail the new bytes of the
    log, parses freshly-emitted `stream-json` lines, emits **coalesced** progress
    events (never per-line — avoids event-log bloat), renews the session lease
@@ -373,6 +390,10 @@ via the credential route, not the event log. Token-shaped data is redacted by
   server and worker pods; the vault works as-is.
 - **Cred dir:** a pod-local credential directory convention
   (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`) off the S3 mount.
+- **Sandbox policy:** extend deny-read and threat-pattern coverage for
+  `/run/code`, `auth.json`, `CODEX_HOME`, and `CLAUDE_CONFIG_DIR`; add regression
+  tests that attempted reads are blocked and that no emitted event/log payload
+  contains token-shaped strings.
 
 ## 10. Non-Goals (v1)
 
@@ -395,21 +416,27 @@ via the credential route, not the event log. Token-shaped data is redacted by
    binary with a `setup-token` the binary minted. The 2026-06-15 "Agent SDK credit
    pool" change still needs product/legal sign-off.
 2. **Long-lived Claude token at rest.** Capture A's `setup-token` is valid ~1 year,
-   so a leak is high-impact. Mitigated by pod-local-off-S3 storage, inline-env-only
-   injection, deletion after each run, and the terminal denylist — but the blast
-   radius is larger than a short-lived token. Security review required.
-3. **Codex credential staleness.** Codex `auth.json` access tokens go stale (~8
+   so a leak is high-impact. Mitigated by pod-local-off-S3 storage,
+   process-launch-only injection, deletion after each run, and explicit
+   `/run/code` deny patterns — but the blast radius is larger than a short-lived
+   token. Security review required.
+3. **Credential self-exposure inside vendor tool execution.** The vendor CLI must
+   authenticate somehow, but the code it executes must not be able to read the
+   subscription token, `auth.json`, or inherited provider env vars. This is a
+   blocking preflight item for v1, because repository prompt injection could
+   otherwise turn `/code` into a credential-exfiltration path.
+4. **Codex credential staleness.** Codex `auth.json` access tokens go stale (~8
    days). The write-back in §6.2 keeps the vault copy fresh across runs; a user who
    doesn't run `/code codex` for longer than the window must re-paste. (Refresh
    token transiently in-pod is within OpenAI's documented `auth.json` portability.)
-4. **Injection-exemption surface.** Exempting `/code` text from the detector is
+5. **Injection-exemption surface.** Exempting `/code` text from the detector is
    safe because the prompt never reaches the platform LLM, but the exemption must
    match **only** genuine `/code` commands (anchor on the same parse the harness
    uses) so it can't be used to smuggle un-screened content into a normal turn.
-5. **s3fs performance.** Git-heavy coding agents on the FUSE-mounted `/workspace`
+6. **s3fs performance.** Git-heavy coding agents on the FUSE-mounted `/workspace`
    may be slow; workspace-only v1 keeps repos small. Watch for FUSE quirks already
    documented in the sandbox.
-6. **Pod deadline.** Long runs (>~1 h) are killed. Acceptable for v1; chunking is a
+7. **Pod deadline.** Long runs (>~1 h) are killed. Acceptable for v1; chunking is a
    future enhancement.
 
 ## 12. Implementation Phasing
@@ -420,8 +447,11 @@ via the credential route, not the event log. Token-shaped data is redacted by
    end-to-end before any execution.
 2. **Execution:** `agents.py` (command builders + output parsing), `runner.py`
    (inject/spawn/poll/capture + codex write-back), the `/code claude|codex`
-   subcommand, new event types + `CodeRunBlock`, sandbox image + NetworkPolicy.
-   Ship a streamed one-shot run.
+   subcommand, new event types + `CodeRunBlock`, sandbox image + NetworkPolicy,
+   sandbox secret-read deny patterns, and the blocking vendor-CLI credential
+   isolation preflight. Ship a streamed one-shot run only after the preflight
+   proves the coding agent's tool subprocesses cannot read the injected auth
+   material.
 3. **Polish:** `--model` / `--effort` / `--allow` normalization, usage reporting,
    idempotency/interrupt hardening, env-hygiene tests, and docs
    (`docs/commands/index.md`, usage docs).
