@@ -15,8 +15,8 @@
 - [x] Task 1: Package + `CredentialBundle` model
 - [x] Task 2: `validate_pasted()` paste validator
 - [x] Task 3: `CodingAgentCredentials` vault wrapper
-- [ ] Task 4: `/code` command parser (in progress)
-- [ ] Task 5: Rendered chat messages
+- [x] Task 4: `/code` command parser
+- [ ] Task 5: Rendered chat messages (in progress)
 - [ ] Task 6: `CodeCommandMixin` handler
 - [ ] Task 7: Credential REST routes + mount
 - [ ] Task 8: Wire `/code` into the harness + injection-screen exemption
