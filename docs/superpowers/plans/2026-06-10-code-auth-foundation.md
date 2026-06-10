@@ -10,6 +10,18 @@
 
 **Spec:** `docs/superpowers/specs/2026-06-10-code-command-coding-agents-design.md` (this plan implements §5, §7.0–7.2, and the auth slice of §4).
 
+## Progress
+
+- [x] Task 1: Package + `CredentialBundle` model
+- [ ] Task 2: `validate_pasted()` paste validator (in progress)
+- [ ] Task 3: `CodingAgentCredentials` vault wrapper
+- [ ] Task 4: `/code` command parser
+- [ ] Task 5: Rendered chat messages
+- [ ] Task 6: `CodeCommandMixin` handler
+- [ ] Task 7: Credential REST routes + mount
+- [ ] Task 8: Wire `/code` into the harness + injection-screen exemption
+- [ ] Final verification (unit + integration + import smoke)
+
 **Conventions in this repo (read before starting):**
 - Run unit tests: `.venv/bin/python -m pytest tests/<file> -v` from `/work/surogates`.
 - Integration tests spin up real Postgres/Redis via testcontainers and need Docker available: `.venv/bin/python -m pytest tests/integration/<file> -v`.
@@ -869,7 +881,7 @@ class _FakeStore:
 
     async def emit_event(self, session_id, event_type, data):
         self.events.append((event_type, data))
-        return uuid4()
+        return len(self.events)  # real store returns a BIGSERIAL int id
 
     async def advance_harness_cursor(self, session_id, *, through_event_id, lease_token):
         return None
@@ -1449,8 +1461,8 @@ Replace the injection-screen block (lines `~727-740`) so it skips genuine `/code
     injection_source = (
         "api_channel" if session.channel == API_CHANNEL else "web_channel"
     )
+    detector = _get_injection_detector()
     if not is_code_command(body.content):
-        detector = _get_injection_detector()
         injection_result = detector.detect(
             body.content,
             source=injection_source,
@@ -1462,7 +1474,7 @@ Replace the injection-screen block (lines `~727-740`) so it skips genuine `/code
             )
 ```
 
-(Leave the attachment-filename screening block below it unchanged — `injection_source` is still defined for it.)
+(Leave the attachment-filename screening block below it unchanged — it uses both `detector` and `injection_source`, which is why `detector = _get_injection_detector()` must stay **outside** the `is_code_command` conditional. Only the body-content detection is guarded.)
 
 - [ ] **Step 8: Run the wiring tests + the full new-module suite**
 
