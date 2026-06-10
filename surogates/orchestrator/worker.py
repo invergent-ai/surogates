@@ -1099,6 +1099,7 @@ async def run_worker(settings: Settings) -> None:
             browser_control=browser_control,
             storage=storage_backend,
             api_client=harness_api_client,
+            credential_vault=credential_vault,
             default_model=model_id,
             session_factory=session_factory,
             saga_enabled=settings.saga.enabled,

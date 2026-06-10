@@ -31,6 +31,7 @@ _SLASH_COMMAND_RE: Final = re.compile(
 # Slash commands handled elsewhere in the loop -- never treat these as skills.
 _BUILTIN_SLASH_COMMANDS: Final[frozenset[str]] = frozenset({
     "clear",
+    "code",
     "compress",
     "deep-research",
     "goal",

@@ -19,8 +19,8 @@
 - [x] Task 5: Rendered chat messages
 - [x] Task 6: `CodeCommandMixin` handler
 - [x] Task 7: Credential REST routes + mount
-- [ ] Task 8: Wire `/code` into the harness + injection-screen exemption (in progress)
-- [ ] Final verification (unit + integration + import smoke)
+- [x] Task 8: Wire `/code` into the harness + injection-screen exemption
+- [ ] Final verification (unit + integration + import smoke) (in progress)
 
 **Conventions in this repo (read before starting):**
 - Run unit tests: `.venv/bin/python -m pytest tests/<file> -v` from `/work/surogates`.
@@ -1460,8 +1460,6 @@ Replace the injection-screen block (lines `~727-740`) so it skips genuine `/code
     # /code command text is exempt: it is a command to the user's own coding
     # agent (parsed by the harness, never fed to the platform LLM), and coding
     # prompts routinely trip the detector.  Attachments/filenames stay screened.
-    from surogates.coding_agents.command import is_code_command
-
     injection_source = (
         "api_channel" if session.channel == API_CHANNEL else "web_channel"
     )
@@ -1477,6 +1475,8 @@ Replace the injection-screen block (lines `~727-740`) so it skips genuine `/code
                 detail=(f"Message blocked: {injection_result.explanation}"),
             )
 ```
+
+Add `from surogates.coding_agents.command import is_code_command` to the module-level import block (it only depends on stdlib, so no circular-import risk).
 
 (Leave the attachment-filename screening block below it unchanged — it uses both `detector` and `injection_source`, which is why `detector = _get_injection_detector()` must stay **outside** the `is_code_command` conditional. Only the body-content detection is guarded.)
 
