@@ -13,11 +13,8 @@ or log.  Conflicting provider env vars are scrubbed before launch.
 
 from __future__ import annotations
 
-import json
 import logging
-from uuid import uuid4
 
-from surogates.coding_agents.agents import build_invocation
 from surogates.coding_agents.command import parse_code_command
 from surogates.coding_agents.credentials import CodingAgentCredentials
 from surogates.coding_agents.messages import (
@@ -26,7 +23,6 @@ from surogates.coding_agents.messages import (
     render_login_instructions,
     render_status,
 )
-from surogates.coding_agents.runner import run_code_agent
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -114,177 +110,74 @@ class CodeCommandMixin:
     # ------------------------------------------------------------------
 
     async def _run_code_agent(self, session, cmd, lease, all_events) -> None:
+        from surogates.coding_agents.run_core import execute_coding_run
+
         creds = self._code_credentials()
         if creds is None:
             await self._emit_code_message(session, _NO_VAULT, lease)
             return
-
         sandbox_pool = getattr(self, "_sandbox_pool", None)
         if sandbox_pool is None:
             await self._emit_code_message(session, _NO_SANDBOX, lease)
             return
 
-        bundle = await creds.load(
-            org_id=self._tenant.org_id,
-            user_id=self._tenant.user_id,
-            provider=cmd.provider,
-        )
-        if bundle is None:
-            await self._emit_code_message(
-                session, render_connect_first(cmd.agent), lease,
-            )
-            return
-
-        # Idempotency: crash-recovery re-wakes replay the same user.message.
-        # If a run for this source event already started, do not relaunch.
+        # Idempotency: a crash-recovery re-wake replays the same user.message;
+        # if a run for this source event already started, do not relaunch.
         source_event_id = _latest_user_event_id(all_events)
         if source_event_id is not None and _code_run_already_started(
             all_events, source_event_id,
         ):
             return
 
-        invocation = build_invocation(
-            cmd.agent,
-            cmd.prompt,
-            model=cmd.flags.get("model"),
-            effort=cmd.flags.get("effort"),
-            read_only=cmd.flags.get("allow") == "read-only",
-        )
-        env, codex_auth_json = _credential_env(bundle)
-
-        run_id = uuid4().hex
-        await self._store.emit_event(
-            session.id,
-            EventType.CODE_RUN_STARTED,
-            {
-                "run_id": run_id,
-                "agent": cmd.agent,
-                "provider": cmd.provider,
-                "prompt": cmd.prompt,
-                "source_event_id": source_event_id,
-            },
-        )
-
         from surogates.sandbox.pool import sandbox_session_key
 
         sandbox_owner = sandbox_session_key(session)
-        try:
-            await self._ensure_code_sandbox(session, sandbox_owner)
-        except Exception as exc:  # provisioning failure — report cleanly
-            logger.warning("Sandbox provisioning failed for /code: %s", exc)
-            await self._emit_code_result(
-                session, run_id, cmd.agent, lease,
-                final_message="", error=f"Could not start a sandbox: {exc}",
-            )
-            return
 
-        async def _emit_progress(chunk: str) -> None:
-            await self._store.emit_event(
-                session.id,
-                EventType.CODE_RUN_PROGRESS,
-                {"run_id": run_id, "agent": cmd.agent, "chunk": chunk},
-            )
+        async def _ensure() -> None:
+            await self._ensure_code_sandbox(session, sandbox_owner)
 
         async def _execute(name: str, input_json: str) -> str:
             return await sandbox_pool.execute(sandbox_owner, name, input_json)
 
-        result = await run_code_agent(
-            run_id=run_id,
-            agent=cmd.agent,
-            invocation=invocation,
-            env=env,
-            codex_auth_json=codex_auth_json,
-            execute=_execute,
-            emit_progress=_emit_progress,
-            should_cancel=lambda: bool(getattr(self, "_interrupt_requested", False)),
-            sleep=_async_sleep,
-        )
-
-        # Codex refreshes its auth.json in-pod; persist the new copy so the
-        # vault stays fresh and the user isn't forced to re-paste.
-        if cmd.provider == "openai" and result.updated_codex_auth_json:
-            await self._writeback_codex_auth(creds, result.updated_codex_auth_json)
-
-        await self._emit_code_result(
-            session, run_id, cmd.agent, lease,
-            final_message=result.final_message,
-            error=result.error,
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
-        )
-
-    async def _writeback_codex_auth(self, creds, auth_json_raw: str) -> None:
-        """Re-store a refreshed codex ``auth.json`` into the vault."""
-        from surogates.coding_agents.credentials import CredentialBundle
-
         try:
-            parsed = json.loads(auth_json_raw)
-        except (json.JSONDecodeError, TypeError):
-            return
-        if not isinstance(parsed, dict):
-            return
-        bundle = CredentialBundle(
-            provider="openai", auth_mode="oauth", auth_json=parsed,
-        )
-        try:
-            await creds.store(
-                org_id=self._tenant.org_id,
-                user_id=self._tenant.user_id,
-                bundle=bundle,
+            outcome = await execute_coding_run(
+                store=self._store, tenant=self._tenant, session=session,
+                credentials=creds, agent=cmd.agent, provider=cmd.provider,
+                prompt=cmd.prompt, model=cmd.flags.get("model"),
+                effort=cmd.flags.get("effort"),
+                read_only=cmd.flags.get("allow") == "read-only",
+                ensure_sandbox=_ensure, execute=_execute,
+                should_cancel=lambda: bool(
+                    getattr(self, "_interrupt_requested", False)
+                ),
+                started_metadata={"source_event_id": source_event_id},
             )
-        except Exception as exc:  # write-back is best-effort
-            logger.warning("Codex auth write-back failed: %s", exc)
+        except Exception as exc:  # provisioning/build failure — report cleanly
+            logger.warning("/code run failed: %s", exc)
+            await self._emit_code_message(
+                session, f"Could not run {cmd.agent}: {exc}", lease,
+            )
+            return
+
+        if outcome.status == "not_connected":
+            await self._emit_code_message(
+                session, render_connect_first(cmd.agent), lease,
+            )
+            return
+
+        # The core already emitted CODE_RUN_RESULT — advance the cursor through
+        # it so this terminal slash turn is durably processed.
+        await self._store.advance_harness_cursor(
+            session.id,
+            through_event_id=outcome.result_event_id,
+            lease_token=lease.lease_token,
+        )
 
     async def _ensure_code_sandbox(self, session, sandbox_owner: str) -> None:
         from surogates.harness.tool_exec import _build_session_sandbox_spec
 
         spec = _build_session_sandbox_spec(session, self._tenant, sandbox_owner)
         await self._sandbox_pool.ensure(sandbox_owner, spec)
-
-    async def _emit_code_result(
-        self, session, run_id, agent, lease, *,
-        final_message: str, error: str | None,
-        input_tokens: int = 0, output_tokens: int = 0,
-    ) -> None:
-        result_event_id = await self._store.emit_event(
-            session.id,
-            EventType.CODE_RUN_RESULT,
-            {
-                "run_id": run_id,
-                "agent": agent,
-                "final_message": final_message,
-                "error": error,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-            },
-        )
-        await self._store.advance_harness_cursor(
-            session.id,
-            through_event_id=result_event_id,
-            lease_token=lease.lease_token,
-        )
-
-
-async def _async_sleep(seconds: float) -> None:
-    import asyncio
-
-    await asyncio.sleep(seconds)
-
-
-def _credential_env(bundle) -> tuple[dict[str, str], str | None]:
-    """Map a credential bundle to a launch env + optional codex auth.json.
-
-    Returns ``(env, codex_auth_json)``.  Only the minimal credential for the
-    chosen provider/mode is emitted; nothing else is added to the child env.
-    """
-    if bundle.provider == "anthropic":
-        if bundle.auth_mode == "oauth":
-            return {"CLAUDE_CODE_OAUTH_TOKEN": bundle.oauth_token or ""}, None
-        return {"ANTHROPIC_API_KEY": bundle.api_key or ""}, None
-    # openai / codex
-    if bundle.auth_mode == "oauth":
-        return {}, json.dumps(bundle.auth_json or {})
-    return {"OPENAI_API_KEY": bundle.api_key or ""}, None
 
 
 def _latest_user_event_id(all_events) -> int | None:
