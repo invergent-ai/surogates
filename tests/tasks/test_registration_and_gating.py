@@ -130,6 +130,32 @@ def test_filter_effective_tools_keeps_worker_self_tools_when_session_has_task_id
     assert "other_tool" in out
 
 
+def test_filter_effective_tools_adds_worker_self_tools_under_restrictive_allowlist():
+    """A task worker with a restrictive AgentDef allowlist (worker_* not in
+    the starting set) still gets its self-tools — they are execution-context
+    tools, not work tools subject to the allowlist."""
+    from surogates.orchestrator.worker import _filter_effective_tools
+
+    tenant = MagicMock(user_id=uuid.uuid4())
+    session = MagicMock(
+        task_id=uuid.uuid4(),
+        service_account_id=None,
+        channel="task",
+    )
+
+    # Mirrors the codex-reviewer / claude-coder AgentDef allowlist.
+    out = _filter_effective_tools(
+        tools={"run_coding_agent", "read_file", "list_files", "search_files"},
+        tenant=tenant,
+        session=session,
+        use_api_for_harness_tools=True,
+    )
+    assert "worker_complete" in out
+    assert "worker_context" in out
+    assert "worker_block" in out
+    assert "run_coding_agent" in out  # the allowlist tools remain
+
+
 def test_filter_effective_tools_worker_self_tools_independent_of_other_gates():
     """Anonymous-channel sessions still get all 3 worker self-tools stripped
     when there's no task_id. The other gates (memory/skill_manage
