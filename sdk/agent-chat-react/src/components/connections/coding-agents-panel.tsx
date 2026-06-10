@@ -5,7 +5,9 @@ import type { AgentChatAdapter, CodingAgentConnection } from "../../types";
 export interface CodingAgentsPanelProps {
   agentId?: string;
   adapter: AgentChatAdapter;
-  onBack: () => void;
+  /** Optional. When omitted (e.g. embedded as a settings tab) the
+   *  "Back" affordance is not rendered. */
+  onBack?: () => void;
 }
 
 type Mode = "oauth" | "api_key";
@@ -103,14 +105,16 @@ export function CodingAgentsPanel({ agentId, adapter, onBack }: CodingAgentsPane
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-6">
-      <button
-        type="button"
-        onClick={onBack}
-        className="flex w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
-      >
-        <ArrowLeftIcon className="h-4 w-4" />
-        Back
-      </button>
+      {onBack && (
+        <button
+          type="button"
+          onClick={onBack}
+          className="flex w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+        >
+          <ArrowLeftIcon className="h-4 w-4" />
+          Back
+        </button>
+      )}
       <div>
         <h1 className="text-2xl font-bold text-foreground">Coding agents</h1>
         <p className="text-sm text-muted-foreground">
