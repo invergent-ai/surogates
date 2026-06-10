@@ -48,9 +48,13 @@ async def main() -> None:
 
     workspace = os.environ.get("WORKSPACE_DIR", "/workspace")
 
-    # Log the incoming call (truncate args for readability).
-    args_preview = tool_args_raw[:200] + ("..." if len(tool_args_raw) > 200 else "")
-    logger.info("→ %s %s", tool_name, args_preview)
+    # Log the incoming call (truncate args for readability).  The _code
+    # launcher payload can carry a credential, so its args are never logged.
+    if tool_name == "_code":
+        logger.info("→ _code")
+    else:
+        args_preview = tool_args_raw[:200] + ("..." if len(tool_args_raw) > 200 else "")
+        logger.info("→ %s %s", tool_name, args_preview)
 
     start = time.monotonic()
 
@@ -59,6 +63,18 @@ async def main() -> None:
         await _handle_checkpoint(tool_args, workspace)
         duration = time.monotonic() - start
         logger.info("← %s completed in %.2fs", tool_name, duration)
+        return
+
+    if tool_name == "_code":
+        # /code run launcher.  The payload may carry a credential on launch,
+        # so it is never logged here (only the action verb is).
+        from surogates.coding_agents.pod_runner import dispatch as code_dispatch
+
+        result = code_dispatch(tool_args)
+        duration = time.monotonic() - start
+        logger.info("← _code action=%s done in %.2fs",
+                    tool_args.get("action"), duration)
+        print(json.dumps(result))
         return
 
     # Register the real tool handlers.
