@@ -108,6 +108,19 @@ describe("code.run_* events", () => {
     expect(parsed.inputTokens).toBe(12);
     expect(parsed.outputTokens).toBe(34);
     expect(parsed.error).toBeNull();
+    // The run is the whole turn: finishing it must clear the busy
+    // indicator (otherwise "Working on it..." sticks forever).
+    expect(state.isRunning).toBe(false);
+  });
+
+  it("clears isRunning when a code.run_result carries an error", () => {
+    let state = createInitialAgentChatState({ isLoadingHistory: false });
+    state = applyAgentChatEvent(state, started("r1"));
+    state = applyAgentChatEvent(
+      state,
+      result("r1", { final_message: "", error: "boom" }),
+    );
+    expect(state.isRunning).toBe(false);
   });
 
   it("marks the frame errored when code.run_result carries an error", () => {

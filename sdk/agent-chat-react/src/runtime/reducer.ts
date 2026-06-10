@@ -239,10 +239,17 @@ export function applyAgentChatEvent(
       );
 
     case "code.run_result":
-      return withMessages(
-        nextState,
-        applyCodeRunResult(nextState.messages, event.data),
-      );
+      // The run is the whole turn — finishing it ends the turn, so clear the
+      // busy indicator (mirrors llm.response setting isRunning=false when a
+      // normal turn has no further tool calls). Without this the
+      // "Working on it..." shimmer sticks forever after a /code run.
+      return {
+        ...withMessages(
+          nextState,
+          applyCodeRunResult(nextState.messages, event.data),
+        ),
+        isRunning: false,
+      };
 
     case "user.feedback":
       return withMessages(
