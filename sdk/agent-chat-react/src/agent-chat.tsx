@@ -40,6 +40,11 @@ export interface AgentChatProps {
    */
   deepResearchEnabled?: boolean;
   /**
+   * When true, the composer exposes the `/code` coding-agent slash commands.
+   * Like `deepResearchEnabled`, the host owns the capability gate.
+   */
+  codeAgentsEnabled?: boolean;
+  /**
    * Called when the user clicks the integrations band under the composer.
    * Hosts navigate to their Integrations route. When omitted, the band is
    * not rendered.
@@ -63,6 +68,7 @@ export function AgentChat({
   disabled,
   onComposerError,
   deepResearchEnabled = false,
+  codeAgentsEnabled = false,
   onOpenIntegrations,
 }: AgentChatProps) {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
@@ -257,6 +263,7 @@ export function AgentChat({
               viewMode={runtime.viewMode}
               onViewModeChange={runtime.setViewMode}
               deepResearchEnabled={deepResearchEnabled}
+              codeAgentsEnabled={codeAgentsEnabled}
               researchSources={runtime.researchSources}
               hideTurnSummary={hideTurnSummary}
               agentId={agentId}

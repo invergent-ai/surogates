@@ -130,6 +130,9 @@ interface ChatThreadProps {
   // When true, the composer's slash menu includes ``/deep-research``.
   // Forwarded as-is to ChatComposer.
   deepResearchEnabled?: boolean;
+  // When true, the composer's slash menu includes the ``/code`` commands.
+  // Forwarded as-is to ChatComposer.
+  codeAgentsEnabled?: boolean;
 
   // Curated research sources from the active deep-research workflow.
   // When non-empty an expandable "Sources" strip renders above the
@@ -2050,6 +2053,7 @@ export function ChatThread({
   viewMode = "simple",
   onViewModeChange,
   deepResearchEnabled = false,
+  codeAgentsEnabled = false,
   researchSources = [],
   hideTurnSummary = false,
   agentId,
@@ -2153,6 +2157,7 @@ export function ChatThread({
         viewMode={viewMode}
         onViewModeChange={onViewModeChange}
         deepResearchEnabled={deepResearchEnabled}
+        codeAgentsEnabled={codeAgentsEnabled}
       />
       {onOpenIntegrations && (
         <IntegrationsBandSlot
