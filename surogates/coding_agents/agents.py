@@ -141,6 +141,53 @@ def _usage_tokens(usage: object) -> tuple[int, int]:
         return 0, 0
 
 
+def summarize_progress(agent: str, raw: str) -> str:
+    """Turn a stream-json transcript into a readable running narrative.
+
+    Keeps assistant text and a compact note per tool the agent invokes;
+    drops system/rate-limit/thinking bookkeeping and the terminal result
+    event (shown separately as the final message).  Used to emit clean
+    ``CODE_RUN_PROGRESS`` deltas instead of raw JSONL.
+    """
+    parts: list[str] = []
+    for obj in _iter_json_lines(raw):
+        obj_type = obj.get("type")
+
+        if obj_type == "assistant":
+            message = obj.get("message")
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        btype = block.get("type")
+                        if btype == "text" and isinstance(block.get("text"), str):
+                            parts.append(block["text"])
+                        elif btype == "tool_use":
+                            parts.append(f"\n› {block.get('name', 'tool')}")
+                else:
+                    text = _extract_text(content)
+                    if text:
+                        parts.append(text)
+            continue
+
+        if obj_type == "result":
+            continue  # terminal — surfaced as the final message
+
+        # Codex agent_message items (bare or wrapped in item.completed).
+        item = obj.get("item") if isinstance(obj.get("item"), dict) else obj
+        if isinstance(item, dict) and item.get("type") in (
+            "agent_message",
+            "assistant_message",
+        ):
+            text = item.get("text") or _extract_text(item.get("content"))
+            if isinstance(text, str) and text:
+                parts.append(text)
+
+    return "".join(parts)
+
+
 def parse_stream(agent: str, raw: str) -> CodeResult:
     """Mine a tolerant ``stream-json`` transcript for the final message + usage.
 

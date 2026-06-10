@@ -19,7 +19,12 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from surogates.coding_agents.agents import CodeInvocation, CodeResult, parse_stream
+from surogates.coding_agents.agents import (
+    CodeInvocation,
+    CodeResult,
+    parse_stream,
+    summarize_progress,
+)
 
 # The pod enforces a 1 h ``activeDeadlineSeconds``; cap a run just under it.
 _DEFAULT_MAX_WAIT = 3600.0
@@ -98,6 +103,7 @@ async def run_code_agent(
             pass
 
     transcript: list[str] = []
+    emitted_readable = 0
     offset = 0
     started = now()
     updated_codex_auth: str | None = None
@@ -126,7 +132,13 @@ async def run_code_agent(
         chunk = poll.get("new_output") or ""
         if chunk:
             transcript.append(chunk)
-            await _emit(chunk)
+            # Emit a readable narrative delta rather than raw stream-json,
+            # so the UI shows the agent's text/tool activity (not JSONL) and
+            # the event log stays compact.
+            readable = summarize_progress(agent, "".join(transcript))
+            if len(readable) > emitted_readable:
+                await _emit(readable[emitted_readable:])
+                emitted_readable = len(readable)
         if "offset" in poll and isinstance(poll["offset"], int):
             offset = poll["offset"]
 

@@ -108,9 +108,13 @@ async def test_launch_failure_returns_error():
 
 
 async def test_interrupt_cancels_run():
+    _assistant = json.dumps({
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text": "thinking"}]},
+    }) + "\n"
     polls = [
-        {"ok": True, "done": False, "exit_code": None, "offset": 5, "new_output": "..."},
-        {"ok": True, "done": False, "exit_code": None, "offset": 10, "new_output": "..."},
+        {"ok": True, "done": False, "exit_code": None, "offset": 5, "new_output": _assistant},
+        {"ok": True, "done": False, "exit_code": None, "offset": 10, "new_output": _assistant},
     ]
     sandbox = _FakeSandbox(polls)
     flag = {"cancel": False}

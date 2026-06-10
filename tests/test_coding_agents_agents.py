@@ -124,6 +124,35 @@ def test_parse_codex_stream_extracts_message_and_tokens():
     assert result.output_tokens == 12
 
 
+def test_summarize_progress_is_readable_not_raw_json():
+    from surogates.coding_agents.agents import summarize_progress
+
+    lines = [
+        json.dumps({"type": "system", "subtype": "init"}),
+        json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "Creating the file"},
+            {"type": "tool_use", "name": "Write"},
+        ]}}),
+        json.dumps({"type": "rate_limit_event"}),
+        json.dumps({"type": "result", "result": "Done."}),
+    ]
+    out = summarize_progress("claude", "\n".join(lines))
+    assert "Creating the file" in out
+    assert "Write" in out
+    # Bookkeeping + the terminal result are not echoed into progress.
+    assert "rate_limit_event" not in out
+    assert "Done." not in out
+    assert "{" not in out  # no raw JSON
+
+
+def test_summarize_progress_codex_agent_message():
+    from surogates.coding_agents.agents import summarize_progress
+
+    line = json.dumps({"type": "item.completed",
+                       "item": {"type": "agent_message", "text": "all set"}})
+    assert summarize_progress("codex", line) == "all set"
+
+
 def test_parse_empty_stream_is_error_result():
     result = parse_stream("claude", "")
     assert result.final_message == ""
