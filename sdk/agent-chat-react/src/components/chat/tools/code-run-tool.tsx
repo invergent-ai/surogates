@@ -5,8 +5,16 @@
 // final message, token usage, and an error state. Mirrors the terminal
 // tool's collapsible shell.
 import { useState } from "react";
-import Ansi from "ansi-to-react";
+import AnsiImport from "ansi-to-react";
 import { ChevronDownIcon } from "lucide-react";
+
+// ansi-to-react is a CJS module ({ default: Component, __esModule: true }).
+// Under the SDK's tsup -> consumer-bundler interop the default import can
+// arrive wrapped as { default: Component } rather than the component itself,
+// which makes React throw "Element type is invalid ... got: object". Unwrap
+// defensively so it works regardless of how the consumer bundles us.
+const Ansi = ((AnsiImport as unknown as { default?: unknown }).default ??
+  AnsiImport) as typeof AnsiImport;
 import {
   Collapsible,
   CollapsibleContent,
