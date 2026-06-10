@@ -69,8 +69,14 @@ function agentLabel(state: CodeRunState): string {
   return "coding agent";
 }
 
-export function CodeRunToolBlock({ tc }: { tc: ToolCallInfo }) {
-  const [isOpen, setIsOpen] = useState(false);
+export function CodeRunToolBlock({
+  tc,
+  defaultOpen = false,
+}: {
+  tc: ToolCallInfo;
+  defaultOpen?: boolean;
+}) {
+  const [isOpen, setIsOpen] = useState(defaultOpen);
   const isRunning = tc.status === "running";
   const state = parseCodeRun(tc.result, tc.args);
   const label = agentLabel(state);

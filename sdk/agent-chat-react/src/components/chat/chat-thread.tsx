@@ -32,6 +32,7 @@ import {
 import { Shimmer } from "../ai-elements/shimmer";
 import { BrowserActivityGroup } from "../browser/browser-activity-group";
 import { ToolCallBlock } from "./tool-call-block";
+import { CodeRunToolBlock } from "./tools/code-run-tool";
 import { WebSearchGroupBlock } from "./tools/web-search-tool";
 import { TodoToolBlock } from "./tools/todo-tool";
 import { AskUserQuestionToolBlock } from "./tools/ask-user-question-tool";
@@ -54,6 +55,7 @@ import {
   AlertTriangle,
   ArrowRight,
   BookOpenIcon,
+  BotIcon,
   ChevronDown,
   ChevronRight,
   CircleCheckIcon,
@@ -628,6 +630,8 @@ function cancelledToolLabel(toolName: string): string {
     ask_user_question: "Ask User Question",
     process: "Process",
     create_artifact: "Create artifact",
+    run_coding_agent: "Coding agent",
+    code_run: "Coding agent",
     // ``Research memory`` reads as a noun ("memory of research") and
     // makes the shimmer awkward ("Running Research memory…").  The
     // one-liner renderer shows just ``Research`` as the label, so
@@ -1101,6 +1105,11 @@ function extractToolDetail(tc: ToolCallInfo): string | null {
     case "consult_expert":
     case "delegate_task":
       return stringArg("name") ?? stringArg("task") ?? stringArg("title");
+    case "run_coding_agent":
+    case "code_run": {
+      const prompt = stringArg("prompt");
+      return prompt ? truncate(prompt, 60) : null;
+    }
     case "memory":
       return stringArg("action") ?? stringArg("key");
     case "research_memory": {
@@ -1285,6 +1294,8 @@ const _TOOL_ROW_ICON: Record<string, LucideIcon> = {
   todo: ListIcon,
   research_memory: BookOpenIcon,
   research_outline: ListIcon,
+  run_coding_agent: BotIcon,
+  code_run: BotIcon,
 };
 
 function _toolRowIcon(toolName: string): LucideIcon {
@@ -1340,6 +1351,24 @@ function _toolRowLabel(tc: ToolCallInfo): string {
       return detail ? `Memory ${detail}` : "Updated memory";
     case "todo":
       return detail ? `Todo ${detail}` : "Updated todo list";
+    case "run_coding_agent":
+    case "code_run": {
+      const a = parseArgs<{ agent?: string; provider?: string }>(tc.args);
+      const agent =
+        a?.agent ??
+        (a?.provider === "openai"
+          ? "codex"
+          : a?.provider === "anthropic"
+            ? "claude"
+            : undefined);
+      const name =
+        agent === "codex"
+          ? "Codex"
+          : agent === "claude"
+            ? "Claude Code"
+            : "coding agent";
+      return detail ? `${name}: ${detail}` : `Ran ${name}`;
+    }
     case "research_memory": {
       // ``detail`` already encodes the action's anchor (title /
       // hostname for add, query for retrieve, raw verb otherwise);
@@ -1495,6 +1524,15 @@ function IterationExpanded({
           return (
             <div key={tc.id} className="pr-1">
               <TodoToolBlock tc={tc} />
+            </div>
+          );
+        }
+        // A coding-agent run's value is its streamed output + result —
+        // reuse the rich CodeRunToolBlock instead of a one-line row.
+        if (tc.toolName === "code_run") {
+          return (
+            <div key={tc.id} className="pr-1">
+              <CodeRunToolBlock tc={tc} defaultOpen />
             </div>
           );
         }
