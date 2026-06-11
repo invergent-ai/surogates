@@ -406,6 +406,7 @@ async def _delegate_handler(
                 session_factory=session_factory,
                 memory_manager=memory_manager,
                 bundle=bundle,
+                live_parent_config=kwargs.get("session_config"),
             )
             for task in tasks
         ], return_exceptions=False)
@@ -443,6 +444,7 @@ async def _run_single_delegation(
     session_factory: Any,
     memory_manager: Any,
     bundle: Any | None = None,
+    live_parent_config: dict[str, Any] | None = None,
 ) -> str:
     """Spawn one child, poll it, emit lifecycle events, and return its result."""
     goal: str = task["goal"]
@@ -492,14 +494,17 @@ async def _run_single_delegation(
 
     from surogates.board.groups import ensure_group_and_inherit
 
-    # Synchronous fork-join path runs outside the parent's live config
-    # dict (parent_session here is a fresh store copy), so the parent's
-    # own board read-path activates on its next wake.
+    # ``live_parent_config`` is the calling harness's session_config
+    # kwarg: mirroring the group id into it lets the parent's board
+    # hook deliver the join snapshot in THIS wake — right after
+    # delegate_task returns — so the model summarizes child results
+    # with the verified board in view.  Concurrent delegations race
+    # benignly (identical value, idempotent set).
     await ensure_group_and_inherit(
         parent_session=parent_session,
         session_store=session_store,
         child_config=child_config,
-        live_parent_config=None,
+        live_parent_config=live_parent_config,
     )
 
     allowed_tools: list[str] | None = None
