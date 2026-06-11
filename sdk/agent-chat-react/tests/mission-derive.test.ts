@@ -13,6 +13,7 @@ import {
   missionTaskStatusDotClass,
   missionTaskTitle,
   missionWorkerTaskCounts,
+  stripMissionControlMarkup,
 } from "../src/components/missions/mission-derive";
 import type {
   AgentChatMissionEvent,
@@ -296,6 +297,40 @@ describe("missionWorkerTaskCounts", () => {
   });
   it("returns null for non-task workers", () => {
     expect(missionWorkerTaskCounts(worker({ kind: "worker" }), [])).toBeNull();
+  });
+});
+
+describe("stripMissionControlMarkup", () => {
+  it("removes next_action blocks (attrs, multiline, self-closing)", () => {
+    expect(
+      stripMissionControlMarkup(
+        'Done.\n\n<next_action complexity="low" summary="hide"> done </next_action>',
+      ),
+    ).toBe("Done.");
+    expect(
+      stripMissionControlMarkup(
+        "Before <next_action>multi\nline</next_action> after",
+      ),
+    ).toBe("Before  after");
+    expect(
+      stripMissionControlMarkup('x <next_action complexity="high" /> y'),
+    ).toBe("x  y");
+    expect(stripMissionControlMarkup("plain text")).toBe("plain text");
+  });
+
+  it("is applied to worker.complete summaries", () => {
+    expect(
+      missionEventSummary(
+        event({
+          id: 9,
+          type: "worker.complete",
+          data: {
+            result:
+              'All done. <next_action complexity="low" summary="hide"> done </next_action>',
+          },
+        }),
+      ),
+    ).toBe("All done.");
   });
 });
 

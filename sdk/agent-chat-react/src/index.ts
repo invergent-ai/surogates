@@ -39,6 +39,7 @@ export {
   missionTaskStatusDotClass,
   missionTaskTitle,
   missionWorkerTaskCounts,
+  stripMissionControlMarkup,
 } from "./components/missions/mission-derive";
 export type {
   MissionEventCategory,

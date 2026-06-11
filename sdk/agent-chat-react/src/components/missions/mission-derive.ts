@@ -133,11 +133,27 @@ function dataString(
   return typeof v === "string" && v.trim().length > 0 ? v.trim() : null;
 }
 
+// ``<next_action complexity="..">..</next_action>`` blocks are loop
+// protocol the model appends to its final response (see
+// surogates/harness/expert_routing.py). They leak into task results /
+// event payloads and must never reach the UI.
+const CONTROL_MARKUP_RE =
+  /<next_action\b[^>]*(?:\/>|>[\s\S]*?<\/next_action>)/gi;
+
+/** Strip harness loop-control markup from user-facing mission text. */
+export function stripMissionControlMarkup(text: string): string {
+  return text.replace(CONTROL_MARKUP_RE, "").trim();
+}
+
 /** One human line per event row. Keys match the harness emit sites:
  * worker.spawned {goal}, worker.complete {result}, iteration.summary
  * {summary}, mission.evaluation.end {result, feedback, explanation},
- * task.blocked {reason}. */
+ * task.blocked {reason}. Control markup is always stripped. */
 export function missionEventSummary(event: AgentChatMissionEvent): string {
+  return stripMissionControlMarkup(rawMissionEventSummary(event));
+}
+
+function rawMissionEventSummary(event: AgentChatMissionEvent): string {
   const d = event.data ?? null;
   switch (event.type) {
     case "worker.spawned":

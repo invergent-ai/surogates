@@ -46,6 +46,7 @@ import {
   missionTaskRailGroups,
   missionTaskStatusDotClass,
   missionTaskTitle,
+  stripMissionControlMarkup,
 } from "./mission-derive";
 import type { MissionEventsFeed } from "./use-mission-events";
 
@@ -110,8 +111,9 @@ function TaskRailRow({
   selected: boolean;
   onSelect: (taskId: string) => void;
 }) {
-  const preview =
-    task.status === "done" && task.result ? task.result : task.goal;
+  const preview = stripMissionControlMarkup(
+    task.status === "done" && task.result ? task.result : task.goal,
+  );
   return (
     <button
       type="button"
@@ -433,6 +435,9 @@ function deriveTaskOutcome({
   liveOutput: AgentChatMissionEvent | null;
   parents: AgentChatMissionTask[];
 }): TaskOutcome {
+  const result = task.result
+    ? stripMissionControlMarkup(task.result)
+    : "";
   switch (task.status) {
     case "done":
       return {
@@ -441,8 +446,8 @@ function deriveTaskOutcome({
         labelTone: "text-emerald-600",
         icon: <CheckCircle2 className="size-3" />,
         timestamp: task.completedAt,
-        markdown: task.result ?? undefined,
-        text: task.result ? undefined : "Completed.",
+        markdown: result || undefined,
+        text: result ? undefined : "Completed.",
       };
     case "failed":
       return {
@@ -451,8 +456,8 @@ function deriveTaskOutcome({
         labelTone: "text-destructive",
         icon: <XCircle className="size-3" />,
         timestamp: task.completedAt,
-        markdown: task.result ?? undefined,
-        text: task.result
+        markdown: result || undefined,
+        text: result
           ? undefined
           : `Failed after ${task.attemptCount}/${task.maxAttempts} attempts.`,
       };
@@ -516,11 +521,14 @@ function deriveTaskOutcome({
 }
 
 function OutcomeCard({ outcome }: { outcome: TaskOutcome }) {
+  // The base Card ships without a radius; the outcome callout is a
+  // freestanding tinted block, so it gets rounded corners and a small
+  // horizontal inset from the pane edges (mirrors the design mock).
   return (
     <Card
       data-testid="task-outcome"
       size="sm"
-      className={`gap-3 py-4 shadow-none ${outcome.tone}`}
+      className={`mx-1 gap-3 rounded-lg py-4 shadow-none ${outcome.tone}`}
     >
       <CardHeader>
         <CardTitle
