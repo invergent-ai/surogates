@@ -63,7 +63,7 @@ def test_session_llm_clients_is_frozen():
     fields = dataclasses.fields(SessionLLMClients)
     assert SessionLLMClients.__dataclass_params__.frozen is True
     assert {f.name for f in fields} == {
-        "main", "summary", "vision", "advisor",
+        "main", "summary", "vision", "advisor", "image",
     }
 
 

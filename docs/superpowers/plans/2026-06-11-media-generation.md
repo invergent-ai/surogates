@@ -20,8 +20,8 @@ Update this list (and the per-step checkboxes below) before each commit: `[ ]` p
 
 - [x] Task 1: Config — `LLMSettings` media fields
 - [x] Task 2: Runtime context slots + resolver parsing
-- [~] Task 3: Session LLM bundle — image slot + video endpoint resolver
-- [ ] Task 4: `media_gen` builtin module — config object, schemas, save helpers, registration
+- [x] Task 3: Session LLM bundle — image slot + video endpoint resolver
+- [~] Task 4: `media_gen` builtin module — config object, schemas, save helpers, registration
 - [ ] Task 5: `generate_image` happy-path + failure tests
 - [ ] Task 6: `generate_video` poll-loop tests
 - [ ] Task 7: Thread `media_gen` through worker → harness → executors
@@ -203,7 +203,7 @@ git commit -m "Add llm_image and llm_video runtime-context slots"
 - Modify: `surogates/harness/session_llm.py`
 - Test: `tests/runtime/test_session_llm_media.py` (create)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 """Tests for the image bundle slot and resolve_video_endpoint."""
@@ -331,12 +331,12 @@ async def test_resolve_video_endpoint_none_when_unconfigured():
     assert endpoint is None
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd /work/surogates && uv run pytest tests/runtime/test_session_llm_media.py -v`
 Expected: FAIL — `bundle.image` attribute missing / `ImportError: cannot import name 'resolve_video_endpoint'`.
 
-- [ ] **Step 3: Implement in `surogates/harness/session_llm.py`**
+- [x] **Step 3: Implement in `surogates/harness/session_llm.py`**
 
 Add to `__all__`: `"ResolvedVideoEndpoint"`, `"resolve_video_endpoint"`.
 
@@ -473,12 +473,12 @@ async def resolve_video_endpoint(
     )
 ```
 
-- [ ] **Step 4: Run the new tests AND the existing bundle tests**
+- [x] **Step 4: Run the new tests AND the existing bundle tests**
 
 Run: `cd /work/surogates && uv run pytest tests/runtime/test_session_llm_media.py tests/runtime/test_session_llm.py -v`
 Expected: all pass (existing 4-slot constructions still work because `image` defaults to `None`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /work/surogates
