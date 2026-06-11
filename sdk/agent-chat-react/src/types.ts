@@ -296,6 +296,7 @@ export interface AgentChatMissionTask {
   parentIds: string[];
   currentSessionId: string | null;
   createdAt: string | null;
+  startedAt: string | null;
   completedAt: string | null;
 }
 
@@ -323,6 +324,29 @@ export interface AgentChatMissionWorker {
   latestEventAt: string | null;
   latestEventSummary: string | null;
   transcriptUrl: string;
+}
+
+export interface AgentChatMissionEvent {
+  id: number;
+  sessionId: string;
+  type: string;
+  data: Record<string, unknown> | null;
+  createdAt: string | null;
+}
+
+/** Label for one session contributing to a mission's event feed.
+ * ``kind`` mirrors the server: the coordinator chat session, a
+ * task-attempt session (spawn_task), or a direct spawn_worker /
+ * delegate_task child. */
+export interface AgentChatMissionEventSession {
+  taskId: string | null;
+  agentDefName: string | null;
+  kind: "coordinator" | "task" | "worker" | "delegation";
+}
+
+export interface AgentChatMissionEventsPage {
+  events: AgentChatMissionEvent[];
+  sessions: Record<string, AgentChatMissionEventSession>;
 }
 
 export interface AgentChatMissionList {
@@ -685,6 +709,15 @@ export interface AgentChatAdapter {
   getMissionWorkers?(input: {
     missionId: string;
   }): Promise<{ workers: AgentChatMissionWorker[] }>;
+  /** Mission-wide event feed (Activity tab + per-task history /
+   * live output). Optional — unlike the other mission methods the
+   * dashboard probes for this at runtime and hides the event-driven
+   * sections when absent, so older host adapters keep working. */
+  listMissionEvents?(input: {
+    missionId: string;
+    afterId?: number;
+    limit?: number;
+  }): Promise<AgentChatMissionEventsPage>;
   pauseMission?(input: {
     missionId: string;
     reason?: string;
