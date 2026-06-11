@@ -685,6 +685,11 @@ def create_app() -> FastAPI:
     # the feedback + missions pattern above.
     app.include_router(skills.read_router, prefix="/v1/api", tags=["skills"])
     app.include_router(agents.router, prefix="/v1", tags=["agents"])
+    # Also at /v1/api so the ops server can forward sub-agent catalog CRUD
+    # under a bare ``surg_sk_`` ops-chat service-account token (the auth
+    # middleware only accepts those on /v1/api/*).  SA contexts have
+    # ``user_id=None``, so writes land in the org-shared layer.
+    app.include_router(agents.router, prefix="/v1/api", tags=["agents"])
     app.include_router(composio.router, prefix="/v1", tags=["composio"])
     app.include_router(coding_agents.router, prefix="/v1", tags=["coding-agents"])
     # Also at /v1/api so the ops server can forward connect/list/disconnect

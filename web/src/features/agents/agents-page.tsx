@@ -433,7 +433,7 @@ function AgentDetailView({
   onDelete: () => void;
 }) {
   return (
-    <article className="max-w-3xl mx-auto px-8 py-8">
+    <article className="w-full px-8 py-8">
       <header className="mb-6 pb-6 border-b border-line">
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0 flex-1">
