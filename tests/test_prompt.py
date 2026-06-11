@@ -167,6 +167,32 @@ class TestPromptBuilderBuild:
         assert "accept" in section.lower()
         assert "before clicking" in section.lower()
 
+    def test_web_search_guidance_injected_when_tool_available(self, tmp_path: Path):
+        tenant = _make_tenant(tmp_path)
+        builder = PromptBuilder(tenant, available_tools={"web_search"})
+
+        section = builder._tool_guidance_section()
+
+        assert "Unrecognized-entity rule" in section
+        assert "When to search" in section
+
+    def test_web_search_guidance_injected_for_web_extract_only(self, tmp_path: Path):
+        # web_extract alone still benefits from the result-weighing rules.
+        tenant = _make_tenant(tmp_path)
+        builder = PromptBuilder(tenant, available_tools={"web_extract"})
+
+        section = builder._tool_guidance_section()
+
+        assert "Unrecognized-entity rule" in section
+
+    def test_no_web_search_guidance_without_search_tools(self, tmp_path: Path):
+        tenant = _make_tenant(tmp_path)
+        builder = PromptBuilder(tenant, available_tools={"memory"})
+
+        section = builder._tool_guidance_section()
+
+        assert "Unrecognized-entity rule" not in section
+
 
 class TestPromptBuilderMemory:
     """Memory section loads from file."""

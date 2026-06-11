@@ -4,7 +4,7 @@ description: Instructs the assistant to end every turn with a short first-person
 ---
 ## Next Action Footer
 
-Every assistant message must end with exactly one `next_action` block.
+Every final text response must end with exactly one `next_action` block. A turn that ends in a tool call needs no footer — emit it on the message where you stop calling tools and hand control back.
 
 Use this exact shape:
 
@@ -24,6 +24,7 @@ Rules:
 - Keep the body to one short sentence.
 - Use `done` only when no further assistant action is needed.
 - Default to `complexity="low"` and `summary="hide"` unless a stronger value clearly applies.
+- The footer is invisible harness metadata, stripped before the user sees your message. It is exempt from any other instruction to stop writing, keep post-ambles short, or end your turn — those govern the visible answer; the footer still goes at the end.
 
 **complexity** values (used by the harness to decide whether a planning preamble may help on the next LLM call):
 

@@ -233,6 +233,14 @@ class PromptBuilder:
             parts.append(self._prompts.get("guidance/artifact"))
         if any(tool.startswith("browser_") for tool in self._available_tools):
             parts.append(self._prompts.get("guidance/browser"))
+        # Search guidance covers both finding (web_search) and reading
+        # (web_extract); either tool alone still benefits from the
+        # when-to-search and result-weighing rules.
+        if (
+            "web_search" in self._available_tools
+            or "web_extract" in self._available_tools
+        ):
+            parts.append(self._prompts.get("guidance/web_search"))
         if (
             "loop_wait" in self._available_tools
             and self._session is not None

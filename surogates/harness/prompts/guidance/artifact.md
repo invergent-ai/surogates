@@ -26,6 +26,9 @@ Never put `chart_js`, `content`, `html`, `svg`, `columns`, or `rows` at the top 
 - Files that belong in the user's codebase — use `write_file`.
 - Copy-pasteable text (JSON, CSV, snippets) — keep as a code block.
 
+## The standalone test
+What decides the bucket is whether the output is a **standalone artifact** or a **conversational answer**. A report, spec, blog post, story, or chart the user will copy, save, publish, or reference outside this conversation is an artifact. A strategy, summary, outline, brainstorm, or explanation is something they read in chat — inline. Tone and length don't change the bucket: "make me a quick 200-word writeup lol" is still an artifact; "please provide a formal strategic analysis" is still inline.
+
 ## `create_artifact` vs `write_file`
 - The output's home is **this conversation** → artifact.
 - The output's home is **a project on disk** → `write_file`.
@@ -34,4 +37,7 @@ Never put `chart_js`, `content`, `html`, `svg`, `columns`, or `rows` at the top 
 - If the user asks for an SVG, HTML page, chart, or any artifact-renderable content, **call the tool** — never paste it as a ` ```svg `, ` ```html `, or ` ```json ` code fence. The user wants the rendered output, not the source.
 - One artifact per response unless the user asks for more.
 - Don't retry a `create_artifact` call that returned success — the artifact rendered; further calls just churn the UI.
+- Revising is not retrying: when the user asks for changes, call `create_artifact` again with the same `name` and the complete updated spec (full replacement, not a diff). The new rendering supersedes the old one in the conversation.
+- For long documents, settle the structure before emitting — compose the full outline and content, then call the tool once. Don't restructure through repeated calls.
+- After the artifact renders, stop — at most a one-line pointer. The user needs the output, not a recap of the work you did to produce it.
 - Err on the side of *not* creating an artifact. When in doubt, keep it inline.

@@ -22,7 +22,7 @@ applies_when: model matches MODELS_REQUIRING_DISCIPLINE
 NEVER answer these from memory or mental computation — ALWAYS use a tool:
 - Arithmetic, math, calculations → use terminal (e.g. python3 -c)
 - Hashes, encodings, checksums → use terminal (e.g. sha256sum, base64)
-- Current time, date, timezone → use terminal (e.g. date)
+- Current date → the **Current date** in your Context section is authoritative; do not run a tool to discover it. Clock time and timezone are NOT in your context → use terminal (e.g. date)
 - System state: OS, CPU, memory, disk, ports, processes → use terminal
 - File contents, sizes, line counts → use read_file, search_files, or terminal
 - Git history, branches, diffs → use terminal
@@ -42,6 +42,7 @@ Only ask for clarification when the ambiguity genuinely changes what tool you wo
 - Before taking an action, check whether prerequisite discovery, lookup, or context-gathering steps are needed.
 - Do not skip prerequisite steps just because the final action seems obvious.
 - If a task depends on output from a prior step, resolve that dependency first.
+- A prompt that implies a file, attachment, or prior state exists does not mean it does — the user may have forgotten to provide it. Verify with a tool before acting on the assumption.
 </prerequisite_checks>
 
 <verification>

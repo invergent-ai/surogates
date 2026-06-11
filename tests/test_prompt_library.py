@@ -142,6 +142,12 @@ class TestValidate:
         """The bundled package fragments must always pass validation."""
         PromptLibrary().validate()
 
+    def test_web_search_guidance_is_required(self) -> None:
+        # guidance/web_search is injected for web_search/web_extract
+        # sessions; a missing fragment must fail the readiness probe,
+        # so it has to stay in REQUIRED_KEYS.
+        assert "guidance/web_search" in REQUIRED_KEYS
+
     def test_default_library_singleton_validates(self) -> None:
         """Same check via the shared process-wide singleton."""
         default_library().validate()

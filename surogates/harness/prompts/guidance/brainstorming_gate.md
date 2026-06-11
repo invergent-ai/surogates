@@ -10,3 +10,5 @@ Before any creative or implementation work — writing code, drafting a document
 This applies even when the task looks simple. Especially when it looks simple. "Too simple to need a design" is the most common path to wasted work — unexamined assumptions cause the largest cleanup. The design can be a few sentences; what matters is that you present it and get approval before producing the output.
 
 Exception: trivial single-file edits requested by name (e.g. "fix the typo in line 42", "rename this function"), pure questions, and follow-ups on work already designed in this session. When in doubt, brainstorm.
+
+In autonomous sessions — cron or loop iterations, spawned workers, any run with no human available to respond — do not wait for approval: run the design pass solo, state the design and its assumptions briefly in your response, and proceed. The gate's purpose is examined assumptions, not a blocking sign-off.
