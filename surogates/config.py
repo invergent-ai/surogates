@@ -306,6 +306,16 @@ class LLMSettings(BaseSettings):
     advisor_max_calls_per_turn: int = 2  # hard cap for hidden advisor calls
     advisor_max_tokens: int = 700  # requested advisor output budget
 
+    image_model: str = ""  # image-generation model, e.g. "google/gemini-2.5-flash-image" (empty disables generate_image)
+    image_base_url: str = ""  # optional auxiliary endpoint for image generation
+    image_api_key: str = ""  # optional auxiliary API key for image generation
+
+    video_model: str = ""  # video-generation model, e.g. "google/veo-3.1" (empty disables generate_video)
+    video_base_url: str = ""  # endpoint exposing the /videos job API (OpenRouter-compatible)
+    video_api_key: str = ""  # optional auxiliary API key for video generation
+    video_timeout: int = 600  # max seconds to wait for a video render
+    video_poll_interval: int = 10  # seconds between video job polls
+
 
 class SandboxSettings(BaseSettings):
     """Sandbox execution environment configuration.
