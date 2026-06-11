@@ -21,8 +21,8 @@ Update this list (and the per-step checkboxes below) before each commit: `[ ]` p
 - [x] Task 1: Config — `LLMSettings` media fields
 - [x] Task 2: Runtime context slots + resolver parsing
 - [x] Task 3: Session LLM bundle — image slot + video endpoint resolver
-- [~] Task 4: `media_gen` builtin module — config object, schemas, save helpers, registration
-- [ ] Task 5: `generate_image` happy-path + failure tests
+- [x] Task 4: `media_gen` builtin module — config object, schemas, save helpers, registration
+- [~] Task 5: `generate_image` happy-path + failure tests
 - [ ] Task 6: `generate_video` poll-loop tests
 - [ ] Task 7: Thread `media_gen` through worker → harness → executors
 - [ ] Task 8: Full-suite verification
@@ -495,7 +495,7 @@ git commit -m "Add image slot and video endpoint resolution to session LLM bundl
 - Modify: `surogates/tools/runtime.py` (builtin import + `modules` list)
 - Test: `tests/test_media_gen_tools.py` (create)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 """Tests for the generate_image / generate_video builtin tools."""
@@ -610,12 +610,12 @@ def test_normalize_output_path_defaults_when_empty():
 
 (`ToolRegistry.get(name)` exists at `surogates/tools/registry.py:98` and returns `ToolEntry | None`.)
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd /work/surogates && uv run pytest tests/test_media_gen_tools.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'surogates.tools.builtin.media_gen'`.
 
-- [ ] **Step 3: Create `surogates/tools/builtin/media_gen.py`**
+- [x] **Step 3: Create `surogates/tools/builtin/media_gen.py`**
 
 ```python
 """Image and video generation tools (OpenRouter-shaped APIs).
@@ -1127,16 +1127,16 @@ def _json_error(message: str) -> str:
     return json.dumps({"error": message}, ensure_ascii=False)
 ```
 
-- [ ] **Step 4: Register the module in `surogates/tools/runtime.py`**
+- [x] **Step 4: Register the module in `surogates/tools/runtime.py`**
 
 In `register_builtins`, add `media_gen,` to the `from surogates.tools.builtin import (...)` block (alphabetical, after `loop_control`) and add `media_gen,` to the `modules` list (after `vision,`).
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cd /work/surogates && uv run pytest tests/test_media_gen_tools.py -v`
 Expected: all pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd /work/surogates
