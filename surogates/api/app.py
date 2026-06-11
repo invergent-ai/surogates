@@ -687,6 +687,10 @@ def create_app() -> FastAPI:
     app.include_router(agents.router, prefix="/v1", tags=["agents"])
     app.include_router(composio.router, prefix="/v1", tags=["composio"])
     app.include_router(coding_agents.router, prefix="/v1", tags=["coding-agents"])
+    # Also at /v1/api so the ops server can forward connect/list/disconnect
+    # under a bare ``surg_sk_`` ops-chat service-account token (the auth
+    # middleware only accepts those on /v1/api/*).  Mirrors missions/feedback.
+    app.include_router(coding_agents.router, prefix="/v1/api", tags=["coding-agents"])
     app.include_router(memory.router, prefix="/v1", tags=["memory"])
     app.include_router(prompts.router, prefix="/v1", tags=["prompts"])
     app.include_router(scheduled_work.router, prefix="/v1", tags=["scheduled-work"])
