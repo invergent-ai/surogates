@@ -34,7 +34,7 @@ __all__ = ["AgentRuntimeContext", "LLMEndpoint"]
 
 @dataclass(frozen=True, slots=True)
 class LLMEndpoint:
-    """One configured LLM client (main / summary / vision / advisor).
+    """One configured LLM client (main / summary / vision / advisor / image / video).
 
     ``api_key_ref`` is a vault reference (e.g. ``vault://<id>``) — the
     raw key never appears in this dataclass.  Resolution to a concrete
@@ -72,10 +72,15 @@ class AgentRuntimeContext:
     must check for ``None`` rather than receive a silent empty
     string.
 
-    The four LLM endpoint triples are independent: only ``llm_main``
-    is logically required for the harness to run; ``llm_summary`` /
+    The LLM endpoint triples are independent: only ``llm_main`` is
+    logically required for the harness to run; ``llm_summary`` /
     ``llm_vision`` / ``llm_advisor`` are auxiliary clients the harness
-    falls back to ``llm_main`` for when absent.
+    falls back to ``llm_main`` for when absent.  ``llm_image`` /
+    ``llm_video`` configure media generation and have no main-model
+    fallback (the main model cannot generate media) — when absent the
+    worker falls back to the operator-level ``Settings.llm`` values,
+    and an unconfigured slot leaves the corresponding tool reporting
+    itself unavailable.
 
     ``mcp_server_ids`` is a tuple (immutable counterpart to a list)
     so the frozen dataclass cannot be mutated through the field.
@@ -95,6 +100,8 @@ class AgentRuntimeContext:
     llm_summary: LLMEndpoint | None = None
     llm_vision: LLMEndpoint | None = None
     llm_advisor: LLMEndpoint | None = None
+    llm_image: LLMEndpoint | None = None
+    llm_video: LLMEndpoint | None = None
 
     mcp_server_ids: tuple[str, ...] = ()
     governance: dict = field(default_factory=dict)

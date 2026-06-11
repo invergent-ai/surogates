@@ -56,6 +56,8 @@ def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
         llm_summary=_opt_llm(payload.get("llm_summary")),
         llm_vision=_opt_llm(payload.get("llm_vision")),
         llm_advisor=_opt_llm(payload.get("llm_advisor")),
+        llm_image=_opt_llm(payload.get("llm_image")),
+        llm_video=_opt_llm(payload.get("llm_video")),
         mcp_server_ids=tuple(payload.get("mcp_server_ids") or ()),
         governance=dict(payload.get("governance") or {}),
         # bundle reference.  Empty strings → None

@@ -19,8 +19,8 @@
 Update this list (and the per-step checkboxes below) before each commit: `[ ]` pending, `[~]` in progress, `[x]` done.
 
 - [x] Task 1: Config — `LLMSettings` media fields
-- [~] Task 2: Runtime context slots + resolver parsing
-- [ ] Task 3: Session LLM bundle — image slot + video endpoint resolver
+- [x] Task 2: Runtime context slots + resolver parsing
+- [~] Task 3: Session LLM bundle — image slot + video endpoint resolver
 - [ ] Task 4: `media_gen` builtin module — config object, schemas, save helpers, registration
 - [ ] Task 5: `generate_image` happy-path + failure tests
 - [ ] Task 6: `generate_video` poll-loop tests
@@ -166,7 +166,7 @@ def test_build_context_defaults_image_and_video_to_none():
 Run: `cd /work/surogates && uv run pytest tests/runtime/test_media_endpoints.py -v`
 Expected: FAIL — `AgentRuntimeContext` has no field `llm_image` (frozen dataclass attribute error) / `TypeError: unexpected keyword argument`.
 
-- [ ] **Step 3: Add the slots**
+- [x] **Step 3: Add the slots**
 
 In `surogates/runtime/context.py`, after `llm_advisor: LLMEndpoint | None = None`:
 
@@ -203,7 +203,7 @@ git commit -m "Add llm_image and llm_video runtime-context slots"
 - Modify: `surogates/harness/session_llm.py`
 - Test: `tests/runtime/test_session_llm_media.py` (create)
 
-- [x] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing tests**
 
 ```python
 """Tests for the image bundle slot and resolve_video_endpoint."""
@@ -331,7 +331,7 @@ async def test_resolve_video_endpoint_none_when_unconfigured():
     assert endpoint is None
 ```
 
-- [x] **Step 2: Run tests to verify they fail**
+- [ ] **Step 2: Run tests to verify they fail**
 
 Run: `cd /work/surogates && uv run pytest tests/runtime/test_session_llm_media.py -v`
 Expected: FAIL — `bundle.image` attribute missing / `ImportError: cannot import name 'resolve_video_endpoint'`.
@@ -478,7 +478,7 @@ async def resolve_video_endpoint(
 Run: `cd /work/surogates && uv run pytest tests/runtime/test_session_llm_media.py tests/runtime/test_session_llm.py -v`
 Expected: all pass (existing 4-slot constructions still work because `image` defaults to `None`).
 
-- [x] **Step 5: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 cd /work/surogates
@@ -495,7 +495,7 @@ git commit -m "Add image slot and video endpoint resolution to session LLM bundl
 - Modify: `surogates/tools/runtime.py` (builtin import + `modules` list)
 - Test: `tests/test_media_gen_tools.py` (create)
 
-- [x] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing tests**
 
 ```python
 """Tests for the generate_image / generate_video builtin tools."""
@@ -610,7 +610,7 @@ def test_normalize_output_path_defaults_when_empty():
 
 (`ToolRegistry.get(name)` exists at `surogates/tools/registry.py:98` and returns `ToolEntry | None`.)
 
-- [x] **Step 2: Run tests to verify they fail**
+- [ ] **Step 2: Run tests to verify they fail**
 
 Run: `cd /work/surogates && uv run pytest tests/test_media_gen_tools.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'surogates.tools.builtin.media_gen'`.
@@ -1131,7 +1131,7 @@ def _json_error(message: str) -> str:
 
 In `register_builtins`, add `media_gen,` to the `from surogates.tools.builtin import (...)` block (alphabetical, after `loop_control`) and add `media_gen,` to the `modules` list (after `vision,`).
 
-- [x] **Step 5: Run tests to verify they pass**
+- [ ] **Step 5: Run tests to verify they pass**
 
 Run: `cd /work/surogates && uv run pytest tests/test_media_gen_tools.py -v`
 Expected: all pass.
@@ -1305,7 +1305,7 @@ async def test_generate_image_errors_without_workspace_destination():
 Run: `cd /work/surogates && uv run pytest tests/test_media_gen_tools.py -v`
 Expected: all pass. If `_first_generated_image_url` or content-part assembly has a bug, fix it in `media_gen.py` and re-run.
 
-- [x] **Step 3: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 cd /work/surogates
@@ -1493,7 +1493,7 @@ Note on the timeout test: with `video_timeout=0` the deadline expires on the fir
 Run: `cd /work/surogates && uv run pytest tests/test_media_gen_tools.py -v`
 Expected: all pass. Fix `media_gen.py` if the poll loop or download path misbehaves, and re-run.
 
-- [x] **Step 3: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 cd /work/surogates
@@ -1645,7 +1645,7 @@ Expected: the `media_gen` count ≥ the `vision_llm_client` count in those files
 Run: `cd /work/surogates && uv run pytest tests/test_media_gen_wiring.py tests/test_media_gen_tools.py -v`
 Expected: all pass.
 
-- [x] **Step 5: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 cd /work/surogates
