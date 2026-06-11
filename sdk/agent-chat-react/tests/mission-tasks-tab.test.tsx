@@ -152,4 +152,114 @@ describe("MissionTasksTab", () => {
     render(<MissionTasksTab tasks={[]} feed={FEED} />);
     expect(container!.textContent).toContain("No tasks spawned yet");
   });
+
+  it("renders brief and result as markdown", () => {
+    const markdownTasks: AgentChatMissionTask[] = [
+      task({
+        id: "T-md",
+        goal: "Fix **all** issues:\n\n- validation\n- error handling",
+        status: "done",
+        result: "Resolved `11/19` findings — **both** critical issues fixed.",
+      }),
+    ];
+    render(<MissionTasksTab tasks={markdownTasks} feed={FEED} />);
+    const detail = container!.querySelector('[data-testid="task-detail"]')!;
+    // Streamdown renders bold as span[data-streamdown="strong"].
+    const bold = Array.from(
+      detail.querySelectorAll('[data-streamdown="strong"]'),
+    ).map((el) => el.textContent);
+    expect(bold).toContain("all");
+    expect(bold).toContain("both");
+    expect(
+      Array.from(detail.querySelectorAll("li")).some((el) =>
+        el.textContent?.includes("validation"),
+      ),
+    ).toBe(true);
+    expect(
+      Array.from(detail.querySelectorAll("code")).some((el) =>
+        el.textContent?.includes("11/19"),
+      ),
+    ).toBe(true);
+  });
+
+  it("leads with a Result outcome card for done tasks", () => {
+    const doneTasks: AgentChatMissionTask[] = [
+      task({
+        id: "T-done",
+        goal: "Implement the feature",
+        status: "done",
+        result: "All four files created and verified.",
+        startedAt: "2026-06-11T10:00:00Z",
+        completedAt: "2026-06-11T10:30:00Z",
+      }),
+    ];
+    render(<MissionTasksTab tasks={doneTasks} feed={FEED} />);
+    const detail = container!.querySelector('[data-testid="task-detail"]')!;
+    const outcome = detail.querySelector('[data-testid="task-outcome"]')!;
+    expect(outcome.textContent).toContain("Result");
+    expect(outcome.textContent).toContain(
+      "All four files created and verified.",
+    );
+    // Started → completed range in the header.
+    expect(detail.textContent).toContain("→");
+  });
+
+  it("explains what a queued task is waiting on", () => {
+    render(
+      <MissionTasksTab tasks={TASKS} feed={FEED} onOpenTranscript={vi.fn()} />,
+    );
+    // Select the queued T-verify task via its left-rail row.
+    const railRow = Array.from(
+      container!.querySelectorAll("button"),
+    ).find(
+      (b) =>
+        !b.hasAttribute("data-task-chip") &&
+        b.textContent?.includes("Verify everything"),
+    )!;
+    act(() => {
+      railRow.click();
+    });
+    const outcome = container!.querySelector(
+      '[data-testid="task-outcome"]',
+    )!;
+    expect(outcome.textContent).toContain("Waiting");
+    expect(outcome.textContent).toContain("Fix Findings from the review");
+    expect(container!.textContent).toContain("not started");
+  });
+
+  it("surfaces the worker_block reason for blocked tasks", () => {
+    const blockedTasks: AgentChatMissionTask[] = [
+      task({
+        id: "T-blocked",
+        goal: "Deploy to production",
+        status: "blocked",
+        currentSessionId: "sess-blocked",
+      }),
+    ];
+    const feed = {
+      supported: true,
+      events: [
+        {
+          id: 9,
+          sessionId: "coord-1",
+          type: "task.blocked",
+          data: { task_id: "T-blocked", reason: "Needs AWS credentials." },
+          createdAt: "2026-06-11T12:00:00Z",
+        },
+      ],
+      sessions: {
+        "coord-1": {
+          taskId: null,
+          agentDefName: null,
+          kind: "coordinator" as const,
+        },
+      },
+    };
+    render(<MissionTasksTab tasks={blockedTasks} feed={feed} />);
+    const outcome = container!.querySelector(
+      '[data-testid="task-outcome"]',
+    )!;
+    expect(outcome.textContent).toContain("Waiting");
+    expect(outcome.textContent).toContain("Needs AWS credentials.");
+  });
 });

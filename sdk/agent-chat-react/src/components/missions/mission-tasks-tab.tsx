@@ -2,16 +2,28 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // Tasks tab — master-detail view of the mission's task DAG. Left rail
-// groups tasks by status; the right panel shows the selected task's
-// live output, dependency chips (depends-on from parentIds, blocks
-// from the client-side inversion), full brief, result, and the
-// per-task slice of the mission event feed. Event-driven sections
-// render only when the adapter supports listMissionEvents.
+// groups tasks by status; the right panel leads with a status-dependent
+// outcome card (result when done, live output while running, waiting /
+// blocked context otherwise), then dependency chips (depends-on from
+// parentIds, blocks from the client-side inversion), the markdown
+// brief, and the per-task slice of the mission event feed.
+// Event-driven sections render only when the adapter supports
+// listMissionEvents.
 import { useMemo, useState } from "react";
-import { ArrowRight } from "lucide-react";
+import type { ReactNode } from "react";
+import {
+  ArrowRight,
+  Ban,
+  CheckCircle2,
+  CircleDot,
+  Clock,
+  XCircle,
+} from "lucide-react";
 
+import { MessageResponse } from "../ai-elements/message";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Card, CardContent } from "../ui/card";
 
 import type {
   AgentChatMissionEvent,
@@ -243,9 +255,15 @@ function TaskDetail({
   const children = blockedTaskIds
     .map((id) => allTasks.get(id))
     .filter((t): t is AgentChatMissionTask => Boolean(t));
-  const startedLabel = formatMissionTimestamp(
-    task.startedAt ?? task.createdAt,
-  );
+  // Started → completed range for terminal tasks; "not started" until a
+  // worker claims an attempt (mirrors the dispatcher's started_at write).
+  const timeLabel =
+    task.startedAt && task.completedAt
+      ? `${formatMissionTimestamp(task.startedAt)} → ${formatMissionTimestamp(task.completedAt)}`
+      : task.startedAt
+        ? `started ${formatMissionTimestamp(task.startedAt)}`
+        : "not started";
+  const outcome = deriveTaskOutcome({ task, taskEvents, liveOutput, parents });
 
   return (
     <div className="space-y-5">
@@ -276,30 +294,16 @@ function TaskDetail({
               attempts {task.attemptCount}/{task.maxAttempts}
             </span>
           ) : null}
-          {startedLabel ? (
-            <span className="ml-auto text-muted-foreground/60">
-              {task.startedAt ? "started" : "created"} {startedLabel}
-            </span>
-          ) : null}
+          <span className="ml-auto inline-flex items-center gap-1 text-muted-foreground/60">
+            <Clock className="size-3" />
+            {timeLabel}
+          </span>
         </div>
       </div>
 
-      {/* Live output */}
-      {liveOutput ? (
-        <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2.5">
-          <div className="mb-1 flex items-center justify-between">
-            <span className="font-mono text-[9px] uppercase tracking-widest text-amber-600">
-              Live output
-            </span>
-            <span className="font-mono text-[10px] text-muted-foreground/60">
-              {formatMissionTimestamp(liveOutput.createdAt)}
-            </span>
-          </div>
-          <p className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-foreground/90">
-            {missionEventSummary(liveOutput)}
-          </p>
-        </div>
-      ) : null}
+      {/* Outcome — the first thing in the pane: result for done tasks,
+          live output while running, waiting/blocked context otherwise. */}
+      <OutcomeCard outcome={outcome} />
 
       {/* Dependencies */}
       {parents.length > 0 || children.length > 0 ? (
@@ -330,27 +334,16 @@ function TaskDetail({
         </div>
       ) : null}
 
-      {/* Brief */}
+      {/* Brief — goals are authored as markdown by the coordinator. */}
       <div>
         <div className="mb-1 font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
           Brief
         </div>
-        <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground/90">
+        <MessageResponse className="text-sm leading-relaxed text-foreground/90">
           {task.goal}
-        </p>
+        </MessageResponse>
       </div>
 
-      {/* Result */}
-      {task.result ? (
-        <div>
-          <div className="mb-1 font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
-            Result
-          </div>
-          <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground/90">
-            {task.result}
-          </p>
-        </div>
-      ) : null}
       {task.resultMetadata ? (
         <details>
           <summary className="cursor-pointer font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
@@ -399,5 +392,154 @@ function TaskDetail({
         </Button>
       ) : null}
     </div>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
+// Outcome card — the status-dependent block pinned to the top of the
+// detail pane: result (done), live output (running), waiting context
+// (blocked / queued), failure / cancellation notices.
+// ---------------------------------------------------------------------------
+
+type TaskOutcome = {
+  label: string;
+  /** Card tint + ring overrides applied on top of the base Card. */
+  tone: string;
+  /** Label/icon color. */
+  labelTone: string;
+  icon: ReactNode;
+  timestamp: string | null;
+  /** Rendered through the markdown renderer when set. */
+  markdown?: string;
+  /** Plain-text fallback body. */
+  text?: string;
+};
+
+function deriveTaskOutcome({
+  task,
+  taskEvents,
+  liveOutput,
+  parents,
+}: {
+  task: AgentChatMissionTask;
+  taskEvents: AgentChatMissionEvent[];
+  liveOutput: AgentChatMissionEvent | null;
+  parents: AgentChatMissionTask[];
+}): TaskOutcome {
+  switch (task.status) {
+    case "done":
+      return {
+        label: "Result",
+        tone: "bg-emerald-500/5 ring-emerald-500/25",
+        labelTone: "text-emerald-600",
+        icon: <CheckCircle2 className="size-3" />,
+        timestamp: task.completedAt,
+        markdown: task.result ?? undefined,
+        text: task.result ? undefined : "Completed.",
+      };
+    case "failed":
+      return {
+        label: "Failed",
+        tone: "bg-destructive/5 ring-destructive/25",
+        labelTone: "text-destructive",
+        icon: <XCircle className="size-3" />,
+        timestamp: task.completedAt,
+        markdown: task.result ?? undefined,
+        text: task.result
+          ? undefined
+          : `Failed after ${task.attemptCount}/${task.maxAttempts} attempts.`,
+      };
+    case "cancelled":
+      return {
+        label: "Cancelled",
+        tone: "bg-muted/40 ring-border",
+        labelTone: "text-muted-foreground",
+        icon: <Ban className="size-3" />,
+        timestamp: task.completedAt,
+        text: "Task cancelled.",
+      };
+    case "running":
+      return {
+        label: "Live output",
+        tone: "bg-amber-500/5 ring-amber-500/25",
+        labelTone: "text-amber-600",
+        icon: <CircleDot className="size-3 animate-pulse" />,
+        timestamp: liveOutput?.createdAt ?? null,
+        text: liveOutput
+          ? missionEventSummary(liveOutput)
+          : "Working — no output yet.",
+      };
+    case "blocked": {
+      // worker_block writes a one-sentence reason into a task.blocked
+      // event on the coordinator session; surface the latest one.
+      const blockedEvent = [...taskEvents]
+        .reverse()
+        .find((e) => e.type === "task.blocked");
+      return {
+        label: "Waiting",
+        tone: "bg-amber-500/5 ring-amber-500/20",
+        labelTone: "text-amber-700 dark:text-amber-500",
+        icon: <Clock className="size-3" />,
+        timestamp: blockedEvent?.createdAt ?? null,
+        text: blockedEvent
+          ? missionEventSummary(blockedEvent)
+          : "Blocked — awaiting input.",
+      };
+    }
+    default: {
+      // todo / ready (and any future pre-run status): explain what the
+      // dispatcher is waiting for.
+      const pending = parents.filter((p) => p.status !== "done");
+      const text =
+        pending.length > 0
+          ? `Waiting on ${pending
+              .map((p) => missionTaskTitle(p.goal, 40))
+              .join(" · ")} to complete.`
+          : "Queued — waiting for a worker slot.";
+      return {
+        label: "Waiting",
+        tone: "bg-muted/30 ring-border",
+        labelTone: "text-muted-foreground",
+        icon: <Clock className="size-3" />,
+        timestamp: null,
+        text,
+      };
+    }
+  }
+}
+
+function OutcomeCard({ outcome }: { outcome: TaskOutcome }) {
+  return (
+    <Card
+      data-testid="task-outcome"
+      size="sm"
+      className={`gap-0 py-0 shadow-none ${outcome.tone}`}
+    >
+      <CardContent className="space-y-1.5 px-4 py-3">
+        <div className="flex items-center justify-between gap-2">
+          <span
+            className={`inline-flex items-center gap-1.5 font-mono text-[9px] uppercase tracking-widest ${outcome.labelTone}`}
+          >
+            {outcome.icon}
+            {outcome.label}
+          </span>
+          {outcome.timestamp ? (
+            <span className="font-mono text-[10px] text-muted-foreground/60">
+              {formatMissionTimestamp(outcome.timestamp)}
+            </span>
+          ) : null}
+        </div>
+        {outcome.markdown ? (
+          <MessageResponse className="text-sm leading-relaxed text-foreground/90">
+            {outcome.markdown}
+          </MessageResponse>
+        ) : (
+          <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground/90">
+            {outcome.text}
+          </p>
+        )}
+      </CardContent>
+    </Card>
   );
 }
