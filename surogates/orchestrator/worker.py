@@ -1220,6 +1220,12 @@ async def run_worker(settings: Settings) -> None:
         name="inbox-expire-sweeper",
     )
 
+    from surogates.jobs.board_maintenance import run_board_maintenance_loop
+    board_maintenance_task = asyncio.create_task(
+        run_board_maintenance_loop(session_factory),
+        name="board-maintenance-sweeper",
+    )
+
     health_server = await start_health_server(
         settings.health_port,
         lambda: infrastructure_readiness(redis_client, session_factory),
@@ -1250,6 +1256,11 @@ async def run_worker(settings: Settings) -> None:
         inbox_expire_task.cancel()
         try:
             await inbox_expire_task
+        except asyncio.CancelledError:
+            pass
+        board_maintenance_task.cancel()
+        try:
+            await board_maintenance_task
         except asyncio.CancelledError:
             pass
         await health_server.stop()
