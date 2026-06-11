@@ -424,3 +424,58 @@ async def test_get_mission_workers_ignores_unrelated_child_channels(
         )
     assert resp.status_code == 200, resp.text
     assert resp.json()["workers"] == []
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_get_mission_tasks_includes_started_at(
+    inbox_app, session_factory, session_store,
+):
+    """The tasks payload serializes ``started_at`` (set for claimed
+    attempts, null for queued tasks) so the dashboard can show
+    "started HH:MM" without guessing from created_at."""
+    from datetime import datetime
+
+    user_session = await create_user_token_session(
+        session_factory, session_store, agent_id="orchestrator",
+    )
+    store = MissionStore(session_factory)
+    created = await handle_mission_create(
+        description="d", rubric="r",
+        session_id=user_session.session.id,
+        user_id=user_session.user_id, org_id=user_session.org_id,
+        agent_id="orchestrator",
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store,
+    )
+    # The column is timezone-naive (UTC by convention, matching the
+    # other task timestamps written by the dispatcher).
+    started = datetime(2026, 6, 11, 12, 0, 0)
+    async with session_factory() as db:
+        db.add_all([
+            Task(
+                org_id=user_session.org_id,
+                parent_session_id=user_session.session.id,
+                goal="claimed", status="running",
+                mission_id=created.mission_id, started_at=started,
+            ),
+            Task(
+                org_id=user_session.org_id,
+                parent_session_id=user_session.session.id,
+                goal="queued", status="todo",
+                mission_id=created.mission_id,
+            ),
+        ])
+        await db.commit()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=inbox_app), base_url="http://test",
+    ) as client:
+        resp = await client.get(
+            f"/v1/missions/{created.mission_id}/tasks",
+            headers=user_session.auth_headers,
+        )
+    assert resp.status_code == 200, resp.text
+    by_goal = {t["goal"]: t for t in resp.json()["tasks"]}
+    assert by_goal["claimed"]["started_at"] is not None
+    assert by_goal["claimed"]["started_at"].startswith("2026-06-11T12:00:00")
+    assert by_goal["queued"]["started_at"] is None

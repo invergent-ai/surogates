@@ -199,6 +199,7 @@ async def get_mission_tasks(
                 str(t.current_session_id) if t.current_session_id else None
             ),
             "created_at": t.created_at.isoformat() if t.created_at else None,
+            "started_at": t.started_at.isoformat() if t.started_at else None,
             "completed_at": (
                 t.completed_at.isoformat() if t.completed_at else None
             ),
