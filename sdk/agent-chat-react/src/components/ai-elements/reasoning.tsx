@@ -194,7 +194,15 @@ export const ReasoningContent = memo(
       )}
       {...props}
     >
-      <Streamdown plugins={streamdownPlugins}>{children}</Streamdown>
+      <Streamdown
+        // Same hanging-indent list fix as MessageResponse — Streamdown's
+        // list-inside + preflight-stripped padding pushes markers to the
+        // container edge.
+        className="[&_ol]:list-outside [&_ol]:pl-5 [&_ul]:list-outside [&_ul]:pl-5"
+        plugins={streamdownPlugins}
+      >
+        {children}
+      </Streamdown>
     </CollapsibleContent>
   )
 );

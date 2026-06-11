@@ -361,6 +361,11 @@ export const MessageResponse = memo(
     <Streamdown
       className={cn(
         "size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+        // Streamdown emits ``list-inside`` lists and preflight strips
+        // the UA list padding, so bullet markers hug the container
+        // edge and wrapped lines slide under them. Hanging-indent
+        // lists instead, everywhere markdown renders.
+        "[&_ol]:list-outside [&_ol]:pl-5 [&_ul]:list-outside [&_ul]:pl-5",
         className
       )}
       plugins={streamdownPlugins}
