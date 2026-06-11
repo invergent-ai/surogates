@@ -479,3 +479,178 @@ async def test_get_mission_tasks_includes_started_at(
     assert by_goal["claimed"]["started_at"] is not None
     assert by_goal["claimed"]["started_at"].startswith("2026-06-11T12:00:00")
     assert by_goal["queued"]["started_at"] is None
+
+
+async def _seed_mission_event_graph(session_factory, session_store, user_session):
+    """Create a mission with one task-attempt session and one direct
+    spawn_worker child, plus four events across the three sessions
+    (one of which is a hidden ``llm.delta`` chunk)."""
+    import uuid as _uuid
+
+    from surogates.db.models import Event as EventRow, Session as SessionRow
+
+    store = MissionStore(session_factory)
+    created = await handle_mission_create(
+        description="d", rubric="r",
+        session_id=user_session.session.id,
+        user_id=user_session.user_id, org_id=user_session.org_id,
+        agent_id="orchestrator",
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store,
+    )
+    task_id = _uuid.uuid4()
+    task_session_id = _uuid.uuid4()
+    worker_session_id = _uuid.uuid4()
+    async with session_factory() as db:
+        db.add(Task(
+            id=task_id, org_id=user_session.org_id,
+            parent_session_id=user_session.session.id,
+            goal="g", status="running", mission_id=created.mission_id,
+            agent_def_name="claude-coder",
+        ))
+        await db.commit()
+    async with session_factory() as db:
+        db.add(SessionRow(
+            id=task_session_id, org_id=user_session.org_id,
+            agent_id="orchestrator", channel="task", task_id=task_id,
+        ))
+        db.add(SessionRow(
+            id=worker_session_id, org_id=user_session.org_id,
+            agent_id="orchestrator", channel="worker",
+            parent_id=user_session.session.id,
+            config={"agent_def_name": "codex-reviewer"},
+        ))
+        await db.commit()
+    # Separate commits pin the bigserial id order the cursor pages over.
+    async with session_factory() as db:
+        db.add(EventRow(
+            session_id=user_session.session.id, org_id=user_session.org_id,
+            type="worker.spawned",
+            data={"task_id": str(task_id), "goal": "g"},
+        ))
+        await db.commit()
+    async with session_factory() as db:
+        db.add(EventRow(
+            session_id=task_session_id, org_id=user_session.org_id,
+            type="iteration.summary", data={"summary": "doing work"},
+        ))
+        await db.commit()
+    async with session_factory() as db:
+        db.add(EventRow(
+            session_id=worker_session_id, org_id=user_session.org_id,
+            type="llm.delta", data={"chunk": "x"},
+        ))
+        db.add(EventRow(
+            session_id=worker_session_id, org_id=user_session.org_id,
+            type="tool.call", data={"name": "bash"},
+        ))
+        await db.commit()
+    return created, task_id, task_session_id, worker_session_id
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_get_mission_events_merges_and_labels_sessions(
+    inbox_app, session_factory, session_store,
+):
+    """GET /v1/missions/{id}/events merges coordinator + task-attempt +
+    direct-child events ascending by id, hides llm.delta, and labels
+    every contributing session in the ``sessions`` map."""
+    user_session = await create_user_token_session(
+        session_factory, session_store, agent_id="orchestrator",
+    )
+    created, task_id, task_session_id, worker_session_id = (
+        await _seed_mission_event_graph(
+            session_factory, session_store, user_session,
+        )
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=inbox_app), base_url="http://test",
+    ) as client:
+        resp = await client.get(
+            f"/v1/missions/{created.mission_id}/events",
+            headers=user_session.auth_headers,
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    # handle_mission_create emits mission.defined on the coordinator
+    # session, so the feed opens with it; llm.delta stays hidden.
+    types = [e["type"] for e in body["events"]]
+    assert types == [
+        "mission.defined", "worker.spawned", "iteration.summary", "tool.call",
+    ]
+    ids = [e["id"] for e in body["events"]]
+    assert ids == sorted(ids)
+
+    sessions = body["sessions"]
+    assert sessions[str(user_session.session.id)] == {
+        "task_id": None, "agent_def_name": None, "kind": "coordinator",
+    }
+    assert sessions[str(task_session_id)] == {
+        "task_id": str(task_id), "agent_def_name": "claude-coder",
+        "kind": "task",
+    }
+    assert sessions[str(worker_session_id)] == {
+        "task_id": None, "agent_def_name": "codex-reviewer",
+        "kind": "worker",
+    }
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_get_mission_events_after_id_cursor(
+    inbox_app, session_factory, session_store,
+):
+    """``after_id`` pages strictly forward; ``limit`` bounds the page."""
+    user_session = await create_user_token_session(
+        session_factory, session_store, agent_id="orchestrator",
+    )
+    created, *_ = await _seed_mission_event_graph(
+        session_factory, session_store, user_session,
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=inbox_app), base_url="http://test",
+    ) as client:
+        first = await client.get(
+            f"/v1/missions/{created.mission_id}/events?limit=1",
+            headers=user_session.auth_headers,
+        )
+        assert first.status_code == 200, first.text
+        events = first.json()["events"]
+        assert len(events) == 1
+        rest = await client.get(
+            f"/v1/missions/{created.mission_id}/events"
+            f"?after_id={events[0]['id']}",
+            headers=user_session.auth_headers,
+        )
+    assert rest.status_code == 200, rest.text
+    # 4 visible events total (mission.defined + the three seeded ones);
+    # the cursor page excludes the first.
+    rest_ids = [e["id"] for e in rest.json()["events"]]
+    assert len(rest_ids) == 3
+    assert all(i > events[0]["id"] for i in rest_ids)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_get_mission_events_cross_tenant_404(
+    inbox_app, session_factory, session_store,
+):
+    """A user from another org gets 404, not an empty page — same
+    contract as every other mission read."""
+    owner = await create_user_token_session(
+        session_factory, session_store, agent_id="orchestrator",
+    )
+    created, *_ = await _seed_mission_event_graph(
+        session_factory, session_store, owner,
+    )
+    stranger = await create_user_token_session(
+        session_factory, session_store, agent_id="orchestrator",
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=inbox_app), base_url="http://test",
+    ) as client:
+        resp = await client.get(
+            f"/v1/missions/{created.mission_id}/events",
+            headers=stranger.auth_headers,
+        )
+    assert resp.status_code == 404, resp.text

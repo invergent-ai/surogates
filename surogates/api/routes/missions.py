@@ -315,6 +315,117 @@ async def _worker_row(
     }
 
 
+# Streaming-only chunk types excluded from the mission feed — mirrors
+# SurogatesClient._HIDDEN_EVENT_TYPES on the ops side.
+_HIDDEN_EVENT_TYPES: frozenset[str] = frozenset({"llm.delta"})
+
+
+@router.get("/{mission_id}/events")
+async def get_mission_events(
+    mission_id: UUID,
+    after_id: int | None = Query(None, ge=0),
+    limit: int = Query(500, ge=1, le=2000),
+    session_factory: async_sessionmaker = Depends(_session_factory_dep),
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> dict[str, Any]:
+    """Mission-wide event timeline, ascending by event id.
+
+    Merges events from every session attached to the mission:
+
+    * the coordinator session (``mission.session_id``),
+    * every task-attempt session (``sessions.task_id`` points at a
+      mission task — includes past retry attempts, not just
+      ``current_session_id``),
+    * direct ``spawn_worker`` / ``delegate_task`` children of the
+      coordinator (same channel filter as the workers route).
+
+    Cursorable by ``after_id`` (bigserial event PK). The ``sessions``
+    map labels every contributing session so clients can attribute
+    rows to tasks/agents without N+1 lookups — required because the
+    client only knows each task's *current* attempt session.
+    """
+    mission_row = await _load_mission_authorized(
+        mission_id, session_factory=session_factory, tenant=tenant,
+    )
+    async with session_factory() as db:
+        task_rows = (await db.execute(
+            select(TaskRow.id, TaskRow.agent_def_name).where(
+                TaskRow.mission_id == mission_id,
+            )
+        )).all()
+        agent_by_task = {t.id: t.agent_def_name for t in task_rows}
+
+        session_meta: dict[str, dict[str, Any]] = {
+            str(mission_row.session_id): {
+                "task_id": None, "agent_def_name": None,
+                "kind": "coordinator",
+            },
+        }
+        session_ids: list[UUID] = [mission_row.session_id]
+
+        if agent_by_task:
+            task_sessions = (await db.execute(
+                select(ORMSession.id, ORMSession.task_id).where(
+                    ORMSession.task_id.in_(list(agent_by_task)),
+                )
+            )).all()
+            for sid, sid_task in task_sessions:
+                session_meta[str(sid)] = {
+                    "task_id": str(sid_task),
+                    "agent_def_name": agent_by_task.get(sid_task),
+                    "kind": "task",
+                }
+                session_ids.append(sid)
+
+        direct_children = (await db.execute(
+            select(ORMSession).where(
+                ORMSession.parent_id == mission_row.session_id,
+                ORMSession.channel.in_(("worker", "delegation")),
+            )
+        )).scalars().all()
+        for sess in direct_children:
+            if str(sess.id) in session_meta:
+                continue
+            session_meta[str(sess.id)] = {
+                "task_id": None,
+                "agent_def_name": (sess.config or {}).get("agent_def_name"),
+                "kind": "worker" if sess.channel == "worker" else "delegation",
+            }
+            session_ids.append(sess.id)
+
+        filters = [
+            Event.session_id.in_(session_ids),
+            Event.type.notin_(_HIDDEN_EVENT_TYPES),
+        ]
+        if after_id is not None:
+            filters.append(Event.id > after_id)
+        rows = (await db.execute(
+            select(
+                Event.id, Event.session_id, Event.type,
+                Event.data, Event.created_at,
+            )
+            .where(*filters)
+            .order_by(Event.id.asc())
+            .limit(limit)
+        )).all()
+
+    return {
+        "events": [
+            {
+                "id": r.id,
+                "session_id": str(r.session_id),
+                "type": r.type,
+                "data": r.data,
+                "created_at": (
+                    r.created_at.isoformat() if r.created_at else None
+                ),
+            }
+            for r in rows
+        ],
+        "sessions": session_meta,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Mutating routes
 # ---------------------------------------------------------------------------
