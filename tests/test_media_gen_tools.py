@@ -531,3 +531,26 @@ def test_media_artifact_specs_validate():
     for bad in ("", "/abs/x.png", "../escape.png", "a/../b.png"):
         with _pytest.raises(ValidationError):
             ImageSpec(path=bad)
+
+
+@pytest.mark.asyncio
+async def test_generate_video_surfaces_upstream_error_body(tmp_path, monkeypatch):
+    import httpx as _httpx
+
+    from surogates.tools.builtin.media_gen import _generate_video_handler
+
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    def handler(request):
+        return _httpx.Response(400, json={
+            "error": {"message": "@preset/video is not a valid model ID"},
+        })
+
+    _patch_video_transport(monkeypatch, handler)
+    result = json.loads(await _generate_video_handler(
+        {"prompt": "x"},
+        media_gen=_video_cfg(),
+        workspace_path=str(tmp_path),
+    ))
+    assert "400 Bad Request" in result["error"]
+    assert "not a valid model ID" in result["error"]  # upstream body surfaced

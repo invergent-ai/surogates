@@ -385,6 +385,12 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
                     "Video job completed but returned no download URL"
                 )
             data = await _download_video(client, str(urls[0]))
+    except httpx.HTTPStatusError as exc:
+        detail = _upstream_error_detail(exc)
+        return _json_error(
+            f"Video generation request failed: {exc}"
+            + (f" — upstream said: {detail}" if detail else "")
+        )
     except httpx.HTTPError as exc:
         return _json_error(f"Video generation request failed: {exc}")
     except ValueError as exc:
@@ -417,6 +423,21 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
     if usage.get("cost") is not None:
         result["cost"] = usage["cost"]
     return json.dumps(result, ensure_ascii=False)
+
+
+def _upstream_error_detail(exc: httpx.HTTPStatusError) -> str:
+    """Extract a short upstream error body for the tool error message.
+
+    ``raise_for_status`` alone loses the response body — which is where
+    providers explain WHY a request was rejected (bad model slug,
+    unsupported resolution, …).  Streamed responses may not have been
+    read; in that case there is nothing to extract.
+    """
+    try:
+        body = exc.response.text
+    except Exception:  # noqa: BLE001 — unread streamed body, best-effort only
+        return ""
+    return " ".join(body.split())[:300]
 
 
 # Artifact captions show under the rendered media; clip runaway prompts
