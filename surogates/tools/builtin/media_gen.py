@@ -75,7 +75,9 @@ GENERATE_IMAGE_SCHEMA = ToolSchema(
         "Generate an image from a text prompt and save it into the session "
         "workspace. Optionally guide the generation with input images "
         "(image-to-image). Returns the workspace-relative file path of the "
-        "generated image."
+        "generated image. The image is automatically shown to the user as "
+        "an inline artifact — do NOT embed the path in your reply as a "
+        "markdown image; just mention the result."
     ),
     parameters={
         "type": "object",
@@ -120,7 +122,10 @@ GENERATE_VIDEO_SCHEMA = ToolSchema(
         "Generate a video from a text prompt and save it into the session "
         "workspace. Rendering takes minutes; the call blocks until the video "
         "is ready. Optionally animate from a first-frame image "
-        "(image-to-video). Returns the workspace-relative file path."
+        "(image-to-video). Returns the workspace-relative file path. The "
+        "video is automatically shown to the user as an inline artifact — "
+        "do NOT embed the path in your reply as markdown; just mention the "
+        "result."
     ),
     parameters={
         "type": "object",
@@ -270,6 +275,14 @@ async def _generate_image_handler(arguments: dict[str, Any], **kwargs: Any) -> s
         "path": relative_path,
         "model": getattr(response, "model", model),
     }
+    if await _create_media_artifact(
+        kwargs.get("api_client"),
+        kind="image",
+        path=relative_path,
+        mime_type=mime_type,
+        caption=prompt,
+    ):
+        result["artifact"] = True
     text = _extract_response_content(response)
     if text:
         result["text"] = text
@@ -392,10 +405,74 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
         )
 
     result: dict[str, Any] = {"path": relative_path, "model": model, "job_id": job_id}
+    if await _create_media_artifact(
+        kwargs.get("api_client"),
+        kind="video",
+        path=relative_path,
+        mime_type="video/mp4",
+        caption=prompt,
+    ):
+        result["artifact"] = True
     usage = status_data.get("usage") or {}
     if usage.get("cost") is not None:
         result["cost"] = usage["cost"]
     return json.dumps(result, ensure_ascii=False)
+
+
+# Artifact captions show under the rendered media; clip runaway prompts
+# so the spec stays a reference, not a payload.
+_MAX_ARTIFACT_CAPTION = 500
+
+
+async def _create_media_artifact(
+    api_client: Any,
+    *,
+    kind: str,
+    path: str,
+    mime_type: str | None,
+    caption: str,
+) -> bool:
+    """Best-effort artifact creation so the chat UI renders the media inline.
+
+    The artifact spec only references the workspace file — the bytes
+    stay in the workspace and stream through the download route.  A
+    failure here must not fail the generation tool: the file is already
+    saved and its path is returned either way, so log and move on.
+    Returns ``True`` when the artifact was created.
+    """
+    if api_client is None:
+        return False
+    # The artifact name validator rejects path separators; the basename
+    # is unique already (timestamp + hex suffix).
+    name = path.rsplit("/", 1)[-1] or path
+    try:
+        raw = await api_client.create_artifact(
+            name=name,
+            kind=kind,
+            spec={
+                "path": path,
+                "mime_type": mime_type,
+                "caption": caption[:_MAX_ARTIFACT_CAPTION],
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — artifact failure must not lose the file
+        logger.warning("media artifact creation failed for %s: %s", path, exc)
+        return False
+    data: dict[str, Any] = {}
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            data = parsed
+    if data.get("success") is False:
+        logger.warning(
+            "media artifact creation rejected for %s: %s",
+            path, data.get("error"),
+        )
+        return False
+    return True
 
 
 def _first_generated_image_url(response: Any) -> str:

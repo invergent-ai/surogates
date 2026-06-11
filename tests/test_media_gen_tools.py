@@ -424,3 +424,110 @@ def test_media_gen_tools_route_to_harness():
             f"{name} is not HARNESS-routed; sandbox fallback surfaces "
             f"it as 'Unknown tool'"
         )
+
+
+class _FakeApiClient:
+    def __init__(self, response='{"success": true}', raise_exc=None):
+        self.response = response
+        self.raise_exc = raise_exc
+        self.calls = []
+
+    async def create_artifact(self, *, name, kind, spec):
+        self.calls.append({"name": name, "kind": kind, "spec": spec})
+        if self.raise_exc is not None:
+            raise self.raise_exc
+        return self.response
+
+
+@pytest.mark.asyncio
+async def test_generate_image_creates_inline_artifact(tmp_path):
+    from surogates.tools.builtin.media_gen import _generate_image_handler
+
+    client = _FakeImageClient(
+        images=[{"image_url": {"url": f"data:image/png;base64,{_PNG_B64}"}}],
+    )
+    api_client = _FakeApiClient()
+    result = json.loads(await _generate_image_handler(
+        {"prompt": "a red square"},
+        media_gen=_image_cfg(client),
+        workspace_path=str(tmp_path),
+        api_client=api_client,
+    ))
+    assert result["artifact"] is True
+    call = api_client.calls[0]
+    assert call["kind"] == "image"
+    assert call["spec"]["path"] == result["path"]
+    assert call["spec"]["mime_type"] == "image/png"
+    assert call["spec"]["caption"] == "a red square"
+    assert "/" not in call["name"]  # artifact names reject path separators
+
+
+@pytest.mark.asyncio
+async def test_generate_image_survives_artifact_failure(tmp_path):
+    from surogates.tools.builtin.media_gen import _generate_image_handler
+
+    client = _FakeImageClient(
+        images=[{"image_url": {"url": f"data:image/png;base64,{_PNG_B64}"}}],
+    )
+    api_client = _FakeApiClient(raise_exc=RuntimeError("api down"))
+    result = json.loads(await _generate_image_handler(
+        {"prompt": "a red square"},
+        media_gen=_image_cfg(client),
+        workspace_path=str(tmp_path),
+        api_client=api_client,
+    ))
+    assert "error" not in result
+    assert "artifact" not in result  # file saved, artifact best-effort
+    assert (tmp_path / result["path"]).is_file()
+
+
+@pytest.mark.asyncio
+async def test_generate_video_creates_inline_artifact(tmp_path, monkeypatch):
+    import httpx as _httpx
+
+    from surogates.tools.builtin.media_gen import _generate_video_handler
+
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    def handler(request):
+        if request.method == "POST":
+            return _httpx.Response(202, json={"id": "job-a", "status": "pending"})
+        if request.url.path.endswith("/videos/job-a"):
+            return _httpx.Response(200, json={
+                "id": "job-a", "status": "completed",
+                "unsigned_urls": ["https://or.example/api/v1/videos/job-a/content"],
+            })
+        return _httpx.Response(200, content=b"mp4")
+
+    _patch_video_transport(monkeypatch, handler)
+    api_client = _FakeApiClient()
+    result = json.loads(await _generate_video_handler(
+        {"prompt": "waves at sunset"},
+        media_gen=_video_cfg(),
+        workspace_path=str(tmp_path),
+        api_client=api_client,
+    ))
+    assert result["artifact"] is True
+    call = api_client.calls[0]
+    assert call["kind"] == "video"
+    assert call["spec"]["path"] == result["path"]
+    assert call["spec"]["mime_type"] == "video/mp4"
+
+
+def test_media_artifact_specs_validate():
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    from surogates.artifacts.models import (
+        ArtifactKind, ArtifactSpec, ImageSpec, VideoSpec,
+    )
+
+    ImageSpec(path="media/images/x.png", mime_type="image/png", caption="c")
+    VideoSpec(path="media/videos/x.mp4")
+    ArtifactSpec(
+        name="x.png", kind=ArtifactKind.IMAGE,
+        spec={"path": "media/images/x.png"},
+    ).validate_spec()
+    for bad in ("", "/abs/x.png", "../escape.png", "a/../b.png"):
+        with _pytest.raises(ValidationError):
+            ImageSpec(path=bad)

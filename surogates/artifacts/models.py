@@ -1,11 +1,15 @@
 """Artifact data shapes and kind-specific spec validators.
 
 An artifact is a named, kind-typed blob produced by the ``create_artifact``
-tool.  Five kinds are supported:
+tool (or emitted directly by harness tools).  Supported kinds:
 
 - ``markdown`` — arbitrary GitHub-flavoured markdown rendered in-thread
 - ``table``   — row/column data with optional column hints
 - ``chart``   — a Chart.js configuration object
+- ``html`` / ``svg`` — sandboxed document previews
+- ``image`` / ``video`` — references to generated media files in the
+  session workspace (emitted by the ``generate_image`` /
+  ``generate_video`` tools; the bytes stay in the workspace)
 
 Each kind parses/validates its spec here before the artifact is persisted,
 so the API layer can reject malformed requests without touching storage.
@@ -54,6 +58,8 @@ class ArtifactKind(str, Enum):
     CHART = "chart"
     HTML = "html"
     SVG = "svg"
+    IMAGE = "image"
+    VIDEO = "video"
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +177,61 @@ class SvgSpec(BaseModel):
         return stripped
 
 
+def _validate_workspace_relative_path(v: str) -> str:
+    """Shared path validator for file-backed media specs.
+
+    The path must stay inside the session workspace: relative, no
+    parent-directory traversal, no NUL/backslash tricks.  The renderer
+    feeds it to the workspace download route, which enforces the same
+    containment server-side — this check just fails fast at create time.
+    """
+    v = v.strip()
+    if not v:
+        raise ValueError("path must not be empty")
+    if v.startswith(("/", "\\")) or "\x00" in v or "\\" in v:
+        raise ValueError("path must be workspace-relative")
+    if any(part == ".." for part in v.split("/")):
+        raise ValueError("path must not contain parent-directory traversal")
+    return v
+
+
+class ImageSpec(BaseModel):
+    """A workspace-file-backed image rendered inline in the chat.
+
+    ``path`` references a file in the session workspace; the renderer
+    streams the bytes through the authenticated workspace download
+    route.  Only the reference lives in the artifact store, so the
+    spec stays tiny regardless of the image size.
+    """
+
+    path: str
+    mime_type: str | None = None
+    caption: str | None = None
+
+    @field_validator("path")
+    @classmethod
+    def _path_in_workspace(cls, v: str) -> str:
+        return _validate_workspace_relative_path(v)
+
+
+class VideoSpec(BaseModel):
+    """A workspace-file-backed video rendered inline in the chat.
+
+    Same file-reference contract as :class:`ImageSpec` — the bytes
+    stream through the workspace download route, never the artifact
+    store.
+    """
+
+    path: str
+    mime_type: str | None = None
+    caption: str | None = None
+
+    @field_validator("path")
+    @classmethod
+    def _path_in_workspace(cls, v: str) -> str:
+        return _validate_workspace_relative_path(v)
+
+
 # ---------------------------------------------------------------------------
 # Top-level spec
 # ---------------------------------------------------------------------------
@@ -216,6 +277,10 @@ class ArtifactSpec(BaseModel):
                 HtmlSpec(**self.spec)
             case ArtifactKind.SVG:
                 SvgSpec(**self.spec)
+            case ArtifactKind.IMAGE:
+                ImageSpec(**self.spec)
+            case ArtifactKind.VIDEO:
+                VideoSpec(**self.spec)
 
 
 # ---------------------------------------------------------------------------
