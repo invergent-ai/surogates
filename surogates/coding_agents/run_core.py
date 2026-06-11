@@ -71,8 +71,10 @@ async def execute_coding_run(
     returns the parsed result plus the CODE_RUN_RESULT event id so callers
     can advance their cursor through it.
     """
+    sa_id = getattr(tenant, "service_account_id", None)
     bundle = await credentials.load(
-        org_id=tenant.org_id, user_id=tenant.user_id, provider=provider,
+        org_id=tenant.org_id, provider=provider,
+        user_id=tenant.user_id, service_account_id=sa_id,
     )
     if bundle is None:
         return CodingRunOutcome(status="not_connected")
@@ -120,7 +122,8 @@ async def execute_coding_run(
             parsed = json.loads(result.updated_codex_auth_json)
             if isinstance(parsed, dict):
                 await credentials.store(
-                    org_id=tenant.org_id, user_id=tenant.user_id,
+                    org_id=tenant.org_id,
+                    user_id=tenant.user_id, service_account_id=sa_id,
                     bundle=CredentialBundle(
                         provider="openai", auth_mode="oauth", auth_json=parsed,
                     ),

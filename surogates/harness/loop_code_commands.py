@@ -85,12 +85,22 @@ class CodeCommandMixin:
             return None
         return CodingAgentCredentials(self._credential_vault)
 
+    def _code_principal(self) -> dict:
+        """Principal kwargs for the credential store — end user or the
+        service account the session runs under."""
+        return {
+            "user_id": self._tenant.user_id,
+            "service_account_id": getattr(
+                self._tenant, "service_account_id", None,
+            ),
+        }
+
     async def _render_code_status(self) -> str:
         creds = self._code_credentials()
         if creds is None:
             return _NO_VAULT
         statuses = await creds.statuses(
-            org_id=self._tenant.org_id, user_id=self._tenant.user_id,
+            org_id=self._tenant.org_id, **self._code_principal(),
         )
         return render_status(statuses)
 
@@ -99,9 +109,8 @@ class CodeCommandMixin:
         if creds is None:
             return _NO_VAULT
         removed = await creds.delete(
-            org_id=self._tenant.org_id,
-            user_id=self._tenant.user_id,
-            provider=provider,
+            org_id=self._tenant.org_id, provider=provider,
+            **self._code_principal(),
         )
         return f"Disconnected {agent}." if removed else f"{agent} was not connected."
 

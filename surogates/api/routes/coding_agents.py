@@ -31,14 +31,27 @@ class CredentialSubmit(BaseModel):
     value: str = Field(..., repr=False)
 
 
-def _require_end_user(tenant: TenantContext, ctx: AgentRuntimeContext) -> UUID:
-    if tenant.user_id is None:
-        raise HTTPException(status_code=401, detail="end-user identity required")
+def _require_principal(
+    tenant: TenantContext, ctx: AgentRuntimeContext,
+) -> dict[str, UUID | None]:
+    """Resolve the connecting principal — an end user (agent UI) or a
+    service account (the ops-chat SA the Studio work surface runs under).
+
+    Returns the principal kwargs for ``CodingAgentCredentials`` so the plan
+    is stored and resolved under whoever actually runs ``/code``.
+    """
+    if tenant.user_id is None and tenant.service_account_id is None:
+        raise HTTPException(
+            status_code=401, detail="user or service-account identity required",
+        )
     if str(tenant.org_id) != ctx.org_id:
         raise HTTPException(
             status_code=403, detail="agent does not belong to this tenant",
         )
-    return tenant.user_id
+    return {
+        "user_id": tenant.user_id,
+        "service_account_id": tenant.service_account_id,
+    }
 
 
 def _vault(request: Request) -> CredentialVault:
@@ -57,9 +70,9 @@ async def list_connections(
     tenant: TenantContext = Depends(get_current_tenant),
     ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> dict:
-    user_id = _require_end_user(tenant, ctx)
+    principal = _require_principal(tenant, ctx)
     creds = CodingAgentCredentials(_vault(request))
-    connections = await creds.statuses(org_id=tenant.org_id, user_id=user_id)
+    connections = await creds.statuses(org_id=tenant.org_id, **principal)
     return {"connections": connections}
 
 
@@ -71,14 +84,14 @@ async def submit_credential(
     tenant: TenantContext = Depends(get_current_tenant),
     ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> dict:
-    user_id = _require_end_user(tenant, ctx)
+    principal = _require_principal(tenant, ctx)
     try:
         bundle = validate_pasted(provider, body.mode, body.value)
     except CredentialError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     creds = CodingAgentCredentials(_vault(request))
-    await creds.store(org_id=tenant.org_id, user_id=user_id, bundle=bundle)
+    await creds.store(org_id=tenant.org_id, bundle=bundle, **principal)
     return {"provider": provider, "connected": True, "auth_mode": bundle.auth_mode}
 
 
@@ -91,12 +104,12 @@ async def disconnect(
     tenant: TenantContext = Depends(get_current_tenant),
     ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> Response:
-    user_id = _require_end_user(tenant, ctx)
+    principal = _require_principal(tenant, ctx)
     if provider not in PROVIDERS:
         raise HTTPException(status_code=404, detail=f"Unknown provider {provider!r}.")
     creds = CodingAgentCredentials(_vault(request))
     removed = await creds.delete(
-        org_id=tenant.org_id, user_id=user_id, provider=provider,
+        org_id=tenant.org_id, provider=provider, **principal,
     )
     if not removed:
         raise HTTPException(status_code=404, detail=f"{provider} is not connected.")

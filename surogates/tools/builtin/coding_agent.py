@@ -95,7 +95,10 @@ async def _run_coding_agent_handler(arguments: dict[str, Any], **kwargs: Any) ->
     store = kwargs.get("session_store")
     sandbox_pool = kwargs.get("sandbox_pool")
     vault = kwargs.get("credential_vault")
-    if tenant is None or tenant.user_id is None:
+    if tenant is None or (
+        getattr(tenant, "user_id", None) is None
+        and getattr(tenant, "service_account_id", None) is None
+    ):
         return json.dumps({"error": "no end-user identity for coding-agent run"})
     if store is None or sandbox_pool is None:
         return json.dumps(

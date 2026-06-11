@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 from cryptography.fernet import Fernet
 
@@ -55,6 +57,42 @@ async def test_no_org_fallback(creds, session_factory):
 
     loaded = await creds.load(org_id=org_id, user_id=user_id, provider="anthropic")
     assert loaded is None  # never falls back to the org row
+
+
+async def test_service_account_principal_stores_and_resolves(creds, session_factory):
+    """A service-account principal stores an FK-safe org-scoped row (the SA
+    id rides in the name) and resolves it back — and stays isolated from a
+    user's credential in the same org."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    sa_id = uuid4()
+
+    await creds.store(
+        org_id=org_id, service_account_id=sa_id,
+        bundle=CredentialBundle(provider="anthropic", auth_mode="api_key",
+                                api_key="sk-ant-api03-sa"),
+    )
+    loaded = await creds.load(
+        org_id=org_id, provider="anthropic", service_account_id=sa_id,
+    )
+    assert loaded is not None
+    assert loaded.api_key == "sk-ant-api03-sa"
+
+    # A user in the same org sees nothing under their own scope.
+    assert await creds.load(
+        org_id=org_id, provider="anthropic", user_id=user_id,
+    ) is None
+
+    statuses = {s["provider"]: s for s in
+                await creds.statuses(org_id=org_id, service_account_id=sa_id)}
+    assert statuses["anthropic"]["connected"] is True
+
+    assert await creds.delete(
+        org_id=org_id, provider="anthropic", service_account_id=sa_id,
+    ) is True
+    assert await creds.load(
+        org_id=org_id, provider="anthropic", service_account_id=sa_id,
+    ) is None
 
 
 async def test_delete(creds, session_factory):

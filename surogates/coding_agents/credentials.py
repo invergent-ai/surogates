@@ -127,44 +127,102 @@ def validate_pasted(provider: str, mode: str, value: str) -> CredentialBundle:
     return CredentialBundle(provider="openai", auth_mode="api_key", api_key=value)
 
 
-class CodingAgentCredentials:
-    """Per-user coding-agent credential storage over the encrypted vault.
+def _row_scope(
+    provider: str,
+    *,
+    user_id: UUID | None,
+    service_account_id: UUID | None,
+) -> tuple[UUID | None, str]:
+    """Return the ``(vault_user_id, vault_name)`` for a principal.
 
-    All reads pass the explicit ``user_id`` — there is deliberately **no**
-    org fallback, so one user's missing credential never resolves to an
-    org-scoped row (which would bill another principal's plan).
+    The credential is keyed on whoever runs ``/code``:
+
+    * **End user** — stored under the ``user_id`` column with the plain
+      ``code_cred:<provider>`` name (the original scheme).
+    * **Service account** — the ``credentials.user_id`` column is FK-bound
+      to ``users.id`` so an SA id can't live there.  Instead the row is
+      org-scoped (``user_id`` NULL) and the SA id rides in the name:
+      ``code_cred:<provider>:sa:<sa_id>``.  The route only ever builds the
+      name from the *caller's own* principal, so SAs can't read each other.
+
+    Deliberately no org fallback: a missing per-principal credential never
+    resolves to another principal's row.
+    """
+    if user_id is not None:
+        return user_id, CRED_NAME[provider]
+    if service_account_id is not None:
+        return None, f"{CRED_NAME[provider]}:sa:{service_account_id}"
+    raise ValueError(
+        "coding-agent credential needs a user or service-account principal",
+    )
+
+
+class CodingAgentCredentials:
+    """Per-principal coding-agent credential storage over the encrypted vault.
+
+    Keyed on the session's *effective principal* — the end user in the
+    agent UI, or the per-operator ``ops-chat`` service account on the ops
+    work surface — so the same identity that connects a plan also resolves
+    it at run time on each surface.
     """
 
     def __init__(self, vault: "CredentialVault") -> None:
         self._vault = vault
 
     async def store(
-        self, *, org_id: UUID, user_id: UUID, bundle: CredentialBundle,
+        self,
+        *,
+        org_id: UUID,
+        bundle: CredentialBundle,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
     ) -> None:
+        vault_user_id, name = _row_scope(
+            bundle.provider, user_id=user_id, service_account_id=service_account_id,
+        )
         await self._vault.store(
-            org_id, CRED_NAME[bundle.provider], bundle.to_json(), user_id=user_id,
+            org_id, name, bundle.to_json(), user_id=vault_user_id,
         )
 
     async def load(
-        self, *, org_id: UUID, user_id: UUID, provider: str,
+        self,
+        *,
+        org_id: UUID,
+        provider: str,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
     ) -> CredentialBundle | None:
-        raw = await self._vault.retrieve(
-            org_id, CRED_NAME[provider], user_id=user_id,
+        vault_user_id, name = _row_scope(
+            provider, user_id=user_id, service_account_id=service_account_id,
         )
+        raw = await self._vault.retrieve(org_id, name, user_id=vault_user_id)
         return CredentialBundle.from_json(raw) if raw else None
 
     async def delete(
-        self, *, org_id: UUID, user_id: UUID, provider: str,
+        self,
+        *,
+        org_id: UUID,
+        provider: str,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
     ) -> bool:
-        return await self._vault.delete(
-            org_id, CRED_NAME[provider], user_id=user_id,
+        vault_user_id, name = _row_scope(
+            provider, user_id=user_id, service_account_id=service_account_id,
         )
+        return await self._vault.delete(org_id, name, user_id=vault_user_id)
 
-    async def statuses(self, *, org_id: UUID, user_id: UUID) -> list[dict]:
+    async def statuses(
+        self,
+        *,
+        org_id: UUID,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
+    ) -> list[dict]:
         out: list[dict] = []
         for provider in PROVIDERS:
             bundle = await self.load(
-                org_id=org_id, user_id=user_id, provider=provider,
+                org_id=org_id, provider=provider,
+                user_id=user_id, service_account_id=service_account_id,
             )
             out.append(
                 bundle.status()
