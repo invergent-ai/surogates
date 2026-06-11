@@ -15,6 +15,7 @@ individually configurable — there is no single "home directory".
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -246,6 +247,26 @@ class WorkerSettings(BaseSettings):
     # cap used by TurnConcurrencyGate.  ``ctx.governance`` may override
     # per tenant in a later plan; until then this is the uniform cap.
     max_concurrent_turns_default: int = 10
+
+
+class BoardSettings(BaseSettings):
+    """Coordination-board tuning knobs (no enable flag by design)."""
+
+    model_config = {"env_prefix": "SUROGATES_BOARD_"}
+
+    snapshot_window_tokens: int = 600
+    delta_max_chars: int = 1200
+    read_tool_window_tokens: int = 1500
+    claim_ttl_seconds: int = 300
+    max_active_claims_per_writer: int = 2
+    max_notes_per_group: int = 300
+    purge_after_days: int = 7
+
+
+@lru_cache(maxsize=1)
+def get_board_settings() -> BoardSettings:
+    """Process-wide cached BoardSettings (env read once)."""
+    return BoardSettings()
 
 
 class LLMSettings(BaseSettings):

@@ -132,6 +132,15 @@ class EventType(str, Enum):
     TASK_BLOCKED = "task.blocked"
     TASK_FAILED = "task.failed"
 
+    # Coordination board (shared verified context).
+    # ``BOARD_NOTE`` is emitted on the WRITER session when notes pass
+    # admission (transcript audit).  ``BOARD_UPDATE`` is emitted on each
+    # READER session and carries the rendered snapshot/delta text that
+    # re-enters the conversation on replay; see
+    # docs/superpowers/specs/2026-06-11-coordination-board-design.md.
+    BOARD_NOTE = "board.note"
+    BOARD_UPDATE = "board.update"
+
     # Mission layer (orchestrated goals).
     # Emitted on the coordinator chat session. The dashboard polls these
     # to render mission state; see

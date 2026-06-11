@@ -17,6 +17,8 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     Numeric,
+    Sequence,
+    String,
     Text,
     UniqueConstraint,
     func,
@@ -1041,6 +1043,80 @@ class TaskLink(Base):
     )
     child_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tasks.id"), primary_key=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Coordination board
+# ---------------------------------------------------------------------------
+
+
+# Monotonic change counter for board notes.  Bumped on INSERT (column
+# default) AND on every status transition (supersede / expire / claim
+# renewal) so a single ``seq`` cursor covers both new notes and state
+# changes.  Created by ``Base.metadata.create_all`` because it is bound
+# to the column below.
+board_note_seq = Sequence("board_note_seq")
+
+
+class BoardNote(Base):
+    """One verified note on a coordination-group board.
+
+    The board is the horizontal communication substrate for a fan-out
+    tree (spec: docs/superpowers/specs/2026-06-11-coordination-board-design.md).
+    ``group_id`` is a plain UUID with NO foreign key: in v1 it holds the
+    fan-out root session id; the mission integration phase will reuse the
+    same column for mission ids.
+
+    Rows are only ever written for notes that passed admission
+    (deterministic pre-checks + LLM verification).  Rejected notes are
+    tool-result feedback, never rows.
+
+    Status machine:
+
+    * ``active``     — visible in renders
+    * ``superseded`` — a newer RESULT from the same writer replaced it
+    * ``expired``    — CLAIM whose TTL lapsed
+    """
+
+    __tablename__ = "board_notes"
+    __table_args__ = (
+        Index("idx_board_notes_group_seq", "group_id", "seq"),
+        Index("idx_board_notes_group_status", "group_id", "status"),
+        Index("idx_board_notes_org", "org_id"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True
+    )
+    seq: Mapped[int] = mapped_column(
+        BigInteger,
+        board_note_seq,
+        server_default=board_note_seq.next_value(),
+        nullable=False,
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
+    )
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    writer_session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=False
+    )
+    writer_label: Mapped[str] = mapped_column(String(16), nullable=False)
+    type: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(String(400), nullable=False)
+    ref: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="active"
+    )
+    expires_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now()
     )
 
 

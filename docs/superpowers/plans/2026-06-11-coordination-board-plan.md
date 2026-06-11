@@ -15,8 +15,8 @@
 
 ## Progress
 
-- [ ] Task 1: Schema foundations — BoardNote model, sequence, event types, settings
-- [ ] Task 2: Note types + windowed/delta renderers (pure)
+- [x] Task 1: Schema foundations — BoardNote model, sequence, event types, settings
+- [ ] Task 2: Note types + windowed/delta renderers (pure) ← in progress
 - [ ] Task 3: Verifier — deterministic pre-checks + LLM gate (fail-closed)
 - [ ] Task 4: BoardStore — admission transaction, queries, expiry, purge
 - [ ] Task 5: share_note tool + registration + summary-client threading
