@@ -129,15 +129,12 @@ function TaskRailRow({
           className={`size-2 shrink-0 rounded-full ${missionTaskStatusDotClass(task.status)}`}
         />
         <span className="min-w-0 flex-1 truncate font-medium text-foreground/90">
-          {missionTaskTitle(task.goal, 60)}
-        </span>
-        <span className="shrink-0 font-mono text-[9px] text-muted-foreground/50">
-          {task.id.slice(0, 8)}
+          {task.goal}
         </span>
       </div>
-      <div className="mt-1 flex items-center gap-2 pl-4">
+      <div className="mt-1 flex flex-col gap-2 pl-4">
         {task.agentDefName ? (
-          <span className="shrink-0 text-[10px] text-muted-foreground/70">
+          <span className="shrink-0 text-xs font-mono text-muted-foreground">
             {task.agentDefName}
           </span>
         ) : null}
@@ -218,7 +215,7 @@ export function MissionTasksTab({
       {/* ----- Detail panel ----------------------------------------- */}
       <div
         data-testid="task-detail"
-        className="min-w-0 flex-1 space-y-4 overflow-y-auto"
+        className="min-w-0 flex-1 space-y-4 overflow-y-auto bg-card px-8 py-5"
       >
         {selected ? (
           <TaskDetail
@@ -287,22 +284,22 @@ function TaskDetail({
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs">
           <Badge
-            variant="outline"
-            className={`font-mono text-[9px] uppercase tracking-wide ${statusBadgeClass(task.status)}`}
+            variant="destructive"
+            className={`font-mono text-sm uppercase tracking-wide ${statusBadgeClass(task.status)}`}
           >
             {task.status}
           </Badge>
           {task.agentDefName ? (
-            <span className="text-muted-foreground/80">
+            <span className="text-muted-foreground">
               {task.agentDefName}
             </span>
           ) : null}
           {task.attemptCount > 1 ? (
-            <span className="text-muted-foreground/60">
+            <span className="text-muted-foreground">
               attempts {task.attemptCount}/{task.maxAttempts}
             </span>
           ) : null}
-          <span className="ml-auto inline-flex items-center gap-1 text-muted-foreground/60">
+          <span className="ml-auto inline-flex items-center gap-1 text-muted-foreground">
             <Clock className="size-3" />
             {timeLabel}
           </span>
@@ -366,21 +363,23 @@ function TaskDetail({
       {/* History */}
       {eventsSupported && taskEvents.length > 0 ? (
         <div>
-          <div className="mb-2 font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
+          <div className="mb-2 font-mono font-semibold uppercase text-muted-foreground">
             History ({taskEvents.length})
           </div>
-          <ol className="space-y-1.5">
+          <ol className="space-y-3">
             {taskEvents.map((e) => (
               <li key={e.id} className="flex items-start gap-3 text-xs">
                 <span className="w-16 shrink-0 font-mono text-[10px] text-muted-foreground/60">
                   {formatMissionTimestamp(e.createdAt)}
                 </span>
-                <span className="shrink-0 font-mono text-[9px] uppercase tracking-wide text-muted-foreground/70">
-                  {missionEventCategory(e.type)}
-                </span>
-                <span className="min-w-0 flex-1 text-foreground/80">
-                  {missionEventSummary(e)}
-                </span>
+                <div className="">
+                  <p className="shrink-0 font-mono uppercase text-muted-foreground">
+                    {missionEventCategory(e.type)}
+                  </p>
+                  <p className="min-w-0 flex-1 text-foreground/80">
+                    {missionEventSummary(e)}
+                  </p>
+                </div>
               </li>
             ))}
           </ol>

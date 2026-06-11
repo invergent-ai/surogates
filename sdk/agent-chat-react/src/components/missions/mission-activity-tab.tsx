@@ -95,22 +95,30 @@ function ActivityRow({
       <span className="w-20 shrink-0 font-mono text-[10px] text-muted-foreground/60">
         {formatMissionTimestamp(event.createdAt)}
       </span>
-      <span
-        className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide ${CATEGORY_BADGE_CLASS[category]}`}
-      >
-        {category}
-      </span>
-      <span className="shrink-0 text-xs text-foreground/80">
-        {missionEventActorLabel(event, feed.sessions)}
-      </span>
-      {taskId ? (
-        <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground/70">
-          {taskId.slice(0, 8)}
-        </span>
-      ) : null}
-      <span className="min-w-0 flex-1 truncate text-foreground/80">
-        {missionEventSummary(event)}
-      </span>
+      <div className="space-y-0.5">
+        <div className="flex gap-2 items-center">
+          <span
+              className={`shrink-0 rounded border px-1.5 font-mono uppercase ${CATEGORY_BADGE_CLASS[category]}`}
+            >
+            {category}
+          </span>
+          <p className="shrink-0 text-xs text-foreground font-mono">
+            {missionEventActorLabel(event, feed.sessions)}
+          </p>
+          {taskId ? (
+            <p className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground/70">
+              {taskId.slice(0, 8)}
+            </p>
+          ) : null}
+        </div>
+
+        <div>
+          <p className="min-w-0 flex-1 truncate text-foreground/80">
+            {missionEventSummary(event)}
+          </p>
+        </div>
+      </div>
+    
     </li>
   );
 }
