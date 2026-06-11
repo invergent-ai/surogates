@@ -52,6 +52,11 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "web_extract": ToolLocation.HARNESS,
     "web_crawl": ToolLocation.HARNESS,
     "vision_analyze": ToolLocation.HARNESS,
+    # Media generation — handlers need the per-session image LLM client
+    # and video endpoint config (threaded through executor kwargs) plus
+    # the storage backend; none of that exists in a sandbox pod.
+    "generate_image": ToolLocation.HARNESS,
+    "generate_video": ToolLocation.HARNESS,
     "ask_user_question": ToolLocation.HARNESS,
     "delegate_task": ToolLocation.HARNESS,
     "consult_expert": ToolLocation.HARNESS,

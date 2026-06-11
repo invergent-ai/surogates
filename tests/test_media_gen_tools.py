@@ -408,3 +408,19 @@ async def test_generate_video_includes_first_frame_image(tmp_path, monkeypatch):
     frame = captured["body"]["frame_images"][0]
     assert frame["frame_type"] == "first_frame"
     assert frame["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_media_gen_tools_route_to_harness():
+    """Regression: tools absent from TOOL_LOCATIONS fall back to SANDBOX
+    routing and die there as 'Unknown tool' (the sandbox tool-executor
+    has no media_gen config, LLM client, or storage) — exactly how
+    generate_image failed in DEV. Both media tools must be explicitly
+    HARNESS-routed, like vision_analyze.
+    """
+    from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
+
+    for name in ("generate_image", "generate_video"):
+        assert TOOL_LOCATIONS.get(name) is ToolLocation.HARNESS, (
+            f"{name} is not HARNESS-routed; sandbox fallback surfaces "
+            f"it as 'Unknown tool'"
+        )
