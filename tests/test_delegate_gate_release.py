@@ -113,6 +113,16 @@ class _CompletingChildStore:
             ),
         ]
 
+    async def update_session_config_key(
+        self, session_id: UUID, key: str, value: Any,
+    ) -> None:
+        # Mirrors SessionStore: board group formation writes the parent's
+        # context_group_id at spawn time.
+        if session_id == self._parent.id:
+            config = dict(self._parent.config or {})
+            config[key] = value
+            self._parent.config = config
+
 
 def _install_child_session_stub(
     monkeypatch: pytest.MonkeyPatch, store: _CompletingChildStore,

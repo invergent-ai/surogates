@@ -82,6 +82,16 @@ class _CapturingStore:
     async def get_events(self, session_id: Any) -> list[Event]:
         return list(self._child_events)
 
+    async def update_session_config_key(
+        self, session_id: Any, key: str, value: Any,
+    ) -> None:
+        # Mirrors SessionStore: board group formation writes the parent's
+        # context_group_id at spawn time.
+        if session_id == self._parent.id:
+            config = dict(self._parent.config or {})
+            config[key] = value
+            self._parent.config = config
+
 
 def _install_stub_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
     import surogates.harness.agent_resolver as resolver_module

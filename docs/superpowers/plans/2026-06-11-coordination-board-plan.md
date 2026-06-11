@@ -26,7 +26,9 @@
 - [x] Task 9: Harness loop integration — BoardMixin, replay hydration
 - [x] Task 10: Claim-expiry sweep + three-clause purge job + wiring
 - [x] Task 11: REST endpoint GET /v1/sessions/{id}/board
-- [ ] Task 12: Docs page, full-suite verification, wrap-up ← in progress
+- [x] Task 12: Docs page, full-suite verification, wrap-up
+
+**Execution record (2026-06-11):** all 12 tasks implemented and committed. Board suite: 42 tests green (29 integration + 13 unit across render/verifier/settings/gating/replay). Full-suite delta vs pre-board baseline (`27cf9ea~`): HEAD 180 failed / 3033 passed vs baseline 180 failed / 2977 passed — **zero new failures**, zero board-related failures; the 180 failures and 4 collection-broken files (`test_loader`, `test_context_files`, `test_session_workspace_storage`, `test_orchestrator_sweeper`) pre-date this work on master. Deviations from plan, all recorded in commits: BoardNote timestamps are `DateTime(timezone=True)` (asyncpg awareness; InboxItem precedent); terminal session statuses are `completed/failed/archived` (from `jobs/inbox_expire.py`), not the plan's assumed `done/failed`; three delegate-test store doubles grew `update_session_config_key` to match the SessionStore interface.
 
 ---
 

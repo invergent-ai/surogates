@@ -1,7 +1,7 @@
 # Coordination Board — design
 
 - **Date**: 2026-06-11
-- **Status**: approved design, pending implementation plan
+- **Status**: implemented (v1) — see `docs/board/index.md`
 - **Source**: adaptation of DeLM — *Decentralized Multi-Agent Systems with Shared Context* (Mao & Mirhoseini, arXiv:2606.10662) — to the surogates harness. Reference implementation studied at `study/DeLM/` (notably `src/shared_lessons.py`, `src/verifier.py`).
 - **Related**: `docs/sub-agents/2026-05-16-subagent-task-layer-v1.md` (task layer this builds beside), `docs/superpowers/specs/2026-05-16-mission-orchestrated-goals-design.md` (missions, untouched in v1)
 
