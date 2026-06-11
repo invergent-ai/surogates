@@ -69,6 +69,7 @@ class ToolRuntime:
             vision,
             web_search,
         )
+        from surogates.board import tools as board_tools
         from surogates.tasks import tools as task_tools
 
         modules = [
@@ -93,6 +94,7 @@ class ToolRuntime:
             artifact,
             coding_agent,  # run_coding_agent (Claude Code / Codex)
             task_tools,  # spawn_task, unblock_task, cancel_task, worker_block/complete/context
+            board_tools,  # share_note, read_board, expand_note (coordination board)
         ]
 
         for mod in modules:
