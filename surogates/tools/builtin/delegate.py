@@ -490,6 +490,18 @@ async def _run_single_delegation(
     if agent_type:
         child_config["agent_type"] = agent_type
 
+    from surogates.board.groups import ensure_group_and_inherit
+
+    # Synchronous fork-join path runs outside the parent's live config
+    # dict (parent_session here is a fresh store copy), so the parent's
+    # own board read-path activates on its next wake.
+    await ensure_group_and_inherit(
+        parent_session=parent_session,
+        session_store=session_store,
+        child_config=child_config,
+        live_parent_config=None,
+    )
+
     allowed_tools: list[str] | None = None
     excluded_tools: list[str] = []
     if agent_def is not None:

@@ -110,6 +110,15 @@ class FakeStore:
     async def get_events(self, session_id: UUID) -> list[Event]:
         return list(self._child_events)
 
+    async def update_session_config_key(
+        self, session_id: UUID, key: str, value: Any,
+    ) -> None:
+        # Mirrors SessionStore: mutate the (in-memory) session config.
+        if session_id == self._parent.id:
+            config = dict(self._parent.config or {})
+            config[key] = value
+            self._parent.config = config
+
 
 class _StubAgentDef:
     """Mimics an AgentDef enough for the delegate handler's reads."""

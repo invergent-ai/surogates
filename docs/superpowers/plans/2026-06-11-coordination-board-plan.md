@@ -22,8 +22,8 @@
 - [x] Task 5: share_note tool + registration + summary-client threading
 - [x] Task 6: read_board + expand_note tools
 - [x] Task 7: Tool gating in _filter_effective_tools
-- [ ] Task 8: Group propagation in the three spawn paths ← in progress
-- [ ] Task 9: Harness loop integration — BoardMixin, replay hydration
+- [x] Task 8: Group propagation in the three spawn paths
+- [ ] Task 9: Harness loop integration — BoardMixin, replay hydration ← in progress
 - [ ] Task 10: Claim-expiry sweep + three-clause purge job + wiring
 - [ ] Task 11: REST endpoint GET /v1/sessions/{id}/board
 - [ ] Task 12: Docs page, full-suite verification, wrap-up

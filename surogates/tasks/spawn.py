@@ -138,6 +138,19 @@ async def _create_session_for_task(
 
     worker_config = _build_task_worker_config(agent_def, task)
 
+    from surogates.board.groups import ensure_group_and_inherit
+
+    # Dispatcher context (eager spawn AND retries both flow through
+    # here): no live parent wake to mirror into, so the parent's board
+    # read-path activates on its next wake.  Retry attempts inherit the
+    # same group and therefore see prior attempts' verified notes.
+    await ensure_group_and_inherit(
+        parent_session=parent,
+        session_store=session_store,
+        child_config=worker_config,
+        live_parent_config=None,
+    )
+
     # Build the initial USER_MESSAGE BEFORE creating the child Session
     # so prior-attempt fetching sees only the actually-prior sessions
     # (the new attempt's session row doesn't exist yet).

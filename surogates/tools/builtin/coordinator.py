@@ -372,6 +372,15 @@ async def _spawn_worker_handler(
     if model_override is None and agent_def is not None and agent_def.model:
         model_override = agent_def.model
 
+    from surogates.board.groups import ensure_group_and_inherit
+
+    await ensure_group_and_inherit(
+        parent_session=parent_session,
+        session_store=session_store,
+        child_config=worker_config,
+        live_parent_config=kwargs.get("session_config"),
+    )
+
     try:
         from surogates.session.provisioning import create_child_session
 
