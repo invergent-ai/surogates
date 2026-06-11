@@ -12,6 +12,21 @@
 
 **Conventions (from project memory):** no Co-Authored-By trailers on commits; never reference plan/task numbers in code comments or commit messages.
 
+**Branch:** implemented directly on `master` (repo convention; spec and plan already live there).
+
+## Progress
+
+Update this list (and the per-step checkboxes below) before each commit: `[ ]` pending, `[~]` in progress, `[x]` done.
+
+- [ ] Task 1: Config — `LLMSettings` media fields
+- [ ] Task 2: Runtime context slots + resolver parsing
+- [ ] Task 3: Session LLM bundle — image slot + video endpoint resolver
+- [ ] Task 4: `media_gen` builtin module — config object, schemas, save helpers, registration
+- [ ] Task 5: `generate_image` happy-path + failure tests
+- [ ] Task 6: `generate_video` poll-loop tests
+- [ ] Task 7: Thread `media_gen` through worker → harness → executors
+- [ ] Task 8: Full-suite verification
+
 ---
 
 ### Task 1: Config — `LLMSettings` media fields
@@ -886,8 +901,8 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
     model = str(getattr(cfg, "video_model", "") or "")
     base_url = str(getattr(cfg, "video_base_url", "") or "")
     api_key = str(getattr(cfg, "video_api_key", "") or "")
-    timeout = int(getattr(cfg, "video_timeout", 600) or 600)
-    poll_interval = max(1, int(getattr(cfg, "video_poll_interval", 10) or 10))
+    timeout = int(getattr(cfg, "video_timeout", 600))
+    poll_interval = max(1, int(getattr(cfg, "video_poll_interval", 10)))
     if not model or not base_url:
         return _json_error(
             "generate_video is not available: no video model is configured"
@@ -1142,6 +1157,8 @@ The handler already exists (Task 4); this task locks its behavior with tests aga
 - [ ] **Step 1: Append the tests**
 
 ```python
+import base64  # add to the imports at the top of the file
+
 _PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="  # 1x1 png
 
 
@@ -1282,8 +1299,6 @@ async def test_generate_image_errors_without_workspace_destination():
     ))
     assert "workspace_unavailable" in result["error"]
 ```
-
-Add `import base64` to the test file imports.
 
 - [ ] **Step 2: Run the tests**
 
