@@ -25,7 +25,7 @@ Update this list (and the per-step checkboxes below) before each commit: `[ ]` p
 - [x] Task 5: `generate_image` happy-path + failure tests
 - [x] Task 6: `generate_video` poll-loop tests
 - [x] Task 7: Thread `media_gen` through worker → harness → executors
-- [~] Task 8: Full-suite verification
+- [x] Task 8: Full-suite verification
 
 ---
 
@@ -1659,17 +1659,17 @@ git commit -m "Thread media generation config from worker to tool executors"
 
 **Files:** none new.
 
-- [ ] **Step 1: Run the affected test modules first**
+- [x] **Step 1: Run the affected test modules first**
 
 Run: `cd /work/surogates && uv run pytest tests/test_media_gen_config.py tests/test_media_gen_tools.py tests/test_media_gen_wiring.py tests/runtime/test_media_endpoints.py tests/runtime/test_session_llm_media.py tests/runtime/test_session_llm.py tests/test_vision_tool.py -v`
 Expected: all pass.
 
-- [ ] **Step 2: Run the full unit-test suite**
+- [x] **Step 2: Run the full unit-test suite**
 
 Run: `cd /work/surogates && uv run pytest tests/ -x -q --ignore=tests/integration`
 Expected: no regressions (anything touching `SessionLLMClients`, `AgentHarness.__init__`, or `tool_exec` signatures is the blast radius — new params all default to `None`/absent, so existing call sites stay valid).
 
-- [ ] **Step 3: Commit any straggler fixes**
+- [x] **Step 3: Commit any straggler fixes**
 
 ```bash
 cd /work/surogates
