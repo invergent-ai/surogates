@@ -29,6 +29,7 @@ from surogates.db.models import (
     Task as TaskRow,
     TaskLink,
 )
+from surogates.harness.next_action import strip_next_action_blocks
 from surogates.harness.redact import redact_sensitive_data
 from surogates.session.events import EventType
 from surogates.session.inbox_payload import build_inbox_row
@@ -664,6 +665,14 @@ class SessionStore:
             if event_type == EventType.LLM_RESPONSE:
                 msg = data.get("message", {})
                 content = msg.get("content", "") if isinstance(msg, dict) else ""
+                if content and isinstance(content, str):
+                    # The <next_action> footer is harness/UI metadata.  The
+                    # web SDK strips it client-side and renders a status
+                    # pill; messaging channels deliver raw text, so strip
+                    # it server-side here.  A footer-only message strips
+                    # to "" and falls through to the nothing-to-deliver
+                    # return below.
+                    content = strip_next_action_blocks(content)
                 if content:
                     payload["content"] = content
 

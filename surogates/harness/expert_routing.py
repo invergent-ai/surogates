@@ -52,13 +52,18 @@ _NEXT_ACTION_COMPLEXITY_VALUES: frozenset[str] = frozenset(
 )
 
 
-_NEXT_ACTION_RE = re.compile(
-    # Match the LAST <next_action ... complexity="..."> ... </next_action>
-    # block in the input. Extra attributes such as summary="hide" are
-    # allowed because the prompt contract uses them for UI rendering.
-    r'<next_action\b(?=[^>]*\bcomplexity="([^"]+)")[^>]*>(.*?)</next_action>',
-    re.IGNORECASE | re.DOTALL,
+# One opening tag; the complexity attribute is extracted from the
+# matched tag text separately.  Parsing is a closer-driven linear scan
+# rather than a single block regex: any ``<next_action...>...</next_action>``
+# pattern walks from every opener toward a closer that may never arrive,
+# which is O(openers x length) on adversarial input (the model can echo
+# prompt-injected garbage verbatim).  See ``surogates.harness.next_action``
+# for the same construction on the delivery-strip path.
+_NEXT_ACTION_OPEN_RE = re.compile(r"<next_action\b[^>]*>", re.IGNORECASE)
+_NEXT_ACTION_COMPLEXITY_ATTR_RE = re.compile(
+    r'\bcomplexity="([^"]+)"', re.IGNORECASE
 )
+_NEXT_ACTION_CLOSE = "</next_action>"
 
 
 def parse_next_action_complexity(assistant_text: str | None) -> str | None:
@@ -79,12 +84,26 @@ def parse_next_action_complexity(assistant_text: str | None) -> str | None:
     """
     if not assistant_text:
         return None
-    matches = list(_NEXT_ACTION_RE.finditer(assistant_text))
-    if not matches:
+    lower = assistant_text.lower()
+    complexity: str | None = None
+    pos = 0
+    # Closer-driven scan: one bounded opener search per closer keeps
+    # this linear on adversarial input (see the regex comment above).
+    # Last complexity-bearing block wins so a model that emits the
+    # directive twice (e.g. retried thinking pre-amble) reports its
+    # FINAL intent.
+    while True:
+        close = lower.find(_NEXT_ACTION_CLOSE, pos)
+        if close == -1:
+            break
+        opener = _NEXT_ACTION_OPEN_RE.search(assistant_text, pos, close)
+        if opener is not None:
+            attr = _NEXT_ACTION_COMPLEXITY_ATTR_RE.search(opener.group(0))
+            if attr is not None:
+                complexity = attr.group(1).strip().lower()
+        pos = close + len(_NEXT_ACTION_CLOSE)
+    if complexity is None:
         return None
-    # Last block wins so a model that emits the directive twice
-    # (e.g. retried thinking pre-amble) reports its FINAL intent.
-    complexity = matches[-1].group(1).strip().lower()
     if complexity in _NEXT_ACTION_COMPLEXITY_VALUES:
         return complexity
     return "medium"
