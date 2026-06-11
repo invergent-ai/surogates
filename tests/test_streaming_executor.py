@@ -108,6 +108,33 @@ def _make_executor(**overrides: Any) -> StreamingToolExecutor:
     )
 
 
+def test_ctor_accepts_every_kwarg_the_harness_passes():
+    """Regression: ``_make_streaming_executor`` in harness/loop.py and this
+    constructor must not drift apart.  A kwarg added to the loop call site
+    without a matching parameter here fails only at runtime (production
+    SESSION_FAIL) — exactly what happened with ``summary_llm_client``.
+    """
+    import inspect
+    import re
+    from pathlib import Path
+
+    import surogates.harness.loop as loop_module
+
+    src = Path(loop_module.__file__).read_text()
+    block = re.search(
+        r"return StreamingToolExecutor\((.*?)\n\s*\)", src, re.S,
+    ).group(1)
+    passed = set(re.findall(r"(\w+)=", block))
+    accepted = set(
+        inspect.signature(StreamingToolExecutor.__init__).parameters,
+    ) - {"self"}
+    missing = passed - accepted
+    assert not missing, (
+        f"harness loop passes kwargs StreamingToolExecutor does not "
+        f"accept: {sorted(missing)}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Concurrency classification
 # ---------------------------------------------------------------------------
