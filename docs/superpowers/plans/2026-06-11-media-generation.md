@@ -23,8 +23,8 @@ Update this list (and the per-step checkboxes below) before each commit: `[ ]` p
 - [x] Task 3: Session LLM bundle — image slot + video endpoint resolver
 - [x] Task 4: `media_gen` builtin module — config object, schemas, save helpers, registration
 - [x] Task 5: `generate_image` happy-path + failure tests
-- [~] Task 6: `generate_video` poll-loop tests
-- [ ] Task 7: Thread `media_gen` through worker → harness → executors
+- [x] Task 6: `generate_video` poll-loop tests
+- [~] Task 7: Thread `media_gen` through worker → harness → executors
 - [ ] Task 8: Full-suite verification
 
 ---
@@ -1321,7 +1321,7 @@ git commit -m "Cover generate_image happy path and failure modes"
 - Test: `tests/test_media_gen_tools.py` (extend)
 - Modify (only if a test exposes a bug): `surogates/tools/builtin/media_gen.py`
 
-- [ ] **Step 1: Append the tests**
+- [x] **Step 1: Append the tests**
 
 Use `httpx.MockTransport` by monkeypatching `httpx.AsyncClient` construction inside the module — simplest is to patch `surogates.tools.builtin.media_gen.httpx.AsyncClient` with a factory that injects `transport=`:
 
@@ -1488,12 +1488,12 @@ async def test_generate_video_includes_first_frame_image(tmp_path, monkeypatch):
 
 Note on the timeout test: with `video_timeout=0` the deadline expires on the first loop check, before any poll — the error must still carry the job id from the submission response.
 
-- [ ] **Step 2: Run the tests**
+- [x] **Step 2: Run the tests**
 
 Run: `cd /work/surogates && uv run pytest tests/test_media_gen_tools.py -v`
 Expected: all pass. Fix `media_gen.py` if the poll loop or download path misbehaves, and re-run.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd /work/surogates
