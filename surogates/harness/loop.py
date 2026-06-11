@@ -204,6 +204,7 @@ from surogates.harness.loop_vision import (
 
 from surogates.harness.loop_advisor import AdvisorMixin
 from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
+from surogates.harness.loop_board import BoardMixin
 from surogates.harness.loop_code_commands import CodeCommandMixin
 from surogates.harness.loop_context_replay import ContextReplayMixin
 from surogates.harness.loop_iteration_summary import IterationSummaryMixin
@@ -267,6 +268,7 @@ def _format_loop_list(rows: list[Any]) -> str:
 
 class AgentHarness(
     AdvisorMixin,
+    BoardMixin,
     ContextReplayMixin,
     IterationSummaryMixin,
     OutcomeCommandMixin,
@@ -1139,6 +1141,9 @@ class AgentHarness(
         # for few-shot examples or planning context. API-call-time only.
         prefill_messages: list[dict] = session.config.get("prefill_messages") or []
 
+        # --- Coordination board cursor (persisted across wakes) ---
+        board_cursor: int | None = session.config.get("board_cursor")
+
         # --- Memory prefetch (one-shot before loop; snapshotted per session) ---
         memory_context = await self._prefetch_memory(session.id)
 
@@ -1227,6 +1232,11 @@ class AgentHarness(
                     self._memory_manager.on_turn_start(turn_number=0, message="")
                 except Exception:
                     logger.debug("Memory manager on_turn_start failed", exc_info=True)
+
+            # --- Coordination board: join snapshot / delta delivery ---
+            board_cursor = await self.maybe_emit_board_update(
+                session, messages, board_cursor,
+            )
 
             # --- Skill nudge tracking ---
             # Counter resets whenever skill_manage is actually used (in

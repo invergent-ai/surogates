@@ -164,6 +164,19 @@ class ContextReplayMixin:
                     ),
                 })
 
+            elif (
+                etype == EventType.BOARD_UPDATE.value
+                and event.data.get("content")
+            ):
+                # Board snapshots/deltas re-enter the conversation exactly
+                # as emitted: message bytes are determined by the durable
+                # event payload, keeping the provider prefix cache
+                # replay-stable.
+                messages.append({
+                    "role": "user",
+                    "content": str(event.data["content"]),
+                })
+
             elif etype == EventType.CONTEXT_COMPACT.value:
                 compacted = event.data.get("compacted_messages")
                 if compacted is not None:
