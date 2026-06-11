@@ -259,7 +259,8 @@ async def test_resume_transitions_back_to_active(
         session_store=session_store, mission_store=store,
     )
     res = await handle_mission_resume(
-        session_id=chat_session.id, agent_id="orchestrator",
+        session_id=chat_session.id, org_id=str(org_id),
+        agent_id="orchestrator",
         session_store=session_store, mission_store=store, redis=redis,
     )
     assert res.ok is True
