@@ -187,6 +187,20 @@ def _filter_effective_tools(
         # its parents' output.
         result.update({"worker_block", "worker_complete", "worker_context"})
 
+    # share_note / read_board / expand_note are coordination self-tools,
+    # meaningful only inside a coordination group (the spawn paths stamp
+    # ``context_group_id`` on every fan-out member; see
+    # docs/superpowers/specs/2026-06-11-coordination-board-design.md).
+    # Same idiom as the worker_* self-tools above: stripped for solo
+    # sessions, force-added for members even under a restrictive AgentDef
+    # allowlist.
+    if not (getattr(session, "config", None) or {}).get("context_group_id"):
+        result.discard("share_note")
+        result.discard("read_board")
+        result.discard("expand_note")
+    else:
+        result.update({"share_note", "read_board", "expand_note"})
+
     return result
 
 
