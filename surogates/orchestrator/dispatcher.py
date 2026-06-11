@@ -13,6 +13,8 @@ The :class:`Orchestrator` is the long-running event loop that:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import random
 import traceback
@@ -43,6 +45,29 @@ _MAX_RETRIES: int = 3
 
 # Base delay (seconds) for exponential back-off on retry.
 _BASE_RETRY_DELAY: float = 1.0
+
+# ── Crash-loop circuit breaker ────────────────────────────────────────
+# The in-process retry counter resets on every re-enqueue, so a session
+# whose conversation deterministically crashes the LLM call (e.g. a
+# provider 400 on poisoned history) can be replayed indefinitely by
+# mission continuations or other automatic re-wakes — burning a full
+# context's worth of input tokens per attempt. Track consecutive
+# crashes with an identical fingerprint in Redis (shared across worker
+# replicas); at the threshold, fail the session terminally and refuse
+# further wakes until an explicit human signal (a real user message or
+# a user-initiated retry) arrives.
+_CRASH_LOOP_THRESHOLD: int = 3
+_CRASH_LOOP_KEY_PREFIX = "surogates:crash_loop:"
+_CRASH_LOOP_TTL_SECONDS: int = 6 * 3600
+
+
+def _crash_fingerprint(exc: BaseException) -> str:
+    """Stable identity for a crash: error category + hashed detail."""
+    info = classify_harness_error(exc)
+    detail_hash = hashlib.sha256(
+        (info.detail or "").encode("utf-8", "replace")
+    ).hexdigest()[:16]
+    return f"{info.category}:{detail_hash}"
 
 # Orphan sweep cadence.  The sweep runs every ``_ORPHAN_SWEEP_INTERVAL``
 # seconds and recovers any session whose lease has expired AND whose
@@ -440,6 +465,97 @@ class Orchestrator:
             session_id=session_id,
         )
 
+    # ── Crash-loop breaker state (Redis, shared across replicas) ──────
+
+    def _crash_loop_key(self, session_id: UUID) -> str:
+        return f"{_CRASH_LOOP_KEY_PREFIX}{session_id}"
+
+    async def _crash_loop_state(self, session_id: UUID) -> dict[str, Any] | None:
+        try:
+            raw = await self.redis.get(self._crash_loop_key(session_id))
+        except Exception:
+            logger.warning(
+                "Failed to read crash-loop state for session %s",
+                session_id, exc_info=True,
+            )
+            return None
+        if not raw:
+            return None
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8", "replace")
+        try:
+            state = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        return state if isinstance(state, dict) else None
+
+    async def _save_crash_loop_state(
+        self, session_id: UUID, state: dict[str, Any],
+    ) -> None:
+        try:
+            await self.redis.set(
+                self._crash_loop_key(session_id),
+                json.dumps(state),
+                ex=_CRASH_LOOP_TTL_SECONDS,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to save crash-loop state for session %s",
+                session_id, exc_info=True,
+            )
+
+    async def _clear_crash_loop_state(self, session_id: UUID) -> None:
+        try:
+            await self.redis.delete(self._crash_loop_key(session_id))
+        except Exception:
+            logger.warning(
+                "Failed to clear crash-loop state for session %s",
+                session_id, exc_info=True,
+            )
+
+    async def _record_crash(self, session_id: UUID, fingerprint: str) -> int:
+        """Bump the consecutive-identical-crash counter; reset on a new error."""
+        state = await self._crash_loop_state(session_id) or {}
+        if state.get("fingerprint") == fingerprint:
+            count = int(state.get("count", 0)) + 1
+        else:
+            count = 1
+        await self._save_crash_loop_state(session_id, {
+            "fingerprint": fingerprint,
+            "count": count,
+            "tripped": bool(state.get("tripped")) if state.get("fingerprint") == fingerprint else False,
+            "tripped_event_id": state.get("tripped_event_id"),
+        })
+        return count
+
+    async def _has_user_signal_since(
+        self, session_id: UUID, after_event_id: int | None,
+    ) -> bool:
+        """A real (non-synthetic) user message or an explicit user retry.
+
+        Synthetic user messages — mission continuations in particular —
+        must NOT count: they re-injected the same poisoned conversation
+        every iteration in the original incident.
+        """
+        events = await self.session_store.get_events(
+            session_id,
+            after=after_event_id,
+            types=[EventType.USER_MESSAGE, EventType.SESSION_RESUME],
+        )
+        for event in events:
+            data = event.data or {}
+            if (
+                event.type == EventType.USER_MESSAGE.value
+                and not data.get("synthetic")
+            ):
+                return True
+            if (
+                event.type == EventType.SESSION_RESUME.value
+                and data.get("source") == "user_retry"
+            ):
+                return True
+        return False
+
     async def _process(self, session_id: UUID, attempt: int = 0) -> None:
         """Process a single session.  Retry with exponential backoff on failure."""
         from surogates.trace import new_span, new_trace
@@ -466,6 +582,23 @@ class Orchestrator:
                 )
                 return
 
+            if attempt == 0:
+                state = await self._crash_loop_state(session_id)
+                if state and state.get("tripped"):
+                    if await self._has_user_signal_since(
+                        session_id, state.get("tripped_event_id"),
+                    ):
+                        await self._clear_crash_loop_state(session_id)
+                    else:
+                        logger.warning(
+                            "Session %s crash-loop breaker is open "
+                            "(fingerprint %s); skipping wake until a real "
+                            "user message or user retry arrives",
+                            session_id,
+                            state.get("fingerprint"),
+                        )
+                        return
+
             harness = self.harness_factory(session_id)
             # Support both sync and async factories.
             if hasattr(harness, "__await__"):
@@ -490,6 +623,11 @@ class Orchestrator:
                             "Failed to aclose SessionLLMClients for "
                             "session %s", session_id, exc_info=True,
                         )
+
+            # Wake finished without crashing — any crash streak is broken.
+            # (Skip lease_held: no work actually ran on this worker.)
+            if wake_result != "lease_held":
+                await self._clear_crash_loop_state(session_id)
 
             # Slot is free; settle any follow-up enqueue.  ``lease_held``
             # (another worker owns the lease) backs off briefly first; a
@@ -521,6 +659,52 @@ class Orchestrator:
                 attempt + 1,
                 _MAX_RETRIES,
             )
+
+            fingerprint = _crash_fingerprint(exc)
+            crash_count = await self._record_crash(session_id, fingerprint)
+            if crash_count >= _CRASH_LOOP_THRESHOLD:
+                logger.error(
+                    "Session %s crashed %d consecutive times with identical "
+                    "fingerprint %s; tripping crash-loop breaker and failing "
+                    "terminally",
+                    session_id,
+                    crash_count,
+                    fingerprint,
+                )
+                info = classify_harness_error(exc)
+                fail_event_id: int | None = None
+                try:
+                    fail_event_id = await self.session_store.emit_event(
+                        session_id,
+                        EventType.SESSION_FAIL,
+                        {
+                            "reason": "crash_loop_detected",
+                            "error": str(exc),
+                            "traceback": traceback.format_exc()[-2000:],
+                            "attempts": crash_count,
+                            "error_category": info.category,
+                            "error_title": info.title,
+                            "error_detail": info.detail,
+                            "retryable": False,
+                            "fingerprint": fingerprint,
+                        },
+                    )
+                    await self.session_store.update_session_status(
+                        session_id,
+                        "failed",
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to emit SESSION_FAIL for session %s",
+                        session_id,
+                    )
+                await self._save_crash_loop_state(session_id, {
+                    "fingerprint": fingerprint,
+                    "count": crash_count,
+                    "tripped": True,
+                    "tripped_event_id": fail_event_id,
+                })
+                return
 
             if attempt + 1 < _MAX_RETRIES:
                 delay = _BASE_RETRY_DELAY * (2**attempt)
