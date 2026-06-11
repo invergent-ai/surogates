@@ -7,6 +7,8 @@ export {
   useAgentChatRuntime,
   useChatViewMode,
 } from "./runtime/use-agent-chat-runtime";
+export { FetchSseEventStream } from "./runtime/fetch-sse-stream";
+export type { FetchSseEventStreamOptions } from "./runtime/fetch-sse-stream";
 export { MessageResponse } from "./components/ai-elements/message";
 export { ComposioConnectCard } from "./components/connections/composio-connect-card";
 export type { ComposioConnectCardProps } from "./components/connections/composio-connect-card";

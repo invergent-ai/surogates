@@ -1,7 +1,7 @@
 import { getArtifact } from "@/api/artifacts";
 import * as codingAgentsApi from "@/api/coding-agents";
 import * as composioApi from "@/api/composio";
-import { refreshSession } from "@/api/auth";
+import { authFetch } from "@/api/auth";
 import { submitAskUserQuestionResponse as submitAskUserQuestionResponseApi } from "@/api/ask_user_question";
 import { submitTurnFeedback } from "@/api/feedback";
 import * as inboxApi from "@/api/inbox";
@@ -15,10 +15,9 @@ import type { ScheduledWorkItem, Session } from "@/types/session";
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
+import { FetchSseEventStream } from "@invergent/agent-chat-react";
 import type {
   AgentChatAdapter,
-  AgentChatEventStream,
-  AgentChatEventType,
   AgentChatInboxEventStream,
   AgentChatInboxStreamEvent,
   AgentChatMissionSummary,
@@ -27,7 +26,6 @@ import type {
   AgentChatScheduledWorkItem,
   AgentChatSession,
   AgentChatSlashCommand,
-  AgentChatSseMessageEvent,
 } from "@invergent/agent-chat-react";
 
 const DEFAULT_OUTCOME_RUBRIC =
@@ -184,7 +182,7 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
   },
 
   openInboxStream() {
-    return openSelfRefreshingInboxStream();
+    return openSelfReopeningInboxStream();
   },
 
   async stopSession(input) {
@@ -293,14 +291,20 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
   },
 
   openEventStream(input) {
-    const token = getAuthToken();
-    const url = new URL(
-      `/api/v1/sessions/${input.sessionId}/events`,
-      window.location.origin,
+    // Fetch-based SSE instead of native EventSource: browsers hide SSE
+    // comment lines from EventSource consumers, so the harness's 15s
+    // ``: ping`` keepalives are invisible there and a silently-dropped
+    // connection (laptop sleep, Wi-Fi roam, NAT expiry) hangs forever.
+    // FetchSseEventStream reads the bytes itself and converts sustained
+    // silence into the normal onerror → reconnect path. Auth travels in
+    // the Authorization header via authFetch (no token in the URL).
+    const qs = new URLSearchParams({ after: String(input.after) });
+    const stream = new FetchSseEventStream(
+      `/api/v1/sessions/${input.sessionId}/events?${qs}`,
+      { fetchFn: authFetch },
     );
-    url.searchParams.set("after", String(input.after));
-    if (token) url.searchParams.set("token", token);
-    return wrapEventSource(new EventSource(url.toString()), input.sessionId);
+    attachTitleSideChannel(stream, input.sessionId);
+    return stream;
   },
 
   browserLiveViewUrl(sessionId) {
@@ -556,19 +560,16 @@ function deriveRunKind(
   return null;
 }
 
-function wrapEventSource(
-  source: EventSource,
+// Side-channel listener for ``session.title_updated``.  Sidebar/title state
+// lives in the zustand store, not in the AgentChat library, so we patch it
+// from here instead of plumbing a new event type through the chat protocol.
+function attachTitleSideChannel(
+  stream: FetchSseEventStream,
   sessionId: string,
-): AgentChatEventStream {
-  let errorHandler: (() => void) | null = null;
-
-  // Side-channel listener for ``session.title_updated``.  Sidebar/title state
-  // lives in the zustand store, not in the AgentChat library, so we patch it
-  // from here instead of plumbing a new event type through the chat protocol.
-  source.addEventListener("session.title_updated", (event) => {
-    const message = event as MessageEvent<string>;
+): void {
+  stream.addEventListener("session.title_updated", (event) => {
     try {
-      const payload = JSON.parse(message.data) as { title?: unknown };
+      const payload = JSON.parse(event.data) as { title?: unknown };
       if (typeof payload.title === "string" && payload.title.length > 0) {
         useAppStore.getState().updateSessionTitle(sessionId, payload.title);
       }
@@ -576,74 +577,47 @@ function wrapEventSource(
       // Malformed payload — ignore.
     }
   });
-
-  return {
-    addEventListener(
-      type: AgentChatEventType,
-      listener: (event: AgentChatSseMessageEvent) => void,
-    ) {
-      source.addEventListener(type, (event) => {
-        const message = event as MessageEvent<string>;
-        listener({
-          data: message.data,
-          lastEventId: message.lastEventId,
-        });
-      });
-    },
-    close() {
-      source.close();
-    },
-    get onerror() {
-      return errorHandler;
-    },
-    set onerror(handler: (() => void) | null) {
-      errorHandler = handler;
-      source.onerror = handler ? () => handler() : null;
-    },
-  };
 }
 
-// EventSource auto-reconnects on failure with the same URL — including
-// the same access token. When the token has expired the server returns
-// 401 forever, hammering at ~3s intervals. This wrapper intercepts the
-// failure, refreshes the token, and reopens with the new one. If the
-// refresh itself fails the wrapper surfaces the error and stops.
-function openSelfRefreshingInboxStream(): AgentChatInboxEventStream {
+// The SDK's inbox hook treats ``onerror`` as terminal ("Inbox stream
+// disconnected"), so this wrapper owns reconnection: it reopens the
+// stream on every failure — including watchdog-detected silent stalls —
+// and only surfaces ``onerror`` after several consecutive failures
+// with no event in between. authFetch refreshes an expired token
+// transparently, so a stale-token failure heals on the first reopen.
+function openSelfReopeningInboxStream(): AgentChatInboxEventStream {
   type InboxStreamType = "item" | "snapshot";
-  type RawHandler = (event: MessageEvent<string>) => void;
 
-  const handlers = new Map<InboxStreamType, Set<RawHandler>>();
-  let source: EventSource | null = null;
+  const handlers = new Map<
+    InboxStreamType,
+    Set<(event: AgentChatInboxStreamEvent) => void>
+  >();
+  let source: FetchSseEventStream | null = null;
   let closed = false;
   let consecutiveFailures = 0;
   let externalErrorHandler: (() => void) | null = null;
   const MAX_CONSECUTIVE_FAILURES = 3;
-
-  function buildUrl(): string {
-    const token = getAuthToken();
-    const url = new URL("/api/v1/inbox/stream", window.location.origin);
-    if (token) url.searchParams.set("token", token);
-    return url.toString();
-  }
+  const REOPEN_DELAY_MS = 3_000;
 
   function open(): void {
     if (closed) return;
-    const next = new EventSource(buildUrl());
+    const next = new FetchSseEventStream("/api/v1/inbox/stream", {
+      fetchFn: authFetch,
+    });
     source = next;
 
     for (const [type, set] of handlers.entries()) {
       for (const fn of set) {
-        next.addEventListener(type, fn as EventListener);
+        next.addEventListener(type, (event) => {
+          // Receiving any event proves the reopened stream is healthy.
+          consecutiveFailures = 0;
+          fn(event);
+        });
       }
     }
 
-    next.onopen = () => {
-      consecutiveFailures = 0;
-    };
     next.onerror = () => {
       if (closed) return;
-      // Close immediately — we don't want EventSource's automatic retry
-      // racing our refresh-then-reopen cycle.
       next.close();
       if (source === next) source = null;
 
@@ -652,15 +626,7 @@ function openSelfRefreshingInboxStream(): AgentChatInboxEventStream {
         externalErrorHandler?.();
         return;
       }
-
-      void refreshSession().then((ok) => {
-        if (closed) return;
-        if (!ok) {
-          externalErrorHandler?.();
-          return;
-        }
-        open();
-      });
+      setTimeout(open, REOPEN_DELAY_MS);
     };
   }
 
@@ -671,16 +637,13 @@ function openSelfRefreshingInboxStream(): AgentChatInboxEventStream {
       type: InboxStreamType,
       listener: (event: AgentChatInboxStreamEvent) => void,
     ) {
-      const wrapper: RawHandler = (event) => {
-        listener({
-          data: event.data,
-          lastEventId: event.lastEventId,
-        });
-      };
-      const set = handlers.get(type) ?? new Set<RawHandler>();
-      set.add(wrapper);
+      const set = handlers.get(type) ?? new Set();
+      set.add(listener);
       handlers.set(type, set);
-      source?.addEventListener(type, wrapper as EventListener);
+      source?.addEventListener(type, (event) => {
+        consecutiveFailures = 0;
+        listener(event);
+      });
     },
     close() {
       closed = true;
