@@ -250,3 +250,32 @@ class TestScanForInjection:
         result = PromptBuilder.scan_for_injection(f"Image data: {encoded}")
         # Binary data won't contain injection keywords, so should pass.
         assert result is False
+
+
+class TestBoardSection:
+    """# Coordination Board block appears only for group members."""
+
+    def test_board_section_for_group_member(self, tmp_path: Path):
+        from types import SimpleNamespace
+
+        tenant = _make_tenant(tmp_path)
+        session = SimpleNamespace(
+            model=None, config={"context_group_id": "g-1"},
+        )
+        prompt = PromptBuilder(tenant, session=session).build()
+        assert "# Coordination Board" in prompt
+        assert "share_note" in prompt
+        assert "read_board" in prompt
+
+    def test_no_board_section_for_solo_session(self, tmp_path: Path):
+        from types import SimpleNamespace
+
+        tenant = _make_tenant(tmp_path)
+        session = SimpleNamespace(model=None, config={})
+        prompt = PromptBuilder(tenant, session=session).build()
+        assert "# Coordination Board" not in prompt
+
+    def test_no_board_section_without_session(self, tmp_path: Path):
+        tenant = _make_tenant(tmp_path)
+        prompt = PromptBuilder(tenant).build()
+        assert "# Coordination Board" not in prompt

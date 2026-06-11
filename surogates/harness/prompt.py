@@ -183,6 +183,7 @@ class PromptBuilder:
         sections.append(self._skills_section())
         sections.append(self._preloaded_skills_section())
         sections.append(self._available_agents_section())
+        sections.append(self._board_section())
         sections.append(self._available_experts_section())
         sections.append(self._kb_section())
         sections.append(self._context_files_section())
@@ -398,6 +399,42 @@ class PromptBuilder:
         )
         self._available_agents_section_cache = rendered
         return rendered
+
+    def _board_section(self) -> str:
+        """Render the ``# Coordination Board`` system-prompt block.
+
+        Injected only for coordination-group members (sessions whose
+        config carries ``context_group_id`` — every fan-out parent and
+        child).  Task workers additionally get the deeper protocol from
+        the ``subagent-task-worker`` skill; this block is the baseline
+        so delegate/spawn_worker children and coordinators use the
+        board without being told to in their goals.
+
+        Returns "" for solo sessions so the section is omitted.
+        """
+        config = (self._session.config or {}) if self._session is not None else {}
+        if not config.get("context_group_id"):
+            return ""
+        return (
+            "# Coordination Board\n\n"
+            "You are part of a coordination group (parallel workers plus "
+            "their coordinator) sharing a verified note board. Use it — "
+            "your discoveries are worthless to peers if they stay in your "
+            "head until handoff.\n\n"
+            "- `share_note`: post compact notes as you work. FAIL when "
+            "something you tried dead-ends (post immediately — peers are "
+            "about to repeat it); FACT for reusable knowledge anchored to "
+            "a path/symbol/endpoint; CLAIM before starting work a sibling "
+            "might duplicate (auto-expires); RESULT for candidate outcomes "
+            "as `outcome=…|evidence=…|risk=…` with evidence from a check "
+            "you actually ran. Vague notes are rejected by verification.\n"
+            "- `[Board update]` messages in your history are peers' notes "
+            "arriving live. Before committing to an approach or retrying "
+            "something a peer may have already tried, call `read_board` "
+            "for the consolidated current state.\n"
+            "- `expand_note(note_id)` retrieves the detail behind a note's "
+            "ref when the one-liner isn't enough."
+        )
 
     def _available_experts_section(self) -> str:
         """Render the ``# Available Experts`` system-prompt block.

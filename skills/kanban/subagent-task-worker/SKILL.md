@@ -99,6 +99,21 @@ worker_complete(
 
 Shape `metadata` so downstream parsers (the parent orchestrator, an aggregator task, a reviewer skill) can use it without re-reading your prose.
 
+## The coordination board — share as you work
+
+Because you were spawned into a fan-out, you also have `share_note`, `read_board`, and `expand_note`: a shared, verified board that all sibling workers, retries, and the coordinator read. This is how your discoveries help peers *while they work*, instead of only at handoff time.
+
+When to write (batch related notes into one `share_note` call):
+
+- **FAIL — highest value, post immediately.** You tried something and it dead-ended: name what you ran and the observed error. A sibling is one note away from repeating it.
+- **FACT** for reusable knowledge anchored to specifics (path, symbol, endpoint, error class). Not narration — anchors a peer can act on.
+- **CLAIM** before starting a substantial unit of work that a sibling might also pick ("claiming the slack adapter"). Expires automatically; re-post to renew.
+- **RESULT** when you have a candidate outcome, as `outcome=…|evidence=…|risk=…` where the evidence names a check you ACTUALLY ran and what it printed. Your latest RESULT replaces your previous one.
+
+When to read: `[Board update]` messages arrive in your history automatically as peers post. Additionally call `read_board` at decision points — before committing to an approach, and before retrying anything that smells like a known dead end — because inline updates may be stale (superseded results, expired claims).
+
+Notes are admission-verified: vague or unevidenced notes are rejected with a reason. Write them anchored the first time. Sharing on the board does NOT replace `worker_complete` — the board is live coordination; the completion summary is your durable handoff.
+
 ## Block reasons that get answered fast
 
 Bad: `"stuck"`. The human or parent has no context.
