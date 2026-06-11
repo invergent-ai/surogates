@@ -1136,6 +1136,11 @@ class AgentHarness(
                 if session.config else None
             )
         )
+        # Guardrail counters are per-wake; re-arm the consecutive
+        # no-progress chain from history so an identical-call loop that
+        # halted last wake is blocked immediately instead of being
+        # allowed to grow again.
+        tool_guardrails.seed_from_messages(messages)
 
         # Subdirectory hint tracker -- discovers context files as the agent navigates.
         hint_tracker = SubdirectoryHintTracker(
@@ -2126,6 +2131,26 @@ class AgentHarness(
 
             # 8. Append tool results to messages.
             messages.extend(tool_results)
+
+            # A guardrail hard stop ends the turn: continuing would let
+            # the model re-issue the same call, and providers reject
+            # conversations that accumulate identical consecutive tool
+            # calls. The halt guidance is already in the last tool result.
+            if tool_guardrails.halt_decision is not None:
+                halt = tool_guardrails.halt_decision
+                logger.warning(
+                    "Session %s: tool loop guardrail halt (%s, count=%d) — "
+                    "ending turn",
+                    session.id, halt.code, halt.count,
+                )
+                await self._complete_session(
+                    session, messages, lease,
+                    reason="tool_loop_halt",
+                    cost_tracker=cost_tracker,
+                    turn_id=turn_id,
+                )
+                return
+
             last_tool_name = ""
             for tc in reversed(tool_calls_raw):
                 last_tool_name = tc.get("function", {}).get("name", "")

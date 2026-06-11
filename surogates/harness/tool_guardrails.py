@@ -49,6 +49,13 @@ class ToolGuardrailConfig:
     same_tool_failure_halt_after: int = 8
     no_progress_warn_after: int = 2
     no_progress_block_after: int = 5
+    # Consecutive identical call + identical result, any tool (mutating
+    # included). Enabled independently of ``hard_stop_enabled``: providers
+    # reject conversations whose history accumulates identical consecutive
+    # tool calls, so the harness must break the pattern before they do.
+    consecutive_no_progress_enabled: bool = True
+    consecutive_no_progress_warn_after: int = 2
+    consecutive_no_progress_block_after: int = 3
     idempotent_tools: frozenset[str] = field(default_factory=lambda: IDEMPOTENT_TOOL_NAMES)
     mutating_tools: frozenset[str] = field(default_factory=lambda: MUTATING_TOOL_NAMES)
 
@@ -89,6 +96,18 @@ class ToolGuardrailConfig:
             no_progress_block_after=_positive_int(
                 hard_stop_after.get("idempotent_no_progress", data.get("no_progress_block_after")),
                 defaults.no_progress_block_after,
+            ),
+            consecutive_no_progress_enabled=_as_bool(
+                data.get("consecutive_no_progress_enabled"),
+                defaults.consecutive_no_progress_enabled,
+            ),
+            consecutive_no_progress_warn_after=_positive_int(
+                warn_after.get("consecutive_no_progress", data.get("consecutive_no_progress_warn_after")),
+                defaults.consecutive_no_progress_warn_after,
+            ),
+            consecutive_no_progress_block_after=_positive_int(
+                hard_stop_after.get("consecutive_no_progress", data.get("consecutive_no_progress_block_after")),
+                defaults.consecutive_no_progress_block_after,
             ),
         )
 
@@ -174,6 +193,12 @@ class ToolGuardrails:
         self._same_tool_failure_counts: dict[str, int] = {}
         self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
         self._halt_decision: ToolGuardrailDecision | None = None
+        # Consecutive no-progress chain: the latest signature, the result
+        # hash the chain is stuck on, and how many completed identical
+        # rounds it has. Any differing call or result restarts the chain.
+        self._consecutive_signature: ToolCallSignature | None = None
+        self._consecutive_result_hash: str | None = None
+        self._consecutive_count: int = 0
 
     @property
     def halt_decision(self) -> ToolGuardrailDecision | None:
@@ -185,6 +210,31 @@ class ToolGuardrails:
         args: Mapping[str, Any] | None,
     ) -> ToolGuardrailDecision:
         signature = ToolCallSignature.from_call(tool_name, _coerce_args(args))
+
+        if self.config.consecutive_no_progress_enabled:
+            if signature != self._consecutive_signature:
+                self._consecutive_signature = signature
+                self._consecutive_result_hash = None
+                self._consecutive_count = 0
+            elif self._consecutive_count >= self.config.consecutive_no_progress_block_after:
+                decision = ToolGuardrailDecision(
+                    action="block",
+                    code="consecutive_no_progress_block",
+                    message=(
+                        f"Blocked {tool_name}: this exact call already ran "
+                        f"{self._consecutive_count} times in a row with the same "
+                        "result. Repeating it cannot make progress and model "
+                        "providers reject conversations with repeated identical "
+                        "tool calls. Change the arguments, use a different tool, "
+                        "or explain the blocker."
+                    ),
+                    tool_name=tool_name,
+                    count=self._consecutive_count,
+                    signature=signature,
+                )
+                self._halt_decision = decision
+                return decision
+
         if not self.config.hard_stop_enabled:
             return ToolGuardrailDecision(tool_name=tool_name, signature=signature)
 
@@ -234,6 +284,66 @@ class ToolGuardrails:
     ) -> ToolGuardrailDecision:
         args = _coerce_args(args)
         signature = ToolCallSignature.from_call(tool_name, args)
+        consecutive_warn = self._update_consecutive_no_progress(
+            tool_name, signature, result,
+        )
+        base = self._after_call_inner(
+            tool_name, args, result, signature=signature, failed=failed,
+        )
+        if consecutive_warn is not None and base.action == "allow":
+            return consecutive_warn
+        return base
+
+    def _update_consecutive_no_progress(
+        self,
+        tool_name: str,
+        signature: ToolCallSignature,
+        result: str | None,
+    ) -> ToolGuardrailDecision | None:
+        """Advance the consecutive-identical chain for an executed call."""
+        if not self.config.consecutive_no_progress_enabled:
+            return None
+        result_hash = _result_hash(result)
+        if signature != self._consecutive_signature:
+            self._consecutive_signature = signature
+            self._consecutive_count = 1
+            self._consecutive_result_hash = result_hash
+            return None
+        if (
+            self._consecutive_count == 0
+            or result_hash != self._consecutive_result_hash
+        ):
+            self._consecutive_count = 1
+            self._consecutive_result_hash = result_hash
+            return None
+        self._consecutive_count += 1
+        if (
+            self.config.warnings_enabled
+            and self._consecutive_count >= self.config.consecutive_no_progress_warn_after
+        ):
+            return ToolGuardrailDecision(
+                action="warn",
+                code="consecutive_no_progress_warning",
+                message=(
+                    f"{tool_name} ran {self._consecutive_count} times in a row "
+                    "with identical arguments and an identical result. Repeating "
+                    "it again will be blocked — change approach."
+                ),
+                tool_name=tool_name,
+                count=self._consecutive_count,
+                signature=signature,
+            )
+        return None
+
+    def _after_call_inner(
+        self,
+        tool_name: str,
+        args: Mapping[str, Any],
+        result: str | None,
+        *,
+        signature: ToolCallSignature,
+        failed: bool | None = None,
+    ) -> ToolGuardrailDecision:
         did_fail = classify_tool_failure(tool_name, result) if failed is None else failed
 
         if did_fail:
@@ -318,6 +428,64 @@ class ToolGuardrails:
             )
 
         return ToolGuardrailDecision(tool_name=tool_name, count=repeat_count, signature=signature)
+
+    def seed_from_messages(self, messages: list[dict[str, Any]] | None) -> None:
+        """Rebuild the consecutive no-progress chain from conversation history.
+
+        Guardrail instances are per-wake; without seeding, a session that
+        halted on an identical-call loop would restart the count from zero
+        on the next wake and re-execute the same stuck call several more
+        times, growing the very pattern providers reject. Walks the message
+        tail backwards over single-tool-call assistant rounds: rounds whose
+        result matches the chain's result count toward the block threshold,
+        guardrail-synthetic results (blocked attempts) continue the chain,
+        and anything else ends it.
+        """
+        if not self.config.consecutive_no_progress_enabled:
+            return
+        results_by_call_id: dict[str, str] = {}
+        chain_signature: ToolCallSignature | None = None
+        chain_result_hash: str | None = None
+        chain_count = 0
+        for message in reversed(messages or []):
+            role = message.get("role")
+            if role == "tool":
+                call_id = message.get("tool_call_id")
+                if call_id:
+                    results_by_call_id[call_id] = message.get("content") or ""
+                continue
+            if role != "assistant":
+                break
+            tool_calls = message.get("tool_calls") or []
+            if len(tool_calls) != 1:
+                break
+            function = tool_calls[0].get("function") or {}
+            raw_args = function.get("arguments", "")
+            parsed_args = _safe_json_loads(raw_args) if isinstance(raw_args, str) else raw_args
+            if not isinstance(parsed_args, Mapping):
+                parsed_args = {}
+            signature = ToolCallSignature.from_call(function.get("name", ""), parsed_args)
+            if chain_signature is None:
+                chain_signature = signature
+            elif signature != chain_signature:
+                break
+            content = results_by_call_id.get(tool_calls[0].get("id", ""), "")
+            parsed_result = _safe_json_loads(content)
+            if isinstance(parsed_result, dict) and "guardrail" in parsed_result:
+                # A blocked attempt: never executed, but still an identical
+                # round in the visible history — keep the chain alive.
+                chain_count += 1
+                continue
+            result_hash = _result_hash(content)
+            if chain_result_hash is None:
+                chain_result_hash = result_hash
+            elif result_hash != chain_result_hash:
+                break
+            chain_count += 1
+        if chain_signature is not None and chain_count > 0:
+            self._consecutive_signature = chain_signature
+            self._consecutive_result_hash = chain_result_hash
+            self._consecutive_count = chain_count
 
     def _is_idempotent(self, tool_name: str) -> bool:
         if tool_name in self.config.mutating_tools:
