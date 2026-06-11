@@ -6,7 +6,7 @@
 #   - Surogates branding for the embedded Neko live-view shell
 #   - Surogates OCI labels
 
-ARG UPSTREAM=docker.io/onkernel/chromium-headful@sha256:b7c0151ee94df4b5a5873605389727db456dbd7c98da74efa29c40eb238ac573
+ARG UPSTREAM=docker.io/onkernel/chromium-headful@sha256:289b10f4bb3d3dcc84bf49feae09a50b350838d78d97eef5eeeb812ac439ff6a
 FROM ${UPSTREAM}
 
 LABEL org.opencontainers.image.title="surogates-agent-browser" \
