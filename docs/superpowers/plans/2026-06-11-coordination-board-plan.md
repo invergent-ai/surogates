@@ -18,8 +18,8 @@
 - [x] Task 1: Schema foundations — BoardNote model, sequence, event types, settings
 - [x] Task 2: Note types + windowed/delta renderers (pure)
 - [x] Task 3: Verifier — deterministic pre-checks + LLM gate (fail-closed)
-- [ ] Task 4: BoardStore — admission transaction, queries, expiry, purge ← in progress
-- [ ] Task 5: share_note tool + registration + summary-client threading
+- [x] Task 4: BoardStore — admission transaction, queries, expiry, purge
+- [ ] Task 5: share_note tool + registration + summary-client threading ← in progress
 - [ ] Task 6: read_board + expand_note tools
 - [ ] Task 7: Tool gating in _filter_effective_tools
 - [ ] Task 8: Group propagation in the three spawn paths
