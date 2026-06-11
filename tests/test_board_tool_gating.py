@@ -36,3 +36,19 @@ def test_board_tools_force_added_with_group():
         use_api_for_harness_tools=True,
     )
     assert {"share_note", "read_board", "expand_note"} <= result
+
+
+def test_board_tools_route_to_harness():
+    """Regression: tools absent from TOOL_LOCATIONS fall back to SANDBOX
+    routing and die there as 'Unknown tool' (no DB in the sandbox pod) —
+    exactly how share_note/read_board failed in production. Every board
+    tool must be explicitly HARNESS-routed, like the task layer.
+    """
+    from surogates.board.tools import BOARD_TOOLS
+    from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
+
+    for name in BOARD_TOOLS:
+        assert TOOL_LOCATIONS.get(name) is ToolLocation.HARNESS, (
+            f"{name} is not HARNESS-routed; sandbox fallback surfaces "
+            f"it as 'Unknown tool'"
+        )

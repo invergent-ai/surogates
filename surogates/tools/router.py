@@ -93,6 +93,12 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "worker_context": ToolLocation.HARNESS,
     "cancel_task": ToolLocation.HARNESS,
     "unblock_task": ToolLocation.HARNESS,
+    # Coordination board — same constraint as the task layer: handlers
+    # need the worker's DB session factory, session store, and the LLM
+    # verifier client; none of that exists in a sandbox pod.
+    "share_note": ToolLocation.HARNESS,
+    "read_board": ToolLocation.HARNESS,
+    "expand_note": ToolLocation.HARNESS,
     # Sandbox (code execution, file mutation, need isolation)
     "terminal": ToolLocation.SANDBOX,
     "read_file": ToolLocation.SANDBOX,
