@@ -8,6 +8,7 @@
 
 import { authFetch } from "./auth";
 import type { AskUserQuestionAnswer } from "@/types/session";
+import { errorDetailMessage } from "./_errors";
 
 export interface AskUserQuestionResponseReply {
   event_id: number;
@@ -28,9 +29,9 @@ export async function submitAskUserQuestionResponse(
   );
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
-      detail?: string;
+      detail?: unknown;
     } | null;
-    throw new Error(err?.detail ?? "Failed to submit ask_user_question response");
+    throw new Error(errorDetailMessage(err?.detail) ?? "Failed to submit ask_user_question response");
   }
   return (await response.json()) as AskUserQuestionResponseReply;
 }

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 import { authFetch } from "./auth";
+import { errorDetailMessage } from "./_errors";
 import type {
   Session,
   SessionChildrenResponse,
@@ -37,9 +38,9 @@ export async function listSessions(params?: {
   const response = await authFetch(`/api/v1/sessions?${search}`);
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
-      detail?: string;
+      detail?: unknown;
     } | null;
-    throw new Error(err?.detail ?? "Failed to fetch sessions");
+    throw new Error(errorDetailMessage(err?.detail) ?? "Failed to fetch sessions");
   }
   return (await response.json()) as SessionListResponse;
 }
@@ -129,9 +130,9 @@ export async function defineOutcome(
   );
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
-      detail?: string;
+      detail?: unknown;
     } | null;
-    throw new Error(err?.detail ?? "Failed to define outcome");
+    throw new Error(errorDetailMessage(err?.detail) ?? "Failed to define outcome");
   }
   return (await response.json()) as {
     events: Array<{
@@ -191,9 +192,9 @@ export async function retrySession(sessionId: string): Promise<Session> {
   );
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
-      detail?: string;
+      detail?: unknown;
     } | null;
-    throw new Error(err?.detail ?? "Failed to retry session");
+    throw new Error(errorDetailMessage(err?.detail) ?? "Failed to retry session");
   }
   return (await response.json()) as Session;
 }
@@ -291,9 +292,9 @@ export async function listScheduledWork(params?: {
   const response = await authFetch(`/api/v1/scheduled-work?${search}`);
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
-      detail?: string;
+      detail?: unknown;
     } | null;
-    throw new Error(err?.detail ?? "Failed to fetch scheduled work");
+    throw new Error(errorDetailMessage(err?.detail) ?? "Failed to fetch scheduled work");
   }
   return (await response.json()) as ScheduledWorkListResponse;
 }
@@ -307,9 +308,9 @@ export async function runScheduledWorkNow(
   );
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
-      detail?: string;
+      detail?: unknown;
     } | null;
-    throw new Error(err?.detail ?? "Failed to run scheduled work");
+    throw new Error(errorDetailMessage(err?.detail) ?? "Failed to run scheduled work");
   }
   return (await response.json()) as { id: string; queued: boolean };
 }
@@ -320,8 +321,8 @@ export async function cancelScheduledWork(scheduleId: string): Promise<void> {
   });
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
-      detail?: string;
+      detail?: unknown;
     } | null;
-    throw new Error(err?.detail ?? "Failed to cancel scheduled work");
+    throw new Error(errorDetailMessage(err?.detail) ?? "Failed to cancel scheduled work");
   }
 }

@@ -11,6 +11,7 @@ import { SunIcon, MoonIcon, Loader2Icon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { authFetch } from "@/api/auth";
 import { Button } from "@/components/ui/button";
+import { errorDetailMessage } from "@/api/_errors";
 import {
   InputOTP,
   InputOTPGroup,
@@ -188,7 +189,7 @@ export function LinkChannelPage() {
         setStatus("success");
       } else {
         const data = await resp.json().catch(() => null);
-        setError(data?.detail ?? "Failed to link account.");
+        setError(errorDetailMessage(data?.detail) ?? "Failed to link account.");
         setStatus("error");
       }
     } catch {

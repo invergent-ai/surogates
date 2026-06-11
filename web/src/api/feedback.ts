@@ -8,6 +8,7 @@
 // target event's type, so this client is event-agnostic.
 
 import { authFetch } from "./auth";
+import { errorDetailMessage } from "./_errors";
 
 export type FeedbackRating = "up" | "down";
 
@@ -32,9 +33,9 @@ export async function submitTurnFeedback(
   );
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
-      detail?: string;
+      detail?: unknown;
     } | null;
-    throw new Error(err?.detail ?? "Failed to submit feedback");
+    throw new Error(errorDetailMessage(err?.detail) ?? "Failed to submit feedback");
   }
   return (await response.json()) as FeedbackResponse;
 }

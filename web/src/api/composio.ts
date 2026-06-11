@@ -1,6 +1,7 @@
 // Raw fetch wrappers for the /v1/composio REST surface. The web app calls
 // the v1 routes through the /api/v1 proxy prefix.
 import { authFetch } from "./auth";
+import { errorDetailMessage } from "./_errors";
 
 export interface ComposioConnections {
   toolkits: {
@@ -30,8 +31,8 @@ export async function authorizeComposioToolkit(
     { method: "POST" },
   );
   if (!r.ok) {
-    const e = (await r.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(e?.detail ?? "Failed to authorize toolkit");
+    const e = (await r.json().catch(() => null)) as { detail?: unknown } | null;
+    throw new Error(errorDetailMessage(e?.detail) ?? "Failed to authorize toolkit");
   }
   const j = (await r.json()) as { redirect_url: string; status: string };
   return { redirectUrl: j.redirect_url, status: j.status };
@@ -43,7 +44,7 @@ export async function disconnectComposioToolkit(toolkit: string): Promise<void> 
     { method: "DELETE" },
   );
   if (!r.ok) {
-    const e = (await r.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(e?.detail ?? "Failed to disconnect toolkit");
+    const e = (await r.json().catch(() => null)) as { detail?: unknown } | null;
+    throw new Error(errorDetailMessage(e?.detail) ?? "Failed to disconnect toolkit");
   }
 }

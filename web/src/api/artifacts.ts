@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 import { authFetch } from "./auth";
+import { errorDetailMessage } from "./_errors";
 import type {
   ArtifactMeta,
   ArtifactPayload,
@@ -19,9 +20,9 @@ export async function listArtifacts(
   );
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
-      detail?: string;
+      detail?: unknown;
     } | null;
-    throw new Error(err?.detail ?? "Failed to list artifacts");
+    throw new Error(errorDetailMessage(err?.detail) ?? "Failed to list artifacts");
   }
   const data = (await response.json()) as ArtifactListResponse;
   return data.artifacts;
@@ -36,9 +37,9 @@ export async function getArtifact(
   );
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
-      detail?: string;
+      detail?: unknown;
     } | null;
-    throw new Error(err?.detail ?? "Failed to fetch artifact");
+    throw new Error(errorDetailMessage(err?.detail) ?? "Failed to fetch artifact");
   }
   return (await response.json()) as ArtifactPayload;
 }

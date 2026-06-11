@@ -3,6 +3,7 @@
 // we surface the FastAPI `detail` string so the panel shows the validator's
 // user-facing message (e.g. a 422 "that doesn't look like a setup token").
 import { authFetch } from "./auth";
+import { errorDetailMessage } from "./_errors";
 
 export interface CodingAgentConnection {
   provider: "anthropic" | "openai";
@@ -16,8 +17,8 @@ export interface CodingAgentConnections {
 }
 
 async function detail(r: Response, fallback: string): Promise<string> {
-  const e = (await r.json().catch(() => null)) as { detail?: string } | null;
-  return e?.detail ?? fallback;
+  const e = (await r.json().catch(() => null)) as { detail?: unknown } | null;
+  return errorDetailMessage(e?.detail) ?? fallback;
 }
 
 export async function listCodingAgentConnections(): Promise<CodingAgentConnections> {

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 import { authFetch } from "./auth";
+import { errorDetailMessage } from "./_errors";
 
 export interface FileEntry {
   name: string;
@@ -35,9 +36,9 @@ export async function getWorkspaceTree(
   );
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
-      detail?: string;
+      detail?: unknown;
     } | null;
-    throw new Error(err?.detail ?? "Failed to fetch workspace tree");
+    throw new Error(errorDetailMessage(err?.detail) ?? "Failed to fetch workspace tree");
   }
   return (await response.json()) as WorkspaceTreeResponse;
 }
@@ -71,9 +72,9 @@ export async function listCheckpoints(
   );
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
-      detail?: string;
+      detail?: unknown;
     } | null;
-    throw new Error(err?.detail ?? "Failed to fetch checkpoints");
+    throw new Error(errorDetailMessage(err?.detail) ?? "Failed to fetch checkpoints");
   }
   return (await response.json()) as CheckpointListResponse;
 }
@@ -96,9 +97,9 @@ export async function rollbackToCheckpoint(
   );
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
-      detail?: string;
+      detail?: unknown;
     } | null;
-    throw new Error(err?.detail ?? "Rollback failed");
+    throw new Error(errorDetailMessage(err?.detail) ?? "Rollback failed");
   }
   return (await response.json()) as RollbackResponse;
 }
@@ -125,9 +126,9 @@ export async function uploadFile(
   );
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
-      detail?: string;
+      detail?: unknown;
     } | null;
-    throw new Error(err?.detail ?? "Upload failed");
+    throw new Error(errorDetailMessage(err?.detail) ?? "Upload failed");
   }
   return (await response.json()) as UploadResponse;
 }
@@ -148,9 +149,9 @@ export async function deleteFile(
   );
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
-      detail?: string;
+      detail?: unknown;
     } | null;
-    throw new Error(err?.detail ?? "Delete failed");
+    throw new Error(errorDetailMessage(err?.detail) ?? "Delete failed");
   }
 }
 
@@ -164,9 +165,9 @@ export async function getWorkspaceFile(
   );
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as {
-      detail?: string;
+      detail?: unknown;
     } | null;
-    throw new Error(err?.detail ?? "Failed to fetch file content");
+    throw new Error(errorDetailMessage(err?.detail) ?? "Failed to fetch file content");
   }
   return (await response.json()) as FileContentResponse;
 }

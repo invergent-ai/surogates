@@ -1,6 +1,7 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
+import { errorDetailMessage } from "./_errors";
 import {
   clearAuthTokens,
   getAuthToken,
@@ -117,7 +118,7 @@ export async function updateCurrentUser(fields: {
   });
   if (!response.ok) {
     const data = await response.json().catch(() => null);
-    throw new Error(data?.detail ?? "Failed to update profile.");
+    throw new Error(errorDetailMessage(data?.detail) ?? "Failed to update profile.");
   }
   return response.json();
 }
@@ -141,7 +142,7 @@ export async function unlinkChannel(identityId: string): Promise<void> {
   });
   if (!response.ok) {
     const data = await response.json().catch(() => null);
-    throw new Error(data?.detail ?? "Failed to unlink channel.");
+    throw new Error(errorDetailMessage(data?.detail) ?? "Failed to unlink channel.");
   }
 }
 
@@ -191,9 +192,9 @@ export async function exchangeFirebaseToken(idToken: string): Promise<{
   });
   if (!response.ok) {
     const data = (await response.json().catch(() => null)) as
-      | { detail?: string }
+      | { detail?: unknown }
       | null;
-    throw new Error(data?.detail ?? "Firebase sign-in failed.");
+    throw new Error(errorDetailMessage(data?.detail) ?? "Firebase sign-in failed.");
   }
   return (await response.json()) as {
     access_token: string;
