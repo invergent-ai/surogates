@@ -290,15 +290,32 @@ return {
 
     async def scroll_at(
         self, x: int, y: int, *, delta_x: int = 0, delta_y: int = 0
-    ) -> None:
-        """Scroll at viewport coordinates."""
+    ) -> dict[str, Any]:
+        """Scroll at viewport coordinates; deltas are pixels.
 
-        response = await self._http.post(
-            "/computer/scroll",
-            json={"x": x, "y": y, "delta_x": delta_x, "delta_y": delta_y},
-        )
-        response.raise_for_status()
+        Goes through Playwright's ``mouse.wheel`` rather than the
+        kernel ``/computer/scroll`` endpoint: that endpoint's deltas
+        are xdotool wheel *ticks*, so a pixel-sized value (the unit
+        every caller passes) overshoots by two orders of magnitude and
+        slams the page to the bottom in one call. Returns the
+        post-scroll position so callers can tell whether the page
+        actually moved.
+        """
+
+        code = f"""
+await page.mouse.move({int(x)}, {int(y)});
+await page.mouse.wheel({int(delta_x)}, {int(delta_y)});
+await page.waitForTimeout(150);
+return await page.evaluate(() => ({{
+  scroll_x: Math.round(window.scrollX),
+  scroll_y: Math.round(window.scrollY),
+  page_height: Math.round(document.documentElement.scrollHeight),
+  viewport_height: Math.round(window.innerHeight),
+}}));
+"""
+        result = await self._playwright_execute(code)
         self._invalidate_snapshot_cache()
+        return result if isinstance(result, dict) else {}
 
     async def drag(self, path: list[tuple[int, int]], *, button: str = "left") -> None:
         """Drag the mouse along a path of viewport coordinates."""

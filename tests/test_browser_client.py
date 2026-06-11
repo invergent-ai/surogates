@@ -583,8 +583,24 @@ class TestSmallActions:
     async def test_scroll_at(self, client_with_transport) -> None:
         client, handlers = client_with_transport
         client._snapshot_cache["@e1"] = {"x": 1, "y": 1, "role": "button", "name": "Go"}
-        handlers.append(("POST", "/computer/scroll", 200, {"ok": True}))
-        await client.scroll_at(640, 400, delta_y=300)
+        handlers.append(
+            (
+                "POST",
+                "/playwright/execute",
+                200,
+                {
+                    "success": True,
+                    "result": {
+                        "scroll_x": 0,
+                        "scroll_y": 300,
+                        "page_height": 4000,
+                        "viewport_height": 720,
+                    },
+                },
+            )
+        )
+        position = await client.scroll_at(640, 400, delta_y=300)
+        assert position["scroll_y"] == 300
         assert client._snapshot_cache == {}
 
     async def test_drag(self, client_with_transport) -> None:

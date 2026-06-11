@@ -418,12 +418,12 @@ SCROLL_SCHEMA = {
         "delta_x": {
             "type": "integer",
             "default": 0,
-            "description": "Horizontal wheel delta. Positive values scroll right; negative values scroll left.",
+            "description": "Horizontal wheel delta in pixels. Positive values scroll right; negative values scroll left.",
         },
         "delta_y": {
             "type": "integer",
             "default": 0,
-            "description": "Vertical wheel delta. Positive values scroll down; negative values scroll up.",
+            "description": "Vertical wheel delta in pixels. Positive values scroll down; negative values scroll up.",
         },
     },
     "required": ["x", "y"],
@@ -457,13 +457,21 @@ async def _browser_scroll_handler(
     _browser_id, endpoint, snapshot_cache = preflight
     client = _make_client(_client_factory, endpoint, snapshot_cache)
     async with client:
-        await client.scroll_at(
+        position = await client.scroll_at(
             arguments["x"],
             arguments["y"],
             delta_x=arguments.get("delta_x", 0),
             delta_y=arguments.get("delta_y", 0),
         )
-    return json.dumps({"scrolled": True})
+    body: dict[str, Any] = {"scrolled": True}
+    if position:
+        body.update(position)
+        scroll_y = position.get("scroll_y")
+        page_height = position.get("page_height")
+        viewport_height = position.get("viewport_height")
+        if None not in (scroll_y, page_height, viewport_height):
+            body["at_bottom"] = scroll_y + viewport_height >= page_height - 2
+    return json.dumps(body)
 
 
 DRAG_SCHEMA = {
@@ -748,6 +756,7 @@ async def _browser_screenshot_handler(
         "relative_path": relative_path,
         "mime_type": "image/png",
         "bytes": len(png_bytes),
+        "hint": "This screenshot is not displayed to you. Call read_file with this path to view it.",
     }
     if "annotations" in result:
         body["annotations"] = result["annotations"]
@@ -826,8 +835,10 @@ def register(registry: ToolRegistry) -> None:
         schema=ToolSchema(
             name="browser_scroll",
             description=(
-                "Scroll at viewport coordinates. Use positive delta_y to scroll down "
-                "and negative delta_y to scroll up."
+                "Scroll at viewport coordinates; deltas are in pixels. Use positive "
+                "delta_y to scroll down and negative delta_y to scroll up. The result "
+                "reports the new scroll position and at_bottom — when at_bottom is "
+                "true, further downward scrolling does nothing."
             ),
             parameters=SCROLL_SCHEMA,
         ),
@@ -860,6 +871,8 @@ def register(registry: ToolRegistry) -> None:
             name="browser_screenshot",
             description=(
                 "Capture a PNG screenshot and save it to the session workspace. "
+                "The screenshot is NOT displayed to you automatically — to see "
+                "its contents, call read_file with the returned path. "
                 "Use annotate=true to overlay numbered labels for cached refs."
             ),
             parameters=SCREENSHOT_SCHEMA,

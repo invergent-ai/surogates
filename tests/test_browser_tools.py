@@ -108,8 +108,14 @@ class FakeClickClient:
     async def press_key(self, *keys: str, **kwargs: Any) -> None:
         self.calls.append(("press_key", keys, kwargs))
 
-    async def scroll_at(self, x: int, y: int, **kwargs: Any) -> None:
+    async def scroll_at(self, x: int, y: int, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(("scroll_at", (x, y), kwargs))
+        return {
+            "scroll_x": 0,
+            "scroll_y": 300,
+            "page_height": 4000,
+            "viewport_height": 720,
+        }
 
     async def drag(self, path: list[tuple[int, int]], **kwargs: Any) -> None:
         self.calls.append(("drag", (tuple(path),), kwargs))
@@ -428,16 +434,48 @@ class TestScrollDragWait:
         from surogates.tools.builtin.browser import _browser_scroll_handler
 
         client = FakeClickClient()
-        await _browser_scroll_handler(
-            {"x": 100, "y": 200, "delta_y": 300},
-            tenant=tenant,
-            session_id=uuid4(),
-            browser_pool=FakePool(),
-            browser_control=FakeControlStore(),
-            _client_factory=lambda endpoint: client,
+        result = json.loads(
+            await _browser_scroll_handler(
+                {"x": 100, "y": 200, "delta_y": 300},
+                tenant=tenant,
+                session_id=uuid4(),
+                browser_pool=FakePool(),
+                browser_control=FakeControlStore(),
+                _client_factory=lambda endpoint: client,
+            )
         )
         assert client.calls[0][0] == "scroll_at"
         assert client.calls[0][2]["delta_y"] == 300
+        # Position feedback lets the model see where it landed instead
+        # of blindly re-scrolling an unmoving page.
+        assert result["scroll_y"] == 300
+        assert result["at_bottom"] is False
+
+    async def test_scroll_reports_bottom(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_scroll_handler
+
+        class BottomClient(FakeClickClient):
+            async def scroll_at(self, x: int, y: int, **kwargs: Any) -> dict[str, Any]:
+                self.calls.append(("scroll_at", (x, y), kwargs))
+                return {
+                    "scroll_x": 0,
+                    "scroll_y": 3280,
+                    "page_height": 4000,
+                    "viewport_height": 720,
+                }
+
+        client = BottomClient()
+        result = json.loads(
+            await _browser_scroll_handler(
+                {"x": 100, "y": 200, "delta_y": 2000},
+                tenant=tenant,
+                session_id=uuid4(),
+                browser_pool=FakePool(),
+                browser_control=FakeControlStore(),
+                _client_factory=lambda endpoint: client,
+            )
+        )
+        assert result["at_bottom"] is True
 
     async def test_drag(self, tenant) -> None:
         from surogates.tools.builtin.browser import _browser_drag_handler
