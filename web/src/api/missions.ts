@@ -44,6 +44,7 @@ export interface MissionTaskRow {
   parent_ids: string[];
   current_session_id: string | null;
   created_at: string | null;
+  started_at: string | null;
   completed_at: string | null;
 }
 
@@ -152,4 +153,41 @@ export async function cancelMission(
   if (!response.ok) {
     throw new Error(await response.text());
   }
+}
+
+export interface MissionEventRow {
+  id: number;
+  session_id: string;
+  type: string;
+  data: Record<string, unknown> | null;
+  created_at: string | null;
+}
+
+export interface MissionEventsPage {
+  events: MissionEventRow[];
+  sessions: Record<
+    string,
+    {
+      task_id: string | null;
+      agent_def_name: string | null;
+      kind: "coordinator" | "task" | "worker" | "delegation";
+    }
+  >;
+}
+
+export async function getMissionEvents(
+  missionId: string,
+  params?: { afterId?: number; limit?: number },
+): Promise<MissionEventsPage> {
+  const search = new URLSearchParams();
+  if (params?.afterId !== undefined) {
+    search.set("after_id", String(params.afterId));
+  }
+  if (params?.limit !== undefined) search.set("limit", String(params.limit));
+  const qs = search.toString();
+  return readJson(
+    await authFetch(
+      `/api/v1/missions/${encodeURIComponent(missionId)}/events${qs ? `?${qs}` : ""}`,
+    ),
+  );
 }

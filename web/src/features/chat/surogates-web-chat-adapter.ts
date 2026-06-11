@@ -363,6 +363,32 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     return { workers: response.workers.map(toAgentChatMissionWorker) };
   },
 
+  async listMissionEvents(input) {
+    const page = await missionsApi.getMissionEvents(input.missionId, {
+      afterId: input.afterId,
+      limit: input.limit,
+    });
+    return {
+      events: page.events.map((e) => ({
+        id: e.id,
+        sessionId: e.session_id,
+        type: e.type,
+        data: e.data,
+        createdAt: e.created_at,
+      })),
+      sessions: Object.fromEntries(
+        Object.entries(page.sessions).map(([sid, meta]) => [
+          sid,
+          {
+            taskId: meta.task_id,
+            agentDefName: meta.agent_def_name,
+            kind: meta.kind,
+          },
+        ]),
+      ),
+    };
+  },
+
   async pauseMission(input) {
     await missionsApi.pauseMission(input.missionId, input.reason);
   },
@@ -467,6 +493,7 @@ function toAgentChatMissionTask(
     parentIds: row.parent_ids,
     currentSessionId: row.current_session_id,
     createdAt: row.created_at,
+    startedAt: row.started_at,
     completedAt: row.completed_at,
   };
 }
