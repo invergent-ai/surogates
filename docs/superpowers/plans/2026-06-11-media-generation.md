@@ -22,8 +22,8 @@ Update this list (and the per-step checkboxes below) before each commit: `[ ]` p
 - [x] Task 2: Runtime context slots + resolver parsing
 - [x] Task 3: Session LLM bundle — image slot + video endpoint resolver
 - [x] Task 4: `media_gen` builtin module — config object, schemas, save helpers, registration
-- [~] Task 5: `generate_image` happy-path + failure tests
-- [ ] Task 6: `generate_video` poll-loop tests
+- [x] Task 5: `generate_image` happy-path + failure tests
+- [~] Task 6: `generate_video` poll-loop tests
 - [ ] Task 7: Thread `media_gen` through worker → harness → executors
 - [ ] Task 8: Full-suite verification
 
@@ -1154,7 +1154,7 @@ The handler already exists (Task 4); this task locks its behavior with tests aga
 - Test: `tests/test_media_gen_tools.py` (extend)
 - Modify (only if a test exposes a bug): `surogates/tools/builtin/media_gen.py`
 
-- [ ] **Step 1: Append the tests**
+- [x] **Step 1: Append the tests**
 
 ```python
 import base64  # add to the imports at the top of the file
@@ -1300,12 +1300,12 @@ async def test_generate_image_errors_without_workspace_destination():
     assert "workspace_unavailable" in result["error"]
 ```
 
-- [ ] **Step 2: Run the tests**
+- [x] **Step 2: Run the tests**
 
 Run: `cd /work/surogates && uv run pytest tests/test_media_gen_tools.py -v`
 Expected: all pass. If `_first_generated_image_url` or content-part assembly has a bug, fix it in `media_gen.py` and re-run.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd /work/surogates
