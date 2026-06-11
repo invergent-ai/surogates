@@ -8,14 +8,7 @@
 // the page.  Hosts wrap this in their own page shell (sidebar, layout,
 // route title).  The dashboard owns its data layer: polls the adapter
 // every 5s while active/paused, stops on terminal status.
-import {
-  Fragment,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Ban,
   Loader2,
@@ -23,17 +16,10 @@ import {
   Play,
   RefreshCw,
   AlertCircle,
-  ChevronRight,
 } from "lucide-react";
 
-import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card, CardContent } from "../ui/card";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "../ui/collapsible";
 import {
   Dialog,
   DialogContent,
@@ -60,39 +46,16 @@ import type {
 
 import {
   ACTIVE_MISSION_STATUSES,
-  deriveMissionWorkerActivityLabel,
-  groupMissionTasksByBucket,
   isTerminalMissionStatus,
 } from "./mission-derive";
+import { MissionActivityTab } from "./mission-activity-tab";
+import { MissionMetadataTab } from "./mission-metadata-tab";
+import { MissionTasksTab } from "./mission-tasks-tab";
+import { MissionWorkersTab } from "./mission-workers-tab";
+import { useMissionEvents } from "./use-mission-events";
 
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
-
-// Worker-row "kind" badge — visually distinguishes the three
-// delegation primitives the coordinator can use.  Order of mention
-// matches the durability gradient: ``task`` is durable + retried,
-// ``worker`` is durable + one-shot, ``delegation`` is ephemeral.
-const MISSION_WORKER_KIND_BADGE_CLASS: Record<
-  AgentChatMissionWorker["kind"],
-  string
-> = {
-  task: "border-primary/40 bg-primary/10 text-primary uppercase tracking-wide text-[10px]",
-  worker:
-    "border-foreground/30 bg-foreground/5 text-foreground/80 uppercase tracking-wide text-[10px]",
-  delegation:
-    "border-foreground/20 bg-foreground/[0.03] text-foreground/60 uppercase tracking-wide text-[10px]",
-};
-
-const MISSION_WORKER_KIND_TOOLTIP: Record<
-  AgentChatMissionWorker["kind"],
-  string
-> = {
-  task: "Durable Task row created by spawn_task. Retried by the dispatcher; survives across coordinator wakes.",
-  worker:
-    "Async one-shot session spawned by spawn_worker. Durable session, no retry/DAG.",
-  delegation:
-    "Sync fork-join child spawned by delegate_task. Coordinator's wake blocked until it finished.",
-};
 
 
 /** Small count chip shown next to tab labels — same shape as
@@ -106,143 +69,6 @@ function CountBadge({ n }: { n: number }) {
       {n}
     </span>
   );
-}
-
-
-/** First non-empty line of *text*, normalised + truncated to *max* chars.
- * Used for collapsed-row previews of task goals + result blobs. */
-function firstLine(text: string, max = 140): string {
-  const trimmed = text.replace(/\s+/g, " ").trim();
-  if (trimmed.length <= max) return trimmed;
-  return `${trimmed.slice(0, max).trimEnd()}…`;
-}
-
-
-/** Mission activity event derived from the existing data set — we
- * synthesise these from ``mission.createdAt``, ``task.createdAt``,
- * ``task.completedAt``, ``worker.latestEventAt``, and
- * ``mission.lastEvaluationAt``.  No new adapter calls required.
- *
- * Sorted newest-first by the dashboard so the timeline reads top-down. */
-type ActivityEntry = {
-  at: string;
-  kind:
-    | "mission.defined"
-    | "mission.paused"
-    | "mission.cancelled"
-    | "task.spawned"
-    | "task.completed"
-    | "task.failed"
-    | "task.cancelled"
-    | "worker.latest"
-    | "evaluator.verdict";
-  label: string;
-  detail?: string;
-};
-
-
-const ACTIVITY_KIND_TONE: Record<ActivityEntry["kind"], string> = {
-  "mission.defined": "bg-primary/10 text-primary border-primary/30",
-  "mission.paused": "bg-amber-500/10 text-amber-600 border-amber-500/30",
-  "mission.cancelled": "bg-destructive/10 text-destructive border-destructive/30",
-  "task.spawned": "bg-foreground/5 text-foreground/80 border-foreground/20",
-  "task.completed": "bg-emerald-500/10 text-emerald-600 border-emerald-500/30",
-  "task.failed": "bg-destructive/10 text-destructive border-destructive/30",
-  "task.cancelled": "bg-muted text-muted-foreground border-border",
-  "worker.latest": "bg-foreground/5 text-foreground/70 border-foreground/15",
-  "evaluator.verdict": "bg-primary/10 text-primary border-primary/30",
-};
-
-
-function buildMissionActivity(
-  mission: AgentChatMissionSummary,
-  tasks: AgentChatMissionTask[],
-  workers: AgentChatMissionWorker[],
-): ActivityEntry[] {
-  const entries: ActivityEntry[] = [];
-
-  entries.push({
-    at: mission.createdAt,
-    kind: "mission.defined",
-    label: "Mission defined",
-    detail: mission.description,
-  });
-
-  if (mission.status === "paused" && mission.pausedReason) {
-    entries.push({
-      at: mission.updatedAt,
-      kind: "mission.paused",
-      label: "Paused",
-      detail: mission.pausedReason,
-    });
-  }
-  if (mission.status === "cancelled" && mission.cancelledReason) {
-    entries.push({
-      at: mission.updatedAt,
-      kind: "mission.cancelled",
-      label: "Cancelled",
-      detail: mission.cancelledReason,
-    });
-  }
-
-  for (const task of tasks) {
-    if (task.createdAt) {
-      entries.push({
-        at: task.createdAt,
-        kind: "task.spawned",
-        label: `Spawn · ${task.agentDefName ?? "task"}`,
-        detail: firstLine(task.goal, 200),
-      });
-    }
-    if (task.completedAt) {
-      const kind: ActivityEntry["kind"] =
-        task.status === "done"
-          ? "task.completed"
-          : task.status === "failed"
-            ? "task.failed"
-            : task.status === "cancelled"
-              ? "task.cancelled"
-              : "task.completed";
-      entries.push({
-        at: task.completedAt,
-        kind,
-        label: `${task.status} · ${task.agentDefName ?? "task"}`,
-        detail: task.result ? firstLine(task.result, 200) : undefined,
-      });
-    }
-  }
-
-  for (const worker of workers) {
-    if (worker.latestEventAt && worker.latestEventKind) {
-      entries.push({
-        at: worker.latestEventAt,
-        kind: "worker.latest",
-        label: `${worker.kind} · ${worker.latestEventKind}`,
-        detail: deriveMissionWorkerActivityLabel(worker),
-      });
-    }
-  }
-
-  if (mission.lastEvaluationAt && mission.lastEvaluationResult) {
-    entries.push({
-      at: mission.lastEvaluationAt,
-      kind: "evaluator.verdict",
-      label: `Verdict · ${mission.lastEvaluationResult}`,
-      detail: mission.lastEvaluationFeedback ?? undefined,
-    });
-  }
-
-  entries.sort((a, b) => b.at.localeCompare(a.at));
-  return entries;
-}
-
-
-function formatTimestamp(iso: string): string {
-  try {
-    return new Date(iso).toLocaleTimeString();
-  } catch {
-    return iso;
-  }
 }
 
 
@@ -372,10 +198,15 @@ export function MissionDashboard({
     };
   }, [refresh, state.mission, pollIntervalMs]);
 
-  const taskBuckets = useMemo(
-    () => groupMissionTasksByBucket(state.tasks),
-    [state.tasks],
-  );
+  const feed = useMissionEvents({
+    adapter,
+    missionId,
+    missionStatus: state.mission?.status ?? null,
+    isTerminal: state.mission
+      ? isTerminalMissionStatus(state.mission.status)
+      : false,
+    pollIntervalMs,
+  });
 
   const runningWorkerCount = useMemo(
     // "running" means the child is still consuming compute right now.
@@ -462,7 +293,6 @@ export function MissionDashboard({
           ? "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400"
           : "border-primary/40 bg-primary/10 text-primary";
 
-  const activity = buildMissionActivity(mission, state.tasks, state.workers);
   const isActive = ACTIVE_MISSION_STATUSES.has(mission.status);
   const iterationPct =
     mission.maxIterations > 0
@@ -609,19 +439,21 @@ export function MissionDashboard({
 
         {/* ----- Tabs ------------------------------------------------ */}
         <Tabs
-          defaultValue="activity"
+          defaultValue="tasks"
           className="mt-5 flex flex-1 flex-col overflow-hidden sm:mt-6"
         >
           <div className="shrink-0 border-b border-border bg-background px-5 sm:px-6">
             <TabsList variant="line">
-              <TabsTrigger value="activity">
-                Activity
-                <CountBadge n={activity.length} />
-              </TabsTrigger>
               <TabsTrigger value="tasks">
                 Tasks
                 <CountBadge n={state.tasks.length} />
               </TabsTrigger>
+              {feed.supported ? (
+                <TabsTrigger value="activity">
+                  Activity
+                  <CountBadge n={feed.events.length} />
+                </TabsTrigger>
+              ) : null}
               <TabsTrigger value="workers">
                 Workers
                 <CountBadge n={state.workers.length} />
@@ -631,23 +463,27 @@ export function MissionDashboard({
           </div>
 
           <div className="flex-1 overflow-y-auto bg-background px-5 py-4 sm:px-6">
-            <TabsContent value="activity" className="mt-0">
-              <ActivityTimeline entries={activity} />
-            </TabsContent>
-            <TabsContent value="tasks" className="mt-0">
-              <TasksList
-                taskBuckets={taskBuckets}
-                totalTasks={state.tasks.length}
+            <TabsContent value="tasks" className="mt-0 h-full">
+              <MissionTasksTab
+                tasks={state.tasks}
+                feed={feed}
+                onOpenTranscript={onOpenTranscript}
               />
             </TabsContent>
+            {feed.supported ? (
+              <TabsContent value="activity" className="mt-0">
+                <MissionActivityTab feed={feed} />
+              </TabsContent>
+            ) : null}
             <TabsContent value="workers" className="mt-0">
-              <WorkersList
+              <MissionWorkersTab
                 workers={state.workers}
+                tasks={state.tasks}
                 onOpenTranscript={onOpenTranscript}
               />
             </TabsContent>
             <TabsContent value="metadata" className="mt-0">
-              <MetadataPane mission={mission} />
+              <MissionMetadataTab mission={mission} />
             </TabsContent>
           </div>
         </Tabs>
@@ -708,346 +544,3 @@ export function MissionDashboard({
   );
 }
 
-
-// ===========================================================================
-// Tab content components — split out so the outer dashboard stays readable.
-// ===========================================================================
-
-
-function ActivityTimeline({ entries }: { entries: ActivityEntry[] }) {
-  if (entries.length === 0) {
-    return (
-      <div className="py-8 text-center text-sm text-muted-foreground/60">
-        No mission activity yet.
-      </div>
-    );
-  }
-  return (
-    <ol className="space-y-1">
-      {entries.map((e, i) => (
-        <li
-          key={`${e.kind}-${e.at}-${i}`}
-          className="flex items-start gap-3 rounded px-2 py-1.5 text-sm hover:bg-muted/30"
-        >
-          <span className="w-20 shrink-0 font-mono text-[10px] text-muted-foreground/60">
-            {formatTimestamp(e.at)}
-          </span>
-          <span
-            className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide ${ACTIVITY_KIND_TONE[e.kind]}`}
-          >
-            {e.label}
-          </span>
-          {e.detail ? (
-            <span className="min-w-0 flex-1 truncate text-foreground/80">
-              {e.detail}
-            </span>
-          ) : null}
-        </li>
-      ))}
-    </ol>
-  );
-}
-
-
-function TaskRow({ task }: { task: AgentChatMissionTask }) {
-  const [open, setOpen] = useState(false);
-  const goalPreview = firstLine(task.goal, 160);
-  const hasMore =
-    task.goal.length > 160 ||
-    Boolean(task.result) ||
-    Boolean(task.resultMetadata);
-
-  const statusTone =
-    task.status === "done"
-      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600"
-      : task.status === "failed"
-        ? "border-destructive/30 bg-destructive/10 text-destructive"
-        : task.status === "cancelled"
-          ? "border-border bg-muted text-muted-foreground"
-          : task.status === "running"
-            ? "border-primary/30 bg-primary/10 text-primary"
-            : "border-foreground/20 bg-foreground/5 text-foreground/70";
-
-  return (
-    <Collapsible open={open} onOpenChange={setOpen} asChild>
-      <li className="rounded border border-border/40 text-sm">
-        <CollapsibleTrigger
-          asChild
-          disabled={!hasMore}
-        >
-          <button
-            type="button"
-            className="flex w-full items-start gap-3 px-3 py-2 text-left hover:bg-muted/30 disabled:hover:bg-transparent"
-          >
-            <ChevronRight
-              className={`mt-0.5 size-3.5 shrink-0 text-muted-foreground/60 transition-transform ${
-                open ? "rotate-90" : ""
-              } ${hasMore ? "" : "opacity-0"}`}
-            />
-            <span
-              className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide ${statusTone}`}
-            >
-              {task.status}
-            </span>
-            {task.agentDefName ? (
-              <span className="shrink-0 text-[10px] text-muted-foreground/70">
-                {task.agentDefName}
-              </span>
-            ) : null}
-            {task.attemptCount > 1 ? (
-              <span className="shrink-0 text-[10px] text-muted-foreground/60">
-                ({task.attemptCount}/{task.maxAttempts})
-              </span>
-            ) : null}
-            <span className="min-w-0 flex-1 truncate text-foreground/80">
-              {goalPreview}
-            </span>
-          </button>
-        </CollapsibleTrigger>
-        <CollapsibleContent className="border-t border-border/40 px-3 py-2 text-xs">
-          <div className="mb-2">
-            <div className="mb-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground/60">
-              Goal
-            </div>
-            <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-muted/30 px-2 py-1.5 text-[11px] text-foreground/90">
-              {task.goal}
-            </pre>
-          </div>
-          {task.parentIds.length > 0 ? (
-            <div className="mb-2 text-[10px] text-muted-foreground/70">
-              after: {task.parentIds.map((p) => p.slice(0, 8)).join(", ")}
-            </div>
-          ) : null}
-          {task.result ? (
-            <div className="mb-2">
-              <div className="mb-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground/60">
-                Result
-              </div>
-              <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-muted/30 px-2 py-1.5 text-[11px] text-foreground/90">
-                {task.result}
-              </pre>
-            </div>
-          ) : null}
-          {task.resultMetadata ? (
-            <div>
-              <div className="mb-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground/60">
-                Result metadata
-              </div>
-              <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-muted/30 px-2 py-1.5 text-[11px] text-foreground/90">
-                {JSON.stringify(task.resultMetadata, null, 2)}
-              </pre>
-            </div>
-          ) : null}
-        </CollapsibleContent>
-      </li>
-    </Collapsible>
-  );
-}
-
-
-function TasksList({
-  taskBuckets,
-  totalTasks,
-}: {
-  taskBuckets: ReturnType<typeof groupMissionTasksByBucket>;
-  totalTasks: number;
-}) {
-  if (totalTasks === 0) {
-    return (
-      <div className="py-8 text-center text-sm text-muted-foreground/60">
-        No tasks spawned yet.
-      </div>
-    );
-  }
-  const headings: Record<keyof typeof taskBuckets, string> = {
-    in_flight: "In flight",
-    blocked: "Blocked",
-    done: "Done",
-    failed_or_cancelled: "Failed / cancelled",
-  };
-  return (
-    <div className="space-y-4">
-      {(Object.keys(headings) as (keyof typeof taskBuckets)[]).map((bucket) => {
-        const rows = taskBuckets[bucket];
-        if (rows.length === 0) return null;
-        return (
-          <Fragment key={bucket}>
-            <div className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
-              {headings[bucket]} ({rows.length})
-            </div>
-            <ul className="space-y-1">
-              {rows.map((task) => (
-                <TaskRow key={task.id} task={task} />
-              ))}
-            </ul>
-          </Fragment>
-        );
-      })}
-    </div>
-  );
-}
-
-
-function WorkersList({
-  workers,
-  onOpenTranscript,
-}: {
-  workers: AgentChatMissionWorker[];
-  onOpenTranscript?: (workerSessionId: string) => void;
-}) {
-  if (workers.length === 0) {
-    return (
-      <div className="py-8 text-center text-sm text-muted-foreground/60">
-        No workers attached to this mission right now.
-      </div>
-    );
-  }
-  return (
-    <ul className="space-y-1">
-      {workers.map((w) => {
-        const onTranscriptClick = (
-          e: React.MouseEvent<HTMLAnchorElement>,
-        ) => {
-          if (onOpenTranscript) {
-            e.preventDefault();
-            onOpenTranscript(w.workerSessionId);
-          }
-        };
-        return (
-          <li
-            key={w.workerSessionId}
-            className="flex flex-col gap-2 rounded border border-border/40 px-3 py-2 text-sm sm:flex-row sm:items-start sm:justify-between"
-          >
-            <div className="min-w-0 flex-1 space-y-1">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge
-                  variant="outline"
-                  className={MISSION_WORKER_KIND_BADGE_CLASS[w.kind]}
-                  title={MISSION_WORKER_KIND_TOOLTIP[w.kind]}
-                >
-                  {w.kind}
-                </Badge>
-                <Badge className="text-foreground/70">
-                  {w.kind === "task" ? w.taskStatus ?? "—" : w.sessionStatus}
-                </Badge>
-                {w.agentDefName ? (
-                  <span className="text-[10px] text-muted-foreground/70">
-                    {w.agentDefName}
-                  </span>
-                ) : null}
-                {w.latestEventAt ? (
-                  <span className="ml-auto font-mono text-[10px] text-muted-foreground/60">
-                    {formatTimestamp(w.latestEventAt)}
-                  </span>
-                ) : null}
-              </div>
-              <div className="truncate text-sm text-foreground/80">
-                {deriveMissionWorkerActivityLabel(w)}
-              </div>
-            </div>
-            <a
-              href={w.transcriptUrl}
-              target="_blank"
-              rel="noreferrer"
-              onClick={onTranscriptClick}
-              className="self-start text-xs text-primary hover:underline"
-            >
-              View session
-            </a>
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
-
-function MetadataPane({ mission }: { mission: AgentChatMissionSummary }) {
-  type Row = { label: string; value: React.ReactNode };
-  const rows: Row[] = [];
-  rows.push({
-    label: "Mission ID",
-    value: <code className="text-[11px]">{mission.id}</code>,
-  });
-  rows.push({
-    label: "Session ID",
-    value: <code className="text-[11px]">{mission.sessionId}</code>,
-  });
-  rows.push({
-    label: "Agent ID",
-    value: <code className="text-[11px]">{mission.agentId}</code>,
-  });
-  rows.push({ label: "Status", value: mission.status });
-  rows.push({
-    label: "Iteration",
-    value: `${mission.iteration} / ${mission.maxIterations}`,
-  });
-  rows.push({
-    label: "Owner",
-    value: mission.userId
-      ? <>user <code className="text-[11px]">{mission.userId}</code></>
-      : mission.serviceAccountId
-        ? <>service account <code className="text-[11px]">{mission.serviceAccountId}</code></>
-        : "—",
-  });
-  rows.push({
-    label: "Created",
-    value: (
-      <span className="font-mono text-[11px]">
-        {new Date(mission.createdAt).toLocaleString()}
-      </span>
-    ),
-  });
-  rows.push({
-    label: "Updated",
-    value: (
-      <span className="font-mono text-[11px]">
-        {new Date(mission.updatedAt).toLocaleString()}
-      </span>
-    ),
-  });
-  if (mission.pausedReason) {
-    rows.push({ label: "Paused reason", value: mission.pausedReason });
-  }
-  if (mission.cancelledReason) {
-    rows.push({ label: "Cancelled reason", value: mission.cancelledReason });
-  }
-
-  return (
-    <div className="space-y-6">
-      {/* Description and Rubric live in the hero card — they don't
-          repeat here.  Metadata is reserved for the things the hero
-          doesn't show: evaluator detail + identifiers. */}
-      {mission.lastEvaluationResult ? (
-        <section className="space-y-2">
-          <div className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
-            Last verdict — {mission.lastEvaluationResult}
-          </div>
-          {mission.lastEvaluationFeedback ? (
-            <p className="whitespace-pre-wrap text-sm text-foreground/90">
-              {mission.lastEvaluationFeedback}
-            </p>
-          ) : null}
-          {mission.lastEvaluationExplanation ? (
-            <p className="whitespace-pre-wrap text-xs text-muted-foreground/70">
-              {mission.lastEvaluationExplanation}
-            </p>
-          ) : null}
-        </section>
-      ) : null}
-      <section>
-        <div className="mb-2 font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
-          Identifiers
-        </div>
-        <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-xs">
-          {rows.map((r) => (
-            <Fragment key={r.label}>
-              <dt className="text-muted-foreground/70">{r.label}</dt>
-              <dd className="break-all text-foreground/90">{r.value}</dd>
-            </Fragment>
-          ))}
-        </dl>
-      </section>
-    </div>
-  );
-}

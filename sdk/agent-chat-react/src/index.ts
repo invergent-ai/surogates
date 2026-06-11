@@ -22,12 +22,32 @@ export { MissionDashboard } from "./components/missions/mission-dashboard";
 export { MissionsPanel } from "./components/missions/missions-panel";
 export {
   ACTIVE_MISSION_STATUSES,
+  defaultSelectedMissionTaskId,
   deriveMissionWorkerActivityLabel,
+  formatMissionTimestamp,
   groupMissionTasksByBucket,
   isTerminalMissionStatus,
+  mergeMissionEvents,
+  MISSION_EVENT_CATEGORIES,
+  missionEventActorLabel,
+  missionEventCategory,
+  missionEventSummary,
+  missionEventTaskId,
+  missionTaskBlocks,
   missionTaskBucket,
+  missionTaskRailGroups,
+  missionTaskStatusDotClass,
+  missionTaskTitle,
+  missionWorkerTaskCounts,
 } from "./components/missions/mission-derive";
-export type { MissionTaskBucket } from "./components/missions/mission-derive";
+export type {
+  MissionEventCategory,
+  MissionTaskBucket,
+  MissionTaskRailGroup,
+  MissionTaskRailGroupKey,
+} from "./components/missions/mission-derive";
+export { useMissionEvents } from "./components/missions/use-mission-events";
+export type { MissionEventsFeed } from "./components/missions/use-mission-events";
 export { ResearchSourcesPanel } from "./components/research/research-sources-panel";
 export {
   CitationText,
@@ -66,6 +86,9 @@ export type {
   AgentChatInboxListInput,
   AgentChatInboxStatus,
   AgentChatInboxStreamEvent,
+  AgentChatMissionEvent,
+  AgentChatMissionEventSession,
+  AgentChatMissionEventsPage,
   AgentChatMissionList,
   AgentChatMissionStatus,
   AgentChatMissionSummary,
