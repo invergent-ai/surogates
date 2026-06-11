@@ -1,4 +1,5 @@
 import { getArtifact } from "@/api/artifacts";
+import * as codingAgentsApi from "@/api/coding-agents";
 import * as composioApi from "@/api/composio";
 import { refreshSession } from "@/api/auth";
 import { submitAskUserQuestionResponse as submitAskUserQuestionResponseApi } from "@/api/ask_user_question";
@@ -324,6 +325,19 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
 
   async disconnectComposioToolkit({ toolkit }) {
     await composioApi.disconnectComposioToolkit(toolkit);
+  },
+
+  // ---- Coding-agent connections ("/code" plans) -----------------------
+  async listCodingAgentConnections() {
+    return codingAgentsApi.listCodingAgentConnections();
+  },
+
+  async submitCodingAgentCredential({ provider, mode, value }) {
+    return codingAgentsApi.submitCodingAgentCredential(provider, mode, value);
+  },
+
+  async disconnectCodingAgentProvider({ provider }) {
+    await codingAgentsApi.disconnectCodingAgentProvider(provider);
   },
 
   // ---- Missions --------------------------------------------------------

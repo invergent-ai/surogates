@@ -112,6 +112,8 @@ RUN npm install -g \
         pdf-lib \
         pdfjs-dist \
         pnpm \
+        @anthropic-ai/claude-code \
+        @openai/codex \
     && npm cache clean --force
 
 # ── Python virtualenv ────────────────────────────────────────────────

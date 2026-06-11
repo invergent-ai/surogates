@@ -204,6 +204,7 @@ from surogates.harness.loop_vision import (
 
 from surogates.harness.loop_advisor import AdvisorMixin
 from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
+from surogates.harness.loop_code_commands import CodeCommandMixin
 from surogates.harness.loop_context_replay import ContextReplayMixin
 from surogates.harness.loop_iteration_summary import IterationSummaryMixin
 from surogates.harness.loop_outcome_commands import OutcomeCommandMixin
@@ -269,6 +270,7 @@ class AgentHarness(
     ContextReplayMixin,
     IterationSummaryMixin,
     OutcomeCommandMixin,
+    CodeCommandMixin,
     ArtifactCompletionMixin,
 ):
     """Stateless agent loop that replays events, runs the LLM, and emits events.
@@ -309,6 +311,7 @@ class AgentHarness(
         saga_enabled: bool = False,
         saga_settings: Any | None = None,
         api_client: Any | None = None,
+        credential_vault: Any | None = None,
         default_model: str = "gpt-4o",
         session_factory: Any | None = None,
         log_policy_allowed: bool = False,
@@ -343,6 +346,7 @@ class AgentHarness(
         self._browser_control: BrowserControlStore | None = browser_control
         self._storage = storage
         self._api_client = api_client
+        self._credential_vault = credential_vault
         self._session_factory = session_factory
         # Per-session Hub-backed bundle shared by every catalogue
         # load inside the harness (sub-agent resolver, prompt
@@ -855,6 +859,12 @@ class AgentHarness(
 
             if last_user_content == "/mission" or last_user_content.startswith("/mission "):
                 await self._handle_mission_command(session, last_user_content, lease)
+                return
+
+            if last_user_content == "/code" or last_user_content.startswith("/code "):
+                await self._handle_code_command(
+                    session, last_user_content, lease, all_events,
+                )
                 return
 
             if last_user_content.startswith("/loop"):
@@ -1373,6 +1383,7 @@ class AgentHarness(
                     memory_manager=self._memory_manager,
                     hint_tracker=hint_tracker,
                     sandbox_pool=self._sandbox_pool,
+                    credential_vault=self._credential_vault,
                     browser_pool=self._browser_pool,
                     browser_control=self._browser_control,
                     storage=self._storage,
@@ -2056,6 +2067,7 @@ class AgentHarness(
                     memory_manager=self._memory_manager,
                     hint_tracker=hint_tracker,
                     sandbox_pool=self._sandbox_pool,
+                    credential_vault=self._credential_vault,
                     browser_pool=self._browser_pool,
                     browser_control=self._browser_control,
                     storage=self._storage,

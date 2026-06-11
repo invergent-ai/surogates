@@ -22,6 +22,7 @@ from surogates.api.routes.workspace import (
     _get_workspace_session_bucket_and_root,
 )
 from surogates.api.session_guards import require_user_writable_session
+from surogates.coding_agents.command import is_code_command
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
 from surogates.session.models import Session
@@ -725,19 +726,23 @@ async def send_message(
         await store.emit_event(session_id, EventType.SESSION_RESUME, {})
 
     # Screen user message for prompt injection (AGT PromptInjectionDetector).
+    # /code command text is exempt: it is a command to the user's own coding
+    # agent (parsed by the harness, never fed to the platform LLM), and coding
+    # prompts routinely trip the detector.  Attachments/filenames stay screened.
     injection_source = (
         "api_channel" if session.channel == API_CHANNEL else "web_channel"
     )
     detector = _get_injection_detector()
-    injection_result = detector.detect(
-        body.content,
-        source=injection_source,
-    )
-    if injection_result.is_injection:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(f"Message blocked: {injection_result.explanation}"),
+    if not is_code_command(body.content):
+        injection_result = detector.detect(
+            body.content,
+            source=injection_source,
         )
+        if injection_result.is_injection:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(f"Message blocked: {injection_result.explanation}"),
+            )
 
     # Resolve any attachments against the session workspace.  Filenames
     # are user-controlled too, so they go through the same prompt-

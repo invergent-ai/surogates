@@ -29,6 +29,7 @@ import { SkillManageToolBlock } from "./tools/skill-manage-tool";
 import { CoordinatorToolBlock } from "./tools/coordinator-tools";
 import { DefaultToolBlock } from "./tools/default-tool";
 import { ResearchOutlineBlock } from "./tools/research-tool";
+import { CodeRunToolBlock } from "./tools/code-run-tool";
 
 export function ToolCallBlock({
   tc,
@@ -113,6 +114,9 @@ export function ToolCallBlock({
 
     case "research_memory":
       return <ResearchMemoryBlock tc={tc} />;
+
+    case "code_run":
+      return <CodeRunToolBlock tc={tc} />;
 
     case "spawn_worker":
     case "send_worker_message":

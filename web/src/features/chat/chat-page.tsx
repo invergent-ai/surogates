@@ -203,6 +203,7 @@ export function ChatPage() {
               disabled={sessionDeclined}
               onMessagesChange={setChatMessages}
               onOpenIntegrations={() => void navigate({ to: "/integrations" })}
+              codeAgentsEnabled
             />
           </div>
         )}

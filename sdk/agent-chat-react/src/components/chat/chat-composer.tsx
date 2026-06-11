@@ -145,6 +145,10 @@ interface ChatComposerProps {
   // the bundle would dispatch a delegate_task to a missing agent
   // type.
   deepResearchEnabled?: boolean;
+  // When true, the composer exposes the ``/code`` coding-agent commands
+  // in its builtin menu. Gated like ``deepResearchEnabled`` because the
+  // host owns the capability.
+  codeAgentsEnabled?: boolean;
 }
 
 // ── Outer wrapper (provides controlled text state) ───────────────────
@@ -305,6 +309,7 @@ function ChatComposerInner({
   canShowBrowser = false,
   canShowWorkspace = false,
   deepResearchEnabled = false,
+  codeAgentsEnabled = false,
   viewMode = "simple",
   onViewModeChange,
 }: ChatComposerProps) {
@@ -382,9 +387,20 @@ function ChatComposerInner({
           description: "Delegate a topic to the deep-research workflow",
         });
       }
+      if (codeAgentsEnabled) {
+        // Trailing space on the prompt-taking entries so the user lands
+        // on the prompt, not the command name -- same pattern as "/mission ".
+        base.push(
+          { value: "/code claude ", label: "/code claude", description: "Run Claude Code on the workspace (your plan)" },
+          { value: "/code codex ", label: "/code codex", description: "Run Codex on the workspace (your plan)" },
+          { value: "/code status", label: "/code status", description: "Show connected coding agents" },
+          { value: "/code login claude", label: "/code login claude", description: "Connect your Claude plan" },
+          { value: "/code login codex", label: "/code login codex", description: "Connect your ChatGPT plan" },
+        );
+      }
       return base;
     },
-    [deepResearchEnabled],
+    [deepResearchEnabled, codeAgentsEnabled],
   );
 
   const scheduledExamples = useMemo<SlashCommand[]>(

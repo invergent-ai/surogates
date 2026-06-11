@@ -107,7 +107,9 @@ async def _finalize_ended_sessions(
     failed_to_emit: list[tuple[UUID, UUID, int]] = []
     for task, sess in rows:
         events = await session_store.get_events(sess.id)
-        outcome, last_event = classify_attempt_outcome(events)
+        outcome, last_event = classify_attempt_outcome(
+            events, session_status=sess.status,
+        )
 
         if outcome is TaskAttemptOutcome.COMPLETED:
             task.status = "done"

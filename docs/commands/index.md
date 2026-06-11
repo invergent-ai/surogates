@@ -195,6 +195,53 @@ Lists active loops for the current user and agent.
 
 Cancels a loop by scheduled session ID.
 
+### `/code` — coding agents
+
+Run **Claude Code** or **Codex** on the session workspace using the end-user's
+*own* subscription or API plan. The platform never runs an OAuth flow and never
+calls the providers itself: the user connects a credential the vendor CLI minted
+on their machine, and the harness runs the real vendor binary in the session
+sandbox.
+
+```text
+/code                          show help
+/code status                   show which providers are connected
+/code login <claude|codex>     instructions to connect your plan
+/code logout <claude|codex>    disconnect (deletes the stored credential)
+/code claude "<task>" [flags]  run Claude Code on the workspace
+/code codex "<task>" [flags]   run Codex on the workspace
+```
+
+Flags: `--model <m>`, `--effort low|medium|high|xhigh`, `--allow read-only`
+(default is the agent's bypass/yolo mode).
+
+**Connecting.** Connections are stored **per user**, encrypted in the credential
+vault, one row per provider (`code_cred:anthropic` / `code_cred:openai`). There
+is deliberately no org fallback — a missing per-user credential reads as "not
+connected" and never resolves to another principal's plan.
+
+| Provider | The user runs | Pastes (in Settings → Coding Agents) |
+|---|---|---|
+| Claude (subscription) | `claude setup-token` | the `sk-ant-oat…` token |
+| Claude (API) | — | an `sk-ant-api…` key |
+| Codex (subscription) | `codex login` | the contents of `~/.codex/auth.json` |
+| Codex (API) | — | an `sk-…` OpenAI key |
+
+The pasted secret travels only over the dedicated TLS credential route
+(`/v1/coding-agents/...`), never through a chat message or the event log.
+
+**Running.** A run emits `code.run_started`, streamed `code.run_progress`, and a
+final `code.run_result` event. The credential is injected only into the spawned
+CLI's process environment inside the user's own per-session sandbox pod, scrubbed
+of conflicting provider env vars, and removed after the run. Credentials never
+appear in any event payload or log. `/code` command text is exempt from the
+prompt-injection screen because it is a command to the user's own coding agent
+and never reaches the platform LLM.
+
+Runs operate on the session `/workspace` only and are bounded by the sandbox's
+~1 h pod deadline. Connecting works on any deployment; running requires the
+sandbox image that bundles the `claude` / `codex` CLIs.
+
 ## Dynamic Skill Commands
 
 Any non-builtin slash command can invoke a skill:

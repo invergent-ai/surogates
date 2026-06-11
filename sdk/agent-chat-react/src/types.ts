@@ -329,6 +329,13 @@ export interface AgentChatMissionList {
   missions: AgentChatMissionSummary[];
 }
 
+export interface CodingAgentConnection {
+  provider: "anthropic" | "openai";
+  connected: boolean;
+  auth_mode: "oauth" | "api_key" | null;
+  expires_at: number | null;
+}
+
 export type AgentChatInboxKind =
   | "input_required"
   | "action_required"
@@ -414,6 +421,9 @@ export type AgentChatEventType =
   | "expert.failure"
   | "expert.endorse"
   | "expert.override"
+  | "code.run_started"
+  | "code.run_progress"
+  | "code.run_result"
   | "user.feedback"
   | "artifact.created"
   | "artifact.updated"
@@ -704,6 +714,22 @@ export interface AgentChatAdapter {
     status: string;
   }>;
   disconnectComposioToolkit?(input: { agentId?: string; toolkit: string }): Promise<void>;
+
+  // ---- Coding-agent connections ("/code" plans) ----
+  // Optional: the coding-agents panel renders only when present.
+  listCodingAgentConnections?(input: { agentId?: string }): Promise<{
+    connections: CodingAgentConnection[];
+  }>;
+  submitCodingAgentCredential?(input: {
+    agentId?: string;
+    provider: string;
+    mode: "oauth" | "api_key";
+    value: string;
+  }): Promise<{ provider: string; connected: boolean; auth_mode: string }>;
+  disconnectCodingAgentProvider?(input: {
+    agentId?: string;
+    provider: string;
+  }): Promise<void>;
 
   listInbox?(input?: AgentChatInboxListInput): Promise<AgentChatInboxList>;
   getInboxItem?(input: { itemId: number }): Promise<AgentChatInboxItem>;

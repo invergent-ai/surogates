@@ -177,6 +177,15 @@ def _filter_effective_tools(
         result.discard("worker_block")
         result.discard("worker_complete")
         result.discard("worker_context")
+    else:
+        # Task workers always get their self-tools, even under a
+        # restrictive AgentDef allowlist (e.g. a specialist whose ``tools``
+        # list is just its domain tools).  ``worker_complete`` /
+        # ``worker_context`` / ``worker_block`` are execution-context
+        # self-tools, not work tools subject to the allowlist — without
+        # them a task worker can't hand off a structured result or read
+        # its parents' output.
+        result.update({"worker_block", "worker_complete", "worker_context"})
 
     return result
 
@@ -1099,6 +1108,7 @@ async def run_worker(settings: Settings) -> None:
             browser_control=browser_control,
             storage=storage_backend,
             api_client=harness_api_client,
+            credential_vault=credential_vault,
             default_model=model_id,
             session_factory=session_factory,
             saga_enabled=settings.saga.enabled,

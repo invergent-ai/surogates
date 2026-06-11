@@ -21,6 +21,7 @@ import {
   TimerIcon,
   Trash2Icon,
 } from "lucide-react";
+import { MessageResponse } from "../ai-elements/message";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { cn } from "../../lib/utils";
@@ -115,6 +116,16 @@ function sortItems(items: AgentChatInboxItem[]): AgentChatInboxItem[] {
     if (a.createdAt !== b.createdAt) return a.createdAt > b.createdAt ? -1 : 1;
     return b.id - a.id;
   });
+}
+
+function InboxBody({ body, muted }: { body: string; muted?: boolean }) {
+  return (
+    <MessageResponse
+      className={cn("text-sm", muted && "text-muted-foreground")}
+    >
+      {body}
+    </MessageResponse>
+  );
 }
 
 function QuestionInput({
@@ -280,11 +291,7 @@ function InputRequiredDetail({
 
   return (
     <div className="space-y-4">
-      {item.body && (
-        <p className="whitespace-pre-wrap text-sm text-muted-foreground">
-          {item.body}
-        </p>
-      )}
+      {item.body && <InboxBody body={item.body} muted />}
       {questions.map((question) => (
         <label key={question.prompt} className="block space-y-1.5">
           <span className="text-sm font-medium text-foreground">
@@ -348,7 +355,7 @@ function AckDetail({
   return (
     <div className="space-y-3">
       {outcome && <Badge variant="secondary">{outcome}</Badge>}
-      {item.body && <p className="whitespace-pre-wrap text-sm">{item.body}</p>}
+      {item.body && <InboxBody body={item.body} />}
       {typeof item.payload.error === "string" && (
         <pre className="overflow-x-auto bg-destructive/10 p-3 text-xs text-destructive">
           {item.payload.error}
@@ -484,7 +491,7 @@ function ActionRequiredDetail({
 
   return (
     <div className="space-y-4">
-      {item.body && <p className="whitespace-pre-wrap text-sm">{item.body}</p>}
+      {item.body && <InboxBody body={item.body} />}
       {context && context !== item.body && (
         <p className="whitespace-pre-wrap text-sm text-muted-foreground">
           {context}
@@ -540,7 +547,7 @@ function ProgressDetail({
   }
   return (
     <div className="space-y-3">
-      {item.body && <p className="whitespace-pre-wrap text-sm">{item.body}</p>}
+      {item.body && <InboxBody body={item.body} />}
       {rows.length > 0 && (
         <dl className="space-y-1 text-xs text-muted-foreground">
           {rows.map(([label, value]) => (
