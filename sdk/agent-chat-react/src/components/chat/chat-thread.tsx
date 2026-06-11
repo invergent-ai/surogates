@@ -639,6 +639,9 @@ function cancelledToolLabel(toolName: string): string {
     // replaces it on completion.
     research_memory: "Research",
     research_outline: "Research",
+    generate_image: "image generation",
+    generate_video: "video generation",
+
   };
   if (map[toolName]) return map[toolName];
   // MCP tools arrive as `mcp__{server}__{tool}`; show a clean label rather
