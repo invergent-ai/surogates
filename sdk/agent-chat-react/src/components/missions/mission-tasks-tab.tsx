@@ -23,7 +23,13 @@ import {
 import { MessageResponse } from "../ai-elements/message";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { Card, CardContent } from "../ui/card";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "../ui/card";
 
 import type {
   AgentChatMissionEvent,
@@ -514,28 +520,28 @@ function OutcomeCard({ outcome }: { outcome: TaskOutcome }) {
     <Card
       data-testid="task-outcome"
       size="sm"
-      className={`gap-0 py-0 shadow-none ${outcome.tone}`}
+      className={`gap-3 py-4 shadow-none ${outcome.tone}`}
     >
-      <CardContent className="space-y-1.5 px-4 py-3">
-        <div className="flex items-center justify-between gap-2">
-          <span
-            className={`inline-flex items-center gap-1.5 font-mono text-[9px] uppercase tracking-widest ${outcome.labelTone}`}
-          >
-            {outcome.icon}
-            {outcome.label}
-          </span>
-          {outcome.timestamp ? (
-            <span className="font-mono text-[10px] text-muted-foreground/60">
-              {formatMissionTimestamp(outcome.timestamp)}
-            </span>
-          ) : null}
-        </div>
+      <CardHeader>
+        <CardTitle
+          className={`flex items-center gap-1.5 font-mono text-[11px] font-semibold tracking-widest ${outcome.labelTone}`}
+        >
+          {outcome.icon}
+          {outcome.label}
+        </CardTitle>
+        {outcome.timestamp ? (
+          <CardAction className="font-mono text-[10px] text-muted-foreground/60">
+            {formatMissionTimestamp(outcome.timestamp)}
+          </CardAction>
+        ) : null}
+      </CardHeader>
+      <CardContent>
         {outcome.markdown ? (
-          <MessageResponse className="text-sm leading-relaxed text-foreground/90">
+          <MessageResponse className="font-mono text-xs leading-relaxed text-foreground/90">
             {outcome.markdown}
           </MessageResponse>
         ) : (
-          <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground/90">
+          <p className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-foreground/90">
             {outcome.text}
           </p>
         )}
