@@ -30,6 +30,7 @@ import { ArtifactMarkdown } from "./artifact-markdown";
 import { ArtifactTable } from "./artifact-table";
 import { ArtifactHtml } from "./artifact-html";
 import { ArtifactSvg } from "./artifact-svg";
+import { ArtifactImage, ArtifactVideo } from "./artifact-media";
 import {
   copyText,
   downloadText,
@@ -57,6 +58,8 @@ const KIND_LABEL: Record<ArtifactKind, string> = {
   chart: "Chart",
   html: "HTML preview",
   svg: "SVG",
+  image: "Generated image",
+  video: "Generated video",
 };
 
 // How long the copy icon shows the green check before reverting.
@@ -105,6 +108,20 @@ export function ArtifactBlock({
 
   const handleDownload = () => {
     if (!payload) return;
+    if (payload.kind === "image" || payload.kind === "video") {
+      // Media bytes live in the workspace, not the payload — hand the
+      // browser the authenticated download URL instead of serialising.
+      const a = document.createElement("a");
+      a.href = adapter.getWorkspaceDownloadUrl({
+        sessionId,
+        path: payload.spec.path,
+      });
+      a.download = "";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      return;
+    }
     const { text, mime, extension } = exportArtifact(payload);
     downloadText(`${safeFilename(name)}.${extension}`, text, mime);
   };
@@ -147,7 +164,7 @@ export function ArtifactBlock({
           </ArtifactActions>
         </ArtifactHeader>
         <ArtifactContent className="p-0 overflow-visible">
-          <ArtifactBody error={error} payload={payload} />
+          <ArtifactBody error={error} payload={payload} sessionId={sessionId} />
         </ArtifactContent>
       </Artifact>
       <Dialog open={expanded} onOpenChange={setExpanded}>
@@ -157,7 +174,7 @@ export function ArtifactBlock({
             <DialogDescription>{description}</DialogDescription>
           </DialogHeader>
           <div className="flex min-h-0 flex-1 flex-col overflow-auto">
-            <ArtifactBody error={error} payload={payload} fill />
+            <ArtifactBody error={error} payload={payload} sessionId={sessionId} fill />
           </div>
         </DialogContent>
       </Dialog>
@@ -168,10 +185,12 @@ export function ArtifactBlock({
 function ArtifactBody({
   error,
   payload,
+  sessionId,
   fill = false,
 }: {
   error: string | null;
   payload: ArtifactPayload | null;
+  sessionId: string;
   fill?: boolean;
 }) {
   if (error) {
@@ -205,5 +224,13 @@ function ArtifactBody({
       return <ArtifactHtml spec={payload.spec} fill={fill} />;
     case "svg":
       return <ArtifactSvg spec={payload.spec} />;
+    case "image":
+      return (
+        <ArtifactImage sessionId={sessionId} spec={payload.spec} fill={fill} />
+      );
+    case "video":
+      return (
+        <ArtifactVideo sessionId={sessionId} spec={payload.spec} fill={fill} />
+      );
   }
 }

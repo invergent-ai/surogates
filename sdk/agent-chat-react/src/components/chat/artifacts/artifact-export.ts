@@ -45,6 +45,17 @@ export function exportArtifact(payload: ArtifactPayload): ArtifactExport {
         mime: "image/svg+xml",
         extension: "svg",
       };
+    // Media artifacts are file references — the bytes live in the
+    // workspace.  Copy yields the path; the download action in
+    // ArtifactBlock bypasses this serialisation and uses the
+    // authenticated workspace download URL directly.
+    case "image":
+    case "video":
+      return {
+        text: payload.spec.path,
+        mime: "text/plain",
+        extension: "txt",
+      };
   }
 }
 

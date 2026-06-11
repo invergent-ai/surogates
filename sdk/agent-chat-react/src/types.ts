@@ -523,7 +523,9 @@ export type AgentChatArtifactKind =
   | "table"
   | "chart"
   | "html"
-  | "svg";
+  | "svg"
+  | "image"
+  | "video";
 
 export interface AgentChatArtifactMeta {
   artifact_id: string;
@@ -560,6 +562,18 @@ export interface AgentChatSvgArtifactSpec {
   caption?: string | null;
 }
 
+/**
+ * File-backed media artifact (generated images/videos).  ``path`` is
+ * workspace-relative; the renderer streams the bytes through
+ * ``adapter.getWorkspaceDownloadUrl`` — the artifact store only holds
+ * this reference, never the media bytes.
+ */
+export interface AgentChatMediaArtifactSpec {
+  path: string;
+  mime_type?: string | null;
+  caption?: string | null;
+}
+
 export type AgentChatArtifactPayload =
   | {
       meta: AgentChatArtifactMeta;
@@ -569,7 +583,9 @@ export type AgentChatArtifactPayload =
   | { meta: AgentChatArtifactMeta; kind: "table"; spec: AgentChatTableArtifactSpec }
   | { meta: AgentChatArtifactMeta; kind: "chart"; spec: AgentChatChartArtifactSpec }
   | { meta: AgentChatArtifactMeta; kind: "html"; spec: AgentChatHtmlArtifactSpec }
-  | { meta: AgentChatArtifactMeta; kind: "svg"; spec: AgentChatSvgArtifactSpec };
+  | { meta: AgentChatArtifactMeta; kind: "svg"; spec: AgentChatSvgArtifactSpec }
+  | { meta: AgentChatArtifactMeta; kind: "image"; spec: AgentChatMediaArtifactSpec }
+  | { meta: AgentChatArtifactMeta; kind: "video"; spec: AgentChatMediaArtifactSpec };
 
 export interface AgentChatAskUserQuestionChoice {
   label: string;
