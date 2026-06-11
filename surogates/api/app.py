@@ -646,6 +646,7 @@ def create_app() -> FastAPI:
         artifacts,
         ask_user_question,
         auth,
+        board,
         browser,
         coding_agents,
         composio,
@@ -668,6 +669,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router, tags=["health"])
     app.include_router(auth.router, prefix="/v1", tags=["auth"])
     app.include_router(sessions.router, prefix="/v1", tags=["sessions"])
+    app.include_router(board.router, prefix="/v1", tags=["board"])
     app.include_router(events.router, prefix="/v1", tags=["events"])
     app.include_router(feedback.router, prefix="/v1", tags=["feedback"])
     # Service-account feedback (automated judges from the API channel)

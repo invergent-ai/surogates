@@ -25,8 +25,8 @@
 - [x] Task 8: Group propagation in the three spawn paths
 - [x] Task 9: Harness loop integration — BoardMixin, replay hydration
 - [x] Task 10: Claim-expiry sweep + three-clause purge job + wiring
-- [ ] Task 11: REST endpoint GET /v1/sessions/{id}/board ← in progress
-- [ ] Task 12: Docs page, full-suite verification, wrap-up
+- [x] Task 11: REST endpoint GET /v1/sessions/{id}/board
+- [ ] Task 12: Docs page, full-suite verification, wrap-up ← in progress
 
 ---
 
