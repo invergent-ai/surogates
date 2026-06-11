@@ -1112,19 +1112,24 @@ async def run_worker(settings: Settings) -> None:
                     agent_id=session.agent_id,
                 )
 
-        # Build a TurnSummarizer when both the summary auxiliary LLM is
-        # configured AND the kill-switch is on. Reuses the existing
-        # cheap-model client constructed for context compression so we
-        # avoid spinning up an extra AsyncOpenAI instance per turn.
+        # Build a TurnSummarizer when the kill-switch is on. The
+        # per-turn recap + artifact curation runs on the agent's base
+        # model (curating deliverables needs the strong model);
+        # iteration one-liners reuse the cheap summary client already
+        # constructed for context compression, and are skipped when no
+        # summary model is configured.
         from surogates.harness.turn_summarizer import TurnSummarizer
 
-        if (
-            settings.worker.emit_turn_summaries
-            and summary_slot is not None
-        ):
+        if settings.worker.emit_turn_summaries:
             turn_summarizer: TurnSummarizer | None = TurnSummarizer(
-                summary_client=summary_slot.client,
-                summary_model=summary_slot.model,
+                base_client=llm_client,
+                base_model=model_id,
+                summary_client=(
+                    summary_slot.client if summary_slot is not None else None
+                ),
+                summary_model=(
+                    summary_slot.model if summary_slot is not None else ""
+                ),
             )
         else:
             turn_summarizer = None

@@ -1,12 +1,18 @@
 """Per-iteration and per-turn LLM summaries for the Simple chat view.
 
-The :class:`TurnSummarizer` runs against the existing ``summary_model``
-auxiliary LLM (the cheap model already wired up for context compression
-and title generation) and produces:
+The :class:`TurnSummarizer` produces:
 
 * one-line imperative summaries for individual LLM iterations
-  ("Rework hero paragraph to introduce brain/hands metaphor"), and
-* a per-turn recap plus a curated artifact list (TurnSummaryCard).
+  ("Rework hero paragraph to introduce brain/hands metaphor"), run on
+  the cheap ``summary_model`` auxiliary LLM (already wired up for
+  context compression and title generation) because they fire on every
+  iteration, and
+* a per-turn recap plus a curated list of downloadable artifacts
+  (TurnSummaryCard), run on the agent's base model — picking the
+  user's actual deliverable out of a pile of intermediate workspace
+  files needs the stronger model, and it only runs once per turn.
+  Only downloadable deliverables — workspace files and created
+  artifacts — are surfaced; URLs and commands are not.
 
 Both methods degrade gracefully on timeouts, malformed responses, and
 unconfigured clients: they return ``None`` and the harness's caller is
@@ -23,25 +29,25 @@ from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
-# Soft cap on each model call so a hung provider can't stall the turn.
-_SUMMARY_TIMEOUT_SECONDS: float = 10.0
+# Soft caps so a hung provider can't stall the turn. The turn summary
+# runs on the base model, which is slower than the cheap summary model.
+_ITERATION_SUMMARY_TIMEOUT_SECONDS: float = 10.0
+_TURN_SUMMARY_TIMEOUT_SECONDS: float = 30.0
 
 _MAX_ITERATION_SUMMARY_TOKENS: int = 64
 _MAX_TURN_SUMMARY_TOKENS: int = 512
 
-TurnArtifactKind = Literal["file", "artifact", "url", "command"]
+TurnArtifactKind = Literal["file", "artifact"]
 
 
 @dataclass(frozen=True)
 class TurnArtifact:
-    """A single artifact reference shown in :class:`TurnSummaryCard`.
+    """A single downloadable artifact shown in :class:`TurnSummaryCard`.
 
     ``ref`` semantics depend on ``kind``:
 
     * ``file``     — workspace-relative file path
     * ``artifact`` — artifact id (matches ``artifact.created`` system event)
-    * ``url``      — absolute URL
-    * ``command``  — tool-call id of the originating ``terminal`` call
     """
 
     kind: TurnArtifactKind
@@ -71,38 +77,59 @@ _ITERATION_PROMPT = (
 )
 
 _TURN_PROMPT = (
-    "Summarize what an agent accomplished in this turn for the user. "
-    "Return ONLY a JSON object with two fields:\n"
-    "  recap: 1-3 short sentences in plain prose, no markdown\n"
-    "  artifacts: ONLY the final deliverables the user actually asked "
-    "for. Be strict — this is what gets surfaced as the user-visible "
-    "summary card, so noise here is worse than missing items.\n"
-    "    DROP: intermediate scripts the agent wrote and ran itself "
-    "(any candidate with executed_by_terminal=true is almost always "
-    "scaffolding — e.g. a python script used to render a chart that "
-    "the user wanted), read-only lookups, scratch files, and "
-    "debugging output. Source-code files (.py, .sh, .js, .ts) are "
-    "intermediate unless the user explicitly asked for code.\n"
-    "    KEEP: documents (.pdf, .docx, .pptx, .xlsx, .csv, .md), "
-    "media files (images, audio, video), datasets, archives, "
-    "created artifacts, and URLs/commands ONLY when they're the "
-    "actual point of the turn (not steps along the way).\n"
+    "You are reviewing a completed agent turn. Return ONLY a JSON "
+    "object with two fields:\n"
+    "  recap: 1-3 short sentences in plain prose, no markdown, "
+    "summarizing what the agent accomplished\n"
+    "  artifacts: the downloadable deliverable(s) that satisfy what "
+    "the user asked for. Re-read the user request first and work "
+    "backwards from it: what file(s) did the user actually ask to "
+    "receive? List those and nothing else — usually a single file. "
+    "This list becomes the user-visible download card, so an "
+    "intermediate file here is worse than a missing one.\n"
+    "    KEEP only the final deliverable matching the request: asked "
+    "for a presentation -> the .pptx; a report -> the .pdf/.docx/.md; "
+    "a dataset -> the .csv/.xlsx; an image/video -> that media file; "
+    "a created artifact -> that artifact.\n"
+    "    DROP everything intermediate: scripts the agent wrote and "
+    "ran itself (executed_by_terminal=true is almost always "
+    "scaffolding), source-code files (.py, .sh, .js, .ts) unless the "
+    "user explicitly asked for code, assets generated only to be "
+    "embedded in the final deliverable (e.g. chart images rendered "
+    "for a .pptx), scratch files, downloads the agent fetched as "
+    "inputs, and debugging output.\n"
     "  Each artifact is "
-    '{"kind": "file|artifact|url|command", "label": str, "ref": str}. '
-    "Return an empty artifacts list when no candidate is a real "
-    "deliverable for this user request."
+    '{"kind": "file|artifact", "label": str, "ref": str} — copy '
+    "kind and ref verbatim from the matching candidate. Return an "
+    "empty artifacts list when no candidate is a real deliverable "
+    "for this user request."
 )
 
 
-_VALID_KINDS: frozenset[str] = frozenset({"file", "artifact", "url", "command"})
+_VALID_KINDS: frozenset[str] = frozenset({"file", "artifact"})
 
 
 class TurnSummarizer:
-    """Produce one-line iteration summaries and per-turn recaps."""
+    """Produce one-line iteration summaries and per-turn recaps.
 
-    def __init__(self, *, summary_client: Any, summary_model: str) -> None:
-        self._client = summary_client
-        self._model = summary_model
+    Iteration summaries run on the cheap auxiliary ``summary_model``
+    (they fire on every iteration); the per-turn recap + artifact
+    curation runs on the agent's base model, which is reliable enough
+    to pick the user's actual deliverable out of intermediate files.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_client: Any,
+        base_model: str,
+        summary_client: Any | None = None,
+        summary_model: str = "",
+    ) -> None:
+        self._base_client = base_client
+        self._base_model = base_model
+        self._summary_client = summary_client
+        self._summary_model = summary_model
 
     async def summarize_iteration(
         self,
@@ -115,9 +142,12 @@ class TurnSummarizer:
     ) -> str | None:
         """Summarize a single LLM iteration as a one-line imperative.
 
-        Returns ``None`` when there's nothing to summarize, the model
-        returns a blank response, or the call fails / times out.
+        Returns ``None`` when there's nothing to summarize, no cheap
+        summary model is configured, the model returns a blank
+        response, or the call fails / times out.
         """
+        if self._summary_client is None or not self._summary_model:
+            return None
         if not reasoning and not tool_calls:
             return None
 
@@ -136,7 +166,7 @@ class TurnSummarizer:
         user_block = "\n\n".join(user_block_parts)
 
         kwargs: dict[str, Any] = {
-            "model": self._model,
+            "model": self._summary_model,
             "messages": [
                 {"role": "system", "content": _ITERATION_PROMPT},
                 {"role": "user", "content": user_block},
@@ -147,7 +177,10 @@ class TurnSummarizer:
         }
 
         content = await self._chat_completion(
-            kwargs, label=f"iteration {iteration_id}",
+            self._summary_client,
+            kwargs,
+            label=f"iteration {iteration_id}",
+            timeout=_ITERATION_SUMMARY_TIMEOUT_SECONDS,
         )
         if content is None:
             return None
@@ -191,7 +224,7 @@ class TurnSummarizer:
         user_block = "\n\n".join(user_block_parts)
 
         kwargs: dict[str, Any] = {
-            "model": self._model,
+            "model": self._base_model,
             "messages": [
                 {"role": "system", "content": _TURN_PROMPT},
                 {"role": "user", "content": user_block},
@@ -202,7 +235,12 @@ class TurnSummarizer:
             "response_format": {"type": "json_object"},
         }
 
-        content = await self._chat_completion(kwargs, label=f"turn {turn_id}")
+        content = await self._chat_completion(
+            self._base_client,
+            kwargs,
+            label=f"turn {turn_id}",
+            timeout=_TURN_SUMMARY_TIMEOUT_SECONDS,
+        )
         if not content:
             return None
 
@@ -230,19 +268,21 @@ class TurnSummarizer:
 
     async def _chat_completion(
         self,
+        client: Any,
         kwargs: dict[str, Any],
         *,
         label: str,
+        timeout: float,
     ) -> str | None:
-        """Run a single chat completion under the summary timeout.
+        """Run a single chat completion under the given timeout.
 
         Returns the message content on success, ``None`` on any failure
         (timeout, network error, malformed response shape).
         """
         try:
             response = await asyncio.wait_for(
-                self._client.chat.completions.create(**kwargs),
-                timeout=_SUMMARY_TIMEOUT_SECONDS,
+                client.chat.completions.create(**kwargs),
+                timeout=timeout,
             )
         except asyncio.TimeoutError:
             logger.warning("summary timed out for %s", label)
@@ -313,16 +353,11 @@ class TurnSummarizer:
                 continue
             if not label or not ref:
                 continue
-            # The summary LLM occasionally misclassifies workspace files
-            # as URLs (e.g. an uploaded PDF whose label sounds like a
-            # paper title). The frontend renders kind=url via <a href>,
-            # so a relative path resolves against the current page and
-            # 404s. Coerce based on whether ref looks like an absolute
-            # URL, regardless of what the model said.
-            is_absolute_url = ref.startswith(("http://", "https://"))
-            if kind == "url" and not is_absolute_url:
-                kind = "file"
-            elif kind == "file" and is_absolute_url:
-                kind = "url"
+            # The summary card only presents downloadable artifacts.
+            # The LLM occasionally smuggles a web URL through as
+            # kind=file; an absolute URL is not downloadable from the
+            # workspace, so drop it rather than render a dead entry.
+            if ref.startswith(("http://", "https://")):
+                continue
             out.append(TurnArtifact(kind=kind, label=label, ref=ref))
         return out

@@ -189,11 +189,16 @@ async def test_drain_passes_iteration_summaries_and_candidates(
     assert call["iteration_summaries"] == [
         "Outline the patch plan", "Apply the rewrite",
     ]
-    # patch + web_extract are surfaced; read_file is dropped (not notable).
+    # patch is surfaced; read_file (not notable) and web_extract (not
+    # downloadable — the summary card only presents downloadable
+    # artifacts) are dropped.
     candidate_kinds = [a.kind for a in call["candidate_artifacts"]]
     assert "file" in candidate_kinds
-    assert "url" in candidate_kinds
+    assert "url" not in candidate_kinds
     assert all(a.label != "x.md" for a in call["candidate_artifacts"])
+    assert all(
+        "example.com" not in a.ref for a in call["candidate_artifacts"]
+    )
 
 
 @pytest.mark.asyncio

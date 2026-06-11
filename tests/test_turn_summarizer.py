@@ -48,10 +48,25 @@ class _StubClient:
         self.chat = _StubChat(content)
 
 
+def _iteration_summarizer(client: Any, model: str = "m") -> TurnSummarizer:
+    """Summarizer whose cheap summary slot is the stub under test."""
+    return TurnSummarizer(
+        base_client=_StubClient("unused"),
+        base_model="base-model",
+        summary_client=client,
+        summary_model=model,
+    )
+
+
+def _turn_summarizer(client: Any, model: str = "m") -> TurnSummarizer:
+    """Summarizer whose base slot is the stub under test."""
+    return TurnSummarizer(base_client=client, base_model=model)
+
+
 @pytest.mark.asyncio
 async def test_summarize_iteration_returns_one_liner() -> None:
     client = _StubClient("Rework hero paragraph to introduce brain/hands metaphor")
-    summarizer = TurnSummarizer(summary_client=client, summary_model="cheap-model")
+    summarizer = _iteration_summarizer(client, "cheap-model")
 
     result = await summarizer.summarize_iteration(
         iteration_id="i0",
@@ -73,7 +88,7 @@ async def test_summarize_iteration_returns_one_liner() -> None:
 @pytest.mark.asyncio
 async def test_summarize_iteration_strips_quotes_and_trailing_period() -> None:
     client = _StubClient('"Outline the patch plan."')
-    summarizer = TurnSummarizer(summary_client=client, summary_model="m")
+    summarizer = _iteration_summarizer(client)
     result = await summarizer.summarize_iteration(
         iteration_id="i0",
         reasoning="x",
@@ -86,7 +101,7 @@ async def test_summarize_iteration_strips_quotes_and_trailing_period() -> None:
 @pytest.mark.asyncio
 async def test_summarize_iteration_returns_none_on_empty_input() -> None:
     client = _StubClient("noise")
-    summarizer = TurnSummarizer(summary_client=client, summary_model="m")
+    summarizer = _iteration_summarizer(client)
 
     result = await summarizer.summarize_iteration(
         iteration_id="i0",
@@ -102,7 +117,7 @@ async def test_summarize_iteration_returns_none_on_empty_input() -> None:
 @pytest.mark.asyncio
 async def test_summarize_iteration_returns_none_on_empty_response() -> None:
     client = _StubClient("")
-    summarizer = TurnSummarizer(summary_client=client, summary_model="m")
+    summarizer = _iteration_summarizer(client)
 
     result = await summarizer.summarize_iteration(
         iteration_id="i0",
@@ -116,7 +131,7 @@ async def test_summarize_iteration_returns_none_on_empty_response() -> None:
 @pytest.mark.asyncio
 async def test_summarize_iteration_includes_prior_summaries_in_prompt() -> None:
     client = _StubClient("Apply the rewrite")
-    summarizer = TurnSummarizer(summary_client=client, summary_model="m")
+    summarizer = _iteration_summarizer(client)
 
     await summarizer.summarize_iteration(
         iteration_id="i1",
@@ -142,7 +157,7 @@ async def test_summarize_iteration_returns_none_on_client_exception() -> None:
             )()},
         )
 
-    summarizer = TurnSummarizer(summary_client=_Boom(), summary_model="m")
+    summarizer = _iteration_summarizer(_Boom())
     result = await summarizer.summarize_iteration(
         iteration_id="i0",
         reasoning="x",
@@ -153,7 +168,9 @@ async def test_summarize_iteration_returns_none_on_client_exception() -> None:
 
 
 @pytest.mark.asyncio
-async def test_summarize_turn_returns_recap_and_artifacts() -> None:
+async def test_summarize_turn_returns_recap_and_downloadable_artifacts() -> None:
+    # The model echoing a url-kind entry must not survive parsing —
+    # the summary card only presents downloadable artifacts.
     payload = (
         '{"recap": "Reworked the hero around brain/hands.",'
         ' "artifacts": ['
@@ -162,7 +179,7 @@ async def test_summarize_turn_returns_recap_and_artifacts() -> None:
         ' ]}'
     )
     client = _StubClient(payload)
-    summarizer = TurnSummarizer(summary_client=client, summary_model="m")
+    summarizer = _turn_summarizer(client, "base-model")
 
     result = await summarizer.summarize_turn(
         turn_id="t1",
@@ -170,15 +187,58 @@ async def test_summarize_turn_returns_recap_and_artifacts() -> None:
         iteration_summaries=["Rework hero paragraph"],
         candidate_artifacts=[
             TurnArtifact(kind="file", label="landing.html", ref="landing.html"),
-            TurnArtifact(kind="url", label="example.com", ref="https://example.com"),
         ],
     )
 
     assert isinstance(result, TurnSummary)
     assert result.recap.startswith("Reworked the hero")
-    assert len(result.artifacts) == 2
+    assert len(result.artifacts) == 1
     assert result.artifacts[0].kind == "file"
     assert result.artifacts[0].label == "landing.html"
+    # The turn summary runs on the base model, not the cheap one.
+    assert client.chat.completions.calls[0]["model"] == "base-model"
+
+
+@pytest.mark.asyncio
+async def test_summarize_turn_drops_web_urls_smuggled_as_files() -> None:
+    payload = (
+        '{"recap": "Fetched the paper.",'
+        ' "artifacts": ['
+        '   {"kind": "file", "label": "paper", "ref": "https://example.com/p.pdf"},'
+        '   {"kind": "file", "label": "report.pdf", "ref": "report.pdf"}'
+        ' ]}'
+    )
+    client = _StubClient(payload)
+    summarizer = _turn_summarizer(client)
+
+    result = await summarizer.summarize_turn(
+        turn_id="t1",
+        user_message="x",
+        iteration_summaries=["s"],
+        candidate_artifacts=[
+            TurnArtifact(kind="file", label="report.pdf", ref="report.pdf"),
+        ],
+    )
+
+    assert result is not None
+    assert [a.ref for a in result.artifacts] == ["report.pdf"]
+
+
+@pytest.mark.asyncio
+async def test_summarize_iteration_skipped_without_summary_model() -> None:
+    """No cheap summary model configured: iteration summaries are
+    skipped gracefully (turn summaries still run on the base model)."""
+    base = _StubClient("unused")
+    summarizer = TurnSummarizer(base_client=base, base_model="base-model")
+
+    result = await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning="some reasoning",
+        tool_calls=[],
+        prior_iteration_summaries=[],
+    )
+    assert result is None
+    assert base.chat.completions.calls == []
 
 
 @pytest.mark.asyncio
@@ -191,7 +251,7 @@ async def test_summarize_turn_drops_unknown_artifact_kinds() -> None:
         ' ]}'
     )
     client = _StubClient(payload)
-    summarizer = TurnSummarizer(summary_client=client, summary_model="m")
+    summarizer = _turn_summarizer(client)
 
     result = await summarizer.summarize_turn(
         turn_id="t1",
@@ -210,7 +270,7 @@ async def test_summarize_turn_drops_unknown_artifact_kinds() -> None:
 @pytest.mark.asyncio
 async def test_summarize_turn_returns_none_on_invalid_json() -> None:
     client = _StubClient("not JSON at all")
-    summarizer = TurnSummarizer(summary_client=client, summary_model="m")
+    summarizer = _turn_summarizer(client)
 
     result = await summarizer.summarize_turn(
         turn_id="t1",
@@ -224,7 +284,7 @@ async def test_summarize_turn_returns_none_on_invalid_json() -> None:
 @pytest.mark.asyncio
 async def test_summarize_turn_returns_none_when_inputs_empty() -> None:
     client = _StubClient("noise")
-    summarizer = TurnSummarizer(summary_client=client, summary_model="m")
+    summarizer = _turn_summarizer(client)
 
     result = await summarizer.summarize_turn(
         turn_id="t1",
@@ -241,7 +301,7 @@ async def test_summarize_turn_returns_none_when_inputs_empty() -> None:
 async def test_summarize_turn_returns_none_when_recap_and_artifacts_empty() -> None:
     """LLM returned a structurally-valid response but empty fields."""
     client = _StubClient('{"recap": "", "artifacts": []}')
-    summarizer = TurnSummarizer(summary_client=client, summary_model="m")
+    summarizer = _turn_summarizer(client)
     result = await summarizer.summarize_turn(
         turn_id="t1",
         user_message="x",

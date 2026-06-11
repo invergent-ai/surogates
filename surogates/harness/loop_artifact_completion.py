@@ -254,6 +254,9 @@ class ArtifactCompletionMixin:
         )
 
         try:
+            # Outer backstop sits above the summarizer's own 30s
+            # timeout — the turn summary runs on the base model, which
+            # is slower than the cheap auxiliary.
             result = await asyncio.wait_for(
                 self._turn_summarizer.summarize_turn(
                     turn_id=turn_id,
@@ -261,7 +264,7 @@ class ArtifactCompletionMixin:
                     iteration_summaries=iteration_summaries,
                     candidate_artifacts=candidate_artifacts,
                 ),
-                timeout=10.0,
+                timeout=35.0,
             )
         except asyncio.TimeoutError:
             logger.warning("turn summary call timed out for %s", turn_id)
@@ -298,12 +301,13 @@ class ArtifactCompletionMixin:
         session_id: UUID,
         turn_id: str,
     ) -> list[Any]:
-        """Pull notable tool calls and artifacts emitted during this turn.
+        """Pull downloadable artifact candidates emitted during this turn.
 
         Returns a list of ``TurnArtifact`` instances from
-        :mod:`surogates.harness.turn_summarizer`. The summarizer
-        curates this list further; this method's job is to surface
-        every plausibly-relevant event so the LLM can pick.
+        :mod:`surogates.harness.turn_summarizer` — workspace files and
+        created artifacts only. The summarizer curates this list down
+        to the user's actual deliverables; this method's job is to
+        surface every plausibly-relevant file so the LLM can pick.
 
         Invariant: this method MUST only be called at the end of the
         queried turn (i.e. from ``_drain_and_emit_turn_summary`` inside
@@ -351,7 +355,6 @@ class ArtifactCompletionMixin:
                 name = str(data.get("name") or "")
                 raw_args = data.get("arguments")
                 args = _coerce_tool_args(raw_args)
-                tc_id = str(data.get("tool_call_id") or data.get("id") or "")
 
                 if name in {"write_file", "patch"}:
                     path = (
@@ -372,23 +375,14 @@ class ArtifactCompletionMixin:
                                 kind="artifact", label=label, ref=label,
                             ),
                         )
-                elif name in {"web_extract", "web_crawl"}:
-                    url = args.get("url") or ""
-                    if isinstance(url, str) and url:
-                        out.append(
-                            TurnArtifact(kind="url", label=url, ref=url),
-                        )
                 elif name == "terminal":
+                    # Not a candidate itself — the summary card only
+                    # presents downloadable artifacts — but commands
+                    # are kept to flag files the agent wrote and ran
+                    # (scaffolding) further down.
                     cmd = args.get("command") or ""
-                    if isinstance(cmd, str) and cmd and tc_id:
+                    if isinstance(cmd, str) and cmd:
                         terminal_commands.append(cmd)
-                        out.append(
-                            TurnArtifact(
-                                kind="command",
-                                label=cmd[:80],
-                                ref=tc_id,
-                            ),
-                        )
             elif etype_str == EventType.ARTIFACT_CREATED.value:
                 artifact_id = str(
                     data.get("artifact_id") or data.get("id") or "",
