@@ -24,8 +24,8 @@ Update this list (and the per-step checkboxes below) before each commit: `[ ]` p
 - [x] Task 4: `media_gen` builtin module — config object, schemas, save helpers, registration
 - [x] Task 5: `generate_image` happy-path + failure tests
 - [x] Task 6: `generate_video` poll-loop tests
-- [~] Task 7: Thread `media_gen` through worker → harness → executors
-- [ ] Task 8: Full-suite verification
+- [x] Task 7: Thread `media_gen` through worker → harness → executors
+- [~] Task 8: Full-suite verification
 
 ---
 
@@ -1512,7 +1512,7 @@ git commit -m "Cover generate_video job lifecycle: poll, fail, timeout, first fr
 - Modify: `surogates/harness/tool_exec.py` (every `vision_llm_client` site: signatures at lines ~599, ~718, ~825, ~989; pass-throughs at ~654, ~684, ~774, ~887, ~1352; kwargs dict at ~1290)
 - Test: `tests/test_media_gen_wiring.py` (create)
 
-- [ ] **Step 1: Write the failing wiring test**
+- [x] **Step 1: Write the failing wiring test**
 
 ```python
 """Signature-level wiring checks for the media_gen kwarg chain.
@@ -1541,12 +1541,12 @@ def test_media_gen_threaded_through_harness_signatures():
         assert "media_gen" in inspect.signature(fn).parameters, fn.__qualname__
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cd /work/surogates && uv run pytest tests/test_media_gen_wiring.py -v`
 Expected: FAIL on `AgentHarness.__init__`.
 
-- [ ] **Step 3: Make the edits**
+- [x] **Step 3: Make the edits**
 
 Ground truth for the executor chain: `grep -n "vision_llm_client" surogates/harness/tool_exec.py surogates/harness/streaming_executor.py surogates/harness/loop.py` — every hit gets a `media_gen` sibling line.
 
@@ -1637,7 +1637,7 @@ Ground truth for the executor chain: `grep -n "vision_llm_client" surogates/harn
 - Call-site pass-throughs (lines ~654, ~684, ~774, ~887, ~1352): add `media_gen=media_gen,` after `vision_model=vision_model,`.
 - The handler-kwargs dict (~line 1290, the one containing `"vision_llm_client": vision_llm_client,`): add `"media_gen": media_gen,`.
 
-- [ ] **Step 4: Verify nothing was missed and tests pass**
+- [x] **Step 4: Verify nothing was missed and tests pass**
 
 Run: `cd /work/surogates && grep -n "vision_llm_client" surogates/harness/tool_exec.py surogates/harness/streaming_executor.py surogates/harness/loop.py | wc -l && grep -n "media_gen" surogates/harness/tool_exec.py surogates/harness/streaming_executor.py surogates/harness/loop.py | wc -l`
 Expected: the `media_gen` count ≥ the `vision_llm_client` count in those files.
@@ -1645,7 +1645,7 @@ Expected: the `media_gen` count ≥ the `vision_llm_client` count in those files
 Run: `cd /work/surogates && uv run pytest tests/test_media_gen_wiring.py tests/test_media_gen_tools.py -v`
 Expected: all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /work/surogates

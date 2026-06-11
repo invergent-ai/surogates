@@ -141,6 +141,7 @@ class StreamingToolExecutor:
         vision_model: str = "",
         summary_llm_client: Any | None = None,
         summary_model: str | None = None,
+        media_gen: Any | None = None,
         saga: SagaOrchestrator | None = None,
         log_policy_allowed: bool = False,
         tool_guardrails: Any | None = None,
@@ -171,6 +172,7 @@ class StreamingToolExecutor:
         self._vision_model = vision_model
         self._summary_llm_client = summary_llm_client
         self._summary_model = summary_model
+        self._media_gen = media_gen
         self._saga = saga
         self._tool_guardrails = tool_guardrails
         self._bundle = bundle
@@ -362,6 +364,7 @@ class StreamingToolExecutor:
                 vision_model=self._vision_model,
                 summary_llm_client=self._summary_llm_client,
                 summary_model=self._summary_model,
+                media_gen=self._media_gen,
                 saga=self._saga,
                 log_policy_allowed=self._log_policy_allowed,
                 bundle=self._bundle,

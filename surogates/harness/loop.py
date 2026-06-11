@@ -325,6 +325,7 @@ class AgentHarness(
         advisor_model: str = "",
         advisor_max_calls_per_turn: int = 2,
         advisor_max_tokens: int = 700,
+        media_gen: Any | None = None,
         turn_summarizer: Any | None = None,
         bundle: Any | None = None,
         turn_gate: Any | None = None,
@@ -387,6 +388,11 @@ class AgentHarness(
         self._advisor_model: str = advisor_model or ""
         self._advisor_max_calls_per_turn = max(0, int(advisor_max_calls_per_turn))
         self._advisor_max_tokens = max(1, int(advisor_max_tokens))
+
+        # Per-session media-generation wiring (image client + video
+        # endpoint), passed opaquely down the executor kwarg chain to
+        # the generate_image / generate_video tools.
+        self._media_gen: Any | None = media_gen
 
         # Optional per-turn LLM summarizer for the Simple chat view.
         # When ``None`` (no summary_model configured, or
@@ -1405,6 +1411,7 @@ class AgentHarness(
                     vision_model=self._vision_model,
                     summary_llm_client=self._summary_client,
                     summary_model=self._summary_model,
+                    media_gen=self._media_gen,
                     saga=saga,
                     log_policy_allowed=self._log_policy_allowed,
                     tool_guardrails=tool_guardrails,
@@ -2091,6 +2098,7 @@ class AgentHarness(
                     vision_model=self._vision_model,
                     summary_llm_client=self._summary_client,
                     summary_model=self._summary_model,
+                    media_gen=self._media_gen,
                     saga=saga,
                     log_policy_allowed=self._log_policy_allowed,
                     bundle=self._bundle,

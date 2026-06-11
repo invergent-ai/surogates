@@ -833,10 +833,15 @@ async def run_worker(settings: Settings) -> None:
         # time by ops's ``create_shared_agent_extras``; an empty
         # main here means the agent's runtime config is broken and
         # the session deserves to fail fast.
-        from surogates.harness.session_llm import build_session_llm_clients
+        from surogates.harness.session_llm import (
+            build_session_llm_clients,
+            resolve_video_endpoint,
+        )
+        from surogates.tools.builtin.media_gen import MediaGenConfig
 
         llm_bundle = await build_session_llm_clients(
             ctx, vault=credential_vault, user_id=tenant.user_id,
+            settings=settings,
         )
 
         if not llm_bundle.main.model:
@@ -859,6 +864,24 @@ async def run_worker(settings: Settings) -> None:
         summary_slot = llm_bundle.summary
         vision_slot = llm_bundle.vision
         advisor_slot = llm_bundle.advisor
+        image_slot = llm_bundle.image
+        video_endpoint = await resolve_video_endpoint(
+            ctx, vault=credential_vault, user_id=tenant.user_id,
+            settings=settings,
+        )
+        media_gen_config = MediaGenConfig(
+            image_client=image_slot.client if image_slot is not None else None,
+            image_model=image_slot.model if image_slot is not None else "",
+            video_model=video_endpoint.model if video_endpoint is not None else "",
+            video_base_url=(
+                video_endpoint.base_url if video_endpoint is not None else ""
+            ),
+            video_api_key=(
+                video_endpoint.api_key if video_endpoint is not None else ""
+            ),
+            video_timeout=settings.llm.video_timeout,
+            video_poll_interval=settings.llm.video_poll_interval,
+        )
         compressor = ContextCompressor(
             model_id,
             base_url=settings.llm.base_url,
@@ -1148,6 +1171,7 @@ async def run_worker(settings: Settings) -> None:
             ),
             advisor_max_calls_per_turn=settings.llm.advisor_max_calls_per_turn,
             advisor_max_tokens=settings.llm.advisor_max_tokens,
+            media_gen=media_gen_config,
             turn_summarizer=turn_summarizer,
             # Share the per-session bundle with
             # the harness so sub-agent resolution at wake time can
