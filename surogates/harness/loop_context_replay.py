@@ -12,6 +12,7 @@ from surogates.harness.loop_attachments import (
     _render_inlined_attachments,
 )
 from surogates.harness.loop_messages import _view_context_note_from_metadata
+from surogates.harness.loop_tool_recovery import collapse_repeated_tool_rounds
 from surogates.harness.sanitize import strip_budget_warnings
 from surogates.session.events import EventType
 
@@ -222,7 +223,11 @@ class ContextReplayMixin:
         # Strip stale budget warnings from replayed tool results.
         strip_budget_warnings(messages)
 
-        return messages
+        # Repair histories poisoned by a prior identical-call loop:
+        # providers reject conversations that repeat the same tool call
+        # across consecutive rounds, which would make every resume of
+        # such a session fail with the same provider 400.
+        return collapse_repeated_tool_rounds(messages)
 
     # ------------------------------------------------------------------
     # Context engineering

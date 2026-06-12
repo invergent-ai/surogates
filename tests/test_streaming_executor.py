@@ -105,6 +105,7 @@ def _make_executor(**overrides: Any) -> StreamingToolExecutor:
         api_client=overrides.get("api_client"),
         session_factory=overrides.get("session_factory"),
         saga=overrides.get("saga"),
+        tool_guardrails=overrides.get("tool_guardrails"),
     )
 
 
@@ -1007,6 +1008,162 @@ class TestErrorHandling:
         # Both should have results.
         assert results[0]["tool_call_id"] == "tc_1"
         assert results[1]["tool_call_id"] == "tc_2"
+
+
+# ---------------------------------------------------------------------------
+# Tool loop guardrails
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingExecutorGuardrails:
+    """The streaming executor must enforce ToolGuardrails like tool_exec does.
+
+    Regression for the production session where ``create_artifact`` ran 5
+    times in a row with identical empty arguments and an identical failure
+    result: every call went through the streaming executor, which received
+    ``tool_guardrails`` but never invoked ``before_call``/``after_call``,
+    so the consecutive-no-progress block never fired and the provider
+    eventually rejected the whole conversation.
+    """
+
+    @staticmethod
+    def _failing_registry() -> MagicMock:
+        tools = _make_registry("create_artifact")
+
+        async def mock_dispatch(name, args, **kwargs):
+            mock_dispatch.calls += 1
+            return json.dumps({"success": False, "error": "name and kind are required."})
+
+        mock_dispatch.calls = 0
+        tools.dispatch = mock_dispatch
+        return tools
+
+    @pytest.mark.asyncio
+    async def test_consecutive_identical_failing_calls_blocked(self) -> None:
+        """The 4th identical call+result round must be blocked, not executed.
+
+        Guardrails are shared across executor instances the way the harness
+        loop shares one ``ToolGuardrails`` across per-iteration executors.
+        """
+        from surogates.harness.tool_guardrails import ToolGuardrails
+
+        guardrails = ToolGuardrails()
+        tools = self._failing_registry()
+        store = _make_store()
+
+        results = []
+        for i in range(4):
+            executor = _make_executor(
+                store=store, tools=tools, tool_guardrails=guardrails,
+            )
+            executor.add_tool(
+                _make_tool_call("create_artifact", {}, call_id=f"tc_{i}"),
+            )
+            batch = await executor.get_all_results()
+            results.extend(batch)
+
+        # Defaults block after 3 identical rounds: only 3 executions.
+        assert tools.dispatch.calls == 3
+        assert len(results) == 4
+        # The 4th result is a synthetic guardrail block, and the loop's
+        # halt check must see the halt decision.
+        assert "guardrail" in results[3]["content"]
+        assert guardrails.halt_decision is not None
+        assert guardrails.halt_decision.code == "consecutive_no_progress_block"
+
+    @pytest.mark.asyncio
+    async def test_warning_appended_to_repeated_identical_result(self) -> None:
+        """The 2nd identical round must carry the loop warning suffix."""
+        from surogates.harness.tool_guardrails import ToolGuardrails
+
+        guardrails = ToolGuardrails()
+        tools = self._failing_registry()
+        store = _make_store()
+
+        results = []
+        for i in range(2):
+            executor = _make_executor(
+                store=store, tools=tools, tool_guardrails=guardrails,
+            )
+            executor.add_tool(
+                _make_tool_call("create_artifact", {}, call_id=f"tc_{i}"),
+            )
+            results.extend(await executor.get_all_results())
+
+        assert "Tool loop warning" not in (results[0].get("content") or "")
+        assert "Tool loop warning" in (results[1].get("content") or "")
+
+    @pytest.mark.asyncio
+    async def test_blocked_call_emits_paired_events(self) -> None:
+        """A blocked call must still emit TOOL_CALL/TOOL_RESULT events so
+        the event log keeps coherent call/result pairs."""
+        from surogates.session.events import EventType
+        from surogates.harness.tool_guardrails import ToolGuardrails
+
+        guardrails = ToolGuardrails()
+        tools = self._failing_registry()
+        store = _make_store()
+
+        for i in range(4):
+            executor = _make_executor(
+                store=store, tools=tools, tool_guardrails=guardrails,
+            )
+            executor.add_tool(
+                _make_tool_call("create_artifact", {}, call_id=f"tc_{i}"),
+            )
+            await executor.get_all_results()
+
+        blocked_results = [
+            call for call in store.emit_event.call_args_list
+            if call.args[1] == EventType.TOOL_RESULT
+            and call.args[2].get("tool_call_id") == "tc_3"
+        ]
+        assert blocked_results, "blocked call must emit a tool.result event"
+        assert "guardrail" in blocked_results[-1].args[2].get("content", "")
+
+    @pytest.mark.asyncio
+    async def test_duplicate_signatures_in_batch_run_sequentially(self) -> None:
+        """Identical concurrency-safe calls in one batch must not overlap,
+        so ``after_call`` state from the first is visible to the second's
+        ``before_call`` (mirrors tool_exec's duplicate-signature rule)."""
+        from surogates.harness.tool_guardrails import ToolGuardrails
+
+        timeline: list[str] = []
+
+        async def mock_dispatch(name, args, **kwargs):
+            timeline.append("start")
+            await asyncio.sleep(0.01)
+            timeline.append("end")
+            return json.dumps({"error": "not found"})
+
+        guardrails = ToolGuardrails()
+        tools = _make_registry("read_file")
+        tools.dispatch = mock_dispatch
+        executor = _make_executor(tools=tools, tool_guardrails=guardrails)
+
+        executor.add_tool(_make_tool_call("read_file", {"path": "x"}, call_id="tc_1"))
+        executor.add_tool(_make_tool_call("read_file", {"path": "x"}, call_id="tc_2"))
+
+        results = await executor.get_all_results()
+
+        assert len(results) == 2
+        assert timeline == ["start", "end", "start", "end"]
+
+    @pytest.mark.asyncio
+    async def test_no_guardrails_keeps_existing_behaviour(self) -> None:
+        """Without guardrails the executor must execute everything as before."""
+        tools = self._failing_registry()
+
+        results = []
+        for i in range(5):
+            executor = _make_executor(tools=tools, tool_guardrails=None)
+            executor.add_tool(
+                _make_tool_call("create_artifact", {}, call_id=f"tc_{i}"),
+            )
+            results.extend(await executor.get_all_results())
+
+        assert tools.dispatch.calls == 5
+        assert all("guardrail" not in (r.get("content") or "") for r in results)
 
 
 # ---------------------------------------------------------------------------

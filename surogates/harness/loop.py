@@ -577,6 +577,32 @@ class AgentHarness(
             return True
         return False
 
+    async def _has_stranded_user_message(self, session_id: UUID) -> bool:
+        """Return True if a real user message landed past the harness cursor.
+
+        Detects the completion race: a reply sent between the final
+        ``llm.response`` and ``_complete_session``'s status flip is
+        appended while the session still reads 'active', so the API
+        never emits SESSION_RESUME — and a wake on the now-terminal
+        session would bail before looking at pending events.
+
+        Only non-synthetic messages count: mission continuations and
+        harness nudges must never revive a terminal session (same rule
+        as the dispatcher's crash-loop ``_has_user_signal_since``).
+        Completion bookkeeping events (turn.summary, session.complete,
+        inbox.task_complete) always sit past the cursor and are
+        excluded by the type filter.
+        """
+        cursor = await self._store.get_harness_cursor(session_id)
+        events = await self._store.get_events(
+            session_id,
+            after=cursor,
+            types=[EventType.USER_MESSAGE],
+        )
+        return any(
+            not (event.data or {}).get("synthetic") for event in events
+        )
+
     async def _abort_iteration_with_pause(
         self,
         session: Session,
@@ -718,14 +744,44 @@ class AgentHarness(
 
             # Bail out if the session was already paused/completed/failed
             # before this wake cycle -- prevents re-running a session
-            # the user stopped.
+            # the user stopped.  Exception: a real user message that
+            # landed past the harness cursor on a completed/failed
+            # session.  ``send_message`` only emits SESSION_RESUME when
+            # it *sees* a terminal status; a reply racing with
+            # ``_complete_session`` (sent between the final
+            # ``llm.response`` and the status flip) is appended while
+            # the session still reads 'active', so no resume ever lands
+            # and the message would be stranded forever.  Resume here —
+            # the message's own enqueue is what triggered this wake.
+            # Paused stays a hard stop: pause is an explicit user
+            # action, and send_message on a paused session resumes
+            # through the API path.
             if session.status in ("paused", "completed", "failed"):
-                logger.info(
-                    "Session %s: status is '%s', skipping wake",
-                    session_id,
-                    session.status,
-                )
-                return
+                if session.status in (
+                    "completed", "failed",
+                ) and await self._has_stranded_user_message(session_id):
+                    logger.info(
+                        "Session %s: status is '%s' but an unprocessed "
+                        "user message sits past the cursor — resuming",
+                        session_id,
+                        session.status,
+                    )
+                    await self._store.update_session_status(
+                        session_id, "active",
+                    )
+                    await self._store.emit_event(
+                        session_id,
+                        EventType.SESSION_RESUME,
+                        {"source": "stranded_user_message"},
+                    )
+                    session.status = "active"
+                else:
+                    logger.info(
+                        "Session %s: status is '%s', skipping wake",
+                        session_id,
+                        session.status,
+                    )
+                    return
 
             # Resolve the sub-agent type (if any) and hydrate session
             # config with its presets.  Wrapped in ``asyncio.wait_for``

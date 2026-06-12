@@ -45,7 +45,10 @@ VISION_ANALYZE_SCHEMA = ToolSchema(
         "Analyze an image from a workspace file path or HTTPS URL. "
         "Do NOT use this tool for images the user attached to their message — "
         "you can already see those directly. Only use this tool when you need "
-        "to fetch and analyze an image from a URL or a file in the workspace."
+        "to fetch and analyze an image from a URL or a file in the workspace. "
+        "Supports raster formats only: PNG, JPEG, WEBP, and GIF. "
+        "SVG files cannot be analyzed — they are vector (text/XML) images, "
+        "not raster pixels; read them as text instead."
     ),
     parameters={
         "type": "object",
@@ -54,7 +57,8 @@ VISION_ANALYZE_SCHEMA = ToolSchema(
                 "type": "string",
                 "description": (
                     "Workspace-relative image path, HTTPS image URL, "
-                    "or data:image base64 URL."
+                    "or data:image base64 URL. Must be a raster image "
+                    "(PNG, JPEG, WEBP, GIF); SVG is not supported."
                 ),
             },
             "question": {
