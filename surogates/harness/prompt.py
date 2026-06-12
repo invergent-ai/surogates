@@ -126,7 +126,8 @@ class PromptBuilder:
         self.has_agents: bool = bool(self._available_agents)
 
         # Knowledge bases attached to this agent. Each entry is a dict
-        # with keys: id, name, display_name, description. Rendered as
+        # with keys: id, name, display_name, description, mode
+        # (grounding|reference), pages_tree, pages_total. Rendered as
         # an "Available Knowledge Bases" block in the system prompt
         # so the LLM can pass kb_id to kb_list_pages / kb_read_page.
         self._available_kbs: list[dict] = list(available_kbs or [])
@@ -784,24 +785,77 @@ class PromptBuilder:
         cleanly by the join filter in build(). The IDs are rendered
         verbatim so the LLM can pass them to kb_list_pages and
         kb_read_page without guesswork.
+
+        Each attachment carries a ``mode``:
+
+        - ``grounding`` (default): the KB is authoritative for its
+          topics -- the agent is told to consult it before answering
+          in-scope questions instead of answering from memory.
+        - ``reference``: optional supporting material, consulted at the
+          agent's judgment.
+
+        Both modes render the KB's page tree (when provided by the
+        worker) so the agent can see what each KB covers instead of
+        guessing from the name alone.
         """
         if not self._available_kbs:
             return ""
-        lines = ["# Available Knowledge Bases", ""]
-        lines.append(
-            "You have access to the following knowledge bases. Use "
-            "`kb_list_pages` to see the structure of a KB and "
-            "`kb_read_page` to read individual pages. Pass the `id` "
-            "value below as the `kb_id` argument."
-        )
-        lines.append("")
-        for kb in self._available_kbs:
+
+        def _render_kb(kb: dict) -> list[str]:
             kb_id = kb.get("id", "")
             display_name = kb.get("display_name") or kb.get("name", "")
             description = (kb.get("description") or "").strip()
-            lines.append(f"- **{display_name}** (id: `{kb_id}`)")
+            out = [f"- **{display_name}** (id: `{kb_id}`)"]
             if description:
-                lines.append(f"  {description}")
+                out.append(f"  {description}")
+            tree = (kb.get("pages_tree") or "").strip()
+            if tree:
+                out.append("  Contents:")
+                out.extend(f"  {line}" for line in tree.splitlines())
+            return out
+
+        grounding = [
+            kb for kb in self._available_kbs
+            if (kb.get("mode") or "grounding") == "grounding"
+        ]
+        reference = [
+            kb for kb in self._available_kbs
+            if (kb.get("mode") or "grounding") != "grounding"
+        ]
+
+        lines = ["# Available Knowledge Bases", ""]
+        lines.append(
+            "Use `kb_list_pages` to list a knowledge base's pages and "
+            "`kb_read_page` to read one. Pass the `id` value below as "
+            "the `kb_id` argument."
+        )
+
+        if grounding:
+            lines.append("")
+            lines.append("## Authoritative (consult first)")
+            lines.append(
+                "These knowledge bases are your authoritative source "
+                "for the topics they cover. Before answering any "
+                "question within their scope, read the relevant "
+                "page(s) with `kb_read_page`. Do not answer from "
+                "memory when one of these covers the topic."
+            )
+            for kb in grounding:
+                lines.append("")
+                lines.extend(_render_kb(kb))
+
+        if reference:
+            lines.append("")
+            lines.append("## Reference (consult when relevant)")
+            lines.append(
+                "Optional supporting material. Consult these when the "
+                "question touches their topics or your own knowledge "
+                "is thin."
+            )
+            for kb in reference:
+                lines.append("")
+                lines.extend(_render_kb(kb))
+
         return "\n".join(lines)
 
     def _context_files_section(self) -> str:
