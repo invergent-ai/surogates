@@ -58,7 +58,8 @@ costs 1–3; 4 and 5 are explicitly out of scope (see Non-goals).
   case. Touching stat/list cache TTLs risks upload-visibility regressions
   (the UI writes `uploads/` directly to S3 mid-session). Follow-up if needed.
 - **Warm sandbox pool** for the ~8 s provisioning latency. Separate project;
-  this design makes it strictly easier (readiness = daemon up).
+  this design makes it strictly easier (the readiness probe already encodes
+  "ready to execute").
 - **Orphaned `Failed` sandbox pods** in `surogates-sandboxes` (46 observed) —
   separate hygiene issue.
 - `ProcessSandbox` (local/dev backend) — does not use tool-executor; untouched.
@@ -73,21 +74,53 @@ image and run as the sandbox container's main process (replacing
 `surogates` package, so the image gains no new dependencies.
 
 - **Boot:** import `ToolRegistry` / `ToolRuntime`, `register_builtins()`
-  once. The ~7.5 CPU-sec import happens during pod startup, hidden inside
-  provisioning.
-- **`POST /execute`** — body `{"name": str, "args": dict}`; runs
-  `registry.dispatch(name, args, workspace_path=$WORKSPACE_DIR, tools=registry)`
-  and returns the same JSON string the CLI printed on stdout today (raw body,
-  `text/plain`). Concurrent requests execute concurrently on the event loop;
-  a server-side `asyncio.Semaphore(8)` (matching `MAX_TOOL_WORKERS`) protects
-  pod CPU. Per-request `asyncio.wait_for(timeout)` where the timeout comes
-  from the request body (`"timeout"` key, defaulting to the spec default) —
-  on expiry return the same `timed_out` result JSON the exec path produced.
-- **`GET /healthz`** — 200 only when (a) the registry finished loading and
-  (b) `/workspace` is a live mount (`os.path.ismount` or the
-  `.s3fs-mounted` sentinel). 503 otherwise. Wired as the sandbox container's
-  `readinessProbe` (httpGet, port 8071); `provision()`'s existing
-  wait-for-Ready then automatically means "daemon and workspace ready".
+  once, *then* bind the port — an open port implies a warm registry. The
+  ~7.5 CPU-sec import happens during pod startup, hidden inside provisioning.
+- **Execution model — fork-per-request, not on the event loop.** Tool
+  handlers were written for process-per-call: they do blocking sync I/O and
+  CPU-bound work inside `async def` (a PDF `read_file` burns ~20 s in
+  liteparse; pypdfium/tesseract are native code that can segfault). Running
+  them on the daemon's event loop would starve `/healthz` — and
+  `_map_pod_status` maps Running-but-NotReady to `PENDING`, which
+  `SandboxPool.ensure()` treats as unhealthy and **destroys the sandbox
+  mid-tool**. Instead, each `/execute` forks a child via the
+  `multiprocessing` fork context (~ms, registry inherited copy-on-write);
+  the child runs `asyncio.run(registry.dispatch(name, args,
+  workspace_path=$WORKSPACE_DIR, tools=registry))` on a fresh event loop and
+  returns the result JSON over a pipe. This is byte-for-byte today's
+  process-per-call code path minus the import cost, and it preserves today's
+  semantics exactly: handler crashes (even segfaults) are contained to the
+  child, and in-memory caches are per-call (they already are — any useful
+  handler cache is disk-based). A `Semaphore(8)` (matching
+  `MAX_TOOL_WORKERS`) caps live children. Fork-safety: children never touch
+  the parent's event loop or sockets; Python's `logging` reinitialises its
+  locks at fork (`_at_fork_reinit`); the parent creates no global HTTP
+  clients.
+- **`POST /execute`** — body `{"name": str, "args": dict, "timeout": int}`
+  (timeout defaults to `SandboxSpec.timeout`); returns the same JSON string the
+  CLI printed on stdout today (raw body, `text/plain`). On timeout the
+  daemon SIGKILLs the child and returns the `timed_out` result JSON — an
+  improvement over the exec path, which abandoned the remote process and
+  left it running.
+- **`GET /healthz`** — 200 only when `$WORKSPACE_DIR` has a live FUSE mount,
+  detected by scanning `/proc/mounts` for an entry at that path with fstype
+  `fuse*`. Not `os.path.ismount` (true for the bare emptyDir bind-mount
+  before geesefs lands) and not the `.s3fs-mounted` sentinel (written in
+  fleet mode only — sandbox pods run the legacy entrypoint). Requiring the
+  mount unconditionally matches the existing invariant: a pod whose sidecar
+  has no `S3_BUCKET_PATH` already fails at startup.
+- **readinessProbe** (httpGet `/healthz`, port 8071) on the sandbox
+  container: `periodSeconds: 1, timeoutSeconds: 2, failureThreshold: 15`.
+  `provision()`'s existing wait-for-Ready then means "daemon and workspace
+  ready". This also fixes a latent race: today pod-Ready ≈
+  containers-running, while geesefs mounts asynchronously after its
+  container starts — the first tool could see an empty `/workspace`,
+  accidentally masked by the ~5 s Python import. Removing the import makes
+  the mount-gated probe a correctness requirement. Probe-flap safety: with
+  the fork model the daemon never starves `/healthz`, so NotReady (after 15
+  consecutive failures) means genuinely broken — daemon dead or mount gone —
+  and the resulting `ensure()` reprovision is desired self-healing, not
+  collateral damage.
 - **Auth:** every `/execute` call requires
   `Authorization: Bearer $TOOL_EXECUTOR_TOKEN`; constant-time compare; 401
   otherwise. `/healthz` is unauthenticated (kubelet probes it).
@@ -95,16 +128,19 @@ image and run as the sandbox container's main process (replacing
   manager) and `_code` (`pod_runner.dispatch`; its args are never logged —
   may carry a credential) keep their dedicated branches, identical to the
   current CLI behaviour, including the no-arg-logging rule.
-- **Shutdown:** SIGTERM → stop accepting, let in-flight requests finish
-  within the pod's termination grace period.
+- **Shutdown:** SIGTERM → stop accepting, let in-flight children finish
+  within the pod's termination grace period. (Worker-initiated
+  `destroy()` uses `grace_period_seconds=0`, as today — the session is over,
+  nothing to drain.)
 - **CLI compatibility:** `images/sandbox/tool-executor` becomes a thin client
-  that POSTs to `localhost:8071` using `TOOL_EXECUTOR_TOKEN` from its env.
-  Keeps the `kubectl exec <pod> -- tool-executor <name> <json>` debugging
-  affordance with exactly one dispatch path. The old in-CLI dispatch code is
-  deleted, not kept as a fallback.
+  that POSTs to `localhost:$TOOL_EXECUTOR_PORT` using `TOOL_EXECUTOR_TOKEN`
+  from its env. Keeps the `kubectl exec <pod> -- tool-executor <name>
+  <json>` debugging affordance with exactly one dispatch path. The old
+  in-CLI dispatch code is deleted, not kept as a fallback.
 
-Port 8071 is a new `SandboxSettings` field (`k8s_executor_port`), default
-8071.
+The port is a new `SandboxSettings` field (`k8s_executor_port`, default
+8071), injected into the pod env as `TOOL_EXECUTOR_PORT` so the daemon, the
+readinessProbe, and the CLI client all agree on it.
 
 ### 2. Worker side
 
@@ -162,13 +198,23 @@ new image. One failed tool call, then self-heal — this is the same path as
 daemon-crash recovery, not a parallel legacy branch. (Worker restarts also
 drop the in-memory pool mapping, so most sessions get fresh pods anyway.)
 
+Daemon-process death has a second detection path besides connect-refused:
+sandbox pods run with `restartPolicy: Never`, so if the daemon (now the
+container's main process) dies, the container terminates, the pod goes
+`Failed`, and the pool's next `status()` check maps it to `FAILED` →
+reprovision. Today's main process is `sleep infinity` and cannot die; the
+daemon can (e.g. parent-process OOM), so both paths matter.
+
 ## Testing
 
 - **Daemon unit tests** (FastAPI test client): 401 without/with-wrong token;
-  happy-path dispatch returns handler JSON; per-request timeout returns
-  `timed_out` JSON; `_checkpoint` and `_code` branches; N concurrent
-  `/execute` calls actually overlap; `/healthz` 503 before registry
-  load/mount, 200 after.
+  happy-path dispatch returns handler JSON; per-request timeout SIGKILLs the
+  child and returns `timed_out` JSON; `_checkpoint` and `_code` branches; N
+  concurrent `/execute` calls actually overlap; `/healthz` 503 without a
+  FUSE mount, 200 with one (fake `/proc/mounts` content); a CPU-bound
+  handler in flight does not delay `/healthz` responses; a child that dies
+  abnormally (simulated segfault via `os._exit`/signal) yields an
+  error-result JSON and leaves the daemon serving.
 - **Worker unit tests:** `KubernetesSandbox.execute()` against a mock server —
   result passthrough, connect-refused → `FAILED` + `SandboxUnavailableError`,
   read-timeout → `timed_out` JSON, 500 → error JSON.

@@ -97,7 +97,9 @@ _TURN_PROMPT = (
     "user explicitly asked for code, assets generated only to be "
     "embedded in the final deliverable (e.g. chart images rendered "
     "for a .pptx), scratch files, downloads the agent fetched as "
-    "inputs, and debugging output.\n"
+    "inputs, debugging output, and internal agent state (anything "
+    "under a hidden directory like .agents/ is context for future "
+    "turns, not a deliverable).\n"
     "  Each artifact is "
     '{"kind": "file|artifact", "label": str, "ref": str} — copy '
     "kind and ref verbatim from the matching candidate. Return an "
@@ -107,6 +109,21 @@ _TURN_PROMPT = (
 
 
 _VALID_KINDS: frozenset[str] = frozenset({"file", "artifact"})
+
+
+def _is_internal_workspace_path(path: str) -> bool:
+    """True for workspace paths that are never user deliverables.
+
+    Any hidden path segment marks agent-internal state (``.agents/``
+    skill context files, ``.claude/`` config, ``.cache/`` …), and
+    ``uploads/`` holds user-provided attachments — inputs, not
+    outputs. Filtered deterministically so they never reach the
+    summary LLM as candidates nor the user-visible download card.
+    """
+    segments = [s for s in path.split("/") if s]
+    if any(s.startswith(".") for s in segments):
+        return True
+    return bool(segments) and segments[0] == "uploads"
 
 
 class TurnSummarizer:
@@ -358,6 +375,10 @@ class TurnSummarizer:
             # kind=file; an absolute URL is not downloadable from the
             # workspace, so drop it rather than render a dead entry.
             if ref.startswith(("http://", "https://")):
+                continue
+            # Candidates are pre-filtered, but the model can still
+            # invent refs — never let internal paths reach the card.
+            if kind == "file" and _is_internal_workspace_path(ref):
                 continue
             out.append(TurnArtifact(kind=kind, label=label, ref=ref))
         return out
