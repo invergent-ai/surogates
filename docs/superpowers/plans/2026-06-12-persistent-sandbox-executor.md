@@ -17,7 +17,7 @@
 ## Status
 
 - [x] Task 1: Branch + SandboxPool lock fix
-- [ ] Task 2: executor_server module — mount detection
+- [x] Task 2: executor_server module — mount detection
 - [ ] Task 3: run_tool — the child-side dispatch
 - [ ] Task 4: execute_in_child — the fork runner
 - [ ] Task 5: create_app — HTTP layer
@@ -145,7 +145,7 @@ so parse `/proc/mounts` for a `fuse*` entry.
 - Create: `surogates/sandbox/executor_server.py`
 - Create: `tests/test_executor_server.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/test_executor_server.py`:
 
@@ -202,12 +202,12 @@ class TestWorkspaceMounted:
         assert executor_server.workspace_mounted("/workspace", "/nonexistent") is False
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_executor_server.py -v`
 Expected: FAIL with `ImportError: cannot import name 'executor_server'` (module doesn't exist)
 
-- [ ] **Step 3: Create the module**
+- [x] **Step 3: Create the module**
 
 Create `surogates/sandbox/executor_server.py`. Note: several imports
 (`hmac`, `os`, `sys`, FastAPI symbols) are used by functions added in the
@@ -305,12 +305,12 @@ def workspace_mounted(workspace: str, mounts_path: str = "/proc/mounts") -> bool
     return False
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_executor_server.py -v`
 Expected: 5 PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add surogates/sandbox/executor_server.py tests/test_executor_server.py
