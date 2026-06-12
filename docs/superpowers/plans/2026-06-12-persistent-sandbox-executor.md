@@ -14,6 +14,19 @@
 
 **Test command:** `uv run pytest tests/<file> -v` (pytest config in pyproject.toml; `asyncio_mode=auto`, so `async def` tests need no decorator)
 
+## Status
+
+- [x] Task 1: Branch + SandboxPool lock fix
+- [x] Task 2: executor_server module — mount detection
+- [x] Task 3: run_tool — the child-side dispatch
+- [x] Task 4: execute_in_child — the fork runner
+- [x] Task 5: create_app — HTTP layer
+- [x] Task 6: main() entry, thin-client CLI, Dockerfile CMD
+- [x] Task 7: Worker-side settings, pod manifest, provisioning
+- [x] Task 8: execute() over HTTP; delete the exec machinery
+- [x] Task 9: NetworkPolicy manifest
+- [x] Task 10: Docs, integration test, full verification
+
 ---
 
 ### Task 1: Branch + SandboxPool lock fix
@@ -28,13 +41,13 @@ needs the lock to read the mapping.
 - Modify: `surogates/sandbox/pool.py:108-120`
 - Test: `tests/test_sandbox.py` (append to `TestSandboxPool`)
 
-- [ ] **Step 1: Create the branch**
+- [x] **Step 1: Create the branch**
 
 ```bash
 cd /work/surogates && git checkout -b persistent-tool-executor
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Append to the `TestSandboxPool` class in `tests/test_sandbox.py`:
 
@@ -74,12 +87,12 @@ Append to the `TestSandboxPool` class in `tests/test_sandbox.py`:
 Check the imports at the top of `tests/test_sandbox.py` — `asyncio`,
 `SandboxPool`, and `SandboxSpec` are already imported there.
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_sandbox.py::TestSandboxPool::test_execute_calls_overlap_for_same_session -v`
 Expected: FAIL with `execute() calls serialized: 0.60s`
 
-- [ ] **Step 4: Implement the lock fix**
+- [x] **Step 4: Implement the lock fix**
 
 In `surogates/sandbox/pool.py`, replace the `execute` method (lines 108-120):
 
@@ -107,12 +120,12 @@ In `surogates/sandbox/pool.py`, replace the `execute` method (lines 108-120):
         return await self._backend.execute(sandbox_id, name, input)
 ```
 
-- [ ] **Step 5: Run the test file to verify it passes (and nothing broke)**
+- [x] **Step 5: Run the test file to verify it passes (and nothing broke)**
 
 Run: `uv run pytest tests/test_sandbox.py -v`
 Expected: all PASS, including `test_execute_calls_overlap_for_same_session`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add surogates/sandbox/pool.py tests/test_sandbox.py
@@ -132,7 +145,7 @@ so parse `/proc/mounts` for a `fuse*` entry.
 - Create: `surogates/sandbox/executor_server.py`
 - Create: `tests/test_executor_server.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/test_executor_server.py`:
 
@@ -189,12 +202,12 @@ class TestWorkspaceMounted:
         assert executor_server.workspace_mounted("/workspace", "/nonexistent") is False
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_executor_server.py -v`
 Expected: FAIL with `ImportError: cannot import name 'executor_server'` (module doesn't exist)
 
-- [ ] **Step 3: Create the module**
+- [x] **Step 3: Create the module**
 
 Create `surogates/sandbox/executor_server.py`. Note: several imports
 (`hmac`, `os`, `sys`, FastAPI symbols) are used by functions added in the
@@ -292,12 +305,12 @@ def workspace_mounted(workspace: str, mounts_path: str = "/proc/mounts") -> bool
     return False
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_executor_server.py -v`
 Expected: 5 PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add surogates/sandbox/executor_server.py tests/test_executor_server.py
@@ -316,7 +329,7 @@ runs inside the forked child (it may block freely).
 - Modify: `surogates/sandbox/executor_server.py` (append)
 - Test: `tests/test_executor_server.py` (append)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_executor_server.py`:
 
@@ -396,12 +409,12 @@ class TestRunTool:
         assert result == {"ok": True, "action": "status"}
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_executor_server.py::TestRunTool -v`
 Expected: FAIL with `AttributeError: module ... has no attribute 'run_tool'`
 
-- [ ] **Step 3: Implement run_tool**
+- [x] **Step 3: Implement run_tool**
 
 Append to `surogates/sandbox/executor_server.py`:
 
@@ -478,12 +491,12 @@ def run_tool(name: str, args: dict, workspace: str) -> str:
         })
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_executor_server.py -v`
 Expected: all PASS (10 tests)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add surogates/sandbox/executor_server.py tests/test_executor_server.py
@@ -501,7 +514,7 @@ classify abnormal child death.
 - Modify: `surogates/sandbox/executor_server.py` (append)
 - Test: `tests/test_executor_server.py` (append)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_executor_server.py`:
 
@@ -541,12 +554,12 @@ class TestExecuteInChild:
         assert "7" in result["error"]
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_executor_server.py::TestExecuteInChild -v`
 Expected: FAIL with `AttributeError: ... has no attribute 'execute_in_child'`
 
-- [ ] **Step 3: Implement the fork runner**
+- [x] **Step 3: Implement the fork runner**
 
 Append to `surogates/sandbox/executor_server.py`:
 
@@ -626,12 +639,12 @@ async def execute_in_child(
         await asyncio.to_thread(proc.join, 5)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_executor_server.py -v`
 Expected: all PASS (13 tests)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add surogates/sandbox/executor_server.py tests/test_executor_server.py
@@ -646,7 +659,7 @@ git commit -m "Run each tool call in a killable forked child"
 - Modify: `surogates/sandbox/executor_server.py` (append)
 - Test: `tests/test_executor_server.py` (append)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_executor_server.py` — move the `import httpx` line up
 into the import block at the top of the file (shown inline here for
@@ -788,12 +801,12 @@ class TestHttpLayer:
             assert json.loads(resp.text)["ok"] is True
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_executor_server.py::TestHttpLayer -v`
 Expected: FAIL with `AttributeError: ... has no attribute 'create_app'`
 
-- [ ] **Step 3: Implement the HTTP layer**
+- [x] **Step 3: Implement the HTTP layer**
 
 Append to `surogates/sandbox/executor_server.py`:
 
@@ -862,12 +875,12 @@ def create_app(
     return app
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_executor_server.py -v`
 Expected: all PASS (22 tests)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add surogates/sandbox/executor_server.py tests/test_executor_server.py
@@ -889,7 +902,7 @@ kept. The old in-CLI dispatch code is deleted.
 - Modify: `images/sandbox/Dockerfile` (CMD only)
 - Test: `tests/test_executor_server.py` (append)
 
-- [ ] **Step 1: Write the failing test (thin client end-to-end over a real port)**
+- [x] **Step 1: Write the failing test (thin client end-to-end over a real port)**
 
 Append to `tests/test_executor_server.py` — move the `subprocess`, `sys`,
 and `uvicorn` imports up into the import block at the top of the file
@@ -941,13 +954,13 @@ class TestThinClientCli:
             await serve_task
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `uv run pytest tests/test_executor_server.py::TestThinClientCli -v`
 Expected: FAIL — the current CLI ignores `TOOL_EXECUTOR_PORT` and tries to
 dispatch through the real registry (wrong output or import-time failure).
 
-- [ ] **Step 3: Add main() to the daemon**
+- [x] **Step 3: Add main() to the daemon**
 
 Append to `surogates/sandbox/executor_server.py`:
 
@@ -985,7 +998,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 4: Rewrite the CLI as a thin client**
+- [x] **Step 4: Rewrite the CLI as a thin client**
 
 Replace the entire contents of `images/sandbox/tool-executor`:
 
@@ -1044,7 +1057,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 5: Update the Dockerfile CMD**
+- [x] **Step 5: Update the Dockerfile CMD**
 
 In `images/sandbox/Dockerfile`, replace the final line:
 
@@ -1061,12 +1074,12 @@ CMD ["python", "-m", "surogates.sandbox.executor_server"]
 (The pod manifest sets an explicit `command` anyway — see Task 7 — but the
 image default should match the real role.)
 
-- [ ] **Step 6: Run the test to verify it passes**
+- [x] **Step 6: Run the test to verify it passes**
 
 Run: `uv run pytest tests/test_executor_server.py -v`
 Expected: all PASS (23 tests)
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add surogates/sandbox/executor_server.py images/sandbox/tool-executor images/sandbox/Dockerfile tests/test_executor_server.py
@@ -1087,7 +1100,7 @@ Remove the now-meaningless `executor_path` knob (no legacy fallback).
 - Modify: `surogates/orchestrator/worker.py:592` (K8sSandbox construction)
 - Test: `tests/test_k8s_sandbox.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `tests/test_k8s_sandbox.py`, update the `sandbox` fixture (line ~21):
 replace `executor_path="/usr/local/bin/tool-executor",` with
@@ -1175,14 +1188,14 @@ class TestProvisionCapturesEndpoint:
                 await sandbox.provision(SandboxSpec())
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_k8s_sandbox.py -v`
 Expected: the new tests FAIL (`unexpected keyword argument 'executor_port'`,
 `'executor_token'`); pre-existing manifest tests now also FAIL on the changed
 fixture — that's expected until Step 3 lands.
 
-- [ ] **Step 3: Implement settings + kubernetes.py changes**
+- [x] **Step 3: Implement settings + kubernetes.py changes**
 
 **`surogates/config.py`** — in `SandboxSettings`, replace:
 
@@ -1344,7 +1357,7 @@ with:
             executor_port=settings.sandbox.k8s_executor_port,
 ```
 
-- [ ] **Step 4: Run the test file**
+- [x] **Step 4: Run the test file**
 
 Run: `uv run pytest tests/test_k8s_sandbox.py -v`
 Expected: new tests PASS; pre-existing tests PASS again (fixture +
@@ -1352,7 +1365,7 @@ callsites updated in Step 1). If any old test asserts on
 `command == ["sleep", "infinity"]`, update that assertion to the new
 daemon command.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add surogates/config.py surogates/sandbox/kubernetes.py surogates/orchestrator/worker.py tests/test_k8s_sandbox.py
@@ -1368,7 +1381,7 @@ git commit -m "Provision sandbox pods with the executor daemon, token, and readi
 - Modify: `surogates/orchestrator/worker.py:1297` (shutdown)
 - Test: `tests/test_k8s_sandbox.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_k8s_sandbox.py` — move the three import lines up into
 the import block at the top of the file (shown inline here for
@@ -1487,13 +1500,13 @@ class TestExecuteHttp:
             await sandbox.aclose()
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_k8s_sandbox.py::TestExecuteHttp -v`
 Expected: FAIL — current `execute()` goes through `_exec_in_pod` (K8s exec),
 and `aclose()` doesn't exist.
 
-- [ ] **Step 3: Rewrite execute() and delete the exec machinery**
+- [x] **Step 3: Rewrite execute() and delete the exec machinery**
 
 In `surogates/sandbox/kubernetes.py`:
 
@@ -1620,20 +1633,20 @@ the rewrite (the module-top import from Task 7 serves the new code).
 (`sandbox_backend` is in scope — it's constructed in the same function at
 line ~586. `ProcessSandbox` has no `aclose`, hence the getattr guard.)
 
-- [ ] **Step 4: Run the full sandbox test files**
+- [x] **Step 4: Run the full sandbox test files**
 
 Run: `uv run pytest tests/test_k8s_sandbox.py tests/test_sandbox.py tests/test_executor_server.py -v`
 Expected: all PASS. Old exec-path tests in `test_k8s_sandbox.py` that mocked
 `_exec_in_pod` will now fail to patch a missing attribute — delete those
 tests (they tested deleted code; `TestExecuteHttp` is their replacement).
 
-- [ ] **Step 5: Run the wider suite for collateral damage**
+- [x] **Step 5: Run the wider suite for collateral damage**
 
 Run: `uv run pytest tests/ -x -q 2>&1 | tail -20`
 Expected: PASS (browser_e2e/live markers are excluded by default). Fix any
 import fallout (e.g. a test importing `executor_path`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add surogates/sandbox/kubernetes.py surogates/orchestrator/worker.py tests/test_k8s_sandbox.py
@@ -1654,7 +1667,7 @@ the `surogates` namespace carries `kubernetes.io/metadata.name=surogates`.
 **Files:**
 - Create: `scripts/k8s/sandbox-executor-networkpolicy.yaml`
 
-- [ ] **Step 1: Write the manifest**
+- [x] **Step 1: Write the manifest**
 
 Create `scripts/k8s/sandbox-executor-networkpolicy.yaml`:
 
@@ -1699,12 +1712,12 @@ spec:
           port: 8071
 ```
 
-- [ ] **Step 2: Validate the manifest parses**
+- [x] **Step 2: Validate the manifest parses**
 
 Run: `python3 -c "import yaml; yaml.safe_load(open('scripts/k8s/sandbox-executor-networkpolicy.yaml')); print('ok')"`
 Expected: `ok`
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add scripts/k8s/sandbox-executor-networkpolicy.yaml
@@ -1720,7 +1733,7 @@ git commit -m "Add NetworkPolicy restricting sandbox executor ingress to runtime
 - Modify: `docs/architecture/index.md:87`
 - Create: `tests/test_executor_integration.py`
 
-- [ ] **Step 1: Update the architecture docs**
+- [x] **Step 1: Update the architecture docs**
 
 In `CLAUDE.md` line ~90, replace:
 
@@ -1752,7 +1765,7 @@ Run: `grep -rn "sleep infinity\|exec'd\|k8s-exec" CLAUDE.md docs/architecture/ -
 Update any remaining hit that describes the sandbox dispatch path
 (specs/plans under `docs/superpowers/` are historical records — leave them).
 
-- [ ] **Step 2: Write the opt-in live integration test**
+- [x] **Step 2: Write the opt-in live integration test**
 
 Create `tests/test_executor_integration.py`:
 
@@ -1874,7 +1887,7 @@ async def test_latency_overlap_and_failure_classification(live_sandbox):
         await live_sandbox.aclose()
 ```
 
-- [ ] **Step 3: Verify the integration test is collected but skipped by default**
+- [x] **Step 3: Verify the integration test is collected but skipped by default**
 
 Run: `uv run pytest tests/test_executor_integration.py -v`
 Expected: `no tests ran` (deselected — the `live` marker is excluded by the
@@ -1883,7 +1896,7 @@ default `addopts` in pyproject.toml)
 Run: `SUROGATES_K8S_INTEGRATION= uv run pytest tests/test_executor_integration.py -m live -v`
 Expected: 1 skipped (env gate)
 
-- [ ] **Step 4: Build the sandbox image and run the live test (local cluster)**
+- [x] **Step 4: Build the sandbox image and run the live test (local cluster)**
 
 ```bash
 docker build -t ghcr.io/invergent-ai/surogates-agent-sandbox:dev -f images/sandbox/Dockerfile .
@@ -1895,7 +1908,7 @@ S3 values from `config.dev.yaml` (local Garage endpoint + credentials).
 Expected: PASS — warm `list_files` < 1 s, batch of 4 ≈ max not sum, pod-kill
 classified as `SandboxUnavailableError`.
 
-- [ ] **Step 5: Full suite + lint**
+- [x] **Step 5: Full suite + lint**
 
 ```bash
 uv run pytest tests/ -q 2>&1 | tail -5
@@ -1904,7 +1917,7 @@ uv run ruff check surogates/sandbox/ tests/test_executor_server.py
 
 Expected: tests PASS; ruff clean (fix anything it flags).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add CLAUDE.md docs/architecture/index.md tests/test_executor_integration.py

@@ -1,0 +1,38 @@
+# Restricts ingress to sandbox pods: only runtime-worker pods (in the
+# `surogates` namespace) may reach the tool-executor daemon port.
+# Token auth on the daemon is the primary control; this is hardening.
+#
+# Apply (PROD):
+#   kubectl apply -f scripts/k8s/sandbox-executor-networkpolicy.yaml
+#
+# IMPORTANT: after applying, verify kubelet readiness probes still reach
+# the daemon port under the cluster CNI — most CNIs exempt host/kubelet
+# traffic from NetworkPolicy, but confirm it, don't assume it:
+#   kubectl get pods -n surogates-sandboxes \
+#     -o custom-columns=NAME:.metadata.name,READY:.status.conditions[?(@.type==\"Ready\")].status
+# A freshly provisioned sandbox must reach Ready=True. If probes are
+# blocked, the CNI needs a host-traffic exemption before this policy
+# can stay.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-executor-ingress
+  namespace: surogates-sandboxes
+spec:
+  podSelector:
+    matchLabels:
+      app: surogates-sandbox
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: surogates
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: surogates-runtime
+              app.kubernetes.io/component: worker
+      ports:
+        - protocol: TCP
+          port: 8071

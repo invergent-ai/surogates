@@ -102,4 +102,5 @@ dev = [
     # tests/tools/fixtures/build_documents.py.  Production parsing goes
     # through liteparse; reportlab is never imported by surogates code.
     "reportlab>=4.0",
+    "aiosqlite>=0.22",
 ]

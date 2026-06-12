@@ -166,4 +166,4 @@ USER sandbox
 WORKDIR /workspace
 
 ENTRYPOINT ["tini", "--"]
-CMD ["sleep", "infinity"]
+CMD ["python", "-m", "surogates.sandbox.executor_server"]

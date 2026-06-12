@@ -1,39 +1,26 @@
 #!/usr/bin/env python3
-"""Tool executor — runs inside the sandbox pod.
+"""Thin client for the tool-executor daemon — debugging affordance.
 
-Dispatches tool calls through the real surogates tool handlers using
-a local ProcessSandbox.  The worker K8s-execs into the sandbox pod
-with: tool-executor <tool_name> <json_args>
+The daemon (``surogates.sandbox.executor_server``, the sandbox
+container's main process) is the single dispatch path; this script just
+forwards one call to it so the familiar invocation keeps working:
 
-Output: JSON result on stdout.
-Logs: written to stderr (visible in pod logs, not in tool result).
+    kubectl exec <sandbox-pod> -c sandbox -- tool-executor <name> <json_args>
+
+Output: the daemon's JSON result on stdout (same shapes as before).
 """
 
-import asyncio
 import json
-import logging
 import os
 import sys
-import time
-
-# Logging goes to a file so it doesn't pollute the JSON result on stdout
-# and is persistent across exec invocations.  View with:
-#   kubectl exec <sandbox-pod> -c sandbox -- cat /tmp/tool-executor.log
-_LOG_FILE = os.environ.get("TOOL_EXECUTOR_LOG", "/tmp/tool-executor.log")
-logging.basicConfig(
-    filename=_LOG_FILE,
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger("tool-executor")
+import urllib.request
 
 
-async def main() -> None:
-    tool_name = sys.argv[1] if len(sys.argv) > 1 else ""
-    tool_args_raw = sys.argv[2] if len(sys.argv) > 2 else "{}"
+def main() -> None:
+    name = sys.argv[1] if len(sys.argv) > 1 else ""
+    raw = sys.argv[2] if len(sys.argv) > 2 else "{}"
 
-    if not tool_name:
+    if not name:
         print(json.dumps({
             "exit_code": 1,
             "output": "",
@@ -42,133 +29,24 @@ async def main() -> None:
         return
 
     try:
-        tool_args = json.loads(tool_args_raw)
+        args = json.loads(raw)
     except json.JSONDecodeError:
-        tool_args = {}
+        args = {}
 
-    workspace = os.environ.get("WORKSPACE_DIR", "/workspace")
-
-    # Log the incoming call (truncate args for readability).  The _code
-    # launcher payload can carry a credential, so its args are never logged.
-    if tool_name == "_code":
-        logger.info("→ _code")
-    else:
-        args_preview = tool_args_raw[:200] + ("..." if len(tool_args_raw) > 200 else "")
-        logger.info("→ %s %s", tool_name, args_preview)
-
-    start = time.monotonic()
-
-    # Internal commands — handled directly.
-    if tool_name == "_checkpoint":
-        await _handle_checkpoint(tool_args, workspace)
-        duration = time.monotonic() - start
-        logger.info("← %s completed in %.2fs", tool_name, duration)
-        return
-
-    if tool_name == "_code":
-        # /code run launcher.  The payload may carry a credential on launch,
-        # so it is never logged here (only the action verb is).
-        from surogates.coding_agents.pod_runner import dispatch as code_dispatch
-
-        result = code_dispatch(tool_args)
-        duration = time.monotonic() - start
-        logger.info("← _code action=%s done in %.2fs",
-                    tool_args.get("action"), duration)
-        print(json.dumps(result))
-        return
-
-    # Register the real tool handlers.
-    from surogates.tools.registry import ToolRegistry
-    from surogates.tools.runtime import ToolRuntime
-
-    registry = ToolRegistry()
-    runtime = ToolRuntime(registry)
-    runtime.register_builtins()
-
-    # Dispatch through the registry — runs the real Python handler.
-    try:
-        result = await registry.dispatch(
-            tool_name,
-            tool_args,
-            workspace_path=workspace,
-            tools=registry,
-        )
-        duration = time.monotonic() - start
-
-        # Log result summary.
-        result_len = len(result) if result else 0
-        try:
-            parsed = json.loads(result)
-            exit_code = parsed.get("exit_code", parsed.get("returncode", "?"))
-            error = parsed.get("error", "")
-            if error:
-                logger.warning("← %s exit=%s error=%s (%.2fs, %d bytes)",
-                               tool_name, exit_code, error[:100], duration, result_len)
-            else:
-                logger.info("← %s exit=%s (%.2fs, %d bytes)",
-                            tool_name, exit_code, duration, result_len)
-        except (json.JSONDecodeError, TypeError):
-            logger.info("← %s (%.2fs, %d bytes)", tool_name, duration, result_len)
-
-        print(result)
-
-    except KeyError:
-        duration = time.monotonic() - start
-        logger.error("← %s UNKNOWN TOOL (%.2fs)", tool_name, duration)
-        print(json.dumps({
-            "exit_code": 1,
-            "output": "",
-            "error": f"Unknown tool: {tool_name}",
-        }))
-    except Exception as exc:
-        duration = time.monotonic() - start
-        logger.error("← %s EXCEPTION: %s (%.2fs)", tool_name, exc, duration, exc_info=True)
-        print(json.dumps({
-            "exit_code": 1,
-            "output": "",
-            "error": str(exc),
-        }))
-
-
-async def _handle_checkpoint(args: dict, workspace: str) -> None:
-    """Handle _checkpoint internal commands."""
-    from surogates.tools.utils.checkpoint_manager import CheckpointManager
-
-    action = args.get("action", "take")
-    mgr = CheckpointManager(enabled=True)
-    logger.info("checkpoint action=%s", action)
-
-    if action == "new_turn":
-        mgr.new_turn()
-        print(json.dumps({"success": True, "action": "new_turn"}))
-    elif action == "take":
-        reason = args.get("reason", "auto")
-        file_path = args.get("file_path")
-        workdir = workspace
-        if file_path:
-            workdir = mgr.get_working_dir_for_path(file_path)
-        ok = mgr.ensure_checkpoint(workdir, reason)
-        result = {"success": ok, "action": "take"}
-        if ok:
-            h = mgr.latest_hash(workdir)
-            if h:
-                result["hash"] = h
-        logger.info("checkpoint take: %s", "ok" if ok else "skipped")
-        print(json.dumps(result))
-    elif action == "latest_hash":
-        h = mgr.latest_hash(workspace)
-        print(json.dumps({"success": True, "hash": h}))
-    elif action == "list":
-        cps = mgr.list_checkpoints(workspace)
-        print(json.dumps({"success": True, "checkpoints": cps}))
-    elif action == "restore":
-        ch = args.get("hash", "")
-        fp = args.get("file_path")
-        r = mgr.restore(workspace, ch, fp)
-        print(json.dumps(r))
-    else:
-        print(json.dumps({"success": False, "error": f"Unknown checkpoint action: {action}"}))
+    port = os.environ.get("TOOL_EXECUTOR_PORT", "8071")
+    token = os.environ.get("TOOL_EXECUTOR_TOKEN", "")
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/execute",
+        data=json.dumps({"name": name, "args": args}).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=600) as resp:
+        sys.stdout.write(resp.read().decode("utf-8"))
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

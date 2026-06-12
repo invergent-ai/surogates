@@ -59,3 +59,11 @@ async def test_kb_read_page_fails_closed_without_agent_id(monkeypatch):
         await kb_tools._kb_read_page_handler(
             {"kb_id": "some-kb", "path": "index.md"},
         )
+
+
+def test_agent_knowledge_bases_read_model_has_mode_column():
+    """The read-side M2M mirrors the writer-side mode column so the
+    worker can SELECT it when loading attached KBs."""
+    from surogates.db.ops_models import agent_knowledge_bases
+
+    assert "mode" in agent_knowledge_bases.c

@@ -317,18 +317,26 @@ async def _load_attached_kbs(
       - The agent simply has no KBs attached.
 
     The dicts returned mirror what PromptBuilder._kb_section consumes:
-    ``id``, ``name``, ``display_name``, ``description``. Keeping the
-    surface plain dict (not a SQLAlchemy row) lets us cache it and
-    pass it across async boundaries without dragging the session.
+    ``id``, ``name``, ``display_name``, ``description``, ``mode``
+    (grounding|reference), ``pages_tree`` (pre-rendered markdown ToC)
+    and ``pages_total``. Keeping the surface plain dict (not a
+    SQLAlchemy row) lets us cache it and pass it across async
+    boundaries without dragging the session.
     """
+    # ToC cap: protects the prompt from a pathological KB. The cut is
+    # announced in the tree so the LLM knows the listing is partial.
+    max_tree_pages = 200
+
     if not ops_db_url:
         return []
     try:
         from surogates.db.ops_engine import get_ops_session_factory
         from surogates.db.ops_models import (
+            OpsKBWikiPage,
             OpsKnowledgeBase,
             agent_knowledge_bases,
         )
+        from surogates.tools.builtin.kb_tools import _format_pages_tree
         import sqlalchemy as sa
 
         factory = get_ops_session_factory()
@@ -342,6 +350,7 @@ async def _load_attached_kbs(
                     OpsKnowledgeBase.name,
                     OpsKnowledgeBase.display_name,
                     OpsKnowledgeBase.description,
+                    agent_knowledge_bases.c.mode,
                 )
                 .join(
                     agent_knowledge_bases,
@@ -350,15 +359,44 @@ async def _load_attached_kbs(
                 .where(agent_knowledge_bases.c.agent_id == agent_id)
                 .order_by(OpsKnowledgeBase.name.asc())
             )
-            return [
+            kbs = [
                 {
                     "id": row[0],
                     "name": row[1],
                     "display_name": row[2],
                     "description": row[3],
+                    "mode": row[4] or "grounding",
                 }
                 for row in result.all()
             ]
+            if not kbs:
+                return []
+
+            # One round-trip for every attached KB's page list. The
+            # page tree makes the KB's contents visible in the system
+            # prompt so the agent can judge relevance instead of being
+            # blind to what the KB covers.
+            kb_ids = [kb["id"] for kb in kbs]
+            pages_result = await session.execute(
+                sa.select(OpsKBWikiPage)
+                .where(OpsKBWikiPage.kb_id.in_(kb_ids))
+                .order_by(OpsKBWikiPage.path.asc())
+            )
+            pages_by_kb: dict[str, list] = {kb_id: [] for kb_id in kb_ids}
+            for page in pages_result.scalars().all():
+                pages_by_kb[page.kb_id].append(page)
+
+        for kb in kbs:
+            pages = pages_by_kb.get(kb["id"], [])
+            kb["pages_total"] = len(pages)
+            tree = _format_pages_tree(pages[:max_tree_pages])
+            if len(pages) > max_tree_pages:
+                tree += (
+                    f"\n(showing {max_tree_pages} of {len(pages)} pages"
+                    f" -- use kb_list_pages for the full listing)"
+                )
+            kb["pages_tree"] = tree
+        return kbs
     except Exception:
         import logging
 
@@ -589,7 +627,7 @@ async def run_worker(settings: Settings) -> None:
             namespace=settings.sandbox.k8s_namespace,
             service_account=settings.sandbox.k8s_service_account,
             pod_ready_timeout=settings.sandbox.k8s_pod_ready_timeout,
-            executor_path=settings.sandbox.k8s_executor_path,
+            executor_port=settings.sandbox.k8s_executor_port,
             storage_settings=settings.storage,
             s3fs_image=settings.sandbox.k8s_s3fs_image,
             s3_endpoint=settings.sandbox.k8s_s3_endpoint,
@@ -1295,6 +1333,11 @@ async def run_worker(settings: Settings) -> None:
         await health_server.stop()
         await browser_pool.destroy_all()
         await sandbox_pool.destroy_all()
+        # K8sSandbox holds an aiohttp session for the executor daemons;
+        # ProcessSandbox has no aclose, hence the getattr guard.
+        backend_close = getattr(sandbox_backend, "aclose", None)
+        if backend_close is not None:
+            await backend_close()
         await mcp_proxy_client.close()
         # Drain the worker-side runtime cache +
         # invalidator before tearing down the redis client.

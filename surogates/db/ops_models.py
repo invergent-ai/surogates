@@ -70,4 +70,15 @@ agent_knowledge_bases = sa.Table(
     OpsBase.metadata,
     sa.Column("agent_id", sa.String(36), primary_key=True),
     sa.Column("kb_id", sa.String(36), primary_key=True),
+    # How hard the agent leans on this KB: "grounding" (authoritative,
+    # consult-first) or "reference" (optional). Written by surogate-ops;
+    # the server_default matters for tests that create this table from
+    # the read-side metadata -- production rows get the value from the
+    # writer-side migration.
+    sa.Column(
+        "mode",
+        sa.String(16),
+        nullable=False,
+        server_default="grounding",
+    ),
 )

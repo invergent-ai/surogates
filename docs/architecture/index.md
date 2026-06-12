@@ -84,7 +84,7 @@ Sandboxes are ephemeral execution environments for untrusted tool commands. One 
 | Network | Restricted by NetworkPolicy -- only MCP proxy reachable |
 | Lifetime | `activeDeadlineSeconds: 3600` (K8s kills orphans) |
 
-The sandbox runs the full `surogates` Python package. A `tool-executor` script accepts tool calls, dispatches them to real Python handlers via `ToolRegistry`, and returns JSON results over stdout.
+The sandbox runs the full `surogates` Python package. A persistent `tool-executor` daemon (`surogates.sandbox.executor_server`) loads `ToolRegistry` once at pod startup, then serves tool calls over HTTP on the pod IP; each call forks a child process that runs the real Python handler and returns the JSON result. The worker authenticates with a per-sandbox bearer token, and a mount-gated readiness probe ensures pod-Ready means "registry warm + workspace mounted".
 
 ## Data Flow: Message In -> LLM Loop -> Response Out
 
