@@ -23,7 +23,7 @@
 - [x] Task 5: create_app — HTTP layer
 - [x] Task 6: main() entry, thin-client CLI, Dockerfile CMD
 - [x] Task 7: Worker-side settings, pod manifest, provisioning
-- [ ] Task 8: execute() over HTTP; delete the exec machinery
+- [x] Task 8: execute() over HTTP; delete the exec machinery
 - [ ] Task 9: NetworkPolicy manifest
 - [ ] Task 10: Docs, integration test, full verification
 
@@ -1381,7 +1381,7 @@ git commit -m "Provision sandbox pods with the executor daemon, token, and readi
 - Modify: `surogates/orchestrator/worker.py:1297` (shutdown)
 - Test: `tests/test_k8s_sandbox.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_k8s_sandbox.py` — move the three import lines up into
 the import block at the top of the file (shown inline here for
@@ -1500,13 +1500,13 @@ class TestExecuteHttp:
             await sandbox.aclose()
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_k8s_sandbox.py::TestExecuteHttp -v`
 Expected: FAIL — current `execute()` goes through `_exec_in_pod` (K8s exec),
 and `aclose()` doesn't exist.
 
-- [ ] **Step 3: Rewrite execute() and delete the exec machinery**
+- [x] **Step 3: Rewrite execute() and delete the exec machinery**
 
 In `surogates/sandbox/kubernetes.py`:
 
@@ -1633,20 +1633,20 @@ the rewrite (the module-top import from Task 7 serves the new code).
 (`sandbox_backend` is in scope — it's constructed in the same function at
 line ~586. `ProcessSandbox` has no `aclose`, hence the getattr guard.)
 
-- [ ] **Step 4: Run the full sandbox test files**
+- [x] **Step 4: Run the full sandbox test files**
 
 Run: `uv run pytest tests/test_k8s_sandbox.py tests/test_sandbox.py tests/test_executor_server.py -v`
 Expected: all PASS. Old exec-path tests in `test_k8s_sandbox.py` that mocked
 `_exec_in_pod` will now fail to patch a missing attribute — delete those
 tests (they tested deleted code; `TestExecuteHttp` is their replacement).
 
-- [ ] **Step 5: Run the wider suite for collateral damage**
+- [x] **Step 5: Run the wider suite for collateral damage**
 
 Run: `uv run pytest tests/ -x -q 2>&1 | tail -20`
 Expected: PASS (browser_e2e/live markers are excluded by default). Fix any
 import fallout (e.g. a test importing `executor_path`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add surogates/sandbox/kubernetes.py surogates/orchestrator/worker.py tests/test_k8s_sandbox.py

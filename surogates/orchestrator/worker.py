@@ -1333,6 +1333,11 @@ async def run_worker(settings: Settings) -> None:
         await health_server.stop()
         await browser_pool.destroy_all()
         await sandbox_pool.destroy_all()
+        # K8sSandbox holds an aiohttp session for the executor daemons;
+        # ProcessSandbox has no aclose, hence the getattr guard.
+        backend_close = getattr(sandbox_backend, "aclose", None)
+        if backend_close is not None:
+            await backend_close()
         await mcp_proxy_client.close()
         # Drain the worker-side runtime cache +
         # invalidator before tearing down the redis client.

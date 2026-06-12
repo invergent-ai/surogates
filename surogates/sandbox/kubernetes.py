@@ -7,8 +7,10 @@ Each pod has:
 - An s3fs sidecar that FUSE-mounts the session's S3 bucket as ``/workspace``
 - Session-scoped S3 credentials injected via a K8s Secret
 
-The worker communicates with the sandbox pod via the K8s exec API
-(``kubernetes_asyncio``).  No HTTP server runs inside the sandbox.
+The worker communicates with the sandbox pod over HTTP: the sandbox
+container's main process is the tool-executor daemon
+(``surogates.sandbox.executor_server``), reached on the pod IP with a
+per-sandbox bearer token minted at provision time.
 """
 
 from __future__ import annotations
@@ -187,21 +189,79 @@ class K8sSandbox:
         return sandbox_id
 
     async def execute(self, sandbox_id: str, name: str, input: str) -> str:
-        """Execute a command in the sandbox pod via K8s exec API."""
-        import aiohttp
+        """Execute a tool in the sandbox pod via the executor daemon.
 
+        POSTs to the daemon on the pod IP.  Handler errors come back as
+        200 + result JSON (the daemon catches them); HTTP/transport
+        failures here mean the daemon itself is unreachable or broken.
+        """
         entry = self._get_entry(sandbox_id)
-        api = await self._get_api()
-
-        command = [self._executor_path, name, input]
-
+        url = f"http://{entry.pod_ip}:{self._executor_port}/execute"
         try:
-            resp = await asyncio.wait_for(
-                self._exec_in_pod(api, entry.pod_name, command),
-                timeout=entry.spec.timeout + 5,  # buffer over tool timeout
+            args = json.loads(input) if input else {}
+        except json.JSONDecodeError:
+            args = {}
+
+        session = await self._get_http()
+        try:
+            async with session.post(
+                url,
+                json={"name": name, "args": args, "timeout": entry.spec.timeout},
+                headers={"Authorization": f"Bearer {entry.token}"},
+                # ``connect=10`` makes a blackholed pod IP (node gone)
+                # fail fast as a connection error instead of burning the
+                # whole tool budget before failing.
+                timeout=aiohttp.ClientTimeout(
+                    total=entry.spec.timeout + 5, connect=10,
+                ),
+            ) as resp:
+                body = await resp.text()
+                if resp.status == 401:
+                    # Token mismatch: the pod predates this worker's entry
+                    # (or vice versa).  Unusable — reprovision.
+                    entry.status = SandboxStatus.FAILED
+                    raise SandboxUnavailableError(
+                        f"Executor daemon in pod {entry.pod_name} rejected "
+                        f"the sandbox token",
+                    )
+                if resp.status != 200:
+                    logger.error(
+                        "Executor daemon in pod %s returned HTTP %s: %s",
+                        entry.pod_name, resp.status, body[:200],
+                    )
+                    return self._result_json(
+                        exit_code=-1,
+                        stdout="",
+                        stderr=f"Executor daemon error (HTTP {resp.status})",
+                        truncated=False,
+                        timed_out=False,
+                    )
+                return body
+        except aiohttp.ClientConnectionError as exc:
+            # Daemon unreachable — pod gone, daemon dead, or an old
+            # (pre-daemon) pod from before a deploy.  Every subsequent
+            # sandbox tool would fail identically; mark FAILED so the
+            # next ensure() reprovisions.
+            #
+            # ORDER MATTERS: this clause must come before TimeoutError.
+            # aiohttp's connect-phase timeouts (ConnectionTimeoutError /
+            # ServerTimeoutError) inherit BOTH ClientConnectionError and
+            # TimeoutError — they mean "daemon unreachable" and must land
+            # here, not in the tool-timeout branch below (which would
+            # leave a dead sandbox marked healthy forever).
+            logger.error(
+                "Sandbox daemon unreachable in pod %s: %s", entry.pod_name, exc,
             )
-            return resp
+            entry.status = SandboxStatus.FAILED
+            raise SandboxUnavailableError(
+                f"Sandbox daemon unreachable in pod {entry.pod_name} "
+                f"(pod terminated, daemon dead, or pre-daemon image): {exc}",
+            ) from exc
         except asyncio.TimeoutError:
+            # Plain total-budget expiry while reading the response (the
+            # connection succeeded, the tool is just slow).  The daemon
+            # kills timed-out children itself; reaching the client-side
+            # budget (+5s buffer) means it is unresponsive to the kill.
             logger.warning("Sandbox exec timed out in pod %s", entry.pod_name)
             return self._result_json(
                 exit_code=-1,
@@ -210,31 +270,18 @@ class K8sSandbox:
                 truncated=False,
                 timed_out=True,
             )
-        except (
-            aiohttp.WSServerHandshakeError,
-            aiohttp.ClientConnectionError,
-            ApiException,
-        ) as exc:
-            # WS handshake / connection failure means the exec endpoint
-            # itself is unreachable -- typically pod missing, RBAC
-            # misconfiguration, or the cluster is down.  Every subsequent
-            # sandbox tool will fail identically; raise so the harness
-            # can surface a single "sandbox unavailable" result.
-            logger.error("Sandbox exec infra failure in pod %s: %s", entry.pod_name, exc)
-            entry.status = SandboxStatus.FAILED
-            raise SandboxUnavailableError(
-                self._classify_exec_failure(entry.pod_name, exc),
-            ) from exc
-        except Exception as exc:
-            logger.error("Sandbox exec failed in pod %s: %s", entry.pod_name, exc)
-            entry.status = SandboxStatus.FAILED
-            return self._result_json(
-                exit_code=-1,
-                stdout="",
-                stderr=f"Sandbox execution error: {exc}",
-                truncated=False,
-                timed_out=False,
-            )
+
+    async def _get_http(self) -> aiohttp.ClientSession:
+        """Shared client session — connection pooling across tool calls."""
+        if self._http is None:
+            self._http = aiohttp.ClientSession()
+        return self._http
+
+    async def aclose(self) -> None:
+        """Release the HTTP client session (worker shutdown)."""
+        if self._http is not None:
+            await self._http.close()
+            self._http = None
 
     async def destroy(self, sandbox_id: str) -> None:
         """Delete the sandbox pod and its S3 credential secret."""
@@ -474,86 +521,6 @@ class K8sSandbox:
         )
 
     # ------------------------------------------------------------------
-    # K8s exec
-    # ------------------------------------------------------------------
-
-    async def _exec_in_pod(
-        self, api: client.CoreV1Api, pod_name: str, command: list[str],
-    ) -> str:
-        """Execute a command in the sandbox container and return stdout.
-
-        Uses ``WsApiClient`` from ``kubernetes-asyncio`` to get a proper
-        websocket-based exec stream with channel multiplexing.
-        """
-        from kubernetes_asyncio.stream import WsApiClient
-        from kubernetes_asyncio.stream.ws_client import STDOUT_CHANNEL, STDERR_CHANNEL, ERROR_CHANNEL
-
-        # WsApiClient must be used instead of the regular ApiClient
-        # to get websocket exec with channel separation.
-        async with WsApiClient() as ws_api:
-            ws_core = client.CoreV1Api(api_client=ws_api)
-            resp = await ws_core.connect_get_namespaced_pod_exec(
-                name=pod_name,
-                namespace=self._namespace,
-                container="sandbox",
-                command=command,
-                stderr=True,
-                stdin=False,
-                stdout=True,
-                tty=False,
-            )
-
-        # resp is a WsResponse — read the full content.
-        # WsApiClient with _preload_content=True (default) merges
-        # stdout and stderr into a single string.
-        if isinstance(resp, str):
-            raw = resp
-        elif isinstance(resp, bytes):
-            raw = resp.decode("utf-8", errors="replace")
-        elif hasattr(resp, "data"):
-            # WsResponse or similar object with a .data attribute.
-            data = resp.data
-            raw = data.decode("utf-8", errors="replace") if isinstance(data, bytes) else str(data)
-        else:
-            raw = str(resp)
-
-        logger.debug("Sandbox exec raw output (%d chars): %s", len(raw), raw[:500])
-
-        # The tool-executor writes a JSON result as the LAST line of
-        # output.  Stderr (e.g. git progress) may precede it.
-        # Find the last valid JSON object in the output.
-        last_json = None
-        for line in reversed(raw.strip().splitlines()):
-            line = line.strip()
-            if line.startswith("{") and line.endswith("}"):
-                try:
-                    json.loads(line)
-                    last_json = line
-                    break
-                except json.JSONDecodeError:
-                    # May be Python repr with single quotes — try converting.
-                    try:
-                        import ast
-                        obj = ast.literal_eval(line)
-                        if isinstance(obj, dict):
-                            last_json = json.dumps(obj)
-                            break
-                    except (ValueError, SyntaxError):
-                        continue
-
-        if last_json:
-            return last_json
-
-        # Fallback: no valid JSON found — wrap raw output.
-        return self._result_json(
-            exit_code=0,
-            stdout=raw,
-            stderr="",
-            truncated=False,
-            timed_out=False,
-        )
-
-    # ------------------------------------------------------------------
     # S3 credential secret
     # ------------------------------------------------------------------
 
@@ -735,20 +702,6 @@ class K8sSandbox:
         if exc.status == 409:
             return f"Sandbox pod name conflict: {message}"
         return f"Sandbox pod creation failed (HTTP {exc.status}): {message}"
-
-    @staticmethod
-    def _classify_exec_failure(pod_name: str, exc: BaseException) -> str:
-        """Map an exec-time WS / API failure into a human-readable reason."""
-        status = getattr(exc, "status", None)
-        if status == 401:
-            return f"Sandbox exec unauthorized for pod {pod_name} (worker token rejected)."
-        if status == 403:
-            return f"Sandbox exec forbidden for pod {pod_name} (worker SA missing pods/exec permission)."
-        if status == 404:
-            return f"Sandbox pod {pod_name} not found (likely terminated or never created)."
-        if isinstance(exc, ApiException):
-            return f"Sandbox exec failed for pod {pod_name} (HTTP {exc.status}): {exc.reason}"
-        return f"Sandbox exec connection failed for pod {pod_name}: {exc}"
 
     @staticmethod
     def _result_json(

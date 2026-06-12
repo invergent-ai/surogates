@@ -9,9 +9,15 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
+from aiohttp import web
 
-from surogates.sandbox.base import SandboxSpec, SandboxStatus
+from surogates.sandbox.base import (
+    SandboxSpec,
+    SandboxStatus,
+    SandboxUnavailableError,
+)
 from surogates.sandbox.kubernetes import K8sSandbox, _PodEntry
 
 
@@ -398,30 +404,6 @@ class TestFailureClassification:
         assert "500" in reason
         assert "etcd timeout" in reason
 
-    def test_classify_exec_403_calls_out_pod_exec_permission(
-        self, sandbox: K8sSandbox,
-    ):
-        from surogates.sandbox.kubernetes import K8sSandbox as KS
-
-        class _FakeWsErr(Exception):
-            status = 403
-
-        reason = KS._classify_exec_failure("sandbox-abc", _FakeWsErr())
-        assert "sandbox-abc" in reason
-        assert "pods/exec" in reason
-
-    def test_classify_exec_404_says_pod_missing(
-        self, sandbox: K8sSandbox,
-    ):
-        from surogates.sandbox.kubernetes import K8sSandbox as KS
-
-        class _FakeWsErr(Exception):
-            status = 404
-
-        reason = KS._classify_exec_failure("sandbox-xyz", _FakeWsErr())
-        assert "sandbox-xyz" in reason
-        assert "not found" in reason.lower()
-
     async def test_provision_pod_create_403_raises_sandbox_unavailable(
         self, sandbox: K8sSandbox,
     ):
@@ -536,3 +518,110 @@ class TestProvisionCapturesEndpoint:
              patch.object(sandbox, "_wait_for_ready", AsyncMock()):
             with pytest.raises(SandboxUnavailableError):
                 await sandbox.provision(SandboxSpec())
+
+
+def _entry_for(sandbox: K8sSandbox, *, port: int, timeout: int = 5) -> _PodEntry:
+    entry = _PodEntry(
+        sandbox_id="sb-test",
+        pod_name="sandbox-test",
+        secret_name="secret-test",
+        namespace="test-ns",
+        spec=SandboxSpec(timeout=timeout),
+        pod_ip="127.0.0.1",
+        token="tok-abc",
+        status=SandboxStatus.RUNNING,
+    )
+    sandbox._pods["sb-test"] = entry
+    sandbox._executor_port = port
+    return entry
+
+
+async def _serve(handler) -> tuple[web.AppRunner, int]:
+    app = web.Application()
+    app.router.add_post("/execute", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0, shutdown_timeout=0.5)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    return runner, port
+
+
+class TestExecuteHttp:
+    """execute() reaches the in-pod daemon over HTTP and classifies failures."""
+
+    async def test_result_passthrough_and_auth_header(self, sandbox: K8sSandbox):
+        seen = {}
+
+        async def handler(request):
+            seen["auth"] = request.headers.get("Authorization")
+            seen["body"] = await request.json()
+            return web.Response(text='{"ok": true}', content_type="application/json")
+
+        runner, port = await _serve(handler)
+        try:
+            _entry_for(sandbox, port=port)
+            result = await sandbox.execute("sb-test", "list_files", '{"pattern": "*"}')
+            assert json.loads(result) == {"ok": True}
+            assert seen["auth"] == "Bearer tok-abc"
+            assert seen["body"] == {
+                "name": "list_files",
+                "args": {"pattern": "*"},
+                "timeout": 5,
+            }
+        finally:
+            await runner.cleanup()
+            await sandbox.aclose()
+
+    async def test_connect_refused_marks_failed_and_raises(self, sandbox: K8sSandbox):
+        entry = _entry_for(sandbox, port=1)  # nothing listens on port 1
+        with pytest.raises(SandboxUnavailableError):
+            await sandbox.execute("sb-test", "list_files", "{}")
+        assert entry.status == SandboxStatus.FAILED
+        await sandbox.aclose()
+
+    async def test_401_marks_failed_and_raises(self, sandbox: K8sSandbox):
+        async def handler(request):
+            return web.Response(status=401, text="unauthorized")
+
+        runner, port = await _serve(handler)
+        try:
+            entry = _entry_for(sandbox, port=port)
+            with pytest.raises(SandboxUnavailableError):
+                await sandbox.execute("sb-test", "list_files", "{}")
+            assert entry.status == SandboxStatus.FAILED
+        finally:
+            await runner.cleanup()
+            await sandbox.aclose()
+
+    async def test_client_timeout_returns_timed_out(self, sandbox: K8sSandbox):
+        async def handler(request):
+            await asyncio.sleep(30)
+            return web.Response(text="{}")
+
+        runner, port = await _serve(handler)
+        try:
+            entry = _entry_for(sandbox, port=port, timeout=1)
+            # Client budget = spec.timeout + 5; shrink it so the test is fast.
+            entry.spec.timeout = -4  # total budget = 1s
+            result = json.loads(await sandbox.execute("sb-test", "list_files", "{}"))
+            assert result["timed_out"] is True
+            assert entry.status == SandboxStatus.RUNNING  # tool-level, not infra
+        finally:
+            await runner.cleanup()
+            await sandbox.aclose()
+
+    async def test_500_returns_error_result(self, sandbox: K8sSandbox):
+        async def handler(request):
+            return web.Response(status=500, text="kaboom")
+
+        runner, port = await _serve(handler)
+        try:
+            entry = _entry_for(sandbox, port=port)
+            result = json.loads(await sandbox.execute("sb-test", "list_files", "{}"))
+            assert result["exit_code"] == -1
+            assert "500" in result["stderr"]
+            assert entry.status == SandboxStatus.RUNNING
+        finally:
+            await runner.cleanup()
+            await sandbox.aclose()
