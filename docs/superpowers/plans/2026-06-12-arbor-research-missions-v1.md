@@ -8,8 +8,8 @@
 > Test runner: `.venv/bin/pytest` from `/work/surogates` (surogates venv has testcontainers + pytest 9.0.3; the ambient `python` is the surogate-ops venv — do not use it). Branch: `research-missions`.
 
 - [x] Task 1 — DB tables: `ResearchRun` + `IdeaNode`
-- [~] Task 2 — `surogates/arbor/` package: models + `ResearchStore`
-- [ ] Task 3 — constraints block + concat-propagate
+- [x] Task 2 — `surogates/arbor/` package: models + `ResearchStore`
+- [~] Task 3 — constraints block + concat-propagate
 - [ ] Task 4 — tool plumbing: `idea_tree` tool, routing, registration, visibility
 - [ ] Task 5 — `create_task_and_spawn` factoring + `AgentDef.preloaded_skills`
 - [ ] Task 6 — `dispatch_experiments`: gates, worktrees, briefs (+ `build_report`)
