@@ -164,3 +164,78 @@ def run_tool(name: str, args: dict, workspace: str) -> str:
             "output": "",
             "error": str(exc),
         })
+
+
+def _timed_out_result() -> str:
+    """Transport-level timeout result — mirrors K8sSandbox._result_json."""
+    return json.dumps({
+        "exit_code": -1,
+        "stdout": "",
+        "stderr": "Execution timed out",
+        "truncated": False,
+        "timed_out": True,
+    })
+
+
+def _child_main(conn: Any, name: str, args: dict, workspace: str) -> None:
+    """Entry point of the forked child: run the tool, ship the result."""
+    # The forked thread inherits the parent's "running event loop"
+    # marker; clear it so run_tool's asyncio.run() can start a fresh
+    # loop.  Python 3.12's asyncio also resets this in an at-fork hook —
+    # this line is belt-and-braces against that hook changing.
+    asyncio._set_running_loop(None)
+    try:
+        result = run_tool(name, args, workspace)
+    except BaseException as exc:  # never die without reporting
+        result = json.dumps({"exit_code": 1, "output": "", "error": str(exc)})
+    try:
+        conn.send_bytes(result.encode("utf-8"))
+    finally:
+        conn.close()
+
+
+async def execute_in_child(
+    name: str, args: dict, workspace: str, timeout: float,
+) -> str:
+    """Fork a child, run *name* in it, and return its result JSON.
+
+    On timeout the child is SIGKILLed and the standard ``timed_out``
+    result is returned — unlike the old exec transport, no orphaned
+    process keeps running.  A child that dies without reporting
+    (segfault, ``os._exit``) yields an error result and the daemon
+    keeps serving.
+    """
+    parent_conn, child_conn = _MP.Pipe(duplex=False)
+    proc = _MP.Process(
+        target=_child_main, args=(child_conn, name, args, workspace), daemon=True,
+    )
+    proc.start()
+    child_conn.close()
+    try:
+        ready = await asyncio.to_thread(parent_conn.poll, timeout)
+        if not ready:
+            logger.warning(
+                "Tool %s timed out after %.0fs; killing child %s",
+                name, timeout, proc.pid,
+            )
+            proc.kill()
+            return _timed_out_result()
+        try:
+            data = await asyncio.to_thread(parent_conn.recv_bytes)
+        except EOFError:
+            await asyncio.to_thread(proc.join, 5)
+            logger.error(
+                "Tool %s child died without a result (exit code %s)",
+                name, proc.exitcode,
+            )
+            return json.dumps({
+                "exit_code": 1,
+                "output": "",
+                "error": f"Tool process died unexpectedly (exit code {proc.exitcode})",
+            })
+        return data.decode("utf-8")
+    finally:
+        parent_conn.close()
+        if proc.is_alive():
+            proc.kill()
+        await asyncio.to_thread(proc.join, 5)

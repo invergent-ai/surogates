@@ -131,3 +131,38 @@ class TestRunTool:
             executor_server.run_tool("_code", {"action": "status"}, "/ws"),
         )
         assert result == {"ok": True, "action": "status"}
+
+
+# ---------------------------------------------------------------------------
+# execute_in_child — fork runner
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteInChild:
+    async def test_result_roundtrip(self, fake_registry):
+        result = json.loads(
+            await executor_server.execute_in_child("echo", {"x": 2}, "/ws", timeout=10),
+        )
+        assert result["ok"] is True
+        assert result["echo"] == {"x": 2}
+
+    async def test_timeout_kills_child(self, fake_registry):
+        start = time.monotonic()
+        result = json.loads(
+            await executor_server.execute_in_child(
+                "slow", {"seconds": 10}, "/ws", timeout=0.3,
+            ),
+        )
+        elapsed = time.monotonic() - start
+        assert result["timed_out"] is True
+        assert result["exit_code"] == -1
+        assert "timed out" in result["stderr"].lower()
+        assert elapsed < 5, f"timeout did not kill promptly: {elapsed:.1f}s"
+
+    async def test_child_abnormal_death(self, fake_registry):
+        result = json.loads(
+            await executor_server.execute_in_child("die", {}, "/ws", timeout=10),
+        )
+        assert result["exit_code"] == 1
+        assert "died" in result["error"]
+        assert "7" in result["error"]

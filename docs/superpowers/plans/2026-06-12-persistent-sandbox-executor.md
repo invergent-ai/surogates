@@ -19,7 +19,7 @@
 - [x] Task 1: Branch + SandboxPool lock fix
 - [x] Task 2: executor_server module — mount detection
 - [x] Task 3: run_tool — the child-side dispatch
-- [ ] Task 4: execute_in_child — the fork runner
+- [x] Task 4: execute_in_child — the fork runner
 - [ ] Task 5: create_app — HTTP layer
 - [ ] Task 6: main() entry, thin-client CLI, Dockerfile CMD
 - [ ] Task 7: Worker-side settings, pod manifest, provisioning
@@ -514,7 +514,7 @@ classify abnormal child death.
 - Modify: `surogates/sandbox/executor_server.py` (append)
 - Test: `tests/test_executor_server.py` (append)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_executor_server.py`:
 
@@ -554,12 +554,12 @@ class TestExecuteInChild:
         assert "7" in result["error"]
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_executor_server.py::TestExecuteInChild -v`
 Expected: FAIL with `AttributeError: ... has no attribute 'execute_in_child'`
 
-- [ ] **Step 3: Implement the fork runner**
+- [x] **Step 3: Implement the fork runner**
 
 Append to `surogates/sandbox/executor_server.py`:
 
@@ -639,12 +639,12 @@ async def execute_in_child(
         await asyncio.to_thread(proc.join, 5)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_executor_server.py -v`
 Expected: all PASS (13 tests)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add surogates/sandbox/executor_server.py tests/test_executor_server.py
