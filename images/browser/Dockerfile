@@ -43,23 +43,23 @@ RUN apt-get update \
 
 COPY images/browser/logo.svg /var/www/img/logo.surogates.svg
 
-RUN cp /var/www/img/logo.surogates.svg /var/www/img/logo.b42d8ab7.svg \
-    && cp /var/www/js/app.32920cec.js /var/www/js/app.surogates.js \
-    && cp /var/www/js/app-legacy.5a69f29c.js /var/www/js/app-legacy.surogates.js \
-    && sed -i 's|img/logo.b42d8ab7.svg|img/logo.surogates.svg|g' \
+RUN cp /var/www/img/logo.surogates.svg /var/www/img/logo.fd6183b7.svg \
+    && cp /var/www/js/app.d56c9c38.js /var/www/js/app.surogates.js \
+    && cp /var/www/js/app-legacy.54b4597c.js /var/www/js/app-legacy.surogates.js \
+    && sed -i 's|img/logo.fd6183b7.svg|img/logo.surogates.svg|g' \
         /var/www/js/app.surogates.js \
         /var/www/js/app-legacy.surogates.js \
     && sed -i \
         -e 's#<title>Kernel</title>#<title>Surogates Browser</title>#' \
         -e 's|<meta name="theme-color" content="#81B300">|<meta name="theme-color" content="#FFB000">|' \
-        -e 's|<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,[^"]*">|<link rel="icon" type="image/svg+xml" href="img/logo.b42d8ab7.svg">|' \
-        -e 's|href="img/logo.b42d8ab7.svg"|href="img/logo.surogates.svg"|' \
-        -e 's|src="js/app.32920cec.js"|src="js/app.surogates.js"|' \
-        -e 's|src="js/app-legacy.5a69f29c.js"|src="js/app-legacy.surogates.js"|' \
+        -e 's|<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,[^"]*">|<link rel="icon" type="image/svg+xml" href="img/logo.fd6183b7.svg">|' \
+        -e 's|href="img/logo.fd6183b7.svg"|href="img/logo.surogates.svg"|' \
+        -e 's|src="js/app.d56c9c38.js"|src="js/app.surogates.js"|' \
+        -e 's|src="js/app-legacy.54b4597c.js"|src="js/app-legacy.surogates.js"|' \
         /var/www/index.html \
     && chown kernel:kernel \
         /var/www/img/logo.surogates.svg \
-        /var/www/img/logo.b42d8ab7.svg \
+        /var/www/img/logo.fd6183b7.svg \
         /var/www/js/app.surogates.js \
         /var/www/js/app-legacy.surogates.js \
         /var/www/index.html
