@@ -201,6 +201,24 @@ def _filter_effective_tools(
     else:
         result.update({"share_note", "read_board", "expand_note"})
 
+    # idea_tree / dispatch_experiments / merge_experiment are the research
+    # coordinator's deterministic spine. They are present only while a
+    # research run is active AND only on the coordinator session (never a
+    # task worker): executors stay tree-blind so they cannot invent a
+    # second shared-state protocol (mle_kaggle.yaml "no second shared-state
+    # protocol between executors"). Unlike the self-tools above they are
+    # never force-added — they ride the registry's full set on the
+    # coordinator and are stripped everywhere else.
+    research_config = getattr(session, "config", None) or {}
+    is_research_coordinator = (
+        bool(research_config.get("active_research_run_id"))
+        and getattr(session, "task_id", None) is None
+    )
+    if not is_research_coordinator:
+        result.discard("idea_tree")
+        result.discard("dispatch_experiments")
+        result.discard("merge_experiment")
+
     return result
 
 

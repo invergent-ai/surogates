@@ -104,6 +104,12 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "share_note": ToolLocation.HARNESS,
     "read_board": ToolLocation.HARNESS,
     "expand_note": ToolLocation.HARNESS,
+    # Arbor research tools — handlers need the DB session factory, the
+    # LLM client, and the sandbox pool (server-side git ops); none of
+    # that exists in a sandbox pod, so they run in the worker process.
+    "idea_tree": ToolLocation.HARNESS,
+    "dispatch_experiments": ToolLocation.HARNESS,
+    "merge_experiment": ToolLocation.HARNESS,
     # Sandbox (code execution, file mutation, need isolation)
     "terminal": ToolLocation.SANDBOX,
     "read_file": ToolLocation.SANDBOX,
