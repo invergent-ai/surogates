@@ -69,6 +69,21 @@ def _naive_utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _node_sort_key(node: "IdeaNode") -> tuple[int, list[int], str]:
+    """Order ROOT first, then by dotted-decimal key numerically
+    ("2" before "10", "1.2" before "1.10")."""
+    if node.node_key == "ROOT":
+        return (0, [], "")
+    try:
+        return (1, [int(p) for p in node.node_key.split(".")], node.node_key)
+    except ValueError:
+        return (1, [], node.node_key)
+
+
+def _ordered(nodes: list["IdeaNode"]) -> list["IdeaNode"]:
+    return sorted(nodes, key=_node_sort_key)
+
+
 class ResearchStoreError(Exception):
     """Base for research store errors."""
 
@@ -343,3 +358,58 @@ class ResearchStore:
                 )
             )
             return int(count or 0)
+
+    # -- rendering ----------------------------------------------------------
+
+    async def constraints_block(self, run_id: UUID) -> str:
+        """The anti-amnesia artifact, re-read every IDEATE.
+
+        Port of ``idea_tree.py:358-435`` — TREE SHAPE / ROOT INSIGHT /
+        PRUNED LESSONS / VALIDATED FINDINGS / BUDGET, rendered from the
+        DB rows. Immune to context compression: it is regenerated from
+        the system of record on every wake.
+        """
+        run = await self.get_run(run_id)
+        nodes = await self.list_nodes(run_id)
+        by_key = {n.node_key: n for n in nodes}
+        meta = run.meta or {}
+
+        def _first_line(node: IdeaNode) -> str:
+            return (node.hypothesis or "").splitlines()[0][:100] if node.hypothesis else ""
+
+        lines: list[str] = ["## RESEARCH CONSTRAINTS", "", "### TREE SHAPE"]
+        for node in _ordered(nodes):
+            indent = "  " * (0 if node.node_key == "ROOT" else node.depth)
+            score = f" score={node.score}" if node.score is not None else ""
+            lines.append(
+                f"{indent}- {node.node_key} [{node.status}]{score} {_first_line(node)}"
+            )
+
+        root = by_key.get("ROOT")
+        lines += ["", "### ROOT INSIGHT",
+                  (root.insight if root and root.insight else "(none yet)")]
+
+        pruned = [n for n in nodes if n.status == "pruned" and n.insight]
+        lines += ["", "### PRUNED LESSONS"]
+        lines += [f"- {n.node_key}: {n.insight.splitlines()[-1][:200]}"
+                  for n in pruned] or ["(none)"]
+
+        merged = [n for n in nodes if n.status == "merged"]
+        lines += ["", "### VALIDATED FINDINGS"]
+        lines += [f"- {n.node_key} score={n.score}: {(n.insight or '')[:200]}"
+                  for n in merged] or ["(none)"]
+
+        cycles = await self.cycles_spent(run_id)
+        lines += [
+            "", "### BUDGET & DISCIPLINE",
+            f"- cycles: {cycles}/{meta.get('max_cycles')}"
+            f" | depth cap: {meta.get('max_tree_depth')}"
+            f" | max parallel: {meta.get('max_parallel')}",
+            f"- scores: baseline={meta.get('baseline_score')}"
+            f" trunk(dev)={meta.get('trunk_score')}"
+            f" test_baseline={meta.get('test_baseline_score')}"
+            f" test_trunk={meta.get('test_trunk_score')}"
+            f" ({meta.get('metric_direction')})",
+            "- B_dev for iteration; B_test ONLY through merge_experiment.",
+        ]
+        return "\n".join(lines)

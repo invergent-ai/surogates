@@ -155,3 +155,18 @@ def test_is_improvement_direction_aware():
     assert is_improvement(0.3, 0.4, "minimize")
     assert is_improvement(0.5, None, "maximize")  # no baseline yet -> improvement
     assert not is_improvement(None, 0.4, "maximize")
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_constraints_block_renders_sections(research_run):
+    store, run_id, org_id = research_run
+    await store.set_meta(run_id, {"eval_cmd": "python eval.py", "max_cycles": 8})
+    await store.add_node(run_id, org_id=org_id, parent_key="ROOT", hypothesis="first idea")
+    await store.update_node(run_id, "1", status="done", score=0.42, insight="i")
+    block = await store.constraints_block(run_id)
+    assert "### TREE SHAPE" in block
+    assert "### ROOT INSIGHT" in block
+    assert "### VALIDATED FINDINGS" in block
+    assert "- 1 [done] score=0.42 first idea" in block
+    assert "cycles: 1/8" in block
+    assert "B_test ONLY through merge_experiment" in block
