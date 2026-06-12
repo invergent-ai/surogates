@@ -1033,12 +1033,27 @@ async def call_llm_streaming(
             exc,
         )
         set_streaming_enabled(False)
-        return await call_llm_non_streaming(
-            session=session,
-            create_kwargs=create_kwargs,
-            iteration=iteration,
-            llm_client=llm_client,
-        )
+        try:
+            return await call_llm_non_streaming(
+                session=session,
+                create_kwargs=create_kwargs,
+                iteration=iteration,
+                llm_client=llm_client,
+            )
+        except Exception as fallback_exc:
+            # The streaming error carries the real provider detail (e.g.
+            # a mid-stream APIError body); the fallback usually dies on a
+            # generic shape validation. Propagate the original so the
+            # crash classifier and the event log see the actionable error.
+            logger.warning(
+                "Non-streaming fallback also failed for session %s "
+                "(iteration %d): %s — propagating the original "
+                "streaming error",
+                session.id,
+                iteration,
+                fallback_exc,
+            )
+            raise exc from fallback_exc
 
 
 async def call_llm_streaming_inner(

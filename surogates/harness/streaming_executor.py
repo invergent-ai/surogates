@@ -311,6 +311,15 @@ class StreamingToolExecutor:
         executing = [t for t in self._tracked if t.status == ToolStatus.EXECUTING]
         if not executing:
             return True
+        if self._tool_guardrails is not None and any(
+            _same_call_signature(t.tool_call, tool.tool_call) for t in executing
+        ):
+            # Duplicate identical calls are a model loop pattern that
+            # ToolGuardrails breaks via successive after_call/before_call
+            # state updates; running them concurrently would fire both
+            # before either after_call ran (same rule as tool_exec's
+            # _batch_has_duplicate_signatures).
+            return False
         if tool.is_parallelizable and all(t.is_parallelizable for t in executing):
             return True
         return False
@@ -337,9 +346,34 @@ class StreamingToolExecutor:
         UI, SSE consumers, and replay logic see a coherent
         call/result pair instead of a permanently pending tool call.
         """
-        from surogates.harness.tool_exec import execute_single_tool
+        from surogates.harness.tool_exec import (
+            _emit_guardrail_tool_result,
+            _parse_tool_args_for_guardrail,
+            execute_single_tool,
+        )
+        from surogates.harness.tool_guardrails import append_toolguard_guidance
+
+        guardrails = self._tool_guardrails
+        tool_name = tool.tool_call.get("function", {}).get("name", "")
+        guardrail_args = (
+            _parse_tool_args_for_guardrail(tool.tool_call)
+            if guardrails is not None
+            else None
+        )
 
         try:
+            if guardrails is not None:
+                before = guardrails.before_call(tool_name, guardrail_args)
+                if not before.allows_execution:
+                    tool.result = await _emit_guardrail_tool_result(
+                        tool.tool_call,
+                        decision=before,
+                        session=self._session,
+                        lease=self._lease,
+                        store=self._store,
+                    )
+                    tool.errored = True
+                    return
             result = await execute_single_tool(
                 tool.tool_call,
                 session=self._session,
@@ -370,6 +404,18 @@ class StreamingToolExecutor:
                 bundle=self._bundle,
                 turn_gate=self._turn_gate,
             )
+            if guardrails is not None:
+                after = guardrails.after_call(
+                    tool_name,
+                    guardrail_args,
+                    result.get("content", ""),
+                )
+                result = {
+                    **result,
+                    "content": append_toolguard_guidance(
+                        result.get("content", ""), after,
+                    ),
+                }
             tool.result = result
             tool.errored = _is_error_result(result)
         except asyncio.CancelledError:
@@ -529,6 +575,15 @@ class StreamingToolExecutor:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _same_call_signature(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Return ``True`` if two tool calls share name and raw arguments."""
+    fa, fb = a.get("function", {}), b.get("function", {})
+    return (
+        fa.get("name", "") == fb.get("name", "")
+        and fa.get("arguments", "") == fb.get("arguments", "")
+    )
 
 
 def _is_error_result(result: dict[str, Any]) -> bool:
