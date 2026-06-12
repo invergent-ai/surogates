@@ -9,7 +9,6 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import aiohttp
 import pytest
 from aiohttp import web
 

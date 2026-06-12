@@ -25,7 +25,7 @@
 - [x] Task 7: Worker-side settings, pod manifest, provisioning
 - [x] Task 8: execute() over HTTP; delete the exec machinery
 - [x] Task 9: NetworkPolicy manifest
-- [ ] Task 10: Docs, integration test, full verification
+- [x] Task 10: Docs, integration test, full verification
 
 ---
 
@@ -1733,7 +1733,7 @@ git commit -m "Add NetworkPolicy restricting sandbox executor ingress to runtime
 - Modify: `docs/architecture/index.md:87`
 - Create: `tests/test_executor_integration.py`
 
-- [ ] **Step 1: Update the architecture docs**
+- [x] **Step 1: Update the architecture docs**
 
 In `CLAUDE.md` line ~90, replace:
 
@@ -1765,7 +1765,7 @@ Run: `grep -rn "sleep infinity\|exec'd\|k8s-exec" CLAUDE.md docs/architecture/ -
 Update any remaining hit that describes the sandbox dispatch path
 (specs/plans under `docs/superpowers/` are historical records — leave them).
 
-- [ ] **Step 2: Write the opt-in live integration test**
+- [x] **Step 2: Write the opt-in live integration test**
 
 Create `tests/test_executor_integration.py`:
 
@@ -1887,7 +1887,7 @@ async def test_latency_overlap_and_failure_classification(live_sandbox):
         await live_sandbox.aclose()
 ```
 
-- [ ] **Step 3: Verify the integration test is collected but skipped by default**
+- [x] **Step 3: Verify the integration test is collected but skipped by default**
 
 Run: `uv run pytest tests/test_executor_integration.py -v`
 Expected: `no tests ran` (deselected — the `live` marker is excluded by the
@@ -1896,7 +1896,7 @@ default `addopts` in pyproject.toml)
 Run: `SUROGATES_K8S_INTEGRATION= uv run pytest tests/test_executor_integration.py -m live -v`
 Expected: 1 skipped (env gate)
 
-- [ ] **Step 4: Build the sandbox image and run the live test (local cluster)**
+- [x] **Step 4: Build the sandbox image and run the live test (local cluster)**
 
 ```bash
 docker build -t ghcr.io/invergent-ai/surogates-agent-sandbox:dev -f images/sandbox/Dockerfile .
@@ -1908,7 +1908,7 @@ S3 values from `config.dev.yaml` (local Garage endpoint + credentials).
 Expected: PASS — warm `list_files` < 1 s, batch of 4 ≈ max not sum, pod-kill
 classified as `SandboxUnavailableError`.
 
-- [ ] **Step 5: Full suite + lint**
+- [x] **Step 5: Full suite + lint**
 
 ```bash
 uv run pytest tests/ -q 2>&1 | tail -5
@@ -1917,7 +1917,7 @@ uv run ruff check surogates/sandbox/ tests/test_executor_server.py
 
 Expected: tests PASS; ruff clean (fix anything it flags).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add CLAUDE.md docs/architecture/index.md tests/test_executor_integration.py

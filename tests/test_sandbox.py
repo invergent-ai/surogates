@@ -7,7 +7,6 @@ import json
 import time
 
 import pytest
-import pytest_asyncio
 
 from surogates.sandbox.base import SandboxSpec, SandboxStatus
 from surogates.sandbox.pool import SandboxPool
