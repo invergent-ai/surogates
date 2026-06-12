@@ -24,7 +24,7 @@
 - [x] Task 6: main() entry, thin-client CLI, Dockerfile CMD
 - [x] Task 7: Worker-side settings, pod manifest, provisioning
 - [x] Task 8: execute() over HTTP; delete the exec machinery
-- [ ] Task 9: NetworkPolicy manifest
+- [x] Task 9: NetworkPolicy manifest
 - [ ] Task 10: Docs, integration test, full verification
 
 ---
@@ -1667,7 +1667,7 @@ the `surogates` namespace carries `kubernetes.io/metadata.name=surogates`.
 **Files:**
 - Create: `scripts/k8s/sandbox-executor-networkpolicy.yaml`
 
-- [ ] **Step 1: Write the manifest**
+- [x] **Step 1: Write the manifest**
 
 Create `scripts/k8s/sandbox-executor-networkpolicy.yaml`:
 
@@ -1712,12 +1712,12 @@ spec:
           port: 8071
 ```
 
-- [ ] **Step 2: Validate the manifest parses**
+- [x] **Step 2: Validate the manifest parses**
 
 Run: `python3 -c "import yaml; yaml.safe_load(open('scripts/k8s/sandbox-executor-networkpolicy.yaml')); print('ok')"`
 Expected: `ok`
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add scripts/k8s/sandbox-executor-networkpolicy.yaml
