@@ -14,6 +14,19 @@
 
 **Test command:** `uv run pytest tests/<file> -v` (pytest config in pyproject.toml; `asyncio_mode=auto`, so `async def` tests need no decorator)
 
+## Status
+
+- [x] Task 1: Branch + SandboxPool lock fix
+- [ ] Task 2: executor_server module — mount detection
+- [ ] Task 3: run_tool — the child-side dispatch
+- [ ] Task 4: execute_in_child — the fork runner
+- [ ] Task 5: create_app — HTTP layer
+- [ ] Task 6: main() entry, thin-client CLI, Dockerfile CMD
+- [ ] Task 7: Worker-side settings, pod manifest, provisioning
+- [ ] Task 8: execute() over HTTP; delete the exec machinery
+- [ ] Task 9: NetworkPolicy manifest
+- [ ] Task 10: Docs, integration test, full verification
+
 ---
 
 ### Task 1: Branch + SandboxPool lock fix
@@ -28,13 +41,13 @@ needs the lock to read the mapping.
 - Modify: `surogates/sandbox/pool.py:108-120`
 - Test: `tests/test_sandbox.py` (append to `TestSandboxPool`)
 
-- [ ] **Step 1: Create the branch**
+- [x] **Step 1: Create the branch**
 
 ```bash
 cd /work/surogates && git checkout -b persistent-tool-executor
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Append to the `TestSandboxPool` class in `tests/test_sandbox.py`:
 
@@ -74,12 +87,12 @@ Append to the `TestSandboxPool` class in `tests/test_sandbox.py`:
 Check the imports at the top of `tests/test_sandbox.py` — `asyncio`,
 `SandboxPool`, and `SandboxSpec` are already imported there.
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_sandbox.py::TestSandboxPool::test_execute_calls_overlap_for_same_session -v`
 Expected: FAIL with `execute() calls serialized: 0.60s`
 
-- [ ] **Step 4: Implement the lock fix**
+- [x] **Step 4: Implement the lock fix**
 
 In `surogates/sandbox/pool.py`, replace the `execute` method (lines 108-120):
 
@@ -107,12 +120,12 @@ In `surogates/sandbox/pool.py`, replace the `execute` method (lines 108-120):
         return await self._backend.execute(sandbox_id, name, input)
 ```
 
-- [ ] **Step 5: Run the test file to verify it passes (and nothing broke)**
+- [x] **Step 5: Run the test file to verify it passes (and nothing broke)**
 
 Run: `uv run pytest tests/test_sandbox.py -v`
 Expected: all PASS, including `test_execute_calls_overlap_for_same_session`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add surogates/sandbox/pool.py tests/test_sandbox.py

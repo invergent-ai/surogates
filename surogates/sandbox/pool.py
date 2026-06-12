@@ -108,16 +108,24 @@ class SandboxPool:
     async def execute(self, session_id: str, name: str, input: str) -> str:
         """Execute a command in the sandbox belonging to *session_id*.
 
+        The session lock is held only while resolving the sandbox id —
+        not across the backend call.  The harness already decides which
+        tool batches may run concurrently (``should_parallelize``), so
+        holding the lock here would serialize them for no benefit.  A
+        ``destroy_for_session`` racing an in-flight call makes that call
+        fail exactly like a pod dying mid-execution, which the caller
+        already handles.
+
         Raises :class:`ValueError` if the session has no associated sandbox.
         """
         lock = await self._session_lock(session_id)
         async with lock:
             sandbox_id = self._mapping.get(session_id)
-            if sandbox_id is None:
-                raise ValueError(
-                    f"No sandbox provisioned for session {session_id}"
-                )
-            return await self._backend.execute(sandbox_id, name, input)
+        if sandbox_id is None:
+            raise ValueError(
+                f"No sandbox provisioned for session {session_id}"
+            )
+        return await self._backend.execute(sandbox_id, name, input)
 
     async def destroy_for_session(self, session_id: str) -> None:
         """Destroy the sandbox for *session_id* and remove the mapping."""

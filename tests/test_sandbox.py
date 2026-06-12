@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 
 import pytest
 import pytest_asyncio
@@ -169,6 +171,36 @@ class TestSandboxPool:
 
         with pytest.raises(ValueError, match="No sandbox"):
             await pool.execute("no-such-session", "echo", "hello")
+
+    @pytest.mark.asyncio
+    async def test_execute_calls_overlap_for_same_session(self):
+        """Two concurrent execute() calls must not serialize on the session lock."""
+
+        class SlowBackend:
+            async def provision(self, spec):
+                return "sb-1"
+
+            async def status(self, sandbox_id):
+                return SandboxStatus.RUNNING
+
+            async def execute(self, sandbox_id, name, input):
+                await asyncio.sleep(0.3)
+                return "{}"
+
+            async def destroy(self, sandbox_id):
+                pass
+
+        pool = SandboxPool(SlowBackend())
+        await pool.ensure("session-1", SandboxSpec())
+
+        start = time.monotonic()
+        await asyncio.gather(
+            pool.execute("session-1", "tool_a", "{}"),
+            pool.execute("session-1", "tool_b", "{}"),
+        )
+        elapsed = time.monotonic() - start
+        # Serialized: ~0.6s. Concurrent: ~0.3s.
+        assert elapsed < 0.5, f"execute() calls serialized: {elapsed:.2f}s"
 
     @pytest.mark.asyncio
     async def test_destroy_all(self):
