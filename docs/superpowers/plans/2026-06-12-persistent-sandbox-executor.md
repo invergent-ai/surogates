@@ -18,7 +18,7 @@
 
 - [x] Task 1: Branch + SandboxPool lock fix
 - [x] Task 2: executor_server module — mount detection
-- [ ] Task 3: run_tool — the child-side dispatch
+- [x] Task 3: run_tool — the child-side dispatch
 - [ ] Task 4: execute_in_child — the fork runner
 - [ ] Task 5: create_app — HTTP layer
 - [ ] Task 6: main() entry, thin-client CLI, Dockerfile CMD
@@ -329,7 +329,7 @@ runs inside the forked child (it may block freely).
 - Modify: `surogates/sandbox/executor_server.py` (append)
 - Test: `tests/test_executor_server.py` (append)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_executor_server.py`:
 
@@ -409,12 +409,12 @@ class TestRunTool:
         assert result == {"ok": True, "action": "status"}
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_executor_server.py::TestRunTool -v`
 Expected: FAIL with `AttributeError: module ... has no attribute 'run_tool'`
 
-- [ ] **Step 3: Implement run_tool**
+- [x] **Step 3: Implement run_tool**
 
 Append to `surogates/sandbox/executor_server.py`:
 
@@ -491,12 +491,12 @@ def run_tool(name: str, args: dict, workspace: str) -> str:
         })
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_executor_server.py -v`
 Expected: all PASS (10 tests)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add surogates/sandbox/executor_server.py tests/test_executor_server.py

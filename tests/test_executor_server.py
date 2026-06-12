@@ -48,3 +48,86 @@ class TestWorkspaceMounted:
 
     def test_unreadable_mounts_file(self):
         assert executor_server.workspace_mounted("/workspace", "/nonexistent") is False
+
+
+# ---------------------------------------------------------------------------
+# run_tool — child-side dispatch
+# ---------------------------------------------------------------------------
+
+
+class FakeRegistry:
+    """Stands in for ToolRegistry; behaviors keyed by tool name."""
+
+    async def dispatch(self, name, args, **kwargs):
+        if name == "missing":
+            raise KeyError(name)
+        if name == "boom":
+            raise RuntimeError("boom")
+        if name == "slow":
+            await asyncio.sleep(float(args.get("seconds", 1.0)))
+            return json.dumps({"ok": True, "slept": True})
+        if name == "spin":  # CPU-bound, never yields
+            deadline = time.monotonic() + float(args.get("seconds", 1.0))
+            while time.monotonic() < deadline:
+                pass
+            return json.dumps({"ok": True, "spun": True})
+        if name == "die":  # simulates a native-code crash
+            os._exit(7)
+        return json.dumps({
+            "ok": True,
+            "echo": args,
+            "kwargs_has_workspace": "workspace_path" in kwargs,
+        })
+
+
+@pytest.fixture()
+def fake_registry(monkeypatch):
+    registry = FakeRegistry()
+    monkeypatch.setattr(executor_server, "_REGISTRY", registry)
+    return registry
+
+
+class TestRunTool:
+    def test_dispatches_through_registry(self, fake_registry):
+        result = json.loads(executor_server.run_tool("echo", {"a": 1}, "/ws"))
+        assert result["ok"] is True
+        assert result["echo"] == {"a": 1}
+        assert result["kwargs_has_workspace"] is True
+
+    def test_unknown_tool(self, fake_registry):
+        result = json.loads(executor_server.run_tool("missing", {}, "/ws"))
+        assert result == {
+            "exit_code": 1,
+            "output": "",
+            "error": "Unknown tool: missing",
+        }
+
+    def test_handler_exception(self, fake_registry):
+        result = json.loads(executor_server.run_tool("boom", {}, "/ws"))
+        assert result == {"exit_code": 1, "output": "", "error": "boom"}
+
+    def test_checkpoint_branch(self, monkeypatch):
+        class FakeMgr:
+            def __init__(self, enabled):
+                pass
+
+            def latest_hash(self, workspace):
+                return "abc123"
+
+        monkeypatch.setattr(
+            "surogates.tools.utils.checkpoint_manager.CheckpointManager", FakeMgr,
+        )
+        result = json.loads(
+            executor_server.run_tool("_checkpoint", {"action": "latest_hash"}, "/ws"),
+        )
+        assert result == {"success": True, "hash": "abc123"}
+
+    def test_code_branch(self, monkeypatch):
+        monkeypatch.setattr(
+            "surogates.coding_agents.pod_runner.dispatch",
+            lambda args: {"ok": True, "action": args.get("action")},
+        )
+        result = json.loads(
+            executor_server.run_tool("_code", {"action": "status"}, "/ws"),
+        )
+        assert result == {"ok": True, "action": "status"}
