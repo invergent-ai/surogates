@@ -256,3 +256,33 @@ async def org_and_user(session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     return org_id, user_id
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def seeded_org_and_session(session_factory):
+    """Insert org + user + session + mission rows; return their ids.
+
+    Shared by the arbor research-mission tests, which need a session
+    (FK target for ``research_runs``) and a mission (FK target for the
+    ``research_runs.mission_id`` sidecar link).
+    """
+    from surogates.db.models import Mission, Session
+
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session_id = uuid.uuid4()
+    async with session_factory() as db:
+        db.add(Session(
+            id=session_id, org_id=org_id, user_id=user_id,
+            agent_id="agent-x", config={},
+        ))
+        await db.commit()
+        mission = Mission(
+            org_id=org_id, user_id=user_id, session_id=session_id,
+            agent_id="agent-x", description="d", rubric="r",
+        )
+        db.add(mission)
+        await db.commit()
+        await db.refresh(mission)
+        mission_id = mission.id
+    return org_id, mission_id, session_id
