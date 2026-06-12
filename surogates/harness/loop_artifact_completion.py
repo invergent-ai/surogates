@@ -319,7 +319,10 @@ class ArtifactCompletionMixin:
         turn that's not the LAST in the log, would incorrectly
         attribute later turns' tool calls to this one.
         """
-        from surogates.harness.turn_summarizer import TurnArtifact
+        from surogates.harness.turn_summarizer import (
+            TurnArtifact,
+            _is_internal_workspace_path,
+        )
 
         out: list[TurnArtifact] = []
         try:
@@ -363,7 +366,11 @@ class ArtifactCompletionMixin:
                         or args.get("name")
                         or ""
                     )
-                    if isinstance(path, str) and path:
+                    if (
+                        isinstance(path, str)
+                        and path
+                        and not _is_internal_workspace_path(path)
+                    ):
                         out.append(
                             TurnArtifact(kind="file", label=path, ref=path),
                         )
@@ -454,7 +461,10 @@ class ArtifactCompletionMixin:
         so mtime/size come from the bulk list response — no per-key HEAD
         round trips.
         """
-        from surogates.harness.turn_summarizer import TurnArtifact
+        from surogates.harness.turn_summarizer import (
+            TurnArtifact,
+            _is_internal_workspace_path,
+        )
         from surogates.storage.tenant import prefixed_session_workspace_prefix
 
         storage = self._storage
@@ -490,6 +500,8 @@ class ArtifactCompletionMixin:
             rel = key[len(prefix):] if key.startswith(prefix) else key
             if not rel or rel in already_seen_paths:
                 continue
+            if _is_internal_workspace_path(rel):
+                continue
             modified = _coerce_modified_to_datetime(entry.get("modified"))
             if modified is None or modified < turn_start:
                 continue
@@ -524,6 +536,15 @@ class ArtifactCompletionMixin:
                 await self._sandbox_pool.destroy_for_session(str(session.id))
             except Exception:
                 logger.debug("Sandbox cleanup failed for %s", session.id, exc_info=True)
+
+        # Close any browser session the agent opened this turn. Best
+        # effort — a leaked browser pod is worse than a failed cleanup,
+        # so swallow errors and never block completion on it.
+        if self._browser_pool is not None:
+            try:
+                await self._browser_pool.destroy_for_session(str(session.id))
+            except Exception:
+                logger.debug("Browser cleanup failed for %s", session.id, exc_info=True)
 
         # Notify memory manager of session end.
         if self._memory_manager is not None:

@@ -164,6 +164,15 @@ async def test_drain_passes_iteration_summaries_and_candidates(
             "arguments": '{"url": "https://example.com"}',
             "tool_call_id": "c3",
         }),
+        _event(7, EventType.TOOL_CALL, {
+            "turn_id": "turn-1",
+            # Internal agent state (e.g. the /product-marketing skill's
+            # canonical context file) — hidden paths are never
+            # presented as downloadable deliverables.
+            "name": "write_file",
+            "arguments": '{"path": ".agents/product-marketing.md"}',
+            "tool_call_id": "c4",
+        }),
     ]
 
     async def _get_events(session_id, **kwargs):
@@ -189,15 +198,20 @@ async def test_drain_passes_iteration_summaries_and_candidates(
     assert call["iteration_summaries"] == [
         "Outline the patch plan", "Apply the rewrite",
     ]
-    # patch is surfaced; read_file (not notable) and web_extract (not
+    # patch is surfaced; read_file (not notable), web_extract (not
     # downloadable — the summary card only presents downloadable
-    # artifacts) are dropped.
+    # artifacts) and the .agents/ write (internal agent state) are
+    # dropped.
     candidate_kinds = [a.kind for a in call["candidate_artifacts"]]
     assert "file" in candidate_kinds
     assert "url" not in candidate_kinds
     assert all(a.label != "x.md" for a in call["candidate_artifacts"])
     assert all(
         "example.com" not in a.ref for a in call["candidate_artifacts"]
+    )
+    assert all(
+        not a.ref.startswith(".agents/")
+        for a in call["candidate_artifacts"]
     )
 
 
@@ -392,3 +406,90 @@ async def test_complete_session_skips_drain_without_summarizer() -> None:
         c.args[1] == EventType.TURN_SUMMARY
         for c in store.emit_event.await_args_list
     )
+
+
+# ---------------------------------------------------------------------------
+# _complete_session closes the session's browser, like the sandbox
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_complete_session_closes_browser() -> None:
+    store = AsyncMock()
+    store.emit_event = AsyncMock()
+    store.get_events = AsyncMock(return_value=[])
+    store.update_session_status = AsyncMock()
+    harness = _make_loop_harness(session_store=store, turn_summarizer=None)
+    harness._browser_pool = AsyncMock()
+
+    session = await _call_complete_session(
+        harness, reason="completed", turn_id="t-1",
+    )
+
+    harness._browser_pool.destroy_for_session.assert_awaited_once_with(
+        str(session.id),
+    )
+
+
+@pytest.mark.asyncio
+async def test_complete_session_closes_browser_on_failure_reason() -> None:
+    """A leaked browser pod is worse than a failed turn — cleanup must
+    run regardless of the completion reason, not just on success."""
+    store = AsyncMock()
+    store.emit_event = AsyncMock()
+    store.get_events = AsyncMock(return_value=[])
+    store.update_session_status = AsyncMock()
+    harness = _make_loop_harness(session_store=store, turn_summarizer=None)
+    harness._browser_pool = AsyncMock()
+
+    session = await _call_complete_session(
+        harness, reason="invalid_tool_calls", turn_id="t-1",
+    )
+
+    harness._browser_pool.destroy_for_session.assert_awaited_once_with(
+        str(session.id),
+    )
+
+
+@pytest.mark.asyncio
+async def test_complete_session_swallows_browser_cleanup_error() -> None:
+    """Browser cleanup is best effort — a backend failure must not
+    abort completion (SESSION_COMPLETE still emitted)."""
+    store = AsyncMock()
+    store.emit_event = AsyncMock()
+    store.get_events = AsyncMock(return_value=[])
+    store.update_session_status = AsyncMock()
+    harness = _make_loop_harness(session_store=store, turn_summarizer=None)
+    harness._browser_pool = AsyncMock()
+    harness._browser_pool.destroy_for_session = AsyncMock(
+        side_effect=RuntimeError("backend down"),
+    )
+
+    await _call_complete_session(harness, reason="completed", turn_id="t-1")
+
+    assert any(
+        c.args[1] == EventType.SESSION_COMPLETE
+        for c in store.emit_event.await_args_list
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal workspace paths are never deliverable candidates
+# ---------------------------------------------------------------------------
+
+
+def test_internal_workspace_paths_are_not_candidates() -> None:
+    from surogates.harness.turn_summarizer import (
+        _is_internal_workspace_path,
+    )
+
+    # Hidden directories hold agent state (.agents/, .claude/, .cache/);
+    # uploads/ holds user-provided inputs. Neither is ever a deliverable.
+    assert _is_internal_workspace_path(".agents/product-marketing.md")
+    assert _is_internal_workspace_path(".claude/settings.json")
+    assert _is_internal_workspace_path("notes/.scratch/tmp.md")
+    assert _is_internal_workspace_path(".env")
+    assert _is_internal_workspace_path("uploads/123-datasheet.pdf")
+
+    assert not _is_internal_workspace_path("report.pdf")
+    assert not _is_internal_workspace_path("docs/strategy.md")

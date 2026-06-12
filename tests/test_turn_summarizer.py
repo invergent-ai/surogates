@@ -309,3 +309,32 @@ async def test_summarize_turn_returns_none_when_recap_and_artifacts_empty() -> N
         candidate_artifacts=[],
     )
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_summarize_turn_drops_internal_workspace_paths() -> None:
+    """Even if the model echoes an internal path (e.g. the
+    /product-marketing skill's .agents/ context file), it must not
+    reach the user-visible download card."""
+    payload = (
+        '{"recap": "Built the marketing context.",'
+        ' "artifacts": ['
+        '   {"kind": "file", "label": ".agents/product-marketing.md",'
+        '    "ref": ".agents/product-marketing.md"}'
+        ' ]}'
+    )
+    client = _StubClient(payload)
+    summarizer = _turn_summarizer(client)
+
+    result = await summarizer.summarize_turn(
+        turn_id="t1",
+        user_message="create a marketing document",
+        iteration_summaries=["Write product marketing context"],
+        candidate_artifacts=[
+            TurnArtifact(kind="file", label="x", ref="x"),
+        ],
+    )
+
+    # recap survives; the internal file does not.
+    assert result is not None
+    assert result.artifacts == []
