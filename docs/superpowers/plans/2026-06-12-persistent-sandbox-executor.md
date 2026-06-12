@@ -564,6 +564,11 @@ def _timed_out_result() -> str:
 
 def _child_main(conn: Any, name: str, args: dict, workspace: str) -> None:
     """Entry point of the forked child: run the tool, ship the result."""
+    # The forked thread inherits the parent's "running event loop"
+    # marker; clear it so run_tool's asyncio.run() can start a fresh
+    # loop.  Python 3.12's asyncio also resets this in an at-fork hook —
+    # this line is belt-and-braces against that hook changing.
+    asyncio._set_running_loop(None)
     try:
         result = run_tool(name, args, workspace)
     except BaseException as exc:  # never die without reporting
@@ -643,7 +648,9 @@ git commit -m "Run each tool call in a killable forked child"
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/test_executor_server.py`:
+Append to `tests/test_executor_server.py` — move the `import httpx` line up
+into the import block at the top of the file (shown inline here for
+completeness; mid-file imports trip ruff E402):
 
 ```python
 # ---------------------------------------------------------------------------
@@ -884,7 +891,9 @@ kept. The old in-CLI dispatch code is deleted.
 
 - [ ] **Step 1: Write the failing test (thin client end-to-end over a real port)**
 
-Append to `tests/test_executor_server.py`:
+Append to `tests/test_executor_server.py` — move the `subprocess`, `sys`,
+and `uvicorn` imports up into the import block at the top of the file
+(shown inline here for completeness):
 
 ```python
 # ---------------------------------------------------------------------------
@@ -1361,8 +1370,10 @@ git commit -m "Provision sandbox pods with the executor daemon, token, and readi
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/test_k8s_sandbox.py`. These run a real local aiohttp server
-so connection-refused and status-code behavior are genuine:
+Append to `tests/test_k8s_sandbox.py` — move the three import lines up into
+the import block at the top of the file (shown inline here for
+completeness). These tests run a real local aiohttp server so
+connection-refused and status-code behavior are genuine:
 
 ```python
 import aiohttp
@@ -1509,7 +1520,12 @@ In `surogates/sandbox/kubernetes.py`:
                 url,
                 json={"name": name, "args": args, "timeout": entry.spec.timeout},
                 headers={"Authorization": f"Bearer {entry.token}"},
-                timeout=aiohttp.ClientTimeout(total=entry.spec.timeout + 5),
+                # ``connect=10`` makes a blackholed pod IP (node gone)
+                # fail fast as a connection error instead of burning the
+                # whole tool budget before failing.
+                timeout=aiohttp.ClientTimeout(
+                    total=entry.spec.timeout + 5, connect=10,
+                ),
             ) as resp:
                 body = await resp.text()
                 if resp.status == 401:
@@ -1533,22 +1549,18 @@ In `surogates/sandbox/kubernetes.py`:
                         timed_out=False,
                     )
                 return body
-        except asyncio.TimeoutError:
-            # The daemon kills timed-out children itself; reaching the
-            # client-side budget (+5s buffer) means it is unresponsive.
-            logger.warning("Sandbox exec timed out in pod %s", entry.pod_name)
-            return self._result_json(
-                exit_code=-1,
-                stdout="",
-                stderr="Execution timed out",
-                truncated=False,
-                timed_out=True,
-            )
         except aiohttp.ClientConnectionError as exc:
             # Daemon unreachable — pod gone, daemon dead, or an old
             # (pre-daemon) pod from before a deploy.  Every subsequent
             # sandbox tool would fail identically; mark FAILED so the
             # next ensure() reprovisions.
+            #
+            # ORDER MATTERS: this clause must come before TimeoutError.
+            # aiohttp's connect-phase timeouts (ConnectionTimeoutError /
+            # ServerTimeoutError) inherit BOTH ClientConnectionError and
+            # TimeoutError — they mean "daemon unreachable" and must land
+            # here, not in the tool-timeout branch below (which would
+            # leave a dead sandbox marked healthy forever).
             logger.error(
                 "Sandbox daemon unreachable in pod %s: %s", entry.pod_name, exc,
             )
@@ -1557,6 +1569,19 @@ In `surogates/sandbox/kubernetes.py`:
                 f"Sandbox daemon unreachable in pod {entry.pod_name} "
                 f"(pod terminated, daemon dead, or pre-daemon image): {exc}",
             ) from exc
+        except asyncio.TimeoutError:
+            # Plain total-budget expiry while reading the response (the
+            # connection succeeded, the tool is just slow).  The daemon
+            # kills timed-out children itself; reaching the client-side
+            # budget (+5s buffer) means it is unresponsive to the kill.
+            logger.warning("Sandbox exec timed out in pod %s", entry.pod_name)
+            return self._result_json(
+                exit_code=-1,
+                stdout="",
+                stderr="Execution timed out",
+                truncated=False,
+                timed_out=True,
+            )
 ```
 
 (b) Add the HTTP session helpers right after `execute`:
