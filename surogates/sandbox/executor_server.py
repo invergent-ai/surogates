@@ -303,3 +303,36 @@ def create_app(
         return Response(content=result, media_type="application/json")
 
     return app
+
+
+def main() -> None:
+    """Daemon entry point — sandbox container main process."""
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    workspace = os.environ.get("WORKSPACE_DIR", "/workspace")
+    port = int(os.environ.get("TOOL_EXECUTOR_PORT", str(DEFAULT_PORT)))
+    token = os.environ.get("TOOL_EXECUTOR_TOKEN", "")
+    if not token:
+        logger.error("TOOL_EXECUTOR_TOKEN is required")
+        sys.exit(1)
+
+    logger.info("Loading tool registry...")
+    init_registry()
+    logger.info("Registry loaded; serving on 0.0.0.0:%d", port)
+
+    import uvicorn
+
+    uvicorn.run(
+        create_app(token=token, workspace=workspace),
+        host="0.0.0.0",
+        port=port,
+        log_level="warning",
+    )
+
+
+if __name__ == "__main__":
+    main()

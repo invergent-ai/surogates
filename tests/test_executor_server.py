@@ -5,12 +5,18 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
+import sys
 import time
 
 import httpx
 import pytest
+import uvicorn
 
 from surogates.sandbox import executor_server
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CLI_PATH = os.path.join(REPO_ROOT, "images", "sandbox", "tool-executor")
 
 
 # ---------------------------------------------------------------------------
@@ -300,3 +306,40 @@ class TestHttpLayer:
                 "/execute", json={"name": "echo", "args": {}}, headers=AUTH,
             )
             assert json.loads(resp.text)["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# Thin-client CLI against a live server
+# ---------------------------------------------------------------------------
+
+
+class TestThinClientCli:
+    async def test_cli_forwards_to_daemon(self, app):
+        config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error")
+        server = uvicorn.Server(config)
+        serve_task = asyncio.create_task(server.serve())
+        try:
+            while not server.started:
+                await asyncio.sleep(0.01)
+            port = server.servers[0].sockets[0].getsockname()[1]
+
+            env = {
+                **os.environ,
+                "TOOL_EXECUTOR_PORT": str(port),
+                "TOOL_EXECUTOR_TOKEN": "secret-token",
+            }
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                [sys.executable, CLI_PATH, "echo", json.dumps({"b": 2})],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            assert proc.returncode == 0, proc.stderr
+            body = json.loads(proc.stdout)
+            assert body["ok"] is True
+            assert body["echo"] == {"b": 2}
+        finally:
+            server.should_exit = True
+            await serve_task

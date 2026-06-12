@@ -21,7 +21,7 @@
 - [x] Task 3: run_tool — the child-side dispatch
 - [x] Task 4: execute_in_child — the fork runner
 - [x] Task 5: create_app — HTTP layer
-- [ ] Task 6: main() entry, thin-client CLI, Dockerfile CMD
+- [x] Task 6: main() entry, thin-client CLI, Dockerfile CMD
 - [ ] Task 7: Worker-side settings, pod manifest, provisioning
 - [ ] Task 8: execute() over HTTP; delete the exec machinery
 - [ ] Task 9: NetworkPolicy manifest
@@ -902,7 +902,7 @@ kept. The old in-CLI dispatch code is deleted.
 - Modify: `images/sandbox/Dockerfile` (CMD only)
 - Test: `tests/test_executor_server.py` (append)
 
-- [ ] **Step 1: Write the failing test (thin client end-to-end over a real port)**
+- [x] **Step 1: Write the failing test (thin client end-to-end over a real port)**
 
 Append to `tests/test_executor_server.py` — move the `subprocess`, `sys`,
 and `uvicorn` imports up into the import block at the top of the file
@@ -954,13 +954,13 @@ class TestThinClientCli:
             await serve_task
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `uv run pytest tests/test_executor_server.py::TestThinClientCli -v`
 Expected: FAIL — the current CLI ignores `TOOL_EXECUTOR_PORT` and tries to
 dispatch through the real registry (wrong output or import-time failure).
 
-- [ ] **Step 3: Add main() to the daemon**
+- [x] **Step 3: Add main() to the daemon**
 
 Append to `surogates/sandbox/executor_server.py`:
 
@@ -998,7 +998,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 4: Rewrite the CLI as a thin client**
+- [x] **Step 4: Rewrite the CLI as a thin client**
 
 Replace the entire contents of `images/sandbox/tool-executor`:
 
@@ -1057,7 +1057,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 5: Update the Dockerfile CMD**
+- [x] **Step 5: Update the Dockerfile CMD**
 
 In `images/sandbox/Dockerfile`, replace the final line:
 
@@ -1074,12 +1074,12 @@ CMD ["python", "-m", "surogates.sandbox.executor_server"]
 (The pod manifest sets an explicit `command` anyway — see Task 7 — but the
 image default should match the real role.)
 
-- [ ] **Step 6: Run the test to verify it passes**
+- [x] **Step 6: Run the test to verify it passes**
 
 Run: `uv run pytest tests/test_executor_server.py -v`
 Expected: all PASS (23 tests)
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add surogates/sandbox/executor_server.py images/sandbox/tool-executor images/sandbox/Dockerfile tests/test_executor_server.py
