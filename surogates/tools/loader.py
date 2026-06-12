@@ -69,6 +69,7 @@ _KNOWN_AGENT_FRONTMATTER_KEYS: frozenset[str] = frozenset({
     "tools", "disallowed_tools",
     "model", "max_iterations", "policy_profile",
     "category", "tags", "enabled",
+    "preloaded_skills",
 })
 
 # Expert status lifecycle constants.
@@ -167,6 +168,7 @@ class AgentDef:
     enabled: bool = True
     category: str | None = None  # subdirectory grouping
     tags: list[str] | None = None  # metadata tags
+    preloaded_skills: list[str] | None = None  # skills inlined into the child's system prompt
 
 
 # ------------------------------------------------------------------
@@ -818,6 +820,16 @@ def _agent_from_db_row(row: Any, source: str) -> AgentDef:
     else:
         disallowed = None
 
+    preloaded_skills = cfg.get("preloaded_skills")
+    if isinstance(preloaded_skills, str):
+        preloaded_skills = [
+            s.strip() for s in preloaded_skills.split(",") if s.strip()
+        ]
+    elif isinstance(preloaded_skills, list):
+        preloaded_skills = [str(s).strip() for s in preloaded_skills if s]
+    else:
+        preloaded_skills = None
+
     tags = cfg.get("tags")
     if isinstance(tags, str):
         tags = [t.strip() for t in tags.split(",") if t.strip()]
@@ -839,6 +851,7 @@ def _agent_from_db_row(row: Any, source: str) -> AgentDef:
         enabled=bool(row.enabled),
         category=cfg.get("category"),
         tags=tags,
+        preloaded_skills=preloaded_skills,
     )
 
 
@@ -872,6 +885,7 @@ def _build_agent_def(
         enabled=bool(enabled),
         category=category or parsed.get("category"),
         tags=parsed.get("tags"),
+        preloaded_skills=parsed.get("preloaded_skills"),
     )
 
 
@@ -904,7 +918,7 @@ def _parse_agent_frontmatter(
             result["description"] = fm.get("description", "")
 
             # List-valued fields: accept YAML lists or comma-separated strings.
-            for key in ("tools", "disallowed_tools", "tags"):
+            for key in ("tools", "disallowed_tools", "tags", "preloaded_skills"):
                 val = fm.get(key)
                 if val:
                     if isinstance(val, str):

@@ -370,180 +370,28 @@ async def _spawn_task_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
             parent_session_id,
         )
 
-    # ----- Phase 1: validate parents + insert Task row + links --------------
-    try:
-        async with session_factory() as db:
-            initial_status = "ready"
-            if parent_ids:
-                parent_rows = (
-                    await db.execute(
-                        select(Task).where(Task.id.in_(parent_ids))
-                    )
-                ).scalars().all()
-                if len(parent_rows) != len(parent_ids):
-                    found = {p.id for p in parent_rows}
-                    missing = [pid for pid in parent_ids if pid not in found]
-                    return _tool_error(
-                        f"parent task(s) not found: {', '.join(str(m) for m in missing)}"
-                    )
-                for p in parent_rows:
-                    if p.org_id != org_id:
-                        return _tool_error(
-                            f"parent task {p.id} belongs to a different org; "
-                            "cross-org dependencies are not allowed"
-                        )
-                if any(p.status != "done" for p in parent_rows):
-                    initial_status = "todo"
-
-            task = Task(
-                org_id=org_id,
-                parent_session_id=parent_session_id,
-                agent_def_name=agent_def_name,
-                goal=goal_clean,
-                context=context,
-                status=initial_status,
-                max_attempts=max_attempts,
-                mission_id=active_mission_id,
-            )
-            db.add(task)
-            await db.flush()
-            for pid in parent_ids:
-                db.add(TaskLink(parent_id=pid, child_id=task.id))
-            await db.commit()
-            task_id = task.id
-    except Exception:
-        logger.exception("spawn_task: failed to insert Task row")
-        return _tool_error("internal error creating task")
-
-    # If status is 'todo' we're done — the dispatcher tick will promote
-    # and spawn once parents complete.
-    if initial_status == "todo":
-        return json.dumps({"task_id": str(task_id), "status": "todo"})
-
-    # ----- Phase 2: atomic claim via UPDATE ... RETURNING -------------------
-    # We can't use SELECT ... FOR UPDATE here: the FOR UPDATE row lock on
-    # the tasks row blocks the FK validation lock (FOR KEY SHARE) that
-    # the subsequent INSERT into sessions(task_id=...) would need to
-    # acquire, deadlocking the eager-spawn path. UPDATE ... RETURNING
-    # serialises against concurrent UPDATEs (the dispatcher tick uses
-    # the same WHERE status='ready' guard) without holding a lock past
-    # the statement, so the child Session INSERT runs unblocked.
-    try:
-        async with session_factory() as db:
-            claim_result = await db.execute(
-                update(Task)
-                .where(Task.id == task_id, Task.status == "ready")
-                .values(
-                    status="running",
-                    attempt_count=Task.attempt_count + 1,
-                    started_at=func.coalesce(Task.started_at, func.now()),
-                )
-                .returning(Task)
-                .execution_options(synchronize_session=False)
-            )
-            claimed = claim_result.scalar_one_or_none()
-            await db.commit()
-
-        if claimed is None:
-            # Lost the race to the dispatcher tick — that's fine, the
-            # work is already in-flight or imminently will be.
-            return json.dumps({"task_id": str(task_id), "status": "ready"})
-    except Exception:
-        logger.exception("spawn_task: atomic claim failed for task %s", task_id)
-        return _tool_error("internal error during atomic claim")
-
-    # We own the task. Spawn outside any DB transaction so the child
-    # Session INSERT's FK lookup against tasks(id) doesn't conflict.
-    from surogates.tasks.spawn import _create_session_for_task
+    # ----- Phases 1-2 + spawn + enqueue are shared with dispatch_experiments
+    # (research missions) via surogates.tasks.service.create_task_and_spawn.
+    from surogates.tasks.service import TaskSpawnError, create_task_and_spawn
 
     try:
-        child = await _create_session_for_task(
-            claimed,
+        result = await create_task_and_spawn(
+            goal=goal_clean,
+            context=context,
+            agent_def_name=agent_def_name,
+            max_attempts=max_attempts,
+            parent_ids=parent_ids,
+            parent_session_id=parent_session_id,
+            org_id=org_id,
+            mission_id=active_mission_id,
             session_store=session_store,
             session_factory=session_factory,
+            redis=redis,
             tenant=tenant,
         )
-    except ValueError as exc:
-        # Roll back the claim so the tick can retry once a human fixes
-        # the AgentDef catalog. Decrement attempt_count because this
-        # attempt never actually ran — counting it would burn a retry
-        # budget on a config error.
-        try:
-            async with session_factory() as db:
-                await db.execute(
-                    update(Task)
-                    .where(Task.id == task_id)
-                    .values(
-                        status="ready",
-                        attempt_count=Task.attempt_count - 1,
-                    )
-                )
-                await db.commit()
-        except Exception:
-            logger.exception(
-                "spawn_task: failed to roll back claim for task %s after "
-                "spawn error; manual intervention may be required",
-                task_id,
-            )
-        logger.warning(
-            "spawn_task: agent_def_name resolution failed for task %s: %s",
-            task_id, exc,
-        )
+    except TaskSpawnError as exc:
         return _tool_error(str(exc))
-    except Exception:
-        # Unknown error during spawn: same rollback pattern.
-        logger.exception("spawn_task: unexpected error during child spawn")
-        try:
-            async with session_factory() as db:
-                await db.execute(
-                    update(Task)
-                    .where(Task.id == task_id)
-                    .values(
-                        status="ready",
-                        attempt_count=Task.attempt_count - 1,
-                    )
-                )
-                await db.commit()
-        except Exception:
-            logger.exception(
-                "spawn_task: rollback failed for task %s; status may be "
-                "stuck at 'running' with no current_session_id",
-                task_id,
-            )
-        return _tool_error("internal error during child spawn (tick will retry)")
-
-    # Wire the child session id back onto the Task row.
-    try:
-        async with session_factory() as db:
-            await db.execute(
-                update(Task)
-                .where(Task.id == task_id)
-                .values(current_session_id=child.id)
-            )
-            await db.commit()
-    except Exception:
-        # The child Session exists but the Task row doesn't point at it.
-        # The tick's finalize step will observe the orphan on the next
-        # pass and recover by either matching the session or treating
-        # the running attempt as crashed. Log and continue so the LLM
-        # still gets a useful tool result.
-        logger.exception(
-            "spawn_task: failed to wire current_session_id for task %s "
-            "(child %s spawned but pointer not committed)",
-            task_id, child.id,
-        )
-
-    await enqueue_session(
-        redis,
-        org_id=str(child.org_id),
-        agent_id=child.agent_id,
-        session_id=child.id,
-    )
-    return json.dumps({
-        "task_id": str(task_id),
-        "status": "running",
-        "worker_id": str(child.id),
-    })
+    return json.dumps(result)
 
 
 # ---------------------------------------------------------------------------
