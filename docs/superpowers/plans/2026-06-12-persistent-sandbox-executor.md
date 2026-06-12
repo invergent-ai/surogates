@@ -20,7 +20,7 @@
 - [x] Task 2: executor_server module — mount detection
 - [x] Task 3: run_tool — the child-side dispatch
 - [x] Task 4: execute_in_child — the fork runner
-- [ ] Task 5: create_app — HTTP layer
+- [x] Task 5: create_app — HTTP layer
 - [ ] Task 6: main() entry, thin-client CLI, Dockerfile CMD
 - [ ] Task 7: Worker-side settings, pod manifest, provisioning
 - [ ] Task 8: execute() over HTTP; delete the exec machinery
@@ -659,7 +659,7 @@ git commit -m "Run each tool call in a killable forked child"
 - Modify: `surogates/sandbox/executor_server.py` (append)
 - Test: `tests/test_executor_server.py` (append)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_executor_server.py` — move the `import httpx` line up
 into the import block at the top of the file (shown inline here for
@@ -801,12 +801,12 @@ class TestHttpLayer:
             assert json.loads(resp.text)["ok"] is True
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_executor_server.py::TestHttpLayer -v`
 Expected: FAIL with `AttributeError: ... has no attribute 'create_app'`
 
-- [ ] **Step 3: Implement the HTTP layer**
+- [x] **Step 3: Implement the HTTP layer**
 
 Append to `surogates/sandbox/executor_server.py`:
 
@@ -875,12 +875,12 @@ def create_app(
     return app
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_executor_server.py -v`
 Expected: all PASS (22 tests)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add surogates/sandbox/executor_server.py tests/test_executor_server.py

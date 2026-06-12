@@ -239,3 +239,67 @@ async def execute_in_child(
         if proc.is_alive():
             proc.kill()
         await asyncio.to_thread(proc.join, 5)
+
+
+def _token_ok(auth_header: str, token: str) -> bool:
+    if not auth_header.startswith("Bearer "):
+        return False
+    return hmac.compare_digest(auth_header[len("Bearer "):], token)
+
+
+def create_app(
+    *,
+    token: str,
+    workspace: str,
+    mounts_path: str = "/proc/mounts",
+    max_concurrency: int = MAX_CONCURRENCY,
+    default_timeout: int = DEFAULT_TIMEOUT,
+) -> FastAPI:
+    """Build the daemon's FastAPI app.
+
+    ``token`` and ``workspace`` are injected (instead of read from env
+    inside the handlers) so tests can construct isolated apps.
+    """
+    app = FastAPI()
+    sem = asyncio.Semaphore(max_concurrency)
+
+    @app.get("/healthz")
+    async def healthz() -> Response:
+        if workspace_mounted(workspace, mounts_path):
+            return Response(content="ok", status_code=200)
+        return Response(content="workspace not mounted", status_code=503)
+
+    @app.post("/execute")
+    async def execute(request: Request) -> Response:
+        auth = request.headers.get("authorization", "")
+        if not _token_ok(auth, token):
+            return Response(content="unauthorized", status_code=401)
+
+        payload = await request.json()
+        name = payload.get("name") or ""
+        args = payload.get("args") or {}
+        timeout = float(payload.get("timeout") or default_timeout)
+
+        if not name:
+            return Response(
+                content=json.dumps({
+                    "exit_code": 1,
+                    "output": "",
+                    "error": "No tool name provided",
+                }),
+                media_type="application/json",
+            )
+
+        # The _code payload may carry a credential — never log its args.
+        if name == "_code":
+            logger.info("→ _code")
+        else:
+            preview = json.dumps(args, default=str)[:200]
+            logger.info("→ %s %s", name, preview)
+
+        async with sem:
+            result = await execute_in_child(name, args, workspace, timeout)
+        logger.info("← %s (%d bytes)", name, len(result))
+        return Response(content=result, media_type="application/json")
+
+    return app

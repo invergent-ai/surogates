@@ -7,6 +7,7 @@ import json
 import os
 import time
 
+import httpx
 import pytest
 
 from surogates.sandbox import executor_server
@@ -166,3 +167,136 @@ class TestExecuteInChild:
         assert result["exit_code"] == 1
         assert "died" in result["error"]
         assert "7" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# HTTP layer
+# ---------------------------------------------------------------------------
+
+
+def _make_client(app):
+    transport = httpx.ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://daemon")
+
+
+@pytest.fixture()
+def mounted_mounts_file(tmp_path):
+    mounts = tmp_path / "mounts"
+    mounts.write_text("geesefs /workspace fuse.geesefs rw 0 0\n")
+    return str(mounts)
+
+
+@pytest.fixture()
+def app(fake_registry, mounted_mounts_file):
+    return executor_server.create_app(
+        token="secret-token",
+        workspace="/workspace",
+        mounts_path=mounted_mounts_file,
+    )
+
+
+AUTH = {"Authorization": "Bearer secret-token"}
+
+
+class TestHttpLayer:
+    async def test_execute_requires_token(self, app):
+        async with _make_client(app) as client:
+            resp = await client.post("/execute", json={"name": "echo", "args": {}})
+            assert resp.status_code == 401
+            resp = await client.post(
+                "/execute",
+                json={"name": "echo", "args": {}},
+                headers={"Authorization": "Bearer wrong"},
+            )
+            assert resp.status_code == 401
+
+    async def test_execute_happy_path(self, app):
+        async with _make_client(app) as client:
+            resp = await client.post(
+                "/execute",
+                json={"name": "echo", "args": {"a": 1}},
+                headers=AUTH,
+            )
+            assert resp.status_code == 200
+            body = json.loads(resp.text)
+            assert body["ok"] is True
+            assert body["echo"] == {"a": 1}
+
+    async def test_execute_missing_name(self, app):
+        async with _make_client(app) as client:
+            resp = await client.post("/execute", json={"args": {}}, headers=AUTH)
+            assert resp.status_code == 200
+            assert json.loads(resp.text)["error"] == "No tool name provided"
+
+    async def test_execute_body_timeout(self, app):
+        async with _make_client(app) as client:
+            start = time.monotonic()
+            resp = await client.post(
+                "/execute",
+                json={"name": "slow", "args": {"seconds": 10}, "timeout": 0.3},
+                headers=AUTH,
+            )
+            assert json.loads(resp.text)["timed_out"] is True
+            assert time.monotonic() - start < 5
+
+    async def test_healthz_unauthenticated_when_mounted(self, app):
+        async with _make_client(app) as client:
+            resp = await client.get("/healthz")
+            assert resp.status_code == 200
+
+    async def test_healthz_503_when_not_mounted(self, fake_registry, tmp_path):
+        mounts = tmp_path / "mounts"
+        mounts.write_text("/dev/sda1 /workspace ext4 rw 0 0\n")
+        app = executor_server.create_app(
+            token="secret-token", workspace="/workspace", mounts_path=str(mounts),
+        )
+        async with _make_client(app) as client:
+            resp = await client.get("/healthz")
+            assert resp.status_code == 503
+
+    async def test_concurrent_executes_overlap(self, app):
+        async with _make_client(app) as client:
+            start = time.monotonic()
+            await asyncio.gather(
+                client.post(
+                    "/execute",
+                    json={"name": "slow", "args": {"seconds": 0.6}},
+                    headers=AUTH,
+                ),
+                client.post(
+                    "/execute",
+                    json={"name": "slow", "args": {"seconds": 0.6}},
+                    headers=AUTH,
+                ),
+            )
+            elapsed = time.monotonic() - start
+            assert elapsed < 1.1, f"requests serialized: {elapsed:.2f}s"
+
+    async def test_cpu_bound_tool_does_not_block_healthz(self, app):
+        async with _make_client(app) as client:
+            spin = asyncio.create_task(
+                client.post(
+                    "/execute",
+                    json={"name": "spin", "args": {"seconds": 1.5}},
+                    headers=AUTH,
+                ),
+            )
+            await asyncio.sleep(0.1)
+            start = time.monotonic()
+            resp = await client.get("/healthz")
+            elapsed = time.monotonic() - start
+            assert resp.status_code == 200
+            assert elapsed < 0.5, f"healthz starved by CPU-bound tool: {elapsed:.2f}s"
+            await spin
+
+    async def test_child_death_keeps_daemon_serving(self, app):
+        async with _make_client(app) as client:
+            resp = await client.post(
+                "/execute", json={"name": "die", "args": {}}, headers=AUTH,
+            )
+            assert "died" in json.loads(resp.text)["error"]
+            # Daemon still serves after the child crash.
+            resp = await client.post(
+                "/execute", json={"name": "echo", "args": {}}, headers=AUTH,
+            )
+            assert json.loads(resp.text)["ok"] is True
