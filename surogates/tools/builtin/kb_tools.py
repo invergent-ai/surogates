@@ -31,7 +31,6 @@ injection that handed the agent a kb_id outside its allowed set.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 import sqlalchemy as sa
@@ -90,17 +89,21 @@ _HUB_BRANCH = "main"
 _MAX_PAGE_BYTES = 200_000
 
 
-def _agent_id_from_env() -> str:
-    """Resolve the worker's agent_id, raising if it isn't set.
+def _agent_id_from_kwargs(kwargs: dict[str, Any]) -> str:
+    """Resolve the per-session agent_id from the tool-dispatch context.
 
-    Tools never run outside a worker process, so the env var is
-    guaranteed at startup -- but we re-read it per call to keep the
-    handler self-contained and easy to test.
+    The harness passes ``agent_id=session.agent_id`` into every tool
+    call (see ``surogates.harness.tool_exec``). We read it from there
+    rather than from a process env var because the shared runtime serves
+    many agents from one worker and never sets ``SUROGATES_AGENT_ID`` --
+    reading that env var broke KB tools for every shared-runtime session.
+    A missing value is an internal wiring bug (the dispatch always
+    supplies it), so we fail loudly rather than degrade.
     """
-    agent_id = os.getenv("SUROGATES_AGENT_ID", "")
+    agent_id = str(kwargs.get("agent_id") or "").strip()
     if not agent_id:
         raise RuntimeError(
-            "SUROGATES_AGENT_ID is not set; KB tools require it to "
+            "agent_id missing from tool context; KB tools require it to "
             "validate KB attachment."
         )
     return agent_id
@@ -168,14 +171,14 @@ async def _kb_list_pages_handler(
     if not kb_id:
         return "Error: kb_id is required."
 
+    agent_id = _agent_id_from_kwargs(kwargs)
+
     factory = _ensure_ops_session_factory()
     if factory is None:
         return (
             "Error: KB tools are unavailable -- the worker was started "
             "without an ops database connection."
         )
-
-    agent_id = _agent_id_from_env()
 
     async with factory() as session:
         if not await _is_kb_attached(
@@ -226,6 +229,8 @@ async def _kb_read_page_handler(
     if not kb_id or not path:
         return "Error: both kb_id and path are required."
 
+    agent_id = _agent_id_from_kwargs(kwargs)
+
     factory = _ensure_ops_session_factory()
     if factory is None:
         return (
@@ -240,8 +245,6 @@ async def _kb_read_page_handler(
         return (
             "Error: KB Hub endpoint not configured on this worker."
         )
-
-    agent_id = _agent_id_from_env()
 
     async with factory() as session:
         if not await _is_kb_attached(
