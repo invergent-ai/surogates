@@ -74,6 +74,7 @@ import {
   CommandItem,
   CommandList,
 } from "../ui/command";
+import { Skeleton } from "../ui/skeleton";
 
 // ── Slash command entry ──────────────────────────────────────────────
 
@@ -320,6 +321,7 @@ function ChatComposerInner({
   // ── Load skills from backend ─────────────────────────────────────
 
   const [adapterCommands, setAdapterCommands] = useState<SlashCommand[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
   const [buttonMenuOpen, setButtonMenuOpen] = useState(false);
   const [menuMode, setMenuMode] = useState<
     "commands" | "skills" | "scheduled" | "all"
@@ -352,11 +354,26 @@ function ChatComposerInner({
   // Platform built-ins (docx, pdf, pptx, xlsx, kanban, …) are dropped here so
   // the slash menu lists only the skills a tenant authored or attached.
   useEffect(() => {
-    if (showSlashMenu && (menuMode === "skills" || menuMode === "all")) {
-      adapter.listSlashCommands?.()
-        .then((commands) => setAdapterCommands(commands.filter((c) => !c.isBuiltin)))
-        .catch(() => { /* best-effort */ });
+    if (!(showSlashMenu && (menuMode === "skills" || menuMode === "all"))) {
+      return;
     }
+    const pending = adapter.listSlashCommands?.();
+    if (!pending) return;
+    let cancelled = false;
+    setSkillsLoading(true);
+    pending
+      .then((commands) => {
+        if (!cancelled) {
+          setAdapterCommands(commands.filter((c) => !c.isBuiltin));
+        }
+      })
+      .catch(() => { /* best-effort */ })
+      .finally(() => {
+        if (!cancelled) setSkillsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [adapter, showSlashMenu, menuMode]);
 
   const builtinCommands = useMemo<SlashCommand[]>(
@@ -905,13 +922,38 @@ function ChatComposerInner({
             />
           )}
           <CommandList>
-            <CommandEmpty>
-              {menuMode === "skills"
-                ? "No skills found."
-                : menuMode === "scheduled"
-                ? "No scheduled tasks found."
-                : "No commands found."}
-            </CommandEmpty>
+            {/*
+              While skills are still being fetched ``adapterCommands`` is
+              empty, so cmdk would otherwise flash "No skills found." until
+              the request resolves. Suppress the empty state and show
+              skeleton rows instead so the menu reads as "loading" on its
+              very first open rather than "empty".
+            */}
+            {!(
+              skillsLoading &&
+              (menuMode === "skills" || menuMode === "all")
+            ) && (
+              <CommandEmpty>
+                {menuMode === "skills"
+                  ? "No skills found."
+                  : menuMode === "scheduled"
+                  ? "No scheduled tasks found."
+                  : "No commands found."}
+              </CommandEmpty>
+            )}
+            {(menuMode === "skills" || menuMode === "all") &&
+              skillsLoading &&
+              adapterCommands.length === 0 &&
+              [0, 1, 2].map((i) => (
+                <div
+                  key={`skill-skeleton-${i}`}
+                  className="grid grid-cols-[12rem_1fr] items-baseline gap-3 px-2 py-2"
+                  aria-hidden="true"
+                >
+                  <Skeleton className="h-4 w-28" />
+                  <Skeleton className="h-3 w-full max-w-[16rem]" />
+                </div>
+              ))}
             {menuMode === "scheduled" &&
               scheduledExamples.map((cmd) => (
                 <CommandItem
