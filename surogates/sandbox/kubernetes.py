@@ -18,14 +18,15 @@ import base64
 import json
 import logging
 import os
+import secrets
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+import aiohttp
 from kubernetes_asyncio import client, config, watch
 from kubernetes_asyncio.client import ApiException
-from kubernetes_asyncio.stream import WsApiClient
 
 from surogates.sandbox.base import (
     SandboxSpec,
@@ -48,6 +49,8 @@ class _PodEntry:
     secret_name: str
     namespace: str
     spec: SandboxSpec
+    pod_ip: str = ""
+    token: str = ""
     status: SandboxStatus = SandboxStatus.PENDING
 
 
@@ -65,8 +68,8 @@ class K8sSandbox:
         ServiceAccount for sandbox pods (should have no K8s API permissions).
     pod_ready_timeout:
         Seconds to wait for a pod to become Ready after creation.
-    executor_path:
-        Path to the tool-executor binary inside the sandbox image.
+    executor_port:
+        Port the tool-executor daemon listens on inside the sandbox pod.
     storage_settings:
         Storage configuration (for S3 endpoint/credentials).
     s3fs_image:
@@ -78,7 +81,7 @@ class K8sSandbox:
         namespace: str = "surogates",
         service_account: str = "surogates-sandbox",
         pod_ready_timeout: int = 60,
-        executor_path: str = "/usr/local/bin/tool-executor",
+        executor_port: int = 8071,
         storage_settings: Any = None,
         s3fs_image: str = "ghcr.io/invergent-ai/s3fs-fuse:latest",
         s3_endpoint: str = "",
@@ -87,13 +90,14 @@ class K8sSandbox:
         self._namespace = namespace
         self._service_account = service_account
         self._pod_ready_timeout = pod_ready_timeout
-        self._executor_path = executor_path
+        self._executor_port = executor_port
         self._storage = storage_settings
         self._s3fs_image = s3fs_image
         self._s3_endpoint = s3_endpoint
         self._mcp_proxy_url = mcp_proxy_url
         self._pods: dict[str, _PodEntry] = {}
         self._api: client.CoreV1Api | None = None
+        self._http: aiohttp.ClientSession | None = None
 
     # ------------------------------------------------------------------
     # K8s client
@@ -138,8 +142,10 @@ class K8sSandbox:
         await self._create_s3_secret(api, secret_name)
 
         # 2. Build and create the pod.
+        executor_token = secrets.token_urlsafe(32)
         pod_manifest = self._build_pod_manifest(
             sandbox_id, pod_name, secret_name, spec,
+            executor_token=executor_token,
         )
         try:
             await api.create_namespaced_pod(self._namespace, pod_manifest)
@@ -156,12 +162,19 @@ class K8sSandbox:
             secret_name=secret_name,
             namespace=self._namespace,
             spec=spec,
+            token=executor_token,
         )
         self._pods[sandbox_id] = entry
 
-        # 3. Wait for the pod to become ready.
+        # 3. Wait for the pod to become ready (the readinessProbe gates
+        # on the executor daemon being up AND /workspace being FUSE-
+        # mounted), then capture the pod IP the daemon is reached on.
         try:
             await self._wait_for_ready(api, pod_name)
+            pod = await api.read_namespaced_pod(pod_name, self._namespace)
+            entry.pod_ip = (pod.status.pod_ip if pod.status else "") or ""
+            if not entry.pod_ip:
+                raise RuntimeError(f"Pod {pod_name} has no IP after becoming ready")
             entry.status = SandboxStatus.RUNNING
         except Exception as exc:
             logger.error("Sandbox pod %s failed to become ready", pod_name, exc_info=True)
@@ -280,6 +293,8 @@ class K8sSandbox:
         pod_name: str,
         secret_name: str,
         spec: SandboxSpec,
+        *,
+        executor_token: str,
     ) -> client.V1Pod:
         """Build the K8s pod manifest for a sandbox."""
         # Parse resources from spec for s3fs mount.  s3fs accepts
@@ -304,6 +319,12 @@ class K8sSandbox:
         # Environment variables for the main container.
         env_vars = [
             client.V1EnvVar(name="WORKSPACE_DIR", value="/workspace"),
+            client.V1EnvVar(
+                name="TOOL_EXECUTOR_PORT", value=str(self._executor_port),
+            ),
+            client.V1EnvVar(
+                name="TOOL_EXECUTOR_TOKEN", value=executor_token,
+            ),
         ]
         if self._mcp_proxy_url:
             env_vars.append(client.V1EnvVar(
@@ -345,7 +366,25 @@ class K8sSandbox:
         sandbox_container = client.V1Container(
             name="sandbox",
             image=spec.image,
-            command=["sleep", "infinity"],
+            # The daemon is the container's main process; its death
+            # terminates the container (restartPolicy=Never -> pod Failed
+            # -> pool status check reprovisions).
+            command=[
+                "tini", "--", "python", "-m", "surogates.sandbox.executor_server",
+            ],
+            readiness_probe=client.V1Probe(
+                http_get=client.V1HTTPGetAction(
+                    path="/healthz", port=self._executor_port,
+                ),
+                # Fast checks for quick provisioning; the high failure
+                # threshold tolerates transient kubelet/CNI blips — the
+                # fork-per-request daemon never starves /healthz, so 15
+                # consecutive failures means genuinely broken (and the
+                # pool's reprovision is then desired self-healing).
+                period_seconds=1,
+                timeout_seconds=2,
+                failure_threshold=15,
+            ),
             resources=client.V1ResourceRequirements(
                 requests={"cpu": spec.cpu, "memory": spec.memory},
                 limits={

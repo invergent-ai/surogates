@@ -22,7 +22,7 @@ def sandbox() -> K8sSandbox:
         namespace="test-ns",
         service_account="test-sa",
         pod_ready_timeout=5,
-        executor_path="/usr/local/bin/tool-executor",
+        executor_port=8071,
         storage_settings=MagicMock(endpoint="http://minio:9000", access_key="key", secret_key="secret", region=""),
         s3fs_image="s3fs:test",
     )
@@ -40,7 +40,7 @@ class TestBuildPodManifest:
             memory_limit="512Mi",
             env={"FOO": "bar"},
         )
-        pod = sandbox._build_pod_manifest("abc123", "sandbox-abc123", "secret-abc", spec)
+        pod = sandbox._build_pod_manifest("abc123", "sandbox-abc123", "secret-abc", spec, executor_token="t")
 
         assert pod.metadata.name == "sandbox-abc123"
         assert pod.metadata.namespace == "test-ns"
@@ -65,7 +65,7 @@ class TestBuildPodManifest:
 
     def test_env_vars_passed(self, sandbox: K8sSandbox):
         spec = SandboxSpec(env={"MY_VAR": "my_value"})
-        pod = sandbox._build_pod_manifest("id", "pod", "secret", spec)
+        pod = sandbox._build_pod_manifest("id", "pod", "secret", spec, executor_token="t")
         container = pod.spec.containers[0]
         env_names = {e.name: e.value for e in container.env}
         assert env_names["WORKSPACE_DIR"] == "/workspace"
@@ -81,7 +81,7 @@ class TestBuildPodManifest:
                 ),
             ],
         )
-        pod = sandbox._build_pod_manifest("id", "pod", "secret", spec)
+        pod = sandbox._build_pod_manifest("id", "pod", "secret", spec, executor_token="t")
         s3fs = pod.spec.containers[1]
         # The s3fs env should contain the bucket path.
         env_map = {e.name: e.value for e in s3fs.env}
@@ -91,7 +91,7 @@ class TestBuildPodManifest:
         # s3fs needs S3_REGION; without it the sidecar runs with
         # ``-o endpoint=garage`` (its hardcoded entrypoint default) and AWS
         # rejects the pre-mount service check, leaving the pod NotReady.
-        pod = sandbox._build_pod_manifest("id", "pod", "secret", SandboxSpec())
+        pod = sandbox._build_pod_manifest("id", "pod", "secret", SandboxSpec(), executor_token="t")
         s3fs = pod.spec.containers[1]
         env_map = {e.name: e.value for e in s3fs.env}
         assert "S3_REGION" in env_map
@@ -464,3 +464,75 @@ class TestSandboxUnavailableResult:
 
         out = json.loads(sandbox_unavailable_result("x"))
         assert "tools_affected" not in out
+
+
+class TestExecutorWiring:
+    """Daemon command, token env, port env, and readinessProbe in the manifest."""
+
+    def test_sandbox_container_runs_daemon(self, sandbox: K8sSandbox):
+        spec = SandboxSpec()
+        pod = sandbox._build_pod_manifest(
+            "id", "pod", "secret", spec, executor_token="tok-123",
+        )
+        container = pod.spec.containers[0]
+        assert container.command == [
+            "tini", "--", "python", "-m", "surogates.sandbox.executor_server",
+        ]
+
+    def test_executor_env_injected(self, sandbox: K8sSandbox):
+        spec = SandboxSpec()
+        pod = sandbox._build_pod_manifest(
+            "id", "pod", "secret", spec, executor_token="tok-123",
+        )
+        env = {e.name: e.value for e in pod.spec.containers[0].env}
+        assert env["TOOL_EXECUTOR_TOKEN"] == "tok-123"
+        assert env["TOOL_EXECUTOR_PORT"] == "8071"
+
+    def test_readiness_probe(self, sandbox: K8sSandbox):
+        spec = SandboxSpec()
+        pod = sandbox._build_pod_manifest(
+            "id", "pod", "secret", spec, executor_token="t",
+        )
+        probe = pod.spec.containers[0].readiness_probe
+        assert probe.http_get.path == "/healthz"
+        assert probe.http_get.port == 8071
+        assert probe.period_seconds == 1
+        assert probe.timeout_seconds == 2
+        assert probe.failure_threshold == 15
+
+
+class TestProvisionCapturesEndpoint:
+    """provision() stores the daemon endpoint (pod IP + token) on the entry."""
+
+    async def test_pod_ip_and_token_stored(self, sandbox: K8sSandbox):
+        api = MagicMock()
+        api.create_namespaced_pod = AsyncMock()
+        pod = MagicMock()
+        pod.status.pod_ip = "10.42.0.99"
+        api.read_namespaced_pod = AsyncMock(return_value=pod)
+
+        with patch.object(sandbox, "_get_api", AsyncMock(return_value=api)), \
+             patch.object(sandbox, "_create_s3_secret", AsyncMock()), \
+             patch.object(sandbox, "_wait_for_ready", AsyncMock()):
+            sandbox_id = await sandbox.provision(SandboxSpec())
+
+        entry = sandbox._pods[sandbox_id]
+        assert entry.pod_ip == "10.42.0.99"
+        assert len(entry.token) >= 32
+
+    async def test_missing_pod_ip_fails_provision(self, sandbox: K8sSandbox):
+        from surogates.sandbox.base import SandboxUnavailableError
+
+        api = MagicMock()
+        api.create_namespaced_pod = AsyncMock()
+        pod = MagicMock()
+        pod.status.pod_ip = None
+        api.read_namespaced_pod = AsyncMock(return_value=pod)
+        api.delete_namespaced_pod = AsyncMock()
+
+        with patch.object(sandbox, "_get_api", AsyncMock(return_value=api)), \
+             patch.object(sandbox, "_create_s3_secret", AsyncMock()), \
+             patch.object(sandbox, "_delete_secret_safe", AsyncMock()), \
+             patch.object(sandbox, "_wait_for_ready", AsyncMock()):
+            with pytest.raises(SandboxUnavailableError):
+                await sandbox.provision(SandboxSpec())

@@ -627,7 +627,7 @@ async def run_worker(settings: Settings) -> None:
             namespace=settings.sandbox.k8s_namespace,
             service_account=settings.sandbox.k8s_service_account,
             pod_ready_timeout=settings.sandbox.k8s_pod_ready_timeout,
-            executor_path=settings.sandbox.k8s_executor_path,
+            executor_port=settings.sandbox.k8s_executor_port,
             storage_settings=settings.storage,
             s3fs_image=settings.sandbox.k8s_s3fs_image,
             s3_endpoint=settings.sandbox.k8s_s3_endpoint,

@@ -22,7 +22,7 @@
 - [x] Task 4: execute_in_child — the fork runner
 - [x] Task 5: create_app — HTTP layer
 - [x] Task 6: main() entry, thin-client CLI, Dockerfile CMD
-- [ ] Task 7: Worker-side settings, pod manifest, provisioning
+- [x] Task 7: Worker-side settings, pod manifest, provisioning
 - [ ] Task 8: execute() over HTTP; delete the exec machinery
 - [ ] Task 9: NetworkPolicy manifest
 - [ ] Task 10: Docs, integration test, full verification
@@ -1100,7 +1100,7 @@ Remove the now-meaningless `executor_path` knob (no legacy fallback).
 - Modify: `surogates/orchestrator/worker.py:592` (K8sSandbox construction)
 - Test: `tests/test_k8s_sandbox.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `tests/test_k8s_sandbox.py`, update the `sandbox` fixture (line ~21):
 replace `executor_path="/usr/local/bin/tool-executor",` with
@@ -1188,14 +1188,14 @@ class TestProvisionCapturesEndpoint:
                 await sandbox.provision(SandboxSpec())
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_k8s_sandbox.py -v`
 Expected: the new tests FAIL (`unexpected keyword argument 'executor_port'`,
 `'executor_token'`); pre-existing manifest tests now also FAIL on the changed
 fixture — that's expected until Step 3 lands.
 
-- [ ] **Step 3: Implement settings + kubernetes.py changes**
+- [x] **Step 3: Implement settings + kubernetes.py changes**
 
 **`surogates/config.py`** — in `SandboxSettings`, replace:
 
@@ -1357,7 +1357,7 @@ with:
             executor_port=settings.sandbox.k8s_executor_port,
 ```
 
-- [ ] **Step 4: Run the test file**
+- [x] **Step 4: Run the test file**
 
 Run: `uv run pytest tests/test_k8s_sandbox.py -v`
 Expected: new tests PASS; pre-existing tests PASS again (fixture +
@@ -1365,7 +1365,7 @@ callsites updated in Step 1). If any old test asserts on
 `command == ["sleep", "infinity"]`, update that assertion to the new
 daemon command.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add surogates/config.py surogates/sandbox/kubernetes.py surogates/orchestrator/worker.py tests/test_k8s_sandbox.py
