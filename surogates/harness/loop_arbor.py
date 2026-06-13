@@ -198,11 +198,41 @@ class ArborHarvestMixin:
             await self._research_worktree_cleanup(session, run.repo_path, node.node_key)
 
         constraints = await store.constraints_block(run_id)
+
+        # Convergence intervention (fail-open): a plateaued run gets an
+        # Exploit/Combine/Leap nudge appended to the digest so the coordinator
+        # sees it before its next IDEATE.
+        intervention = ""
+        try:
+            from surogates.arbor.convergence import (
+                ConvergenceConfig, detect_convergence, format_intervention,
+            )
+
+            meta = run.meta or {}
+            signal = detect_convergence(
+                await store.list_nodes(run_id),
+                trunk_score=meta.get("trunk_score"),
+                meta=meta, config=ConvergenceConfig.from_meta(meta),
+            )
+            if signal is not None:
+                intervention = "\n\n" + format_intervention(signal)
+                await self._store.emit_event(
+                    session.id, EventType.RESEARCH_CONVERGED,
+                    {"run_id": str(run_id), "level": signal.level,
+                     "consecutive_non_improving": signal.consecutive_non_improving},
+                )
+        except Exception:
+            logger.warning(
+                "research: convergence check failed for session %s (continuing)",
+                session.id, exc_info=True,
+            )
+
         content = (
             "[research harvest]\n"
             + json.dumps(digests, default=str)
             + "\n\n"
             + constraints
+            + intervention
         )
         await self._store.emit_event(
             session.id, EventType.RESEARCH_HARVESTED,

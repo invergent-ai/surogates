@@ -32,7 +32,11 @@ META_KEYS: frozenset[str] = frozenset({
     "protected_paths", "required_outputs",
     "max_cycles", "max_tree_depth", "max_parallel",
     "merge_threshold", "hitl_mode",
-    "convergence_window", "convergence_min_delta",
+    # Convergence detector config (ConvergenceConfig.from_meta reads these).
+    "convergence_enabled", "convergence_min_experiments",
+    "convergence_window_size", "convergence_improvement_threshold",
+    "convergence_parent_exhaustion_count",
+    "convergence_warn_after", "convergence_force_after", "convergence_stop_after",
     "merge_eval",
 })
 

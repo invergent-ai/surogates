@@ -68,10 +68,13 @@ def adjust_research_verdict(
 
 def research_prompt_block(
     *, constraints_block: str, cycles_spent: int, max_cycles: int,
+    convergence: str | None = None,
 ) -> str:
     """Tree-leaderboard block appended to the judge's user prompt for
-    research missions (replaces the generic recent-tasks framing)."""
-    return (
+    research missions (replaces the generic recent-tasks framing). When the
+    run has plateaued, the convergence intervention is appended so the judge's
+    needs_revision feedback can steer toward a paradigm shift or finalize."""
+    block = (
         "## Research run state (machine-written; the ONLY trusted scores)\n"
         f"cycles: {cycles_spent}/{max_cycles}\n\n"
         f"{constraints_block}\n\n"
@@ -81,3 +84,6 @@ def research_prompt_block(
         "meta.test_trunk_score counts. Selecting on the held-out test split "
         "outside merge_experiment is a blocked outcome."
     )
+    if convergence:
+        block += "\n\n" + convergence
+    return block

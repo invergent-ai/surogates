@@ -98,9 +98,27 @@ async def _maybe_run_mission_evaluator(
     if research_run is not None:
         from surogates.arbor.evaluator_policy import research_prompt_block
 
+        # Convergence intervention (fail-open) steers the judge's
+        # needs_revision feedback toward paradigm-shift / finalize on a plateau.
+        conv_text = None
+        try:
+            from surogates.arbor.convergence import (
+                ConvergenceConfig, detect_convergence, format_intervention,
+            )
+
+            cmeta = research_run.meta or {}
+            sig = detect_convergence(
+                await research_store.list_nodes(research_run.id),
+                trunk_score=cmeta.get("trunk_score"),
+                meta=cmeta, config=ConvergenceConfig.from_meta(cmeta),
+            )
+            conv_text = format_intervention(sig) if sig else None
+        except Exception:
+            conv_text = None
         user_prompt = user_prompt + "\n\n" + research_prompt_block(
             constraints_block=await research_store.constraints_block(research_run.id),
             cycles_spent=research_cycles, max_cycles=research_max_cycles,
+            convergence=conv_text,
         )
     try:
         verdict = await judge(evaluator_system_prompt(), user_prompt)
