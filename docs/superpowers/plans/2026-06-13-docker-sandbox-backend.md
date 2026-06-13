@@ -22,8 +22,8 @@ Status is updated before each commit. Legend: `[ ]` pending · `[~]` in progress
 - [x] Task 6: `DockerSandbox` core — lifecycle + execute
 - [x] Task 7: `DockerSandbox` — MCP proxy + KB env wiring
 - [x] Task 8: `SandboxPool.destroy_for_session` optional backend hook
-- [~] Task 9: Spec builder sets `session_id` and `workspace_path`
-- [ ] Task 10: Worker wires the `docker` backend branch
+- [x] Task 9: Spec builder sets `session_id` and `workspace_path`
+- [~] Task 10: Worker wires the `docker` backend branch
 - [ ] Task 11: Opt-in integration smoke test (real Docker)
 
 ---

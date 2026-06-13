@@ -227,3 +227,30 @@ def test_no_tenant_baseline_no_env_uses_aligned_defaults():
     assert spec.cpu_limit == fresh.cpu_limit
     assert spec.memory == fresh.memory
     assert spec.memory_limit == fresh.memory_limit
+
+
+def test_spec_sets_session_id_and_workspace_path():
+    session = _session(
+        config={
+            "storage_bucket": "agent-bucket",
+            "workspace_path": "/data/agent-bucket/sessions/root-1",
+        },
+    )
+
+    spec = _build_session_sandbox_spec(
+        session, tenant=SimpleNamespace(), sandbox_owner="root-1",
+    )
+
+    assert spec.session_id == "root-1"
+    assert spec.workspace_path == "/data/agent-bucket/sessions/root-1"
+
+
+def test_spec_workspace_path_none_when_absent():
+    session = _session(config={"storage_bucket": "agent-bucket"})
+
+    spec = _build_session_sandbox_spec(
+        session, tenant=SimpleNamespace(), sandbox_owner="root-1",
+    )
+
+    assert spec.session_id == "root-1"
+    assert spec.workspace_path is None
