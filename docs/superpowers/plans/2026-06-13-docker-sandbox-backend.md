@@ -10,6 +10,24 @@
 
 ---
 
+## Progress
+
+Status is updated before each commit. Legend: `[ ]` pending · `[~]` in progress · `[x]` complete.
+
+- [x] Task 1: `ExecutorHTTPClient` — shared daemon HTTP transport
+- [~] Task 2: Refactor `K8sSandbox` to delegate to `ExecutorHTTPClient`
+- [ ] Task 3: Add `session_id` and `workspace_path` to `SandboxSpec`
+- [ ] Task 4: `executor_server` — `TOOL_EXECUTOR_REQUIRE_FUSE`
+- [ ] Task 5: `SandboxSettings` config — docker backend + fields
+- [ ] Task 6: `DockerSandbox` core — lifecycle + execute
+- [ ] Task 7: `DockerSandbox` — MCP proxy + KB env wiring
+- [ ] Task 8: `SandboxPool.destroy_for_session` optional backend hook
+- [ ] Task 9: Spec builder sets `session_id` and `workspace_path`
+- [ ] Task 10: Worker wires the `docker` backend branch
+- [ ] Task 11: Opt-in integration smoke test (real Docker)
+
+---
+
 ## File Structure
 
 **New files**
@@ -353,7 +371,8 @@ git commit -m "feat: add shared ExecutorHTTPClient for sandbox daemon transport"
 
 **Files:**
 - Modify: `surogates/sandbox/kubernetes.py`
-- Test (regression): `tests/test_k8s_sandbox.py` (existing `TestExecuteHttp`)
+- Test (regression): `tests/test_k8s_sandbox.py` (existing `TestExecuteHttp`,
+  plus moving `TestResultJson` to the shared client)
 
 - [ ] **Step 1: Run the existing K8s execute tests to confirm the baseline is green**
 
@@ -382,7 +401,59 @@ Add the import near the other sandbox imports at the top of the file:
 from surogates.sandbox._executor_client import ExecutorHTTPClient
 ```
 
-- [ ] **Step 3: Replace `execute`, `_get_http`, `aclose`, and `_result_json`**
+- [ ] **Step 3: Move the result-shape tests to `ExecutorHTTPClient`**
+
+In `tests/test_k8s_sandbox.py`, add this import near the existing sandbox imports:
+
+```python
+from surogates.sandbox._executor_client import ExecutorHTTPClient
+```
+
+Then replace the existing `TestResultJson` class:
+
+```python
+class TestResultJson:
+    """Standard result JSON builder."""
+
+    def test_success(self):
+        result = json.loads(K8sSandbox._result_json(
+            exit_code=0, stdout="hello", stderr="", truncated=False, timed_out=False,
+        ))
+        assert result["exit_code"] == 0
+        assert result["stdout"] == "hello"
+        assert result["timed_out"] is False
+
+    def test_timeout(self):
+        result = json.loads(K8sSandbox._result_json(
+            exit_code=-1, stdout="", stderr="timed out", truncated=False, timed_out=True,
+        ))
+        assert result["timed_out"] is True
+        assert result["exit_code"] == -1
+```
+
+with:
+
+```python
+class TestResultJson:
+    """Standard result JSON builder."""
+
+    def test_success(self):
+        result = json.loads(ExecutorHTTPClient._result_json(
+            exit_code=0, stdout="hello", stderr="", truncated=False, timed_out=False,
+        ))
+        assert result["exit_code"] == 0
+        assert result["stdout"] == "hello"
+        assert result["timed_out"] is False
+
+    def test_timeout(self):
+        result = json.loads(ExecutorHTTPClient._result_json(
+            exit_code=-1, stdout="", stderr="timed out", truncated=False, timed_out=True,
+        ))
+        assert result["timed_out"] is True
+        assert result["exit_code"] == -1
+```
+
+- [ ] **Step 4: Replace `execute`, `_get_http`, `aclose`, and `_result_json`**
 
 Replace the entire `execute` method (currently lines ~190–271) **and** the `_get_http` / `aclose` methods (currently lines ~273–283) with:
 
@@ -419,20 +490,20 @@ Then delete the now-unused `_result_json` static method (currently ~lines 706–
 Run: `grep -n "_result_json" surogates/sandbox/kubernetes.py`
 Expected after deletion: no matches.
 
-- [ ] **Step 4: Remove the now-unused `aiohttp` import if nothing references it**
+- [ ] **Step 5: Remove the now-unused `aiohttp` import if nothing references it**
 
 Run: `grep -n "aiohttp" surogates/sandbox/kubernetes.py`
 If the only remaining reference was the deleted code, remove the `import aiohttp` line. If `grep` still shows other uses, leave the import.
 
-- [ ] **Step 5: Run the regression tests**
+- [ ] **Step 6: Run the regression tests**
 
 Run: `pytest tests/test_k8s_sandbox.py -v`
 Expected: PASS (all, including `TestExecuteHttp` — identical result shapes, 401/connection errors still mark the entry `FAILED`, timeout still returns `timed_out`).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add surogates/sandbox/kubernetes.py
+git add surogates/sandbox/kubernetes.py tests/test_k8s_sandbox.py
 git commit -m "refactor: K8sSandbox delegates daemon HTTP to ExecutorHTTPClient"
 ```
 
@@ -1604,53 +1675,44 @@ git commit -m "feat: SandboxPool reaps via optional backend destroy_for_session"
 - Modify: `surogates/harness/tool_exec.py` (`_build_session_sandbox_spec`, ~lines 61-123)
 - Test: `tests/test_tool_exec_sandbox_spec.py`
 
-- [ ] **Step 1: Read the existing test file to match its fixtures**
+- [ ] **Step 1: Write the failing test**
 
-Run: `sed -n '1,60p' tests/test_tool_exec_sandbox_spec.py`
-Note how it constructs the fake `session`/`tenant` and calls `_build_session_sandbox_spec`. Reuse the same construction style in the new test below (adjust names to match what you see).
-
-- [ ] **Step 2: Write the failing test**
-
-Append to `tests/test_tool_exec_sandbox_spec.py` (adapt `_make_session` / `_make_tenant` to the helpers already in the file; the pattern below assumes a `session` with a `.config` dict and a `sandbox_owner` string argument):
+Append to `tests/test_tool_exec_sandbox_spec.py`:
 
 ```python
 def test_spec_sets_session_id_and_workspace_path():
-    from surogates.harness.tool_exec import _build_session_sandbox_spec
-
-    session = _make_session(
+    session = _session(
         config={
             "storage_bucket": "agent-bucket",
             "workspace_path": "/data/agent-bucket/sessions/root-1",
         },
     )
-    tenant = _make_tenant(sandbox_spec=None)
 
-    spec = _build_session_sandbox_spec(session, tenant, "root-1")
+    spec = _build_session_sandbox_spec(
+        session, tenant=SimpleNamespace(), sandbox_owner="root-1",
+    )
 
     assert spec.session_id == "root-1"
     assert spec.workspace_path == "/data/agent-bucket/sessions/root-1"
 
 
 def test_spec_workspace_path_none_when_absent():
-    from surogates.harness.tool_exec import _build_session_sandbox_spec
+    session = _session(config={"storage_bucket": "agent-bucket"})
 
-    session = _make_session(config={"storage_bucket": "agent-bucket"})
-    tenant = _make_tenant(sandbox_spec=None)
-
-    spec = _build_session_sandbox_spec(session, tenant, "root-1")
+    spec = _build_session_sandbox_spec(
+        session, tenant=SimpleNamespace(), sandbox_owner="root-1",
+    )
 
     assert spec.session_id == "root-1"
     assert spec.workspace_path is None
 ```
 
-> If the existing file does not already define `_make_session` / `_make_tenant`, use whatever construction the existing tests in this file use (e.g. `types.SimpleNamespace(config={...})` for the session and `SimpleNamespace(sandbox_spec=None)` for the tenant). Match the existing style exactly.
-
-- [ ] **Step 3: Run the test to verify it fails**
+- [ ] **Step 2: Run the test to verify it fails**
 
 Run: `pytest tests/test_tool_exec_sandbox_spec.py -k "session_id_and_workspace or workspace_path_none" -v`
 Expected: FAIL — `spec.session_id` is `""` and `spec.workspace_path` is `None` even when config has a path.
 
-- [ ] **Step 4: Set the fields in `_build_session_sandbox_spec`**
+- [ ] **Step 3: Set the fields in `_build_session_sandbox_spec`**
 
 In `surogates/harness/tool_exec.py`, just before the final `return sandbox_spec` in `_build_session_sandbox_spec`, add:
 
@@ -1666,12 +1728,12 @@ In `surogates/harness/tool_exec.py`, just before the final `return sandbox_spec`
 
 (Remove the existing bare `return sandbox_spec` line that this replaces.)
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pytest tests/test_tool_exec_sandbox_spec.py -v`
 Expected: PASS (new tests + existing tests unchanged — the baseline-not-mutated tests still hold because `session_id`/`workspace_path` are set on the per-session copy, never on the tenant baseline).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add surogates/harness/tool_exec.py tests/test_tool_exec_sandbox_spec.py
@@ -1875,7 +1937,7 @@ git commit -m "test: add opt-in DockerSandbox e2e smoke test"
 - Worker `docker` branch + `__init__` export (spec §Configuration) → Task 10 / Task 6 Step 4.
 - Tests (spec §Testing): `ExecutorHTTPClient` T1, K8s regression T2, `DockerSandbox` T6+T7, spec builder T9, executor_server healthz T4, integration T11. All covered.
 
-**Placeholder scan** — no "TBD"/"handle edge cases"/"similar to". Task 9's test helpers are the one spot deferring to existing file conventions; Step 1 there explicitly reads the file first and the step gives the exact fallback (`SimpleNamespace`) so there is no ambiguity.
+**Placeholder scan** — no "TBD"/"handle edge cases"/"similar to". Task 9 now uses the concrete `_session` helper and `SimpleNamespace` already present in `tests/test_tool_exec_sandbox_spec.py`.
 
 **Type/name consistency** — checked across tasks: `ExecutorHTTPClient.execute(*, host, port, token, name, args_str, timeout)` is defined in T1 and called identically in T2 (K8s) and T6 (Docker). `_Entry(sandbox_id, container_id, host_port, token, spec, status)` defined in T6 is constructed with the same fields in T6 tests. `_build_env(spec, sandbox_id, token)` signature is stable from T6 to T7. `create_app(..., require_fuse=...)` defined T4, used in T4 tests. `SandboxSpec.session_id`/`workspace_path` defined T3, set T9, read T6/T7. `destroy_for_session(session_id)` is the method name in T6 (backend), T8 (pool delegates), and T8 fake backends.
 
