@@ -13,7 +13,8 @@ user-invoked shortcuts that shape the next harness turn.
 When the latest user message starts with `/`, Surogates resolves it in this
 order:
 
-1. Builtin command handlers: `/clear`, `/compress`, `/goal`, `/loop`.
+1. Builtin command handlers: `/clear`, `/compress`, `/goal`, `/mission`,
+   `/auto-research`, `/loop`, `/code`, `/deep-research`.
 2. Dynamic skill command: `/<skill-name> [args...]`.
 3. Plain user message if no builtin or skill matches.
 
@@ -133,6 +134,58 @@ Outcome behavior:
   resumes after the user-directed turn.
 - Evaluator failures fail open as `needs_revision`; repeated unparseable
   evaluator output pauses the outcome.
+
+### `/auto-research`
+
+Creates a **research-kind mission** — an autonomous, long-horizon optimization
+run (the Arbor port). It is a thin alias over `/mission`: the coordinator grows
+a durable Idea Tree, dispatches executors into isolated git worktrees, and
+merges into a protected trunk only after an independently re-run held-out eval.
+See [Research Missions](../research-missions/index.md) for the full workflow.
+
+Usual flow: run the `arbor-research` intake skill first (`/arbor-research
+<goal>`), which discovers the repo / eval / splits, measures the baseline, and
+emits a ready-to-send command. Then send it:
+
+```text
+/auto-research repo=/workspace/<repo> max_iterations=60 baseline=<dev> baseline_test=<test> <objective>
+
+Rubric:
+- Satisfied only when the held-out test score (written only by the merge gate)
+  improves on the test baseline, with at least one merged node — or the budget
+  is exhausted with an explicit no-improvement root insight — AND the final
+  report task is done.
+- Never satisfied on prose claims or dev-split scores alone.
+```
+
+Leading `key=value` tokens (all optional except `repo=` for create):
+
+| Token | Meaning |
+|---|---|
+| `repo=` | Workspace repo path (required for create; must be under `/workspace/`) |
+| `max_iterations=` | Mission iteration budget (defaults to `2 × max_cycles`) |
+| `baseline=` | Measured dev-split baseline (written server-side) |
+| `baseline_test=` | Measured held-out baseline (the merge-gate reference) |
+
+Controls (delegated to the same handlers as `/mission`):
+
+| Command | Behavior |
+|---|---|
+| `/auto-research status` | Show the run's mission status and last verdict |
+| `/auto-research pause` | Pause automatic continuation |
+| `/auto-research resume` | Resume a paused run |
+| `/auto-research cancel [--cascade]` | Cancel the run (and, with `--cascade`, its running executors) |
+
+Behavior notes:
+
+- Requires a user or service-account session — anonymous channels cannot own
+  missions.
+- The coordinator runs in strict mode (code edits / terminal stripped) with a
+  read-only OBSERVE carve-out; experiments run in `arbor-executor` sub-agent
+  task workers. The `arbor-executor` sub-agent must be provisioned for the agent.
+- The evaluator honours `satisfied` only on a machine-written held-out
+  improvement plus a finished report task; it skips entirely while experiments
+  are in flight.
 
 ### `/loop [interval] <prompt>`
 
