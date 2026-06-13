@@ -88,10 +88,28 @@ print("wrote data/dev.jsonl + data/test.jsonl (40 balanced rows each)")
 PY
 
 git init -q && git add -A && git commit -q -m "benchmark: baseline sentiment classifier"
+
+# Report what step 1 needs: clean tree, the commit, and both baselines.
+test -z "$(git status --porcelain)" && echo "clean" || echo "DIRTY"
+git log --oneline
+echo "baseline dev:  $(python3 eval.py --split dev)"
+echo "baseline test: $(python3 eval.py --split test)"
 ```
 ````
 
-That produces a clean, runnable repo with a deterministic structure:
+You never touch the workspace yourself — it lives in the session sandbox. The
+**agent** runs the script there and reports back. Its reply should show a clean
+tree, one commit, and both baselines:
+
+```text
+clean
+a1b2c3d benchmark: baseline sentiment classifier
+baseline dev:  {"score": 0.5}
+baseline test: {"score": 0.5}
+```
+
+That confirms the repo is ready and gives you the two numbers step 2 needs. The
+resulting layout is deterministic:
 
 ```text
 /workspace/bench/
@@ -103,30 +121,16 @@ That produces a clean, runnable repo with a deterministic structure:
 ```
 
 The 6 "ambiguous" neutral rows per class keep a pure-keyword rule below 100%, so
-there's real headroom to improve. The always-"neg" baseline scores 0.5 on each
-balanced split:
+there's real headroom to improve. (You can of course point a run at any repo
+that already satisfies the eval contract; this scaffold just makes the
+quickstart reproducible.)
 
-```bash
-$ cd /workspace/bench && python eval.py --split dev
-{"score": 0.5}
-```
+### 1. Form the contract
 
-Confirm `git status` is clean before launching — experiments branch off this
-commit. (You can of course point a run at any repo of your own that satisfies
-the eval contract; this scaffold just makes the quickstart reproducible.)
-
-### 1. Get the baselines and form the contract
-
-You already ran the dev eval (0.50). Run the held-out split once too, so you
-have the reference the merge gate compares against:
-
-```bash
-$ cd /workspace/bench && python eval.py --split test
-{"score": 0.5}
-```
-
-That's everything `/auto-research` needs — repo path, both baselines, the two
-eval commands, and the metric direction.
+Step 0's reply already gave you everything `/auto-research` needs: the repo path
+(`/workspace/bench`), both baselines (`dev 0.50`, `test 0.50` — the held-out one
+is the reference the merge gate compares against), the two eval commands, and
+the metric direction.
 
 > **Optional — let intake draft it for you.** `arbor-research` is an *intake
 > skill*, not a builtin command. If it's attached to this agent, you can
@@ -136,7 +140,7 @@ eval commands, and the metric direction.
 > /arbor-research improve accuracy of the classifier in /workspace/bench
 > ```
 > If you see "no skill named arbor-research", it isn't attached — just build the
-> command yourself as in step 2 (you have the numbers above).
+> command yourself as in step 2 (you have the numbers from step 0).
 
 ### 2. Launch the run
 
