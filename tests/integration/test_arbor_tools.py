@@ -176,3 +176,116 @@ async def test_dispatch_refuses_without_eval_cmd(session_factory, seeded_org_and
     }
     out = json.loads(await _dispatch_experiments_handler({"node_keys": ["1"]}, **kwargs))
     assert "eval_cmd" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# merge_experiment
+# ---------------------------------------------------------------------------
+
+
+async def _merge_run(session_factory, seeded, *, prefix, with_test_eval):
+    org_id, mission_id, session_id = seeded
+    store = ResearchStore(session_factory)
+    run_id = await store.create_run(
+        org_id=org_id, mission_id=mission_id, session_id=session_id,
+        agent_id="agent-x", repo_path="/workspace/repo",
+        trunk_branch=f"{prefix}/trunk", branch_prefix=prefix, objective="o",
+    )
+    meta = {"eval_cmd": "python eval.py --split dev"}
+    if with_test_eval:
+        meta["eval_cmd_test"] = "python eval.py --split test"
+    await store.set_meta(run_id, meta)
+    await store.add_node(run_id, org_id=org_id, parent_key="ROOT", hypothesis="h1")
+    await store.update_node(
+        run_id, "1", status="done", score=0.55,
+        code_ref=f"{prefix}/n1-h1-abcd1234",
+    )
+    pool = FakeSandboxPool()
+    kwargs = {
+        "session_factory": session_factory,
+        "session_config": {"active_research_run_id": str(run_id)},
+        "session_id": str(session_id),
+        "sandbox_pool": pool,
+        "session_store": _StubSessionStore(),
+        "tenant": object(), "redis": object(),
+    }
+    return store, run_id, pool, kwargs
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def merge_env(session_factory, seeded_org_and_session):
+    """A done node '1' but NO eval_cmd_test configured."""
+    return await _merge_run(
+        session_factory, seeded_org_and_session,
+        prefix="research/mrg1", with_test_eval=False,
+    )
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def merge_env_with_eval(session_factory, seeded_org_and_session):
+    """A done node '1' WITH eval_cmd_test; result.json absent until scripted."""
+    return await _merge_run(
+        session_factory, seeded_org_and_session,
+        prefix="research/mrg2", with_test_eval=True,
+    )
+
+
+def test_merge_schema_accepts_no_score_argument():
+    from surogates.tools.builtin.arbor import _MERGE_SCHEMA
+
+    props = _MERGE_SCHEMA.parameters["properties"]
+    assert "score" not in props and "test_score" not in props
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_requires_eval_cmd_test(merge_env):
+    _store, _run_id, _pool, kwargs = merge_env
+    out = json.loads(await _merge_experiment_handler(
+        {"action": "start", "node_key": "1"}, **kwargs,
+    ))
+    assert "eval_cmd_test" in out["error"]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_status_blocks_on_no_improvement(merge_env_with_eval):
+    store, run_id, pool, kwargs = merge_env_with_eval
+    await store.set_meta(run_id, {"test_baseline_score": 0.50}, allow_machine_keys=True)
+    await _merge_experiment_handler({"action": "start", "node_key": "1"}, **kwargs)
+    pool.responses["cat /workspace/.arbor/merge-eval/1/result.json"] = '{"score": 0.40}'
+    out = json.loads(await _merge_experiment_handler(
+        {"action": "status", "node_key": "1"}, **kwargs,
+    ))
+    assert out["merged"] is False and out["test_score"] == 0.40
+    run = await store.get_run(run_id)
+    assert run.meta.get("test_trunk_score") is None  # gate did NOT write
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_status_merges_on_improvement_and_writes_score(merge_env_with_eval):
+    store, run_id, pool, kwargs = merge_env_with_eval
+    await store.set_meta(run_id, {"test_baseline_score": 0.50}, allow_machine_keys=True)
+    await _merge_experiment_handler({"action": "start", "node_key": "1"}, **kwargs)
+    pool.responses["cat /workspace/.arbor/merge-eval/1/result.json"] = '{"score": 0.61}'
+    out = json.loads(await _merge_experiment_handler(
+        {"action": "status", "node_key": "1"}, **kwargs,
+    ))
+    assert out["merged"] is True and out["test_score"] == 0.61
+    run = await store.get_run(run_id)
+    assert run.meta["test_trunk_score"] == 0.61
+    assert (await store.get_node(run_id, "1")).status == "merged"
+    assert any("git merge --no-ff" in i for (_, _, i) in pool.calls)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_status_reports_stale_eval(merge_env_with_eval):
+    store, run_id, pool, kwargs = merge_env_with_eval
+    await _merge_experiment_handler({"action": "start", "node_key": "1"}, **kwargs)
+    # Rewind started_at far past eval_timeout + grace; result.json stays absent.
+    run = await store.get_run(run_id)
+    stamp = dict(run.meta["merge_eval"])
+    stamp["started_at"] = "2000-01-01T00:00:00+00:00"
+    await store.set_meta(run_id, {"merge_eval": stamp}, allow_machine_keys=True)
+    out = json.loads(await _merge_experiment_handler(
+        {"action": "status", "node_key": "1"}, **kwargs,
+    ))
+    assert out.get("stale") is True

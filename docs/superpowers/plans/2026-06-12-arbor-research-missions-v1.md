@@ -13,8 +13,8 @@
 - [x] Task 4 — tool plumbing: `idea_tree` tool, routing, registration, visibility
 - [x] Task 5 — `create_task_and_spawn` factoring + `AgentDef.preloaded_skills`
 - [x] Task 6 — `dispatch_experiments`: gates, worktrees, briefs (+ `build_report`)
-- [~] Task 7 — `merge_experiment`: bypass-proof detached eval gate
-- [ ] Task 8 — harvest mixin + `research.*` events
+- [x] Task 7 — `merge_experiment`: bypass-proof detached eval gate
+- [~] Task 8 — harvest mixin + `research.*` events
 - [ ] Task 9 — `/auto-research` command
 - [ ] Task 10 — `research_coordinator` read-only carve-out
 - [ ] Task 11 — research evaluator policy

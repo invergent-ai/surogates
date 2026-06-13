@@ -307,9 +307,239 @@ _DISPATCH_SCHEMA = ToolSchema(
 
 _MERGE_SCHEMA = ToolSchema(
     name="merge_experiment",
-    description="(implemented in the merge task)",
-    parameters={"type": "object", "properties": {}},
+    description=(
+        "Merge a done experiment into trunk ONLY after this tool itself "
+        "re-runs the held-out test eval in a detached worktree. "
+        "start(node_key) launches the eval and returns immediately; "
+        "status(node_key) reads the result and finalizes. There is NO way "
+        "to pass a score — the held-out number is machine-measured here."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["start", "status"]},
+            "node_key": {"type": "string"},
+        },
+        "required": ["action", "node_key"],
+    },
 )
+
+# Stdlib-only extractor written into the workspace and run by the detached
+# eval. Reads the eval log, takes the LAST flat ``{... "score": <num> ...}``
+# object, and always writes a result.json (score or error) so ``status`` can
+# distinguish "still running" (no file) from "finished without a score".
+_SCORE_EXTRACTOR = r'''import json, re, sys
+try:
+    text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+except Exception as exc:  # pragma: no cover - defensive
+    print(json.dumps({"error": "could not read eval log: %s" % exc})); raise SystemExit(0)
+best = None
+for m in re.finditer(r'\{[^{}]*"score"[^{}]*\}', text):
+    try:
+        obj = json.loads(m.group(0))
+    except Exception:
+        continue
+    if isinstance(obj.get("score"), (int, float)) and not isinstance(obj.get("score"), bool):
+        best = obj
+if best is not None:
+    print(json.dumps({"score": float(best["score"])}))
+else:
+    print(json.dumps({"error": 'no {"score": <number>} found in eval output'}))
+'''
+
+
+def _merge_eval_dir(node_key: str) -> str:
+    return f"/workspace/.arbor/merge-eval/{node_key}"
+
+
+async def _launch_merge_eval(kwargs, *, run, node_key: str, branch: str) -> None:
+    """Write the extractor and launch the held-out eval detached.
+
+    The eval runs under ``nohup ... &`` writing ``eval.log`` then
+    ``result.json`` — so no sandbox exec is held open for the eval's
+    duration (per-exec timeouts, pod churn) and ``status`` polls the file.
+    """
+    meta = run.meta or {}
+    evald = _merge_eval_dir(node_key)
+    extractor = "/workspace/.arbor/extract_score.py"
+    await _persist_workspace_file(
+        kwargs, path="extract_score.py", content=_SCORE_EXTRACTOR,
+    )
+    eval_cmd_test = meta["eval_cmd_test"]
+    await _sandbox_sh(kwargs, (
+        f"rm -rf {evald} && mkdir -p {evald} && "
+        f"cd {run.repo_path} && "
+        f"git worktree add --detach {evald}/wt {branch} && "
+        f"cd {evald}/wt && "
+        f"nohup sh -c '{eval_cmd_test} > {evald}/eval.log 2>&1; "
+        f"python3 {extractor} {evald}/eval.log > {evald}/result.json.tmp "
+        f"2>>{evald}/eval.log; mv {evald}/result.json.tmp {evald}/result.json' "
+        f">/dev/null 2>&1 &"
+    ), timeout=60)
+
+
+async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+    from surogates.arbor.store import ResearchStoreError, is_improvement
+
+    try:
+        store, run_id = await _require_run(
+            kwargs.get("session_config") or {}, kwargs["session_factory"],
+        )
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+
+    action = arguments.get("action")
+    node_key = arguments.get("node_key")
+    if not node_key:
+        return json.dumps({"error": "node_key is required"})
+
+    try:
+        run = await store.get_run(run_id)
+        meta = run.meta or {}
+        node = await store.get_node(run_id, node_key)
+        evald = _merge_eval_dir(node_key)
+
+        if action == "start":
+            if node.status != "done":
+                return json.dumps({"error": f"node {node_key} is {node.status}, not done"})
+            if not node.code_ref:
+                return json.dumps({"error": f"node {node_key} has no branch recorded"})
+            if not meta.get("eval_cmd_test"):
+                return json.dumps({"error": (
+                    "meta.eval_cmd_test is not set — a research run without a "
+                    "held-out eval cannot merge (there is no LLM-reported fallback)"
+                )})
+            if run.trunk_branch in ("main", "master"):
+                return json.dumps({"error": "refusing to operate on main/master as trunk"})
+            await _launch_merge_eval(kwargs, run=run, node_key=node_key, branch=node.code_ref)
+            await store.set_meta(run_id, {"merge_eval": {
+                "node_key": node_key,
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "retries_left": int(meta.get("eval_retries", 1)),
+            }}, allow_machine_keys=True)
+            return json.dumps({
+                "started": node_key,
+                "note": f"poll with merge_experiment(status, {node_key!r})",
+            })
+
+        if action != "status":
+            return json.dumps({"error": f"unknown action {action!r}"})
+
+        # ---- status ----
+        stamp = meta.get("merge_eval") or {}
+        if stamp.get("node_key") != node_key:
+            return json.dumps({"error": f"no merge eval started for {node_key}"})
+
+        raw = await _sandbox_sh(kwargs, f"cat {evald}/result.json 2>/dev/null")
+        if not (raw or "").strip():
+            started = _parse_iso(stamp.get("started_at"))
+            grace = int(meta.get("eval_timeout", 1800)) + 300
+            age = (datetime.now(timezone.utc) - started).total_seconds() if started else 0
+            if started is not None and age > grace:
+                return json.dumps({
+                    "stale": True, "age_seconds": int(age),
+                    "note": "eval orphaned (pod recycle?) — call start again to re-run",
+                })
+            return json.dumps({"running": True, "age_seconds": int(age)})
+
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = {"error": "result.json was not valid JSON"}
+
+        if "score" not in parsed:
+            # Eval finished but produced no score. Retry within budget,
+            # else report failure (the eval contract requires a JSON score).
+            retries_left = int(stamp.get("retries_left", 0))
+            err = parsed.get("error", "eval produced no score")
+            if retries_left > 0:
+                await _launch_merge_eval(
+                    kwargs, run=run, node_key=node_key, branch=node.code_ref,
+                )
+                await store.set_meta(run_id, {"merge_eval": {
+                    "node_key": node_key,
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "retries_left": retries_left - 1,
+                }}, allow_machine_keys=True)
+                return json.dumps({
+                    "running": True, "retrying": True,
+                    "retries_left": retries_left - 1, "previous_error": err,
+                })
+            await store.set_meta(run_id, {"merge_eval": {}}, allow_machine_keys=True)
+            return json.dumps({
+                "merged": False,
+                "error": f"held-out eval produced no score after retries: {err}; "
+                         f"see {evald}/eval.log",
+            })
+
+        score = float(parsed["score"])
+        reference = meta.get("test_trunk_score", meta.get("test_baseline_score"))
+        direction = meta.get("metric_direction", "maximize")
+        if not is_improvement(score, reference, direction):
+            await store.set_meta(run_id, {"merge_eval": {}}, allow_machine_keys=True)
+            return json.dumps({
+                "merged": False, "test_score": score, "reference": reference,
+                "note": "held-out eval shows no improvement — treat as tree evidence",
+            })
+
+        threshold = float(meta.get("merge_threshold", 0.0))
+        warning = None
+        if reference is not None and abs(score - reference) < threshold:
+            warning = (f"below merge_threshold={threshold} but improving — "
+                       "merging per Arbor's soft-threshold semantics")
+
+        # Protected-paths guard before touching trunk.
+        protected = meta.get("protected_paths") or []
+        if protected:
+            diff = await _sandbox_sh(kwargs, (
+                f"cd {run.repo_path} && "
+                f"git diff --name-only {run.trunk_branch}...{node.code_ref}"
+            ))
+            hit = sorted({
+                p for p in protected
+                for f in (diff or "").splitlines()
+                if f.strip().startswith(p)
+            })
+            if hit:
+                await store.set_meta(run_id, {"merge_eval": {}}, allow_machine_keys=True)
+                return json.dumps({
+                    "merged": False,
+                    "error": f"branch touches protected paths: {hit}",
+                })
+
+        out = await _sandbox_sh(kwargs, (
+            f"cd {run.repo_path} && git checkout {run.trunk_branch} && "
+            f"git merge --no-ff {node.code_ref} "
+            f"-m 'research: merge {node_key} (test={score})' 2>&1 "
+            f"|| (git merge --abort; echo MERGE_CONFLICT)"
+        ), timeout=120)
+        if "MERGE_CONFLICT" in (out or ""):
+            await store.set_meta(run_id, {"merge_eval": {}}, allow_machine_keys=True)
+            return json.dumps({
+                "merged": False,
+                "error": "merge conflict — trunk restored; rebase the branch and retry",
+            })
+
+        # The tool is the SOLE writer of test_trunk_score (machine key).
+        await store.set_meta(run_id, {
+            "test_trunk_score": score, "trunk_score": node.score, "merge_eval": {},
+        }, allow_machine_keys=True)
+        await store.update_node(run_id, node_key, status="merged")
+        result: dict[str, Any] = {"merged": True, "test_score": score}
+        if warning:
+            result["warning"] = warning
+        return json.dumps(result)
+    except ResearchStoreError as exc:
+        return json.dumps({"error": str(exc)})
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
 
 
 async def _dispatch_experiments_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
@@ -445,10 +675,6 @@ async def _dispatch_experiments_handler(arguments: dict[str, Any], **kwargs: Any
         })
     except ResearchStoreError as exc:
         return json.dumps({"error": str(exc)})
-
-
-async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
-    return json.dumps({"error": "not implemented"})
 
 
 def register(registry: ToolRegistry) -> None:
