@@ -33,13 +33,15 @@ run.
 
 ### 1. Create a tiny benchmark
 
-In a normal chat session, send the agent this script with *"run it verbatim in
-the sandbox"*. (Paste the shell lines only, not surrounding Markdown — a bare
-```` ``` ````, `---`, or `###` line trips the message scanner.)
+Paste this whole message into a normal chat session. It tells the agent to build
+the benchmark and report the baseline. Copy everything inside the box — it's
+plain text with no Markdown fences, so it passes the message scanner cleanly.
 
-```bash
+```text
+Create a tiny benchmark for a research mission, then run the baseline eval and tell me the score. Run these commands in the sandbox exactly as written:
+
 mkdir -p /workspace/bench/data && cd /workspace/bench
-printf 'def predict(t):\n    return "neg"\n' > solver.py   # baseline: always "neg"
+printf 'def predict(t):\n    return "neg"\n' > solver.py
 cat > eval.py <<'PY'
 import json, sys, solver
 split = sys.argv[2] if len(sys.argv) > 2 else "dev"
@@ -50,8 +52,11 @@ PY
 printf '%s\n' '{"text":"great","label":"pos"}' '{"text":"loved it","label":"pos"}' '{"text":"a joy","label":"pos"}' '{"text":"terrible","label":"neg"}' '{"text":"so boring","label":"neg"}' '{"text":"a dull mess","label":"neg"}' > data/dev.jsonl
 printf '%s\n' '{"text":"brilliant","label":"pos"}' '{"text":"excellent","label":"pos"}' '{"text":"a delight","label":"pos"}' '{"text":"awful","label":"neg"}' '{"text":"the worst","label":"neg"}' '{"text":"painfully dull","label":"neg"}' > data/test.jsonl
 git init -q && git add -A && git commit -q -m bench
-python3 eval.py --split dev      # baseline -> {"score": 0.5}
+python3 eval.py --split dev
 ```
+
+The agent should reply with `{"score": 0.5}` — the always-"neg" baseline the run
+will try to beat.
 
 ### 2. Launch the run
 
