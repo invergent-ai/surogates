@@ -24,8 +24,8 @@
 - [x] Task 3 — Wire convergence into harvest digest + evaluator feedback
 - [x] Task 4 — INIT fallback: real `dispatch_experiments(action="baseline")`
 - [x] Task 5 — Final-report polish (test deltas, eval commands, convergence note)
-- [~] Task 6 — Parallel dispatch hardening + multi-node harvest test
-- [ ] Task 7 — `arbor-ideate` skill bundle + coordinator hard-gate reference
+- [x] Task 6 — Parallel dispatch hardening + multi-node harvest test
+- [~] Task 7 — `arbor-ideate` skill bundle + coordinator hard-gate reference
 - [ ] Task 8 — `arbor-merge-discipline` skill + HITL/search-scout/board prose + `hitl_mode` in constraints block
 
 ---

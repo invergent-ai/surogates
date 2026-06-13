@@ -99,3 +99,33 @@ async def test_related_work_is_writable_via_update(base_run):
     ))
     assert out["ok"]
     assert (await store.get_node(run_id, "1")).related_work == "see Smith et al. 2024"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_dispatch_rejects_duplicate_node_keys(base_run):
+    store, run_id, org_id, kwargs = base_run
+    await store.add_node(run_id, org_id=org_id, parent_key="ROOT", hypothesis="h")
+    out = json.loads(await _dispatch_experiments_handler(
+        {"node_keys": ["1", "1"]}, **kwargs,
+    ))
+    assert "duplicate" in out["error"]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_dispatch_two_nodes_spawns_two_worktrees(base_run):
+    store, run_id, org_id, kwargs = base_run
+    await store.set_meta(run_id, {"max_parallel": 2})
+    await store.add_node(run_id, org_id=org_id, parent_key="ROOT", hypothesis="a")
+    await store.add_node(run_id, org_id=org_id, parent_key="ROOT", hypothesis="b")
+    spawn = AsyncMock(side_effect=_fake_spawn(
+        kwargs["session_factory"], org_id, uuid.UUID(kwargs["session_id"]),
+    ))
+    with patch("surogates.tasks.service.create_task_and_spawn", new=spawn):
+        out = json.loads(await _dispatch_experiments_handler(
+            {"node_keys": ["1", "2"]}, **kwargs,
+        ))
+    assert out["dispatched"] == ["1", "2"]
+    pool = kwargs["sandbox_pool"]
+    adds = [i for (_, _, i) in pool.calls if "git worktree add" in i]
+    assert len(adds) == 2
+    assert spawn.await_count == 2

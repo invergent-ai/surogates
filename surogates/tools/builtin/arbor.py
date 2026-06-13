@@ -671,6 +671,8 @@ async def _dispatch_experiments_handler(arguments: dict[str, Any], **kwargs: Any
     node_keys = list(arguments.get("node_keys") or [])
     if not node_keys:
         return json.dumps({"error": "node_keys is required (1-4 pending leaves)"})
+    if len(set(node_keys)) != len(node_keys):
+        return json.dumps({"error": "duplicate node_keys in one dispatch batch"})
 
     try:
         run = await store.get_run(run_id)
