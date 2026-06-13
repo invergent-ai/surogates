@@ -1,4 +1,4 @@
-# Research Missions (Arbor)
+# Research Missions
 
 A **research mission** turns a long-horizon optimization goal — "improve this
 benchmark", "beat the leaderboard overnight" — into a cumulative tree search.
@@ -18,6 +18,120 @@ by code; the intelligence is steered by skills.
 
 This document covers the architecture, the lifecycle of one cycle, the three
 tools, the durable state model, steering, and the operational guardrails.
+
+---
+
+## Quickstart
+
+This walks through one research run end to end: optimizing a small text
+classifier's F1 on a benchmark repo.
+
+### 0. Prepare the benchmark
+
+The target repo lives in the session workspace and must have a runnable eval, a
+**dev** split for iteration, and a held-out **test** split for merge decisions.
+The only contract the harness requires is that the eval prints its score as a
+JSON object on its last line:
+
+```text
+/workspace/clf/
+├── train.py            # the model the agent will modify
+├── eval.py             # prints e.g.  {"score": 0.41}  as its last line
+└── data/
+    ├── dev.jsonl       # iterate here
+    └── test.jsonl      # held out — only the merge gate runs this
+```
+
+```bash
+# eval.py contract: run on a split, print {"score": <float>} last
+$ python eval.py --split dev
+... training/inference logs ...
+{"score": 0.41}
+```
+
+The repo should be a clean git checkout (no uncommitted changes).
+
+### 1. Intake — turn the goal into a contract
+
+In a normal chat session, run the intake skill:
+
+```text
+/arbor-research improve macro-F1 of the classifier in /workspace/clf
+```
+
+Intake inspects the repo, finds `eval.py`, identifies the dev/test splits,
+measures the baseline on **both** (say dev 0.41, test 0.40), asks one compact
+clarification checkpoint (metric direction, budget, permissions, HITL mode),
+and then prints a ready-to-send command. It does **not** start the run.
+
+### 2. Launch the run
+
+Send the command intake produced (edit any line first if you like):
+
+```text
+/auto-research repo=/workspace/clf max_iterations=40 baseline=0.41 baseline_test=0.40 Maximize macro-F1 of the classifier on the dev split; merge only verified gains.
+
+Rubric:
+- Satisfied only when the held-out test score (written only by the merge gate)
+  improves on test_baseline_score (0.40), with at least one merged node — or the
+  cycle budget is exhausted with an explicit no-improvement root insight — AND
+  the final report task is done.
+- Never satisfied on prose claims or dev-split scores alone.
+- eval_cmd: python eval.py --split dev
+- eval_cmd_test: python eval.py --split test
+- metric_direction: maximize
+```
+
+This flips the session into a strict research coordinator and emits the kickoff.
+From here the run is autonomous (in `auto` HITL mode).
+
+### 3. What you see as it runs
+
+The coordinator works in cycles; each is visible on the mission dashboard's
+activity feed:
+
+```text
+research.defined      run created, ROOT node seeded, baselines recorded
+research.dispatched   node 1 "TF-IDF → contextual embeddings" → executor (worktree research/run-…/n1)
+research.dispatched   node 2 "class-balanced loss"            → executor
+research.harvested    node 1 done score=0.46 · node 2 done score=0.43   (folded at the coordinator's wake)
+research.merged       node 1 merged — held-out test 0.40 → 0.47, trunk advanced
+research.dispatched   node 3 "1.1: embedding + balanced loss (combine)" off the new trunk
+research.harvested    node 3 done score=0.44
+research.converged    WARNING — 3 experiments without a trunk gain; suggests Leap/Combine
+research.merged       node 1.1 merged — held-out test 0.47 → 0.49
+research.report       REPORT.md written; report task created
+```
+
+Steer it any time with plain chat (a nudge, not a pause), or
+`/auto-research pause` / `resume` / `cancel`. In `review` HITL mode the
+coordinator asks for approval (via the agent inbox) before each dispatch and
+merge instead.
+
+### 4. The result
+
+The run finishes when the budget is spent, convergence says STOP, or the target
+is hit. `REPORT.md` (held-out scores authoritative) lands in the workspace and
+as a chat artifact:
+
+```markdown
+# Research Report — Maximize macro-F1 of the classifier
+## Held-out test (authoritative)
+- baseline: 0.40
+- final trunk: 0.49 (maximize)
+- delta: +0.09
+## Eval commands
+- dev:  python eval.py --split dev
+- test: python eval.py --split test
+## Merged ideas
+- 1   dev=0.46: Mechanism: replace TF-IDF features with contextual embeddings
+- 1.1 dev=0.48: Mechanism: combine embeddings with a class-balanced loss
+...
+```
+
+The improvements are real commits on the per-run `trunk` branch in your repo;
+promote them into `main` when satisfied (`git merge research/run-…/trunk`). The
+Idea Tree, every branch, and the report stay queryable after the run ends.
 
 ---
 
