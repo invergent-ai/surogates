@@ -15,8 +15,8 @@
 - [x] Task 6 — `dispatch_experiments`: gates, worktrees, briefs (+ `build_report`)
 - [x] Task 7 — `merge_experiment`: bypass-proof detached eval gate
 - [x] Task 8 — harvest mixin + `research.*` events
-- [~] Task 9 — `/auto-research` command
-- [ ] Task 10 — `research_coordinator` read-only carve-out
+- [x] Task 9 — `/auto-research` command
+- [~] Task 10 — `research_coordinator` read-only carve-out
 - [ ] Task 11 — research evaluator policy
 - [ ] Task 12 — the three v1 skills
 - [ ] Task 13 — smoke-mode end-to-end test

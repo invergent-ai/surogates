@@ -927,6 +927,10 @@ class AgentHarness(
                 await self._handle_mission_command(session, last_user_content, lease)
                 return
 
+            if last_user_content == "/auto-research" or last_user_content.startswith("/auto-research "):
+                await self._handle_auto_research_command(session, last_user_content, lease)
+                return
+
             if last_user_content == "/code" or last_user_content.startswith("/code "):
                 await self._handle_code_command(
                     session, last_user_content, lease, all_events,

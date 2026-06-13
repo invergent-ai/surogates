@@ -46,8 +46,27 @@ class MissionCommand:
     cascade_to_workers: bool = False
 
 
+@dataclass(slots=True)
+class AutoResearchCommand(MissionCommand):
+    """Parsed shape of an /auto-research invocation.
+
+    A :class:`MissionCommand` plus the research-specific leading
+    ``key=value`` tokens (``repo=`` / ``max_iterations=`` / ``baseline=``
+    / ``baseline_test=`` / ``resume=``).
+    """
+
+    max_iterations: int | None = None
+    resume_run: str | None = None
+    repo: str | None = None
+    baseline: float | None = None
+    baseline_test: float | None = None
+
+
 _CONTROL_VERBS = ("status", "pause", "resume", "cancel")
 _RUBRIC_RE = re.compile(r"\bRubric\s*:", re.IGNORECASE)
+_AUTO_RESEARCH_KV_RE = re.compile(
+    r"^(max_iterations|resume|repo|baseline|baseline_test)=(\S+)\s*"
+)
 
 
 def parse_mission_command(raw: str) -> MissionCommand:
@@ -105,6 +124,56 @@ def parse_mission_command(raw: str) -> MissionCommand:
     )
 
 
+def parse_auto_research_command(raw: str) -> AutoResearchCommand:
+    """Parse the args of an /auto-research slash command.
+
+    An alias of /mission: identical control verbs and ``Rubric:``
+    contract, preceded by optional leading ``key=value`` tokens
+    (``repo=`` / ``max_iterations=`` / ``baseline=`` / ``baseline_test=``
+    / ``resume=``). Control verbs and the rubric requirement are
+    delegated to :func:`parse_mission_command`.
+    """
+    text = (raw or "").strip()
+    kv: dict[str, str] = {}
+    while True:
+        match = _AUTO_RESEARCH_KV_RE.match(text)
+        if not match:
+            break
+        kv[match.group(1)] = match.group(2)
+        text = text[match.end():]
+
+    def _as_int(key: str) -> int | None:
+        if key not in kv:
+            return None
+        try:
+            return int(kv[key])
+        except ValueError:
+            raise MissionCommandParseError(
+                f"{key} must be an integer, got {kv[key]!r}"
+            )
+
+    def _as_float(key: str) -> float | None:
+        if key not in kv:
+            return None
+        try:
+            return float(kv[key])
+        except ValueError:
+            raise MissionCommandParseError(
+                f"{key} must be a number, got {kv[key]!r}"
+            )
+
+    base = parse_mission_command(text)
+    return AutoResearchCommand(
+        action=base.action, description=base.description, rubric=base.rubric,
+        reason=base.reason, cascade_to_workers=base.cascade_to_workers,
+        max_iterations=_as_int("max_iterations"),
+        resume_run=kv.get("resume"),
+        repo=kv.get("repo"),
+        baseline=_as_float("baseline"),
+        baseline_test=_as_float("baseline_test"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Slash command handlers
 # ---------------------------------------------------------------------------
@@ -149,6 +218,35 @@ completion claims backed by verifier-task evidence OR an explicit
 """
 
 
+_RESEARCH_KICKOFF_TEMPLATE = """\
+[Research mission kickoff]
+
+Objective: {description}
+
+Rubric:
+{rubric}
+
+You are this run's coordinator (Arbor protocol). You cannot edit code or
+run commands — executors do that in isolated worktrees; you steer the
+Idea Tree. Your loop each turn:
+
+1. idea_tree(action=view, format=constraints) — re-ground in the tree.
+2. OBSERVE the latest harvest + failure evidence.
+3. IDEATE: load the arbor-ideate skill, then idea_tree(action=add) 1-3
+   four-line hypotheses under the most informative node.
+4. dispatch_experiments(node_keys=[...]) — then END YOUR TURN. Harvest
+   folds the results automatically before your next wake.
+5. DECIDE on returned experiments: merge_experiment(start/status) for a
+   done node that beats trunk on B_dev; idea_tree(action=prune) for dead
+   branches (record the lesson as the reason).
+
+First action now: idea_tree(action=set_meta) with the contract values
+from the message above (eval_cmd, eval_cmd_test, metric_direction, …),
+then ideate. B_dev is for iteration; the held-out test split is reached
+ONLY through merge_experiment.
+"""
+
+
 def _outcome_is_active(outcome: dict[str, Any] | None) -> bool:
     """True iff session.config['outcome'] represents a non-terminal /goal."""
     if not isinstance(outcome, dict):
@@ -169,6 +267,7 @@ async def handle_mission_create(
     mission_store: MissionStore,
     user_id: UUID | None = None,
     service_account_id: UUID | None = None,
+    max_iterations: int = 20,
 ) -> MissionHandlerResult:
     """Create a new mission on the calling session.
 
@@ -229,6 +328,7 @@ async def handle_mission_create(
             agent_id=agent_id,
             description=description,
             rubric=rubric,
+            max_iterations=max_iterations,
         )
     except ActiveMissionConflictError as exc:
         return MissionHandlerResult(ok=False, error=str(exc))
@@ -258,7 +358,7 @@ async def handle_mission_create(
             "mission_id": str(mission_id),
             "description": description,
             "rubric": rubric,
-            "max_iterations": 20,
+            "max_iterations": max_iterations,
         },
     )
 
@@ -270,6 +370,100 @@ async def handle_mission_create(
         message=f"Mission {mission_id} started.",
         kickoff_content=kickoff,
     )
+
+
+async def handle_research_mission_create(
+    *,
+    cmd: AutoResearchCommand,
+    session_id: UUID,
+    org_id: UUID,
+    agent_id: str,
+    session_store: Any,
+    session_factory: Any,
+    mission_store: MissionStore,
+    user_id: UUID | None = None,
+    service_account_id: UUID | None = None,
+) -> MissionHandlerResult:
+    """Create a research-kind (Arbor) mission.
+
+    Wraps :func:`handle_mission_create` (Mission row + standard config
+    stamping), then adds the research sidecar: a ``research_runs`` row +
+    ROOT idea node, server-side baseline writes (``test_baseline_score``
+    is a machine key the coordinator's ``set_meta`` cannot write), the
+    ``arbor-coordinator`` preload in place of ``subagent-task-orchestrator``,
+    a ``research.defined`` event, and the research kickoff. ``/mission``'s
+    create path is untouched.
+    """
+    if cmd.resume_run:
+        return MissionHandlerResult(
+            ok=False, error="resume=<run> is not supported yet",
+        )
+    if not cmd.repo or not cmd.repo.startswith("/workspace/"):
+        return MissionHandlerResult(
+            ok=False,
+            error="repo=</workspace/...> is required for /auto-research create",
+        )
+
+    base = await handle_mission_create(
+        description=cmd.description, rubric=cmd.rubric,
+        session_id=session_id, org_id=org_id, agent_id=agent_id,
+        session_store=session_store, session_factory=session_factory,
+        mission_store=mission_store,
+        user_id=user_id, service_account_id=service_account_id,
+        max_iterations=cmd.max_iterations or 20,
+    )
+    if not base.ok:
+        return base
+
+    from surogates.arbor.store import ResearchStore
+
+    store = ResearchStore(session_factory)
+    short = str(base.mission_id)[:8]
+    run_id = await store.create_run(
+        org_id=org_id, mission_id=base.mission_id, session_id=session_id,
+        agent_id=agent_id, repo_path=cmd.repo,
+        trunk_branch=f"research/run-{short}/trunk",
+        branch_prefix=f"research/run-{short}",
+        objective=cmd.description,
+    )
+
+    # Baselines measured at intake are written server-side: test_baseline_score
+    # is a machine key (idea_tree(set_meta) rejects it), and the merge gate
+    # needs it as the held-out reference.
+    baseline_meta: dict[str, Any] = {}
+    if cmd.baseline is not None:
+        baseline_meta["baseline_score"] = cmd.baseline
+    if cmd.baseline_test is not None:
+        baseline_meta["test_baseline_score"] = cmd.baseline_test
+    if baseline_meta:
+        await store.set_meta(run_id, baseline_meta, allow_machine_keys=True)
+
+    async with session_factory() as db:
+        sess = await db.get(ORMSession, session_id)
+        cfg = dict(sess.config or {})
+        cfg["active_research_run_id"] = str(run_id)
+        # The research coordinator runs the Arbor protocol, not the generic
+        # task-orchestrator playbook handle_mission_create preloaded.
+        preloaded = [
+            s for s in (cfg.get("preloaded_skills") or [])
+            if s != "subagent-task-orchestrator"
+        ]
+        if "arbor-coordinator" not in preloaded:
+            preloaded.append("arbor-coordinator")
+        cfg["preloaded_skills"] = preloaded
+        sess.config = cfg
+        await db.commit()
+
+    await session_store.emit_event(
+        session_id, EventType.RESEARCH_DEFINED,
+        {"mission_id": str(base.mission_id), "run_id": str(run_id)},
+    )
+
+    base.kickoff_content = _RESEARCH_KICKOFF_TEMPLATE.format(
+        description=cmd.description, rubric=cmd.rubric,
+    )
+    base.message = f"Research mission {base.mission_id} started (run {run_id})."
+    return base
 
 
 async def handle_mission_status(
