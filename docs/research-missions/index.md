@@ -37,14 +37,17 @@ decisions only). The single hard contract: the eval prints its score as a JSON
 object on its last line — `{"score": <float>}`.
 
 You don't need an existing repo. In a **normal chat session** (full tools, not
-yet a research mission), paste the block below and tell the agent to **run it
-verbatim** — it has `terminal` access, so it writes the files and makes the
-first commit. Running it as-is (rather than describing the benchmark in prose)
-is what guarantees the exact `solver.py` / `eval.py` / split layout the rest of
-this quickstart refers to:
+yet a research mission), send the agent the shell script below with the
+instruction *"run this verbatim in the sandbox"* — it has `terminal` access, so
+it writes the files, commits, and reports the baselines. Running it as-is
+(rather than describing the benchmark in prose) is what guarantees the exact
+`solver.py` / `eval.py` / split layout the rest of this quickstart refers to.
 
-````text
-Run this exactly, then show me `git -C /workspace/bench log --oneline`:
+> **Paste the script body only — not surrounding Markdown.** A bare ```` ``` ````
+> fence (or a `---` / `###` line) on its own line trips the message scanner's
+> delimiter-injection check and the send is blocked. The plain shell script
+> below contains none of those, so it goes through; copy from `mkdir` to the
+> last line.
 
 ```bash
 mkdir -p /workspace/bench/data && cd /workspace/bench
@@ -95,7 +98,6 @@ git log --oneline
 echo "baseline dev:  $(python3 eval.py --split dev)"
 echo "baseline test: $(python3 eval.py --split test)"
 ```
-````
 
 You never touch the workspace yourself — it lives in the session sandbox. The
 **agent** runs the script there and reports back. Its reply should show a clean
