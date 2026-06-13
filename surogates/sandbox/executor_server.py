@@ -254,6 +254,7 @@ def create_app(
     mounts_path: str = "/proc/mounts",
     max_concurrency: int = MAX_CONCURRENCY,
     default_timeout: int = DEFAULT_TIMEOUT,
+    require_fuse: bool = True,
 ) -> FastAPI:
     """Build the daemon's FastAPI app.
 
@@ -265,7 +266,10 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz() -> Response:
-        if workspace_mounted(workspace, mounts_path):
+        # When the workspace is not a FUSE mount (Docker bind-mount or
+        # ephemeral), the FUSE check is the wrong readiness signal; the
+        # backend disables it via require_fuse=False.
+        if not require_fuse or workspace_mounted(workspace, mounts_path):
             return Response(content="ok", status_code=200)
         return Response(content="workspace not mounted", status_code=503)
 
@@ -320,6 +324,11 @@ def main() -> None:
         logger.error("TOOL_EXECUTOR_TOKEN is required")
         sys.exit(1)
 
+    # Docker/local backends bind-mount (or skip) the workspace instead of
+    # FUSE-mounting it, so they set TOOL_EXECUTOR_REQUIRE_FUSE=0 to make
+    # /healthz ready once the registry has loaded. Defaults on for K8s.
+    require_fuse = os.environ.get("TOOL_EXECUTOR_REQUIRE_FUSE", "1") != "0"
+
     logger.info("Loading tool registry...")
     init_registry()
     logger.info("Registry loaded; serving on 0.0.0.0:%d", port)
@@ -327,7 +336,7 @@ def main() -> None:
     import uvicorn
 
     uvicorn.run(
-        create_app(token=token, workspace=workspace),
+        create_app(token=token, workspace=workspace, require_fuse=require_fuse),
         host="0.0.0.0",
         port=port,
         log_level="warning",
