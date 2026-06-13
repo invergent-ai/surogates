@@ -83,22 +83,33 @@ $ cd /workspace/bench && python eval.py --split dev
 Confirm `git status` is clean before launching — experiments branch off this
 commit.
 
-### 1. Intake — turn the goal into a contract
+### 1. Get the baselines and form the contract
 
-Still in the normal chat session, run the intake skill:
+You already ran the dev eval (0.50). Run the held-out split once too, so you
+have the reference the merge gate compares against:
 
-```text
-/arbor-research improve accuracy of the classifier in /workspace/bench
+```bash
+$ cd /workspace/bench && python eval.py --split test
+{"score": 0.5}
 ```
 
-Intake inspects the repo, finds `eval.py`, identifies the dev/test splits,
-measures the baseline on **both** (here dev 0.50, test 0.50), asks one compact
-clarification checkpoint (metric direction, budget, permissions, HITL mode),
-and then prints a ready-to-send command. It does **not** start the run.
+That's everything `/auto-research` needs — repo path, both baselines, the two
+eval commands, and the metric direction.
+
+> **Optional — let intake draft it for you.** `arbor-research` is an *intake
+> skill*, not a builtin command. If it's attached to this agent, you can
+> describe the goal and it will measure the baselines and print a ready-to-send
+> `/auto-research` command:
+> ```text
+> /arbor-research improve accuracy of the classifier in /workspace/bench
+> ```
+> If you see "no skill named arbor-research", it isn't attached — just build the
+> command yourself as in step 2 (you have the numbers above).
 
 ### 2. Launch the run
 
-Send the command intake produced (edit any line first if you like):
+Send the `/auto-research` command — built from the numbers above, or drafted by
+intake (edit any line first if you like):
 
 ```text
 /auto-research repo=/workspace/bench max_iterations=40 baseline=0.50 baseline_test=0.50 Maximize classification accuracy on the dev split by improving solver.py; merge only verified gains.
