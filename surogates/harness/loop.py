@@ -204,6 +204,7 @@ from surogates.harness.loop_vision import (
 
 from surogates.harness.loop_advisor import AdvisorMixin
 from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
+from surogates.harness.loop_arbor import ArborHarvestMixin
 from surogates.harness.loop_board import BoardMixin
 from surogates.harness.loop_code_commands import CodeCommandMixin
 from surogates.harness.loop_context_replay import ContextReplayMixin
@@ -269,6 +270,7 @@ def _format_loop_list(rows: list[Any]) -> str:
 class AgentHarness(
     AdvisorMixin,
     BoardMixin,
+    ArborHarvestMixin,
     ContextReplayMixin,
     IterationSummaryMixin,
     OutcomeCommandMixin,
@@ -1304,6 +1306,12 @@ class AgentHarness(
             board_cursor = await self.maybe_emit_board_update(
                 session, messages, board_cursor,
             )
+
+            # --- Research missions: deterministic pre-LLM harvest ---
+            # Folds finished experiments into the Idea Tree before the
+            # coordinator LLM runs, so a dead executor or compacted context
+            # can never strand a running node or stale the leaderboard.
+            await self.maybe_harvest_research(session, messages)
 
             # --- Skill nudge tracking ---
             # Counter resets whenever skill_manage is actually used (in

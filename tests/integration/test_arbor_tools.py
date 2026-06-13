@@ -16,6 +16,7 @@ import pytest_asyncio
 from surogates.arbor.store import ResearchStore
 from surogates.tools.builtin.arbor import (
     _dispatch_experiments_handler,
+    _idea_tree_handler,
     _merge_experiment_handler,
 )
 
@@ -289,3 +290,56 @@ async def test_merge_status_reports_stale_eval(merge_env_with_eval):
         {"action": "status", "node_key": "1"}, **kwargs,
     ))
     assert out.get("stale") is True
+
+
+# ---------------------------------------------------------------------------
+# idea_tree(record_from_task) — the coordinator's correction channel, which
+# resolves the node from the idea_nodes.task_id link and folds via harvest.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_record_from_task_folds_a_real_task(session_factory, seeded_org_and_session):
+    from surogates.db.models import Task
+
+    org_id, mission_id, session_id = seeded_org_and_session
+    store = ResearchStore(session_factory)
+    run_id = await store.create_run(
+        org_id=org_id, mission_id=mission_id, session_id=session_id,
+        agent_id="agent-x", repo_path="/workspace/repo",
+        trunk_branch="research/rec/trunk", branch_prefix="research/rec",
+        objective="o",
+    )
+    await store.add_node(run_id, org_id=org_id, parent_key="ROOT", hypothesis="h1")
+
+    # A real terminal Task carrying a structured report, linked to node "1".
+    async with session_factory() as db:
+        task = Task(
+            org_id=org_id, parent_session_id=session_id,
+            agent_def_name="arbor-executor", goal="g", status="done",
+            max_attempts=1,
+            result="prose", result_metadata={"score": 0.73, "insight": "X helps"},
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        task_id = task.id
+    await store.update_node(run_id, "1", status="running", task_id=task_id)
+
+    kwargs = {
+        "session_factory": session_factory,
+        "session_config": {"active_research_run_id": str(run_id)},
+        "session_id": str(session_id),
+        "sandbox_pool": FakeSandboxPool(),
+        "session_store": _StubSessionStore(),
+        "tenant": object(), "redis": object(),
+    }
+    out = json.loads(await _idea_tree_handler(
+        {"action": "record_from_task", "task_id": str(task_id)}, **kwargs,
+    ))
+    assert out["folded"] == "1"
+    node = await store.get_node(run_id, "1")
+    assert node.status == "done" and node.score == 0.73
+    # Insight propagated up to ROOT.
+    root = await store.get_node(run_id, "ROOT")
+    assert "X helps" in (root.insight or "")

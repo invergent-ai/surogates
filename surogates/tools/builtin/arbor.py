@@ -194,8 +194,14 @@ async def _idea_tree_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
 
 async def _record_from_task(store, run_id, task_id: str, kwargs) -> str:
     """Coordinator's correction channel: fold a Task row by id — reads
-    ``Task.result``/``result_metadata`` from the DB, never coordinator prose."""
-    from surogates.db.models import Task
+    ``Task.result``/``result_metadata`` from the DB, never coordinator prose.
+
+    The node is resolved from the ``idea_nodes.task_id`` link (the same
+    authoritative source the harvest hook uses), not from task metadata.
+    """
+    from sqlalchemy import select
+
+    from surogates.db.models import IdeaNode, Task
     # Lazy import: loop_arbor.py ships with the harvest hook; record is
     # the same deterministic fold the wake hook uses.
     from surogates.harness.loop_arbor import fold_task_into_node
@@ -209,8 +215,17 @@ async def _record_from_task(store, run_id, task_id: str, kwargs) -> str:
         if task is None:
             return json.dumps({"error": f"task {task_id} not found"})
         db.expunge(task)
+        node = await db.scalar(
+            select(IdeaNode).where(
+                IdeaNode.run_id == run_id, IdeaNode.task_id == tid,
+            )
+        )
+    if node is None:
+        return json.dumps({
+            "error": f"no idea node in this run links task {task_id}"
+        })
     folded = await fold_task_into_node(
-        store, run_id, task, llm_client=None, model=None,
+        store, run_id, node.node_key, task, llm_client=None, model=None,
     )
     return json.dumps(folded)
 
