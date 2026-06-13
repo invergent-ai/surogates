@@ -20,8 +20,8 @@
 > Updated before every commit. `[ ]` pending · `[~]` in progress · `[x]` done.
 
 - [x] Task 1 — LLM-synthesis insight backprop (`synthesize_insight` + `propagate_insights_llm` + `idea_tree(action=propagate)` + wire into prune/merge/record)
-- [~] Task 2 — Convergence detector module (`surogates/arbor/convergence.py`)
-- [ ] Task 3 — Wire convergence into harvest digest + evaluator feedback
+- [x] Task 2 — Convergence detector module (`surogates/arbor/convergence.py`)
+- [~] Task 3 — Wire convergence into harvest digest + evaluator feedback
 - [ ] Task 4 — INIT fallback: real `dispatch_experiments(action="baseline")`
 - [ ] Task 5 — Final-report polish (test deltas, eval commands, convergence note)
 - [ ] Task 6 — Parallel dispatch hardening + multi-node harvest test
