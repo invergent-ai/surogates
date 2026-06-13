@@ -19,8 +19,8 @@ Status is updated before each commit. Legend: `[ ]` pending · `[~]` in progress
 - [x] Task 3: Add `session_id` and `workspace_path` to `SandboxSpec`
 - [x] Task 4: `executor_server` — `TOOL_EXECUTOR_REQUIRE_FUSE`
 - [x] Task 5: `SandboxSettings` config — docker backend + fields
-- [~] Task 6: `DockerSandbox` core — lifecycle + execute
-- [ ] Task 7: `DockerSandbox` — MCP proxy + KB env wiring
+- [x] Task 6: `DockerSandbox` core — lifecycle + execute
+- [~] Task 7: `DockerSandbox` — MCP proxy + KB env wiring
 - [ ] Task 8: `SandboxPool.destroy_for_session` optional backend hook
 - [ ] Task 9: Spec builder sets `session_id` and `workspace_path`
 - [ ] Task 10: Worker wires the `docker` backend branch
@@ -1139,7 +1139,10 @@ class DockerSandbox:
 
         workspace = self._mountable_workspace(spec.workspace_path)
         env = self._build_env(spec, sandbox_id, token)
-        image = spec.image or self._image
+        # Docker is the local-dev backend: the configured image (docker_image)
+        # is authoritative, so a developer's locally-built image is used rather
+        # than the production ghcr reference that SandboxSpec.image defaults to.
+        image = self._image
 
         container_id = ""
         for _attempt in range(_MAX_PORT_ATTEMPTS):
