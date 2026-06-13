@@ -214,3 +214,16 @@ class TestSandboxPool:
 
         assert await backend.status(id1) == SandboxStatus.TERMINATED
         assert await backend.status(id2) == SandboxStatus.TERMINATED
+
+
+def test_sandbox_spec_has_session_and_workspace_fields():
+    from surogates.sandbox.base import SandboxSpec
+
+    # Defaults keep existing call sites working.
+    spec = SandboxSpec()
+    assert spec.session_id == ""
+    assert spec.workspace_path is None
+
+    spec2 = SandboxSpec(session_id="root-123", workspace_path="/tmp/ws")
+    assert spec2.session_id == "root-123"
+    assert spec2.workspace_path == "/tmp/ws"

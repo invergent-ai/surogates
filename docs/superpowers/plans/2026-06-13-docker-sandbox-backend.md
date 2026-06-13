@@ -16,8 +16,8 @@ Status is updated before each commit. Legend: `[ ]` pending · `[~]` in progress
 
 - [x] Task 1: `ExecutorHTTPClient` — shared daemon HTTP transport
 - [x] Task 2: Refactor `K8sSandbox` to delegate to `ExecutorHTTPClient`
-- [~] Task 3: Add `session_id` and `workspace_path` to `SandboxSpec`
-- [ ] Task 4: `executor_server` — `TOOL_EXECUTOR_REQUIRE_FUSE`
+- [x] Task 3: Add `session_id` and `workspace_path` to `SandboxSpec`
+- [~] Task 4: `executor_server` — `TOOL_EXECUTOR_REQUIRE_FUSE`
 - [ ] Task 5: `SandboxSettings` config — docker backend + fields
 - [ ] Task 6: `DockerSandbox` core — lifecycle + execute
 - [ ] Task 7: `DockerSandbox` — MCP proxy + KB env wiring
