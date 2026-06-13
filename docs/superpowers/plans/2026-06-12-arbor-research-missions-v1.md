@@ -19,7 +19,7 @@
 - [x] Task 10 — `research_coordinator` read-only carve-out
 - [x] Task 11 — research evaluator policy
 - [x] Task 12 — the three v1 skills (+ bundle DESCRIPTION.md documenting arbor-executor AgentDef provisioning; ops feature-pack toggle remains a cross-repo follow-up)
-- [~] Task 13 — smoke-mode end-to-end test
+- [x] Task 13 — smoke-mode end-to-end test
 
 **Goal:** One real arbor cycle end to end — `/auto-research` creates a research-kind mission whose strict coordinator grows a DB-backed Idea Tree, dispatches executor task-workers into git worktrees, harvests results deterministically at wake, and merges into trunk only through a machine-run held-out eval gate.
 
