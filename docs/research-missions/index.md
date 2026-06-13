@@ -23,44 +23,76 @@ tools, the durable state model, steering, and the operational guardrails.
 
 ## Quickstart
 
-This walks through one research run end to end: optimizing a small text
-classifier's F1 on a benchmark repo.
+This walks through one research run end to end, **starting from nothing** — we
+build a tiny, self-contained benchmark in the session workspace, then let a
+research mission improve it. The toy task is a rule-based sentiment classifier
+(stdlib only, no ML deps, no external repo), so the whole loop runs in the
+sandbox in seconds and anyone can reproduce it.
 
-### 0. Prepare the benchmark
+### 0. Scaffold a benchmark from scratch
 
-The target repo lives in the session workspace and must have a runnable eval, a
-**dev** split for iteration, and a held-out **test** split for merge decisions.
-The only contract the harness requires is that the eval prints its score as a
-JSON object on its last line:
+A research run optimizes a **git repo in `/workspace`** that has a runnable
+eval, a **dev** split (iterate here), and a held-out **test** split (merge
+decisions only). The single hard contract: the eval prints its score as a JSON
+object on its last line — `{"score": <float>}`.
+
+You don't need an existing repo. In a **normal chat session** (full tools, not
+yet a research mission), ask the agent to create one:
 
 ```text
-/workspace/clf/
-├── train.py            # the model the agent will modify
-├── eval.py             # prints e.g.  {"score": 0.41}  as its last line
+Scaffold a tiny sentiment benchmark in /workspace/bench:
+- solver.py with predict(text) -> "pos"/"neg", baseline = always "neg"
+- eval.py --split <dev|test> that scores accuracy and prints {"score": <float>} last
+- data/dev.jsonl and data/test.jsonl, ~40 balanced labeled rows each, disjoint
+Then git init and commit it.
+```
+
+The agent has `terminal` + file tools in a normal session, so it writes the
+files and makes the first commit. The result is a clean, runnable repo:
+
+```text
+/workspace/bench/
+├── solver.py          # def predict(text): return "neg"   ← baseline to beat
+├── eval.py            # runs solver on a split, prints {"score": <accuracy>}
 └── data/
-    ├── dev.jsonl       # iterate here
-    └── test.jsonl      # held out — only the merge gate runs this
+    ├── dev.jsonl      # {"text": "...", "label": "pos"|"neg"} — iterate here
+    └── test.jsonl     # held out — only the merge gate runs this
+```
+
+```python
+# solver.py — the only file experiments edit
+def predict(text: str) -> str:
+    return "neg"        # majority-class baseline
+
+# eval.py — the contract: print {"score": <float>} on the last line
+import json, sys
+from pathlib import Path
+import solver
+
+split = sys.argv[sys.argv.index("--split") + 1] if "--split" in sys.argv else "dev"
+rows = [json.loads(l) for l in Path(f"data/{split}.jsonl").read_text().splitlines() if l.strip()]
+correct = sum(solver.predict(r["text"]) == r["label"] for r in rows)
+print(json.dumps({"score": round(correct / len(rows), 4)}))
 ```
 
 ```bash
-# eval.py contract: run on a split, print {"score": <float>} last
-$ python eval.py --split dev
-... training/inference logs ...
-{"score": 0.41}
+$ cd /workspace/bench && python eval.py --split dev
+{"score": 0.5}          # always-"neg" on a balanced split
 ```
 
-The repo should be a clean git checkout (no uncommitted changes).
+Confirm `git status` is clean before launching — experiments branch off this
+commit.
 
 ### 1. Intake — turn the goal into a contract
 
-In a normal chat session, run the intake skill:
+Still in the normal chat session, run the intake skill:
 
 ```text
-/arbor-research improve macro-F1 of the classifier in /workspace/clf
+/arbor-research improve accuracy of the classifier in /workspace/bench
 ```
 
 Intake inspects the repo, finds `eval.py`, identifies the dev/test splits,
-measures the baseline on **both** (say dev 0.41, test 0.40), asks one compact
+measures the baseline on **both** (here dev 0.50, test 0.50), asks one compact
 clarification checkpoint (metric direction, budget, permissions, HITL mode),
 and then prints a ready-to-send command. It does **not** start the run.
 
@@ -69,11 +101,11 @@ and then prints a ready-to-send command. It does **not** start the run.
 Send the command intake produced (edit any line first if you like):
 
 ```text
-/auto-research repo=/workspace/clf max_iterations=40 baseline=0.41 baseline_test=0.40 Maximize macro-F1 of the classifier on the dev split; merge only verified gains.
+/auto-research repo=/workspace/bench max_iterations=40 baseline=0.50 baseline_test=0.50 Maximize classification accuracy on the dev split by improving solver.py; merge only verified gains.
 
 Rubric:
 - Satisfied only when the held-out test score (written only by the merge gate)
-  improves on test_baseline_score (0.40), with at least one merged node — or the
+  improves on test_baseline_score (0.50), with at least one merged node — or the
   cycle budget is exhausted with an explicit no-improvement root insight — AND
   the final report task is done.
 - Never satisfied on prose claims or dev-split scores alone.
@@ -92,14 +124,14 @@ activity feed:
 
 ```text
 research.defined      run created, ROOT node seeded, baselines recorded
-research.dispatched   node 1 "TF-IDF → contextual embeddings" → executor (worktree research/run-…/n1)
-research.dispatched   node 2 "class-balanced loss"            → executor
-research.harvested    node 1 done score=0.46 · node 2 done score=0.43   (folded at the coordinator's wake)
-research.merged       node 1 merged — held-out test 0.40 → 0.47, trunk advanced
-research.dispatched   node 3 "1.1: embedding + balanced loss (combine)" off the new trunk
-research.harvested    node 3 done score=0.44
-research.converged    WARNING — 3 experiments without a trunk gain; suggests Leap/Combine
-research.merged       node 1.1 merged — held-out test 0.47 → 0.49
+research.dispatched   node 1 "positive/negative keyword lexicon" → executor (worktree research/run-…/n1)
+research.dispatched   node 2 "negation handling (not good → neg)" → executor
+research.harvested    node 1 done score=0.69 · node 2 done score=0.61   (folded at the coordinator's wake)
+research.merged       node 1 merged — held-out test 0.50 → 0.66, trunk advanced
+research.dispatched   node 1.1 "lexicon + negation (combine)" off the new trunk
+research.harvested    node 1.1 done score=0.80
+research.converged    WARNING — 2 experiments without a trunk gain; suggests Leap/Combine
+research.merged       node 1.1 merged — held-out test 0.66 → 0.75
 research.report       REPORT.md written; report task created
 ```
 
@@ -115,23 +147,24 @@ is hit. `REPORT.md` (held-out scores authoritative) lands in the workspace and
 as a chat artifact:
 
 ```markdown
-# Research Report — Maximize macro-F1 of the classifier
+# Research Report — Maximize classification accuracy
 ## Held-out test (authoritative)
-- baseline: 0.40
-- final trunk: 0.49 (maximize)
-- delta: +0.09
+- baseline: 0.50
+- final trunk: 0.75 (maximize)
+- delta: +0.25
 ## Eval commands
 - dev:  python eval.py --split dev
 - test: python eval.py --split test
 ## Merged ideas
-- 1   dev=0.46: Mechanism: replace TF-IDF features with contextual embeddings
-- 1.1 dev=0.48: Mechanism: combine embeddings with a class-balanced loss
+- 1   dev=0.69: Mechanism: keyword lexicon in solver.predict (pos/neg word lists)
+- 1.1 dev=0.80: Mechanism: combine the lexicon with negation handling
 ...
 ```
 
-The improvements are real commits on the per-run `trunk` branch in your repo;
-promote them into `main` when satisfied (`git merge research/run-…/trunk`). The
-Idea Tree, every branch, and the report stay queryable after the run ends.
+The improvements are real commits on the per-run `trunk` branch in the
+`/workspace/bench` repo you scaffolded; promote them into your own default
+branch when satisfied (`git merge research/run-…/trunk`). The Idea Tree, every
+branch, and the report stay queryable after the run ends.
 
 ---
 
