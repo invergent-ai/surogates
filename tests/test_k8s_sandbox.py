@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from aiohttp import web
 
+from surogates.sandbox._executor_client import ExecutorHTTPClient
 from surogates.sandbox.base import (
     SandboxSpec,
     SandboxStatus,
@@ -198,7 +199,7 @@ class TestResultJson:
     """Standard result JSON builder."""
 
     def test_success(self):
-        result = json.loads(K8sSandbox._result_json(
+        result = json.loads(ExecutorHTTPClient._result_json(
             exit_code=0, stdout="hello", stderr="", truncated=False, timed_out=False,
         ))
         assert result["exit_code"] == 0
@@ -206,7 +207,7 @@ class TestResultJson:
         assert result["timed_out"] is False
 
     def test_timeout(self):
-        result = json.loads(K8sSandbox._result_json(
+        result = json.loads(ExecutorHTTPClient._result_json(
             exit_code=-1, stdout="", stderr="timed out", truncated=False, timed_out=True,
         ))
         assert result["timed_out"] is True

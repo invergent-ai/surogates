@@ -25,10 +25,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-import aiohttp
 from kubernetes_asyncio import client, config, watch
 from kubernetes_asyncio.client import ApiException
 
+from surogates.sandbox._executor_client import ExecutorHTTPClient
 from surogates.sandbox.base import (
     SandboxSpec,
     SandboxStatus,
@@ -98,7 +98,7 @@ class K8sSandbox:
         self._mcp_proxy_url = mcp_proxy_url
         self._pods: dict[str, _PodEntry] = {}
         self._api: client.CoreV1Api | None = None
-        self._http: aiohttp.ClientSession | None = None
+        self._client = ExecutorHTTPClient()
 
     # ------------------------------------------------------------------
     # K8s client
@@ -190,97 +190,28 @@ class K8sSandbox:
     async def execute(self, sandbox_id: str, name: str, input: str) -> str:
         """Execute a tool in the sandbox pod via the executor daemon.
 
-        POSTs to the daemon on the pod IP.  Handler errors come back as
-        200 + result JSON (the daemon catches them); HTTP/transport
-        failures here mean the daemon itself is unreachable or broken.
+        Delegates the HTTP transport to the shared client.  On a fatal
+        condition (token rejected, daemon unreachable) the client raises
+        ``SandboxUnavailableError``; we mark the entry FAILED so the next
+        ``SandboxPool.ensure`` reprovisions, then re-raise.
         """
         entry = self._get_entry(sandbox_id)
-        url = f"http://{entry.pod_ip}:{self._executor_port}/execute"
         try:
-            args = json.loads(input) if input else {}
-        except json.JSONDecodeError:
-            args = {}
-
-        session = await self._get_http()
-        try:
-            async with session.post(
-                url,
-                json={"name": name, "args": args, "timeout": entry.spec.timeout},
-                headers={"Authorization": f"Bearer {entry.token}"},
-                # ``connect=10`` makes a blackholed pod IP (node gone)
-                # fail fast as a connection error instead of burning the
-                # whole tool budget before failing.
-                timeout=aiohttp.ClientTimeout(
-                    total=entry.spec.timeout + 5, connect=10,
-                ),
-            ) as resp:
-                body = await resp.text()
-                if resp.status == 401:
-                    # Token mismatch: the pod predates this worker's entry
-                    # (or vice versa).  Unusable — reprovision.
-                    entry.status = SandboxStatus.FAILED
-                    raise SandboxUnavailableError(
-                        f"Executor daemon in pod {entry.pod_name} rejected "
-                        f"the sandbox token",
-                    )
-                if resp.status != 200:
-                    logger.error(
-                        "Executor daemon in pod %s returned HTTP %s: %s",
-                        entry.pod_name, resp.status, body[:200],
-                    )
-                    return self._result_json(
-                        exit_code=-1,
-                        stdout="",
-                        stderr=f"Executor daemon error (HTTP {resp.status})",
-                        truncated=False,
-                        timed_out=False,
-                    )
-                return body
-        except aiohttp.ClientConnectionError as exc:
-            # Daemon unreachable — pod gone, daemon dead, or an old
-            # (pre-daemon) pod from before a deploy.  Every subsequent
-            # sandbox tool would fail identically; mark FAILED so the
-            # next ensure() reprovisions.
-            #
-            # ORDER MATTERS: this clause must come before TimeoutError.
-            # aiohttp's connect-phase timeouts (ConnectionTimeoutError /
-            # ServerTimeoutError) inherit BOTH ClientConnectionError and
-            # TimeoutError — they mean "daemon unreachable" and must land
-            # here, not in the tool-timeout branch below (which would
-            # leave a dead sandbox marked healthy forever).
-            logger.error(
-                "Sandbox daemon unreachable in pod %s: %s", entry.pod_name, exc,
+            return await self._client.execute(
+                host=entry.pod_ip,
+                port=self._executor_port,
+                token=entry.token,
+                name=name,
+                args_str=input,
+                timeout=entry.spec.timeout,
             )
+        except SandboxUnavailableError:
             entry.status = SandboxStatus.FAILED
-            raise SandboxUnavailableError(
-                f"Sandbox daemon unreachable in pod {entry.pod_name} "
-                f"(pod terminated, daemon dead, or pre-daemon image): {exc}",
-            ) from exc
-        except asyncio.TimeoutError:
-            # Plain total-budget expiry while reading the response (the
-            # connection succeeded, the tool is just slow).  The daemon
-            # kills timed-out children itself; reaching the client-side
-            # budget (+5s buffer) means it is unresponsive to the kill.
-            logger.warning("Sandbox exec timed out in pod %s", entry.pod_name)
-            return self._result_json(
-                exit_code=-1,
-                stdout="",
-                stderr="Execution timed out",
-                truncated=False,
-                timed_out=True,
-            )
-
-    async def _get_http(self) -> aiohttp.ClientSession:
-        """Shared client session — connection pooling across tool calls."""
-        if self._http is None:
-            self._http = aiohttp.ClientSession()
-        return self._http
+            raise
 
     async def aclose(self) -> None:
-        """Release the HTTP client session (worker shutdown)."""
-        if self._http is not None:
-            await self._http.close()
-            self._http = None
+        """Release the shared HTTP client session (worker shutdown)."""
+        await self._client.aclose()
 
     async def destroy(self, sandbox_id: str) -> None:
         """Delete the sandbox pod and its S3 credential secret."""
@@ -701,21 +632,3 @@ class K8sSandbox:
         if exc.status == 409:
             return f"Sandbox pod name conflict: {message}"
         return f"Sandbox pod creation failed (HTTP {exc.status}): {message}"
-
-    @staticmethod
-    def _result_json(
-        *,
-        exit_code: int,
-        stdout: str,
-        stderr: str,
-        truncated: bool,
-        timed_out: bool,
-    ) -> str:
-        """Build the standard sandbox result JSON."""
-        return json.dumps({
-            "exit_code": exit_code,
-            "stdout": stdout,
-            "stderr": stderr,
-            "truncated": truncated,
-            "timed_out": timed_out,
-        })
