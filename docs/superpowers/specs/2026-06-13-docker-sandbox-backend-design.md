@@ -1,8 +1,10 @@
 # Docker Sandbox Backend — Design
 
 **Date:** 2026-06-13
-**Status:** Approved (pending spec review)
-**Scope:** `surogates` framework — `surogates/sandbox/`
+**Status:** Approved (reviewed)
+**Scope:** `surogates` framework — `surogates/sandbox/`,
+`surogates/harness/tool_exec.py`, `surogates/orchestrator/worker.py`,
+`surogates/config.py`
 
 ## Summary
 
@@ -114,27 +116,34 @@ Implements the `Sandbox` protocol (`provision` / `execute` / `destroy` /
 
 - **`provision(spec)`**:
   1. Mint `executor_token = secrets.token_urlsafe(32)`.
-  2. Allocate `host_port = docker_executor_port_base + offset`, retrying on
+  2. If `spec.session_id` is set, first run `destroy_for_session(spec.session_id)`
+     to remove stale containers left by a previous worker process for the same
+     root session. The session lease prevents a healthy second worker from
+     provisioning the same session concurrently.
+  3. Allocate `host_port = docker_executor_port_base + offset`, retrying on
      port-conflict stderr up to a fixed cap (mirrors `ProcessBrowserBackend`).
      The daemon always binds a **fixed in-container port** (`8071`, the image
      default); only the published host port varies. The client connects to the
      host port.
-  3. `docker run -d --rm` with:
+  4. `docker run -d --rm` with:
      - `-p {host_port}:8071` (host port → fixed in-container daemon port)
-     - `--label app=surogates-sandbox --label surogates.session_id={…}`
+     - `--label app=surogates-sandbox --label surogates.session_id={spec.session_id}`
+       when `spec.session_id` is present
+     - `--network {docker_network}` when configured (default `bridge`)
      - `--add-host=host.docker.internal:host-gateway` (host-service reachability
        for MCP/KB tools, best-effort)
      - `-v {workspace_host_path}:/workspace` when a host path is resolvable
        (see Workspace), otherwise no mount (ephemeral container `/workspace`)
      - env: `TOOL_EXECUTOR_TOKEN`, `WORKSPACE_DIR=/workspace`,
        `TOOL_EXECUTOR_REQUIRE_FUSE=0`, plus `spec.env` passthrough (with
-       host-targeting URL rewrite, see Networking). `TOOL_EXECUTOR_PORT` is left
-       at the image default (`8071`).
+       host-targeting URL rewrite, see Networking), plus `MCP_PROXY_URL` and
+       a per-sandbox `MCP_PROXY_TOKEN` when the worker has an MCP proxy URL.
+       `TOOL_EXECUTOR_PORT` is left at the image default (`8071`).
      - the image from `spec.image` or the configured `docker_image`
-  4. Poll `GET /healthz` until 200 within `docker_ready_timeout` seconds (the
+  5. Poll `GET /healthz` until 200 within `docker_ready_timeout` seconds (the
      browser backend's `_wait_ready` shape). On timeout, `stop`+`rm` the
      container and raise `SandboxUnavailableError(classification="docker")`.
-  5. Record the entry (`container_id`, `host_port`, `token`, `spec`); return the
+  6. Record the entry (`container_id`, `host_port`, `token`, `spec`); return the
      `sandbox_id`.
 
 - **`execute(sandbox_id, name, input)`** — resolve the entry, delegate to
@@ -151,7 +160,9 @@ Implements the `Sandbox` protocol (`provision` / `execute` / `destroy` /
 
 - **`destroy_for_session(session_id)`** — `docker ps -aq --filter
   label=surogates.session_id={…}` then stop/rm each, covering containers not in
-  the in-memory map (e.g. after a worker restart).
+  the in-memory map (e.g. after a worker restart). `SandboxPool.destroy_for_session`
+  should call this optional backend method even when it has no in-memory mapping,
+  so session shutdown also reaps stale Docker containers.
 
 - **`aclose()`** — close the `ExecutorHTTPClient`. (`worker.py` shutdown already
   `getattr`-guards `aclose`, so this is picked up automatically.)
@@ -166,16 +177,25 @@ port=self._executor_port, token=entry.token`). The 401/connection-error entry
 **only** edit to the production execution path; it is covered by a regression
 test asserting identical result shapes.
 
-## Workspace handling
+## Sandbox spec and workspace handling
 
 The `SandboxPool` keys by **root** session (`sandbox_session_key`), so all
 delegation children and loop ticks resolve to one `sandbox_id` → one container →
 one `/workspace`. Sharing is handled by the pool; the backend only decides what
 `/workspace` is backed by.
 
+Add two optional fields to `SandboxSpec`:
+
+- `session_id: str = ""` — the root sandbox session key. Docker uses it for
+  labels and stale-container cleanup. `K8sSandbox` ignores it.
+- `workspace_path: str | None = None` — a host-bindable workspace path when one
+  exists. Docker bind-mounts it when valid; `K8sSandbox` ignores it because its
+  workspace is mounted by the s3fs/geesefs sidecar.
+
 - **Local dev (`LocalBackend`, the default):** bind-mount the root session's
   on-disk workspace directory
-  (`LocalBackend.resolve_workspace_path` → `{base_path}/{bucket}/sessions/{root}`)
+  (`session.config["workspace_path"]`, originally from
+  `LocalBackend.resolve_workspace_path` → `{base_path}/{bucket}/sessions/{root}`)
   as `/workspace`. This makes `/workspace == storage` (matching K8s s3fs
   semantics), survives a mid-session container reprovision, and is inspectable
   on the host.
@@ -183,21 +203,32 @@ one `/workspace`. Sharing is handled by the pool; the backend only decides what
   an ephemeral container-internal `/workspace`. Local Docker mode does not run
   an s3fs sidecar.
 
-**Plumbing.** Add `workspace_path: str | None = None` to `SandboxSpec` (mirrors
-`BrowserSpec.workspace_path`). `_build_session_sandbox_spec` in
-`surogates/harness/tool_exec.py` already computes the **root**'s workspace
-prefix for the storage `Resource`; it populates `spec.workspace_path` with the
-root's resolved host directory. `DockerSandbox` bind-mounts it when present.
-`K8sSandbox` ignores the field (it mounts via the s3fs sidecar as before).
+**Plumbing.** `_build_session_sandbox_spec` in
+`surogates/harness/tool_exec.py` already receives the **root** sandbox owner and
+uses it for the storage `Resource`. Extend it to also set `spec.session_id =
+sandbox_owner` and `spec.workspace_path = session.config.get("workspace_path")`.
+This works for delegation children because `create_child_session` already copies
+the parent's root `workspace_path`. Docker treats missing, empty, or
+`"/workspace"` workspace paths as unmountable sentinels and runs with an
+ephemeral container workspace instead.
 
 ## Networking
 
 Bridge networking with a published executor port, like the browser backend. The
 container reaches host services via `host.docker.internal` (injected with
 `--add-host=…:host-gateway`). Env vars that point at host-local services
-(e.g. `MCP_PROXY_URL`, `SUROGATES_OPS_DB_URL`) are rewritten on a best-effort
-basis: `localhost`/`127.0.0.1` → `host.docker.internal`. This mirrors the
-existing k3d `host.k3d.internal` convention.
+(e.g. `MCP_PROXY_URL`, `SUROGATES_OPS_DB_URL`,
+`SUROGATES_KB_HUB_ENDPOINT_URL`) are rewritten on a best-effort basis:
+`localhost`/`127.0.0.1` → `host.docker.internal`. This mirrors the existing k3d
+`host.k3d.internal` convention.
+
+Docker should mirror the K8s backend's sandbox env behavior:
+
+- inject `MCP_PROXY_URL` from worker settings when configured;
+- mint `MCP_PROXY_TOKEN` with the sandbox token helper, using `ORG_ID`,
+  `USER_ID`, `SUROGATES_AGENT_ID`, and `spec.session_id` when available;
+- propagate the same KB-related worker env vars that K8s propagates, after the
+  host URL rewrite.
 
 Host wiring is best-effort: terminal and file tools work regardless. MCP and KB
 tools work when their host services are running locally; when they are not, only
@@ -231,8 +262,7 @@ additive, no effect on the K8s path.
 
 `surogates/orchestrator/worker.py` — add a `docker` branch in the backend
 selection that constructs `DockerSandbox(image=…, executor_port_base=…,
-network=…, storage_backend=storage_backend)`. The storage backend is passed so
-the workspace host-path is resolvable.
+network=…, ready_timeout=…, mcp_proxy_url=settings.mcp_proxy_url)`.
 
 `surogates/sandbox/__init__.py` — export `DockerSandbox`.
 
@@ -240,7 +270,7 @@ the workspace host-path is resolvable.
 
 ```
 router (SANDBOX location)
-  → SandboxPool.ensure(root_id, spec)          # provisions on first call, then cached
+  → SandboxPool.ensure(root_id, spec)          # spec.session_id == root_id
       → DockerSandbox.provision(spec)          # docker run + /healthz poll
   → SandboxPool.execute(root_id, "terminal", args_json)
       → DockerSandbox.execute(...)
@@ -265,18 +295,23 @@ harness's "stop dispatching sandbox tools" behavior works identically to K8s.
 ## Testing
 
 - **`ExecutorHTTPClient`** (`tests/test_executor_http_client.py`): inject a fake
-  aiohttp transport; assert 200 / 401 / non-200 / `ClientConnectionError` /
-  `TimeoutError` each map to the right result-or-raise. Assert `ClientConnection`
-  takes precedence over `TimeoutError`.
+  local `aiohttp.web` server or monkeypatched `ClientSession`; assert 200 / 401 /
+  non-200 / `ClientConnectionError` / `TimeoutError` each map to the right
+  result-or-raise. Assert `ClientConnection` takes precedence over
+  `TimeoutError`.
 - **`K8sSandbox` regression** (extend existing K8s tests): same inputs produce
   byte-identical results after delegating to the shared client; 401/connection
   errors still mark the entry `FAILED`.
 - **`DockerSandbox`** (`tests/test_docker_sandbox.py`): inject a fake
   `_DockerDriver`; assert `provision` arg construction (port mapping, labels,
   bind-mount when `workspace_path` set / omitted when not, env including
-  `TOOL_EXECUTOR_REQUIRE_FUSE=0` and `--add-host`), port-conflict retry, status
-  mapping, `destroy`, and `destroy_for_session` label filtering. Mirrors
+  `TOOL_EXECUTOR_REQUIRE_FUSE=0`, MCP/KB env propagation, URL rewrite, and
+  `--add-host`), stale-session cleanup before provision, port-conflict retry,
+  status mapping, `destroy`, and `destroy_for_session` label filtering. Mirrors
   `tests/test_browser_process.py`.
+- **`SandboxSpec` builder** (`tests/test_tool_exec_sandbox_spec.py`): assert
+  `session_id` is the root sandbox owner and `workspace_path` is copied from
+  session config without mutating the tenant baseline.
 - **`executor_server`** (extend existing tests): `/healthz` → 200 with
   `TOOL_EXECUTOR_REQUIRE_FUSE=0` and no FUSE mount; still 503 by default
   (FUSE expected, absent).
@@ -296,12 +331,14 @@ harness's "stop dispatching sandbox tools" behavior works identically to K8s.
 
 **Modified**
 - `surogates/sandbox/kubernetes.py` (delegate to shared client)
-- `surogates/sandbox/base.py` (`SandboxSpec.workspace_path`)
+- `surogates/sandbox/base.py` (`SandboxSpec.session_id`, `workspace_path`)
 - `surogates/sandbox/executor_server.py` (`TOOL_EXECUTOR_REQUIRE_FUSE`)
 - `surogates/sandbox/__init__.py` (export `DockerSandbox`)
 - `surogates/config.py` (`SandboxSettings`: `backend` literal + docker fields)
 - `surogates/orchestrator/worker.py` (`docker` backend branch)
-- `surogates/harness/tool_exec.py` (populate `spec.workspace_path` from the root)
+- `surogates/harness/tool_exec.py` (populate `spec.session_id` and
+  `spec.workspace_path`)
+- `surogates/sandbox/pool.py` (call optional backend `destroy_for_session`)
 
 ## Out of scope
 
