@@ -115,8 +115,20 @@ async def fold_task_into_node(
 
     await store.update_node(run_id, node_key, **fields)
 
+    # The baseline experiment's dev score seeds meta.baseline_score so the
+    # coordinator and the convergence detector have a reference before any
+    # merge. baseline_score is not a machine key, so the deterministic harvest
+    # may write it directly.
+    if node_key == "BASELINE" and fields.get("score") is not None:
+        try:
+            await store.set_meta(run_id, {"baseline_score": fields["score"]})
+        except Exception:
+            logger.warning(
+                "research: baseline_score write failed (continuing)", exc_info=True,
+            )
+
     # Deterministic concat-propagate up the ancestor chain (no LLM in the
-    # wake hot path; LLM-synthesis backprop lands in v2 inside tool calls).
+    # wake hot path; LLM-synthesis backprop runs in the tool-call paths).
     from surogates.arbor.propagate import concat_propagate
 
     nodes = await store.list_nodes(run_id)

@@ -587,6 +587,70 @@ def _parse_iso(value: Any) -> datetime | None:
         return None
 
 
+async def _dispatch_baseline(store, run_id, kwargs) -> str:
+    """Measure the UNMODIFIED repo on the dev split (the INIT fallback when
+    intake supplied no baseline). Creates the trunk and a fixed-key BASELINE
+    node, spawns an executor whose brief forbids source edits; the harvest
+    writes ``meta.baseline_score`` from its reported dev score."""
+    from surogates.db.models import IdeaNode
+    from surogates.tasks.service import TaskSpawnError, create_task_and_spawn
+
+    run = await store.get_run(run_id)
+    meta = run.meta or {}
+    if not meta.get("eval_cmd"):
+        return json.dumps({"error": "meta.eval_cmd is not set — set it before baseline"})
+    if meta.get("baseline_score") is not None:
+        return json.dumps({"error": "baseline_score already set"})
+    existing = {n.node_key for n in await store.list_nodes(run_id)}
+    if "BASELINE" in existing:
+        return json.dumps({"error": "a baseline experiment already exists"})
+
+    worktree = "/workspace/.arbor/worktrees/BASELINE"
+    out = await _sandbox_sh(kwargs, (
+        f"cd {run.repo_path} && "
+        f"(git rev-parse --verify {run.trunk_branch} >/dev/null 2>&1 "
+        f"|| git branch {run.trunk_branch}) && "
+        f"git worktree add --detach {worktree} {run.trunk_branch} 2>&1"
+    ))
+    if "fatal" in (out or "").lower():
+        return json.dumps({"error": f"baseline worktree failed: {out[:300]}"})
+
+    brief = (
+        "[Baseline experiment]\n\n"
+        f"Measure the UNMODIFIED repo on the dev split. Worktree: {worktree}.\n"
+        "DO NOT MODIFY any source — run the eval as-is and report the number.\n"
+        f"Eval (dev): {meta['eval_cmd']}\n\n"
+        "Finish with worker_complete(metadata={\"node_key\": \"BASELINE\", "
+        "\"score\": <float dev score>, \"insight\": \"baseline\", "
+        "\"result\": \"baseline measured\"})."
+    )
+    # Insert the fixed-key BASELINE node directly (not the auto-incrementing add).
+    async with kwargs["session_factory"]() as db:
+        db.add(IdeaNode(
+            org_id=run.org_id, run_id=run_id, node_key="BASELINE",
+            parent_key="ROOT", depth=1, hypothesis="baseline (unmodified repo)",
+            status="pending",
+        ))
+        await db.commit()
+    try:
+        result = await create_task_and_spawn(
+            goal=brief, context=None, agent_def_name="arbor-executor",
+            max_attempts=1, parent_ids=[],
+            parent_session_id=UUID(str(kwargs["session_id"])),
+            org_id=run.org_id, mission_id=run.mission_id,
+            session_store=kwargs["session_store"], session_factory=kwargs["session_factory"],
+            redis=kwargs.get("redis"), tenant=kwargs.get("tenant"),
+        )
+    except TaskSpawnError as exc:
+        return json.dumps({"error": f"failed to spawn baseline: {exc}"})
+    await store.update_node(
+        run_id, "BASELINE", status="running",
+        task_id=UUID(result["task_id"]), code_ref=run.trunk_branch,
+        dispatched_at=_naive_utcnow(),
+    )
+    return json.dumps({"baseline_dispatched": True})
+
+
 async def _dispatch_experiments_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     from surogates.arbor.store import ResearchStoreError
     from surogates.tasks.service import TaskSpawnError, create_task_and_spawn
@@ -599,12 +663,10 @@ async def _dispatch_experiments_handler(arguments: dict[str, Any], **kwargs: Any
         return json.dumps({"error": str(exc)})
 
     if arguments.get("action") == "baseline":
-        return json.dumps({"error": (
-            "baselines are captured at mission creation "
-            "(/auto-research baseline=<dev> baseline_test=<test>), not via "
-            "dispatch — dispatch is for hypotheses. If no baseline was set, "
-            "clear and recreate the run with the baseline tokens."
-        )})
+        try:
+            return await _dispatch_baseline(store, run_id, kwargs)
+        except ResearchStoreError as exc:
+            return json.dumps({"error": str(exc)})
 
     node_keys = list(arguments.get("node_keys") or [])
     if not node_keys:
