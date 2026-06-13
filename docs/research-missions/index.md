@@ -37,34 +37,25 @@ decisions only). The single hard contract: the eval prints its score as a JSON
 object on its last line — `{"score": <float>}`.
 
 You don't need an existing repo. In a **normal chat session** (full tools, not
-yet a research mission), ask the agent to create one:
+yet a research mission), paste the block below and tell the agent to **run it
+verbatim** — it has `terminal` access, so it writes the files and makes the
+first commit. Running it as-is (rather than describing the benchmark in prose)
+is what guarantees the exact `solver.py` / `eval.py` / split layout the rest of
+this quickstart refers to:
 
-```text
-Scaffold a tiny sentiment benchmark in /workspace/bench:
-- solver.py with predict(text) -> "pos"/"neg", baseline = always "neg"
-- eval.py --split <dev|test> that scores accuracy and prints {"score": <float>} last
-- data/dev.jsonl and data/test.jsonl, ~40 balanced labeled rows each, disjoint
-Then git init and commit it.
-```
+````text
+Run this exactly, then show me `git -C /workspace/bench log --oneline`:
 
-The agent has `terminal` + file tools in a normal session, so it writes the
-files and makes the first commit. The result is a clean, runnable repo:
+```bash
+mkdir -p /workspace/bench/data && cd /workspace/bench
 
-```text
-/workspace/bench/
-├── solver.py          # def predict(text): return "neg"   ← baseline to beat
-├── eval.py            # runs solver on a split, prints {"score": <accuracy>}
-└── data/
-    ├── dev.jsonl      # {"text": "...", "label": "pos"|"neg"} — iterate here
-    └── test.jsonl     # held out — only the merge gate runs this
-```
-
-```python
-# solver.py — the only file experiments edit
+cat > solver.py <<'PY'
+"""Baseline sentiment classifier. Experiments improve predict() only."""
 def predict(text: str) -> str:
-    return "neg"        # majority-class baseline
+    return "neg"          # majority-class baseline to beat
+PY
 
-# eval.py — the contract: print {"score": <float>} on the last line
+cat > eval.py <<'PY'
 import json, sys
 from pathlib import Path
 import solver
@@ -72,16 +63,57 @@ import solver
 split = sys.argv[sys.argv.index("--split") + 1] if "--split" in sys.argv else "dev"
 rows = [json.loads(l) for l in Path(f"data/{split}.jsonl").read_text().splitlines() if l.strip()]
 correct = sum(solver.predict(r["text"]) == r["label"] for r in rows)
-print(json.dumps({"score": round(correct / len(rows), 4)}))
+print(json.dumps({"score": round(correct / len(rows), 4)}))   # contract: {"score": <float>} last
+PY
+
+python3 - <<'PY'
+import json, random
+lead = ["the film was", "honestly", "overall", "i thought it was", "the acting was"]
+pos  = ["great", "loved it", "excellent", "wonderful", "fantastic", "brilliant", "superb"]
+neg  = ["terrible", "boring", "awful", "horrible", "dull", "a letdown", "the worst"]
+neutral = ["it exists", "a movie happened", "on a tuesday", "as expected", "fine i guess"]
+def split(seed):
+    r = random.Random(seed)
+    rows  = [{"text": f"{r.choice(lead)} {r.choice(pos)}", "label": "pos"} for _ in range(14)]
+    rows += [{"text": r.choice(neutral), "label": "pos"} for _ in range(6)]   # ambiguous
+    rows += [{"text": f"{r.choice(lead)} {r.choice(neg)}", "label": "neg"} for _ in range(14)]
+    rows += [{"text": r.choice(neutral), "label": "neg"} for _ in range(6)]   # ambiguous
+    r.shuffle(rows)
+    return rows
+for name, seed in (("dev", 1), ("test", 2)):
+    with open(f"data/{name}.jsonl", "w") as f:
+        for row in split(seed):
+            f.write(json.dumps(row) + "\n")
+print("wrote data/dev.jsonl + data/test.jsonl (40 balanced rows each)")
+PY
+
+git init -q && git add -A && git commit -q -m "benchmark: baseline sentiment classifier"
 ```
+````
+
+That produces a clean, runnable repo with a deterministic structure:
+
+```text
+/workspace/bench/
+├── solver.py          # def predict(text): return "neg"   ← the only file experiments edit
+├── eval.py            # runs solver on a split, prints {"score": <accuracy>}
+└── data/
+    ├── dev.jsonl      # {"text": "...", "label": "pos"|"neg"} — iterate here
+    └── test.jsonl     # held out — only the merge gate runs this
+```
+
+The 6 "ambiguous" neutral rows per class keep a pure-keyword rule below 100%, so
+there's real headroom to improve. The always-"neg" baseline scores 0.5 on each
+balanced split:
 
 ```bash
 $ cd /workspace/bench && python eval.py --split dev
-{"score": 0.5}          # always-"neg" on a balanced split
+{"score": 0.5}
 ```
 
 Confirm `git status` is clean before launching — experiments branch off this
-commit.
+commit. (You can of course point a run at any repo of your own that satisfies
+the eval contract; this scaffold just makes the quickstart reproducible.)
 
 ### 1. Get the baselines and form the contract
 
