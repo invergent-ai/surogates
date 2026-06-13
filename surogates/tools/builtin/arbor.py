@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import uuid as _uuid
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -236,6 +239,40 @@ async def _persist_workspace_file(kwargs, *, path: str, content: str) -> None:
         )
 
 
+def _naive_utcnow() -> datetime:
+    """Naive UTC timestamp matching the schema's TIMESTAMP WITHOUT TIME ZONE."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _slug(text: str, length: int = 24) -> str:
+    """Branch-safe slug from a hypothesis line."""
+    slug = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return slug[:length] or "exp"
+
+
+async def _sandbox_sh(kwargs, command: str, *, timeout: int = 120) -> str:
+    """Run a shell command in the session's sandbox via the terminal tool."""
+    from surogates.sandbox.base import default_sandbox_spec
+
+    pool = kwargs["sandbox_pool"]
+    owner = str(kwargs["session_id"])
+    await pool.ensure(owner, default_sandbox_spec())
+    return await pool.execute(owner, "terminal", json.dumps({
+        "command": command, "timeout": timeout,
+    }))
+
+
+async def _ancestor_insights(store, run_id, node) -> list[tuple[str, str]]:
+    """The (key, insight) chain from root down to the node's parent."""
+    chain: list[tuple[str, str]] = []
+    key = node.parent_key
+    while key is not None:
+        parent = await store.get_node(run_id, key)
+        chain.append((parent.node_key, parent.insight or ""))
+        key = parent.parent_key
+    return list(reversed(chain))
+
+
 # ---------------------------------------------------------------------------
 # dispatch_experiments / merge_experiment — real schemas + handlers land in
 # their own tasks; minimal stubs keep register() valid and the tool schemas
@@ -244,8 +281,28 @@ async def _persist_workspace_file(kwargs, *, path: str, content: str) -> None:
 
 _DISPATCH_SCHEMA = ToolSchema(
     name="dispatch_experiments",
-    description="(implemented in the dispatch task)",
-    parameters={"type": "object", "properties": {}},
+    description=(
+        "Dispatch 1-4 pending leaf hypotheses to executor workers, each in "
+        "an isolated git worktree. Validates cycle budget, depth, leaf-ness, "
+        "and parallelism before spawning. Harvest folds results at your next "
+        "wake — end your turn after dispatching."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "node_keys": {
+                "type": "array", "items": {"type": "string"},
+                "minItems": 1, "maxItems": 4,
+                "description": "Pending leaf node keys to run, e.g. [\"1\", \"2\"].",
+            },
+            "extra_context": {
+                "type": "string",
+                "description": "Optional extra guidance appended to every brief.",
+            },
+            "action": {"type": "string", "enum": ["experiments", "baseline"]},
+        },
+        "required": ["node_keys"],
+    },
 )
 
 _MERGE_SCHEMA = ToolSchema(
@@ -256,7 +313,138 @@ _MERGE_SCHEMA = ToolSchema(
 
 
 async def _dispatch_experiments_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
-    return json.dumps({"error": "not implemented"})
+    from surogates.arbor.store import ResearchStoreError
+    from surogates.tasks.service import TaskSpawnError, create_task_and_spawn
+
+    try:
+        store, run_id = await _require_run(
+            kwargs.get("session_config") or {}, kwargs["session_factory"],
+        )
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+
+    if arguments.get("action") == "baseline":
+        return json.dumps({"error": (
+            "baselines are captured at mission creation "
+            "(/auto-research baseline=<dev> baseline_test=<test>), not via "
+            "dispatch — dispatch is for hypotheses. If no baseline was set, "
+            "clear and recreate the run with the baseline tokens."
+        )})
+
+    node_keys = list(arguments.get("node_keys") or [])
+    if not node_keys:
+        return json.dumps({"error": "node_keys is required (1-4 pending leaves)"})
+
+    try:
+        run = await store.get_run(run_id)
+        meta = run.meta or {}
+
+        if not meta.get("eval_cmd"):
+            return json.dumps({"error": (
+                "meta.eval_cmd is not set — set the dev eval command with "
+                "idea_tree(set_meta) before dispatching"
+            )})
+
+        # ---- hard gates (budget does NOT ride the mission iteration cap) ----
+        # Order: global budget stop, then per-node validity (the most
+        # actionable message), then parallelism capacity.
+        spent = await store.cycles_spent(run_id)
+        max_cycles = int(meta.get("max_cycles", 20))
+        if spent >= max_cycles:
+            return json.dumps({"error": (
+                f"cycle budget spent ({spent}/{max_cycles}) — merge the best, "
+                "prune the rest, and finalize"
+            )})
+
+        all_nodes = await store.list_nodes(run_id)
+        parents = {n.parent_key for n in all_nodes if n.parent_key}
+        for key in node_keys:
+            node = await store.get_node(run_id, key)
+            if node.status != "pending":
+                return json.dumps({
+                    "error": f"node {key} is {node.status}, not pending"
+                })
+            if key in parents:
+                return json.dumps({"error": f"node {key} is not a leaf"})
+
+        in_flight = await store.in_flight_count(run_id)
+        max_parallel = int(meta.get("max_parallel", 2))
+        if in_flight + len(node_keys) > max_parallel:
+            return json.dumps({"error": (
+                f"max_parallel={max_parallel} exceeded "
+                f"({in_flight} in flight, {len(node_keys)} requested)"
+            )})
+
+        parent_session_id = UUID(str(kwargs["session_id"]))
+        dispatched: list[str] = []
+        for key in node_keys:
+            node = await store.get_node(run_id, key)
+            sha8 = _uuid.uuid4().hex[:8]
+            branch = f"{run.branch_prefix}/n{key}-{_slug(node.hypothesis)}-{sha8}"
+            worktree = f"/workspace/.arbor/worktrees/{key}"
+            # Trunk is created lazily from the repo HEAD on first dispatch;
+            # nothing else creates it on a fresh run.
+            out = await _sandbox_sh(kwargs, (
+                f"cd {run.repo_path} && "
+                f"(git rev-parse --verify {run.trunk_branch} >/dev/null 2>&1 "
+                f"|| git branch {run.trunk_branch}) && "
+                f"git worktree add -b {branch} {worktree} {run.trunk_branch} 2>&1"
+            ))
+            if "fatal" in (out or "").lower():
+                return json.dumps({
+                    "error": f"worktree creation failed for {key}: {out[:500]}",
+                    "dispatched": dispatched,
+                })
+
+            from surogates.arbor.prompts import build_executor_brief
+
+            brief = build_executor_brief(
+                node=node, run=run, worktree_path=worktree, branch=branch,
+                ancestor_insights=await _ancestor_insights(store, run_id, node),
+                extra_context=arguments.get("extra_context") or "",
+            )
+            await _persist_workspace_file(
+                kwargs, path=f".arbor/experiments/{key}/executor_prompt.md",
+                content=brief,
+            )
+
+            try:
+                result = await create_task_and_spawn(
+                    goal=brief,
+                    context=None,
+                    agent_def_name="arbor-executor",
+                    # A failed experiment is evidence, not a retryable crash —
+                    # the tool default of 3 would silently re-run trainings.
+                    max_attempts=1,
+                    parent_ids=[],
+                    parent_session_id=parent_session_id,
+                    org_id=run.org_id,
+                    mission_id=run.mission_id,
+                    session_store=kwargs["session_store"],
+                    session_factory=kwargs["session_factory"],
+                    redis=kwargs.get("redis"),
+                    tenant=kwargs.get("tenant"),
+                )
+            except TaskSpawnError as exc:
+                return json.dumps({
+                    "error": f"failed to spawn executor for {key}: {exc}",
+                    "dispatched": dispatched,
+                })
+
+            await store.update_node(
+                run_id, key, status="running",
+                task_id=UUID(result["task_id"]), code_ref=branch,
+                dispatched_at=_naive_utcnow(),
+            )
+            dispatched.append(key)
+
+        return json.dumps({
+            "dispatched": dispatched,
+            "cycles_spent": spent, "max_cycles": max_cycles,
+            "note": "end your turn — harvest folds these results at your next wake",
+        })
+    except ResearchStoreError as exc:
+        return json.dumps({"error": str(exc)})
 
 
 async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
