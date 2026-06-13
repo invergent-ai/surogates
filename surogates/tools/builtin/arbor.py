@@ -408,6 +408,12 @@ async def _launch_merge_eval(kwargs, *, run, node_key: str, branch: str) -> None
     await _sandbox_sh(kwargs, (
         f"rm -rf {evald} && mkdir -p {evald} && "
         f"cd {run.repo_path} && "
+        # ``git worktree prune`` clears the admin entry left behind when a
+        # previous merge-eval dir was rm-ed (a re-start after a stale eval,
+        # or a re-merge); without it ``git worktree add`` to the same path
+        # fails as already-registered. Keeps the staleness-recovery path
+        # working and stops registered worktrees from accumulating.
+        f"git worktree prune && "
         f"git worktree add --detach {evald}/wt {branch} && "
         f"cd {evald}/wt && "
         f"nohup sh -c '{eval_cmd_test} > {evald}/eval.log 2>&1; "
@@ -415,6 +421,28 @@ async def _launch_merge_eval(kwargs, *, run, node_key: str, branch: str) -> None
         f"2>>{evald}/eval.log; mv {evald}/result.json.tmp {evald}/result.json' "
         f">/dev/null 2>&1 &"
     ), timeout=60)
+
+
+async def _cleanup_merge_worktree(kwargs, *, run, node_key: str) -> None:
+    """Remove the detached merge-eval worktree once its result is consumed.
+
+    The merge operates on the main checkout, not this worktree, so it is
+    safe to drop as soon as ``status`` has read result.json — keeping
+    distinct merged nodes from leaving a worktree each. Best-effort; the
+    ``git worktree prune`` in ``_launch_merge_eval`` is the backstop.
+    """
+    evald = _merge_eval_dir(node_key)
+    try:
+        await _sandbox_sh(kwargs, (
+            f"cd {run.repo_path} && "
+            f"git worktree remove --force {evald}/wt 2>/dev/null; "
+            f"rm -rf {evald}/wt; git worktree prune; true"
+        ))
+    except Exception:
+        logger.warning(
+            "research: merge-eval worktree cleanup failed for %s (continuing)",
+            node_key, exc_info=True,
+        )
 
 
 async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
@@ -450,6 +478,17 @@ async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) ->
                 )})
             if run.trunk_branch in ("main", "master"):
                 return json.dumps({"error": "refusing to operate on main/master as trunk"})
+            # One merge eval at a time: the merge_eval stamp is a single slot,
+            # so starting a second while another node's eval is in flight would
+            # clobber it and orphan the first eval. Refuse — finish that one
+            # first (its status() clears the stamp on a terminal outcome).
+            in_flight = (meta.get("merge_eval") or {}).get("node_key")
+            if in_flight and in_flight != node_key:
+                return json.dumps({"error": (
+                    f"a merge eval for node {in_flight} is already in flight — "
+                    f"poll merge_experiment(status, {in_flight!r}) to finish it "
+                    "before starting another"
+                )})
             await _launch_merge_eval(kwargs, run=run, node_key=node_key, branch=node.code_ref)
             await store.set_meta(run_id, {"merge_eval": {
                 "node_key": node_key,
@@ -491,6 +530,9 @@ async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) ->
             # else report failure (the eval contract requires a JSON score).
             retries_left = int(stamp.get("retries_left", 0))
             err = parsed.get("error", "eval produced no score")
+            if retries_left <= 0:
+                # Terminal: no relaunch will reuse the worktree — drop it.
+                await _cleanup_merge_worktree(kwargs, run=run, node_key=node_key)
             if retries_left > 0:
                 await _launch_merge_eval(
                     kwargs, run=run, node_key=node_key, branch=node.code_ref,
@@ -510,6 +552,10 @@ async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) ->
                 "error": f"held-out eval produced no score after retries: {err}; "
                          f"see {evald}/eval.log",
             })
+
+        # The eval is finished and read; the merge runs on the main checkout,
+        # so the detached eval worktree is no longer needed on any path below.
+        await _cleanup_merge_worktree(kwargs, run=run, node_key=node_key)
 
         score = float(parsed["score"])
         reference = meta.get("test_trunk_score", meta.get("test_baseline_score"))
@@ -610,6 +656,7 @@ async def _dispatch_baseline(store, run_id, kwargs) -> str:
         f"cd {run.repo_path} && "
         f"(git rev-parse --verify {run.trunk_branch} >/dev/null 2>&1 "
         f"|| git branch {run.trunk_branch}) && "
+        f"git worktree prune && "
         f"git worktree add --detach {worktree} {run.trunk_branch} 2>&1"
     ))
     if "fatal" in (out or "").lower():
@@ -727,6 +774,7 @@ async def _dispatch_experiments_handler(arguments: dict[str, Any], **kwargs: Any
                 f"cd {run.repo_path} && "
                 f"(git rev-parse --verify {run.trunk_branch} >/dev/null 2>&1 "
                 f"|| git branch {run.trunk_branch}) && "
+                f"git worktree prune && "
                 f"git worktree add -b {branch} {worktree} {run.trunk_branch} 2>&1"
             ))
             if "fatal" in (out or "").lower():

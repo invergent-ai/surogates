@@ -96,6 +96,12 @@ class SandboxSpec:
     memory_limit: str = "8Gi"
     timeout: int = 300
     env: dict[str, str] = field(default_factory=dict)
+    # Root sandbox session key (set by the spec builder). Docker uses it for
+    # container labels and stale-container cleanup; K8sSandbox ignores it.
+    session_id: str = ""
+    # Host-bindable workspace path when one exists. Docker bind-mounts it;
+    # K8sSandbox ignores it (its workspace is mounted by the s3fs sidecar).
+    workspace_path: str | None = None
 
 
 def default_sandbox_spec() -> SandboxSpec:

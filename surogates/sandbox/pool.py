@@ -128,7 +128,13 @@ class SandboxPool:
         return await self._backend.execute(sandbox_id, name, input)
 
     async def destroy_for_session(self, session_id: str) -> None:
-        """Destroy the sandbox for *session_id* and remove the mapping."""
+        """Destroy the sandbox for *session_id* and remove the mapping.
+
+        Also calls the backend's optional ``destroy_for_session`` (Docker)
+        so stale containers/pods labelled for this session are reaped even
+        when this pool has no in-memory mapping (e.g. after a worker
+        restart).
+        """
         lock = await self._session_lock(session_id)
         async with lock:
             sandbox_id = self._mapping.pop(session_id, None)
@@ -140,6 +146,12 @@ class SandboxPool:
                     sandbox_id,
                     session_id,
                 )
+
+            # Optional backend-level reap (label-based), independent of the
+            # mapping above.
+            backend_reap = getattr(self._backend, "destroy_for_session", None)
+            if backend_reap is not None:
+                await backend_reap(session_id)
 
         # Clean up the per-session lock to prevent unbounded growth.
         async with self._global_lock:

@@ -343,3 +343,83 @@ async def test_record_from_task_folds_a_real_task(session_factory, seeded_org_an
     # Insight propagated up to ROOT.
     root = await store.get_node(run_id, "ROOT")
     assert "X helps" in (root.insight or "")
+
+
+def _worktree_add_cmds(pool):
+    return [i for (_, _, i) in pool.calls if "git worktree add --detach" in i]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_start_prunes_before_adding_worktree(merge_env_with_eval):
+    # Each merge-eval launch must `git worktree prune` before `git worktree
+    # add`, so a re-start after a stale eval (which rm-ed the dir but left the
+    # git admin entry) does not fail as already-registered.
+    store, run_id, pool, kwargs = merge_env_with_eval
+    await _merge_experiment_handler({"action": "start", "node_key": "1"}, **kwargs)
+    adds = _worktree_add_cmds(pool)
+    assert adds, "no worktree-add command issued"
+    assert "git worktree prune" in adds[-1]
+    assert adds[-1].index("git worktree prune") < adds[-1].index("git worktree add")
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_restart_after_stale_eval_succeeds(merge_env_with_eval):
+    store, run_id, pool, kwargs = merge_env_with_eval
+    out = json.loads(await _merge_experiment_handler(
+        {"action": "start", "node_key": "1"}, **kwargs,
+    ))
+    assert out["started"] == "1"
+    # result.json never appears; rewind started_at so status reports stale.
+    run = await store.get_run(run_id)
+    stamp = dict(run.meta["merge_eval"])
+    stamp["started_at"] = "2000-01-01T00:00:00+00:00"
+    await store.set_meta(run_id, {"merge_eval": stamp}, allow_machine_keys=True)
+    assert json.loads(await _merge_experiment_handler(
+        {"action": "status", "node_key": "1"}, **kwargs,
+    )).get("stale") is True
+    # The coordinator re-starts; the second launch must succeed (prune clears
+    # the stale admin entry) and re-issue the worktree add.
+    before = len(_worktree_add_cmds(pool))
+    out2 = json.loads(await _merge_experiment_handler(
+        {"action": "start", "node_key": "1"}, **kwargs,
+    ))
+    assert out2["started"] == "1"
+    assert len(_worktree_add_cmds(pool)) == before + 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_start_refuses_while_another_eval_in_flight(merge_env_with_eval):
+    # The single merge_eval stamp must not be clobbered by a second start for
+    # a different node — that would orphan the first node's detached eval.
+    store, run_id, pool, kwargs = merge_env_with_eval
+    org = (await store.get_run(run_id)).org_id
+    await store.add_node(run_id, org_id=org, parent_key="ROOT", hypothesis="second")
+    await store.update_node(
+        run_id, "2", status="done", score=0.6, code_ref="research/mrg2/n2-x-bbbb2222",
+    )
+    out1 = json.loads(await _merge_experiment_handler(
+        {"action": "start", "node_key": "1"}, **kwargs,
+    ))
+    assert out1["started"] == "1"
+    out2 = json.loads(await _merge_experiment_handler(
+        {"action": "start", "node_key": "2"}, **kwargs,
+    ))
+    assert "merged" not in out2 and "1" in out2["error"]  # refused, names node 1
+    # Node 1's eval stamp is untouched.
+    run = await store.get_run(run_id)
+    assert run.meta["merge_eval"]["node_key"] == "1"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_removes_worktree_after_consuming_result(merge_env_with_eval):
+    store, run_id, pool, kwargs = merge_env_with_eval
+    await store.set_meta(run_id, {"test_baseline_score": 0.50}, allow_machine_keys=True)
+    await _merge_experiment_handler({"action": "start", "node_key": "1"}, **kwargs)
+    pool.responses["cat /workspace/.arbor/merge-eval/1/result.json"] = '{"score": 0.61}'
+    out = json.loads(await _merge_experiment_handler(
+        {"action": "status", "node_key": "1"}, **kwargs,
+    ))
+    assert out["merged"] is True
+    # Once the score is read the detached eval worktree is dropped (no leak
+    # across distinct merged nodes).
+    assert any("git worktree remove --force" in i for (_, _, i) in pool.calls)

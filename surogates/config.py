@@ -332,7 +332,7 @@ class SandboxSettings(BaseSettings):
 
     model_config = {"env_prefix": "SUROGATES_SANDBOX_"}
 
-    backend: Literal["process", "kubernetes"] = "process"
+    backend: Literal["process", "kubernetes", "docker"] = "process"
     default_timeout: int = 300
     # Defaults match :class:`surogates.sandbox.base.SandboxSpec` so the
     # ``default_sandbox_spec`` factory yields identical values when no
@@ -343,6 +343,17 @@ class SandboxSettings(BaseSettings):
     default_memory_limit: str = "8Gi"
     srt_enabled: bool = False
     srt_settings_dir: str = "/tmp/surogates/srt"
+
+    # Docker sandbox backend settings (only used when backend == "docker").
+    # Local-development backend: one container per root session, talking to
+    # the in-container executor daemon over a published port.
+    docker_image: str = "ghcr.io/invergent-ai/surogates-agent-sandbox:latest"
+    # Host port base for the published executor port (host_port = base + offset).
+    # Chosen to avoid the browser backend's 30000/31000/32000 bases.
+    docker_executor_port_base: int = 33000
+    # Seconds to wait for /healthz after docker run (matches k8s_pod_ready_timeout).
+    docker_ready_timeout: int = 60
+    docker_network: str = "bridge"
 
     # K8s sandbox backend settings (only used when backend == "kubernetes")
     k8s_namespace: str = "surogates"

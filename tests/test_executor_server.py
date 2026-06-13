@@ -343,3 +343,36 @@ class TestThinClientCli:
         finally:
             server.should_exit = True
             await serve_task
+
+
+class TestHealthzRequireFuse:
+    async def test_healthz_ok_without_fuse_when_not_required(
+        self, fake_registry, tmp_path
+    ):
+        # A mounts file with no FUSE entry at /workspace.
+        mounts = tmp_path / "mounts"
+        mounts.write_text("overlay / overlay rw 0 0\n")
+        app = executor_server.create_app(
+            token="t",
+            workspace="/workspace",
+            mounts_path=str(mounts),
+            require_fuse=False,
+        )
+        async with _make_client(app) as client:
+            resp = await client.get("/healthz")
+            assert resp.status_code == 200
+
+    async def test_healthz_503_without_fuse_when_required(
+        self, fake_registry, tmp_path
+    ):
+        mounts = tmp_path / "mounts"
+        mounts.write_text("overlay / overlay rw 0 0\n")
+        app = executor_server.create_app(
+            token="t",
+            workspace="/workspace",
+            mounts_path=str(mounts),
+            require_fuse=True,
+        )
+        async with _make_client(app) as client:
+            resp = await client.get("/healthz")
+            assert resp.status_code == 503

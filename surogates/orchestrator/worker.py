@@ -651,6 +651,16 @@ async def run_worker(settings: Settings) -> None:
             s3_endpoint=settings.sandbox.k8s_s3_endpoint,
             mcp_proxy_url=settings.mcp_proxy_url,
         )
+    elif settings.sandbox.backend == "docker":
+        from surogates.sandbox.docker import DockerSandbox
+
+        sandbox_backend = DockerSandbox(
+            image=settings.sandbox.docker_image,
+            executor_port_base=settings.sandbox.docker_executor_port_base,
+            ready_timeout=settings.sandbox.docker_ready_timeout,
+            network=settings.sandbox.docker_network,
+            mcp_proxy_url=settings.mcp_proxy_url,
+        )
     else:
         sandbox_backend = ProcessSandbox()
     sandbox_pool = SandboxPool(sandbox_backend)

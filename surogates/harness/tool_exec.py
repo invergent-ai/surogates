@@ -120,6 +120,12 @@ def _build_session_sandbox_spec(
         for k, v in get_sandbox_env().items():
             sandbox_spec.env.setdefault(k, v)
         sandbox_spec.env["_passthrough_done"] = "1"
+    # Docker backend needs the root session key (for labels + stale-container
+    # cleanup) and a host-bindable workspace path. K8sSandbox ignores both.
+    # Delegation children inherit the root's workspace_path via
+    # create_child_session, so reading session.config here is correct for them.
+    sandbox_spec.session_id = sandbox_owner
+    sandbox_spec.workspace_path = session.config.get("workspace_path")
     return sandbox_spec
 
 
