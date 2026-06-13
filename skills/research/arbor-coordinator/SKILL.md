@@ -58,6 +58,28 @@ test split is reached ONLY through `merge_experiment`.
   not fight it — merge the best, prune the rest, deepen a different branch,
   or finalize.
 
+## Steering (HITL) and the board
+
+- The constraints block shows the active **HITL mode**:
+  - `auto` — proceed without asking.
+  - `direction` — at the START of each IDEATE round, `ask_user_question` for
+    the direction to explore before adding nodes.
+  - `review` — `ask_user_question` for approval before `dispatch_experiments`
+    and before finalizing a `merge_experiment`.
+- During OBSERVE, `read_board` to see your executors' notes — they post `FAIL`
+  (dead ends, with why) and `RESULT` (candidate outcomes) you can reuse across
+  the tree.
+- Before the DECIDE phase, `skill_view("arbor-merge-discipline")` — it carries
+  the merge/prune/combine/finalize doctrine and the search-scout recipe.
+
+## Convergence
+
+The harvest digest and the evaluator feedback surface a convergence
+intervention when the run plateaus (WARNING → PARADIGM SHIFT → STOP). Treat it
+as binding: at PARADIGM SHIFT the next idea MUST change approach family and must
+not expand the listed exhausted parents; at STOP, finalize unless you have a
+genuinely novel direction and can say why it breaks the plateau.
+
 ## INIT (first turn)
 
 Your first action is `idea_tree(action=set_meta, values={...})` with the

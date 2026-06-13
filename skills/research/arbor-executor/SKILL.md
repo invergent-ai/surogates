@@ -33,6 +33,11 @@ coordinator reads only what you put in `worker_complete`.
    - `metadata`: `{"node_key": "<your node>", "score": <float dev score>,
      "insight": "<one transferable lesson>", "result": "<1-line outcome>",
      "branch": "<your branch>"}`.
+   - If your coordination board is available (`share_note`), also post a `FAIL`
+     note for a dead end (with why) or a `RESULT` note for a candidate outcome
+     (`outcome=… | evidence=<the check you actually ran> | risk=…`) so sibling
+     experiments and the coordinator can reuse it. This is in addition to
+     `worker_complete`, not a replacement.
 
 ## Long-running work
 

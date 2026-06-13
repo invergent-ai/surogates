@@ -408,7 +408,8 @@ class ResearchStore:
             "", "### BUDGET & DISCIPLINE",
             f"- cycles: {cycles}/{meta.get('max_cycles')}"
             f" | depth cap: {meta.get('max_tree_depth')}"
-            f" | max parallel: {meta.get('max_parallel')}",
+            f" | max parallel: {meta.get('max_parallel')}"
+            f" | HITL mode: {meta.get('hitl_mode', 'auto')}",
             f"- scores: baseline={meta.get('baseline_score')}"
             f" trunk(dev)={meta.get('trunk_score')}"
             f" test_baseline={meta.get('test_baseline_score')}"

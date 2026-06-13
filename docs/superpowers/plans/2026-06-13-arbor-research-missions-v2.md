@@ -26,7 +26,7 @@
 - [x] Task 5 — Final-report polish (test deltas, eval commands, convergence note)
 - [x] Task 6 — Parallel dispatch hardening + multi-node harvest test
 - [x] Task 7 — `arbor-ideate` skill bundle + coordinator hard-gate reference
-- [~] Task 8 — `arbor-merge-discipline` skill + HITL/search-scout/board prose + `hitl_mode` in constraints block
+- [x] Task 8 — `arbor-merge-discipline` skill + HITL/search-scout/board prose + `hitl_mode` in constraints block
 
 ---
 

@@ -158,6 +158,14 @@ def test_is_improvement_direction_aware():
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_constraints_block_shows_hitl_mode(research_run):
+    store, run_id, _ = research_run
+    await store.set_meta(run_id, {"hitl_mode": "review"})
+    block = await store.constraints_block(run_id)
+    assert "HITL mode: review" in block
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_constraints_block_renders_sections(research_run):
     store, run_id, org_id = research_run
     await store.set_meta(run_id, {"eval_cmd": "python eval.py", "max_cycles": 8})
