@@ -17,8 +17,8 @@
 - [x] Task 8 — harvest mixin + `research.*` events
 - [x] Task 9 — `/auto-research` command
 - [x] Task 10 — `research_coordinator` read-only carve-out
-- [~] Task 11 — research evaluator policy
-- [ ] Task 12 — the three v1 skills
+- [x] Task 11 — research evaluator policy
+- [~] Task 12 — the three v1 skills
 - [ ] Task 13 — smoke-mode end-to-end test
 
 **Goal:** One real arbor cycle end to end — `/auto-research` creates a research-kind mission whose strict coordinator grows a DB-backed Idea Tree, dispatches executor task-workers into git worktrees, harvests results deterministically at wake, and merges into trunk only through a machine-run held-out eval gate.
