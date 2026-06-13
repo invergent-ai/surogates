@@ -23,8 +23,8 @@ Status is updated before each commit. Legend: `[ ]` pending · `[~]` in progress
 - [x] Task 7: `DockerSandbox` — MCP proxy + KB env wiring
 - [x] Task 8: `SandboxPool.destroy_for_session` optional backend hook
 - [x] Task 9: Spec builder sets `session_id` and `workspace_path`
-- [~] Task 10: Worker wires the `docker` backend branch
-- [ ] Task 11: Opt-in integration smoke test (real Docker)
+- [x] Task 10: Worker wires the `docker` backend branch
+- [~] Task 11: Opt-in integration smoke test (real Docker)
 
 ---
 
