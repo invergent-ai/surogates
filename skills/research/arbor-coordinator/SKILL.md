@@ -25,8 +25,9 @@ test split is reached ONLY through `merge_experiment`.
    This is your system of record (it survives context compression). Read
    the `[research harvest]` digest at the end of history and, if useful,
    read failure logs / eval output with the read-only file tools.
-2. **IDEATE** — load the `arbor-ideate` skill (hard gate), then add 1-3
-   four-line hypotheses as CHILDREN of the most informative node with
+2. **IDEATE** — you MUST `skill_view("arbor-ideate")` and complete its PROBE
+   BLOCK before adding any node. Then add 1-3 four-line hypotheses as CHILDREN
+   of the most informative node with
    `idea_tree(action=add, parent_key=..., hypothesis=...)`.
 3. **SELECT + DISPATCH** — pick the most promising pending leaves and call
    `dispatch_experiments(node_keys=[...])`. Then **END YOUR TURN**. Do not
