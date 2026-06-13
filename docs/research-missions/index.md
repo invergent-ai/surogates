@@ -23,197 +23,55 @@ tools, the durable state model, steering, and the operational guardrails.
 
 ## Quickstart
 
-This walks through one research run end to end, **starting from nothing** — we
-build a tiny, self-contained benchmark in the session workspace, then let a
-research mission improve it. The toy task is a rule-based sentiment classifier
-(stdlib only, no ML deps, no external repo), so the whole loop runs in the
-sandbox in seconds and anyone can reproduce it.
+A research mission optimizes **any git repo in the session workspace whose eval
+prints `{"score": <float>}` on its last line**, with a **dev** split (iterate)
+and a held-out **test** split (merge decisions). Here is the smallest end-to-end
+run.
 
-### 0. Scaffold a benchmark from scratch
+> You never touch the workspace yourself — it lives in the session sandbox. You
+> chat; the agent runs everything there and reports back.
 
-A research run optimizes a **git repo in `/workspace`** that has a runnable
-eval, a **dev** split (iterate here), and a held-out **test** split (merge
-decisions only). The single hard contract: the eval prints its score as a JSON
-object on its last line — `{"score": <float>}`.
+### 1. Create a tiny benchmark
 
-You don't need an existing repo. In a **normal chat session** (full tools, not
-yet a research mission), send the agent the shell script below with the
-instruction *"run this verbatim in the sandbox"* — it has `terminal` access, so
-it writes the files, commits, and reports the baselines. Running it as-is
-(rather than describing the benchmark in prose) is what guarantees the exact
-`solver.py` / `eval.py` / split layout the rest of this quickstart refers to.
-
-> **Paste the script body only — not surrounding Markdown.** A bare ```` ``` ````
-> fence (or a `---` / `###` line) on its own line trips the message scanner's
-> delimiter-injection check and the send is blocked. The plain shell script
-> below contains none of those, so it goes through; copy from `mkdir` to the
-> last line.
+In a normal chat session, send the agent this script with *"run it verbatim in
+the sandbox"*. (Paste the shell lines only, not surrounding Markdown — a bare
+```` ``` ````, `---`, or `###` line trips the message scanner.)
 
 ```bash
 mkdir -p /workspace/bench/data && cd /workspace/bench
-
-cat > solver.py <<'PY'
-"""Baseline sentiment classifier. Experiments improve predict() only."""
-def predict(text: str) -> str:
-    return "neg"          # majority-class baseline to beat
-PY
-
+printf 'def predict(t):\n    return "neg"\n' > solver.py   # baseline: always "neg"
 cat > eval.py <<'PY'
-import json, sys
-from pathlib import Path
-import solver
-
-split = sys.argv[sys.argv.index("--split") + 1] if "--split" in sys.argv else "dev"
-rows = [json.loads(l) for l in Path(f"data/{split}.jsonl").read_text().splitlines() if l.strip()]
-correct = sum(solver.predict(r["text"]) == r["label"] for r in rows)
-print(json.dumps({"score": round(correct / len(rows), 4)}))   # contract: {"score": <float>} last
+import json, sys, solver
+split = sys.argv[2] if len(sys.argv) > 2 else "dev"
+rows = [json.loads(l) for l in open(f"data/{split}.jsonl")]
+hit = sum(solver.predict(r["text"]) == r["label"] for r in rows)
+print(json.dumps({"score": round(hit / len(rows), 3)}))
 PY
-
-python3 - <<'PY'
-import json, random
-lead = ["the film was", "honestly", "overall", "i thought it was", "the acting was"]
-pos  = ["great", "loved it", "excellent", "wonderful", "fantastic", "brilliant", "superb"]
-neg  = ["terrible", "boring", "awful", "horrible", "dull", "a letdown", "the worst"]
-neutral = ["it exists", "a movie happened", "on a tuesday", "as expected", "fine i guess"]
-def split(seed):
-    r = random.Random(seed)
-    rows  = [{"text": f"{r.choice(lead)} {r.choice(pos)}", "label": "pos"} for _ in range(14)]
-    rows += [{"text": r.choice(neutral), "label": "pos"} for _ in range(6)]   # ambiguous
-    rows += [{"text": f"{r.choice(lead)} {r.choice(neg)}", "label": "neg"} for _ in range(14)]
-    rows += [{"text": r.choice(neutral), "label": "neg"} for _ in range(6)]   # ambiguous
-    r.shuffle(rows)
-    return rows
-for name, seed in (("dev", 1), ("test", 2)):
-    with open(f"data/{name}.jsonl", "w") as f:
-        for row in split(seed):
-            f.write(json.dumps(row) + "\n")
-print("wrote data/dev.jsonl + data/test.jsonl (40 balanced rows each)")
-PY
-
-git init -q && git add -A && git commit -q -m "benchmark: baseline sentiment classifier"
-
-# Report what step 1 needs: clean tree, the commit, and both baselines.
-test -z "$(git status --porcelain)" && echo "clean" || echo "DIRTY"
-git log --oneline
-echo "baseline dev:  $(python3 eval.py --split dev)"
-echo "baseline test: $(python3 eval.py --split test)"
+printf '%s\n' '{"text":"great","label":"pos"}' '{"text":"loved it","label":"pos"}' '{"text":"a joy","label":"pos"}' '{"text":"terrible","label":"neg"}' '{"text":"so boring","label":"neg"}' '{"text":"a dull mess","label":"neg"}' > data/dev.jsonl
+printf '%s\n' '{"text":"brilliant","label":"pos"}' '{"text":"excellent","label":"pos"}' '{"text":"a delight","label":"pos"}' '{"text":"awful","label":"neg"}' '{"text":"the worst","label":"neg"}' '{"text":"painfully dull","label":"neg"}' > data/test.jsonl
+git init -q && git add -A && git commit -q -m bench
+python3 eval.py --split dev      # baseline -> {"score": 0.5}
 ```
-
-You never touch the workspace yourself — it lives in the session sandbox. The
-**agent** runs the script there and reports back. Its reply should show a clean
-tree, one commit, and both baselines:
-
-```text
-clean
-a1b2c3d benchmark: baseline sentiment classifier
-baseline dev:  {"score": 0.5}
-baseline test: {"score": 0.5}
-```
-
-That confirms the repo is ready and gives you the two numbers step 2 needs. The
-resulting layout is deterministic:
-
-```text
-/workspace/bench/
-├── solver.py          # def predict(text): return "neg"   ← the only file experiments edit
-├── eval.py            # runs solver on a split, prints {"score": <accuracy>}
-└── data/
-    ├── dev.jsonl      # {"text": "...", "label": "pos"|"neg"} — iterate here
-    └── test.jsonl     # held out — only the merge gate runs this
-```
-
-The 6 "ambiguous" neutral rows per class keep a pure-keyword rule below 100%, so
-there's real headroom to improve. (You can of course point a run at any repo
-that already satisfies the eval contract; this scaffold just makes the
-quickstart reproducible.)
-
-### 1. Form the contract
-
-Step 0's reply already gave you everything `/auto-research` needs: the repo path
-(`/workspace/bench`), both baselines (`dev 0.50`, `test 0.50` — the held-out one
-is the reference the merge gate compares against), the two eval commands, and
-the metric direction.
-
-> **Optional — let intake draft it for you.** `arbor-research` is an *intake
-> skill*, not a builtin command. If it's attached to this agent, you can
-> describe the goal and it will measure the baselines and print a ready-to-send
-> `/auto-research` command:
-> ```text
-> /arbor-research improve accuracy of the classifier in /workspace/bench
-> ```
-> If you see "no skill named arbor-research", it isn't attached — just build the
-> command yourself as in step 2 (you have the numbers from step 0).
 
 ### 2. Launch the run
 
-Send the `/auto-research` command — built from the numbers above, or drafted by
-intake (edit any line first if you like):
+Send (the `Rubric:` block is required — it's what the run is graded against):
 
 ```text
-/auto-research repo=/workspace/bench max_iterations=40 baseline=0.50 baseline_test=0.50 Maximize classification accuracy on the dev split by improving solver.py; merge only verified gains.
+/auto-research repo=/workspace/bench baseline=0.5 baseline_test=0.5 max_iterations=20 Improve classification accuracy by editing solver.py. Dev eval: python eval.py --split dev. Held-out eval: python eval.py --split test.
 
-Rubric:
-- Satisfied only when the held-out test score (written only by the merge gate)
-  improves on test_baseline_score (0.50), with at least one merged node — or the
-  cycle budget is exhausted with an explicit no-improvement root insight — AND
-  the final report task is done.
-- Never satisfied on prose claims or dev-split scores alone.
-- eval_cmd: python eval.py --split dev
-- eval_cmd_test: python eval.py --split test
-- metric_direction: maximize
+Rubric: Satisfied when the held-out test score beats 0.5 with at least one merged experiment and a final report; never on dev scores or prose alone.
 ```
 
-This flips the session into a strict research coordinator and emits the kickoff.
-From here the run is autonomous (in `auto` HITL mode).
+### 3. Watch it run
 
-### 3. What you see as it runs
+The coordinator proposes hypotheses, runs each in its own git worktree on the
+**dev** split, and merges a change into trunk **only** after it re-runs the
+**held-out test** itself and confirms the gain. It writes `REPORT.md` when done.
+Steer any time with plain chat, or `/auto-research pause | resume | cancel`.
 
-The coordinator works in cycles; each is visible on the mission dashboard's
-activity feed:
-
-```text
-research.defined      run created, ROOT node seeded, baselines recorded
-research.dispatched   node 1 "positive/negative keyword lexicon" → executor (worktree research/run-…/n1)
-research.dispatched   node 2 "negation handling (not good → neg)" → executor
-research.harvested    node 1 done score=0.69 · node 2 done score=0.61   (folded at the coordinator's wake)
-research.merged       node 1 merged — held-out test 0.50 → 0.66, trunk advanced
-research.dispatched   node 1.1 "lexicon + negation (combine)" off the new trunk
-research.harvested    node 1.1 done score=0.80
-research.converged    WARNING — 2 experiments without a trunk gain; suggests Leap/Combine
-research.merged       node 1.1 merged — held-out test 0.66 → 0.75
-research.report       REPORT.md written; report task created
-```
-
-Steer it any time with plain chat (a nudge, not a pause), or
-`/auto-research pause` / `resume` / `cancel`. In `review` HITL mode the
-coordinator asks for approval (via the agent inbox) before each dispatch and
-merge instead.
-
-### 4. The result
-
-The run finishes when the budget is spent, convergence says STOP, or the target
-is hit. `REPORT.md` (held-out scores authoritative) lands in the workspace and
-as a chat artifact:
-
-```markdown
-# Research Report — Maximize classification accuracy
-## Held-out test (authoritative)
-- baseline: 0.50
-- final trunk: 0.75 (maximize)
-- delta: +0.25
-## Eval commands
-- dev:  python eval.py --split dev
-- test: python eval.py --split test
-## Merged ideas
-- 1   dev=0.69: Mechanism: keyword lexicon in solver.predict (pos/neg word lists)
-- 1.1 dev=0.80: Mechanism: combine the lexicon with negation handling
-...
-```
-
-The improvements are real commits on the per-run `trunk` branch in the
-`/workspace/bench` repo you scaffolded; promote them into your own default
-branch when satisfied (`git merge research/run-…/trunk`). The Idea Tree, every
-branch, and the report stay queryable after the run ends.
+Verified gains are real commits on the run's `trunk` branch in your repo;
+promote them when satisfied (`git merge research/run-…/trunk`).
 
 ---
 
