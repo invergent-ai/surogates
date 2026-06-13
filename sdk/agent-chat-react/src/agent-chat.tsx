@@ -40,6 +40,12 @@ export interface AgentChatProps {
    */
   deepResearchEnabled?: boolean;
   /**
+   * When true, the composer surfaces the `/auto-research` slash command
+   * (research missions / Arbor). Like `deepResearchEnabled`, the host owns
+   * the capability gate.
+   */
+  researchEnabled?: boolean;
+  /**
    * When true, the composer exposes the `/code` coding-agent slash commands.
    * Like `deepResearchEnabled`, the host owns the capability gate.
    */
@@ -68,6 +74,7 @@ export function AgentChat({
   disabled,
   onComposerError,
   deepResearchEnabled = false,
+  researchEnabled = false,
   codeAgentsEnabled = false,
   onOpenIntegrations,
 }: AgentChatProps) {
@@ -263,6 +270,7 @@ export function AgentChat({
               viewMode={runtime.viewMode}
               onViewModeChange={runtime.setViewMode}
               deepResearchEnabled={deepResearchEnabled}
+              researchEnabled={researchEnabled}
               codeAgentsEnabled={codeAgentsEnabled}
               researchSources={runtime.researchSources}
               hideTurnSummary={hideTurnSummary}
