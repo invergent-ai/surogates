@@ -227,3 +227,16 @@ def test_sandbox_spec_has_session_and_workspace_fields():
     spec2 = SandboxSpec(session_id="root-123", workspace_path="/tmp/ws")
     assert spec2.session_id == "root-123"
     assert spec2.workspace_path == "/tmp/ws"
+
+
+def test_sandbox_settings_docker_defaults():
+    from surogates.config import SandboxSettings
+
+    s = SandboxSettings()
+    # backend literal accepts "docker"
+    s2 = SandboxSettings(backend="docker")
+    assert s2.backend == "docker"
+    assert s.docker_image == "ghcr.io/invergent-ai/surogates-agent-sandbox:latest"
+    assert s.docker_executor_port_base == 33000
+    assert s.docker_ready_timeout == 60
+    assert s.docker_network == "bridge"
