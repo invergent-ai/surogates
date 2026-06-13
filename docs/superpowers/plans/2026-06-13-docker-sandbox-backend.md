@@ -1315,7 +1315,12 @@ class DockerSandbox:
 
     async def _wait_ready(self, host_port: int) -> None:
         deadline = asyncio.get_running_loop().time() + self._ready_timeout
-        last_error: Exception | None = None
+        # Track the last observed reason across BOTH paths: a transport
+        # exception (daemon not bound yet) and a non-200 response (daemon up
+        # but unhealthy, e.g. an image whose /healthz still requires a FUSE
+        # mount). Otherwise a persistent 503 would be misreported with a
+        # stale connection-error name from the brief startup window.
+        last_detail = ""
         async with httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{host_port}",
             transport=self._transport,
@@ -1326,12 +1331,13 @@ class DockerSandbox:
                     response = await client.get("/healthz")
                     if response.status_code == 200:
                         return
+                    last_detail = f"last status {response.status_code}"
                 except Exception as exc:  # noqa: BLE001
-                    last_error = exc
+                    last_detail = type(exc).__name__
                 await asyncio.sleep(0.5)
-        detail = type(last_error).__name__ if last_error is not None else "no_response"
         raise SandboxUnavailableError(
-            f"Sandbox did not become ready within {self._ready_timeout}s ({detail})",
+            f"Sandbox did not become ready within {self._ready_timeout}s "
+            f"({last_detail or 'no_response'})",
             classification="readiness",
         )
 ```

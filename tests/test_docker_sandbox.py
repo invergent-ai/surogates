@@ -295,3 +295,38 @@ class TestHostServiceEnv:
         run_call = next(c for c in docker.calls if c[:2] == ["run", "-d"])
         assert "MCP_PROXY_URL=" not in " ".join(run_call)
         await backend.aclose()
+
+
+class TestReadinessReporting:
+    """Readiness timeout reports the *last* observed reason — including a
+    daemon that comes up but keeps returning a non-200 status (e.g. an image
+    whose /healthz still requires a FUSE mount), not a stale connection error.
+    """
+
+    async def test_persistent_503_reported_as_status(self):
+        class Healthz503(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request):
+                return httpx.Response(503, text="workspace not mounted")
+
+        backend = DockerSandbox(
+            image="sbx-test:1", executor_port_base=33000, ready_timeout=1,
+            network="bridge", docker=FakeDocker(), httpx_transport=Healthz503(),
+        )
+        with pytest.raises(SandboxUnavailableError) as ei:
+            await backend.provision(SandboxSpec(session_id="root-1"))
+        assert "last status 503" in str(ei.value)
+        await backend.aclose()
+
+    async def test_connection_error_reported_as_exception_type(self):
+        class HealthzBoom(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request):
+                raise httpx.ConnectError("boom")
+
+        backend = DockerSandbox(
+            image="sbx-test:1", executor_port_base=33000, ready_timeout=1,
+            network="bridge", docker=FakeDocker(), httpx_transport=HealthzBoom(),
+        )
+        with pytest.raises(SandboxUnavailableError) as ei:
+            await backend.provision(SandboxSpec(session_id="root-1"))
+        assert "ConnectError" in str(ei.value)
+        await backend.aclose()
