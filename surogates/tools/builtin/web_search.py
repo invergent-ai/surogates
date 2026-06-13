@@ -745,6 +745,16 @@ WEB_SEARCH_SCHEMA_PARAMS = {
             "type": "string",
             "description": "The search query to look up on the web",
         },
+        "limit": {
+            "type": "integer",
+            "description": (
+                "Maximum number of results to return (1-20, default 5). "
+                "Request more to cast a wider net when researching a topic "
+                "broadly; keep it small for a quick lookup."
+            ),
+            "minimum": 1,
+            "maximum": _MAX_SEARCH_LIMIT,
+        },
     },
     "required": ["query"],
 }
@@ -798,8 +808,10 @@ def register(registry: ToolRegistry) -> None:
         schema=ToolSchema(
             name="web_search",
             description=(
-                "Search the web for information on any topic. Returns up to 5 "
-                "relevant results with titles, URLs, and descriptions."
+                "Search the web for information on any topic. Returns "
+                "relevant results with titles, URLs, and descriptions. "
+                "Returns 5 results by default; pass `limit` (up to 20) to "
+                "widen the net for broad or open-ended research."
             ),
             parameters=WEB_SEARCH_SCHEMA_PARAMS,
         ),
