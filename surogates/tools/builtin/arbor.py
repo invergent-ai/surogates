@@ -42,7 +42,7 @@ _IDEA_TREE_SCHEMA = ToolSchema(
         "properties": {
             "action": {"type": "string", "enum": [
                 "view", "add", "update", "prune", "set_meta",
-                "record_from_task", "requeue", "report",
+                "record_from_task", "requeue", "propagate", "report",
             ]},
             "format": {"type": "string", "enum": ["constraints", "compact"]},
             "parent_key": {"type": "string"},
@@ -147,6 +147,11 @@ async def _idea_tree_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
             pruned = await store.prune(
                 run_id, node_key, arguments.get("reason") or "no reason given",
             )
+            from surogates.arbor.propagate import propagate_insights_llm
+            await propagate_insights_llm(
+                store, run_id, node_key,
+                llm_client=kwargs.get("llm_client"), model=kwargs.get("model"),
+            )
             return json.dumps({"pruned": pruned})
 
         if action == "set_meta":
@@ -175,6 +180,17 @@ async def _idea_tree_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
                 "note": "requeued; the spent cycle is NOT refunded "
                         f"(reason: {arguments.get('reason') or 'unspecified'})",
             })
+
+        if action == "propagate":
+            node_key = arguments.get("node_key")
+            if not node_key:
+                return json.dumps({"error": "propagate requires node_key"})
+            from surogates.arbor.propagate import propagate_insights_llm
+            n = await propagate_insights_llm(
+                store, run_id, node_key,
+                llm_client=kwargs.get("llm_client"), model=kwargs.get("model"),
+            )
+            return json.dumps({"ok": True, "ancestors_synthesized": n})
 
         if action == "report":
             # Lazy import: prompts.py (incl. build_report) ships with
@@ -226,6 +242,14 @@ async def _record_from_task(store, run_id, task_id: str, kwargs) -> str:
         })
     folded = await fold_task_into_node(
         store, run_id, node.node_key, task, llm_client=None, model=None,
+    )
+    # LLM-synthesize the ancestor chain now that the node carries a fresh
+    # insight (the wake harvest only concat-propagates; this is the v2
+    # distillation, available because record runs in a coordinator turn).
+    from surogates.arbor.propagate import propagate_insights_llm
+    await propagate_insights_llm(
+        store, run_id, node.node_key,
+        llm_client=kwargs.get("llm_client"), model=kwargs.get("model"),
     )
     return json.dumps(folded)
 
@@ -540,6 +564,12 @@ async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) ->
             "test_trunk_score": score, "trunk_score": node.score, "merge_eval": {},
         }, allow_machine_keys=True)
         await store.update_node(run_id, node_key, status="merged")
+        # Distill the validated win up the ancestor chain (fail-open).
+        from surogates.arbor.propagate import propagate_insights_llm
+        await propagate_insights_llm(
+            store, run_id, node_key,
+            llm_client=kwargs.get("llm_client"), model=kwargs.get("model"),
+        )
         result: dict[str, Any] = {"merged": True, "test_score": score}
         if warning:
             result["warning"] = warning
