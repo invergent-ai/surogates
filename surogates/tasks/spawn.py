@@ -82,6 +82,13 @@ def _build_task_worker_config(agent_def: Any | None, task: Any) -> dict[str, Any
     # on every dispatched worker: workers shouldn't have to discover the
     # task contract; it's the manual for their role.
     preloaded = list(cfg.get("preloaded_skills") or [])
+    # An AgentDef may preload role-specific skills onto every worker it
+    # backs (e.g. the arbor-executor agent preloads the arbor-executor
+    # skill so the executor sees its workflow inlined, not discovered).
+    if agent_def is not None and agent_def.preloaded_skills:
+        for skill_name in agent_def.preloaded_skills:
+            if skill_name not in preloaded:
+                preloaded.append(skill_name)
     if "subagent-task-worker" not in preloaded:
         preloaded.append("subagent-task-worker")
     cfg["preloaded_skills"] = preloaded

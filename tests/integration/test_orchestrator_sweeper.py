@@ -15,7 +15,7 @@ import asyncio
 import pytest
 from sqlalchemy import text
 
-from surogates.config import agent_queue_key
+from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
 from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.session.events import EventType
 
@@ -80,7 +80,18 @@ async def test_sweeper_recovers_orphaned_session(
         user_id=user_id, org_id=org_id, agent_id=agent_id,
     )
 
-    queue = agent_queue_key(agent_id)
+    # The work queue is now a single shared sorted-set keyed by an encoded
+    # (org, agent, session) member tuple (the per-agent queues were collapsed
+    # into SHARED_WORK_QUEUE_KEY). The sweeper re-enqueues via enqueue_session,
+    # which writes the encoded member — so membership is checked by member,
+    # not by bare session id.
+    queue = SHARED_WORK_QUEUE_KEY
+    orphan_member = encode_queue_member(
+        org_id=str(org_id), agent_id=agent_id, session_id=str(orphan.id),
+    )
+    healthy_member = encode_queue_member(
+        org_id=str(org_id), agent_id=agent_id, session_id=str(healthy.id),
+    )
     await redis_client.delete(queue)  # ensure clean state
 
     # Dummy harness factory — the sweeper never calls it, but Orchestrator
@@ -111,7 +122,7 @@ async def test_sweeper_recovers_orphaned_session(
     try:
         # Wait up to 5s for the sweeper to process the orphan.
         for _ in range(50):
-            score = await redis_client.zscore(queue, str(orphan.id))
+            score = await redis_client.zscore(queue, orphan_member)
             if score is not None:
                 break
             await asyncio.sleep(0.1)
@@ -124,9 +135,9 @@ async def test_sweeper_recovers_orphaned_session(
             pass
 
     # Re-enqueued: orphan now sits in the agent's work queue.
-    score = await redis_client.zscore(queue, str(orphan.id))
+    score = await redis_client.zscore(queue, orphan_member)
     assert score is not None, "orphan should be on the agent's work queue"
-    healthy_score = await redis_client.zscore(queue, str(healthy.id))
+    healthy_score = await redis_client.zscore(queue, healthy_member)
     assert healthy_score is None, "healthy session must not be enqueued"
 
     # harness.recovered lands in the event log so audit can explain

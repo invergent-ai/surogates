@@ -204,6 +204,7 @@ from surogates.harness.loop_vision import (
 
 from surogates.harness.loop_advisor import AdvisorMixin
 from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
+from surogates.harness.loop_arbor import ArborHarvestMixin
 from surogates.harness.loop_board import BoardMixin
 from surogates.harness.loop_code_commands import CodeCommandMixin
 from surogates.harness.loop_context_replay import ContextReplayMixin
@@ -269,6 +270,7 @@ def _format_loop_list(rows: list[Any]) -> str:
 class AgentHarness(
     AdvisorMixin,
     BoardMixin,
+    ArborHarvestMixin,
     ContextReplayMixin,
     IterationSummaryMixin,
     OutcomeCommandMixin,
@@ -925,6 +927,10 @@ class AgentHarness(
                 await self._handle_mission_command(session, last_user_content, lease)
                 return
 
+            if last_user_content == "/auto-research" or last_user_content.startswith("/auto-research "):
+                await self._handle_auto_research_command(session, last_user_content, lease)
+                return
+
             if last_user_content == "/code" or last_user_content.startswith("/code "):
                 await self._handle_code_command(
                     session, last_user_content, lease, all_events,
@@ -1304,6 +1310,12 @@ class AgentHarness(
             board_cursor = await self.maybe_emit_board_update(
                 session, messages, board_cursor,
             )
+
+            # --- Research missions: deterministic pre-LLM harvest ---
+            # Folds finished experiments into the Idea Tree before the
+            # coordinator LLM runs, so a dead executor or compacted context
+            # can never strand a running node or stale the leaderboard.
+            await self.maybe_harvest_research(session, messages)
 
             # --- Skill nudge tracking ---
             # Counter resets whenever skill_manage is actually used (in
@@ -3033,6 +3045,18 @@ class AgentHarness(
 
                 excluded = set(config.get("excluded_tools") or [])
                 excluded.update(COORDINATOR_IMPLEMENTATION_TOOLS)
+                # Research coordinators get READ access back for OBSERVE
+                # forensics (failure logs, eval output). Writes, terminal,
+                # web, and browser stay stripped — the strict-mode incident
+                # class was the model DOING the work, which still needs tools
+                # it does not have. Reads the user explicitly excluded stay
+                # excluded.
+                if config.get("active_research_run_id"):
+                    user_excluded = set(config.get("excluded_tools") or [])
+                    excluded -= (
+                        {"read_file", "search_files", "list_files"}
+                        - user_excluded
+                    )
                 tool_filter = set(self._tools.tool_names) - excluded
         elif explicit_allowed:
             tool_filter = set(config["allowed_tools"])

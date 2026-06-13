@@ -12,6 +12,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -1205,6 +1206,111 @@ class Mission(Base):
     )
     paused_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     cancelled_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+# ---------------------------------------------------------------------------
+# Research missions (Arbor) — sidecar tables; `missions` is never altered.
+# ---------------------------------------------------------------------------
+
+
+class ResearchRun(Base):
+    """Sidecar row that makes a mission a research (Arbor) run.
+
+    Presence of this row IS the research-kind dispatch — ``missions``
+    itself is never altered. ``meta`` mirrors Arbor's ``tree.meta``
+    (closed key set, enforced by :class:`~surogates.arbor.store.ResearchStore`;
+    machine-score keys are writable only by the merge / baseline paths).
+    """
+
+    __tablename__ = "research_runs"
+    __table_args__ = (
+        Index("idx_research_runs_session", "session_id"),
+        UniqueConstraint("mission_id", name="uq_research_runs_mission"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
+    )
+    mission_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("missions.id"), nullable=False
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=False
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    repo_path: Mapped[str] = mapped_column(Text, nullable=False)
+    trunk_branch: Mapped[str] = mapped_column(Text, nullable=False)
+    branch_prefix: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="init"
+    )
+    meta: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class IdeaNode(Base):
+    """One hypothesis in a research run's Idea Tree.
+
+    ``node_key`` is Arbor's dotted-decimal key ("ROOT", "1", "1.2").
+    ``score`` is the absolute dev-split score (never a delta).
+    ``task_id`` is the experiment ledger join: dispatch writes it,
+    harvest folds by it.
+    """
+
+    __tablename__ = "idea_nodes"
+    __table_args__ = (
+        UniqueConstraint("run_id", "node_key", name="uq_idea_nodes_run_key"),
+        Index("idx_idea_nodes_run_status", "run_id", "status"),
+        CheckConstraint(
+            "status IN ('pending','running','done','failed','merged','pruned')",
+            name="ck_idea_nodes_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
+    )
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("research_runs.id"), nullable=False
+    )
+    node_key: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    depth: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    hypothesis: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="pending"
+    )
+    insight: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    result: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    code_ref: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    related_work: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    task_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=True
+    )
+    dispatched_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=func.now()
     )

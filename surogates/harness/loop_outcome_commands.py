@@ -302,6 +302,182 @@ class OutcomeCommandMixin:
                         "Failed to enqueue mission kickoff", exc_info=True,
                     )
 
+    async def _handle_auto_research_command(
+        self,
+        session: Session,
+        content: str,
+        lease: SessionLease,
+    ) -> None:
+        """Dispatch ``/auto-research ...`` — an alias of /mission that
+        creates a research-kind mission.
+
+        Create routes to :func:`handle_research_mission_create`; control
+        verbs (status/pause/resume/cancel) reuse the standard mission
+        handlers (a research mission IS a mission). The kickoff-after-cursor
+        and LLM_RESPONSE emit follow the same contract as /mission.
+        """
+        from surogates.db.models import Session as ORMSession
+        from surogates.missions.commands import (
+            MissionCommandParseError,
+            MissionHandlerResult,
+            handle_mission_cancel,
+            handle_mission_pause,
+            handle_mission_resume,
+            handle_mission_status,
+            handle_research_mission_create,
+            parse_auto_research_command,
+        )
+        from surogates.missions.store import MissionStore
+
+        result: MissionHandlerResult | None = None
+        args = content[len("/auto-research"):].strip()
+        try:
+            command = parse_auto_research_command(args)
+        except MissionCommandParseError as exc:
+            message = f"/auto-research parse error: {exc}"
+        else:
+            if self._session_factory is None:
+                message = (
+                    "/auto-research requires a configured session factory; "
+                    "this looks like a harness initialization bug."
+                )
+            else:
+                mission_store = MissionStore(self._session_factory)
+                redis_client = self._redis
+                if command.action == "create":
+                    principal_user_id = self._tenant.user_id
+                    principal_sa_id = self._tenant.service_account_id
+                    if redis_client is None:
+                        message = (
+                            "/auto-research cannot run without a Redis "
+                            "connection (the coordinator must be enqueued "
+                            "after kickoff)."
+                        )
+                    elif principal_user_id is None and principal_sa_id is None:
+                        message = (
+                            "/auto-research requires a user or service-account "
+                            "session — anonymous channel sessions cannot own "
+                            "research missions."
+                        )
+                    else:
+                        result = await handle_research_mission_create(
+                            cmd=command,
+                            session_id=session.id,
+                            user_id=principal_user_id,
+                            service_account_id=principal_sa_id,
+                            org_id=self._tenant.org_id,
+                            agent_id=session.agent_id,
+                            session_store=self._store,
+                            session_factory=self._session_factory,
+                            mission_store=mission_store,
+                        )
+                        message = result.message or result.error
+                        if result.ok and result.mission_id is not None:
+                            # The research handler wrote several config keys
+                            # (active_mission_id, coordinator, strict_coordinator,
+                            # active_research_run_id, arbor-coordinator preload).
+                            # Re-read the row so this wake sees the full set and
+                            # the kickoff is processed against fresh config.
+                            async with self._session_factory() as db:
+                                row = await db.get(ORMSession, session.id)
+                                if row is not None:
+                                    session.config = dict(row.config or {})
+                elif command.action == "status":
+                    result = await handle_mission_status(
+                        session_id=session.id, mission_store=mission_store,
+                    )
+                    message = result.message
+                elif command.action == "pause":
+                    result = await handle_mission_pause(
+                        session_id=session.id, reason=command.reason,
+                        session_store=self._store, mission_store=mission_store,
+                    )
+                    message = result.message or result.error
+                elif command.action == "resume":
+                    if redis_client is None:
+                        message = (
+                            "/auto-research resume cannot wake the coordinator "
+                            "without a Redis connection."
+                        )
+                    else:
+                        result = await handle_mission_resume(
+                            session_id=session.id,
+                            org_id=str(session.org_id),
+                            agent_id=session.agent_id,
+                            session_store=self._store,
+                            mission_store=mission_store,
+                            redis=redis_client,
+                        )
+                        message = result.message or result.error
+                elif command.action == "cancel":
+                    if redis_client is None:
+                        message = (
+                            "/auto-research cancel cannot cascade interrupts "
+                            "without a Redis connection."
+                        )
+                    else:
+                        result = await handle_mission_cancel(
+                            session_id=session.id, reason=command.reason,
+                            cascade_to_workers=command.cascade_to_workers,
+                            session_store=self._store,
+                            session_factory=self._session_factory,
+                            mission_store=mission_store, redis=redis_client,
+                        )
+                        message = result.message or result.error
+                        if result.ok:
+                            cfg = dict(session.config or {})
+                            cfg.pop("active_mission_id", None)
+                            session.config = cfg
+                else:
+                    message = (
+                        "Usage: /auto-research repo=</workspace/...> "
+                        "[max_iterations=N] [baseline=<dev>] "
+                        "[baseline_test=<test>] <objective>\\n\\nRubric:\\n"
+                        "<criterion> | /auto-research status | pause | "
+                        "resume | cancel [--cascade]"
+                    )
+
+        response_event_id = await self._store.emit_event(
+            session.id,
+            EventType.LLM_RESPONSE,
+            {"message": {"role": "assistant", "content": message}},
+        )
+        await self._store.advance_harness_cursor(
+            session.id,
+            through_event_id=response_event_id,
+            lease_token=lease.lease_token,
+        )
+
+        # Defer the synthetic kickoff until after the cursor advance — same
+        # cursor-race contract as /mission and /goal.
+        if (
+            result is not None
+            and result.ok
+            and result.kickoff_content is not None
+        ):
+            await self._store.emit_event(
+                session.id, EventType.USER_MESSAGE,
+                {
+                    "content": result.kickoff_content,
+                    "synthetic": "mission_kickoff",
+                },
+            )
+            if redis_client is not None:
+                try:
+                    from surogates.config import enqueue_session
+
+                    await enqueue_session(
+                        redis_client,
+                        org_id=str(session.org_id),
+                        agent_id=session.agent_id,
+                        session_id=session.id,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to enqueue research mission kickoff",
+                        exc_info=True,
+                    )
+
     async def _handle_goal_command(
         self,
         session: Session,

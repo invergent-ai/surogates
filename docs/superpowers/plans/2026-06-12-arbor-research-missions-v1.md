@@ -2,6 +2,25 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+## Progress Tracker
+
+> Updated before every commit. `[ ]` pending · `[~]` in progress · `[x]` done.
+> Test runner: `.venv/bin/pytest` from `/work/surogates` (surogates venv has testcontainers + pytest 9.0.3; the ambient `python` is the surogate-ops venv — do not use it). Branch: `research-missions`.
+
+- [x] Task 1 — DB tables: `ResearchRun` + `IdeaNode`
+- [x] Task 2 — `surogates/arbor/` package: models + `ResearchStore`
+- [x] Task 3 — constraints block + concat-propagate
+- [x] Task 4 — tool plumbing: `idea_tree` tool, routing, registration, visibility
+- [x] Task 5 — `create_task_and_spawn` factoring + `AgentDef.preloaded_skills`
+- [x] Task 6 — `dispatch_experiments`: gates, worktrees, briefs (+ `build_report`)
+- [x] Task 7 — `merge_experiment`: bypass-proof detached eval gate
+- [x] Task 8 — harvest mixin + `research.*` events
+- [x] Task 9 — `/auto-research` command
+- [x] Task 10 — `research_coordinator` read-only carve-out
+- [x] Task 11 — research evaluator policy
+- [x] Task 12 — the three v1 skills (+ bundle DESCRIPTION.md documenting arbor-executor AgentDef provisioning; ops feature-pack toggle remains a cross-repo follow-up)
+- [x] Task 13 — smoke-mode end-to-end test
+
 **Goal:** One real arbor cycle end to end — `/auto-research` creates a research-kind mission whose strict coordinator grows a DB-backed Idea Tree, dispatches executor task-workers into git worktrees, harvests results deterministically at wake, and merges into trunk only through a machine-run held-out eval gate.
 
 **Architecture:** Per the spec at `docs/superpowers/specs/2026-06-12-arbor-research-missions-design.md` (§4): two new sidecar tables (`research_runs`, `idea_nodes`; no `missions` ALTER), a `surogates/arbor/` package (store + propagate + prompts + evaluator policy), three HARNESS builtin tools (`idea_tree`, `dispatch_experiments`, `merge_experiment`), a pre-LLM harvest mixin modeled on `BoardMixin`, a research-kind branch in the mission evaluator hook, and the `/auto-research` slash command. Judgment ships as skills; guarantees live in tools.

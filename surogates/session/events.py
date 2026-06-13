@@ -153,6 +153,17 @@ class EventType(str, Enum):
     MISSION_RESUMED = "mission.resumed"
     MISSION_CANCELLED = "mission.cancelled"
 
+    # Research missions (Arbor). Emitted on the research coordinator session;
+    # the mission dashboard's Activity tab surfaces them. See
+    # docs/superpowers/specs/2026-06-12-arbor-research-missions-design.md.
+    RESEARCH_DEFINED = "research.defined"
+    RESEARCH_DISPATCHED = "research.dispatched"
+    RESEARCH_HARVESTED = "research.harvested"
+    RESEARCH_MERGED = "research.merged"
+    RESEARCH_PRUNED = "research.pruned"
+    RESEARCH_CONVERGED = "research.converged"
+    RESEARCH_REPORT = "research.report"
+
     # Governance
     POLICY_ALLOWED = "policy.allowed"
     POLICY_DENIED = "policy.denied"

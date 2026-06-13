@@ -37,6 +37,7 @@ _BUILTIN_SLASH_COMMANDS: Final[frozenset[str]] = frozenset({
     "goal",
     "loop",
     "mission",
+    "auto-research",
 })
 
 

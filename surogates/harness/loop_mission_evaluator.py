@@ -54,6 +54,23 @@ async def _maybe_run_mission_evaluator(
     if active is None or active.status != "active":
         return
 
+    # Research-kind missions: deterministic gates around the LLM judge.
+    # Standard missions take the path below untouched (research_run is None).
+    from surogates.arbor.store import ResearchStore
+
+    research_store = ResearchStore(session_factory)
+    research_run = await research_store.get_run_for_mission(active.id)
+    research_cycles = 0
+    research_max_cycles = 0
+    if research_run is not None:
+        from surogates.arbor.evaluator_policy import research_should_skip
+
+        if await research_should_skip(research_store, research_run.id):
+            # Experiments still in flight: no verdict, no iteration burn.
+            return
+        research_cycles = await research_store.cycles_spent(research_run.id)
+        research_max_cycles = int((research_run.meta or {}).get("max_cycles", 20))
+
     decision = await should_evaluate(
         mission_id=active.id,
         coordinator_last_response=coordinator_last_response,
@@ -78,6 +95,31 @@ async def _maybe_run_mission_evaluator(
         session_factory=session_factory,
         mission_store=mission_store,
     )
+    if research_run is not None:
+        from surogates.arbor.evaluator_policy import research_prompt_block
+
+        # Convergence intervention (fail-open) steers the judge's
+        # needs_revision feedback toward paradigm-shift / finalize on a plateau.
+        conv_text = None
+        try:
+            from surogates.arbor.convergence import (
+                ConvergenceConfig, detect_convergence, format_intervention,
+            )
+
+            cmeta = research_run.meta or {}
+            sig = detect_convergence(
+                await research_store.list_nodes(research_run.id),
+                trunk_score=cmeta.get("trunk_score"),
+                meta=cmeta, config=ConvergenceConfig.from_meta(cmeta),
+            )
+            conv_text = format_intervention(sig) if sig else None
+        except Exception:
+            conv_text = None
+        user_prompt = user_prompt + "\n\n" + research_prompt_block(
+            constraints_block=await research_store.constraints_block(research_run.id),
+            cycles_spent=research_cycles, max_cycles=research_max_cycles,
+            convergence=conv_text,
+        )
     try:
         verdict = await judge(evaluator_system_prompt(), user_prompt)
     except MissionJudgeParseError as exc:
@@ -122,6 +164,16 @@ async def _maybe_run_mission_evaluator(
         )
         return
 
+    if research_run is not None:
+        from surogates.arbor.evaluator_policy import adjust_research_verdict
+
+        report_done = await _research_report_task_done(session_factory, active.id)
+        verdict = adjust_research_verdict(
+            verdict, meta=research_run.meta or {},
+            report_task_done=report_done,
+            budget_exhausted=research_cycles >= research_max_cycles,
+        )
+
     await apply_verdict(
         mission_id=active.id,
         verdict=verdict,
@@ -130,6 +182,26 @@ async def _maybe_run_mission_evaluator(
         mission_store=mission_store,
         trigger=decision.trigger,
     )
+
+
+async def _research_report_task_done(session_factory: Any, mission_id: Any) -> bool:
+    """True iff a finished task for this mission flagged itself the report
+    task (``result_metadata.report is True``). The final report is created
+    worker-side because the strict coordinator cannot call create_artifact."""
+    from sqlalchemy import select
+
+    from surogates.db.models import Task
+
+    async with session_factory() as db:
+        rows = (await db.execute(
+            select(Task.result_metadata).where(
+                Task.mission_id == mission_id, Task.status == "done",
+            )
+        )).all()
+    for (md,) in rows:
+        if isinstance(md, dict) and md.get("report") is True:
+            return True
+    return False
 
 
 def _parse_judge_json(raw: str) -> dict[str, Any]:

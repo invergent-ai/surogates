@@ -1,0 +1,367 @@
+# Research Missions
+
+A **research mission** turns a long-horizon optimization goal — "improve this
+benchmark", "beat the leaderboard overnight" — into a cumulative tree search.
+A coordinator grows a durable **Idea Tree** of hypotheses; ephemeral executors
+implement and evaluate each hypothesis in an isolated git worktree; verified
+gains merge into a protected trunk only after an independently re-run held-out
+eval confirms the improvement. It is the Surogates port of
+[Arbor](https://github.com/RUC-NLPIR/Arbor): the method, hosted on the existing
+[missions](../tasks/index.md#missions) machinery.
+
+Research missions are launched with [`/auto-research`](../commands/index.md#auto-research),
+a thin alias over `/mission` that creates a **research-kind** mission. The
+deterministic spine (the tree, the dispatch gates, the merge gate, the wake-time
+harvest) lives in the harness; the *judgment* (ideation quality, decide policy,
+executor briefs) ships as the `research` skill bundle. Determinism is enforced
+by code; the intelligence is steered by skills.
+
+This document covers the architecture, the lifecycle of one cycle, the three
+tools, the durable state model, steering, and the operational guardrails.
+
+---
+
+## Quickstart
+
+This walks through one research run end to end: optimizing a small text
+classifier's F1 on a benchmark repo.
+
+### 0. Prepare the benchmark
+
+The target repo lives in the session workspace and must have a runnable eval, a
+**dev** split for iteration, and a held-out **test** split for merge decisions.
+The only contract the harness requires is that the eval prints its score as a
+JSON object on its last line:
+
+```text
+/workspace/clf/
+├── train.py            # the model the agent will modify
+├── eval.py             # prints e.g.  {"score": 0.41}  as its last line
+└── data/
+    ├── dev.jsonl       # iterate here
+    └── test.jsonl      # held out — only the merge gate runs this
+```
+
+```bash
+# eval.py contract: run on a split, print {"score": <float>} last
+$ python eval.py --split dev
+... training/inference logs ...
+{"score": 0.41}
+```
+
+The repo should be a clean git checkout (no uncommitted changes).
+
+### 1. Intake — turn the goal into a contract
+
+In a normal chat session, run the intake skill:
+
+```text
+/arbor-research improve macro-F1 of the classifier in /workspace/clf
+```
+
+Intake inspects the repo, finds `eval.py`, identifies the dev/test splits,
+measures the baseline on **both** (say dev 0.41, test 0.40), asks one compact
+clarification checkpoint (metric direction, budget, permissions, HITL mode),
+and then prints a ready-to-send command. It does **not** start the run.
+
+### 2. Launch the run
+
+Send the command intake produced (edit any line first if you like):
+
+```text
+/auto-research repo=/workspace/clf max_iterations=40 baseline=0.41 baseline_test=0.40 Maximize macro-F1 of the classifier on the dev split; merge only verified gains.
+
+Rubric:
+- Satisfied only when the held-out test score (written only by the merge gate)
+  improves on test_baseline_score (0.40), with at least one merged node — or the
+  cycle budget is exhausted with an explicit no-improvement root insight — AND
+  the final report task is done.
+- Never satisfied on prose claims or dev-split scores alone.
+- eval_cmd: python eval.py --split dev
+- eval_cmd_test: python eval.py --split test
+- metric_direction: maximize
+```
+
+This flips the session into a strict research coordinator and emits the kickoff.
+From here the run is autonomous (in `auto` HITL mode).
+
+### 3. What you see as it runs
+
+The coordinator works in cycles; each is visible on the mission dashboard's
+activity feed:
+
+```text
+research.defined      run created, ROOT node seeded, baselines recorded
+research.dispatched   node 1 "TF-IDF → contextual embeddings" → executor (worktree research/run-…/n1)
+research.dispatched   node 2 "class-balanced loss"            → executor
+research.harvested    node 1 done score=0.46 · node 2 done score=0.43   (folded at the coordinator's wake)
+research.merged       node 1 merged — held-out test 0.40 → 0.47, trunk advanced
+research.dispatched   node 3 "1.1: embedding + balanced loss (combine)" off the new trunk
+research.harvested    node 3 done score=0.44
+research.converged    WARNING — 3 experiments without a trunk gain; suggests Leap/Combine
+research.merged       node 1.1 merged — held-out test 0.47 → 0.49
+research.report       REPORT.md written; report task created
+```
+
+Steer it any time with plain chat (a nudge, not a pause), or
+`/auto-research pause` / `resume` / `cancel`. In `review` HITL mode the
+coordinator asks for approval (via the agent inbox) before each dispatch and
+merge instead.
+
+### 4. The result
+
+The run finishes when the budget is spent, convergence says STOP, or the target
+is hit. `REPORT.md` (held-out scores authoritative) lands in the workspace and
+as a chat artifact:
+
+```markdown
+# Research Report — Maximize macro-F1 of the classifier
+## Held-out test (authoritative)
+- baseline: 0.40
+- final trunk: 0.49 (maximize)
+- delta: +0.09
+## Eval commands
+- dev:  python eval.py --split dev
+- test: python eval.py --split test
+## Merged ideas
+- 1   dev=0.46: Mechanism: replace TF-IDF features with contextual embeddings
+- 1.1 dev=0.48: Mechanism: combine embeddings with a class-balanced loss
+...
+```
+
+The improvements are real commits on the per-run `trunk` branch in your repo;
+promote them into `main` when satisfied (`git merge research/run-…/trunk`). The
+Idea Tree, every branch, and the report stay queryable after the run ends.
+
+---
+
+## 1. What makes it work — the four enforced mechanisms
+
+1. **Tree memory as system of record.** Run state lives in the `idea_nodes`
+   table, not the conversation. A *constraints block* (tree shape, root insight,
+   pruned lessons, validated findings, budget) is re-read at the start of every
+   cycle, so the loop survives context compression.
+2. **Real-experiment discipline.** Executors iterate on a **dev** split; a change
+   reaches trunk only after the merge tool *independently re-runs* the
+   **held-out test** split. The coordinator cannot self-report a score onto
+   trunk. Failed and timed-out experiments still spend budget — a timeout is
+   evidence, not a free retry.
+3. **Isolated, reversible experiments.** Every hypothesis is a branch in a
+   throwaway git worktree off a protected trunk. The branch survives worktree
+   removal; trunk advances only through a verified merge.
+4. **Insight backpropagation.** After every experiment its lesson is propagated
+   up the ancestor chain — deterministically at harvest (crash-safe) and
+   LLM-synthesized inside the coordinator's tool calls — so later ideas start
+   from what the whole subtree has learned.
+
+---
+
+## 2. Architecture
+
+```
+user ── /auto-research repo=… baseline=… <goal>  + Rubric: …
+        │  (intake skill refined the goal into this command first)
+        ▼
+research-kind mission  (Mission row + research_runs row + idea_nodes ROOT)
+        │  session.config: active_mission_id, active_research_run_id,
+        │                  coordinator, strict_coordinator, research_coordinator
+        ▼
+Coordinator session  (strict — reads allowed, code edits/terminal stripped)
+   tools: delegation suite + idea_tree + dispatch_experiments + merge_experiment
+        │ dispatch_experiments(node_keys=[…])  → server-side worktree + brief
+        ▼
+spawn_task executors  ("arbor-executor", one worktree each, dev-split eval)
+        │ worker_complete(metadata={node_key, score, insight, result, branch})
+        ▼
+pre-LLM harvest (deterministic, fail-open): fold finished experiments into the
+   tree, concat-propagate, clean up worktrees, inject digest + constraints +
+   any convergence intervention before the coordinator's next turn
+        ▼
+research mission evaluator: SKIP while experiments are in flight; otherwise the
+   rubric judge over the SQL tree leaderboard, gated so `satisfied` requires a
+   machine-written held-out improvement AND a finished report task
+```
+
+One run ⇔ one Mission ⇔ one coordinator session ⇔ one Idea Tree ⇔ one git repo
+under `/workspace`. Executors share the coordinator's sandbox pod and its
+S3-durable `/workspace`.
+
+---
+
+## 3. The Idea Tree and run state
+
+Two sidecar tables (the `missions` table is never altered):
+
+- **`research_runs`** — one row per run. `meta` (JSONB) mirrors Arbor's
+  `tree.meta` over a closed key set: `eval_cmd`, `eval_cmd_test`,
+  `metric_direction`, `eval_timeout`/`eval_retries`, `baseline_score`/
+  `test_baseline_score`, `trunk_score`/`test_trunk_score`, `max_cycles`,
+  `max_tree_depth`, `max_parallel`, `merge_threshold`, `hitl_mode`,
+  `protected_paths`, `required_outputs`, and `convergence_*` thresholds. The
+  machine-score keys (`test_trunk_score`, `trunk_score`, `test_baseline_score`)
+  are writable **only** by the merge / baseline paths — `idea_tree(set_meta)`
+  from the coordinator rejects them, so progress cannot be faked.
+- **`idea_nodes`** — one row per hypothesis. Dotted-decimal `node_key`
+  (`ROOT`, `1`, `1.2`); `status ∈ pending | running | done | failed | merged |
+  pruned`; absolute dev `score`; `insight`; `code_ref` (branch); `task_id`
+  (the experiment-ledger link to the executor task).
+
+Both tables arrive via `create_all` — no Alembic migration. The DB is the
+source of truth; a markdown twin and `REPORT.md` under `/workspace/.arbor/` are
+audit/display artifacts.
+
+**Cycle budget.** `cycles_spent` counts nodes in a terminal state
+(`done`/`failed`/`merged`/`pruned`) — failed experiments spend budget. The
+mission's `max_iterations` defaults to `2 × max_cycles`.
+
+---
+
+## 4. The three tools
+
+All three are HARNESS-routed and visible **only** on the coordinator session
+while a research run is active — executors stay tree-blind.
+
+- **`idea_tree`** — `view` (the constraints block / a compact leaderboard),
+  `add` (machine-warns on a non-four-line hypothesis), `update`, `prune`
+  (recursive, lesson backpropagated), `set_meta` (closed keys; machine-score
+  keys rejected), `record_from_task` (fold an executor result by task id, then
+  LLM-synthesize ancestors), `requeue` (infra-failure escape hatch — does NOT
+  refund the spent cycle), `propagate` (LLM-synthesize a node's ancestors), and
+  `report` (render `REPORT.md`).
+- **`dispatch_experiments(node_keys=[…])`** — validates the cycle budget, tree
+  depth, leaf-ness, parallelism, and duplicate keys; creates the worktree
+  **server-side** (`git worktree add` off trunk, trunk created lazily on first
+  dispatch); builds the executor brief (the dev `eval_cmd` is rendered; the
+  held-out `eval_cmd_test` is **never** put in front of an executor); and spawns
+  one `arbor-executor` task per node with `max_attempts=1`. `action="baseline"`
+  measures the unmodified repo on dev to seed `baseline_score`.
+- **`merge_experiment`** — the bypass-proof gate. `start(node_key)` launches the
+  held-out eval **detached** (so no sandbox exec is held open across it);
+  `status(node_key)` reads the result, applies the direction-aware improvement +
+  `merge_threshold` + protected-paths guards, and on success does `git merge
+  --no-ff` and writes `test_trunk_score`. **The schema accepts no score
+  argument** — the held-out number is machine-measured here, with an
+  `eval_retries` policy for flaky evals and a staleness re-run for evals
+  orphaned by a pod recycle.
+
+---
+
+## 5. The arbor cycle, turn by turn
+
+1. **Intake** (`/arbor-research <goal>`, a normal full-tool session): discover
+   the repo / eval / dev+test splits, measure the baseline on both splits, and
+   emit a ready-to-send `/auto-research` command with the Research Contract and
+   a machine-anchored rubric. Intake never starts the run — the user sends the
+   command.
+2. **Create**: `/auto-research` creates the research mission, writes the
+   baselines server-side, stamps the session config, and preloads the
+   `arbor-coordinator` skill.
+3. **INIT** (coordinator turn 1): `idea_tree(set_meta …)` with the contract
+   values, then OBSERVE → IDEATE → dispatch.
+4. **IDEATE** (hard-gated): load `arbor-ideate`, write the first-principles
+   PROBE BLOCK, then `idea_tree(add)` 1–3 four-line hypotheses.
+5. **DISPATCH**: `dispatch_experiments(node_keys=[…])`, then **end the turn** —
+   the harvest folds results before the next wake.
+6. **Executors** run in their worktrees, evaluate on dev, and
+   `worker_complete` with structured metadata (and optionally a `FAIL`/`RESULT`
+   board note for siblings to reuse).
+7. **Harvest + OBSERVE + DECIDE** (next wake): the deterministic pre-LLM harvest
+   folds finished experiments, propagates insights, cleans up worktrees, and
+   injects the digest + constraints block + any convergence intervention. The
+   coordinator (read tools restored for OBSERVE) decides:
+   `merge_experiment(start)` for a winner, `idea_tree(prune)` for a dead end.
+8. **FINALIZE** (budget spent / convergence STOP / target hit): merge the best,
+   `idea_tree(report)`, then spawn one report task that creates the artifact and
+   completes with `metadata={"report": true}`.
+
+---
+
+## 6. Convergence steering
+
+A convergence detector watches score velocity and consecutive non-improving
+experiments. On a plateau it escalates **WARNING → PARADIGM SHIFT → STOP** and
+injects an intervention (with the Exploit / Combine / Leap suggestions and the
+list of exhausted parents) into both the harvest digest and the evaluator
+feedback. At PARADIGM SHIFT the next idea must change approach family; at STOP
+the coordinator finalizes unless it can justify a genuinely novel direction.
+Thresholds are tunable via `convergence_*` meta keys; the check is fail-open.
+
+---
+
+## 7. Human-in-the-loop
+
+`meta.hitl_mode` (shown in the constraints block) sets how much the coordinator
+asks:
+
+| Mode | Behavior |
+|---|---|
+| `auto` | Fully autonomous (default). |
+| `direction` | `ask_user_question` for the direction at the start of each IDEATE round. |
+| `review` | `ask_user_question` for approval before dispatch and before finalizing a merge. |
+
+Mid-run chat is a nudge, not a pause. `/auto-research pause`, `resume`, and
+`cancel [--cascade]` control the run (the control verbs delegate to the same
+mission handlers). Questions surface through the [agent inbox](../agent-inbox/index.md)
+over web / Telegram / Slack and survive pod churn.
+
+---
+
+## 8. Resume and durability
+
+Every layer is durable: the run, tree, and mission rows are in Postgres; the
+conversation is the append-only event log (replay is resume); tasks survive in
+the task layer; branches survive in git; worktree directories are
+reconstructible. After any crash the harvest folds whatever finished at the next
+wake and the evaluator's continuation restarts the cycle. A run that outgrows a
+single mission chain continues over the same durable tree.
+
+Research-specific events on the coordinator session — `research.defined`,
+`research.dispatched`, `research.harvested`, `research.merged`,
+`research.pruned`, `research.converged`, `research.report` — are surfaced on the
+mission dashboard's activity feed.
+
+---
+
+## 9. The `research` skill bundle
+
+Hub-published under `skills/research/`:
+
+| Skill | Role | Loaded |
+|---|---|---|
+| `arbor-research` | Intake → Research Contract → `/auto-research` command | user types `/arbor-research` |
+| `arbor-coordinator` | The OBSERVE→IDEATE→SELECT→DISPATCH→DECIDE protocol | preloaded on `/auto-research` |
+| `arbor-ideate` | Hard-gated ideation (PI mindset, probe, four-line format) | `skill_view` at IDEATE |
+| `arbor-merge-discipline` | DECIDE doctrine (merge/prune/combine/finalize) | `skill_view` at DECIDE |
+| `arbor-executor` | Implement+evaluate one hypothesis in a worktree | preloaded on executor task workers |
+
+The `arbor-executor` sub-agent (`AGENT.md`) must be available through one of the
+[sub-agent](../sub-agents/index.md) layers — a per-agent Hub bundle (the
+recommended ops feature-pack path, behind a per-agent `research_enabled` flag),
+an org/user agents bucket file, or an `agents` DB row.
+
+---
+
+## 10. Operational guardrails
+
+- **Strict coordinator.** The coordinator runs in strict mode: code edits,
+  terminal, web, and browser are stripped. A research carve-out restores
+  read-only file tools (`read_file`/`search_files`/`list_files`) for OBSERVE
+  forensics; writes and execution stay stripped.
+- **No score injection.** `merge_experiment` has no score parameter; a held-out
+  improvement is machine-measured. The evaluator demotes a prose `satisfied`
+  to `needs_revision` unless `test_trunk_score` improved on `test_baseline_score`
+  AND a report task is done; it demotes a noisy `failed`/`blocked` unless the
+  budget is genuinely exhausted.
+- **No iteration burn while in flight.** The evaluator skips entirely while any
+  experiment is running.
+- **Fail-open intelligence.** LLM synthesis and the convergence check are
+  wrapped so a provider outage degrades to the deterministic result and never
+  breaks the loop.
+- **Pod limits.** In-pod experiments are bounded by the ~1 h sandbox pod
+  deadline; the executor skill mandates checkpoint-to-`/workspace` and scopes
+  experiments accordingly. Long (>1 h) training via the ops training-runs path
+  is a later increment.
+
+See [Commands](../commands/index.md#auto-research) for the slash-command
+reference and [Tasks → Missions](../tasks/index.md#missions) for the underlying
+mission machinery.

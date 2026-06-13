@@ -63,7 +63,7 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - Shared `agent-chat-react` inbox adapter contract
 
 ### [9. Commands](commands/index.md)
-- Builtin slash commands: `/clear`, `/compress`, `/goal`, `/loop`
+- Builtin slash commands: `/clear`, `/compress`, `/goal`, `/loop`, `/code`, `/auto-research`
 - Dynamic skill commands: `/<skill-name> [args...]`
 - Command resolution order and channel notes
 
@@ -107,6 +107,13 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - `research_memory` + `research_outline` tools (shared `.research/` workspace dir)
 - `create_artifact` Guard 3 (rejects markdown bodies with dangling `[S#]` citations)
 - Operational guardrails: 15-min delegation timeout, planner self-recursion blocked, sub-agent sessions read-only
+
+### [11c. Research Missions (Arbor)](research-missions/index.md)
+- Long-horizon optimization as a cumulative tree search (the Arbor port, hosted on missions)
+- `/auto-research` slash command; the `arbor-research` intake → Research Contract flow
+- Idea Tree state (`research_runs` / `idea_nodes`) and the three tools (`idea_tree`, `dispatch_experiments`, `merge_experiment`)
+- Bypass-proof held-out merge gate, deterministic wake-time harvest, insight backpropagation
+- Convergence steering (WARNING → PARADIGM SHIFT → STOP), HITL modes, the `research` skill bundle
 
 ### [12. Experts](experts/index.md)
 - What is an expert? (task-specialized model as a skill)

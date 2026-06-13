@@ -1,0 +1,345 @@
+"""Dispatch and merge gate tests for the arbor tools, with a fake sandbox.
+
+No real git / K8s / LLM: a ``FakeSandboxPool`` records the shell commands
+the handlers issue and returns scripted stdout, and ``create_task_and_spawn``
+is patched so dispatch never touches the task layer.
+"""
+from __future__ import annotations
+
+import json
+import uuid
+from unittest.mock import AsyncMock, patch
+
+import pytest
+import pytest_asyncio
+
+from surogates.arbor.store import ResearchStore
+from surogates.tools.builtin.arbor import (
+    _dispatch_experiments_handler,
+    _idea_tree_handler,
+    _merge_experiment_handler,
+)
+
+
+class FakeSandboxPool:
+    """Records exec calls; returns scripted stdout by command substring."""
+
+    def __init__(self, responses: dict[str, str] | None = None):
+        self.calls: list[tuple[str, str, str]] = []
+        self.responses: dict[str, str] = responses or {}
+
+    async def ensure(self, session_id, spec):  # noqa: D401 - test stub
+        return session_id
+
+    async def execute(self, session_id, name, input):
+        self.calls.append((session_id, name, input))
+        for needle, out in self.responses.items():
+            if needle in input:
+                return out
+        return ""
+
+
+class _StubSessionStore:
+    async def emit_event(self, *args, **kwargs):
+        return None
+
+
+def _fake_spawn(session_factory, org_id, parent_session_id):
+    """Side effect for create_task_and_spawn: insert a REAL Task row (so the
+    idea_nodes.task_id FK holds) and return the standard result dict."""
+    async def _spawn(**kwargs):
+        from surogates.db.models import Task
+
+        async with session_factory() as db:
+            task = Task(
+                org_id=org_id, parent_session_id=parent_session_id,
+                agent_def_name=kwargs.get("agent_def_name"),
+                goal=kwargs.get("goal") or "g", status="running",
+                max_attempts=kwargs.get("max_attempts", 1),
+            )
+            db.add(task)
+            await db.commit()
+            await db.refresh(task)
+            task_id = task.id
+        return {"task_id": str(task_id), "status": "running",
+                "worker_id": str(uuid.uuid4())}
+    return _spawn
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def dispatch_env(session_factory, seeded_org_and_session):
+    """A run with eval_cmd + eval_cmd_test set, two pending leaves '1'/'2',
+    max_cycles=2, max_parallel=1; plus the HARNESS handler kwargs."""
+    org_id, mission_id, session_id = seeded_org_and_session
+    store = ResearchStore(session_factory)
+    run_id = await store.create_run(
+        org_id=org_id, mission_id=mission_id, session_id=session_id,
+        agent_id="agent-x", repo_path="/workspace/repo",
+        trunk_branch="research/run1/trunk", branch_prefix="research/run1",
+        objective="maximize F1",
+        meta_overrides={"max_cycles": 2, "max_parallel": 1},
+    )
+    await store.set_meta(run_id, {
+        "eval_cmd": "python eval.py --split dev",
+        "eval_cmd_test": "python eval.py --split test",
+    })
+    await store.add_node(run_id, org_id=org_id, parent_key="ROOT", hypothesis="h1")
+    await store.add_node(run_id, org_id=org_id, parent_key="ROOT", hypothesis="h2")
+    pool = FakeSandboxPool()
+    kwargs = {
+        "session_factory": session_factory,
+        "session_config": {"active_research_run_id": str(run_id)},
+        "session_id": str(session_id),
+        "sandbox_pool": pool,
+        "session_store": _StubSessionStore(),
+        "tenant": object(),
+        "redis": object(),
+    }
+    return store, run_id, pool, kwargs
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_dispatch_refuses_when_budget_spent(dispatch_env):
+    store, run_id, _pool, kwargs = dispatch_env
+    await store.update_node(run_id, "1", status="done", insight="i")
+    await store.update_node(run_id, "2", status="failed", insight="t")
+    # cycles_spent == max_cycles == 2 -> refuse before the per-node checks.
+    out = json.loads(await _dispatch_experiments_handler({"node_keys": ["1"]}, **kwargs))
+    assert "budget" in out["error"]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_dispatch_refuses_non_pending(dispatch_env):
+    store, run_id, _pool, kwargs = dispatch_env
+    await store.update_node(run_id, "1", status="running")
+    out = json.loads(await _dispatch_experiments_handler({"node_keys": ["1"]}, **kwargs))
+    assert "pending" in out["error"]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_dispatch_refuses_non_leaf(dispatch_env):
+    store, run_id, org_id_pool, kwargs = dispatch_env
+    # Give node "1" a child so it is no longer a leaf.
+    run = await store.get_run(run_id)
+    await store.add_node(run_id, org_id=run.org_id, parent_key="1", hypothesis="child")
+    out = json.loads(await _dispatch_experiments_handler({"node_keys": ["1"]}, **kwargs))
+    assert "leaf" in out["error"]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_dispatch_creates_worktree_brief_and_task(dispatch_env):
+    store, run_id, pool, kwargs = dispatch_env
+    run = await store.get_run(run_id)
+    spawn = AsyncMock(side_effect=_fake_spawn(
+        kwargs["session_factory"], run.org_id, uuid.UUID(kwargs["session_id"]),
+    ))
+    with patch("surogates.tasks.service.create_task_and_spawn", new=spawn):
+        out = json.loads(await _dispatch_experiments_handler(
+            {"node_keys": ["1"]}, **kwargs,
+        ))
+    assert out["dispatched"] == ["1"]
+
+    node = await store.get_node(run_id, "1")
+    assert node.status == "running"
+    assert node.task_id is not None
+    assert node.code_ref and node.code_ref.startswith("research/run1/")
+    assert node.dispatched_at is not None
+
+    # Worktree created server-side BEFORE the worker's first token.
+    assert any("git worktree add" in i for (_, _, i) in pool.calls)
+
+    # Brief renders the dev command but NEVER the held-out test command.
+    brief = spawn.call_args.kwargs["goal"]
+    assert "eval.py --split dev" in brief
+    assert "eval.py --split test" not in brief
+    assert spawn.call_args.kwargs["max_attempts"] == 1
+    assert spawn.call_args.kwargs["agent_def_name"] == "arbor-executor"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_dispatch_refuses_without_eval_cmd(session_factory, seeded_org_and_session):
+    org_id, mission_id, session_id = seeded_org_and_session
+    store = ResearchStore(session_factory)
+    run_id = await store.create_run(
+        org_id=org_id, mission_id=mission_id, session_id=session_id,
+        agent_id="agent-x", repo_path="/workspace/repo",
+        trunk_branch="research/run2/trunk", branch_prefix="research/run2",
+        objective="o",
+    )
+    await store.add_node(run_id, org_id=org_id, parent_key="ROOT", hypothesis="h")
+    kwargs = {
+        "session_factory": session_factory,
+        "session_config": {"active_research_run_id": str(run_id)},
+        "session_id": str(session_id),
+        "sandbox_pool": FakeSandboxPool(),
+        "session_store": _StubSessionStore(),
+        "tenant": object(), "redis": object(),
+    }
+    out = json.loads(await _dispatch_experiments_handler({"node_keys": ["1"]}, **kwargs))
+    assert "eval_cmd" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# merge_experiment
+# ---------------------------------------------------------------------------
+
+
+async def _merge_run(session_factory, seeded, *, prefix, with_test_eval):
+    org_id, mission_id, session_id = seeded
+    store = ResearchStore(session_factory)
+    run_id = await store.create_run(
+        org_id=org_id, mission_id=mission_id, session_id=session_id,
+        agent_id="agent-x", repo_path="/workspace/repo",
+        trunk_branch=f"{prefix}/trunk", branch_prefix=prefix, objective="o",
+    )
+    meta = {"eval_cmd": "python eval.py --split dev"}
+    if with_test_eval:
+        meta["eval_cmd_test"] = "python eval.py --split test"
+    await store.set_meta(run_id, meta)
+    await store.add_node(run_id, org_id=org_id, parent_key="ROOT", hypothesis="h1")
+    await store.update_node(
+        run_id, "1", status="done", score=0.55,
+        code_ref=f"{prefix}/n1-h1-abcd1234",
+    )
+    pool = FakeSandboxPool()
+    kwargs = {
+        "session_factory": session_factory,
+        "session_config": {"active_research_run_id": str(run_id)},
+        "session_id": str(session_id),
+        "sandbox_pool": pool,
+        "session_store": _StubSessionStore(),
+        "tenant": object(), "redis": object(),
+    }
+    return store, run_id, pool, kwargs
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def merge_env(session_factory, seeded_org_and_session):
+    """A done node '1' but NO eval_cmd_test configured."""
+    return await _merge_run(
+        session_factory, seeded_org_and_session,
+        prefix="research/mrg1", with_test_eval=False,
+    )
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def merge_env_with_eval(session_factory, seeded_org_and_session):
+    """A done node '1' WITH eval_cmd_test; result.json absent until scripted."""
+    return await _merge_run(
+        session_factory, seeded_org_and_session,
+        prefix="research/mrg2", with_test_eval=True,
+    )
+
+
+def test_merge_schema_accepts_no_score_argument():
+    from surogates.tools.builtin.arbor import _MERGE_SCHEMA
+
+    props = _MERGE_SCHEMA.parameters["properties"]
+    assert "score" not in props and "test_score" not in props
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_requires_eval_cmd_test(merge_env):
+    _store, _run_id, _pool, kwargs = merge_env
+    out = json.loads(await _merge_experiment_handler(
+        {"action": "start", "node_key": "1"}, **kwargs,
+    ))
+    assert "eval_cmd_test" in out["error"]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_status_blocks_on_no_improvement(merge_env_with_eval):
+    store, run_id, pool, kwargs = merge_env_with_eval
+    await store.set_meta(run_id, {"test_baseline_score": 0.50}, allow_machine_keys=True)
+    await _merge_experiment_handler({"action": "start", "node_key": "1"}, **kwargs)
+    pool.responses["cat /workspace/.arbor/merge-eval/1/result.json"] = '{"score": 0.40}'
+    out = json.loads(await _merge_experiment_handler(
+        {"action": "status", "node_key": "1"}, **kwargs,
+    ))
+    assert out["merged"] is False and out["test_score"] == 0.40
+    run = await store.get_run(run_id)
+    assert run.meta.get("test_trunk_score") is None  # gate did NOT write
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_status_merges_on_improvement_and_writes_score(merge_env_with_eval):
+    store, run_id, pool, kwargs = merge_env_with_eval
+    await store.set_meta(run_id, {"test_baseline_score": 0.50}, allow_machine_keys=True)
+    await _merge_experiment_handler({"action": "start", "node_key": "1"}, **kwargs)
+    pool.responses["cat /workspace/.arbor/merge-eval/1/result.json"] = '{"score": 0.61}'
+    out = json.loads(await _merge_experiment_handler(
+        {"action": "status", "node_key": "1"}, **kwargs,
+    ))
+    assert out["merged"] is True and out["test_score"] == 0.61
+    run = await store.get_run(run_id)
+    assert run.meta["test_trunk_score"] == 0.61
+    assert (await store.get_node(run_id, "1")).status == "merged"
+    assert any("git merge --no-ff" in i for (_, _, i) in pool.calls)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_status_reports_stale_eval(merge_env_with_eval):
+    store, run_id, pool, kwargs = merge_env_with_eval
+    await _merge_experiment_handler({"action": "start", "node_key": "1"}, **kwargs)
+    # Rewind started_at far past eval_timeout + grace; result.json stays absent.
+    run = await store.get_run(run_id)
+    stamp = dict(run.meta["merge_eval"])
+    stamp["started_at"] = "2000-01-01T00:00:00+00:00"
+    await store.set_meta(run_id, {"merge_eval": stamp}, allow_machine_keys=True)
+    out = json.loads(await _merge_experiment_handler(
+        {"action": "status", "node_key": "1"}, **kwargs,
+    ))
+    assert out.get("stale") is True
+
+
+# ---------------------------------------------------------------------------
+# idea_tree(record_from_task) — the coordinator's correction channel, which
+# resolves the node from the idea_nodes.task_id link and folds via harvest.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_record_from_task_folds_a_real_task(session_factory, seeded_org_and_session):
+    from surogates.db.models import Task
+
+    org_id, mission_id, session_id = seeded_org_and_session
+    store = ResearchStore(session_factory)
+    run_id = await store.create_run(
+        org_id=org_id, mission_id=mission_id, session_id=session_id,
+        agent_id="agent-x", repo_path="/workspace/repo",
+        trunk_branch="research/rec/trunk", branch_prefix="research/rec",
+        objective="o",
+    )
+    await store.add_node(run_id, org_id=org_id, parent_key="ROOT", hypothesis="h1")
+
+    # A real terminal Task carrying a structured report, linked to node "1".
+    async with session_factory() as db:
+        task = Task(
+            org_id=org_id, parent_session_id=session_id,
+            agent_def_name="arbor-executor", goal="g", status="done",
+            max_attempts=1,
+            result="prose", result_metadata={"score": 0.73, "insight": "X helps"},
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        task_id = task.id
+    await store.update_node(run_id, "1", status="running", task_id=task_id)
+
+    kwargs = {
+        "session_factory": session_factory,
+        "session_config": {"active_research_run_id": str(run_id)},
+        "session_id": str(session_id),
+        "sandbox_pool": FakeSandboxPool(),
+        "session_store": _StubSessionStore(),
+        "tenant": object(), "redis": object(),
+    }
+    out = json.loads(await _idea_tree_handler(
+        {"action": "record_from_task", "task_id": str(task_id)}, **kwargs,
+    ))
+    assert out["folded"] == "1"
+    node = await store.get_node(run_id, "1")
+    assert node.status == "done" and node.score == 0.73
+    # Insight propagated up to ROOT.
+    root = await store.get_node(run_id, "ROOT")
+    assert "X helps" in (root.insight or "")
