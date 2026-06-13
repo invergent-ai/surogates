@@ -23,8 +23,8 @@
 - [x] Task 2 — Convergence detector module (`surogates/arbor/convergence.py`)
 - [x] Task 3 — Wire convergence into harvest digest + evaluator feedback
 - [x] Task 4 — INIT fallback: real `dispatch_experiments(action="baseline")`
-- [~] Task 5 — Final-report polish (test deltas, eval commands, convergence note)
-- [ ] Task 6 — Parallel dispatch hardening + multi-node harvest test
+- [x] Task 5 — Final-report polish (test deltas, eval commands, convergence note)
+- [~] Task 6 — Parallel dispatch hardening + multi-node harvest test
 - [ ] Task 7 — `arbor-ideate` skill bundle + coordinator hard-gate reference
 - [ ] Task 8 — `arbor-merge-discipline` skill + HITL/search-scout/board prose + `hitl_mode` in constraints block
 

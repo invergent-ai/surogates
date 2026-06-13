@@ -68,6 +68,13 @@ def build_executor_brief(
     )
 
 
+def _fmt_delta(baseline, trunk) -> str:
+    """Signed held-out delta baseline -> trunk, or 'n/a' when unmeasured."""
+    if baseline is None or trunk is None:
+        return "n/a"
+    return f"{trunk - baseline:+.4g}"
+
+
 def build_report(run: Any, nodes: list[Any]) -> str:
     """Final REPORT.md: held-out test scores primary (the
     final-report-uses-TEST rule), top-10 dev-scored nodes, root insight,
@@ -87,6 +94,11 @@ def build_report(run: Any, nodes: list[Any]) -> str:
         "## Held-out test (authoritative)",
         f"- baseline: {meta.get('test_baseline_score')}",
         f"- final trunk: {meta.get('test_trunk_score')} ({direction})",
+        f"- delta: {_fmt_delta(meta.get('test_baseline_score'), meta.get('test_trunk_score'))}",
+        "",
+        "## Eval commands",
+        f"- dev:  {meta.get('eval_cmd', '(unset)')}",
+        f"- test: {meta.get('eval_cmd_test', '(unset)')}",
         "",
         "## Root insight",
         (root.insight if root and root.insight else "(none recorded)"),
