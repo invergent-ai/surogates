@@ -3045,6 +3045,18 @@ class AgentHarness(
 
                 excluded = set(config.get("excluded_tools") or [])
                 excluded.update(COORDINATOR_IMPLEMENTATION_TOOLS)
+                # Research coordinators get READ access back for OBSERVE
+                # forensics (failure logs, eval output). Writes, terminal,
+                # web, and browser stay stripped — the strict-mode incident
+                # class was the model DOING the work, which still needs tools
+                # it does not have. Reads the user explicitly excluded stay
+                # excluded.
+                if config.get("active_research_run_id"):
+                    user_excluded = set(config.get("excluded_tools") or [])
+                    excluded -= (
+                        {"read_file", "search_files", "list_files"}
+                        - user_excluded
+                    )
                 tool_filter = set(self._tools.tool_names) - excluded
         elif explicit_allowed:
             tool_filter = set(config["allowed_tools"])
