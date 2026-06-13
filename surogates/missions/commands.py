@@ -162,7 +162,19 @@ def parse_auto_research_command(raw: str) -> AutoResearchCommand:
                 f"{key} must be a number, got {kv[key]!r}"
             )
 
-    base = parse_mission_command(text)
+    try:
+        base = parse_mission_command(text)
+    except MissionCommandParseError as exc:
+        # parse_mission_command's message names /mission and omits the
+        # research-specific repo= token. Reframe it for /auto-research so the
+        # operator sees the actual required shape.
+        raise MissionCommandParseError(
+            "a research run needs a repo and a Rubric. Format:\n"
+            "/auto-research repo=/workspace/<repo> [max_iterations=N] "
+            "[baseline=<dev>] [baseline_test=<test>] <objective>\n\n"
+            "Rubric:\n<criteria>\n"
+            "(or a control verb: status | pause | resume | cancel [--cascade])"
+        ) from exc
     return AutoResearchCommand(
         action=base.action, description=base.description, rubric=base.rubric,
         reason=base.reason, cascade_to_workers=base.cascade_to_workers,

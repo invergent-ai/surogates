@@ -50,6 +50,15 @@ def test_parse_requires_rubric():
         parse_auto_research_command("max_iterations=10 no rubric here")
 
 
+def test_parse_error_is_auto_research_specific():
+    # The error must guide toward /auto-research + repo=, not leak /mission.
+    with pytest.raises(MissionCommandParseError) as ei:
+        parse_auto_research_command("improve accuracy of the classifier")
+    msg = str(ei.value)
+    assert "/auto-research" in msg and "repo=" in msg
+    assert "/mission" not in msg
+
+
 def test_parse_plain_create_without_tokens():
     cmd = parse_auto_research_command("Optimize the model\n\nRubric:\n- improves")
     assert cmd.action == "create"
