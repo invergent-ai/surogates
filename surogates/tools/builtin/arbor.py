@@ -478,6 +478,17 @@ async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) ->
                 )})
             if run.trunk_branch in ("main", "master"):
                 return json.dumps({"error": "refusing to operate on main/master as trunk"})
+            # One merge eval at a time: the merge_eval stamp is a single slot,
+            # so starting a second while another node's eval is in flight would
+            # clobber it and orphan the first eval. Refuse — finish that one
+            # first (its status() clears the stamp on a terminal outcome).
+            in_flight = (meta.get("merge_eval") or {}).get("node_key")
+            if in_flight and in_flight != node_key:
+                return json.dumps({"error": (
+                    f"a merge eval for node {in_flight} is already in flight — "
+                    f"poll merge_experiment(status, {in_flight!r}) to finish it "
+                    "before starting another"
+                )})
             await _launch_merge_eval(kwargs, run=run, node_key=node_key, branch=node.code_ref)
             await store.set_meta(run_id, {"merge_eval": {
                 "node_key": node_key,

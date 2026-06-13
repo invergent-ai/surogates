@@ -388,6 +388,29 @@ async def test_merge_restart_after_stale_eval_succeeds(merge_env_with_eval):
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_merge_start_refuses_while_another_eval_in_flight(merge_env_with_eval):
+    # The single merge_eval stamp must not be clobbered by a second start for
+    # a different node — that would orphan the first node's detached eval.
+    store, run_id, pool, kwargs = merge_env_with_eval
+    org = (await store.get_run(run_id)).org_id
+    await store.add_node(run_id, org_id=org, parent_key="ROOT", hypothesis="second")
+    await store.update_node(
+        run_id, "2", status="done", score=0.6, code_ref="research/mrg2/n2-x-bbbb2222",
+    )
+    out1 = json.loads(await _merge_experiment_handler(
+        {"action": "start", "node_key": "1"}, **kwargs,
+    ))
+    assert out1["started"] == "1"
+    out2 = json.loads(await _merge_experiment_handler(
+        {"action": "start", "node_key": "2"}, **kwargs,
+    ))
+    assert "merged" not in out2 and "1" in out2["error"]  # refused, names node 1
+    # Node 1's eval stamp is untouched.
+    run = await store.get_run(run_id)
+    assert run.meta["merge_eval"]["node_key"] == "1"
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_merge_removes_worktree_after_consuming_result(merge_env_with_eval):
     store, run_id, pool, kwargs = merge_env_with_eval
     await store.set_meta(run_id, {"test_baseline_score": 0.50}, allow_machine_keys=True)
