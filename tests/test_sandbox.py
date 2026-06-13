@@ -240,3 +240,75 @@ def test_sandbox_settings_docker_defaults():
     assert s.docker_executor_port_base == 33000
     assert s.docker_ready_timeout == 60
     assert s.docker_network == "bridge"
+
+
+class _BackendWithReap:
+    def __init__(self):
+        self.destroyed_ids = []
+        self.reaped_sessions = []
+
+    async def provision(self, spec):
+        return "sb-1"
+
+    async def execute(self, sandbox_id, name, input):
+        return "{}"
+
+    async def status(self, sandbox_id):
+        from surogates.sandbox.base import SandboxStatus
+        return SandboxStatus.RUNNING
+
+    async def destroy(self, sandbox_id):
+        self.destroyed_ids.append(sandbox_id)
+
+    async def destroy_for_session(self, session_id):
+        self.reaped_sessions.append(session_id)
+
+
+class _BackendNoReap:
+    async def provision(self, spec):
+        return "sb-1"
+
+    async def execute(self, sandbox_id, name, input):
+        return "{}"
+
+    async def status(self, sandbox_id):
+        from surogates.sandbox.base import SandboxStatus
+        return SandboxStatus.RUNNING
+
+    async def destroy(self, sandbox_id):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_pool_destroy_for_session_calls_backend_reap():
+    from surogates.sandbox.base import SandboxSpec
+    from surogates.sandbox.pool import SandboxPool
+
+    backend = _BackendWithReap()
+    pool = SandboxPool(backend)
+    await pool.ensure("root-1", SandboxSpec())
+    await pool.destroy_for_session("root-1")
+    assert backend.destroyed_ids == ["sb-1"]
+    assert backend.reaped_sessions == ["root-1"]
+
+
+@pytest.mark.asyncio
+async def test_pool_destroy_for_session_reaps_without_mapping():
+    from surogates.sandbox.pool import SandboxPool
+
+    backend = _BackendWithReap()
+    pool = SandboxPool(backend)
+    # No ensure() — pool has no mapping, but the backend should still reap.
+    await pool.destroy_for_session("orphan-1")
+    assert backend.destroyed_ids == []
+    assert backend.reaped_sessions == ["orphan-1"]
+
+
+@pytest.mark.asyncio
+async def test_pool_destroy_for_session_without_backend_reap_is_noop():
+    from surogates.sandbox.pool import SandboxPool
+
+    backend = _BackendNoReap()
+    pool = SandboxPool(backend)
+    # Backend has no destroy_for_session — must not raise.
+    await pool.destroy_for_session("root-1")
