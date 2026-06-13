@@ -255,7 +255,13 @@ class DockerSandbox:
     def _build_env(
         self, spec: SandboxSpec, sandbox_id: str, token: str,
     ) -> dict[str, str]:
-        """Base container env. MCP/KB host wiring is layered on in Task 7."""
+        """Container env: base + spec passthrough + MCP/KB host wiring.
+
+        Mirrors the K8s pod manifest's env block, with host-local URLs
+        rewritten so a bridged container can reach host services.
+        """
+        import os
+
         env = {
             "TOOL_EXECUTOR_TOKEN": token,
             "WORKSPACE_DIR": "/workspace",
@@ -268,7 +274,58 @@ class DockerSandbox:
         for key, value in spec.env.items():
             if key not in reserved:
                 env[key] = value
+
+        # MCP proxy -- mirror the K8s pod manifest.
+        if self._mcp_proxy_url:
+            env["MCP_PROXY_URL"] = _rewrite_host_for_container(self._mcp_proxy_url)
+            mcp_token = self._mint_mcp_token(spec, sandbox_id)
+            if mcp_token:
+                env["MCP_PROXY_TOKEN"] = mcp_token
+
+        # KB env passthrough from the worker process, URLs rewritten for the
+        # bridged container. Mirrors the K8s manifest's KB var loop.
+        for kb_var in (
+            "SUROGATES_AGENT_ID",
+            "SUROGATES_OPS_DB_URL",
+            "SUROGATES_KB_HUB_ENDPOINT_URL",
+            "SUROGATES_KB_HUB_ACCESS_KEY_ID",
+            "SUROGATES_KB_HUB_SECRET_ACCESS_KEY",
+        ):
+            val = os.environ.get(kb_var, "")
+            if val:
+                env[kb_var] = (
+                    _rewrite_host_for_container(val)
+                    if kb_var.endswith("_URL")
+                    else val
+                )
         return env
+
+    def _mint_mcp_token(self, spec: SandboxSpec, sandbox_id: str) -> str:
+        """Mint a sandbox->MCP-proxy token, mirroring the K8s manifest.
+
+        Returns "" on any failure (e.g. non-UUID env in local dev) so a
+        misconfigured MCP setup degrades to "MCP tools unavailable" rather
+        than failing the whole provision.
+        """
+        from surogates.tenant.auth.jwt import create_sandbox_token
+
+        zero = "00000000-0000-0000-0000-000000000000"
+        try:
+            session_uuid = (
+                uuid.UUID(spec.session_id) if spec.session_id
+                else uuid.UUID(sandbox_id)
+            )
+            return create_sandbox_token(
+                org_id=uuid.UUID(spec.env.get("ORG_ID", zero)),
+                user_id=uuid.UUID(spec.env.get("USER_ID", zero)),
+                session_id=session_uuid,
+                agent_id=spec.env.get("SUROGATES_AGENT_ID") or None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Could not mint MCP proxy token for docker sandbox: %s", exc,
+            )
+            return ""
 
     def _mountable_workspace(self, workspace_path: str | None) -> Path | None:
         # "/workspace" is the in-pod FUSE sentinel returned by S3Backend; it is

@@ -244,3 +244,54 @@ class TestStatusAndDestroy:
         assert any(c[:2] == ["ps", "-aq"] for c in docker.calls)
         assert any(c[0] == "rm" for c in docker.calls)
         await backend.aclose()
+
+
+class TestHostServiceEnv:
+    async def test_mcp_url_rewritten_and_token_injected(
+        self, healthz_transport, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "surogates.tenant.auth.jwt.create_sandbox_token",
+            lambda **kw: "mcp-tok",
+        )
+        docker = FakeDocker()
+        backend = _backend(
+            docker, healthz_transport,
+            mcp_proxy_url="http://localhost:8001",
+        )
+        spec = SandboxSpec(
+            session_id="11111111-1111-1111-1111-111111111111",
+            env={
+                "ORG_ID": "22222222-2222-2222-2222-222222222222",
+                "USER_ID": "33333333-3333-3333-3333-333333333333",
+                "SUROGATES_AGENT_ID": "agent-9",
+            },
+        )
+        await backend.provision(spec)
+        run_call = next(c for c in docker.calls if c[:2] == ["run", "-d"])
+        joined = " ".join(run_call)
+        assert "MCP_PROXY_URL=http://host.docker.internal:8001" in joined
+        assert "MCP_PROXY_TOKEN=mcp-tok" in joined
+        await backend.aclose()
+
+    async def test_kb_env_passed_with_url_rewrite(
+        self, healthz_transport, monkeypatch
+    ):
+        monkeypatch.setenv("SUROGATES_OPS_DB_URL", "postgresql://localhost:5432/ops")
+        monkeypatch.setenv("SUROGATES_KB_HUB_ACCESS_KEY_ID", "ak-1")
+        docker = FakeDocker()
+        backend = _backend(docker, healthz_transport)
+        await backend.provision(SandboxSpec(session_id="root-1"))
+        run_call = next(c for c in docker.calls if c[:2] == ["run", "-d"])
+        joined = " ".join(run_call)
+        assert "SUROGATES_OPS_DB_URL=postgresql://host.docker.internal:5432/ops" in joined
+        assert "SUROGATES_KB_HUB_ACCESS_KEY_ID=ak-1" in joined
+        await backend.aclose()
+
+    async def test_no_mcp_env_when_proxy_url_unset(self, healthz_transport):
+        docker = FakeDocker()
+        backend = _backend(docker, healthz_transport)  # mcp_proxy_url defaults to ""
+        await backend.provision(SandboxSpec(session_id="root-1"))
+        run_call = next(c for c in docker.calls if c[:2] == ["run", "-d"])
+        assert "MCP_PROXY_URL=" not in " ".join(run_call)
+        await backend.aclose()
