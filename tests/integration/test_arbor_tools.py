@@ -547,3 +547,28 @@ async def test_create_session_for_task_passes_bundle_to_resolver():
         )
     assert captured["bundle"] is sentinel_bundle
     assert captured["name"] == "arbor-executor"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_eval_extractor_written_where_eval_runs_it(merge_env_with_eval):
+    """The detached held-out eval runs ``python3 <extractor>``; the
+    extractor must be written to that exact path or the merge gate reads
+    no score and nothing ever merges (the .arbor/ vs root path bug)."""
+    _store, _run_id, pool, kwargs = merge_env_with_eval
+    await _merge_experiment_handler({"action": "start", "node_key": "1"}, **kwargs)
+
+    writes = [
+        json.loads(i) for (_, name, i) in pool.calls if name == "write_file"
+    ]
+    extractor_paths = [
+        w["path"] for w in writes
+        if str(w.get("path", "")).endswith("extract_score.py")
+    ]
+    assert extractor_paths == ["/workspace/.arbor/extract_score.py"], (
+        extractor_paths
+    )
+    # The launched eval references the SAME absolute path it was written to.
+    assert any(
+        "python3 /workspace/.arbor/extract_score.py" in i
+        for (_, _, i) in pool.calls
+    ), "eval command does not run the extractor at its written path"

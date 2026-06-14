@@ -449,8 +449,10 @@ async def _launch_merge_eval(kwargs, *, run, node_key: str, branch: str) -> None
     meta = run.meta or {}
     evald = _merge_eval_dir(node_key)
     extractor = "/workspace/.arbor/extract_score.py"
+    # Must match ``extractor`` above — the detached eval runs it by that
+    # absolute path. ``write_file`` creates the ``.arbor`` parent dir.
     await _persist_workspace_file(
-        kwargs, path="extract_score.py", content=_SCORE_EXTRACTOR,
+        kwargs, path=".arbor/extract_score.py", content=_SCORE_EXTRACTOR,
     )
     eval_cmd_test = meta["eval_cmd_test"]
     await _sandbox_sh(kwargs, (
