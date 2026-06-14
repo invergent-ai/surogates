@@ -645,6 +645,10 @@ function cancelledToolLabel(toolName: string): string {
     research_outline: "Research",
     generate_image: "image generation",
     generate_video: "video generation",
+    // Arbor research-mission tools (the /auto-research coordinator loop).
+    idea_tree: "Idea tree",
+    dispatch_experiments: "Dispatch experiments",
+    merge_experiment: "Merge experiment",
 
   };
   if (map[toolName]) return map[toolName];
@@ -1117,6 +1121,19 @@ function extractToolDetail(tc: ToolCallInfo): string | null {
       const prompt = stringArg("prompt");
       return prompt ? truncate(prompt, 60) : null;
     }
+    case "idea_tree":
+      // The action ("add", "view", "report", …) is the meaningful verb;
+      // the header reads "Idea tree · report".
+      return stringArg("action");
+    case "dispatch_experiments": {
+      const keys = args.node_keys;
+      if (Array.isArray(keys) && keys.length > 0) {
+        return truncate(keys.map((k) => String(k)).join(", "), 40);
+      }
+      return stringArg("action");
+    }
+    case "merge_experiment":
+      return stringArg("node_key") ?? stringArg("action");
     case "memory":
       return stringArg("action") ?? stringArg("key");
     case "research_memory": {

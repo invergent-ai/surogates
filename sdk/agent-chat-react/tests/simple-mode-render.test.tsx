@@ -166,6 +166,43 @@ describe("Simple mode ChatThread rendering", () => {
     expect(dom.textContent).not.toMatch(/^Patch$/m);
   });
 
+  it("labels arbor research tools in Simple mode instead of raw tool names", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "iter-0",
+        role: "assistant",
+        content: "",
+        createdAt: new Date(),
+        status: "complete",
+        turnId: "t-arbor",
+        iterationIndex: 0,
+        toolCalls: [
+          {
+            id: "a1",
+            toolName: "idea_tree",
+            args: JSON.stringify({ action: "report" }),
+            status: "complete",
+            result: "{}",
+          },
+        ],
+      },
+    ];
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={messages}
+        isRunning={false}
+        terminal={true}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+    // Friendly label + action detail, not the raw snake_case tool name.
+    expect(dom.textContent).toContain("Idea tree");
+    expect(dom.textContent).not.toContain("idea_tree");
+  });
+
   it("Expert mode renders the per-tool timeline and hides the TurnSummaryCard", () => {
     const messages = [assistantMessage()];
     const dom = mount(
