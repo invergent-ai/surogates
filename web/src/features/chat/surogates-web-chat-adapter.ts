@@ -308,6 +308,17 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     return stream;
   },
 
+  async pollEvents(input) {
+    // Reconciliation backstop behind openEventStream: the SDK runtime polls
+    // this independently of stream health so any dropped/idle-killed/
+    // prematurely-closed SSE connection self-heals.
+    const page = await sessionsApi.pollSessionEvents(input.sessionId, {
+      afterId: input.after,
+      limit: input.limit ?? 200,
+    });
+    return { events: page.events, hasMore: page.hasMore };
+  },
+
   browserLiveViewUrl(sessionId) {
     const url = new URL(
       `/api/v1/sessions/${sessionId}/browser/live/`,

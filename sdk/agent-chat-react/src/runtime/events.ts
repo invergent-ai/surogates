@@ -47,3 +47,12 @@ export const AGENT_CHAT_LISTENED_EVENTS = [
   "iteration.summary",
   "turn.summary",
 ] as const satisfies readonly AgentChatEventType[];
+
+/** Membership set for the listened events above.  The reconciliation poll
+ * receives every persisted event type (including ones the reducer has no
+ * case for); applying an unhandled type would drive the reducer to
+ * ``undefined``.  Filtering through this set keeps the poll path aligned
+ * with the SSE path, which only ever subscribes to the listed types. */
+export const AGENT_CHAT_LISTENED_EVENT_SET: ReadonlySet<string> = new Set(
+  AGENT_CHAT_LISTENED_EVENTS,
+);

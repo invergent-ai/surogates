@@ -1,12 +1,14 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
 import { useAgentChatRuntime } from "../src/runtime/use-agent-chat-runtime";
 import type {
   AgentChatAdapter,
+  AgentChatEventsPage,
   AgentChatEventStream,
   AgentChatEventType,
+  AgentChatPolledEvent,
   AgentChatRuntimeApi,
   AgentChatSession,
   AgentChatSseMessageEvent,
@@ -1088,6 +1090,215 @@ describe("useAgentChatRuntime — attachment upload orchestration", () => {
     });
 
     expect(uploads[0]?.filename).toMatch(/^\d+-0-attachment$/);
+  });
+});
+
+describe("useAgentChatRuntime — reconciliation safety net", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function buildReconcilerAdapter(opts: {
+    status?: () => string;
+    config?: () => Record<string, unknown> | undefined;
+    poll?: (after: number) => AgentChatEventsPage;
+    withoutPoll?: boolean;
+  }): {
+    adapter: AgentChatAdapter;
+    opened: FakeEventStream[];
+    pollAfters: number[];
+  } {
+    const opened: FakeEventStream[] = [];
+    const pollAfters: number[] = [];
+    const base = createFakeAdapter({
+      opened: [],
+      sent: [],
+      paused: [],
+      retried: [],
+      created: [],
+    });
+    const adapter: AgentChatAdapter = {
+      ...base,
+      async getSession(input) {
+        return {
+          id: input.sessionId,
+          status: opts.status?.() ?? "active",
+          config: opts.config?.(),
+        };
+      },
+      openEventStream(input) {
+        const stream = new FakeEventStream();
+        opened.push(stream);
+        // mirror the cursor onto the stream for assertions
+        (stream as unknown as { openedAfter: number }).openedAfter =
+          input.after;
+        return stream;
+      },
+    };
+    if (!opts.withoutPoll) {
+      adapter.pollEvents = async (input) => {
+        pollAfters.push(input.after);
+        return opts.poll
+          ? opts.poll(input.after)
+          : { events: [], hasMore: false };
+      };
+    }
+    return { adapter, opened, pollAfters };
+  }
+
+  it("self-heals a frozen stream by polling missed events and reviving the stream", async () => {
+    let status = "active";
+    const polled: AgentChatPolledEvent[] = [];
+    const { adapter, opened } = buildReconcilerAdapter({
+      status: () => status,
+      // A mission session: the server can resume autonomously, which is
+      // exactly when a frozen client would otherwise stall forever.
+      config: () => ({ active_mission_id: "m-1" }),
+      poll: (after) => ({
+        events: polled.filter((e) => e.id > after),
+        hasMore: false,
+      }),
+    });
+
+    const runtime = renderRuntime({ adapter, sessionId: "s-1" });
+
+    // The live turn streams to completion.
+    act(() => {
+      opened[0]?.emit("user.message", 1, { content: "go" });
+      opened[0]?.emit("llm.delta", 2, { content: "partial" });
+      opened[0]?.emit("llm.response", 3, {
+        message: { role: "assistant", content: "partial" },
+      });
+      opened[0]?.emit("session.complete", 4, {});
+      opened[0]?.emit("session.done", 0, { status: "completed" });
+    });
+
+    // The stream then "freezes": onerror fires AFTER the done-latch has
+    // committed (as it does in the real app, asynchronously), so the
+    // built-in reconnect declines and the thread is dead.
+    act(() => {
+      opened[0]?.onerror?.();
+    });
+
+    expect(runtime.api.isRunning).toBe(false);
+    expect(opened).toHaveLength(1); // no reconnect — the stream is dead
+
+    // The server actually kept going: the mission resumed and produced a
+    // final answer the dead stream never delivered.
+    status = "active";
+    polled.push(
+      { id: 5, type: "session.resume", data: {} },
+      { id: 6, type: "llm.delta", data: { content: "final answer" } },
+      {
+        id: 7,
+        type: "llm.response",
+        data: { message: { role: "assistant", content: "final answer" } },
+      },
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    // The reconciliation poll delivered the missed events...
+    expect(
+      runtime.api.messages.some((m) => m.content === "final answer"),
+    ).toBe(true);
+    // ...and the fast SSE path was revived.
+    expect(opened.length).toBeGreaterThanOrEqual(2);
+
+    // The revived stream replays from its open cursor, re-delivering the
+    // events the poll already applied.  The monotonic dedup guard must drop
+    // them so "final answer" is not doubled.
+    const revived = opened[opened.length - 1]!;
+    act(() => {
+      revived.emit("session.resume", 5, {});
+      revived.emit("llm.delta", 6, { content: "final answer" });
+      revived.emit("llm.response", 7, {
+        message: { role: "assistant", content: "final answer" },
+      });
+    });
+    expect(
+      runtime.api.messages.filter((m) => m.content === "final answer"),
+    ).toHaveLength(1);
+  });
+
+  it("does not double-apply an event delivered by both the stream and the poll", async () => {
+    const { adapter, opened } = buildReconcilerAdapter({
+      status: () => "active",
+      // The poll always returns event id 1 regardless of cursor — the
+      // worst-case overlap the dedup guard must absorb.
+      poll: () => ({
+        events: [{ id: 1, type: "llm.delta", data: { content: "X" } }],
+        hasMore: false,
+      }),
+    });
+
+    const runtime = renderRuntime({ adapter, sessionId: "s-1" });
+
+    act(() => {
+      opened[0]?.emit("llm.delta", 1, { content: "X" });
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    const assistant = runtime.api.messages.find((m) => m.role === "assistant");
+    expect(assistant?.content).toBe("X"); // not "XX"
+  });
+
+  it("revives a dead stream even without pollEvents when the session is live", async () => {
+    const { adapter, opened } = buildReconcilerAdapter({
+      status: () => "active",
+      withoutPoll: true,
+    });
+
+    const runtime = renderRuntime({ adapter, sessionId: "s-1" });
+
+    act(() => {
+      opened[0]?.emit("session.done", 0, { status: "completed" });
+    });
+    act(() => {
+      opened[0]?.onerror?.();
+    });
+    expect(opened).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    // Status-only reconciliation: the server says active, so the stream is
+    // reopened even though this adapter cannot poll events.
+    expect(opened.length).toBeGreaterThanOrEqual(2);
+    expect(runtime.api).toBeDefined();
+  });
+
+  it("does not revive the stream for a finished non-mission session", async () => {
+    const { adapter, opened } = buildReconcilerAdapter({
+      status: () => "completed",
+      config: () => ({}),
+    });
+
+    renderRuntime({ adapter, sessionId: "s-1" });
+
+    act(() => {
+      opened[0]?.emit("session.done", 0, { status: "completed" });
+    });
+    act(() => {
+      opened[0]?.onerror?.();
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(8000);
+    });
+
+    // A genuinely-done chat only resumes on a local user action, so the
+    // reconciler must not churn the stream open again.
+    expect(opened).toHaveLength(1);
   });
 });
 

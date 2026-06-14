@@ -721,6 +721,21 @@ export interface AgentChatSseMessageEvent {
   lastEventId: string;
 }
 
+/** A single session event pulled via {@link AgentChatAdapter.pollEvents}.
+ *  Mirrors the persisted DB event: a monotonic ``id``, the event ``type``,
+ *  and its JSON ``data`` payload. */
+export interface AgentChatPolledEvent {
+  id: number;
+  type: string;
+  data: Record<string, unknown>;
+}
+
+export interface AgentChatEventsPage {
+  events: AgentChatPolledEvent[];
+  /** True when more events exist past this page (cursor < newest). */
+  hasMore: boolean;
+}
+
 export interface AgentChatEventStream {
   addEventListener(
     type: AgentChatEventType,
@@ -910,6 +925,21 @@ export interface AgentChatAdapter {
     sessionId: string;
     after: number;
   }): AgentChatEventStream;
+  /**
+   * One-shot pull of session events after a cursor — the reconciliation
+   * safety net behind {@link openEventStream}.  The runtime polls this on a
+   * timer independently of SSE health, so any stream failure (premature
+   * close, proxy idle-kill, a missed reconnect, a stale done-latch) self-
+   * heals: the next poll delivers whatever the live stream dropped and the
+   * stream is revived.  Events are deduplicated by ``id`` against the SSE
+   * path, so the two channels run concurrently without double-applying.
+   * Optional — adapters that omit it degrade to SSE-only (no safety net).
+   */
+  pollEvents?(input: {
+    sessionId: string;
+    after: number;
+    limit?: number;
+  }): Promise<AgentChatEventsPage>;
   getBrowserState(sessionId: string): Promise<AgentChatBrowserStateResponse | null>;
   getBrowserPreviewSnapshot?(
     sessionId: string,

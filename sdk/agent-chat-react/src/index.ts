@@ -105,6 +105,8 @@ export type {
   AgentChatImageAttachment,
   AgentChatPendingAttachment,
   AgentChatResearchSource,
+  AgentChatEventsPage,
+  AgentChatPolledEvent,
   AgentChatEventStream,
   AgentChatEventType,
   AgentChatExpertFeedbackRating,
