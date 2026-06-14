@@ -2,6 +2,22 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+## Execution Todo List
+
+- [x] Task 1: `SkillOverride` schema + `skill_overrides` field on `PromptRequest`
+- [ ] Task 2: Feature flag `skill_overrides_enabled`
+- [ ] Task 3: Store `skill_overrides` into `session.config` at prompt submission
+- [ ] Task 4: Loader override layer (`_apply_overrides` + `load_skills(overrides=)`)
+- [ ] Task 5: API `view_skill` resolves overrides (shared-runtime path)
+- [ ] Task 6: API `list_skills` honors overrides (catalog completeness)
+- [ ] Task 7: `HarnessAPIClient.list_skills` forwards `session_id`
+- [ ] Task 8: Slash `/<skill>` expansion uses override content (coverage)
+- [ ] Task 9: Audit — enrich `skill.invoked` when an override was used
+- [ ] Task 10: Worker-local `skill_view` applies overrides (dedicated-agent path)
+- [ ] Task 11: Full-suite verification
+
+> **Execution note (discovered during implementation):** the integration-test reference `tests/integration/test_skills_sa_token.py` is stale on this branch — it sets `settings.platform_skills_dir`, a field that no longer exists on `Settings` (platform skills are now bundle-only), so it errors at fixture setup. Tasks 5/6 therefore wire a fake Hub bundle + `RuntimeConfigCache` instead of the dead `platform_skills_dir` path.
+
 **Goal:** Let an authorized service-account prompt submission attach a candidate `SKILL.md` body to a single Surogates session, so that session's `/<skill>` expansion and `skill_view` resolve the candidate content instead of the published skill — without mutating any skill catalog or redeploying the agent.
 
 **Architecture:** A new `skill_overrides` map is stored on `session.config` at prompt-submission time (gated to service accounts + a feature flag). Skill resolution gains a single highest-precedence override layer applied via `dataclasses.replace`, which patches the candidate's `content`/`description`/`trigger` onto the *original* `SkillDef` while preserving its `source` — so supporting-file staging continues to work from the original bundle/storage. The shared-runtime path (API skill routes) and the worker-local path (`_skill_view_handler`) both read the session's overrides and pass them into `ResourceLoader.load_skills(overrides=...)`. The harness audit trail records that an override was used.
