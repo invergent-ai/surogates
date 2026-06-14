@@ -22,7 +22,7 @@ import asyncio
 import json
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -194,12 +194,49 @@ class ResourceLoader:
     # Skills
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _apply_overrides(
+        skills: list["SkillDef"],
+        overrides: dict[str, dict] | None,
+    ) -> list["SkillDef"]:
+        """Apply session-scoped candidate overrides as the top layer.
+
+        For each ``{name: {content, description?, trigger?, ...}}`` entry,
+        field-merge the candidate onto the matching ``SkillDef`` via
+        ``dataclasses.replace`` so ``source``/``category``/expert fields are
+        preserved — keeping supporting-file staging pointed at the original
+        skill source.  A name with no matching base is ignored; SkillOpt
+        optimizes an existing bound skill and must not inject a new session-only
+        command that is not present in the target agent's catalog.
+
+        Returns a NEW list; the input is not mutated.  ``None``/empty
+        ``overrides`` returns the input list unchanged (identity).
+        """
+        if not overrides:
+            return skills
+        by_name: dict[str, SkillDef] = {s.name: s for s in skills}
+        for name, ov in overrides.items():
+            content = ov.get("content")
+            if not content:
+                continue
+            base = by_name.get(name)
+            if base is None:
+                continue
+            by_name[name] = replace(
+                base,
+                content=content,
+                description=ov.get("description") or base.description,
+                trigger=ov.get("trigger") if ov.get("trigger") is not None else base.trigger,
+            )
+        return list(by_name.values())
+
     async def load_skills(
         self,
         tenant: Any,
         db_session: Any | None = None,
         bundle: Any | None = None,
         system_bundle: Any | None = None,
+        overrides: dict[str, dict] | None = None,
     ) -> list[SkillDef]:
         """Merge skills from the system bundle, per-agent bundle, user
         files, and DB layers.
@@ -287,11 +324,13 @@ class ResourceLoader:
                 )
             else:
                 user_db = []
-            return self._merge(platform, user_files, org_db, user_db)
+            return self._apply_overrides(
+                self._merge(platform, user_files, org_db, user_db), overrides,
+            )
 
         # Fallback for the tests / paths that don't pass a session: just
         # the bundle + user-file merge.
-        return self._merge(platform, user_files)
+        return self._apply_overrides(self._merge(platform, user_files), overrides)
 
     # ------------------------------------------------------------------
     # Conditional skill filtering
