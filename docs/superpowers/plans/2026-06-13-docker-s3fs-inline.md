@@ -19,7 +19,7 @@ Status updated before each commit. Legend: `[ ]` pending · `[~]` in progress ·
 - [x] Task 3: `DockerSandbox` mode detection + `storage_settings`
 - [x] Task 4: `DockerSandbox` per-mode run args + env
 - [x] Task 5: Worker wiring + `config.dev.yaml` back to s3
-- [~] Task 6: Opt-in integration test (real docker + R2)
+- [x] Task 6: Opt-in integration test (real docker + R2) — **verified e2e**: DockerSandbox s3fs provision → write → readback OK; fresh geesefs mount confirmed the file persisted to R2.
 
 ---
 
