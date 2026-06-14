@@ -158,6 +158,11 @@ export interface AgentChatErrorInfo {
   title: string;
   detail: string;
   retryable: boolean;
+  /** True when the failure is the platform's token-credit gate returning
+   * 402 ``insufficient_credits`` (not a model-provider error). The UI
+   * renders a "buy credits / upgrade" card with a billing CTA instead of
+   * the generic error bubble. */
+  insufficientCredits?: boolean;
 }
 
 export interface AgentChatSession {

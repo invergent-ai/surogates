@@ -56,6 +56,13 @@ export interface AgentChatProps {
    * not rendered.
    */
   onOpenIntegrations?: () => void;
+  /**
+   * Navigate to the host's billing page. When provided, a 402
+   * ``insufficient_credits`` failure renders a "buy credits / upgrade"
+   * card with a "Go to Billing" button that calls this. The host owns the
+   * billing route.
+   */
+  onOpenBilling?: () => void;
 }
 
 // CSS variable controlling the desktop right-stack width. Inlined as a style
@@ -77,6 +84,7 @@ export function AgentChat({
   researchEnabled = false,
   codeAgentsEnabled = false,
   onOpenIntegrations,
+  onOpenBilling,
 }: AgentChatProps) {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   // On phones the chat and workspace panes don't fit side-by-side. A
@@ -174,6 +182,7 @@ export function AgentChat({
         adapter,
         sessionId,
         onFileSelect: handleFileSelect,
+        onOpenBilling,
       }}
     >
       <TooltipProvider>

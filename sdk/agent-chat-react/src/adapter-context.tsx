@@ -5,6 +5,9 @@ export interface AgentChatAdapterContextValue {
   adapter: AgentChatAdapter;
   sessionId: string | null;
   onFileSelect?: (path: string) => void;
+  /** Navigate to the host's billing page. Wired by the host through
+   *  ``AgentChat``; consumed by the insufficient-credits card. */
+  onOpenBilling?: () => void;
 }
 
 const AgentChatAdapterContext =
