@@ -353,6 +353,54 @@ export interface AgentChatMissionList {
   missions: AgentChatMissionSummary[];
 }
 
+// Research missions (Arbor) — the Idea Tree behind an `/auto-research` run.
+// Mirrors `GET /v1/missions/{id}/research` (see surogates
+// `api/routes/missions.py::get_mission_research`). Only present for
+// missions that carry a `research_runs` row; the dashboard probes the
+// endpoint and hides the Research tab on 404.
+
+export interface AgentChatResearchRun {
+  id: string;
+  status: string;
+  repoPath: string;
+  trunkBranch: string;
+  objective: string | null;
+  metricDirection: string;
+  /** Dev-split scores: where the run started vs. the current trunk. */
+  baselineScore: number | null;
+  trunkScore: number | null;
+  /** Held-out test-split scores (authoritative for merge decisions). */
+  testBaselineScore: number | null;
+  testTrunkScore: number | null;
+  evalCmd: string | null;
+  evalCmdTest: string | null;
+  maxCycles: number | null;
+  maxParallel: number | null;
+  mergeThreshold: number | null;
+}
+
+export interface AgentChatIdeaNode {
+  /** Dotted-decimal key: "ROOT", "1", "1.2". */
+  nodeKey: string;
+  parentKey: string | null;
+  depth: number;
+  status: string;
+  hypothesis: string;
+  /** Absolute dev-split score (never a delta); null until evaluated. */
+  score: number | null;
+  insight: string | null;
+  result: string | null;
+  codeRef: string | null;
+  taskId: string | null;
+  createdAt: string | null;
+  completedAt: string | null;
+}
+
+export interface AgentChatMissionResearch {
+  run: AgentChatResearchRun;
+  nodes: AgentChatIdeaNode[];
+}
+
 export interface CodingAgentConnection {
   provider: "anthropic" | "openai";
   connected: boolean;
@@ -725,6 +773,12 @@ export interface AgentChatAdapter {
   getMissionWorkers?(input: {
     missionId: string;
   }): Promise<{ workers: AgentChatMissionWorker[] }>;
+  /** Arbor Idea Tree for a research (`/auto-research`) mission. Optional
+   * and probed at runtime: the dashboard shows the Research tab only when
+   * this resolves; a rejection (404 for non-research missions) hides it. */
+  getMissionResearch?(input: {
+    missionId: string;
+  }): Promise<AgentChatMissionResearch>;
   /** Mission-wide event feed (Activity tab + per-task history /
    * live output). Optional — unlike the other mission methods the
    * dashboard probes for this at runtime and hides the event-driven

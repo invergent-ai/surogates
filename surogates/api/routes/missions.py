@@ -207,6 +207,79 @@ async def get_mission_tasks(
     return {"tasks": payload}
 
 
+def _research_run_payload(run: Any) -> dict[str, Any]:
+    """Serialize a ResearchRun row + its mirrored ``meta`` scores."""
+    meta = run.meta or {}
+    return {
+        "id": str(run.id),
+        "status": run.status,
+        "repo_path": run.repo_path,
+        "trunk_branch": run.trunk_branch,
+        "objective": meta.get("objective"),
+        "metric_direction": meta.get("metric_direction", "maximize"),
+        "baseline_score": meta.get("baseline_score"),
+        "trunk_score": meta.get("trunk_score"),
+        "test_baseline_score": meta.get("test_baseline_score"),
+        "test_trunk_score": meta.get("test_trunk_score"),
+        "eval_cmd": meta.get("eval_cmd"),
+        "eval_cmd_test": meta.get("eval_cmd_test"),
+        "max_cycles": meta.get("max_cycles"),
+        "max_parallel": meta.get("max_parallel"),
+        "merge_threshold": meta.get("merge_threshold"),
+    }
+
+
+def _idea_node_payload(n: Any) -> dict[str, Any]:
+    """Serialize one IdeaNode for the Research tab tree."""
+    return {
+        "node_key": n.node_key,
+        "parent_key": n.parent_key,
+        "depth": n.depth,
+        "status": n.status,
+        "hypothesis": n.hypothesis,
+        "score": n.score,
+        "insight": n.insight,
+        "result": n.result,
+        "code_ref": n.code_ref,
+        "task_id": str(n.task_id) if n.task_id else None,
+        "created_at": n.created_at.isoformat() if n.created_at else None,
+        "completed_at": (
+            n.completed_at.isoformat() if n.completed_at else None
+        ),
+    }
+
+
+@router.get("/{mission_id}/research")
+async def get_mission_research(
+    mission_id: UUID,
+    session_factory: async_sessionmaker = Depends(_session_factory_dep),
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> dict[str, Any]:
+    """Return the Arbor research run + Idea Tree for a research mission.
+
+    404s when the mission has no ``research_runs`` row (it isn't a
+    research mission), so a client can probe this endpoint to decide
+    whether to surface the Research tab.
+    """
+    await _load_mission_authorized(
+        mission_id, session_factory=session_factory, tenant=tenant,
+    )
+    from surogates.arbor.store import ResearchStore
+
+    store = ResearchStore(session_factory)
+    run = await store.get_run_for_mission(mission_id)
+    if run is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"mission {mission_id} has no research run",
+        )
+    nodes = await store.list_nodes(run.id)
+    return {
+        "run": _research_run_payload(run),
+        "nodes": [_idea_node_payload(n) for n in nodes],
+    }
+
+
 @router.get("/{mission_id}/workers")
 async def get_mission_workers(
     mission_id: UUID,

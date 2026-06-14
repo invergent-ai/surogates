@@ -20,6 +20,7 @@ import type {
   AgentChatAdapter,
   AgentChatInboxEventStream,
   AgentChatInboxStreamEvent,
+  AgentChatMissionResearch,
   AgentChatMissionSummary,
   AgentChatMissionTask,
   AgentChatMissionWorker,
@@ -367,6 +368,12 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     return { workers: response.workers.map(toAgentChatMissionWorker) };
   },
 
+  async getMissionResearch(input) {
+    return toAgentChatMissionResearch(
+      await missionsApi.getMissionResearch(input.missionId),
+    );
+  },
+
   async listMissionEvents(input) {
     const page = await missionsApi.getMissionEvents(input.missionId, {
       afterId: input.afterId,
@@ -520,6 +527,45 @@ function toAgentChatMissionWorker(
     latestEventAt: row.latest_event_at,
     latestEventSummary: row.latest_event_summary,
     transcriptUrl: row.transcript_url,
+  };
+}
+
+function toAgentChatMissionResearch(
+  wire: missionsApi.MissionResearchRow,
+): AgentChatMissionResearch {
+  const r = wire.run;
+  return {
+    run: {
+      id: r.id,
+      status: r.status,
+      repoPath: r.repo_path,
+      trunkBranch: r.trunk_branch,
+      objective: r.objective,
+      metricDirection: r.metric_direction,
+      baselineScore: r.baseline_score,
+      trunkScore: r.trunk_score,
+      testBaselineScore: r.test_baseline_score,
+      testTrunkScore: r.test_trunk_score,
+      evalCmd: r.eval_cmd,
+      evalCmdTest: r.eval_cmd_test,
+      maxCycles: r.max_cycles,
+      maxParallel: r.max_parallel,
+      mergeThreshold: r.merge_threshold,
+    },
+    nodes: wire.nodes.map((n) => ({
+      nodeKey: n.node_key,
+      parentKey: n.parent_key,
+      depth: n.depth,
+      status: n.status,
+      hypothesis: n.hypothesis,
+      score: n.score,
+      insight: n.insight,
+      result: n.result,
+      codeRef: n.code_ref,
+      taskId: n.task_id,
+      createdAt: n.created_at,
+      completedAt: n.completed_at,
+    })),
   };
 }
 

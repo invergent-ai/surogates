@@ -654,3 +654,78 @@ async def test_get_mission_events_cross_tenant_404(
             headers=stranger.auth_headers,
         )
     assert resp.status_code == 404, resp.text
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_get_mission_research(inbox_app, session_factory, session_store):
+    """GET /v1/missions/{id}/research returns the run + Idea Tree."""
+    from surogates.arbor.store import ResearchStore
+
+    user_session = await create_user_token_session(
+        session_factory, session_store, agent_id="orchestrator",
+    )
+    store = MissionStore(session_factory)
+    created = await handle_mission_create(
+        description="improve F1", rubric="test_trunk_score improves",
+        session_id=user_session.session.id,
+        user_id=user_session.user_id, org_id=user_session.org_id,
+        agent_id="orchestrator",
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store,
+    )
+    research = ResearchStore(session_factory)
+    run_id = await research.create_run(
+        org_id=user_session.org_id, mission_id=created.mission_id,
+        session_id=user_session.session.id, agent_id="orchestrator",
+        repo_path="/workspace/bench", trunk_branch="research/run1/trunk",
+        branch_prefix="research/run1", objective="improve F1",
+    )
+    await research.set_meta(run_id, {
+        "baseline_score": 0.5, "eval_cmd": "python eval.py --split dev",
+    })
+    await research.add_node(
+        run_id, org_id=user_session.org_id, parent_key="ROOT",
+        hypothesis="Mechanism: lexicon",
+    )
+    await research.update_node(run_id, "1", status="done", score=0.8)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=inbox_app), base_url="http://test",
+    ) as client:
+        resp = await client.get(
+            f"/v1/missions/{created.mission_id}/research",
+            headers=user_session.auth_headers,
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["run"]["repo_path"] == "/workspace/bench"
+    assert body["run"]["baseline_score"] == 0.5
+    keys = {n["node_key"]: n for n in body["nodes"]}
+    assert keys["ROOT"]["status"] == "pending"
+    assert keys["1"]["status"] == "done" and keys["1"]["score"] == 0.8
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_get_mission_research_404_for_plain_mission(
+    inbox_app, session_factory, session_store,
+):
+    """A non-research mission 404s so the client can hide the tab."""
+    user_session = await create_user_token_session(
+        session_factory, session_store, agent_id="orchestrator",
+    )
+    store = MissionStore(session_factory)
+    created = await handle_mission_create(
+        description="d", rubric="r",
+        session_id=user_session.session.id,
+        user_id=user_session.user_id, org_id=user_session.org_id,
+        agent_id="orchestrator",
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store,
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=inbox_app), base_url="http://test",
+    ) as client:
+        resp = await client.get(
+            f"/v1/missions/{created.mission_id}/research",
+            headers=user_session.auth_headers,
+        )
+    assert resp.status_code == 404, resp.text
