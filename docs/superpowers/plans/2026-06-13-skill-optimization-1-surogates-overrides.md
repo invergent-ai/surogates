@@ -12,7 +12,7 @@
 - [x] Task 6: API `list_skills` honors overrides (catalog completeness)
 - [x] Task 7: `HarnessAPIClient.list_skills` forwards `session_id`
 - [x] Task 8: Slash `/<skill>` expansion uses override content (coverage)
-- [ ] Task 9: Audit — enrich `skill.invoked` when an override was used
+- [x] Task 9: Audit — enrich `skill.invoked` when an override was used
 - [ ] Task 10: Worker-local `skill_view` applies overrides (dedicated-agent path)
 - [ ] Task 11: Full-suite verification
 
