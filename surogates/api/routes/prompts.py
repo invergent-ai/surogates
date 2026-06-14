@@ -201,6 +201,24 @@ async def _submit_one(
     if body.metadata:
         config["pipeline_metadata"] = body.metadata
 
+    # Session-scoped skill overrides (SkillOpt candidate bodies) are
+    # gated behind the worker kill switch.  When disabled we drop them
+    # rather than persisting state the resolver would ignore — that keeps
+    # the stored config honest about what the session will actually use.
+    if body.skill_overrides:
+        worker_settings = getattr(settings, "worker", settings)
+        if getattr(worker_settings, "skill_overrides_enabled", True):
+            config["skill_overrides"] = {
+                name: ov.model_dump(exclude_none=False)
+                for name, ov in body.skill_overrides.items()
+            }
+        else:
+            logger.warning(
+                "skill_overrides supplied but feature flag disabled; dropping "
+                "(org=%s, keys=%s)",
+                tenant.org_id, sorted(body.skill_overrides),
+            )
+
     try:
         session = await create_agent_session(
             store=store,
