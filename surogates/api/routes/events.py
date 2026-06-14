@@ -37,6 +37,11 @@ _MAX_STREAM_DURATION = 300
 # Interval (seconds) between polls when no new events are found.
 _POLL_INTERVAL = 0.5  # Fallback poll; Redis pub/sub is the primary notification
 
+# Idle keepalive cadence. An SSE comment is sent at least this often when
+# no events flow, so a long idle stretch (a coordinator waiting on
+# executors) never trips a proxy's idle-connection timeout (~100s).
+_KEEPALIVE_INTERVAL = 15.0
+
 
 # ---------------------------------------------------------------------------
 # Response schemas
@@ -321,6 +326,12 @@ async def stream_events(
             # Send an immediate comment to establish the SSE connection
             # (browsers show the request as "pending" until first byte).
             yield {"comment": "connected"}
+            # Last time any byte was sent to the client. A research/mission
+            # coordinator goes idle for minutes between wakes (dispatch ->
+            # wait for executors -> harvest); without a periodic keepalive
+            # the proxy (Cloudflare / ingress, ~100s idle cap) silently
+            # drops the connection and the live thread freezes until reload.
+            last_emit = asyncio.get_event_loop().time()
 
             while elapsed < _MAX_STREAM_DURATION:
                 # Check if client disconnected.
@@ -353,6 +364,8 @@ async def stream_events(
                     }
                     if event.id is not None:
                         cursor = event.id
+                if events:
+                    last_emit = asyncio.get_event_loop().time()
 
                 if not events:
                     in_replay = False
@@ -442,6 +455,12 @@ async def stream_events(
                         await asyncio.sleep(_POLL_INTERVAL)
 
                     elapsed += _POLL_INTERVAL
+
+                    # Keep the connection warm through proxy idle timeouts.
+                    now = asyncio.get_event_loop().time()
+                    if now - last_emit >= _KEEPALIVE_INTERVAL:
+                        yield {"comment": "keepalive"}
+                        last_emit = now
 
             # Stream duration exceeded -- close gracefully.
             yield {

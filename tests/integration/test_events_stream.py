@@ -256,3 +256,49 @@ async def test_race_recovery_streams_resumed_events(
         f"session.done must not be emitted when the race is recovered; "
         f"got: {types}"
     )
+
+
+async def test_keepalive_comment_on_idle_active_session(
+    session_factory,
+    session_store,
+    client,
+    monkeypatch,
+):
+    """An active session with no new events still receives periodic SSE
+    keepalive comments, so a proxy's idle-connection timeout (the
+    coordinator's minutes-long waits between wakes) can't silently drop the
+    live stream."""
+    import surogates.api.routes.events as events_module
+    monkeypatch.setattr(events_module, "_MAX_STREAM_DURATION", 1)
+    monkeypatch.setattr(events_module, "_KEEPALIVE_INTERVAL", 0.2)
+
+    org_id = await create_org(session_factory)
+    user_id = uuid.uuid4()
+    await create_user(session_factory, org_id, user_id=user_id)
+    token = create_access_token(
+        org_id, user_id, {"sessions:read", "sessions:write"},
+    )
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+    )  # left active, no events
+
+    lines: list[str] = []
+
+    async def _collect(response):
+        async for line in response.aiter_lines():
+            lines.append(line)
+
+    async with client.stream(
+        "GET",
+        f"/v1/sessions/{session.id}/events?after=0",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as response:
+        assert response.status_code == 200
+        try:
+            await asyncio.wait_for(_collect(response), timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
+
+    assert any("keepalive" in line for line in lines), (
+        f"expected a keepalive comment on an idle active session, got: {lines[:30]}"
+    )
