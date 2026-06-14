@@ -40,7 +40,7 @@ plain text with no Markdown fences, so it passes the message scanner cleanly.
 ```text
 Create a tiny benchmark for a research mission, then run the baseline eval and tell me the score. Run these commands in the sandbox exactly as written:
 
-mkdir -p /workspace/bench/data && cd /workspace/bench
+mkdir -p /workspace/bench && cd /workspace/bench
 printf 'def predict(t):\n    return "neg"\n' > solver.py
 cat > eval.py <<'PY'
 import json, sys, solver
@@ -49,14 +49,35 @@ rows = [json.loads(l) for l in open(f"data/{split}.jsonl")]
 hit = sum(solver.predict(r["text"]) == r["label"] for r in rows)
 print(json.dumps({"score": round(hit / len(rows), 3)}))
 PY
-printf '%s\n' '{"text":"great","label":"pos"}' '{"text":"loved it","label":"pos"}' '{"text":"a joy","label":"pos"}' '{"text":"terrible","label":"neg"}' '{"text":"so boring","label":"neg"}' '{"text":"a dull mess","label":"neg"}' > data/dev.jsonl
-printf '%s\n' '{"text":"brilliant","label":"pos"}' '{"text":"excellent","label":"pos"}' '{"text":"a delight","label":"pos"}' '{"text":"awful","label":"neg"}' '{"text":"the worst","label":"neg"}' '{"text":"painfully dull","label":"neg"}' > data/test.jsonl
+python3 - <<'PY'
+import json, os
+POS = ["great","excellent","wonderful","amazing","brilliant","fantastic","superb","delightful"]
+NEG = ["terrible","awful","boring","horrible","dreadful","bad","poor","dull"]
+def make(start, n):
+    rows = []
+    for k in range(n):
+        i = start + k
+        pos = i % 2 == 0
+        word = (POS if pos else NEG)[(i // 2) % 8]
+        if i % 8 in (0, 5):                      # ~25% negated; flips the label
+            text, label = f"not {word}", ("neg" if pos else "pos")
+        else:
+            text, label = f"the movie was {word}", ("pos" if pos else "neg")
+        rows.append({"text": text, "label": label})
+    return rows
+os.makedirs("data", exist_ok=True)
+open("data/dev.jsonl","w").write("\n".join(map(json.dumps, make(0, 64))))
+open("data/test.jsonl","w").write("\n".join(map(json.dumps, make(64, 64))))
+PY
 git init -q && git config user.email bench@local && git config user.name bench && git add -A && git commit -q -m bench
 python3 eval.py --split dev
 ```
 
-The agent should reply with `{"score": 0.5}` — the always-"neg" baseline the run
-will try to beat.
+The agent should reply with `{"score": 0.5}` — the always-"neg" baseline. Unlike
+a memorized toy set, this benchmark **generalizes**: dev and test are drawn from
+the same vocabulary, so a real mechanism beats 0.5 on the held-out split too. A
+keyword lexicon scores ≈0.75, and adding negation handling (`not great` → neg)
+reaches ≈1.0 — so the merge gate has something genuine to validate and merge.
 
 ### 2. Launch the run
 
@@ -70,10 +91,12 @@ Rubric: Satisfied when the held-out test score beats 0.5 with at least one merge
 
 ### 3. Watch it run
 
-The coordinator proposes hypotheses, runs each in its own git worktree on the
-**dev** split, and merges a change into trunk **only** after it re-runs the
-**held-out test** itself and confirms the gain. It writes `REPORT.md` when done.
-Steer any time with plain chat, or `/auto-research pause | resume | cancel`.
+The coordinator proposes hypotheses, hands each executor an isolated copy of the
+repo to try on the **dev** split, and merges a change into trunk **only** after
+it re-runs the **held-out test** itself and confirms the gain. Expect it to land
+the keyword lexicon first (held-out ≈0.75 > 0.5 → merged), then improve on it
+with negation handling (≈1.0), pruning the dead ends. It writes `REPORT.md` when
+done. Steer any time with plain chat, or `/auto-research pause | resume | cancel`.
 
 Verified gains are real commits on the run's `trunk` branch in your repo;
 promote them when satisfied (`git merge research/run-…/trunk`).
