@@ -349,6 +349,27 @@ async def _sandbox_sh(kwargs, command: str, *, timeout: int = 120) -> str:
     }))
 
 
+def _terminal_stdout(raw: str) -> str:
+    """Extract bare stdout from the terminal tool's JSON envelope.
+
+    ``_sandbox_sh`` returns the terminal tool's wrapper
+    ``{"output", "exit_code", "error"}``. Callers that parse command
+    output (the merge-eval ``result.json``, the protected-paths diff)
+    need the stdout, not the envelope — parsing the envelope as the
+    payload silently swallows the result (its ``error`` field is the
+    command's error, NOT the eval's, so a clean run looks like a
+    no-score failure). Defensive: a non-envelope string (e.g. a test
+    stub returning raw stdout) passes through unchanged.
+    """
+    try:
+        obj = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return raw
+    if isinstance(obj, dict) and "output" in obj:
+        return obj.get("output") or ""
+    return raw
+
+
 async def _ancestor_insights(store, run_id, node) -> list[tuple[str, str]]:
     """The (key, insight) chain from root down to the node's parent."""
     chain: list[tuple[str, str]] = []
@@ -558,7 +579,9 @@ async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) ->
         if stamp.get("node_key") != node_key:
             return json.dumps({"error": f"no merge eval started for {node_key}"})
 
-        raw = await _sandbox_sh(kwargs, f"cat {evald}/result.json 2>/dev/null")
+        raw = _terminal_stdout(
+            await _sandbox_sh(kwargs, f"cat {evald}/result.json 2>/dev/null")
+        )
         if not (raw or "").strip():
             started = _parse_iso(stamp.get("started_at"))
             grace = int(meta.get("eval_timeout", 1800)) + 300
@@ -626,10 +649,10 @@ async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) ->
         # Protected-paths guard before touching trunk.
         protected = meta.get("protected_paths") or []
         if protected:
-            diff = await _sandbox_sh(kwargs, (
+            diff = _terminal_stdout(await _sandbox_sh(kwargs, (
                 f"cd {run.repo_path} && "
                 f"git diff --name-only {run.trunk_branch}...{node.code_ref}"
-            ))
+            )))
             hit = sorted({
                 p for p in protected
                 for f in (diff or "").splitlines()

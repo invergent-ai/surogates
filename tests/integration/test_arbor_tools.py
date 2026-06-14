@@ -572,3 +572,38 @@ async def test_merge_eval_extractor_written_where_eval_runs_it(merge_env_with_ev
         "python3 /workspace/.arbor/extract_score.py" in i
         for (_, _, i) in pool.calls
     ), "eval command does not run the extractor at its written path"
+
+
+def test_terminal_stdout_unwraps_envelope():
+    """_terminal_stdout pulls stdout from the terminal tool's JSON
+    envelope and passes a bare (non-envelope) string through."""
+    from surogates.tools.builtin.arbor import _terminal_stdout
+
+    env = json.dumps({"output": '{"score": 1.0}\n', "exit_code": 0, "error": None})
+    assert _terminal_stdout(env) == '{"score": 1.0}\n'
+    # bare stdout (e.g. a test stub) is returned unchanged
+    assert _terminal_stdout('{"score": 1.0}') == '{"score": 1.0}'
+    # empty / missing file
+    assert _terminal_stdout(json.dumps({"output": "", "exit_code": 0, "error": None})) == ""
+    assert _terminal_stdout("") == ""
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_status_reads_score_from_terminal_envelope(merge_env_with_eval):
+    """The real terminal tool wraps stdout in {output, exit_code, error};
+    merge status must read result.json from the envelope's output, not
+    parse the wrapper (whose null ``error`` masqueraded as 'no score' and
+    failed every merge)."""
+    store, run_id, pool, kwargs = merge_env_with_eval
+    await store.set_meta(
+        run_id, {"test_baseline_score": 0.50}, allow_machine_keys=True,
+    )
+    await _merge_experiment_handler({"action": "start", "node_key": "1"}, **kwargs)
+    pool.responses["cat /workspace/.arbor/merge-eval/1/result.json"] = json.dumps(
+        {"output": '{"score": 0.61}\n', "exit_code": 0, "error": None},
+    )
+    out = json.loads(await _merge_experiment_handler(
+        {"action": "status", "node_key": "1"}, **kwargs,
+    ))
+    assert out["merged"] is True and out["test_score"] == 0.61
+    assert (await store.get_node(run_id, "1")).status == "merged"
