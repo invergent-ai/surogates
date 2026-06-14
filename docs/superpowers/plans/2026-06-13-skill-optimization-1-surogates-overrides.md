@@ -14,7 +14,7 @@
 - [x] Task 8: Slash `/<skill>` expansion uses override content (coverage)
 - [x] Task 9: Audit — enrich `skill.invoked` when an override was used
 - [x] Task 10: Worker-local `skill_view` applies overrides (dedicated-agent path) — the plan's "passing session_config is enough" was incomplete: the non-DB branch of `_skill_view_handler` re-reads `SKILL.md` from disk, so I added `_active_skill_override` and an explicit override branch that serves the candidate body while keeping original supporting-file listing (mirrors the API path)
-- [ ] Task 11: Full-suite verification
+- [x] Task 11: Full-suite verification — all touched suites green (91/94 in the prompts+overrides set; the 3 remaining `test_prompts_api.py` failures are the pre-existing `/v1/memory` path-traversal bug, unrelated to this feature). Broader skills/loader/tools (110) and harness (22) suites pass clean.
 
 > **Execution note (discovered during implementation):** the integration-test reference `tests/integration/test_skills_sa_token.py` is stale on this branch — it sets `settings.platform_skills_dir`, a field that no longer exists on `Settings` (platform skills are now bundle-only), so it errors at fixture setup. Tasks 5/6 therefore wire a fake Hub bundle + `RuntimeConfigCache` instead of the dead `platform_skills_dir` path.
 
