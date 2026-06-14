@@ -51,7 +51,7 @@ print(json.dumps({"score": round(hit / len(rows), 3)}))
 PY
 printf '%s\n' '{"text":"great","label":"pos"}' '{"text":"loved it","label":"pos"}' '{"text":"a joy","label":"pos"}' '{"text":"terrible","label":"neg"}' '{"text":"so boring","label":"neg"}' '{"text":"a dull mess","label":"neg"}' > data/dev.jsonl
 printf '%s\n' '{"text":"brilliant","label":"pos"}' '{"text":"excellent","label":"pos"}' '{"text":"a delight","label":"pos"}' '{"text":"awful","label":"neg"}' '{"text":"the worst","label":"neg"}' '{"text":"painfully dull","label":"neg"}' > data/test.jsonl
-git init -q && git add -A && git commit -q -m bench
+git init -q && git config user.email bench@local && git config user.name bench && git add -A && git commit -q -m bench
 python3 eval.py --split dev
 ```
 
