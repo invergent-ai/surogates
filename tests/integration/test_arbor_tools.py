@@ -36,6 +36,16 @@ class FakeSandboxPool:
         for needle, out in self.responses.items():
             if needle in input:
                 return out
+        # The dispatch handoff bundles the repo and base64-encodes it;
+        # return a valid one-line base64 so _bundle_branch_b64 succeeds.
+        if "git bundle create" in input and "base64" in input:
+            return "ZmFrZS1idW5kbGU="
+        # The merge-eval launch confirms it backgrounded with this marker.
+        if "MERGE_EVAL_LAUNCHED" in input:
+            return "MERGE_EVAL_LAUNCHED"
+        # The trunk merge runs in a worktree and echoes its outcome.
+        if "echo MERGE_OK" in input:
+            return "MERGE_OK"
         return ""
 
 
@@ -145,8 +155,10 @@ async def test_dispatch_creates_worktree_brief_and_task(dispatch_env):
     assert node.code_ref and node.code_ref.startswith("research/run1/")
     assert node.dispatched_at is not None
 
-    # Worktree created server-side BEFORE the worker's first token.
-    assert any("git worktree add" in i for (_, _, i) in pool.calls)
+    # The repo is bundled and the base64 written to the durable channel
+    # the executor reads (terminal-created git state never crosses).
+    assert any("git bundle create" in i for (_, _, i) in pool.calls)
+    assert any("repo.bundle.b64" in i for (_, _, i) in pool.calls)
 
     # Brief renders the dev command but NEVER the held-out test command.
     brief = spawn.call_args.kwargs["goal"]
@@ -274,7 +286,7 @@ async def test_merge_status_merges_on_improvement_and_writes_score(merge_env_wit
     run = await store.get_run(run_id)
     assert run.meta["test_trunk_score"] == 0.61
     assert (await store.get_node(run_id, "1")).status == "merged"
-    assert any("git merge --no-ff" in i for (_, _, i) in pool.calls)
+    assert any("merge --no-ff" in i for (_, _, i) in pool.calls)
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -423,3 +435,314 @@ async def test_merge_removes_worktree_after_consuming_result(merge_env_with_eval
     # Once the score is read the detached eval worktree is dropped (no leak
     # across distinct merged nodes).
     assert any("git worktree remove --force" in i for (_, _, i) in pool.calls)
+
+
+# ---------------------------------------------------------------------------
+# idea_tree forgiving-contract hardening
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_idea_tree_add_normalizes_root_aliases(dispatch_env):
+    """parent_key "0" / "root" / omitted all resolve to ROOT, so a
+    first-cycle add never bounces on "node '0' not found"."""
+    store, run_id, _pool, kwargs = dispatch_env
+    for parent in ("0", "root", "Root", None):
+        args = {"action": "add", "hypothesis": "Mechanism: x\nHypothesis: y"}
+        if parent is not None:
+            args["parent_key"] = parent
+        out = json.loads(await _idea_tree_handler(args, **kwargs))
+        assert "node_key" in out and out["depth"] == 1, out
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_idea_tree_update_aliases_lesson_and_strips_machine_fields(dispatch_env):
+    """`lesson` maps to `insight`; score/test_score/branch are reported as
+    ignored (set by dispatch/merge, never coordinator prose)."""
+    store, run_id, _pool, kwargs = dispatch_env
+    out = json.loads(await _idea_tree_handler(
+        {"action": "update", "node_key": "1", "fields": {
+            "lesson": "keyword lexicon wins",
+            "score": 1.0, "test_score": 1.0, "branch": "exp/1",
+            "status": "done",
+        }},
+        **kwargs,
+    ))
+    assert out["ok"] is True
+    assert sorted(out["ignored"]) == ["branch", "score", "test_score"]
+    node = await store.get_node(run_id, "1")
+    assert node.insight == "keyword lexicon wins"
+    assert node.status == "done"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_idea_tree_set_meta_drops_creation_time_keys(dispatch_env):
+    """baseline + repo are fixed at run creation; set_meta reports them as
+    ignored and still applies the valid run-config keys."""
+    store, run_id, _pool, kwargs = dispatch_env
+    out = json.loads(await _idea_tree_handler(
+        {"action": "set_meta", "values": {
+            "baseline": 0.5, "repo": "/workspace/repo",
+            "max_parallel": 3,
+        }},
+        **kwargs,
+    ))
+    assert out["ok"] is True
+    assert sorted(out["ignored"]) == ["baseline", "repo"]
+    run = await store.get_run(run_id)
+    assert run.meta["max_parallel"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Bundle-aware task spawn (arbor-executor lives only in the agent bundle)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_dispatch_threads_bundle_to_spawn(dispatch_env):
+    """The coordinator's wake bundle (carrying the arbor-executor AgentDef)
+    must reach create_task_and_spawn — without it the spawn resolver is
+    bundle-blind and every executor dispatch fails."""
+    store, run_id, _pool, kwargs = dispatch_env
+    run = await store.get_run(run_id)
+    sentinel = object()
+    kwargs = {**kwargs, "bundle": sentinel}
+    spawn = AsyncMock(side_effect=_fake_spawn(
+        kwargs["session_factory"], run.org_id, uuid.UUID(kwargs["session_id"]),
+    ))
+    with patch("surogates.tasks.service.create_task_and_spawn", new=spawn):
+        await _dispatch_experiments_handler({"node_keys": ["1"]}, **kwargs)
+    assert spawn.call_args.kwargs["bundle"] is sentinel
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_session_for_task_passes_bundle_to_resolver():
+    """_create_session_for_task forwards the bundle to resolve_agent_by_name
+    so bundle-delivered sub-agents (arbor-executor) actually resolve."""
+    from types import SimpleNamespace
+
+    from surogates.tasks import spawn as spawn_mod
+
+    sentinel_bundle = object()
+    captured: dict = {}
+
+    async def fake_resolve(name, tenant, *, session_factory=None, bundle=None, **_):
+        captured["bundle"] = bundle
+        captured["name"] = name
+        return SimpleNamespace(
+            name=name, model=None, max_iterations=None, policy_profile=None,
+            tools=None, disallowed_tools=None,
+            preloaded_skills=["arbor-executor"],
+        )
+
+    parent = SimpleNamespace(id=uuid.uuid4(), agent_id="agent-x")
+    child = SimpleNamespace(id=uuid.uuid4())
+    task = SimpleNamespace(
+        id=uuid.uuid4(), agent_def_name="arbor-executor", goal="g",
+        context=None, attempt_count=0, parent_session_id=parent.id,
+    )
+    store = SimpleNamespace(
+        get_session=AsyncMock(return_value=parent), emit_event=AsyncMock(),
+    )
+    with patch.object(spawn_mod, "resolve_agent_by_name", new=fake_resolve), \
+        patch.object(
+            spawn_mod, "create_child_session",
+            new=AsyncMock(return_value=child),
+        ), \
+        patch(
+            "surogates.board.groups.ensure_group_and_inherit",
+            new=AsyncMock(),
+        ):
+        await spawn_mod._create_session_for_task(
+            task, session_store=store, session_factory=None,
+            tenant=object(), bundle=sentinel_bundle,
+        )
+    assert captured["bundle"] is sentinel_bundle
+    assert captured["name"] == "arbor-executor"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_eval_extractor_written_where_eval_runs_it(merge_env_with_eval):
+    """The detached held-out eval runs ``python3 <extractor>``; the
+    extractor must be written to that exact path or the merge gate reads
+    no score and nothing ever merges (the .arbor/ vs root path bug)."""
+    _store, _run_id, pool, kwargs = merge_env_with_eval
+    await _merge_experiment_handler({"action": "start", "node_key": "1"}, **kwargs)
+
+    writes = [
+        json.loads(i) for (_, name, i) in pool.calls if name == "write_file"
+    ]
+    extractor_paths = [
+        w["path"] for w in writes
+        if str(w.get("path", "")).endswith("extract_score.py")
+    ]
+    assert extractor_paths == ["/workspace/.arbor/extract_score.py"], (
+        extractor_paths
+    )
+    # The launched eval references the SAME absolute path it was written to.
+    assert any(
+        "python3 /workspace/.arbor/extract_score.py" in i
+        for (_, _, i) in pool.calls
+    ), "eval command does not run the extractor at its written path"
+
+
+def test_terminal_stdout_unwraps_envelope():
+    """_terminal_stdout pulls stdout from the terminal tool's JSON
+    envelope and passes a bare (non-envelope) string through."""
+    from surogates.tools.builtin.arbor import _terminal_stdout
+
+    env = json.dumps({"output": '{"score": 1.0}\n', "exit_code": 0, "error": None})
+    assert _terminal_stdout(env) == '{"score": 1.0}\n'
+    # bare stdout (e.g. a test stub) is returned unchanged
+    assert _terminal_stdout('{"score": 1.0}') == '{"score": 1.0}'
+    # empty / missing file
+    assert _terminal_stdout(json.dumps({"output": "", "exit_code": 0, "error": None})) == ""
+    assert _terminal_stdout("") == ""
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_status_reads_score_from_terminal_envelope(merge_env_with_eval):
+    """The real terminal tool wraps stdout in {output, exit_code, error};
+    merge status must read result.json from the envelope's output, not
+    parse the wrapper (whose null ``error`` masqueraded as 'no score' and
+    failed every merge)."""
+    store, run_id, pool, kwargs = merge_env_with_eval
+    await store.set_meta(
+        run_id, {"test_baseline_score": 0.50}, allow_machine_keys=True,
+    )
+    await _merge_experiment_handler({"action": "start", "node_key": "1"}, **kwargs)
+    pool.responses["cat /workspace/.arbor/merge-eval/1/result.json"] = json.dumps(
+        {"output": '{"score": 0.61}\n', "exit_code": 0, "error": None},
+    )
+    out = json.loads(await _merge_experiment_handler(
+        {"action": "status", "node_key": "1"}, **kwargs,
+    ))
+    assert out["merged"] is True and out["test_score"] == 0.61
+    assert (await store.get_node(run_id, "1")).status == "merged"
+
+
+# ---------------------------------------------------------------------------
+# Bundle handoff (executors run in a separate sandbox; git state can't cross)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_bundle_branch_b64_success_and_failure():
+    """_bundle_branch_b64 returns the one-line base64 on success and None
+    when the bundle command empties out or leaks a git error."""
+    from surogates.tools.builtin.arbor import _bundle_branch_b64
+
+    class _Pool:
+        def __init__(self, resp):
+            self.resp = resp
+
+        async def ensure(self, *a, **k):
+            return None
+
+        async def execute(self, *a, **k):
+            return self.resp
+
+    async def call(resp):
+        return await _bundle_branch_b64(
+            {"sandbox_pool": _Pool(resp), "session_id": "s"},
+            repo_path="/repo", trunk_branch="trunk", branch="b", key="1",
+        )
+
+    assert await call("ZmFrZS1idW5kbGU=") == "ZmFrZS1idW5kbGU="
+    assert await call("") is None                       # bundle failed
+    assert await call("fatal: not a git repository") is None  # error leaked
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_dispatch_writes_bundle_and_brief_clones(dispatch_env):
+    """Dispatch persists the repo bundle to the durable path and the brief
+    tells the executor to clone it (no pre-made worktree)."""
+    store, run_id, pool, kwargs = dispatch_env
+    run = await store.get_run(run_id)
+    spawn = AsyncMock(side_effect=_fake_spawn(
+        kwargs["session_factory"], run.org_id, uuid.UUID(kwargs["session_id"]),
+    ))
+    with patch("surogates.tasks.service.create_task_and_spawn", new=spawn):
+        await _dispatch_experiments_handler({"node_keys": ["1"]}, **kwargs)
+
+    writes = [
+        json.loads(i) for (_, name, i) in pool.calls if name == "write_file"
+    ]
+    bundle_writes = [
+        w for w in writes
+        if str(w.get("path", "")).endswith("repo.bundle.b64")
+    ]
+    assert bundle_writes, "bundle was not persisted to the durable channel"
+    assert bundle_writes[0]["content"] == "ZmFrZS1idW5kbGU="
+
+    brief = spawn.call_args.kwargs["goal"]
+    assert "git clone" in brief and "repo.bundle.b64" in brief
+    assert "git worktree" not in brief  # no pre-made worktree handoff
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_start_surfaces_eval_setup_failure(merge_env_with_eval):
+    """If the held-out eval can't be launched (worktree setup fails), start
+    returns the error immediately instead of leaving status to poll
+    'running' until the ~30-min stale-grace timeout."""
+    store, run_id, pool, kwargs = merge_env_with_eval
+    # Worktree add fails -> the launch never echoes its MERGE_EVAL_LAUNCHED
+    # marker. (responses are matched before the default marker stub.)
+    pool.responses["git worktree add --detach"] = (
+        "fatal: 'b' is already checked out at '/x'"
+    )
+    out = json.loads(await _merge_experiment_handler(
+        {"action": "start", "node_key": "1"}, **kwargs,
+    ))
+    assert out["merged"] is False
+    assert "setup failed" in out["error"]
+    # No merge_eval stamp was set, so nothing is left to poll forever.
+    run = await store.get_run(run_id)
+    assert not (run.meta.get("merge_eval") or {}).get("node_key")
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_surfaces_real_git_error_on_failure(merge_env_with_eval):
+    """A failed trunk merge returns the actual git output (not a generic
+    'merge conflict') and leaves trunk + node untouched."""
+    store, run_id, pool, kwargs = merge_env_with_eval
+    await store.set_meta(
+        run_id, {"test_baseline_score": 0.50}, allow_machine_keys=True,
+    )
+    await _merge_experiment_handler({"action": "start", "node_key": "1"}, **kwargs)
+    pool.responses["cat /workspace/.arbor/merge-eval/1/result.json"] = '{"score": 0.61}'
+    # The worktree merge fails — script the git error + the FAILED marker.
+    pool.responses["git worktree add --force /workspace/.arbor/merge/1"] = (
+        "CONFLICT (content): Merge conflict in solver.py\nMERGE_FAILED"
+    )
+    out = json.loads(await _merge_experiment_handler(
+        {"action": "status", "node_key": "1"}, **kwargs,
+    ))
+    assert out["merged"] is False
+    assert "could not merge" in out["error"]
+    assert "solver.py" in out["error"]           # the real reason, surfaced
+    assert (await store.get_node(run_id, "1")).status != "merged"
+    assert (await store.get_run(run_id)).meta.get("test_trunk_score") is None
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_report_renders_artifact_on_coordinator_session(dispatch_env):
+    """idea_tree(report) creates the Research Report artifact directly on the
+    coordinator session, so it never has to spawn a child to render it (whose
+    artifact would never reach the root chat)."""
+    _store, _run_id, _pool, kwargs = dispatch_env
+    calls = []
+
+    class _Api:
+        async def create_artifact(self, *, name, kind, spec):
+            calls.append((name, kind, spec))
+            return "{}"
+
+    out = await _idea_tree_handler(
+        {"action": "report"}, **{**kwargs, "api_client": _Api()},
+    )
+    assert len(calls) == 1
+    name, kind, spec = calls[0]
+    assert name == "Research Report" and kind == "markdown"
+    assert spec["content"].startswith("# Research Report")
+    assert "do NOT spawn" in out

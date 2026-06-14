@@ -93,6 +93,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-impress \
         imagemagick \
         pdfgrep \
+        fuse \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
     && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
@@ -156,14 +157,28 @@ ENV PATH="/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/opt/venv/bin:$
 COPY images/sandbox/tool-executor /usr/local/bin/tool-executor
 RUN chmod +x /usr/local/bin/tool-executor
 
+# ── geesefs (inline s3fs mount for docker-mode sandboxes) ───────────
+# Same pinned build as the s3fs sidecar image. Inert in K8s/prod: the
+# inline mount is gated behind SANDBOX_S3FS_INLINE, and the K8s manifest
+# overrides the container command entirely. user_allow_other lets the
+# non-root sandbox user mount with -o allow_other.
+ARG GEESEFS_VERSION=v0.43.7
+RUN echo "user_allow_other" >> /etc/fuse.conf \
+    && curl -fsSL -o /usr/local/bin/geesefs \
+        "https://github.com/yandex-cloud/geesefs/releases/download/${GEESEFS_VERSION}/geesefs-linux-amd64" \
+    && chmod +x /usr/local/bin/geesefs
+
 # ── Non-root user ───────────────────────────────────────────────────
 RUN groupadd --gid 1000 sandbox \
     && useradd --uid 1000 --gid sandbox --create-home sandbox \
     && mkdir -p /workspace /home/sandbox/.local /home/sandbox/.npm-global /home/sandbox/.cache/uv \
     && chown -R sandbox:sandbox /workspace /home/sandbox/.local /home/sandbox/.npm-global /home/sandbox/.cache
 
+COPY images/sandbox/entrypoint.sh /usr/local/bin/sandbox-entrypoint
+RUN chmod +x /usr/local/bin/sandbox-entrypoint
+
 USER sandbox
 WORKDIR /workspace
 
 ENTRYPOINT ["tini", "--"]
-CMD ["python", "-m", "surogates.sandbox.executor_server"]
+CMD ["/usr/local/bin/sandbox-entrypoint"]

@@ -158,6 +158,11 @@ export interface AgentChatErrorInfo {
   title: string;
   detail: string;
   retryable: boolean;
+  /** True when the failure is the platform's token-credit gate returning
+   * 402 ``insufficient_credits`` (not a model-provider error). The UI
+   * renders a "buy credits / upgrade" card with a billing CTA instead of
+   * the generic error bubble. */
+  insufficientCredits?: boolean;
 }
 
 export interface AgentChatSession {
@@ -353,6 +358,54 @@ export interface AgentChatMissionList {
   missions: AgentChatMissionSummary[];
 }
 
+// Research missions (Arbor) — the Idea Tree behind an `/auto-research` run.
+// Mirrors `GET /v1/missions/{id}/research` (see surogates
+// `api/routes/missions.py::get_mission_research`). Only present for
+// missions that carry a `research_runs` row; the dashboard probes the
+// endpoint and hides the Research tab on 404.
+
+export interface AgentChatResearchRun {
+  id: string;
+  status: string;
+  repoPath: string;
+  trunkBranch: string;
+  objective: string | null;
+  metricDirection: string;
+  /** Dev-split scores: where the run started vs. the current trunk. */
+  baselineScore: number | null;
+  trunkScore: number | null;
+  /** Held-out test-split scores (authoritative for merge decisions). */
+  testBaselineScore: number | null;
+  testTrunkScore: number | null;
+  evalCmd: string | null;
+  evalCmdTest: string | null;
+  maxCycles: number | null;
+  maxParallel: number | null;
+  mergeThreshold: number | null;
+}
+
+export interface AgentChatIdeaNode {
+  /** Dotted-decimal key: "ROOT", "1", "1.2". */
+  nodeKey: string;
+  parentKey: string | null;
+  depth: number;
+  status: string;
+  hypothesis: string;
+  /** Absolute dev-split score (never a delta); null until evaluated. */
+  score: number | null;
+  insight: string | null;
+  result: string | null;
+  codeRef: string | null;
+  taskId: string | null;
+  createdAt: string | null;
+  completedAt: string | null;
+}
+
+export interface AgentChatMissionResearch {
+  run: AgentChatResearchRun;
+  nodes: AgentChatIdeaNode[];
+}
+
 export interface CodingAgentConnection {
   provider: "anthropic" | "openai";
   connected: boolean;
@@ -504,6 +557,11 @@ export interface AgentChatState {
   sessionDone: boolean;
   hadDeltas: boolean;
   terminal: boolean;
+  /** True only after a user-initiated Stop. Gates the aborted turn's
+   * late in-flight events (and a redundant resume) from flashing
+   * "running" — unlike ``terminal``, a natural session.complete does not
+   * set it, so an autonomous mission/research resume keeps streaming. */
+  stopped: boolean;
   workspaceRefreshKey: number;
   browser: AgentChatBrowserState | null;
   // "simple" groups iteration content under one-liners + appends a
@@ -663,6 +721,21 @@ export interface AgentChatSseMessageEvent {
   lastEventId: string;
 }
 
+/** A single session event pulled via {@link AgentChatAdapter.pollEvents}.
+ *  Mirrors the persisted DB event: a monotonic ``id``, the event ``type``,
+ *  and its JSON ``data`` payload. */
+export interface AgentChatPolledEvent {
+  id: number;
+  type: string;
+  data: Record<string, unknown>;
+}
+
+export interface AgentChatEventsPage {
+  events: AgentChatPolledEvent[];
+  /** True when more events exist past this page (cursor < newest). */
+  hasMore: boolean;
+}
+
 export interface AgentChatEventStream {
   addEventListener(
     type: AgentChatEventType,
@@ -725,6 +798,12 @@ export interface AgentChatAdapter {
   getMissionWorkers?(input: {
     missionId: string;
   }): Promise<{ workers: AgentChatMissionWorker[] }>;
+  /** Arbor Idea Tree for a research (`/auto-research`) mission. Optional
+   * and probed at runtime: the dashboard shows the Research tab only when
+   * this resolves; a rejection (404 for non-research missions) hides it. */
+  getMissionResearch?(input: {
+    missionId: string;
+  }): Promise<AgentChatMissionResearch>;
   /** Mission-wide event feed (Activity tab + per-task history /
    * live output). Optional — unlike the other mission methods the
    * dashboard probes for this at runtime and hides the event-driven
@@ -846,6 +925,21 @@ export interface AgentChatAdapter {
     sessionId: string;
     after: number;
   }): AgentChatEventStream;
+  /**
+   * One-shot pull of session events after a cursor — the reconciliation
+   * safety net behind {@link openEventStream}.  The runtime polls this on a
+   * timer independently of SSE health, so any stream failure (premature
+   * close, proxy idle-kill, a missed reconnect, a stale done-latch) self-
+   * heals: the next poll delivers whatever the live stream dropped and the
+   * stream is revived.  Events are deduplicated by ``id`` against the SSE
+   * path, so the two channels run concurrently without double-applying.
+   * Optional — adapters that omit it degrade to SSE-only (no safety net).
+   */
+  pollEvents?(input: {
+    sessionId: string;
+    after: number;
+    limit?: number;
+  }): Promise<AgentChatEventsPage>;
   getBrowserState(sessionId: string): Promise<AgentChatBrowserStateResponse | null>;
   getBrowserPreviewSnapshot?(
     sessionId: string,

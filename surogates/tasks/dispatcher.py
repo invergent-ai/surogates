@@ -167,6 +167,7 @@ async def _enqueue_ready_tasks(
     redis: Any,
     session_store: Any,
     tenant_for_task: Callable[[Any], Any],
+    file_bundle_cache: Any | None = None,
 ) -> int:
     """Atomically claim up to ``_MAX_ENQUEUES_PER_TICK`` ready tasks,
     create child Sessions, push to the Redis work queue.
@@ -244,6 +245,7 @@ async def _enqueue_ready_tasks(
                 session_store=session_store,
                 session_factory=session_factory,
                 tenant=tenant,
+                file_bundle_cache=file_bundle_cache,
             )
         except ValueError as exc:
             # Config-level error (unknown agent_def_name, missing
@@ -332,6 +334,7 @@ async def tasks_tick(
     redis: Any,
     session_store: Any,
     tenant_for_task: Callable[[Any], Any],
+    file_bundle_cache: Any | None = None,
 ) -> dict[str, int]:
     """Run one tick of the subagent task layer.
 
@@ -359,5 +362,6 @@ async def tasks_tick(
         redis=redis,
         session_store=session_store,
         tenant_for_task=tenant_for_task,
+        file_bundle_cache=file_bundle_cache,
     )
     return {"promoted": promoted, "finalized": finalized, "enqueued": enqueued}

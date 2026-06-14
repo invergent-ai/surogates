@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 
 import { MessageResponse } from "../ai-elements/message";
+import { renderInlineMarkdown } from "../chat/inline-markdown";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
@@ -377,7 +378,7 @@ function TaskDetail({
                     {missionEventCategory(e.type)}
                   </p>
                   <p className="min-w-0 flex-1 text-foreground/80">
-                    {missionEventSummary(e)}
+                    {renderInlineMarkdown(missionEventSummary(e))}
                   </p>
                 </div>
               </li>
@@ -549,7 +550,7 @@ function OutcomeCard({ outcome }: { outcome: TaskOutcome }) {
           </MessageResponse>
         ) : (
           <p className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-foreground/90">
-            {outcome.text}
+            {renderInlineMarkdown(outcome.text)}
           </p>
         )}
       </CardContent>

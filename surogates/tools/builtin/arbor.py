@@ -31,11 +31,19 @@ logger = logging.getLogger(__name__)
 _IDEA_TREE_SCHEMA = ToolSchema(
     name="idea_tree",
     description=(
-        "Read and mutate this research run's Idea Tree. Actions: "
-        "view (format=constraints|compact), add(parent_key, hypothesis), "
-        "update(node_key, fields), prune(node_key, reason), "
-        "set_meta(values), record_from_task(task_id), "
-        "requeue(node_key, reason), report."
+        "Read and mutate this research run's Idea Tree. The root node's key "
+        "is \"ROOT\". Actions: "
+        "view (format=constraints|compact); "
+        "add(parent_key, hypothesis) — parent_key defaults to \"ROOT\" for a "
+        "top-level idea; "
+        "update(node_key, fields) — mutable fields are status, insight, "
+        "result, code_ref, related_work; score/test_score/branch are "
+        "machine-set by dispatch/merge and ignored here; "
+        "prune(node_key, reason); "
+        "set_meta(values) — run-config keys only (eval_cmd, eval_cmd_test, "
+        "max_cycles, max_parallel, …); baseline and repo are fixed at run "
+        "creation and cannot be set; "
+        "record_from_task(task_id); requeue(node_key, reason); report."
     ),
     parameters={
         "type": "object",
@@ -81,7 +89,11 @@ async def _require_run(session_config: dict, session_factory: Any):
 
 
 async def _idea_tree_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
-    from surogates.arbor.store import MetaKeyError, ResearchStoreError
+    from surogates.arbor.store import (
+        MACHINE_KEYS,
+        MetaKeyError,
+        ResearchStoreError,
+    )
 
     try:
         store, run_id = await _require_run(
@@ -109,9 +121,12 @@ async def _idea_tree_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         if action == "add":
             warnings = _hypothesis_warnings(arguments.get("hypothesis") or "")
             meta = run.meta or {}
-            parent_key = arguments.get("parent_key")
-            if not parent_key:
-                return json.dumps({"error": "add requires parent_key"})
+            # Top-level hypotheses hang off ROOT, and models routinely omit
+            # parent_key or guess "0"/"root". Normalise all of those so a
+            # first-cycle add doesn't bounce on "node '0' not found".
+            parent_key = (arguments.get("parent_key") or "ROOT").strip() or "ROOT"
+            if parent_key in ("0", "root", "Root"):
+                parent_key = "ROOT"
             if not (arguments.get("hypothesis") or "").strip():
                 return json.dumps({"error": "add requires a non-empty hypothesis"})
             parent = await store.get_node(run_id, parent_key)
@@ -135,10 +150,26 @@ async def _idea_tree_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
             if not node_key:
                 return json.dumps({"error": "update requires node_key"})
             fields = dict(arguments.get("fields") or {})
-            # Scores arrive via harvest / merge, never coordinator prose.
-            fields.pop("score", None)
+            # Forgiving alias: models reach for "lesson"; the field is
+            # "insight". Map it when the canonical field isn't already set.
+            if "lesson" in fields:
+                lesson = fields.pop("lesson")
+                fields.setdefault("insight", lesson)
+            # Machine-owned fields: scores and the experiment branch arrive
+            # via dispatch / harvest / merge, never coordinator prose. Strip
+            # them so the call still succeeds, and say they were ignored.
+            ignored = [k for k in ("score", "test_score", "branch") if k in fields]
+            for k in ignored:
+                fields.pop(k, None)
             await store.update_node(run_id, node_key, **fields)
-            return json.dumps({"ok": True})
+            out = {"ok": True}
+            if ignored:
+                out["ignored"] = ignored
+                out["note"] = (
+                    "score/test_score/branch are set by dispatch_experiments "
+                    "and merge_experiment, not update; ignored those keys"
+                )
+            return json.dumps(out)
 
         if action == "prune":
             node_key = arguments.get("node_key")
@@ -155,11 +186,28 @@ async def _idea_tree_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
             return json.dumps({"pruned": pruned})
 
         if action == "set_meta":
+            values = dict(arguments.get("values") or {})
+            # Creation-time / machine-owned keys the model reaches for but
+            # cannot set: baseline + repo are fixed at run creation; the
+            # *_score keys are written by the eval / merge paths. Drop them
+            # with a note instead of failing the whole call; genuinely
+            # unknown keys still raise below so typos stay visible.
+            readonly = {"baseline", "repo", "repo_path"} | MACHINE_KEYS
+            ignored = sorted(k for k in values if k in readonly)
+            settable = {k: v for k, v in values.items() if k not in ignored}
             try:
-                await store.set_meta(run_id, dict(arguments.get("values") or {}))
+                if settable:
+                    await store.set_meta(run_id, settable)
             except MetaKeyError as exc:
                 return json.dumps({"error": str(exc)})
-            return json.dumps({"ok": True})
+            out = {"ok": True}
+            if ignored:
+                out["ignored"] = ignored
+                out["note"] = (
+                    "baseline/repo are fixed at run creation and *_score keys "
+                    "are machine-set; ignored those keys"
+                )
+            return json.dumps(out)
 
         if action == "record_from_task":
             task_id = arguments.get("task_id")
@@ -201,7 +249,34 @@ async def _idea_tree_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
             await _persist_workspace_file(
                 kwargs, path=".arbor/REPORT.md", content=report,
             )
-            return report
+            # Mark the report produced — the evaluator gates `satisfied` on
+            # this (machine-written, so the LLM cannot fake completion).
+            await store.set_meta(
+                run_id, {"report_rendered": True}, allow_machine_keys=True,
+            )
+            # Render the report as a markdown artifact on THIS (coordinator)
+            # session so it surfaces in the chat. The strict coordinator has
+            # no create_artifact tool, so without this it resorts to spawning
+            # a child worker — whose artifact never propagates back to the
+            # root, and which can't worker_complete unless task-bound.
+            artifact_note = ""
+            api_client = kwargs.get("api_client")
+            if api_client is not None:
+                try:
+                    await api_client.create_artifact(
+                        name="Research Report", kind="markdown",
+                        spec={"content": report},
+                    )
+                    artifact_note = (
+                        "\n\n[rendered as the 'Research Report' artifact in "
+                        "this chat — do NOT spawn a worker/task to render it]"
+                    )
+                except Exception:  # noqa: BLE001 — artifact is best-effort
+                    logger.warning(
+                        "research: report artifact creation failed "
+                        "(continuing)", exc_info=True,
+                    )
+            return report + artifact_note
 
         return json.dumps({"error": f"unknown action {action!r}"})
     except ResearchStoreError as exc:
@@ -301,6 +376,58 @@ async def _sandbox_sh(kwargs, command: str, *, timeout: int = 120) -> str:
     }))
 
 
+def _terminal_stdout(raw: str) -> str:
+    """Extract bare stdout from the terminal tool's JSON envelope.
+
+    ``_sandbox_sh`` returns the terminal tool's wrapper
+    ``{"output", "exit_code", "error"}``. Callers that parse command
+    output (the merge-eval ``result.json``, the protected-paths diff)
+    need the stdout, not the envelope — parsing the envelope as the
+    payload silently swallows the result (its ``error`` field is the
+    command's error, NOT the eval's, so a clean run looks like a
+    no-score failure). Defensive: a non-envelope string (e.g. a test
+    stub returning raw stdout) passes through unchanged.
+    """
+    try:
+        obj = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return raw
+    if isinstance(obj, dict) and "output" in obj:
+        return obj.get("output") or ""
+    return raw
+
+
+async def _bundle_branch_b64(
+    kwargs, *, repo_path: str, trunk_branch: str, branch: str, key: str,
+) -> str | None:
+    """Create the experiment branch at trunk and return its git bundle,
+    base64-encoded on a single line.
+
+    The bundle is the durable payload the executor clones: terminal-created
+    git state does NOT cross the per-session workspace boundary, but a
+    ``write_file``'d bundle does. Returns ``None`` when bundling fails (the
+    repo isn't a git repo, the branch can't be created, etc.).
+    """
+    tmp = f"/tmp/arbor-{key}.bundle"
+    out = _terminal_stdout(await _sandbox_sh(kwargs, (
+        f"cd {repo_path} && "
+        f"(git rev-parse --verify {trunk_branch} >/dev/null 2>&1 "
+        f"|| git branch {trunk_branch}) && "
+        f"(git rev-parse --verify {branch} >/dev/null 2>&1 "
+        f"|| git branch {branch} {trunk_branch}) && "
+        f"git bundle create {tmp} {branch} >/dev/null 2>&1 && "
+        # ``| tr -d '\\n'`` keeps the base64 one line on GNU *and* busybox
+        # (no ``-w0`` flag dependency); the trailing rm always runs.
+        f"base64 {tmp} | tr -d '\\n'; rm -f {tmp}"
+    )))
+    b64 = (out or "").strip()
+    # A clean run yields one unbroken base64 line; reject empties and any
+    # git error text that leaked instead.
+    if not b64 or any(c.isspace() for c in b64) or "fatal" in b64.lower():
+        return None
+    return b64
+
+
 async def _ancestor_insights(store, run_id, node) -> list[tuple[str, str]]:
     """The (key, insight) chain from root down to the node's parent."""
     chain: list[tuple[str, str]] = []
@@ -391,21 +518,28 @@ def _merge_eval_dir(node_key: str) -> str:
     return f"/workspace/.arbor/merge-eval/{node_key}"
 
 
-async def _launch_merge_eval(kwargs, *, run, node_key: str, branch: str) -> None:
+async def _launch_merge_eval(kwargs, *, run, node_key: str, branch: str) -> str | None:
     """Write the extractor and launch the held-out eval detached.
 
     The eval runs under ``nohup ... &`` writing ``eval.log`` then
     ``result.json`` — so no sandbox exec is held open for the eval's
     duration (per-exec timeouts, pod churn) and ``status`` polls the file.
+
+    Returns ``None`` when the eval was launched, else a one-line error
+    describing why the setup (worktree add) failed — so ``start`` can
+    surface it immediately instead of leaving ``status`` to poll
+    ``running`` until the stale-grace timeout (~30 min).
     """
     meta = run.meta or {}
     evald = _merge_eval_dir(node_key)
     extractor = "/workspace/.arbor/extract_score.py"
+    # Must match ``extractor`` above — the detached eval runs it by that
+    # absolute path. ``write_file`` creates the ``.arbor`` parent dir.
     await _persist_workspace_file(
-        kwargs, path="extract_score.py", content=_SCORE_EXTRACTOR,
+        kwargs, path=".arbor/extract_score.py", content=_SCORE_EXTRACTOR,
     )
     eval_cmd_test = meta["eval_cmd_test"]
-    await _sandbox_sh(kwargs, (
+    out = _terminal_stdout(await _sandbox_sh(kwargs, (
         f"rm -rf {evald} && mkdir -p {evald} && "
         f"cd {run.repo_path} && "
         # ``git worktree prune`` clears the admin entry left behind when a
@@ -414,13 +548,24 @@ async def _launch_merge_eval(kwargs, *, run, node_key: str, branch: str) -> None
         # fails as already-registered. Keeps the staleness-recovery path
         # working and stops registered worktrees from accumulating.
         f"git worktree prune && "
-        f"git worktree add --detach {evald}/wt {branch} && "
+        f"git worktree add --detach {evald}/wt {branch} 2>&1 && "
         f"cd {evald}/wt && "
-        f"nohup sh -c '{eval_cmd_test} > {evald}/eval.log 2>&1; "
+        f"(nohup sh -c '{eval_cmd_test} > {evald}/eval.log 2>&1; "
         f"python3 {extractor} {evald}/eval.log > {evald}/result.json.tmp "
         f"2>>{evald}/eval.log; mv {evald}/result.json.tmp {evald}/result.json' "
-        f">/dev/null 2>&1 &"
-    ), timeout=60)
+        # The setup runs synchronously; on success ``echo`` confirms the
+        # eval was backgrounded. On a worktree-add failure the ``&&`` chain
+        # stops before this and the marker is absent.
+        f">/dev/null 2>&1 &) && echo MERGE_EVAL_LAUNCHED"
+    ), timeout=60))
+    if "MERGE_EVAL_LAUNCHED" in (out or ""):
+        return None
+    detail = " ".join((out or "").split())[:300] or "no output"
+    return (
+        f"held-out eval setup failed for {node_key}: {detail} — the branch "
+        "may be checked out in another worktree or the repo is mid-merge; "
+        "retry shortly"
+    )
 
 
 async def _cleanup_merge_worktree(kwargs, *, run, node_key: str) -> None:
@@ -489,7 +634,11 @@ async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) ->
                     f"poll merge_experiment(status, {in_flight!r}) to finish it "
                     "before starting another"
                 )})
-            await _launch_merge_eval(kwargs, run=run, node_key=node_key, branch=node.code_ref)
+            launch_err = await _launch_merge_eval(
+                kwargs, run=run, node_key=node_key, branch=node.code_ref,
+            )
+            if launch_err is not None:
+                return json.dumps({"merged": False, "error": launch_err})
             await store.set_meta(run_id, {"merge_eval": {
                 "node_key": node_key,
                 "started_at": datetime.now(timezone.utc).isoformat(),
@@ -508,7 +657,9 @@ async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) ->
         if stamp.get("node_key") != node_key:
             return json.dumps({"error": f"no merge eval started for {node_key}"})
 
-        raw = await _sandbox_sh(kwargs, f"cat {evald}/result.json 2>/dev/null")
+        raw = _terminal_stdout(
+            await _sandbox_sh(kwargs, f"cat {evald}/result.json 2>/dev/null")
+        )
         if not (raw or "").strip():
             started = _parse_iso(stamp.get("started_at"))
             grace = int(meta.get("eval_timeout", 1800)) + 300
@@ -534,9 +685,14 @@ async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) ->
                 # Terminal: no relaunch will reuse the worktree — drop it.
                 await _cleanup_merge_worktree(kwargs, run=run, node_key=node_key)
             if retries_left > 0:
-                await _launch_merge_eval(
+                relaunch_err = await _launch_merge_eval(
                     kwargs, run=run, node_key=node_key, branch=node.code_ref,
                 )
+                if relaunch_err is not None:
+                    await store.set_meta(
+                        run_id, {"merge_eval": {}}, allow_machine_keys=True,
+                    )
+                    return json.dumps({"merged": False, "error": relaunch_err})
                 await store.set_meta(run_id, {"merge_eval": {
                     "node_key": node_key,
                     "started_at": datetime.now(timezone.utc).isoformat(),
@@ -576,10 +732,10 @@ async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) ->
         # Protected-paths guard before touching trunk.
         protected = meta.get("protected_paths") or []
         if protected:
-            diff = await _sandbox_sh(kwargs, (
+            diff = _terminal_stdout(await _sandbox_sh(kwargs, (
                 f"cd {run.repo_path} && "
                 f"git diff --name-only {run.trunk_branch}...{node.code_ref}"
-            ))
+            )))
             hit = sorted({
                 p for p in protected
                 for f in (diff or "").splitlines()
@@ -592,17 +748,36 @@ async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) ->
                     "error": f"branch touches protected paths: {hit}",
                 })
 
-        out = await _sandbox_sh(kwargs, (
-            f"cd {run.repo_path} && git checkout {run.trunk_branch} && "
-            f"git merge --no-ff {node.code_ref} "
-            f"-m 'research: merge {node_key} (test={score})' 2>&1 "
-            f"|| (git merge --abort; echo MERGE_CONFLICT)"
-        ), timeout=120)
-        if "MERGE_CONFLICT" in (out or ""):
+        # Merge inside a fresh worktree of trunk, NOT the shared main
+        # checkout. ``git checkout {trunk}`` in the main working dir is
+        # flaky on the shared workspace — a stray dirty file or a worktree
+        # contending for the branch makes it fail, which the old ``||``
+        # mislabelled as a "merge conflict". Merging in a worktree on the
+        # trunk branch advances the trunk ref the same way; on ANY failure
+        # we drop the worktree, which discards the in-progress merge and
+        # leaves trunk exactly as it was.
+        mwt = f"/workspace/.arbor/merge/{node_key}"
+        out = _terminal_stdout(await _sandbox_sh(kwargs, (
+            f"cd {run.repo_path} && git worktree prune && rm -rf {mwt} && "
+            f"git worktree add --force {mwt} {run.trunk_branch} 2>&1 && "
+            f"git -C {mwt} -c user.email=arbor@local -c user.name=arbor "
+            f"merge --no-ff {node.code_ref} "
+            f"-m 'research: merge {node_key} (test={score})' 2>&1; rc=$?; "
+            f"cd {run.repo_path} && "
+            f"git worktree remove --force {mwt} 2>/dev/null; rm -rf {mwt}; "
+            f"[ $rc -eq 0 ] && echo MERGE_OK || echo MERGE_FAILED"
+        ), timeout=120))
+        if "MERGE_OK" not in (out or ""):
             await store.set_meta(run_id, {"merge_eval": {}}, allow_machine_keys=True)
+            detail = " ".join(
+                (out or "").replace("MERGE_FAILED", "").split()
+            )[:400] or "no output"
             return json.dumps({
                 "merged": False,
-                "error": "merge conflict — trunk restored; rebase the branch and retry",
+                "error": (
+                    f"could not merge {node_key} into trunk (trunk left "
+                    f"unchanged): {detail}"
+                ),
             })
 
         # The tool is the SOLE writer of test_trunk_score (machine key).
@@ -651,22 +826,28 @@ async def _dispatch_baseline(store, run_id, kwargs) -> str:
     if "BASELINE" in existing:
         return json.dumps({"error": "a baseline experiment already exists"})
 
-    worktree = "/workspace/.arbor/worktrees/BASELINE"
-    out = await _sandbox_sh(kwargs, (
-        f"cd {run.repo_path} && "
-        f"(git rev-parse --verify {run.trunk_branch} >/dev/null 2>&1 "
-        f"|| git branch {run.trunk_branch}) && "
-        f"git worktree prune && "
-        f"git worktree add --detach {worktree} {run.trunk_branch} 2>&1"
-    ))
-    if "fatal" in (out or "").lower():
-        return json.dumps({"error": f"baseline worktree failed: {out[:300]}"})
+    work_dir = "/workspace/.arbor/experiments/BASELINE/wt"
+    bundle_rel = ".arbor/experiments/BASELINE/repo.bundle.b64"
+    b64 = await _bundle_branch_b64(
+        kwargs, repo_path=run.repo_path,
+        trunk_branch=run.trunk_branch, branch=run.trunk_branch, key="BASELINE",
+    )
+    if b64 is None:
+        return json.dumps({"error": (
+            f"could not bundle repo for baseline — is {run.repo_path} a "
+            "git repo with commits?"
+        )})
+    await _persist_workspace_file(kwargs, path=bundle_rel, content=b64)
 
     brief = (
         "[Baseline experiment]\n\n"
-        f"Measure the UNMODIFIED repo on the dev split. Worktree: {worktree}.\n"
+        "Measure the UNMODIFIED repo on the dev split.\n"
+        "Set up the repo (handed to you as a git bundle):\n"
+        f"    mkdir -p {work_dir} && cd {work_dir}\n"
+        f"    base64 -d /workspace/{bundle_rel} > /tmp/repo-baseline.bundle\n"
+        f"    git clone -q /tmp/repo-baseline.bundle . && rm /tmp/repo-baseline.bundle\n"
         "DO NOT MODIFY any source — run the eval as-is and report the number.\n"
-        f"Eval (dev): {meta['eval_cmd']}\n\n"
+        f"Eval (dev), run from {work_dir}: {meta['eval_cmd']}\n\n"
         "Finish with worker_complete(metadata={\"node_key\": \"BASELINE\", "
         "\"score\": <float dev score>, \"insight\": \"baseline\", "
         "\"result\": \"baseline measured\"})."
@@ -687,6 +868,9 @@ async def _dispatch_baseline(store, run_id, kwargs) -> str:
             org_id=run.org_id, mission_id=run.mission_id,
             session_store=kwargs["session_store"], session_factory=kwargs["session_factory"],
             redis=kwargs.get("redis"), tenant=kwargs.get("tenant"),
+            # The coordinator's own wake bundle carries the arbor-executor
+            # AgentDef; without it the spawn resolver is bundle-blind.
+            bundle=kwargs.get("bundle"),
         )
     except TaskSpawnError as exc:
         return json.dumps({"error": f"failed to spawn baseline: {exc}"})
@@ -767,26 +951,31 @@ async def _dispatch_experiments_handler(arguments: dict[str, Any], **kwargs: Any
             node = await store.get_node(run_id, key)
             sha8 = _uuid.uuid4().hex[:8]
             branch = f"{run.branch_prefix}/n{key}-{_slug(node.hypothesis)}-{sha8}"
-            worktree = f"/workspace/.arbor/worktrees/{key}"
-            # Trunk is created lazily from the repo HEAD on first dispatch;
-            # nothing else creates it on a fresh run.
-            out = await _sandbox_sh(kwargs, (
-                f"cd {run.repo_path} && "
-                f"(git rev-parse --verify {run.trunk_branch} >/dev/null 2>&1 "
-                f"|| git branch {run.trunk_branch}) && "
-                f"git worktree prune && "
-                f"git worktree add -b {branch} {worktree} {run.trunk_branch} 2>&1"
-            ))
-            if "fatal" in (out or "").lower():
+            bundle_rel = f".arbor/experiments/{key}/repo.bundle.b64"
+            work_dir = f"/workspace/.arbor/experiments/{key}/wt"
+            # The executor runs in a separate sandbox that cannot see this
+            # session's git state. Hand it the repo as a write_file'd bundle
+            # (the durable cross-session channel); it clones into work_dir.
+            b64 = await _bundle_branch_b64(
+                kwargs, repo_path=run.repo_path,
+                trunk_branch=run.trunk_branch, branch=branch, key=key,
+            )
+            if b64 is None:
                 return json.dumps({
-                    "error": f"worktree creation failed for {key}: {out[:500]}",
+                    "error": (
+                        f"could not bundle repo for {key} — is "
+                        f"{run.repo_path} a git repo with commits?"
+                    ),
                     "dispatched": dispatched,
                 })
+            await _persist_workspace_file(kwargs, path=bundle_rel, content=b64)
 
             from surogates.arbor.prompts import build_executor_brief
 
             brief = build_executor_brief(
-                node=node, run=run, worktree_path=worktree, branch=branch,
+                node=node, run=run,
+                bundle_path=f"/workspace/{bundle_rel}", work_dir=work_dir,
+                branch=branch,
                 ancestor_insights=await _ancestor_insights(store, run_id, node),
                 extra_context=arguments.get("extra_context") or "",
             )
@@ -811,6 +1000,8 @@ async def _dispatch_experiments_handler(arguments: dict[str, Any], **kwargs: Any
                     session_factory=kwargs["session_factory"],
                     redis=kwargs.get("redis"),
                     tenant=kwargs.get("tenant"),
+                    # Coordinator's wake bundle carries arbor-executor.
+                    bundle=kwargs.get("bundle"),
                 )
             except TaskSpawnError as exc:
                 return json.dumps({

@@ -330,3 +330,114 @@ class TestReadinessReporting:
             await backend.provision(SandboxSpec(session_id="root-1"))
         assert "ConnectError" in str(ei.value)
         await backend.aclose()
+
+
+class TestWorkspaceModeSelection:
+    @staticmethod
+    def _s3_storage():
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            endpoint="https://acct.r2.cloudflarestorage.com",
+            access_key="ak", secret_key="sk", region="auto",
+        )
+
+    def _spec_with_s3_resource(self):
+        from surogates.sandbox.base import Resource
+        return SandboxSpec(
+            session_id="root-1",
+            workspace_path="/workspace",  # S3Backend sentinel
+            resources=[Resource(
+                source_ref="s3://surogate-workspaces-dev/sessions/root-1",
+                mount_path="/workspace",
+            )],
+        )
+
+    def test_s3fs_mode_when_resource_and_creds(self, healthz_transport):
+        backend = _backend(FakeDocker(), healthz_transport,
+                           storage_settings=self._s3_storage())
+        mode, detail = backend._workspace_mode(self._spec_with_s3_resource())
+        assert mode == "s3fs"
+        assert detail == "surogate-workspaces-dev:/sessions/root-1"
+
+    def test_ephemeral_when_s3_resource_but_no_creds(self, healthz_transport):
+        backend = _backend(FakeDocker(), healthz_transport)  # no storage_settings
+        mode, detail = backend._workspace_mode(self._spec_with_s3_resource())
+        assert mode == "ephemeral"
+        assert detail is None
+
+    def test_bind_mode_for_real_host_path(self, healthz_transport, tmp_path):
+        backend = _backend(FakeDocker(), healthz_transport,
+                           storage_settings=self._s3_storage())
+        spec = SandboxSpec(session_id="root-1", workspace_path=str(tmp_path))
+        mode, detail = backend._workspace_mode(spec)
+        assert mode == "bind"
+        assert detail == str(tmp_path)
+
+    def test_bucket_spec_bare_bucket(self, healthz_transport):
+        from surogates.sandbox.base import Resource
+        backend = _backend(FakeDocker(), healthz_transport,
+                           storage_settings=self._s3_storage())
+        spec = SandboxSpec(resources=[Resource(
+            source_ref="s3://justbucket", mount_path="/workspace")])
+        mode, detail = backend._workspace_mode(spec)
+        assert mode == "s3fs"
+        assert detail == "justbucket"
+
+
+class TestS3fsModeProvision:
+    @staticmethod
+    def _s3_storage():
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            endpoint="https://acct.r2.cloudflarestorage.com",
+            access_key="ak", secret_key="sk", region="auto",
+        )
+
+    def _spec(self):
+        from surogates.sandbox.base import Resource
+        return SandboxSpec(
+            session_id="root-1",
+            workspace_path="/workspace",
+            resources=[Resource(
+                source_ref="s3://surogate-workspaces-dev/sessions/root-1",
+                mount_path="/workspace",
+            )],
+        )
+
+    async def test_s3fs_run_args_and_env(self, healthz_transport):
+        docker = FakeDocker()
+        backend = _backend(docker, healthz_transport,
+                           storage_settings=self._s3_storage())
+        await backend.provision(self._spec())
+        run_call = next(c for c in docker.calls if c[:2] == ["run", "-d"])
+        joined = " ".join(run_call)
+        # FUSE caps
+        assert "--cap-add SYS_ADMIN" in joined
+        assert "--device /dev/fuse" in joined
+        assert "apparmor:unconfined" in joined
+        # s3fs env
+        assert "SANDBOX_S3FS_INLINE=1" in joined
+        assert "S3_BUCKET_PATH=surogate-workspaces-dev:/sessions/root-1" in joined
+        assert "S3_ENDPOINT=https://acct.r2.cloudflarestorage.com" in joined
+        assert "S3_REGION=auto" in joined
+        assert "AWS_ACCESS_KEY_ID=ak" in joined
+        assert "AWS_SECRET_ACCESS_KEY=sk" in joined
+        # no bind mount, and the FUSE healthz check is left ON (no =0)
+        assert "-v" not in run_call
+        assert "TOOL_EXECUTOR_REQUIRE_FUSE=0" not in joined
+        await backend.aclose()
+
+    async def test_bind_mode_still_sets_require_fuse_off_and_no_caps(
+        self, healthz_transport, tmp_path
+    ):
+        docker = FakeDocker()
+        backend = _backend(docker, healthz_transport,
+                           storage_settings=self._s3_storage())
+        await backend.provision(
+            SandboxSpec(session_id="root-1", workspace_path=str(tmp_path)))
+        run_call = next(c for c in docker.calls if c[:2] == ["run", "-d"])
+        joined = " ".join(run_call)
+        assert "TOOL_EXECUTOR_REQUIRE_FUSE=0" in joined
+        assert "SYS_ADMIN" not in joined
+        assert f"{tmp_path}:/workspace" in joined
+        await backend.aclose()

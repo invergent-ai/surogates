@@ -660,6 +660,7 @@ async def run_worker(settings: Settings) -> None:
             ready_timeout=settings.sandbox.docker_ready_timeout,
             network=settings.sandbox.docker_network,
             mcp_proxy_url=settings.mcp_proxy_url,
+            storage_settings=settings.storage,
         )
     else:
         sandbox_backend = ProcessSandbox()
@@ -1302,6 +1303,7 @@ async def run_worker(settings: Settings) -> None:
         session_factory=session_factory,
         tenant_for_task=_tenant_for_task,
         turn_gate=turn_gate,
+        file_bundle_cache=worker_state.get("file_bundle_cache"),
     )
 
     # Scheduled-work polling is owned by the platform ticker

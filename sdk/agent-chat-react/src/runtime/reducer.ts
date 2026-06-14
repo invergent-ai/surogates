@@ -39,6 +39,7 @@ export function createInitialAgentChatState(
     sessionDone: false,
     hadDeltas: false,
     terminal: false,
+    stopped: false,
     workspaceRefreshKey: 0,
     browser: null,
     viewMode: options.viewMode ?? "simple",
@@ -59,7 +60,13 @@ export function applyAgentChatEvent(
 
   nextState = applyRetryIndicator(nextState, event);
 
-  if (state.terminal && isPostTerminalLiveEvent(event.type)) {
+  // Gate late in-flight events ONLY after a user-initiated Stop, so the
+  // aborted turn's trailing deltas / a redundant session.resume don't
+  // flash "running" again. A natural session.complete does NOT set
+  // ``stopped``, so an autonomous resume (a mission/research coordinator
+  // continuing with no user.message) still clears ``terminal`` below and
+  // keeps the live thread flowing.
+  if (state.stopped && isPostTerminalLiveEvent(event.type)) {
     return nextState;
   }
 
@@ -71,7 +78,7 @@ export function applyAgentChatEvent(
       // emits (e.g. the harness's redundant abort-cleanup pause) doesn't
       // suppress the running indicator for the new turn's deltas.
       return withMessages(
-        { ...nextState, terminal: false, isRunning: true },
+        { ...nextState, terminal: false, stopped: false, isRunning: true },
         applyUserMessage(nextState.messages, event.eventId, event.data),
       );
 
@@ -903,13 +910,28 @@ function buildErrorInfo(
   ) {
     return undefined;
   }
+  const detail =
+    stringValue(event.data.error_detail) || stringValue(event.data.error);
+  const insufficientCredits = isInsufficientCreditsError(detail);
   return {
     category: event.data.error_category as AgentChatErrorInfo["category"],
-    title: stringValue(event.data.error_title) ||
-      "The session failed due to an internal error.",
-    detail: stringValue(event.data.error_detail) || stringValue(event.data.error),
-    retryable: Boolean(event.data.retryable),
+    title: insufficientCredits
+      ? "You're out of credits"
+      : stringValue(event.data.error_title) ||
+        "The session failed due to an internal error.",
+    detail,
+    // A credit shortfall is not a transient failure — retrying just hits
+    // the same 402. The billing CTA replaces Retry.
+    retryable: insufficientCredits ? false : Boolean(event.data.retryable),
+    insufficientCredits,
   };
+}
+
+/** Detect the platform proxy's 402 token-credit gate from an error string.
+ * Matches the proxy payload ``{"error": "insufficient_credits", ...}`` —
+ * this is a billing state, not a model-provider failure. */
+export function isInsufficientCreditsError(text: string | null | undefined): boolean {
+  return typeof text === "string" && text.includes("insufficient_credits");
 }
 
 function applyExpertResult(

@@ -555,10 +555,25 @@ class ArtifactCompletionMixin:
 
         # Emit TURN_SUMMARY (if applicable) BEFORE SESSION_COMPLETE so
         # late-arriving SSE subscribers see them in event-id order.
+        #
+        # Orchestrated sessions skip it: a mission / auto-research
+        # coordinator ends its turn repeatedly across the orchestration loop
+        # (dispatch, wait, harvest, decide), and a "Task complete" recap
+        # after each one reads as the chat stopping when the run is still
+        # going. ``active_mission_id`` marks a live mission; an Arbor
+        # research coordinator also carries ``active_research_run_id`` (and
+        # keeps running report turns even after the mission id is cleared at
+        # a terminal verdict), so suppress on either key.
+        config = session.config or {}
+        is_orchestrated_session = bool(
+            config.get("active_mission_id")
+            or config.get("active_research_run_id")
+        )
         if (
             turn_id is not None
             and self._turn_summarizer is not None
             and reason in {"stop", "done", "complete", "completed"}
+            and not is_orchestrated_session
         ):
             try:
                 await self._drain_and_emit_turn_summary(

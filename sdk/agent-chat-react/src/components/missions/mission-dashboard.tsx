@@ -39,6 +39,7 @@ import {
 
 import type {
   AgentChatAdapter,
+  AgentChatMissionResearch,
   AgentChatMissionSummary,
   AgentChatMissionTask,
   AgentChatMissionWorker,
@@ -50,6 +51,7 @@ import {
 } from "./mission-derive";
 import { MissionActivityTab } from "./mission-activity-tab";
 import { MissionMetadataTab } from "./mission-metadata-tab";
+import { MissionResearchTab } from "./mission-research-tab";
 import { MissionTasksTab } from "./mission-tasks-tab";
 import { MissionWorkersTab } from "./mission-workers-tab";
 import { useMissionEvents } from "./use-mission-events";
@@ -91,6 +93,9 @@ type DashboardState = {
   mission: AgentChatMissionSummary | null;
   tasks: AgentChatMissionTask[];
   workers: AgentChatMissionWorker[];
+  /** Arbor Idea Tree, present only for `/auto-research` missions; null
+   * when the adapter lacks the method or the endpoint 404s. */
+  research: AgentChatMissionResearch | null;
   loading: boolean;
   error: string | null;
 };
@@ -100,6 +105,7 @@ const INITIAL_STATE: DashboardState = {
   mission: null,
   tasks: [],
   workers: [],
+  research: null,
   loading: true,
   error: null,
 };
@@ -159,16 +165,23 @@ export function MissionDashboard({
 
   const refresh = useCallback(async () => {
     try {
-      const [mission, tasksResp, workersResp] = await Promise.all([
+      // Research is optional + probed: non-research missions 404, so a
+      // rejection just means "no Research tab" — never fail the load.
+      const researchFn = adapter.getMissionResearch;
+      const [mission, tasksResp, workersResp, research] = await Promise.all([
         api.getMission({ missionId }),
         api.getMissionTasks({ missionId }),
         api.getMissionWorkers({ missionId }),
+        researchFn
+          ? researchFn({ missionId }).catch(() => null)
+          : Promise.resolve(null),
       ]);
       if (!isMounted.current) return;
       setState({
         mission,
         tasks: tasksResp.tasks,
         workers: workersResp.workers,
+        research,
         loading: false,
         error: null,
       });
@@ -180,7 +193,7 @@ export function MissionDashboard({
         error: err instanceof Error ? err.message : String(err),
       }));
     }
-  }, [api, missionId]);
+  }, [adapter, api, missionId]);
 
   useEffect(() => {
     void refresh();
@@ -444,6 +457,12 @@ export function MissionDashboard({
         >
           <div className="shrink-0 border-b border-border bg-background px-5 sm:px-6">
             <TabsList variant="line">
+              {state.research ? (
+                <TabsTrigger value="research">
+                  Research
+                  <CountBadge n={state.research.nodes.length} />
+                </TabsTrigger>
+              ) : null}
               <TabsTrigger value="tasks">
                 Tasks
                 <CountBadge n={state.tasks.length} />
@@ -463,6 +482,11 @@ export function MissionDashboard({
           </div>
 
           <div className="flex-1 overflow-y-auto bg-background px-5 py-4 sm:px-6">
+            {state.research ? (
+              <TabsContent value="research" className="mt-0">
+                <MissionResearchTab research={state.research} />
+              </TabsContent>
+            ) : null}
             <TabsContent value="tasks" className="mt-0 h-full">
               <MissionTasksTab
                 tasks={state.tasks}

@@ -4,17 +4,63 @@ import type {
   AgentChatAttachment,
   AgentChatDisplayAttachment,
   AgentChatEventStream,
+  AgentChatEventType,
   AgentChatImageAttachment,
   AgentChatPendingAttachment,
+  AgentChatPolledEvent,
   AgentChatRuntimeApi,
+  AgentChatRuntimeEvent,
   AgentChatSession,
   AgentChatState,
 } from "../types";
-import { AGENT_CHAT_LISTENED_EVENTS } from "./events";
+import {
+  AGENT_CHAT_LISTENED_EVENT_SET,
+  AGENT_CHAT_LISTENED_EVENTS,
+} from "./events";
 import {
   applyAgentChatEvent,
   createInitialAgentChatState,
 } from "./reducer";
+
+// ---------------------------------------------------------------------------
+// Reconciliation cadence
+//
+// The SSE stream is a latency optimization; the DB event log is the source of
+// truth.  A timer polls that log independently of stream health, so any stream
+// failure — premature close, proxy idle-kill, a stale done-latch, a missed
+// reconnect — self-heals within one tick instead of freezing the thread.
+// ---------------------------------------------------------------------------
+
+/** First poll waits for the SSE replay to settle so it usually finds nothing
+ *  new (and so the initial paint comes from the wide, delta-collapsed replay
+ *  rather than a redundant full poll). */
+const RECONCILE_FIRST_DELAY = 4000;
+/** Just caught up on events — more may be arriving, drain quickly. */
+const RECONCILE_FAST = 1500;
+/** Session is live; poll as a cheap SSE backstop. */
+const RECONCILE_ACTIVE = 4000;
+/** Terminal but mission-driven: the server resumes autonomously, so keep a
+ *  brisk heartbeat to catch the next wake even if the stream is dead. */
+const RECONCILE_MISSION_IDLE = 5000;
+/** Terminal, non-mission: only a local user action resumes it, so a slow
+ *  heartbeat is enough to stay correct without churning idle tabs. */
+const RECONCILE_IDLE = 15000;
+
+/**
+ * Apply an event only if it hasn't been applied yet.  Both the SSE stream and
+ * the reconciliation poll deliver the same monotonically-id'd DB events, so a
+ * re-delivery (a revived stream replaying from a stale cursor, or a poll
+ * overlapping the stream) repeats an id already seen.  Dropping those keeps the
+ * two channels idempotent so they can run concurrently.  Synthetic control
+ * events (``session.done``, ``stream.timeout``) carry id 0 and always pass.
+ */
+function applyRuntimeEvent(
+  prev: AgentChatState,
+  event: AgentChatRuntimeEvent,
+): AgentChatState {
+  if (event.eventId > 0 && event.eventId <= prev.lastEventId) return prev;
+  return applyAgentChatEvent(prev, event);
+}
 
 const VIEW_MODE_KEY = "@invergent/agent-chat-react:viewMode";
 const VIEW_MODE_EVENT = "@invergent/agent-chat-react:viewMode:change";
@@ -101,6 +147,7 @@ export function useAgentChatRuntime({
   const stateRef = useRef(state);
   const streamRef = useRef<AgentChatEventStream | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconcileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previousSessionIdRef = useRef<string | null>(sessionId);
   const sessionIdRef = useRef<string | null>(sessionId);
 
@@ -141,7 +188,7 @@ export function useAgentChatRuntime({
             ? Number(messageEvent.lastEventId)
             : 0;
           setState((prev) =>
-            applyAgentChatEvent(prev, {
+            applyRuntimeEvent(prev, {
               type: eventType,
               eventId,
               data,
@@ -180,11 +227,145 @@ export function useAgentChatRuntime({
         ...stateRef.current,
         sessionDone: false,
         terminal: false,
+        stopped: false,
       };
       openStream(targetSessionId, after);
     },
     [clearReconnectTimer, closeStream, openStream],
   );
+
+  // ---- Reconciliation safety net -----------------------------------------
+  //
+  // Independent of SSE health, a timer pulls the authoritative event log and
+  // the authoritative session status.  This is what makes a frozen thread
+  // impossible: a dropped/idle-killed/prematurely-closed stream is caught up
+  // by the next poll, and a stream that died while the session is still live
+  // is reopened.  "Done" is decided from the fetched status, never latched
+  // from a possibly-stale stream event.
+
+  const reviveStreamIfNeeded = useCallback(
+    (targetSessionId: string) => {
+      // Only the reconciler reopens a *dead* stream; never race the mount
+      // effect's stream or a pending reconnect.
+      if (streamRef.current) return;
+      if (reconnectTimerRef.current) return;
+      // The server says the session is live, so any latched ``sessionDone``
+      // (e.g. from a premature ``session.done``) is stale — clear it in both
+      // the ref and React state so the normal stream lifecycle works again.
+      stateRef.current = { ...stateRef.current, sessionDone: false };
+      setState((prev) =>
+        prev.sessionDone ? { ...prev, sessionDone: false } : prev,
+      );
+      openStream(targetSessionId, stateRef.current.lastEventId);
+    },
+    [openStream],
+  );
+
+  const applyPolledEvents = useCallback((events: AgentChatPolledEvent[]) => {
+    if (events.length === 0) return;
+    setState((prev) => {
+      let next = prev;
+      for (const event of events) {
+        if (!AGENT_CHAT_LISTENED_EVENT_SET.has(event.type)) continue;
+        next = applyRuntimeEvent(next, {
+          type: event.type as AgentChatEventType,
+          eventId: event.id,
+          data: event.data ?? {},
+        });
+      }
+      return next;
+    });
+  }, []);
+
+  const reconcileTick = useCallback(async (): Promise<number> => {
+    const targetSessionId = sessionIdRef.current;
+    if (!targetSessionId) return RECONCILE_IDLE;
+
+    // 1) Drain any events the stream missed.  A local cursor walks pages
+    //    within this tick (React state hasn't committed yet between awaits),
+    //    so a long backlog catches up without re-fetching the same range.
+    let appliedNew = false;
+    if (adapter.pollEvents) {
+      let cursor = stateRef.current.lastEventId;
+      try {
+        for (let page = 0; page < 5; page++) {
+          const res = await adapter.pollEvents({
+            sessionId: targetSessionId,
+            after: cursor,
+            limit: 200,
+          });
+          if (sessionIdRef.current !== targetSessionId) return RECONCILE_IDLE;
+          const events = res.events ?? [];
+          if (events.length === 0) break;
+          const fresh = events.filter((event) => event.id > cursor);
+          const known = fresh.filter((event) =>
+            AGENT_CHAT_LISTENED_EVENT_SET.has(event.type),
+          );
+          if (known.length > 0) {
+            applyPolledEvents(known);
+            appliedNew = true;
+          }
+          // Advance past every returned id (handled or not) so unhandled
+          // types don't make the next page re-fetch the same window.
+          for (const event of events) cursor = Math.max(cursor, event.id);
+          if (!res.hasMore) break;
+        }
+      } catch {
+        // Transient poll failure — try again on the next tick.
+      }
+    }
+
+    // 2) Consult the authoritative status to decide liveness, revive a dead
+    //    stream, and pick the next cadence.
+    let live = false;
+    let isMission = false;
+    let statusKnown = false;
+    try {
+      const session = await adapter.getSession({ sessionId: targetSessionId });
+      if (sessionIdRef.current !== targetSessionId) return RECONCILE_IDLE;
+      statusKnown = true;
+      live = session.status === "active";
+      isMission = Boolean(
+        (session.config as Record<string, unknown> | undefined)
+          ?.active_mission_id,
+      );
+    } catch {
+      // Status unknown — keep the backstop running at the active cadence.
+    }
+
+    if (live) reviveStreamIfNeeded(targetSessionId);
+
+    if (appliedNew) return RECONCILE_FAST;
+    if (live || !statusKnown) return RECONCILE_ACTIVE;
+    return isMission || stateRef.current.isRunning
+      ? RECONCILE_MISSION_IDLE
+      : RECONCILE_IDLE;
+  }, [adapter, applyPolledEvents, reviveStreamIfNeeded]);
+
+  useEffect(() => {
+    if (!sessionId) return;
+    let cancelled = false;
+    const schedule = (delay: number) => {
+      if (cancelled) return;
+      reconcileTimerRef.current = setTimeout(() => {
+        if (cancelled) return;
+        void reconcileTick()
+          .catch(() => RECONCILE_ACTIVE)
+          .then((next) => {
+            if (cancelled) return;
+            schedule(next);
+          });
+      }, delay);
+    };
+    schedule(RECONCILE_FIRST_DELAY);
+    return () => {
+      cancelled = true;
+      if (reconcileTimerRef.current) {
+        clearTimeout(reconcileTimerRef.current);
+        reconcileTimerRef.current = null;
+      }
+    };
+  }, [sessionId, reconcileTick]);
 
   useEffect(() => {
     const previousSessionId = previousSessionIdRef.current;
@@ -343,6 +524,10 @@ export function useAgentChatRuntime({
       return {
         ...prev,
         terminal: true,
+        // User-initiated stop: gate the aborted turn's late in-flight
+        // events (a natural session.complete leaves this false so an
+        // autonomous mission resume still streams).
+        stopped: true,
         isRunning: false,
         messages,
       };
@@ -451,6 +636,7 @@ export function useAgentChatRuntime({
     setState((prev) => ({
       ...prev,
       terminal: false,
+      stopped: false,
       retryIndicator: null,
       isRunning: true,
     }));

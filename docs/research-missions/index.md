@@ -23,115 +23,83 @@ tools, the durable state model, steering, and the operational guardrails.
 
 ## Quickstart
 
-This walks through one research run end to end: optimizing a small text
-classifier's F1 on a benchmark repo.
+A research mission optimizes **any git repo in the session workspace whose eval
+prints `{"score": <float>}` on its last line**, with a **dev** split (iterate)
+and a held-out **test** split (merge decisions). Here is the smallest end-to-end
+run.
 
-### 0. Prepare the benchmark
+> You never touch the workspace yourself — it lives in the session sandbox. You
+> chat; the agent runs everything there and reports back.
 
-The target repo lives in the session workspace and must have a runnable eval, a
-**dev** split for iteration, and a held-out **test** split for merge decisions.
-The only contract the harness requires is that the eval prints its score as a
-JSON object on its last line:
+### 1. Create a tiny benchmark
 
-```text
-/workspace/clf/
-├── train.py            # the model the agent will modify
-├── eval.py             # prints e.g.  {"score": 0.41}  as its last line
-└── data/
-    ├── dev.jsonl       # iterate here
-    └── test.jsonl      # held out — only the merge gate runs this
-```
-
-```bash
-# eval.py contract: run on a split, print {"score": <float>} last
-$ python eval.py --split dev
-... training/inference logs ...
-{"score": 0.41}
-```
-
-The repo should be a clean git checkout (no uncommitted changes).
-
-### 1. Intake — turn the goal into a contract
-
-In a normal chat session, run the intake skill:
+Paste this whole message into a normal chat session. It tells the agent to build
+the benchmark and report the baseline. Copy everything inside the box — it's
+plain text with no Markdown fences, so it passes the message scanner cleanly.
 
 ```text
-/arbor-research improve macro-F1 of the classifier in /workspace/clf
+Create a tiny benchmark for a research mission, then run the baseline eval and tell me the score. Run these commands in the sandbox exactly as written:
+
+mkdir -p /workspace/bench && cd /workspace/bench
+printf 'def predict(t):\n    return "neg"\n' > solver.py
+cat > eval.py <<'PY'
+import json, sys, solver
+split = sys.argv[2] if len(sys.argv) > 2 else "dev"
+rows = [json.loads(l) for l in open(f"data/{split}.jsonl")]
+hit = sum(solver.predict(r["text"]) == r["label"] for r in rows)
+print(json.dumps({"score": round(hit / len(rows), 3)}))
+PY
+python3 - <<'PY'
+import json, os
+POS = ["great","excellent","wonderful","amazing","brilliant","fantastic","superb","delightful"]
+NEG = ["terrible","awful","boring","horrible","dreadful","bad","poor","dull"]
+def make(start, n):
+    rows = []
+    for k in range(n):
+        i = start + k
+        pos = i % 2 == 0
+        word = (POS if pos else NEG)[(i // 2) % 8]
+        if i % 8 in (0, 5):                      # ~25% negated; flips the label
+            text, label = f"not {word}", ("neg" if pos else "pos")
+        else:
+            text, label = f"the movie was {word}", ("pos" if pos else "neg")
+        rows.append({"text": text, "label": label})
+    return rows
+os.makedirs("data", exist_ok=True)
+open("data/dev.jsonl","w").write("\n".join(map(json.dumps, make(0, 64))))
+open("data/test.jsonl","w").write("\n".join(map(json.dumps, make(64, 64))))
+PY
+git init -q && git config user.email bench@local && git config user.name bench && git add -A && git commit -q -m bench
+python3 eval.py --split dev
 ```
 
-Intake inspects the repo, finds `eval.py`, identifies the dev/test splits,
-measures the baseline on **both** (say dev 0.41, test 0.40), asks one compact
-clarification checkpoint (metric direction, budget, permissions, HITL mode),
-and then prints a ready-to-send command. It does **not** start the run.
+The agent should reply with `{"score": 0.5}` — the always-"neg" baseline. Unlike
+a memorized toy set, this benchmark **generalizes**: dev and test are drawn from
+the same vocabulary, so a real mechanism beats 0.5 on the held-out split too. A
+keyword lexicon scores ≈0.75, and adding negation handling (`not great` → neg)
+reaches ≈1.0 — so the merge gate has something genuine to validate and merge.
 
 ### 2. Launch the run
 
-Send the command intake produced (edit any line first if you like):
+Send (the `Rubric:` block is required — it's what the run is graded against):
 
 ```text
-/auto-research repo=/workspace/clf max_iterations=40 baseline=0.41 baseline_test=0.40 Maximize macro-F1 of the classifier on the dev split; merge only verified gains.
+/auto-research repo=/workspace/bench baseline=0.5 baseline_test=0.5 max_iterations=20 Improve classification accuracy by editing solver.py. Dev eval: python eval.py --split dev. Held-out eval: python eval.py --split test.
 
-Rubric:
-- Satisfied only when the held-out test score (written only by the merge gate)
-  improves on test_baseline_score (0.40), with at least one merged node — or the
-  cycle budget is exhausted with an explicit no-improvement root insight — AND
-  the final report task is done.
-- Never satisfied on prose claims or dev-split scores alone.
-- eval_cmd: python eval.py --split dev
-- eval_cmd_test: python eval.py --split test
-- metric_direction: maximize
+Rubric: Satisfied when the held-out test score beats 0.5 with at least one merged experiment and a final report; never on dev scores or prose alone.
 ```
 
-This flips the session into a strict research coordinator and emits the kickoff.
-From here the run is autonomous (in `auto` HITL mode).
+### 3. Watch it run
 
-### 3. What you see as it runs
+The coordinator proposes hypotheses, hands each executor an isolated copy of the
+repo to try on the **dev** split, and merges a change into trunk **only** after
+it re-runs the **held-out test** itself and confirms the gain. Expect it to land
+the keyword lexicon first (held-out ≈0.75 > 0.5 → merged), then improve on it
+with negation handling (≈1.0), pruning the dead ends. It writes `REPORT.md` when
+done. Steer any time with plain chat, or `/auto-research pause | resume | cancel`.
 
-The coordinator works in cycles; each is visible on the mission dashboard's
-activity feed:
-
-```text
-research.defined      run created, ROOT node seeded, baselines recorded
-research.dispatched   node 1 "TF-IDF → contextual embeddings" → executor (worktree research/run-…/n1)
-research.dispatched   node 2 "class-balanced loss"            → executor
-research.harvested    node 1 done score=0.46 · node 2 done score=0.43   (folded at the coordinator's wake)
-research.merged       node 1 merged — held-out test 0.40 → 0.47, trunk advanced
-research.dispatched   node 3 "1.1: embedding + balanced loss (combine)" off the new trunk
-research.harvested    node 3 done score=0.44
-research.converged    WARNING — 3 experiments without a trunk gain; suggests Leap/Combine
-research.merged       node 1.1 merged — held-out test 0.47 → 0.49
-research.report       REPORT.md written; report task created
-```
-
-Steer it any time with plain chat (a nudge, not a pause), or
-`/auto-research pause` / `resume` / `cancel`. In `review` HITL mode the
-coordinator asks for approval (via the agent inbox) before each dispatch and
-merge instead.
-
-### 4. The result
-
-The run finishes when the budget is spent, convergence says STOP, or the target
-is hit. `REPORT.md` (held-out scores authoritative) lands in the workspace and
-as a chat artifact:
-
-```markdown
-# Research Report — Maximize macro-F1 of the classifier
-## Held-out test (authoritative)
-- baseline: 0.40
-- final trunk: 0.49 (maximize)
-- delta: +0.09
-## Eval commands
-- dev:  python eval.py --split dev
-- test: python eval.py --split test
-## Merged ideas
-- 1   dev=0.46: Mechanism: replace TF-IDF features with contextual embeddings
-- 1.1 dev=0.48: Mechanism: combine embeddings with a class-balanced loss
-...
-```
-
-The improvements are real commits on the per-run `trunk` branch in your repo;
-promote them into `main` when satisfied (`git merge research/run-…/trunk`). The
-Idea Tree, every branch, and the report stay queryable after the run ends.
+Verified gains are real commits on the run's `trunk` branch in your repo;
+promote them when satisfied (`git merge research/run-…/trunk`).
 
 ---
 

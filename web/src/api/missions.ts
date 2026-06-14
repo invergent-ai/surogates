@@ -108,6 +108,56 @@ export async function getMissionWorkers(
   );
 }
 
+export interface ResearchRunRow {
+  id: string;
+  status: string;
+  repo_path: string;
+  trunk_branch: string;
+  objective: string | null;
+  metric_direction: string;
+  baseline_score: number | null;
+  trunk_score: number | null;
+  test_baseline_score: number | null;
+  test_trunk_score: number | null;
+  eval_cmd: string | null;
+  eval_cmd_test: string | null;
+  max_cycles: number | null;
+  max_parallel: number | null;
+  merge_threshold: number | null;
+}
+
+export interface IdeaNodeRow {
+  node_key: string;
+  parent_key: string | null;
+  depth: number;
+  status: string;
+  hypothesis: string;
+  score: number | null;
+  insight: string | null;
+  result: string | null;
+  code_ref: string | null;
+  task_id: string | null;
+  created_at: string | null;
+  completed_at: string | null;
+}
+
+export interface MissionResearchRow {
+  run: ResearchRunRow;
+  nodes: IdeaNodeRow[];
+}
+
+/** 404s for non-research missions; ``readJson`` throws, the dashboard
+ * catches it and hides the Research tab. */
+export async function getMissionResearch(
+  missionId: string,
+): Promise<MissionResearchRow> {
+  return readJson(
+    await authFetch(
+      `/api/v1/missions/${encodeURIComponent(missionId)}/research`,
+    ),
+  );
+}
+
 export async function pauseMission(
   missionId: string,
   reason?: string,

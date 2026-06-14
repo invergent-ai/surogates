@@ -40,6 +40,12 @@ export interface AgentChatProps {
    */
   deepResearchEnabled?: boolean;
   /**
+   * When true, the composer surfaces the `/auto-research` slash command
+   * (research missions / Arbor). Like `deepResearchEnabled`, the host owns
+   * the capability gate.
+   */
+  researchEnabled?: boolean;
+  /**
    * When true, the composer exposes the `/code` coding-agent slash commands.
    * Like `deepResearchEnabled`, the host owns the capability gate.
    */
@@ -50,6 +56,13 @@ export interface AgentChatProps {
    * not rendered.
    */
   onOpenIntegrations?: () => void;
+  /**
+   * Navigate to the host's billing page. When provided, a 402
+   * ``insufficient_credits`` failure renders a "buy credits / upgrade"
+   * card with a "Go to Billing" button that calls this. The host owns the
+   * billing route.
+   */
+  onOpenBilling?: () => void;
 }
 
 // CSS variable controlling the desktop right-stack width. Inlined as a style
@@ -68,8 +81,10 @@ export function AgentChat({
   disabled,
   onComposerError,
   deepResearchEnabled = false,
+  researchEnabled = false,
   codeAgentsEnabled = false,
   onOpenIntegrations,
+  onOpenBilling,
 }: AgentChatProps) {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   // On phones the chat and workspace panes don't fit side-by-side. A
@@ -167,6 +182,7 @@ export function AgentChat({
         adapter,
         sessionId,
         onFileSelect: handleFileSelect,
+        onOpenBilling,
       }}
     >
       <TooltipProvider>
@@ -263,6 +279,7 @@ export function AgentChat({
               viewMode={runtime.viewMode}
               onViewModeChange={runtime.setViewMode}
               deepResearchEnabled={deepResearchEnabled}
+              researchEnabled={researchEnabled}
               codeAgentsEnabled={codeAgentsEnabled}
               researchSources={runtime.researchSources}
               hideTurnSummary={hideTurnSummary}

@@ -226,6 +226,7 @@ class Orchestrator:
         session_factory: Any | None = None,
         tenant_for_task: Callable[[Any], Any] | None = None,
         turn_gate: Any | None = None,
+        file_bundle_cache: Any | None = None,
     ) -> None:
         self.redis = redis_client
         self.session_store = session_store
@@ -241,6 +242,9 @@ class Orchestrator:
         # spawn_worker / chat sessions normally).
         self._session_factory = session_factory
         self._tenant_for_task = tenant_for_task
+        # Per-agent Hub bundle cache so the tick's task-spawn path can
+        # resolve bundle-delivered sub-agents (e.g. arbor-executor).
+        self._file_bundle_cache = file_bundle_cache
         # per-tenant TurnConcurrencyGate.  ``None`` in tests →
         # dequeue skips the gate.
         self._turn_gate = turn_gate
@@ -992,6 +996,7 @@ class Orchestrator:
                     redis=self.redis,
                     session_store=self.session_store,
                     tenant_for_task=self._tenant_for_task,
+                    file_bundle_cache=self._file_bundle_cache,
                 )
                 if any(counts.values()):
                     logger.debug(

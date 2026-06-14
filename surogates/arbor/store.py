@@ -37,7 +37,7 @@ META_KEYS: frozenset[str] = frozenset({
     "convergence_window_size", "convergence_improvement_threshold",
     "convergence_parent_exhaustion_count",
     "convergence_warn_after", "convergence_force_after", "convergence_stop_after",
-    "merge_eval",
+    "merge_eval", "report_rendered",
 })
 
 # Writable ONLY by merge_experiment / the baseline-record path
@@ -45,6 +45,7 @@ META_KEYS: frozenset[str] = frozenset({
 # cannot fake research progress by writing these.
 MACHINE_KEYS: frozenset[str] = frozenset({
     "test_baseline_score", "test_trunk_score", "trunk_score", "merge_eval",
+    "report_rendered",
 })
 
 DEFAULT_META: dict[str, Any] = {

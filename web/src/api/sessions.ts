@@ -144,6 +144,45 @@ export async function defineOutcome(
   };
 }
 
+/**
+ * One-shot pull of the session event log after a cursor.  Non-streaming
+ * companion to the SSE endpoint, used by the SDK's reconciliation backstop
+ * to catch up whatever the live stream missed.
+ */
+export async function pollSessionEvents(
+  sessionId: string,
+  params?: { afterId?: number; limit?: number },
+): Promise<{
+  events: Array<{ id: number; type: string; data: Record<string, unknown> }>;
+  hasMore: boolean;
+}> {
+  const qs = new URLSearchParams();
+  if (params?.afterId != null) qs.set("after", String(params.afterId));
+  if (params?.limit != null) qs.set("limit", String(params.limit));
+  const response = await authFetch(
+    `/api/v1/sessions/${sessionId}/events/poll${
+      qs.toString() ? `?${qs}` : ""
+    }`,
+  );
+  if (!response.ok) throw new Error("Failed to poll session events");
+  const body = (await response.json()) as {
+    events: Array<{
+      id: number;
+      type: string;
+      data: Record<string, unknown> | null;
+    }>;
+    has_more: boolean;
+  };
+  return {
+    events: body.events.map((event) => ({
+      id: event.id,
+      type: event.type,
+      data: event.data ?? {},
+    })),
+    hasMore: body.has_more,
+  };
+}
+
 export async function confirmDisclosure(sessionId: string): Promise<void> {
   const response = await authFetch(
     `/api/v1/sessions/${sessionId}/confirm-disclosure`,

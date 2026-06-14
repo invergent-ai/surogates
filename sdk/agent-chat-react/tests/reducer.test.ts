@@ -597,3 +597,78 @@ describe("applyAgentChatEvent — user.message images and attachments", () => {
     expect(state.isRunning).toBe(true);
   });
 });
+
+describe("autonomous resume after session.complete (mission/research)", () => {
+  it("session.resume clears terminal even when no user.message precedes it", () => {
+    // Intake turn ends: session.complete -> terminal.
+    let s = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "session.complete",
+      eventId: 1,
+      data: {},
+    });
+    expect(s.terminal).toBe(true);
+
+    // The mission coordinator resumes ON ITS OWN (no user message). The
+    // resume + the events it drives must NOT be gated, or the live thread
+    // freezes until a reload.
+    s = applyAgentChatEvent(s, { type: "session.resume", eventId: 2, data: {} });
+    expect(s.terminal).toBe(false);
+    expect(s.isRunning).toBe(true);
+
+    // Subsequent coordinator activity now flows (terminal already cleared).
+    s = applyAgentChatEvent(s, { type: "llm.request", eventId: 3, data: {} });
+    s = applyAgentChatEvent(s, {
+      type: "llm.delta",
+      eventId: 4,
+      data: { content: "working" },
+    });
+    expect(s.terminal).toBe(false);
+    expect(s.messages.some((m) => m.content.includes("working"))).toBe(true);
+  });
+});
+
+describe("insufficient credits (402 token-credit gate)", () => {
+  it("detects the proxy payload via isInsufficientCreditsError", async () => {
+    const { isInsufficientCreditsError } = await import("../src/runtime/reducer");
+    expect(
+      isInsufficientCreditsError(
+        "Error code: 402 - {'detail': {'error': 'insufficient_credits', 'available': -31725}}",
+      ),
+    ).toBe(true);
+    expect(isInsufficientCreditsError("network unreachable")).toBe(false);
+    expect(isInsufficientCreditsError(undefined)).toBe(false);
+  });
+
+  it("flags a 402 session.fail as a billing card (non-retryable)", () => {
+    const state = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "session.fail",
+      eventId: 1,
+      data: {
+        error_category: "provider_error",
+        error:
+          "Error code: 402 - {'detail': {'error': 'insufficient_credits', " +
+          "'resource': 'tokens', 'requested': 14769, 'available': -31725}}",
+        retryable: true, // proxy says transient; we override — retrying re-hits 402
+      },
+    });
+    const errMsg = state.messages.find((m) => m.errorInfo);
+    expect(errMsg?.errorInfo?.insufficientCredits).toBe(true);
+    expect(errMsg?.errorInfo?.retryable).toBe(false);
+    expect(errMsg?.errorInfo?.title).toBe("You're out of credits");
+  });
+
+  it("leaves a normal failure untouched", () => {
+    const state = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "session.fail",
+      eventId: 1,
+      data: {
+        error_category: "network",
+        error: "connection reset",
+        retryable: true,
+      },
+    });
+    const errMsg = state.messages.find((m) => m.errorInfo);
+    expect(errMsg?.errorInfo?.insufficientCredits).toBeFalsy();
+    expect(errMsg?.errorInfo?.retryable).toBe(true);
+  });
+});

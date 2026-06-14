@@ -93,10 +93,10 @@ When the cycle budget is spent, the metric target is reached, or the tree
 has converged:
 
 1. Ensure the best validated node is merged (`merge_experiment`).
-2. `idea_tree(action=report)` — renders REPORT.md (test scores primary).
-3. Spawn ONE report task whose worker creates the artifact from
-   `/workspace/.arbor/REPORT.md` and calls
-   `worker_complete(metadata={"report": true})`. (You cannot create the
-   artifact yourself — create_artifact is stripped; the report task is how
-   the run finishes.) The evaluator only honours `satisfied` once a
-   machine-written test improvement AND that report task exist.
+2. `idea_tree(action=report)` — writes REPORT.md (test scores primary) AND
+   renders it as the **"Research Report"** artifact directly in this chat.
+   That single call finishes the run. Do **NOT** spawn a worker or task to
+   create the report artifact — a spawned child's artifact never reaches
+   this (root) chat, and a non-task worker cannot `worker_complete`. The
+   evaluator honours `satisfied` once a machine-written test improvement
+   exists and the report has been rendered.

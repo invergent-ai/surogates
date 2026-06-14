@@ -20,8 +20,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import (
     Event as EventRow,
+    IdeaNode,
     InboxItem,
     Mission as MissionRow,
+    ResearchRun,
     ScheduledSession as ScheduledSessionRow,
     Session as SessionRow,
     SessionCursor,
@@ -279,6 +281,26 @@ class SessionStore:
                 )
             )).scalars().all()
             if mission_ids:
+                # Research-run sidecar (Arbor): idea_nodes -> research_runs
+                # -> missions, and idea_nodes -> tasks.  None of those FKs
+                # carry ON DELETE CASCADE, so delete the tree rows before
+                # the mission's tasks and the mission itself or they reject.
+                run_ids = (await db.execute(
+                    select(ResearchRun.id).where(
+                        ResearchRun.mission_id.in_(mission_ids),
+                    )
+                )).scalars().all()
+                if run_ids:
+                    await db.execute(
+                        delete(IdeaNode).where(
+                            IdeaNode.run_id.in_(run_ids),
+                        )
+                    )
+                    await db.execute(
+                        delete(ResearchRun).where(
+                            ResearchRun.id.in_(run_ids),
+                        )
+                    )
                 task_ids = (await db.execute(
                     select(TaskRow.id).where(
                         TaskRow.mission_id.in_(mission_ids),

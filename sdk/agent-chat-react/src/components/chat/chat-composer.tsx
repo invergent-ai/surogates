@@ -146,6 +146,11 @@ interface ChatComposerProps {
   // the bundle would dispatch a delegate_task to a missing agent
   // type.
   deepResearchEnabled?: boolean;
+  // When true, the composer surfaces the ``/auto-research`` slash command
+  // (research missions / Arbor) in its builtin menu. Gated like
+  // ``deepResearchEnabled`` because the arbor-executor sub-agent is only in
+  // the published bundle when the agent has the workflow toggled on.
+  researchEnabled?: boolean;
   // When true, the composer exposes the ``/code`` coding-agent commands
   // in its builtin menu. Gated like ``deepResearchEnabled`` because the
   // host owns the capability.
@@ -310,6 +315,7 @@ function ChatComposerInner({
   canShowBrowser = false,
   canShowWorkspace = false,
   deepResearchEnabled = false,
+  researchEnabled = false,
   codeAgentsEnabled = false,
   viewMode = "simple",
   onViewModeChange,
@@ -404,6 +410,17 @@ function ChatComposerInner({
           description: "Delegate a topic to the deep-research workflow",
         });
       }
+      if (researchEnabled) {
+        // Trailing space so the user lands on the goal, not the command
+        // name -- same pattern as "/mission ". Only the builtin
+        // /auto-research is surfaced; the arbor-research intake skill is
+        // reached through normal skill autocomplete when attached.
+        base.push({
+          value: "/auto-research ",
+          label: "/auto-research",
+          description: "Launch an autonomous research mission (Arbor)",
+        });
+      }
       if (codeAgentsEnabled) {
         // Trailing space on the prompt-taking entries so the user lands
         // on the prompt, not the command name -- same pattern as "/mission ".
@@ -417,7 +434,7 @@ function ChatComposerInner({
       }
       return base;
     },
-    [deepResearchEnabled, codeAgentsEnabled],
+    [deepResearchEnabled, researchEnabled, codeAgentsEnabled],
   );
 
   const scheduledExamples = useMemo<SlashCommand[]>(

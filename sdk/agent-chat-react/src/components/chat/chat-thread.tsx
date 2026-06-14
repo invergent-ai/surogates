@@ -39,6 +39,7 @@ import { AskUserQuestionToolBlock } from "./tools/ask-user-question-tool";
 import { parseTerminalResult } from "./tools/terminal-tool";
 import { statusColorClass, effectiveStatus, toolErrorSummary, parseArgs } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
+import { renderInlineMarkdown } from "./inline-markdown";
 import { ChatComposer } from "./chat-composer";
 import { IntegrationsBand } from "../connections/integrations-band";
 import { useAgentChatAdapterContext } from "../../adapter-context";
@@ -132,6 +133,9 @@ interface ChatThreadProps {
   // When true, the composer's slash menu includes ``/deep-research``.
   // Forwarded as-is to ChatComposer.
   deepResearchEnabled?: boolean;
+  // When true, the composer's slash menu includes ``/auto-research``
+  // (research missions / Arbor). Forwarded as-is to ChatComposer.
+  researchEnabled?: boolean;
   // When true, the composer's slash menu includes the ``/code`` commands.
   // Forwarded as-is to ChatComposer.
   codeAgentsEnabled?: boolean;
@@ -641,6 +645,10 @@ function cancelledToolLabel(toolName: string): string {
     research_outline: "Research",
     generate_image: "image generation",
     generate_video: "video generation",
+    // Arbor research-mission tools (the /auto-research coordinator loop).
+    idea_tree: "Idea tree",
+    dispatch_experiments: "Dispatch experiments",
+    merge_experiment: "Merge experiment",
 
   };
   if (map[toolName]) return map[toolName];
@@ -913,7 +921,7 @@ function NarrationEntry({
         <TimelineIndicator className="size-2 border-none bg-foreground/30" />
       </TimelineHeader>
       <TimelineContent>
-        <p>{line}</p>
+        <p>{renderInlineMarkdown(line)}</p>
       </TimelineContent>
     </TimelineItem>
   );
@@ -1113,6 +1121,19 @@ function extractToolDetail(tc: ToolCallInfo): string | null {
       const prompt = stringArg("prompt");
       return prompt ? truncate(prompt, 60) : null;
     }
+    case "idea_tree":
+      // The action ("add", "view", "report", …) is the meaningful verb;
+      // the header reads "Idea tree · report".
+      return stringArg("action");
+    case "dispatch_experiments": {
+      const keys = args.node_keys;
+      if (Array.isArray(keys) && keys.length > 0) {
+        return truncate(keys.map((k) => String(k)).join(", "), 40);
+      }
+      return stringArg("action");
+    }
+    case "merge_experiment":
+      return stringArg("node_key") ?? stringArg("action");
     case "memory":
       return stringArg("action") ?? stringArg("key");
     case "research_memory": {
@@ -1619,7 +1640,9 @@ export function IterationGroup({
         aria-expanded={open}
         className="flex w-full items-center gap-2 rounded py-0.5 text-left text-sm hover:bg-muted/40"
       >
-        <span className={cn("flex-1 truncate", labelTone)}>{label}</span>
+        <span className={cn("flex-1 truncate", labelTone)}>
+          {renderInlineMarkdown(label)}
+        </span>
         <ChevronDown
           className={cn(
             "size-3 shrink-0 text-foreground/60 transition-transform",
@@ -1869,7 +1892,7 @@ function SimpleAssistantGroup({
                   <MessageResponse>{askBody}</MessageResponse>
                 ) : narrationLine ? (
                   <p className="text-sm text-foreground">
-                    {narrationLine}
+                    {renderInlineMarkdown(narrationLine)}
                   </p>
                 ) : null}
                 <IterationGroup
@@ -2094,6 +2117,7 @@ export function ChatThread({
   viewMode = "simple",
   onViewModeChange,
   deepResearchEnabled = false,
+  researchEnabled = false,
   codeAgentsEnabled = false,
   researchSources = [],
   hideTurnSummary = false,
@@ -2198,6 +2222,7 @@ export function ChatThread({
         viewMode={viewMode}
         onViewModeChange={onViewModeChange}
         deepResearchEnabled={deepResearchEnabled}
+        researchEnabled={researchEnabled}
         codeAgentsEnabled={codeAgentsEnabled}
       />
       {onOpenIntegrations && (
