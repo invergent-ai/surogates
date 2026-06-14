@@ -31,11 +31,19 @@ logger = logging.getLogger(__name__)
 _IDEA_TREE_SCHEMA = ToolSchema(
     name="idea_tree",
     description=(
-        "Read and mutate this research run's Idea Tree. Actions: "
-        "view (format=constraints|compact), add(parent_key, hypothesis), "
-        "update(node_key, fields), prune(node_key, reason), "
-        "set_meta(values), record_from_task(task_id), "
-        "requeue(node_key, reason), report."
+        "Read and mutate this research run's Idea Tree. The root node's key "
+        "is \"ROOT\". Actions: "
+        "view (format=constraints|compact); "
+        "add(parent_key, hypothesis) — parent_key defaults to \"ROOT\" for a "
+        "top-level idea; "
+        "update(node_key, fields) — mutable fields are status, insight, "
+        "result, code_ref, related_work; score/test_score/branch are "
+        "machine-set by dispatch/merge and ignored here; "
+        "prune(node_key, reason); "
+        "set_meta(values) — run-config keys only (eval_cmd, eval_cmd_test, "
+        "max_cycles, max_parallel, …); baseline and repo are fixed at run "
+        "creation and cannot be set; "
+        "record_from_task(task_id); requeue(node_key, reason); report."
     ),
     parameters={
         "type": "object",
@@ -81,7 +89,11 @@ async def _require_run(session_config: dict, session_factory: Any):
 
 
 async def _idea_tree_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
-    from surogates.arbor.store import MetaKeyError, ResearchStoreError
+    from surogates.arbor.store import (
+        MACHINE_KEYS,
+        MetaKeyError,
+        ResearchStoreError,
+    )
 
     try:
         store, run_id = await _require_run(
@@ -109,9 +121,12 @@ async def _idea_tree_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         if action == "add":
             warnings = _hypothesis_warnings(arguments.get("hypothesis") or "")
             meta = run.meta or {}
-            parent_key = arguments.get("parent_key")
-            if not parent_key:
-                return json.dumps({"error": "add requires parent_key"})
+            # Top-level hypotheses hang off ROOT, and models routinely omit
+            # parent_key or guess "0"/"root". Normalise all of those so a
+            # first-cycle add doesn't bounce on "node '0' not found".
+            parent_key = (arguments.get("parent_key") or "ROOT").strip() or "ROOT"
+            if parent_key in ("0", "root", "Root"):
+                parent_key = "ROOT"
             if not (arguments.get("hypothesis") or "").strip():
                 return json.dumps({"error": "add requires a non-empty hypothesis"})
             parent = await store.get_node(run_id, parent_key)
@@ -135,10 +150,26 @@ async def _idea_tree_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
             if not node_key:
                 return json.dumps({"error": "update requires node_key"})
             fields = dict(arguments.get("fields") or {})
-            # Scores arrive via harvest / merge, never coordinator prose.
-            fields.pop("score", None)
+            # Forgiving alias: models reach for "lesson"; the field is
+            # "insight". Map it when the canonical field isn't already set.
+            if "lesson" in fields:
+                lesson = fields.pop("lesson")
+                fields.setdefault("insight", lesson)
+            # Machine-owned fields: scores and the experiment branch arrive
+            # via dispatch / harvest / merge, never coordinator prose. Strip
+            # them so the call still succeeds, and say they were ignored.
+            ignored = [k for k in ("score", "test_score", "branch") if k in fields]
+            for k in ignored:
+                fields.pop(k, None)
             await store.update_node(run_id, node_key, **fields)
-            return json.dumps({"ok": True})
+            out = {"ok": True}
+            if ignored:
+                out["ignored"] = ignored
+                out["note"] = (
+                    "score/test_score/branch are set by dispatch_experiments "
+                    "and merge_experiment, not update; ignored those keys"
+                )
+            return json.dumps(out)
 
         if action == "prune":
             node_key = arguments.get("node_key")
@@ -155,11 +186,28 @@ async def _idea_tree_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
             return json.dumps({"pruned": pruned})
 
         if action == "set_meta":
+            values = dict(arguments.get("values") or {})
+            # Creation-time / machine-owned keys the model reaches for but
+            # cannot set: baseline + repo are fixed at run creation; the
+            # *_score keys are written by the eval / merge paths. Drop them
+            # with a note instead of failing the whole call; genuinely
+            # unknown keys still raise below so typos stay visible.
+            readonly = {"baseline", "repo", "repo_path"} | MACHINE_KEYS
+            ignored = sorted(k for k in values if k in readonly)
+            settable = {k: v for k, v in values.items() if k not in ignored}
             try:
-                await store.set_meta(run_id, dict(arguments.get("values") or {}))
+                if settable:
+                    await store.set_meta(run_id, settable)
             except MetaKeyError as exc:
                 return json.dumps({"error": str(exc)})
-            return json.dumps({"ok": True})
+            out = {"ok": True}
+            if ignored:
+                out["ignored"] = ignored
+                out["note"] = (
+                    "baseline/repo are fixed at run creation and *_score keys "
+                    "are machine-set; ignored those keys"
+                )
+            return json.dumps(out)
 
         if action == "record_from_task":
             task_id = arguments.get("task_id")

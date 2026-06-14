@@ -423,3 +423,59 @@ async def test_merge_removes_worktree_after_consuming_result(merge_env_with_eval
     # Once the score is read the detached eval worktree is dropped (no leak
     # across distinct merged nodes).
     assert any("git worktree remove --force" in i for (_, _, i) in pool.calls)
+
+
+# ---------------------------------------------------------------------------
+# idea_tree forgiving-contract hardening
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_idea_tree_add_normalizes_root_aliases(dispatch_env):
+    """parent_key "0" / "root" / omitted all resolve to ROOT, so a
+    first-cycle add never bounces on "node '0' not found"."""
+    store, run_id, _pool, kwargs = dispatch_env
+    for parent in ("0", "root", "Root", None):
+        args = {"action": "add", "hypothesis": "Mechanism: x\nHypothesis: y"}
+        if parent is not None:
+            args["parent_key"] = parent
+        out = json.loads(await _idea_tree_handler(args, **kwargs))
+        assert "node_key" in out and out["depth"] == 1, out
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_idea_tree_update_aliases_lesson_and_strips_machine_fields(dispatch_env):
+    """`lesson` maps to `insight`; score/test_score/branch are reported as
+    ignored (set by dispatch/merge, never coordinator prose)."""
+    store, run_id, _pool, kwargs = dispatch_env
+    out = json.loads(await _idea_tree_handler(
+        {"action": "update", "node_key": "1", "fields": {
+            "lesson": "keyword lexicon wins",
+            "score": 1.0, "test_score": 1.0, "branch": "exp/1",
+            "status": "done",
+        }},
+        **kwargs,
+    ))
+    assert out["ok"] is True
+    assert sorted(out["ignored"]) == ["branch", "score", "test_score"]
+    node = await store.get_node(run_id, "1")
+    assert node.insight == "keyword lexicon wins"
+    assert node.status == "done"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_idea_tree_set_meta_drops_creation_time_keys(dispatch_env):
+    """baseline + repo are fixed at run creation; set_meta reports them as
+    ignored and still applies the valid run-config keys."""
+    store, run_id, _pool, kwargs = dispatch_env
+    out = json.loads(await _idea_tree_handler(
+        {"action": "set_meta", "values": {
+            "baseline": 0.5, "repo": "/workspace/repo",
+            "max_parallel": 3,
+        }},
+        **kwargs,
+    ))
+    assert out["ok"] is True
+    assert sorted(out["ignored"]) == ["baseline", "repo"]
+    run = await store.get_run(run_id)
+    assert run.meta["max_parallel"] == 3
