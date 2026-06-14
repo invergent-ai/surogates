@@ -392,3 +392,61 @@ class TestExpandSlashSkill:
         _, _, call_kwargs = registry.calls[0]
         assert call_kwargs["api_client"] is sentinel_api
         assert call_kwargs["session_factory"] is sentinel_factory
+
+
+class _ApiBackedRegistry:
+    """Tool registry whose ``skill_view`` delegates to the API client.
+
+    Mirrors the production wiring where, in shared-runtime mode, the
+    ``skill_view`` tool handler forwards to ``HarnessAPIClient.view_skill``.
+    """
+
+    async def dispatch(self, name: str, arguments: Any, **kwargs: Any) -> str:
+        assert name == "skill_view"
+        api_client = kwargs["api_client"]
+        return await api_client.view_skill(arguments["name"])
+
+
+class _OverrideApiClient:
+    """Fake API client returning candidate (override) content for one skill."""
+
+    async def view_skill(self, name: str, file_path: str | None = None) -> str:
+        return json.dumps({
+            "success": True,
+            "name": name,
+            "content": "CANDIDATE BODY",
+        })
+
+    async def list_skills(self, category: str | None = None) -> str:
+        return json.dumps({
+            "success": True,
+            "skills": [
+                {"name": "browser-research", "description": "Research the web",
+                 "type": "skill", "category": None, "trigger": None},
+            ],
+            "count": 1,
+        })
+
+
+@pytest.mark.asyncio
+class TestExpandSlashSkillOverride:
+    async def test_slash_expansion_uses_override_content(self) -> None:
+        """End-to-end: the API path serves override content into the expansion.
+
+        Task 5 made ``view_skill`` return the session's override body; this
+        proves the slash ``/<skill>`` path surfaces that candidate content so
+        a future refactor cannot silently regress it.
+        """
+        result = await expand_slash_skill(
+            text="/browser-research compare vendors",
+            tools=_ApiBackedRegistry(),
+            tenant=object(),
+            session_id="sess-1",
+            api_client=_OverrideApiClient(),
+            session_factory=None,
+        )
+        assert result is not None
+        expanded_text, name, staged_at, kind = result
+        assert name == "browser-research"
+        assert kind == "skill"
+        assert "CANDIDATE BODY" in expanded_text
