@@ -243,6 +243,9 @@ class WorkerSettings(BaseSettings):
     # per-turn artifact recaps. Off disables the summarizer entirely;
     # older SDK versions ignore the events when this is on.
     emit_turn_summaries: bool = True
+    # When False, service-account ``skill_overrides`` on prompt submissions
+    # are ignored by the API and worker-local skill resolution.
+    skill_overrides_enabled: bool = True
     # per-(org_id, agent_id) max in-flight turns
     # cap used by TurnConcurrencyGate.  ``ctx.governance`` may override
     # per tenant in a later plan; until then this is the uniform cap.

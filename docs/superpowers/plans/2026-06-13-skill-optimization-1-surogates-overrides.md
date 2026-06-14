@@ -5,7 +5,7 @@
 ## Execution Todo List
 
 - [x] Task 1: `SkillOverride` schema + `skill_overrides` field on `PromptRequest`
-- [ ] Task 2: Feature flag `skill_overrides_enabled`
+- [x] Task 2: Feature flag `skill_overrides_enabled`
 - [ ] Task 3: Store `skill_overrides` into `session.config` at prompt submission
 - [ ] Task 4: Loader override layer (`_apply_overrides` + `load_skills(overrides=)`)
 - [ ] Task 5: API `view_skill` resolves overrides (shared-runtime path)
