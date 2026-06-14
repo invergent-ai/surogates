@@ -249,7 +249,34 @@ async def _idea_tree_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
             await _persist_workspace_file(
                 kwargs, path=".arbor/REPORT.md", content=report,
             )
-            return report
+            # Mark the report produced — the evaluator gates `satisfied` on
+            # this (machine-written, so the LLM cannot fake completion).
+            await store.set_meta(
+                run_id, {"report_rendered": True}, allow_machine_keys=True,
+            )
+            # Render the report as a markdown artifact on THIS (coordinator)
+            # session so it surfaces in the chat. The strict coordinator has
+            # no create_artifact tool, so without this it resorts to spawning
+            # a child worker — whose artifact never propagates back to the
+            # root, and which can't worker_complete unless task-bound.
+            artifact_note = ""
+            api_client = kwargs.get("api_client")
+            if api_client is not None:
+                try:
+                    await api_client.create_artifact(
+                        name="Research Report", kind="markdown",
+                        spec={"content": report},
+                    )
+                    artifact_note = (
+                        "\n\n[rendered as the 'Research Report' artifact in "
+                        "this chat — do NOT spawn a worker/task to render it]"
+                    )
+                except Exception:  # noqa: BLE001 — artifact is best-effort
+                    logger.warning(
+                        "research: report artifact creation failed "
+                        "(continuing)", exc_info=True,
+                    )
+            return report + artifact_note
 
         return json.dumps({"error": f"unknown action {action!r}"})
     except ResearchStoreError as exc:

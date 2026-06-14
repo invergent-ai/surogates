@@ -185,14 +185,22 @@ async def _maybe_run_mission_evaluator(
 
 
 async def _research_report_task_done(session_factory: Any, mission_id: Any) -> bool:
-    """True iff a finished task for this mission flagged itself the report
-    task (``result_metadata.report is True``). The final report is created
-    worker-side because the strict coordinator cannot call create_artifact."""
+    """True iff the final report has been produced.
+
+    Primary path: ``idea_tree(report)`` writes ``meta.report_rendered`` (a
+    machine key) and renders the artifact directly on the coordinator
+    session. Back-compat path: a finished report task flagged itself with
+    ``result_metadata.report is True`` (the old spawn-a-report-task flow)."""
     from sqlalchemy import select
 
-    from surogates.db.models import Task
+    from surogates.db.models import ResearchRun, Task
 
     async with session_factory() as db:
+        run = (await db.execute(
+            select(ResearchRun).where(ResearchRun.mission_id == mission_id)
+        )).scalar_one_or_none()
+        if run is not None and (run.meta or {}).get("report_rendered") is True:
+            return True
         rows = (await db.execute(
             select(Task.result_metadata).where(
                 Task.mission_id == mission_id, Task.status == "done",

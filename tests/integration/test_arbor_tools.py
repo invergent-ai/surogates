@@ -723,3 +723,26 @@ async def test_merge_surfaces_real_git_error_on_failure(merge_env_with_eval):
     assert "solver.py" in out["error"]           # the real reason, surfaced
     assert (await store.get_node(run_id, "1")).status != "merged"
     assert (await store.get_run(run_id)).meta.get("test_trunk_score") is None
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_report_renders_artifact_on_coordinator_session(dispatch_env):
+    """idea_tree(report) creates the Research Report artifact directly on the
+    coordinator session, so it never has to spawn a child to render it (whose
+    artifact would never reach the root chat)."""
+    _store, _run_id, _pool, kwargs = dispatch_env
+    calls = []
+
+    class _Api:
+        async def create_artifact(self, *, name, kind, spec):
+            calls.append((name, kind, spec))
+            return "{}"
+
+    out = await _idea_tree_handler(
+        {"action": "report"}, **{**kwargs, "api_client": _Api()},
+    )
+    assert len(calls) == 1
+    name, kind, spec = calls[0]
+    assert name == "Research Report" and kind == "markdown"
+    assert spec["content"].startswith("# Research Report")
+    assert "do NOT spawn" in out
