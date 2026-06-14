@@ -1303,6 +1303,7 @@ async def run_worker(settings: Settings) -> None:
         session_factory=session_factory,
         tenant_for_task=_tenant_for_task,
         turn_gate=turn_gate,
+        file_bundle_cache=worker_state.get("file_bundle_cache"),
     )
 
     # Scheduled-work polling is owned by the platform ticker

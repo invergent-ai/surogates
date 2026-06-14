@@ -47,6 +47,7 @@ async def create_task_and_spawn(
     session_factory: object,
     redis: object,
     tenant: object,
+    bundle: object | None = None,
 ) -> dict[str, str]:
     """Insert a Task row and eagerly spawn its first attempt.
 
@@ -154,6 +155,7 @@ async def create_task_and_spawn(
             session_store=session_store,
             session_factory=session_factory,
             tenant=tenant,
+            bundle=bundle,
         )
     except ValueError as exc:
         # Roll back the claim so the tick can retry once a human fixes

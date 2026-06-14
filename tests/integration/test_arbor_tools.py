@@ -479,3 +479,71 @@ async def test_idea_tree_set_meta_drops_creation_time_keys(dispatch_env):
     assert sorted(out["ignored"]) == ["baseline", "repo"]
     run = await store.get_run(run_id)
     assert run.meta["max_parallel"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Bundle-aware task spawn (arbor-executor lives only in the agent bundle)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_dispatch_threads_bundle_to_spawn(dispatch_env):
+    """The coordinator's wake bundle (carrying the arbor-executor AgentDef)
+    must reach create_task_and_spawn — without it the spawn resolver is
+    bundle-blind and every executor dispatch fails."""
+    store, run_id, _pool, kwargs = dispatch_env
+    run = await store.get_run(run_id)
+    sentinel = object()
+    kwargs = {**kwargs, "bundle": sentinel}
+    spawn = AsyncMock(side_effect=_fake_spawn(
+        kwargs["session_factory"], run.org_id, uuid.UUID(kwargs["session_id"]),
+    ))
+    with patch("surogates.tasks.service.create_task_and_spawn", new=spawn):
+        await _dispatch_experiments_handler({"node_keys": ["1"]}, **kwargs)
+    assert spawn.call_args.kwargs["bundle"] is sentinel
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_session_for_task_passes_bundle_to_resolver():
+    """_create_session_for_task forwards the bundle to resolve_agent_by_name
+    so bundle-delivered sub-agents (arbor-executor) actually resolve."""
+    from types import SimpleNamespace
+
+    from surogates.tasks import spawn as spawn_mod
+
+    sentinel_bundle = object()
+    captured: dict = {}
+
+    async def fake_resolve(name, tenant, *, session_factory=None, bundle=None, **_):
+        captured["bundle"] = bundle
+        captured["name"] = name
+        return SimpleNamespace(
+            name=name, model=None, max_iterations=None, policy_profile=None,
+            tools=None, disallowed_tools=None,
+            preloaded_skills=["arbor-executor"],
+        )
+
+    parent = SimpleNamespace(id=uuid.uuid4(), agent_id="agent-x")
+    child = SimpleNamespace(id=uuid.uuid4())
+    task = SimpleNamespace(
+        id=uuid.uuid4(), agent_def_name="arbor-executor", goal="g",
+        context=None, attempt_count=0, parent_session_id=parent.id,
+    )
+    store = SimpleNamespace(
+        get_session=AsyncMock(return_value=parent), emit_event=AsyncMock(),
+    )
+    with patch.object(spawn_mod, "resolve_agent_by_name", new=fake_resolve), \
+        patch.object(
+            spawn_mod, "create_child_session",
+            new=AsyncMock(return_value=child),
+        ), \
+        patch(
+            "surogates.board.groups.ensure_group_and_inherit",
+            new=AsyncMock(),
+        ):
+        await spawn_mod._create_session_for_task(
+            task, session_store=store, session_factory=None,
+            tenant=object(), bundle=sentinel_bundle,
+        )
+    assert captured["bundle"] is sentinel_bundle
+    assert captured["name"] == "arbor-executor"

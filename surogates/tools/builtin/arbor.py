@@ -735,6 +735,9 @@ async def _dispatch_baseline(store, run_id, kwargs) -> str:
             org_id=run.org_id, mission_id=run.mission_id,
             session_store=kwargs["session_store"], session_factory=kwargs["session_factory"],
             redis=kwargs.get("redis"), tenant=kwargs.get("tenant"),
+            # The coordinator's own wake bundle carries the arbor-executor
+            # AgentDef; without it the spawn resolver is bundle-blind.
+            bundle=kwargs.get("bundle"),
         )
     except TaskSpawnError as exc:
         return json.dumps({"error": f"failed to spawn baseline: {exc}"})
@@ -859,6 +862,8 @@ async def _dispatch_experiments_handler(arguments: dict[str, Any], **kwargs: Any
                     session_factory=kwargs["session_factory"],
                     redis=kwargs.get("redis"),
                     tenant=kwargs.get("tenant"),
+                    # Coordinator's wake bundle carries arbor-executor.
+                    bundle=kwargs.get("bundle"),
                 )
             except TaskSpawnError as exc:
                 return json.dumps({

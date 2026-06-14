@@ -102,6 +102,8 @@ async def _create_session_for_task(
     session_store: Any,
     session_factory: Any | None,
     tenant: Any,
+    bundle: Any | None = None,
+    file_bundle_cache: Any | None = None,
 ) -> Any:
     """Create a Session attempt for *task*.
 
@@ -133,8 +135,26 @@ async def _create_session_for_task(
 
     agent_def = None
     if task.agent_def_name:
+        # AgentDefs delivered through the per-agent Hub bundle (e.g. the
+        # arbor-executor research sub-agent) are invisible to a
+        # bundle-less catalog load. Prefer the caller-supplied bundle
+        # (the coordinator's own wake bundle, eager-spawn path); else
+        # resolve it for the task's agent from the worker's file-bundle
+        # cache (the dispatcher-tick / retry path).
+        resolved_bundle = bundle
+        if resolved_bundle is None and file_bundle_cache is not None:
+            try:
+                resolved_bundle = await file_bundle_cache.get(parent.agent_id)
+            except Exception:  # noqa: BLE001 — bundle fetch is best-effort
+                logger.warning(
+                    "could not resolve file bundle for agent %s spawning "
+                    "task %s; bundle sub-agents will be invisible",
+                    parent.agent_id, task.id, exc_info=True,
+                )
+                resolved_bundle = None
         agent_def = await resolve_agent_by_name(
-            task.agent_def_name, tenant, session_factory=session_factory,
+            task.agent_def_name, tenant,
+            session_factory=session_factory, bundle=resolved_bundle,
         )
         if agent_def is None:
             raise ValueError(
