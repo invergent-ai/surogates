@@ -597,3 +597,32 @@ describe("applyAgentChatEvent — user.message images and attachments", () => {
     expect(state.isRunning).toBe(true);
   });
 });
+
+describe("autonomous resume after session.complete (mission/research)", () => {
+  it("session.resume clears terminal even when no user.message precedes it", () => {
+    // Intake turn ends: session.complete -> terminal.
+    let s = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "session.complete",
+      eventId: 1,
+      data: {},
+    });
+    expect(s.terminal).toBe(true);
+
+    // The mission coordinator resumes ON ITS OWN (no user message). The
+    // resume + the events it drives must NOT be gated, or the live thread
+    // freezes until a reload.
+    s = applyAgentChatEvent(s, { type: "session.resume", eventId: 2, data: {} });
+    expect(s.terminal).toBe(false);
+    expect(s.isRunning).toBe(true);
+
+    // Subsequent coordinator activity now flows (terminal already cleared).
+    s = applyAgentChatEvent(s, { type: "llm.request", eventId: 3, data: {} });
+    s = applyAgentChatEvent(s, {
+      type: "llm.delta",
+      eventId: 4,
+      data: { content: "working" },
+    });
+    expect(s.terminal).toBe(false);
+    expect(s.messages.some((m) => m.content.includes("working"))).toBe(true);
+  });
+});

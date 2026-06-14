@@ -39,6 +39,7 @@ export function createInitialAgentChatState(
     sessionDone: false,
     hadDeltas: false,
     terminal: false,
+    stopped: false,
     workspaceRefreshKey: 0,
     browser: null,
     viewMode: options.viewMode ?? "simple",
@@ -59,7 +60,13 @@ export function applyAgentChatEvent(
 
   nextState = applyRetryIndicator(nextState, event);
 
-  if (state.terminal && isPostTerminalLiveEvent(event.type)) {
+  // Gate late in-flight events ONLY after a user-initiated Stop, so the
+  // aborted turn's trailing deltas / a redundant session.resume don't
+  // flash "running" again. A natural session.complete does NOT set
+  // ``stopped``, so an autonomous resume (a mission/research coordinator
+  // continuing with no user.message) still clears ``terminal`` below and
+  // keeps the live thread flowing.
+  if (state.stopped && isPostTerminalLiveEvent(event.type)) {
     return nextState;
   }
 
@@ -71,7 +78,7 @@ export function applyAgentChatEvent(
       // emits (e.g. the harness's redundant abort-cleanup pause) doesn't
       // suppress the running indicator for the new turn's deltas.
       return withMessages(
-        { ...nextState, terminal: false, isRunning: true },
+        { ...nextState, terminal: false, stopped: false, isRunning: true },
         applyUserMessage(nextState.messages, event.eventId, event.data),
       );
 

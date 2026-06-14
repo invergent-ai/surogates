@@ -552,6 +552,11 @@ export interface AgentChatState {
   sessionDone: boolean;
   hadDeltas: boolean;
   terminal: boolean;
+  /** True only after a user-initiated Stop. Gates the aborted turn's
+   * late in-flight events (and a redundant resume) from flashing
+   * "running" — unlike ``terminal``, a natural session.complete does not
+   * set it, so an autonomous mission/research resume keeps streaming. */
+  stopped: boolean;
   workspaceRefreshKey: number;
   browser: AgentChatBrowserState | null;
   // "simple" groups iteration content under one-liners + appends a

@@ -180,6 +180,7 @@ export function useAgentChatRuntime({
         ...stateRef.current,
         sessionDone: false,
         terminal: false,
+        stopped: false,
       };
       openStream(targetSessionId, after);
     },
@@ -343,6 +344,10 @@ export function useAgentChatRuntime({
       return {
         ...prev,
         terminal: true,
+        // User-initiated stop: gate the aborted turn's late in-flight
+        // events (a natural session.complete leaves this false so an
+        // autonomous mission resume still streams).
+        stopped: true,
         isRunning: false,
         messages,
       };
@@ -451,6 +456,7 @@ export function useAgentChatRuntime({
     setState((prev) => ({
       ...prev,
       terminal: false,
+      stopped: false,
       retryIndicator: null,
       isRunning: true,
     }));
