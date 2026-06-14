@@ -266,8 +266,6 @@ def _skill_invoked_event_data(
     return data
 
 
-
-
 # Reminder injected when the deep-research planner ends a turn with
 # no tool calls AND has never actually delegated to research-writer.
 # Phrased to push the model toward emitting the call rather than
