@@ -17,7 +17,7 @@ import secrets
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
@@ -83,6 +83,7 @@ class DockerSandbox:
         ready_timeout: int = 60,
         network: str = "bridge",
         mcp_proxy_url: str = "",
+        storage_settings: Any = None,
         docker: _DockerDriver | None = None,
         httpx_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
@@ -91,6 +92,7 @@ class DockerSandbox:
         self._ready_timeout = ready_timeout
         self._network = network
         self._mcp_proxy_url = mcp_proxy_url
+        self._storage = storage_settings
         self._docker = docker or _RealDocker()
         self._transport = httpx_transport
         self._client = ExecutorHTTPClient()
@@ -326,6 +328,41 @@ class DockerSandbox:
                 "Could not mint MCP proxy token for docker sandbox: %s", exc,
             )
             return ""
+
+    def _has_s3_creds(self) -> bool:
+        s = self._storage
+        return bool(
+            s
+            and getattr(s, "access_key", "")
+            and getattr(s, "secret_key", "")
+        )
+
+    def _s3_bucket_spec(self, spec: SandboxSpec) -> str | None:
+        """Parse the spec's s3:// workspace Resource into geesefs's
+        ``bucket:/prefix`` form (mirrors K8sSandbox._build_pod_manifest)."""
+        for res in spec.resources:
+            if res.source_ref.startswith("s3://"):
+                source = res.source_ref[5:].rstrip("/")
+                if "/" in source:
+                    bucket, path = source.split("/", 1)
+                    return f"{bucket}:/{path}"
+                return source
+        return None
+
+    def _workspace_mode(self, spec: SandboxSpec) -> tuple[str, str | None]:
+        """Decide how /workspace is backed for this provision.
+
+        - ``("s3fs", bucket_spec)``  -- geesefs FUSE mount of R2 (needs creds)
+        - ``("bind", host_path)``    -- host bind-mount
+        - ``("ephemeral", None)``    -- container-internal scratch
+        """
+        bucket_spec = self._s3_bucket_spec(spec)
+        if bucket_spec and self._has_s3_creds():
+            return ("s3fs", bucket_spec)
+        workspace = self._mountable_workspace(spec.workspace_path)
+        if workspace is not None:
+            return ("bind", str(workspace))
+        return ("ephemeral", None)
 
     def _mountable_workspace(self, workspace_path: str | None) -> Path | None:
         # "/workspace" is the in-pod FUSE sentinel returned by S3Backend; it is
