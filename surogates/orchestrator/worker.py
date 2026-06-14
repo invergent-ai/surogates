@@ -660,6 +660,7 @@ async def run_worker(settings: Settings) -> None:
             ready_timeout=settings.sandbox.docker_ready_timeout,
             network=settings.sandbox.docker_network,
             mcp_proxy_url=settings.mcp_proxy_url,
+            storage_settings=settings.storage,
         )
     else:
         sandbox_backend = ProcessSandbox()

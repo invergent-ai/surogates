@@ -18,8 +18,8 @@ Status updated before each commit. Legend: `[ ]` pending · `[~]` in progress ·
 - [x] Task 2: Sandbox image — fuse + geesefs + gated `entrypoint.sh`
 - [x] Task 3: `DockerSandbox` mode detection + `storage_settings`
 - [x] Task 4: `DockerSandbox` per-mode run args + env
-- [~] Task 5: Worker wiring + `config.dev.yaml` back to s3
-- [ ] Task 6: Opt-in integration test (real docker + R2)
+- [x] Task 5: Worker wiring + `config.dev.yaml` back to s3
+- [~] Task 6: Opt-in integration test (real docker + R2)
 
 ---
 
