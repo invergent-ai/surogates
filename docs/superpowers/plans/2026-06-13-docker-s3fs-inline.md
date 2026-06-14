@@ -15,7 +15,7 @@
 Status updated before each commit. Legend: `[ ]` pending · `[~]` in progress · `[x]` complete.
 
 - [x] Task 1: Spike — validate non-root geesefs R2 mount (go/no-go, no commit) — **PASS**: uid-1000 geesefs mount of R2 + write/read works; requires a uid-1000 `/etc/passwd` entry (the `sandbox` user provides it). No gosu fallback needed.
-- [~] Task 2: Sandbox image — fuse + geesefs + gated `entrypoint.sh`
+- [x] Task 2: Sandbox image — fuse + geesefs + gated `entrypoint.sh`
 - [x] Task 3: `DockerSandbox` mode detection + `storage_settings`
 - [x] Task 4: `DockerSandbox` per-mode run args + env
 - [~] Task 5: Worker wiring + `config.dev.yaml` back to s3
