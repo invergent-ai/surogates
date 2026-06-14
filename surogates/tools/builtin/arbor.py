@@ -370,6 +370,37 @@ def _terminal_stdout(raw: str) -> str:
     return raw
 
 
+async def _bundle_branch_b64(
+    kwargs, *, repo_path: str, trunk_branch: str, branch: str, key: str,
+) -> str | None:
+    """Create the experiment branch at trunk and return its git bundle,
+    base64-encoded on a single line.
+
+    The bundle is the durable payload the executor clones: terminal-created
+    git state does NOT cross the per-session workspace boundary, but a
+    ``write_file``'d bundle does. Returns ``None`` when bundling fails (the
+    repo isn't a git repo, the branch can't be created, etc.).
+    """
+    tmp = f"/tmp/arbor-{key}.bundle"
+    out = _terminal_stdout(await _sandbox_sh(kwargs, (
+        f"cd {repo_path} && "
+        f"(git rev-parse --verify {trunk_branch} >/dev/null 2>&1 "
+        f"|| git branch {trunk_branch}) && "
+        f"(git rev-parse --verify {branch} >/dev/null 2>&1 "
+        f"|| git branch {branch} {trunk_branch}) && "
+        f"git bundle create {tmp} {branch} >/dev/null 2>&1 && "
+        # ``| tr -d '\\n'`` keeps the base64 one line on GNU *and* busybox
+        # (no ``-w0`` flag dependency); the trailing rm always runs.
+        f"base64 {tmp} | tr -d '\\n'; rm -f {tmp}"
+    )))
+    b64 = (out or "").strip()
+    # A clean run yields one unbroken base64 line; reject empties and any
+    # git error text that leaked instead.
+    if not b64 or any(c.isspace() for c in b64) or "fatal" in b64.lower():
+        return None
+    return b64
+
+
 async def _ancestor_insights(store, run_id, node) -> list[tuple[str, str]]:
     """The (key, insight) chain from root down to the node's parent."""
     chain: list[tuple[str, str]] = []
@@ -724,22 +755,28 @@ async def _dispatch_baseline(store, run_id, kwargs) -> str:
     if "BASELINE" in existing:
         return json.dumps({"error": "a baseline experiment already exists"})
 
-    worktree = "/workspace/.arbor/worktrees/BASELINE"
-    out = await _sandbox_sh(kwargs, (
-        f"cd {run.repo_path} && "
-        f"(git rev-parse --verify {run.trunk_branch} >/dev/null 2>&1 "
-        f"|| git branch {run.trunk_branch}) && "
-        f"git worktree prune && "
-        f"git worktree add --detach {worktree} {run.trunk_branch} 2>&1"
-    ))
-    if "fatal" in (out or "").lower():
-        return json.dumps({"error": f"baseline worktree failed: {out[:300]}"})
+    work_dir = "/workspace/.arbor/experiments/BASELINE/wt"
+    bundle_rel = ".arbor/experiments/BASELINE/repo.bundle.b64"
+    b64 = await _bundle_branch_b64(
+        kwargs, repo_path=run.repo_path,
+        trunk_branch=run.trunk_branch, branch=run.trunk_branch, key="BASELINE",
+    )
+    if b64 is None:
+        return json.dumps({"error": (
+            f"could not bundle repo for baseline — is {run.repo_path} a "
+            "git repo with commits?"
+        )})
+    await _persist_workspace_file(kwargs, path=bundle_rel, content=b64)
 
     brief = (
         "[Baseline experiment]\n\n"
-        f"Measure the UNMODIFIED repo on the dev split. Worktree: {worktree}.\n"
+        "Measure the UNMODIFIED repo on the dev split.\n"
+        "Set up the repo (handed to you as a git bundle):\n"
+        f"    mkdir -p {work_dir} && cd {work_dir}\n"
+        f"    base64 -d /workspace/{bundle_rel} > /tmp/repo-baseline.bundle\n"
+        f"    git clone -q /tmp/repo-baseline.bundle . && rm /tmp/repo-baseline.bundle\n"
         "DO NOT MODIFY any source — run the eval as-is and report the number.\n"
-        f"Eval (dev): {meta['eval_cmd']}\n\n"
+        f"Eval (dev), run from {work_dir}: {meta['eval_cmd']}\n\n"
         "Finish with worker_complete(metadata={\"node_key\": \"BASELINE\", "
         "\"score\": <float dev score>, \"insight\": \"baseline\", "
         "\"result\": \"baseline measured\"})."
@@ -843,26 +880,31 @@ async def _dispatch_experiments_handler(arguments: dict[str, Any], **kwargs: Any
             node = await store.get_node(run_id, key)
             sha8 = _uuid.uuid4().hex[:8]
             branch = f"{run.branch_prefix}/n{key}-{_slug(node.hypothesis)}-{sha8}"
-            worktree = f"/workspace/.arbor/worktrees/{key}"
-            # Trunk is created lazily from the repo HEAD on first dispatch;
-            # nothing else creates it on a fresh run.
-            out = await _sandbox_sh(kwargs, (
-                f"cd {run.repo_path} && "
-                f"(git rev-parse --verify {run.trunk_branch} >/dev/null 2>&1 "
-                f"|| git branch {run.trunk_branch}) && "
-                f"git worktree prune && "
-                f"git worktree add -b {branch} {worktree} {run.trunk_branch} 2>&1"
-            ))
-            if "fatal" in (out or "").lower():
+            bundle_rel = f".arbor/experiments/{key}/repo.bundle.b64"
+            work_dir = f"/workspace/.arbor/experiments/{key}/wt"
+            # The executor runs in a separate sandbox that cannot see this
+            # session's git state. Hand it the repo as a write_file'd bundle
+            # (the durable cross-session channel); it clones into work_dir.
+            b64 = await _bundle_branch_b64(
+                kwargs, repo_path=run.repo_path,
+                trunk_branch=run.trunk_branch, branch=branch, key=key,
+            )
+            if b64 is None:
                 return json.dumps({
-                    "error": f"worktree creation failed for {key}: {out[:500]}",
+                    "error": (
+                        f"could not bundle repo for {key} — is "
+                        f"{run.repo_path} a git repo with commits?"
+                    ),
                     "dispatched": dispatched,
                 })
+            await _persist_workspace_file(kwargs, path=bundle_rel, content=b64)
 
             from surogates.arbor.prompts import build_executor_brief
 
             brief = build_executor_brief(
-                node=node, run=run, worktree_path=worktree, branch=branch,
+                node=node, run=run,
+                bundle_path=f"/workspace/{bundle_rel}", work_dir=work_dir,
+                branch=branch,
                 ancestor_insights=await _ancestor_insights(store, run_id, node),
                 extra_context=arguments.get("extra_context") or "",
             )

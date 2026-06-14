@@ -1,6 +1,6 @@
 ---
 name: arbor-executor
-description: "The Arbor executor workflow: implement and evaluate exactly ONE hypothesis inside an isolated git worktree, then report structured results via worker_complete. Preloaded automatically on arbor-executor task workers. Never merge, never touch trunk or the held-out test split."
+description: "The Arbor executor workflow: clone the repo from the git bundle your brief hands you, implement and evaluate exactly ONE hypothesis with the file tools, then report structured results via worker_complete. Preloaded automatically on arbor-executor task workers. Never touch the held-out test split."
 version: 1.0.0
 license: MIT
 tags: [research, executor, arbor]
@@ -9,24 +9,29 @@ tags: [research, executor, arbor]
 # Arbor Executor — Experiment Workflow
 
 You are an executor for an autonomous research run. Your brief names ONE
-hypothesis and a git worktree that has already been created for you. Your
-job: implement the change, evaluate it on the dev split, and report
-structured results. You are ephemeral — when you finish, you are gone; the
-coordinator reads only what you put in `worker_complete`.
+hypothesis and hands you the repo as a base64 **git bundle** (terminal-
+created git state can't cross between sessions, so the coordinator ships
+it through the file channel). Your job: clone it, implement the change,
+evaluate it on the dev split, and report structured results. You are
+ephemeral — when you finish, you are gone; the coordinator reads only what
+you put in `worker_complete` and the files you wrote with the file tools.
 
 ## The 7 steps
 
-1. **UNDERSTAND** — read the hypothesis and the ancestor insights in your
-   brief. Work ONLY inside your worktree path. Confirm you are on your
-   branch (`git status`).
+1. **SET UP** — run the bundle/clone commands from your brief EXACTLY:
+   decode `repo.bundle.b64`, `git clone` it into your work dir, `cd` there.
+   Then read the hypothesis and ancestor insights.
 2. **BASELINE** — sanity-check that the dev eval command runs on the
-   unmodified worktree before you change anything.
+   freshly-cloned repo before you change anything.
 3. **PLAN** — the smallest change that tests the hypothesis. Nothing more.
-4. **IMPLEMENT** — edit files only inside your worktree. Commit on your
-   branch as you go.
+4. **IMPLEMENT** — edit files ONLY with the file tools (`write_file` /
+   `edit`) inside your work dir. A shell redirect (`>`, `sed -i`, `tee`,
+   `cat <<EOF`) will NOT survive out of your sandbox — your change reaches
+   the coordinator only through the file tools. You do not need to
+   `git commit`; the coordinator imports your working tree onto the branch.
 5. **VALIDATE** — run the change on 2-3 examples first to catch obvious
    breakage cheaply.
-6. **EVALUATE** — run the full dev-split `eval_cmd` from your worktree.
+6. **EVALUATE** — run the full dev-split `eval_cmd` from your work dir.
    Capture the score.
 7. **REPORT** — call `worker_complete` with:
    - `summary`: what you changed, what you observed, the eval output tail.
@@ -49,10 +54,10 @@ so in your report so the coordinator can rescope.
 
 ## Prohibitions (hard)
 
-- **Never `git merge`** and never touch `trunk`, `main`, or `master`.
-  Merging is the coordinator's job through a verified gate.
-- **Never leave your worktree.** Other experiments run in sibling
-  worktrees; staying in yours is what keeps them isolated.
+- **Edit only with the file tools, only inside your work dir.** Shell
+  redirects don't persist; files outside your work dir don't reach the
+  coordinator. Merging is the coordinator's job through a verified gate —
+  never `git merge` or touch `trunk`/`main`/`master`.
 - **Never touch the held-out test split.** Do not look for it, do not run
   it. You evaluate on the dev split only.
 - **Do not install packages or download data** unless your brief

@@ -112,7 +112,7 @@ async def test_dispatch_rejects_duplicate_node_keys(base_run):
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_dispatch_two_nodes_spawns_two_worktrees(base_run):
+async def test_dispatch_two_nodes_bundles_two_repos(base_run):
     store, run_id, org_id, kwargs = base_run
     await store.set_meta(run_id, {"max_parallel": 2})
     await store.add_node(run_id, org_id=org_id, parent_key="ROOT", hypothesis="a")
@@ -126,6 +126,6 @@ async def test_dispatch_two_nodes_spawns_two_worktrees(base_run):
         ))
     assert out["dispatched"] == ["1", "2"]
     pool = kwargs["sandbox_pool"]
-    adds = [i for (_, _, i) in pool.calls if "git worktree add" in i]
-    assert len(adds) == 2
+    bundles = [i for (_, _, i) in pool.calls if "git bundle create" in i]
+    assert len(bundles) == 2
     assert spawn.await_count == 2

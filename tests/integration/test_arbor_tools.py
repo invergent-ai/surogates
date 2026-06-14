@@ -36,6 +36,10 @@ class FakeSandboxPool:
         for needle, out in self.responses.items():
             if needle in input:
                 return out
+        # The dispatch handoff bundles the repo and base64-encodes it;
+        # return a valid one-line base64 so _bundle_branch_b64 succeeds.
+        if "git bundle create" in input and "base64" in input:
+            return "ZmFrZS1idW5kbGU="
         return ""
 
 
@@ -145,8 +149,10 @@ async def test_dispatch_creates_worktree_brief_and_task(dispatch_env):
     assert node.code_ref and node.code_ref.startswith("research/run1/")
     assert node.dispatched_at is not None
 
-    # Worktree created server-side BEFORE the worker's first token.
-    assert any("git worktree add" in i for (_, _, i) in pool.calls)
+    # The repo is bundled and the base64 written to the durable channel
+    # the executor reads (terminal-created git state never crosses).
+    assert any("git bundle create" in i for (_, _, i) in pool.calls)
+    assert any("repo.bundle.b64" in i for (_, _, i) in pool.calls)
 
     # Brief renders the dev command but NEVER the held-out test command.
     brief = spawn.call_args.kwargs["goal"]
@@ -607,3 +613,62 @@ async def test_merge_status_reads_score_from_terminal_envelope(merge_env_with_ev
     ))
     assert out["merged"] is True and out["test_score"] == 0.61
     assert (await store.get_node(run_id, "1")).status == "merged"
+
+
+# ---------------------------------------------------------------------------
+# Bundle handoff (executors run in a separate sandbox; git state can't cross)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_bundle_branch_b64_success_and_failure():
+    """_bundle_branch_b64 returns the one-line base64 on success and None
+    when the bundle command empties out or leaks a git error."""
+    from surogates.tools.builtin.arbor import _bundle_branch_b64
+
+    class _Pool:
+        def __init__(self, resp):
+            self.resp = resp
+
+        async def ensure(self, *a, **k):
+            return None
+
+        async def execute(self, *a, **k):
+            return self.resp
+
+    async def call(resp):
+        return await _bundle_branch_b64(
+            {"sandbox_pool": _Pool(resp), "session_id": "s"},
+            repo_path="/repo", trunk_branch="trunk", branch="b", key="1",
+        )
+
+    assert await call("ZmFrZS1idW5kbGU=") == "ZmFrZS1idW5kbGU="
+    assert await call("") is None                       # bundle failed
+    assert await call("fatal: not a git repository") is None  # error leaked
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_dispatch_writes_bundle_and_brief_clones(dispatch_env):
+    """Dispatch persists the repo bundle to the durable path and the brief
+    tells the executor to clone it (no pre-made worktree)."""
+    store, run_id, pool, kwargs = dispatch_env
+    run = await store.get_run(run_id)
+    spawn = AsyncMock(side_effect=_fake_spawn(
+        kwargs["session_factory"], run.org_id, uuid.UUID(kwargs["session_id"]),
+    ))
+    with patch("surogates.tasks.service.create_task_and_spawn", new=spawn):
+        await _dispatch_experiments_handler({"node_keys": ["1"]}, **kwargs)
+
+    writes = [
+        json.loads(i) for (_, name, i) in pool.calls if name == "write_file"
+    ]
+    bundle_writes = [
+        w for w in writes
+        if str(w.get("path", "")).endswith("repo.bundle.b64")
+    ]
+    assert bundle_writes, "bundle was not persisted to the durable channel"
+    assert bundle_writes[0]["content"] == "ZmFrZS1idW5kbGU="
+
+    brief = spawn.call_args.kwargs["goal"]
+    assert "git clone" in brief and "repo.bundle.b64" in brief
+    assert "git worktree" not in brief  # no pre-made worktree handoff

@@ -206,8 +206,12 @@ class ArborHarvestMixin:
                 llm_client=getattr(self, "_llm", None), model=model,
             )
             digests.append(folded)
-            # Worktree cleanup — the branch survives (Arbor's invariant).
-            await self._research_worktree_cleanup(session, run.repo_path, node.node_key)
+            # Import the executor's working-tree edits onto its branch so
+            # the merge gate's held-out eval runs on the real change (the
+            # branch survives — Arbor's invariant).
+            await self._research_import_executor_work(
+                session, run.repo_path, node.code_ref, node.node_key,
+            )
 
         constraints = await store.constraints_block(run_id)
 
@@ -252,27 +256,50 @@ class ArborHarvestMixin:
         )
         messages.append({"role": "user", "content": content})
 
-    async def _research_worktree_cleanup(
-        self, session: Any, repo_path: str, node_key: str,
+    async def _research_import_executor_work(
+        self, session: Any, repo_path: str, branch: str | None, node_key: str,
     ) -> None:
-        """Remove the experiment worktree dir; keep its branch. Best-effort."""
+        """Fold the executor's working-tree edits onto its branch + commit.
+
+        The executor runs in a separate sandbox whose git state never
+        crosses back; only the files it wrote with the file tools land in
+        the shared workspace at ``.arbor/experiments/<key>/wt/``. Overlay
+        those onto a fresh checkout of ``branch`` and commit, so the merge
+        gate's held-out eval runs on the executor's actual change. Then
+        drop the temp worktree + the experiments dir. Best-effort: on any
+        failure the branch stays at trunk, which the gate reads as 'no
+        improvement'.
+        """
         pool = getattr(self, "_sandbox_pool", None)
-        if pool is None:
+        if pool is None or not branch:
             return
         from surogates.sandbox.base import default_sandbox_spec
 
         owner = str(session.id)
+        wt_src = f"/workspace/.arbor/experiments/{node_key}/wt"
+        tmp = f"/workspace/.arbor/import/{node_key}"
         try:
             await pool.ensure(owner, default_sandbox_spec())
             await pool.execute(owner, "terminal", json.dumps({
                 "command": (
-                    f"cd {repo_path} && git worktree remove --force "
-                    f"/workspace/.arbor/worktrees/{node_key} 2>/dev/null; true"
+                    f"cd {repo_path} && git worktree prune && rm -rf {tmp} && "
+                    f"git worktree add --force {tmp} {branch} && "
+                    # The executor's terminal-created clone never crossed;
+                    # only its write_file'd edits are under wt/. Overlay
+                    # them (never its .git — absent here) onto the branch.
+                    f"if [ -d {wt_src} ]; then cp -a {wt_src}/. {tmp}/ "
+                    f"2>/dev/null || true; fi && cd {tmp} && git add -A && "
+                    f"(git diff --cached --quiet || "
+                    f"git -c user.email=arbor@local -c user.name=arbor "
+                    f"commit -q -m 'executor {node_key}') ; "
+                    f"cd {repo_path} && "
+                    f"git worktree remove --force {tmp} 2>/dev/null; "
+                    f"rm -rf {tmp} {wt_src}; true"
                 ),
-                "timeout": 60,
+                "timeout": 120,
             }))
         except Exception:
             logger.warning(
-                "research: worktree cleanup failed for node %s (continuing)",
-                node_key, exc_info=True,
+                "research: importing executor work failed for node %s "
+                "(continuing)", node_key, exc_info=True,
             )

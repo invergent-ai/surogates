@@ -14,13 +14,21 @@ BRIEF_TEMPLATE = """\
 [Research experiment {node_key}]
 
 You are an executor for an autonomous research run. Implement and
-evaluate EXACTLY ONE hypothesis in YOUR OWN git worktree.
+evaluate EXACTLY ONE hypothesis against the REAL benchmark.
 
-## Worktree (already created for you — work ONLY here)
-- path: {worktree_path}
-- branch: {branch}
-- Never `git merge`, never touch {trunk_branch} or main/master, never
-  leave your worktree. Commit your changes on your branch when done.
+## Set up your repo (handed to you as a git bundle — NOT pre-checked-out)
+Run these EXACTLY:
+    mkdir -p {work_dir} && cd {work_dir}
+    base64 -d {bundle_path} > /tmp/repo-{node_key}.bundle
+    git clone -q -b {branch} /tmp/repo-{node_key}.bundle . && rm /tmp/repo-{node_key}.bundle
+You now have the full repo at {work_dir} on branch {branch}.
+
+## Edit ONLY with the file tools (write_file / edit) — NOT shell redirects
+Your code changes reach the coordinator ONLY through the file tools. A
+change made with a shell redirect (`>`, `sed -i`, `tee`, `cat <<EOF`)
+will NOT survive out of your sandbox and your experiment is lost. Edit
+every file you change with write_file/edit under {work_dir}/. You do not
+need to `git commit` — the coordinator imports your working tree.
 
 ## Hypothesis
 {hypothesis}
@@ -29,11 +37,11 @@ evaluate EXACTLY ONE hypothesis in YOUR OWN git worktree.
 {ancestor_insights}
 
 ## Evaluation (B_dev ONLY)
-- command (run from your worktree): {eval_cmd}
+- command (run from {work_dir}): {eval_cmd}
 - timeout: {eval_timeout}s. Long runs: use terminal(background=true,
-  notify_on_complete=true) + process(wait); checkpoint to /workspace.
-- The held-out test split is OFF LIMITS. Do not look for it, do not
-  run it. Merging is the coordinator's job through a verified gate.
+  notify_on_complete=true) + process(wait).
+- The held-out test split is OFF LIMITS. Do not look for it, do not run
+  it. Merging is the coordinator's job through a verified gate.
 
 ## Report contract (MANDATORY)
 Finish by calling worker_complete with:
@@ -46,10 +54,16 @@ and the failure as the insight.{extra_context}"""
 
 
 def build_executor_brief(
-    *, node: Any, run: Any, worktree_path: str, branch: str,
+    *, node: Any, run: Any, bundle_path: str, work_dir: str, branch: str,
     ancestor_insights: list[tuple[str, str]], extra_context: str = "",
 ) -> str:
-    """Render the executor brief for one dispatched hypothesis."""
+    """Render the executor brief for one dispatched hypothesis.
+
+    The repo crosses to the executor's separate sandbox as a base64 git
+    bundle at ``bundle_path`` (the only durable channel between sessions);
+    the executor clones it into ``work_dir`` and edits there with the file
+    tools so its changes survive back to the coordinator.
+    """
     meta = run.meta or {}
     insights = "\n".join(
         f"- [{key}] {value}" for key, value in ancestor_insights if value
@@ -57,7 +71,8 @@ def build_executor_brief(
     extra = f"\n\n## Extra context\n{extra_context}" if extra_context else ""
     return BRIEF_TEMPLATE.format(
         node_key=node.node_key,
-        worktree_path=worktree_path,
+        bundle_path=bundle_path,
+        work_dir=work_dir,
         branch=branch,
         trunk_branch=run.trunk_branch,
         hypothesis=node.hypothesis,
