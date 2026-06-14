@@ -43,6 +43,9 @@ class FakeSandboxPool:
         # The merge-eval launch confirms it backgrounded with this marker.
         if "MERGE_EVAL_LAUNCHED" in input:
             return "MERGE_EVAL_LAUNCHED"
+        # The trunk merge runs in a worktree and echoes its outcome.
+        if "echo MERGE_OK" in input:
+            return "MERGE_OK"
         return ""
 
 
@@ -283,7 +286,7 @@ async def test_merge_status_merges_on_improvement_and_writes_score(merge_env_wit
     run = await store.get_run(run_id)
     assert run.meta["test_trunk_score"] == 0.61
     assert (await store.get_node(run_id, "1")).status == "merged"
-    assert any("git merge --no-ff" in i for (_, _, i) in pool.calls)
+    assert any("merge --no-ff" in i for (_, _, i) in pool.calls)
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -696,3 +699,27 @@ async def test_merge_start_surfaces_eval_setup_failure(merge_env_with_eval):
     # No merge_eval stamp was set, so nothing is left to poll forever.
     run = await store.get_run(run_id)
     assert not (run.meta.get("merge_eval") or {}).get("node_key")
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_surfaces_real_git_error_on_failure(merge_env_with_eval):
+    """A failed trunk merge returns the actual git output (not a generic
+    'merge conflict') and leaves trunk + node untouched."""
+    store, run_id, pool, kwargs = merge_env_with_eval
+    await store.set_meta(
+        run_id, {"test_baseline_score": 0.50}, allow_machine_keys=True,
+    )
+    await _merge_experiment_handler({"action": "start", "node_key": "1"}, **kwargs)
+    pool.responses["cat /workspace/.arbor/merge-eval/1/result.json"] = '{"score": 0.61}'
+    # The worktree merge fails — script the git error + the FAILED marker.
+    pool.responses["git worktree add --force /workspace/.arbor/merge/1"] = (
+        "CONFLICT (content): Merge conflict in solver.py\nMERGE_FAILED"
+    )
+    out = json.loads(await _merge_experiment_handler(
+        {"action": "status", "node_key": "1"}, **kwargs,
+    ))
+    assert out["merged"] is False
+    assert "could not merge" in out["error"]
+    assert "solver.py" in out["error"]           # the real reason, surfaced
+    assert (await store.get_node(run_id, "1")).status != "merged"
+    assert (await store.get_run(run_id)).meta.get("test_trunk_score") is None

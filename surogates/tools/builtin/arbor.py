@@ -721,17 +721,36 @@ async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) ->
                     "error": f"branch touches protected paths: {hit}",
                 })
 
-        out = await _sandbox_sh(kwargs, (
-            f"cd {run.repo_path} && git checkout {run.trunk_branch} && "
-            f"git merge --no-ff {node.code_ref} "
-            f"-m 'research: merge {node_key} (test={score})' 2>&1 "
-            f"|| (git merge --abort; echo MERGE_CONFLICT)"
-        ), timeout=120)
-        if "MERGE_CONFLICT" in (out or ""):
+        # Merge inside a fresh worktree of trunk, NOT the shared main
+        # checkout. ``git checkout {trunk}`` in the main working dir is
+        # flaky on the shared workspace — a stray dirty file or a worktree
+        # contending for the branch makes it fail, which the old ``||``
+        # mislabelled as a "merge conflict". Merging in a worktree on the
+        # trunk branch advances the trunk ref the same way; on ANY failure
+        # we drop the worktree, which discards the in-progress merge and
+        # leaves trunk exactly as it was.
+        mwt = f"/workspace/.arbor/merge/{node_key}"
+        out = _terminal_stdout(await _sandbox_sh(kwargs, (
+            f"cd {run.repo_path} && git worktree prune && rm -rf {mwt} && "
+            f"git worktree add --force {mwt} {run.trunk_branch} 2>&1 && "
+            f"git -C {mwt} -c user.email=arbor@local -c user.name=arbor "
+            f"merge --no-ff {node.code_ref} "
+            f"-m 'research: merge {node_key} (test={score})' 2>&1; rc=$?; "
+            f"cd {run.repo_path} && "
+            f"git worktree remove --force {mwt} 2>/dev/null; rm -rf {mwt}; "
+            f"[ $rc -eq 0 ] && echo MERGE_OK || echo MERGE_FAILED"
+        ), timeout=120))
+        if "MERGE_OK" not in (out or ""):
             await store.set_meta(run_id, {"merge_eval": {}}, allow_machine_keys=True)
+            detail = " ".join(
+                (out or "").replace("MERGE_FAILED", "").split()
+            )[:400] or "no output"
             return json.dumps({
                 "merged": False,
-                "error": "merge conflict — trunk restored; rebase the branch and retry",
+                "error": (
+                    f"could not merge {node_key} into trunk (trunk left "
+                    f"unchanged): {detail}"
+                ),
             })
 
         # The tool is the SOLE writer of test_trunk_score (machine key).
