@@ -39,6 +39,7 @@ import { AskUserQuestionToolBlock } from "./tools/ask-user-question-tool";
 import { parseTerminalResult } from "./tools/terminal-tool";
 import { statusColorClass, effectiveStatus, toolErrorSummary, parseArgs } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
+import { renderInlineMarkdown } from "./inline-markdown";
 import { ChatComposer } from "./chat-composer";
 import { IntegrationsBand } from "../connections/integrations-band";
 import { useAgentChatAdapterContext } from "../../adapter-context";
@@ -916,7 +917,7 @@ function NarrationEntry({
         <TimelineIndicator className="size-2 border-none bg-foreground/30" />
       </TimelineHeader>
       <TimelineContent>
-        <p>{line}</p>
+        <p>{renderInlineMarkdown(line)}</p>
       </TimelineContent>
     </TimelineItem>
   );
@@ -1622,7 +1623,9 @@ export function IterationGroup({
         aria-expanded={open}
         className="flex w-full items-center gap-2 rounded py-0.5 text-left text-sm hover:bg-muted/40"
       >
-        <span className={cn("flex-1 truncate", labelTone)}>{label}</span>
+        <span className={cn("flex-1 truncate", labelTone)}>
+          {renderInlineMarkdown(label)}
+        </span>
         <ChevronDown
           className={cn(
             "size-3 shrink-0 text-foreground/60 transition-transform",
@@ -1872,7 +1875,7 @@ function SimpleAssistantGroup({
                   <MessageResponse>{askBody}</MessageResponse>
                 ) : narrationLine ? (
                   <p className="text-sm text-foreground">
-                    {narrationLine}
+                    {renderInlineMarkdown(narrationLine)}
                   </p>
                 ) : null}
                 <IterationGroup

@@ -19,6 +19,7 @@ import {
   type MissionEventCategory,
 } from "./mission-derive";
 import type { MissionEventsFeed } from "./use-mission-events";
+import { renderInlineMarkdown } from "../chat/inline-markdown";
 
 
 export interface MissionActivityTabProps {
@@ -114,7 +115,7 @@ function ActivityRow({
 
         <div>
           <p className="min-w-0 flex-1 truncate text-foreground/80">
-            {missionEventSummary(event)}
+            {renderInlineMarkdown(missionEventSummary(event))}
           </p>
         </div>
       </div>
