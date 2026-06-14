@@ -40,6 +40,9 @@ class FakeSandboxPool:
         # return a valid one-line base64 so _bundle_branch_b64 succeeds.
         if "git bundle create" in input and "base64" in input:
             return "ZmFrZS1idW5kbGU="
+        # The merge-eval launch confirms it backgrounded with this marker.
+        if "MERGE_EVAL_LAUNCHED" in input:
+            return "MERGE_EVAL_LAUNCHED"
         return ""
 
 
@@ -672,3 +675,24 @@ async def test_dispatch_writes_bundle_and_brief_clones(dispatch_env):
     brief = spawn.call_args.kwargs["goal"]
     assert "git clone" in brief and "repo.bundle.b64" in brief
     assert "git worktree" not in brief  # no pre-made worktree handoff
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_merge_start_surfaces_eval_setup_failure(merge_env_with_eval):
+    """If the held-out eval can't be launched (worktree setup fails), start
+    returns the error immediately instead of leaving status to poll
+    'running' until the ~30-min stale-grace timeout."""
+    store, run_id, pool, kwargs = merge_env_with_eval
+    # Worktree add fails -> the launch never echoes its MERGE_EVAL_LAUNCHED
+    # marker. (responses are matched before the default marker stub.)
+    pool.responses["git worktree add --detach"] = (
+        "fatal: 'b' is already checked out at '/x'"
+    )
+    out = json.loads(await _merge_experiment_handler(
+        {"action": "start", "node_key": "1"}, **kwargs,
+    ))
+    assert out["merged"] is False
+    assert "setup failed" in out["error"]
+    # No merge_eval stamp was set, so nothing is left to poll forever.
+    run = await store.get_run(run_id)
+    assert not (run.meta.get("merge_eval") or {}).get("node_key")

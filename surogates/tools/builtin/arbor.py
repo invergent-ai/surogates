@@ -491,12 +491,17 @@ def _merge_eval_dir(node_key: str) -> str:
     return f"/workspace/.arbor/merge-eval/{node_key}"
 
 
-async def _launch_merge_eval(kwargs, *, run, node_key: str, branch: str) -> None:
+async def _launch_merge_eval(kwargs, *, run, node_key: str, branch: str) -> str | None:
     """Write the extractor and launch the held-out eval detached.
 
     The eval runs under ``nohup ... &`` writing ``eval.log`` then
     ``result.json`` — so no sandbox exec is held open for the eval's
     duration (per-exec timeouts, pod churn) and ``status`` polls the file.
+
+    Returns ``None`` when the eval was launched, else a one-line error
+    describing why the setup (worktree add) failed — so ``start`` can
+    surface it immediately instead of leaving ``status`` to poll
+    ``running`` until the stale-grace timeout (~30 min).
     """
     meta = run.meta or {}
     evald = _merge_eval_dir(node_key)
@@ -507,7 +512,7 @@ async def _launch_merge_eval(kwargs, *, run, node_key: str, branch: str) -> None
         kwargs, path=".arbor/extract_score.py", content=_SCORE_EXTRACTOR,
     )
     eval_cmd_test = meta["eval_cmd_test"]
-    await _sandbox_sh(kwargs, (
+    out = _terminal_stdout(await _sandbox_sh(kwargs, (
         f"rm -rf {evald} && mkdir -p {evald} && "
         f"cd {run.repo_path} && "
         # ``git worktree prune`` clears the admin entry left behind when a
@@ -516,13 +521,24 @@ async def _launch_merge_eval(kwargs, *, run, node_key: str, branch: str) -> None
         # fails as already-registered. Keeps the staleness-recovery path
         # working and stops registered worktrees from accumulating.
         f"git worktree prune && "
-        f"git worktree add --detach {evald}/wt {branch} && "
+        f"git worktree add --detach {evald}/wt {branch} 2>&1 && "
         f"cd {evald}/wt && "
-        f"nohup sh -c '{eval_cmd_test} > {evald}/eval.log 2>&1; "
+        f"(nohup sh -c '{eval_cmd_test} > {evald}/eval.log 2>&1; "
         f"python3 {extractor} {evald}/eval.log > {evald}/result.json.tmp "
         f"2>>{evald}/eval.log; mv {evald}/result.json.tmp {evald}/result.json' "
-        f">/dev/null 2>&1 &"
-    ), timeout=60)
+        # The setup runs synchronously; on success ``echo`` confirms the
+        # eval was backgrounded. On a worktree-add failure the ``&&`` chain
+        # stops before this and the marker is absent.
+        f">/dev/null 2>&1 &) && echo MERGE_EVAL_LAUNCHED"
+    ), timeout=60))
+    if "MERGE_EVAL_LAUNCHED" in (out or ""):
+        return None
+    detail = " ".join((out or "").split())[:300] or "no output"
+    return (
+        f"held-out eval setup failed for {node_key}: {detail} — the branch "
+        "may be checked out in another worktree or the repo is mid-merge; "
+        "retry shortly"
+    )
 
 
 async def _cleanup_merge_worktree(kwargs, *, run, node_key: str) -> None:
@@ -591,7 +607,11 @@ async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) ->
                     f"poll merge_experiment(status, {in_flight!r}) to finish it "
                     "before starting another"
                 )})
-            await _launch_merge_eval(kwargs, run=run, node_key=node_key, branch=node.code_ref)
+            launch_err = await _launch_merge_eval(
+                kwargs, run=run, node_key=node_key, branch=node.code_ref,
+            )
+            if launch_err is not None:
+                return json.dumps({"merged": False, "error": launch_err})
             await store.set_meta(run_id, {"merge_eval": {
                 "node_key": node_key,
                 "started_at": datetime.now(timezone.utc).isoformat(),
@@ -638,9 +658,14 @@ async def _merge_experiment_handler(arguments: dict[str, Any], **kwargs: Any) ->
                 # Terminal: no relaunch will reuse the worktree — drop it.
                 await _cleanup_merge_worktree(kwargs, run=run, node_key=node_key)
             if retries_left > 0:
-                await _launch_merge_eval(
+                relaunch_err = await _launch_merge_eval(
                     kwargs, run=run, node_key=node_key, branch=node.code_ref,
                 )
+                if relaunch_err is not None:
+                    await store.set_meta(
+                        run_id, {"merge_eval": {}}, allow_machine_keys=True,
+                    )
+                    return json.dumps({"merged": False, "error": relaunch_err})
                 await store.set_meta(run_id, {"merge_eval": {
                     "node_key": node_key,
                     "started_at": datetime.now(timezone.utc).isoformat(),
