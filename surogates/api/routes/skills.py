@@ -374,6 +374,33 @@ def _populate_expert_detail(
                 pass
 
 
+async def _load_session_skill_overrides(
+    request: Request,
+    tenant: TenantContext,
+    session_id: "UUID | None",
+) -> dict[str, dict]:
+    """Return the session's ``skill_overrides`` map, or ``{}``.
+
+    Returns ``{}`` when no session is given, the feature flag is off, the
+    session does not belong to the tenant, or the session carries no
+    overrides.  Authorization reuses the same tenant-ownership check the
+    staging path uses, so a caller cannot read another tenant's
+    overrides by guessing a session id.
+    """
+    if session_id is None:
+        return {}
+    worker_settings = getattr(
+        request.app.state.settings, "worker", request.app.state.settings,
+    )
+    if not getattr(worker_settings, "skill_overrides_enabled", True):
+        return {}
+    try:
+        session = await _authorize_session_for_staging(request, tenant, session_id)
+    except HTTPException:
+        return {}
+    return (session.config or {}).get("skill_overrides") or {}
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -384,6 +411,7 @@ async def list_skills(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
     type: str | None = None,
+    session_id: UUID | None = None,
 ) -> SkillListResponse:
     """List available skills from all layers (platform, user files, org DB, user DB).
 
@@ -400,12 +428,14 @@ async def list_skills(
     session_factory = request.app.state.session_factory
     bundle = await _resolve_agent_bundle(request)
     system_bundle = await _resolve_system_bundle(request)
+    overrides = await _load_session_skill_overrides(request, tenant, session_id)
     async with session_factory() as db_session:
         all_skills = await loader.load_skills(
             tenant,
             db_session=db_session,
             bundle=bundle,
             system_bundle=system_bundle,
+            overrides=overrides,
         )
 
     summaries: list[SkillSummary] = []
@@ -450,12 +480,14 @@ async def view_skill(
     session_factory = request.app.state.session_factory
     bundle = await _resolve_agent_bundle(request)
     system_bundle = await _resolve_system_bundle(request)
+    overrides = await _load_session_skill_overrides(request, tenant, session_id)
     async with session_factory() as db_session:
         all_skills = await loader.load_skills(
             tenant,
             db_session=db_session,
             bundle=bundle,
             system_bundle=system_bundle,
+            overrides=overrides,
         )
 
     skill_def = next((s for s in all_skills if s.name == name), None)

@@ -8,8 +8,8 @@
 - [x] Task 2: Feature flag `skill_overrides_enabled`
 - [x] Task 3: Store `skill_overrides` into `session.config` at prompt submission (also repaired the stale `test_prompts_api.py` `app` fixture, which never wired agent resolution — the route now requires an agent; 3 unrelated `/v1/memory` storage path-traversal failures remain pre-existing)
 - [x] Task 4: Loader override layer (`_apply_overrides` + `load_skills(overrides=)`) — note `tests/test_loader.py` (stale `MCPServerDef` import) and 3 `test_resource_loader_bundle.py` cases fail pre-existing, unaffected by the override param (verified by stash)
-- [ ] Task 5: API `view_skill` resolves overrides (shared-runtime path)
-- [ ] Task 6: API `list_skills` honors overrides (catalog completeness)
+- [x] Task 5: API `view_skill` resolves overrides (shared-runtime path) — integration tests use a fake Hub bundle + `RuntimeConfigCache` (requests carry `agent_id`, as the real Work UI/SkillOpt worker do) instead of the dead `platform_skills_dir`
+- [x] Task 6: API `list_skills` honors overrides (catalog completeness)
 - [ ] Task 7: `HarnessAPIClient.list_skills` forwards `session_id`
 - [ ] Task 8: Slash `/<skill>` expansion uses override content (coverage)
 - [ ] Task 9: Audit — enrich `skill.invoked` when an override was used
