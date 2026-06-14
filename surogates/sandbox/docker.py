@@ -113,8 +113,8 @@ class DockerSandbox:
         if spec.session_id:
             await self.destroy_for_session(spec.session_id)
 
-        workspace = self._mountable_workspace(spec.workspace_path)
-        env = self._build_env(spec, sandbox_id, token)
+        mode, detail = self._workspace_mode(spec)
+        env = self._build_env(spec, sandbox_id, token, mode, detail)
         # Docker is the local-dev backend: the configured image (docker_image)
         # is authoritative, so a developer's locally-built image is used rather
         # than the production ghcr reference that SandboxSpec.image defaults to.
@@ -136,8 +136,15 @@ class DockerSandbox:
             ]
             if spec.session_id:
                 args += ["--label", f"surogates.session_id={spec.session_id}"]
-            if workspace is not None:
-                args += ["-v", f"{workspace}:/workspace"]
+            if mode == "s3fs":
+                # geesefs needs FUSE inside the container.
+                args += [
+                    "--cap-add", "SYS_ADMIN",
+                    "--device", "/dev/fuse",
+                    "--security-opt", "apparmor:unconfined",
+                ]
+            elif mode == "bind":
+                args += ["-v", f"{detail}:/workspace"]
             for key, value in env.items():
                 args += ["-e", f"{key}={value}"]
             args.append(image)
@@ -255,9 +262,14 @@ class DockerSandbox:
     # ------------------------------------------------------------------
 
     def _build_env(
-        self, spec: SandboxSpec, sandbox_id: str, token: str,
+        self,
+        spec: SandboxSpec,
+        sandbox_id: str,
+        token: str,
+        mode: str,
+        bucket_spec: str | None,
     ) -> dict[str, str]:
-        """Container env: base + spec passthrough + MCP/KB host wiring.
+        """Container env: base + per-mode workspace wiring + MCP/KB.
 
         Mirrors the K8s pod manifest's env block, with host-local URLs
         rewritten so a bridged container can reach host services.
@@ -267,11 +279,25 @@ class DockerSandbox:
         env = {
             "TOOL_EXECUTOR_TOKEN": token,
             "WORKSPACE_DIR": "/workspace",
-            "TOOL_EXECUTOR_REQUIRE_FUSE": "0",
         }
+        if mode == "s3fs":
+            # /workspace becomes a real FUSE mount, so leave the daemon's
+            # FUSE readiness check at its default (require_fuse=1) -- the
+            # entrypoint mounts geesefs from these vars before serving.
+            s = self._storage
+            env["SANDBOX_S3FS_INLINE"] = "1"
+            env["S3_BUCKET_PATH"] = bucket_spec or ""
+            env["S3_ENDPOINT"] = getattr(s, "endpoint", "")
+            env["S3_REGION"] = getattr(s, "region", "") or "auto"
+            env["AWS_ACCESS_KEY_ID"] = getattr(s, "access_key", "")
+            env["AWS_SECRET_ACCESS_KEY"] = getattr(s, "secret_key", "")
+        else:
+            # bind / ephemeral: /workspace is not FUSE, so disable the check.
+            env["TOOL_EXECUTOR_REQUIRE_FUSE"] = "0"
         reserved = {
-            "TOOL_EXECUTOR_TOKEN", "WORKSPACE_DIR",
-            "TOOL_EXECUTOR_REQUIRE_FUSE", "TOOL_EXECUTOR_PORT",
+            "TOOL_EXECUTOR_TOKEN", "WORKSPACE_DIR", "TOOL_EXECUTOR_REQUIRE_FUSE",
+            "TOOL_EXECUTOR_PORT", "SANDBOX_S3FS_INLINE", "S3_BUCKET_PATH",
+            "S3_ENDPOINT", "S3_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
         }
         for key, value in spec.env.items():
             if key not in reserved:
