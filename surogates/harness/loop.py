@@ -1007,6 +1007,7 @@ class AgentHarness(
                     session_id=str(session.id),
                     api_client=self._api_client,
                     session_factory=self._session_factory,
+                    session_config=session.config,
                     session_store=self._store,
                     sandbox_pool=self._sandbox_pool,
                 )
