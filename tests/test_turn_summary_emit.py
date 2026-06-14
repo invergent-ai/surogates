@@ -525,3 +525,37 @@ async def test_complete_session_skips_drain_for_mission_session(
     emit_types = [c.args[1] for c in store.emit_event.await_args_list]
     assert EventType.TURN_SUMMARY not in emit_types
     assert EventType.SESSION_COMPLETE in emit_types
+
+
+@pytest.mark.asyncio
+async def test_complete_session_skips_drain_for_research_session(
+    stub_turn_summarizer,
+) -> None:
+    """An Arbor /auto-research coordinator carries ``active_research_run_id``
+    and keeps running coordinator/report turns even after the mission id is
+    cleared at a terminal verdict, so turn summaries are suppressed on the
+    research key too (not just ``active_mission_id``).
+    """
+    stub_turn_summarizer.turn_response = TurnSummary(recap="x", artifacts=[])
+    store = AsyncMock()
+    store.emit_event = AsyncMock()
+    store.get_events = AsyncMock(return_value=[])
+    store.update_session_status = AsyncMock()
+    harness = _make_loop_harness(
+        session_store=store, turn_summarizer=stub_turn_summarizer,
+    )
+
+    real = AgentHarness._complete_session.__get__(harness, AgentHarness)
+    session = _make_session()
+    # Research run live, mission id already cleared at a terminal verdict.
+    session.config.pop("active_mission_id", None)
+    session.config["active_research_run_id"] = str(uuid4())
+    lease = SimpleNamespace(lease_token=uuid4())
+    await real(
+        session, [{"role": "user", "content": "do it"}], lease,
+        reason="completed", turn_id="t-1", user_message="do it",
+    )
+
+    emit_types = [c.args[1] for c in store.emit_event.await_args_list]
+    assert EventType.TURN_SUMMARY not in emit_types
+    assert EventType.SESSION_COMPLETE in emit_types
