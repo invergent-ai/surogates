@@ -57,13 +57,16 @@ function friendlyError(err: { code?: string; message?: string } | unknown): stri
   if (err instanceof SurogatesRateLimitError) {
     return 'You’re sending messages too quickly. Please wait a moment and try again.';
   }
-  const code = (err as { code?: string }).code;
-  if (code === 'auth') {
-    return 'This chat isn’t accepting messages from this site yet. The site owner needs to allow this origin.';
+  if (err && typeof err === 'object') {
+    const code = (err as { code?: string }).code;
+    if (code === 'auth') {
+      return 'This chat isn’t accepting messages from this site yet. The site owner needs to allow this origin.';
+    }
+    if (code === 'sse_closed') return 'Connection lost. Please send your message again.';
+    const message = (err as { message?: string }).message;
+    if (message && message.length < 160) return message;
   }
-  if (code === 'sse_closed') return 'Connection lost. Please send your message again.';
-  const message = (err as { message?: string }).message;
-  return message && message.length < 160 ? message : 'Something went wrong. Please try again.';
+  return 'Something went wrong. Please try again.';
 }
 
 const ICON_CHAT = (
@@ -131,7 +134,11 @@ export function Widget({ agent, config, registerOpenControl, onOpenChange }: Wid
       .then((res) => {
         if (res.agentName) setAgentName(res.agentName);
       })
-      .catch((err) => setError(friendlyError(err)));
+      .catch((err) => {
+        // Allow a retry the next time the panel opens (transient network, etc.).
+        bootstrapStarted.current = false;
+        setError(friendlyError(err));
+      });
   }, [open, agent]);
 
   // Keep the transcript pinned to the latest message.

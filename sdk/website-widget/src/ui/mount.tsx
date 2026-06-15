@@ -46,8 +46,8 @@ export function mount(config: MountConfig): WidgetHandle {
     );
   }
 
-  const target = config.target ?? document.body;
   const accent = config.accentColor ?? DEFAULT_ACCENT;
+  let destroyed = false;
 
   // Host element + Shadow DOM: total style isolation in both directions.
   const host = document.createElement('div');
@@ -70,7 +70,21 @@ export function mount(config: MountConfig): WidgetHandle {
     root.style.setProperty('--surg-accent-fg', accentForeground(a));
   };
   applyAccent(accent);
-  target.appendChild(host);
+
+  // Attach to the page. Drop-in embeds are often placed in <head>, where
+  // document.body doesn't exist yet — defer the append until the DOM is ready.
+  const attach = () => (config.target ?? document.body)?.appendChild(host);
+  if (config.target || document.body) {
+    attach();
+  } else {
+    document.addEventListener(
+      "DOMContentLoaded",
+      () => {
+        if (!destroyed) attach();
+      },
+      { once: true },
+    );
+  }
 
   const agent = new WebsiteAgent(config);
 
@@ -108,7 +122,6 @@ export function mount(config: MountConfig): WidgetHandle {
   };
   window.addEventListener('beforeunload', endOnUnload);
 
-  let destroyed = false;
   return {
     agent,
     open: () => setOpen?.(true),
