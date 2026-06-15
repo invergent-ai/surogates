@@ -40,6 +40,27 @@ export interface BootstrapResult {
 }
 
 /**
+ * Append ``?agent_id=`` (or ``&agent_id=``) when an explicit id is set.
+ *
+ * Per-agent deployments resolve the agent from the request ``Host``
+ * subdomain on every call, so the embed never needs this.  Shared/
+ * multi-tenant runtimes (and the Studio preview) aren't reached through
+ * the per-agent host, and the server resolves the agent on *every*
+ * website request (the rate limiter depends on the agent context), not
+ * just bootstrap -- so the id must ride on all four endpoints.
+ *
+ * BRIDGE (not the long-term design): the publishable key already scopes to
+ * one agent, so the deeper fix is server-side resolution of the agent from
+ * the key (a key->agent registry), after which shared mode would need no
+ * query param at all. Until that lands, every endpoint must thread the id.
+ */
+function withAgentId(path: string, agentId?: string): string {
+  if (!agentId) return path;
+  const sep = path.includes('?') ? '&' : '?';
+  return `${path}${sep}agent_id=${encodeURIComponent(agentId)}`;
+}
+
+/**
  * Shape the website channel returns from ``POST /v1/website/sessions``.
  * Mirrors the pydantic ``BootstrapResponse`` server-side; kept separate
  * from :class:`BootstrapResult` (camelCase) so future protocol drift
@@ -119,12 +140,21 @@ async function raiseForStatus(response: Response, action: string): Promise<never
   });
 }
 
-/** ``POST /v1/website/sessions`` with a publishable key. */
+/** ``POST /v1/website/sessions`` with a publishable key.
+ *
+ * ``agentId`` is optional.  In a per-agent deployment the server resolves
+ * the agent from the request ``Host`` subdomain, so the embed never needs
+ * it.  Shared/multi-tenant runtimes (and the Studio live preview) that
+ * aren't reached through the per-agent host can pass it explicitly; it is
+ * appended as the ``?agent_id=`` query param the server's resolver accepts.
+ * Only the bootstrap needs it -- subsequent calls are cookie-bound.
+ */
 export async function bootstrap(
   apiUrl: string,
   publishableKey: string,
+  agentId?: string,
 ): Promise<BootstrapResult> {
-  const response = await doFetch(apiUrl + PATH_BOOTSTRAP, {
+  const response = await doFetch(apiUrl + withAgentId(PATH_BOOTSTRAP, agentId), {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${publishableKey}`,
@@ -161,8 +191,9 @@ export async function sendMessage(
   sessionId: string,
   csrfToken: string,
   content: string,
+  agentId?: string,
 ): Promise<{ eventId: number }> {
-  const response = await doFetch(apiUrl + PATH_MESSAGES(sessionId), {
+  const response = await doFetch(apiUrl + withAgentId(PATH_MESSAGES(sessionId), agentId), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -184,9 +215,10 @@ export async function endSession(
   apiUrl: string,
   sessionId: string,
   csrfToken: string,
+  agentId?: string,
 ): Promise<void> {
   try {
-    await doFetch(apiUrl + PATH_END(sessionId), {
+    await doFetch(apiUrl + withAgentId(PATH_END(sessionId), agentId), {
       method: 'POST',
       headers: { [CSRF_HEADER]: csrfToken },
     });
@@ -201,8 +233,9 @@ export function openEventStream(
   apiUrl: string,
   sessionId: string,
   cursor: number,
+  agentId?: string,
 ): EventSource {
-  const url = apiUrl + PATH_EVENTS(sessionId, cursor);
+  const url = apiUrl + withAgentId(PATH_EVENTS(sessionId, cursor), agentId);
   // ``withCredentials`` is the non-obvious flag that makes EventSource
   // send the session cookie cross-origin.  Without it the server sees
   // an unauthenticated request and returns 401, and the EventSource
