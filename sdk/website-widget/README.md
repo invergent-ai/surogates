@@ -46,29 +46,57 @@ pnpm add @invergent/website-widget @ag-ui/client @ag-ui/core rxjs
 
 `@ag-ui/client`, `@ag-ui/core`, and `rxjs` are **peer dependencies** -- they likely already exist in your app's bundle (especially if you're using CopilotKit or another AG-UI consumer), so we don't duplicate them.
 
-### CDN / `<script>` tag
+### Drop-in widget (`<script>` tag)
 
-For plain HTML sites without a bundler, use the IIFE build from a CDN. It bundles AG-UI and RxJS:
+For plain HTML sites without a bundler, load the IIFE build from a CDN and
+call `mount()`. One call renders a complete, self-contained chat widget — a
+floating launcher button that opens a streaming chat panel, fully isolated in
+a Shadow DOM so it can't collide with your site's CSS. The bundle includes
+AG-UI, RxJS, and the UI:
 
 ```html
-<script src="https://cdn.surogates.com/widget/v1/surogates-widget.global.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@invergent/website-widget@2/dist/surogates-widget.global.js"></script>
 <script>
-  const agent = new SurogatesWidget.WebsiteAgent({
+  SurogatesWidget.mount({
     apiUrl: 'https://agent.acme.com',
     publishableKey: 'surg_wk_...',
+    // Optional appearance:
+    // title: 'Acme Support',
+    // accentColor: '#4f46e5',
+    // welcomeMessage: 'Hi! How can I help?',
+    // position: 'bottom-right',
   });
-
-  agent.subscribe({
-    onTextMessageContentEvent: ({ event }) => document.body.append(event.delta),
-    onRunFinishedEvent: () => console.log('done'),
-  });
-
-  agent.addMessage({ role: 'user', content: 'hello' });
-  agent.runAgent();
 </script>
 ```
 
-The IIFE exposes `WebsiteAgent`, `EventType`, `AbstractAgent`, the error classes, and the `Translator` on `window.SurogatesWidget`.
+`mount(config)` returns a `WidgetHandle` — `{ open(), close(), toggle(),
+destroy(), agent }` — for programmatic control.
+
+| Option | Type | Notes |
+|---|---|---|
+| `apiUrl` | string, required | Base URL of the Surogates API. |
+| `publishableKey` | string, required | `surg_wk_...` key. Safe to embed in browser JS. |
+| `title` | string | Header label. Defaults to the deployed agent's name. |
+| `accentColor` | string | Brand colour (hex) for the launcher/header/bubbles. |
+| `welcomeMessage` | string | Greeting shown before the first turn (Markdown). |
+| `position` | `'bottom-right'` \| `'bottom-left'` | Launcher corner. Default `bottom-right`. |
+| `target` | `HTMLElement` | Host element. Defaults to `document.body`. |
+| `inline` | boolean | Render the panel inline (no floating launcher). |
+| `openByDefault` | boolean | Open the panel on load. |
+
+The IIFE also exposes the headless `WebsiteAgent`, `EventType`,
+`AbstractAgent`, the error classes, and the `Translator` on
+`window.SurogatesWidget` for hosts that want to build their own UI.
+
+#### Bundler consumers
+
+If you build your own React/Vue app, import the headless client from the
+package root, or the self-mounting UI from the `./ui` subpath:
+
+```ts
+import { mount } from '@invergent/website-widget/ui';
+mount({ apiUrl: 'https://agent.acme.com', publishableKey: 'surg_wk_...' });
+```
 
 ## API
 
@@ -160,11 +188,15 @@ Measured on the current build:
 
 | Target | Raw | Gzipped |
 |---|---|---|
-| ESM (`dist/index.js`) | 21 KB | **6 KB** |
-| CJS (`dist/index.cjs`) | 22 KB | **6 KB** |
-| IIFE (`dist/surogates-widget.global.js`) | 285 KB | **66 KB** |
+| ESM headless (`dist/index.js` + chunk) | ~23 KB | **~6 KB** |
+| ESM widget UI (`dist/ui.js`) | 16 KB | **~5 KB** |
+| IIFE (`dist/surogates-widget.global.js`) | 178 KB | **~49 KB** |
 
-The npm/ESM numbers exclude AG-UI, RxJS, and zod (peer deps). The IIFE bundles everything for script-tag users.
+The npm headless numbers exclude AG-UI, RxJS, and zod (peer deps); the headless
+entry stays Preact-free. The `./ui` build bundles Preact (peers still external).
+The IIFE bundles everything (AG-UI + RxJS + Preact + UI) for script-tag users and
+is built with `platform: 'browser'` so transitive deps resolve to their
+Web-Crypto variants rather than Node's `require('crypto')`.
 
 ## Versioning
 

@@ -32,6 +32,11 @@
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
     },
+    "./ui": {
+      "types": "./dist/ui.d.ts",
+      "import": "./dist/ui.js",
+      "require": "./dist/ui.cjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -50,6 +55,9 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "pnpm run typecheck && pnpm run build"
+  },
+  "dependencies": {
+    "preact": "^10.25.4"
   },
   "peerDependencies": {
     "@ag-ui/client": "^0.0.52",

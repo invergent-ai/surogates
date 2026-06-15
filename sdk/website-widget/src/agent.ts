@@ -119,7 +119,11 @@ export class WebsiteAgent extends AbstractAgent {
    */
   async ensureBootstrapped(): Promise<BootstrapResult> {
     if (this.bootstrapResult) return this.bootstrapResult;
-    this.bootstrapResult = await bootstrap(this.apiUrl, this.publishableKey);
+    this.bootstrapResult = await bootstrap(
+      this.apiUrl,
+      this.publishableKey,
+      this.agentId,
+    );
     return this.bootstrapResult;
   }
 
@@ -136,7 +140,7 @@ export class WebsiteAgent extends AbstractAgent {
     if (!current) return;
     this.bootstrapResult = undefined;
     this.cursor = 0;
-    await endSession(this.apiUrl, current.sessionId, current.csrfToken);
+    await endSession(this.apiUrl, current.sessionId, current.csrfToken, this.agentId);
   }
 
   /**
@@ -275,7 +279,7 @@ export class WebsiteAgent extends AbstractAgent {
     input: RunAgentInput,
   ): void {
     closeEventSource(ctx.source);
-    const source = openEventStream(this.apiUrl, sessionId, after);
+    const source = openEventStream(this.apiUrl, sessionId, after, this.agentId);
     ctx.source = source;
     this.attachStreamListeners(source, translator, subscriber, input, ctx);
   }
@@ -298,7 +302,7 @@ export class WebsiteAgent extends AbstractAgent {
     onRebootstrap: (fresh: BootstrapResult) => void,
   ): Promise<void> {
     try {
-      await sendMessage(this.apiUrl, boot.sessionId, boot.csrfToken, content);
+      await sendMessage(this.apiUrl, boot.sessionId, boot.csrfToken, content, this.agentId);
       return;
     } catch (err) {
       if (!(err instanceof SurogatesAuthError)) throw err;
@@ -306,7 +310,7 @@ export class WebsiteAgent extends AbstractAgent {
       this.cursor = 0;
       const fresh = await this.ensureBootstrapped();
       onRebootstrap(fresh);
-      await sendMessage(this.apiUrl, fresh.sessionId, fresh.csrfToken, content);
+      await sendMessage(this.apiUrl, fresh.sessionId, fresh.csrfToken, content, this.agentId);
     }
   }
 
