@@ -356,3 +356,194 @@ def test_latest_user_event_text_returns_empty_when_no_user_event() -> None:
     from surogates.harness.loop import _latest_user_event_text
 
     assert _latest_user_event_text([]) == ""
+
+
+# ---------------------------------------------------------------------------
+# fold_attachment_context: re-fold attachment notes + inlined blocks into a
+# replacement message body (used when slash-skill expansion overwrites the
+# rebuilt user content, which would otherwise drop the attachment context).
+# ---------------------------------------------------------------------------
+
+
+def test_fold_attachment_context_preserves_inlined_content() -> None:
+    from surogates.harness.loop import fold_attachment_context
+
+    out = fold_attachment_context(
+        "EXPANDED SKILL BODY",
+        {
+            "content": "/pdf-skill",
+            "attachments": [
+                {
+                    "path": "uploads/report.pdf",
+                    "filename": "report.pdf",
+                    "inlined_text": "INLINE BODY",
+                    "inlined_render_kind": "markdown",
+                }
+            ],
+        },
+    )
+    assert "EXPANDED SKILL BODY" in out
+    assert "**Attachment: report.pdf**" in out
+    assert "INLINE BODY" in out
+
+
+def test_fold_attachment_context_preserves_attachments_note_for_path_only() -> None:
+    from surogates.harness.loop import fold_attachment_context
+
+    out = fold_attachment_context(
+        "EXPANDED SKILL BODY",
+        {
+            "content": "/pdf-skill",
+            "attachments": [
+                {
+                    "path": "uploads/big.pdf",
+                    "filename": "big.pdf",
+                    "mime_type": "application/pdf",
+                    "size": 9_000_000,
+                },
+            ],
+        },
+    )
+    assert "EXPANDED SKILL BODY" in out
+    assert "big.pdf" in out  # the note lists the path-only file
+    # note is folded in as a prefix, before the (expanded) body
+    assert out.index("big.pdf") < out.index("EXPANDED SKILL BODY")
+
+
+def test_fold_attachment_context_is_noop_without_attachments() -> None:
+    from surogates.harness.loop import fold_attachment_context
+
+    assert fold_attachment_context("plain body", {"content": "/skill"}) == "plain body"
+    assert fold_attachment_context("plain body", {}) == "plain body"
+    assert fold_attachment_context("plain body", None) == "plain body"
+
+
+def test_fold_attachment_context_preserves_view_context_note() -> None:
+    from surogates.harness.loop import fold_attachment_context
+
+    out = fold_attachment_context(
+        "EXPANDED SKILL BODY",
+        {
+            "content": "/skill",
+            "metadata": {
+                "view_context": {"kind": "document", "id": "doc-42", "name": "Q3 plan"},
+            },
+        },
+    )
+    assert "EXPANDED SKILL BODY" in out
+    assert "currently viewing" in out
+    assert "doc-42" in out
+    assert out.index("currently viewing") < out.index("EXPANDED SKILL BODY")
+
+
+def test_latest_user_event_data_returns_latest_payload() -> None:
+    from types import SimpleNamespace
+    from surogates.harness.loop import _latest_user_event_data
+    from surogates.session.events import EventType
+
+    events = [
+        SimpleNamespace(
+            type=EventType.USER_MESSAGE.value, data={"content": "first"}, id=1,
+        ),
+        SimpleNamespace(
+            type=EventType.LLM_RESPONSE.value, data={"message": {}}, id=2,
+        ),
+        SimpleNamespace(
+            type=EventType.USER_MESSAGE.value,
+            data={
+                "content": "/skill",
+                "attachments": [{"path": "uploads/a.pdf", "filename": "a.pdf"}],
+            },
+            id=3,
+        ),
+    ]
+    data = _latest_user_event_data(events)
+    assert data["content"] == "/skill"
+    assert data["attachments"][0]["filename"] == "a.pdf"
+
+
+def test_latest_user_event_data_empty_when_no_user_event() -> None:
+    from surogates.harness.loop import _latest_user_event_data
+
+    assert _latest_user_event_data([]) == {}
+
+
+# ---------------------------------------------------------------------------
+# build_user_message_dict: full user-message construction (text + attachment
+# notes + inlined files + image blocks). ``base_content`` overrides the
+# event's raw content (used by slash-skill / deep-research rewrite paths) so
+# the current turn's attachments AND images survive the rewrite.
+# ---------------------------------------------------------------------------
+
+
+def test_build_user_message_dict_preserves_image_blocks_with_base_content() -> None:
+    from surogates.harness.loop import build_user_message_dict
+
+    msg = build_user_message_dict(
+        {
+            "content": "/image-ocr",
+            "images": [{"data": "BASE64DATA", "mime_type": "image/jpeg"}],
+        },
+        base_content="SKILL_BODY_HERE",
+    )
+    assert msg["role"] == "user"
+    content = msg["content"]
+    # images present -> content is a multimodal blocks list, not a bare string
+    assert isinstance(content, list)
+    text_block = next(b for b in content if b.get("type") == "text")
+    assert "SKILL_BODY_HERE" in text_block["text"]
+    img_block = next(b for b in content if b.get("type") == "image_url")
+    assert img_block["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+def test_build_user_message_dict_preserves_attachments_with_base_content() -> None:
+    from surogates.harness.loop import build_user_message_dict
+
+    msg = build_user_message_dict(
+        {
+            "content": "/pdf-skill",
+            "attachments": [
+                {
+                    "path": "uploads/r.pdf", "filename": "r.pdf",
+                    "inlined_text": "INLINE BODY", "inlined_render_kind": "markdown",
+                }
+            ],
+        },
+        base_content="SKILL_BODY_HERE",
+    )
+    assert msg["role"] == "user"
+    # no images -> plain string content
+    assert isinstance(msg["content"], str)
+    assert "SKILL_BODY_HERE" in msg["content"]
+    assert "**Attachment: r.pdf**" in msg["content"]
+    assert "INLINE BODY" in msg["content"]
+
+
+def test_build_user_message_dict_plain_passthrough() -> None:
+    from surogates.harness.loop import build_user_message_dict
+
+    assert build_user_message_dict({"content": "just text"}) == {
+        "role": "user", "content": "just text",
+    }
+
+
+def test_build_user_message_dict_combines_attachment_and_image() -> None:
+    from surogates.harness.loop import build_user_message_dict
+
+    msg = build_user_message_dict(
+        {
+            "content": "/image-ocr",
+            "images": [{"data": "B64", "mime_type": "image/png"}],
+            "attachments": [
+                {"path": "uploads/big.pdf", "filename": "big.pdf",
+                 "mime_type": "application/pdf", "size": 9_000_000},
+            ],
+        },
+        base_content="SKILL_BODY",
+    )
+    content = msg["content"]
+    assert isinstance(content, list)
+    text_block = next(b for b in content if b.get("type") == "text")
+    assert "SKILL_BODY" in text_block["text"]
+    assert "big.pdf" in text_block["text"]  # attachments note folded into the text block
+    assert any(b.get("type") == "image_url" for b in content)

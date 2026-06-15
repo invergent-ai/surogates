@@ -7,11 +7,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from surogates.harness.loop_attachments import (
-    _attachments_note_from_data,
-    _render_inlined_attachments,
-)
-from surogates.harness.loop_messages import _view_context_note_from_metadata
+from surogates.harness.loop_attachments import build_user_message_dict
 from surogates.harness.loop_tool_recovery import collapse_repeated_tool_rounds
 from surogates.harness.sanitize import strip_budget_warnings
 from surogates.session.events import EventType
@@ -94,55 +90,16 @@ class ContextReplayMixin:
             etype = event.type
 
             if etype == EventType.USER_MESSAGE.value:
-                content = event.data.get("content", "")
-                content = _render_inlined_attachments(
-                    content, event.data.get("attachments"),
-                )
-                # Fold per-user ephemeral notes (view-context, non-inlined
-                # attachments) into the user content here so the bytes are
-                # determined entirely by the durable event payload.  This
-                # keeps the provider's implicit prefix cache stable across
-                # turns -- the previous design inserted the notes mid-array
-                # before the latest user message, which left them present
-                # in turn T's request but absent in turn T+1's prefix.
-                note_parts: list[str] = []
-                view_note = _view_context_note_from_metadata(
-                    event.data.get("metadata"),
-                )
-                if view_note:
-                    note_parts.append(view_note)
-                attachments_note = _attachments_note_from_data(event.data)
-                if attachments_note:
-                    note_parts.append(attachments_note)
-                if note_parts:
-                    notes_block = "\n\n".join(note_parts)
-                    content = (
-                        f"{notes_block}\n\n{content}" if content else notes_block
-                    )
-                images = event.data.get("images")
-                if images:
-                    logger.info(
-                        "User message has %d image(s), first mime: %s",
-                        len(images),
-                        images[0].get("mime_type", "?"),
-                    )
-                if images:
-                    blocks: list[dict] = [{"type": "text", "text": content}]
-                    for img in images:
-                        data_url = img["data"]
-                        if not data_url.startswith("data:"):
-                            mime = img.get("mime_type", "image/png")
-                            data_url = f"data:{mime};base64,{data_url}"
-                        blocks.append({
-                            "type": "image_url",
-                            "image_url": {"url": data_url, "detail": "auto"},
-                        })
-                    user_msg = {"role": "user", "content": blocks}
-                    from surogates.harness.image_shrink import shrink_image_parts_in_messages
-                    shrink_image_parts_in_messages([user_msg])
-                    messages.append(user_msg)
-                else:
-                    messages.append({"role": "user", "content": content})
+                # Single source of truth for per-user-message construction
+                # (attachment note + inlined file content + view-context note
+                # + image blocks).  Shared with the slash-skill and
+                # /deep-research rewrite paths in loop.py via
+                # build_user_message_dict so the two can't drift -- that drift
+                # was the original cause of slash turns dropping the current
+                # turn's attachment + image context.  Building from the durable
+                # event payload also keeps the request bytes (and the
+                # provider's implicit prefix cache) stable across turns.
+                messages.append(build_user_message_dict(event.data))
 
             elif etype == EventType.LLM_RESPONSE.value:
                 stored_message = event.data.get("message")

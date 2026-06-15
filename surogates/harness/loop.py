@@ -132,6 +132,8 @@ from surogates.harness.loop_attachments import (
     _attachments_note,
     _attachments_note_from_data,
     _render_inlined_attachments,
+    build_user_message_dict,
+    fold_attachment_context,
 )
 from surogates.harness.loop_constants import (
     DEFAULT_PRESERVE_THINKING,
@@ -158,6 +160,7 @@ from surogates.harness.loop_messages import (
     _format_bytes,
     _initial_system_message,
     _last_assistant_message_excerpt,
+    _latest_user_event_data,
     _latest_user_event_text,
     _latest_user_message_text,
     _seconds_since,
@@ -986,9 +989,15 @@ class AgentHarness(
             )
             if deep_research_topic is not None:
                 if last_user is not None:
-                    last_user["content"] = build_deep_research_message(
-                        topic=deep_research_topic,
-                    )
+                    # Rebuild with the deep-research directive as the base so
+                    # this turn's attachment note / inlined files / image
+                    # blocks survive the rewrite (same fix as the slash path).
+                    last_user["content"] = build_user_message_dict(
+                        _latest_user_event_data(all_events),
+                        base_content=build_deep_research_message(
+                            topic=deep_research_topic,
+                        ),
+                    )["content"]
                 # The rewritten directive is the planning structure;
                 # skip the SELF-DISCOVER / thinking-gate scaffold.
                 self._skip_pre_llm_scaffold_for_turn = True
@@ -1011,7 +1020,15 @@ class AgentHarness(
                 )
                 if expansion is not None:
                     expanded_text, skill_name, staged_at, kind = expansion
-                    last_user["content"] = expanded_text
+                    # Rebuild with the skill body as the base so this turn's
+                    # attachment note, inlined file content, and image blocks
+                    # survive the rewrite.  Overwriting with the bare skill
+                    # body dropped them, leaving the agent unaware a file/image
+                    # was attached on a slash-skill turn.
+                    last_user["content"] = build_user_message_dict(
+                        _latest_user_event_data(all_events),
+                        base_content=expanded_text,
+                    )["content"]
                     # The skill body itself is the planning structure;
                     # don't pay for the thinking-gate + SELF-DISCOVER
                     # classifier pair on this turn.

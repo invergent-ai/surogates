@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from surogates.harness.loop_messages import _format_bytes
+from surogates.harness.loop_messages import (
+    _format_bytes,
+    _view_context_note_from_metadata,
+)
 from surogates.session.events import EventType
 
 _ATTACHMENT_SKIP_HINTS: dict[str, str] = {
@@ -138,3 +141,74 @@ def _render_inlined_attachments(
     if not blocks:
         return content
     return content + "\n\n" + "\n\n".join(blocks)
+
+
+def fold_attachment_context(text: str, data: Any) -> str:
+    """Fold a ``user.message`` event's attachment context into ``text``.
+
+    Mirrors what :meth:`AgentHarness._rebuild_messages` does for a normal
+    user turn: render inlined attachment blocks onto ``text`` and prepend
+    the view-context and attachments notes.  Used to preserve attachment
+    context when the rebuilt user content is replaced wholesale (e.g.
+    slash-skill expansion overwriting it with just the skill body), which
+    would otherwise drop the note and the inlined file content so the
+    agent acts as if no file was attached.
+
+    ``data`` is the ``user.message`` event's ``data`` dict.  Returns
+    ``text`` unchanged when there is no attachment/view context to fold.
+    """
+    if not isinstance(data, dict):
+        return text
+    out = _render_inlined_attachments(text, data.get("attachments"))
+    note_parts: list[str] = []
+    view_note = _view_context_note_from_metadata(data.get("metadata"))
+    if view_note:
+        note_parts.append(view_note)
+    attachments_note = _attachments_note_from_data(data)
+    if attachments_note:
+        note_parts.append(attachments_note)
+    if note_parts:
+        notes_block = "\n\n".join(note_parts)
+        out = f"{notes_block}\n\n{out}" if out else notes_block
+    return out
+
+
+def build_user_message_dict(
+    event_data: Any, base_content: str | None = None,
+) -> dict:
+    """Build the LLM user-message dict for a ``user.message`` event.
+
+    Single source of truth for per-user-message content construction:
+    folds the attachment note + inlined file content + view-context note
+    into the text (via :func:`fold_attachment_context`) and, when the
+    event carries images, assembles a multimodal ``content`` blocks list
+    (text + ``image_url`` parts) and shrinks oversized images.
+
+    ``base_content`` overrides the event's raw ``content`` as the text
+    base.  The slash-skill and ``/deep-research`` rewrite paths pass the
+    rewritten body here so the *current turn's* attachment note, inlined
+    file content, and image blocks survive the rewrite instead of being
+    clobbered.  Returns ``{"role": "user", "content": str | list}``.
+    """
+    data = event_data if isinstance(event_data, dict) else {}
+    base = data.get("content", "") if base_content is None else base_content
+    text = fold_attachment_context(base, data)
+
+    images = data.get("images")
+    if not images:
+        return {"role": "user", "content": text}
+
+    blocks: list[dict] = [{"type": "text", "text": text}]
+    for img in images:
+        data_url = img["data"]
+        if not data_url.startswith("data:"):
+            mime = img.get("mime_type", "image/png")
+            data_url = f"data:{mime};base64,{data_url}"
+        blocks.append({
+            "type": "image_url",
+            "image_url": {"url": data_url, "detail": "auto"},
+        })
+    msg = {"role": "user", "content": blocks}
+    from surogates.harness.image_shrink import shrink_image_parts_in_messages
+    shrink_image_parts_in_messages([msg])
+    return msg

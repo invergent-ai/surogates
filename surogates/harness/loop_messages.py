@@ -141,6 +141,28 @@ def _latest_user_event_text(events: list[Any]) -> str:
             )
         return (raw or "").strip()
     return ""
+
+
+def _latest_user_event_data(events: list[Any]) -> dict:
+    """Return the ``data`` dict of the latest ``USER_MESSAGE`` event.
+
+    Companion to :func:`_latest_user_event_text` for callers that need the
+    full payload (attachments, metadata) rather than just the raw text --
+    e.g. re-folding attachment context after slash-skill expansion
+    overwrites the rebuilt user content.  Returns ``{}`` when no
+    ``USER_MESSAGE`` event exists or its ``data`` is malformed.
+    """
+    for event in reversed(events):
+        event_type = event.type
+        type_value = (
+            event_type.value if hasattr(event_type, "value") else event_type
+        )
+        if type_value != EventType.USER_MESSAGE.value:
+            continue
+        return event.data if isinstance(event.data, dict) else {}
+    return {}
+
+
 def _last_assistant_message_excerpt(
     messages: list[dict[str, Any]],
     limit: int = 500,
