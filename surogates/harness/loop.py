@@ -3859,9 +3859,17 @@ class AgentHarness(
         original_count = len(messages)
 
         # Remove the /compress message itself — it's not real conversation.
-        messages = [m for m in messages if not (
-            m.get("role") == "user" and (m.get("content") or "").strip() == "/compress"
-        )]
+        # Dispatch only reaches here once the latest user *event* text is
+        # exactly "/compress", so the command is the last user message.
+        # Drop it by identity rather than by content match: rebuilt content
+        # may carry attachment / view-context note prefixes (so a string
+        # compare would miss it) and may be a multimodal *list* of blocks
+        # (so ``.strip()`` would raise ``AttributeError``).
+        last_user = next(
+            (m for m in reversed(messages) if m.get("role") == "user"),
+            None,
+        )
+        messages = [m for m in messages if m is not last_user]
 
         if len(messages) <= 5:
             # Too few messages to compress.
