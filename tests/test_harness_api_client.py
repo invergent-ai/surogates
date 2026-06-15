@@ -57,6 +57,42 @@ class TestListSkills:
         result = json.loads(await client.list_skills())
         assert result["count"] == 0
 
+    async def test_list_skills_forwards_session_id(self):
+        """A session-scoped client forwards session_id so the catalog sees overrides."""
+        captured: list[httpx.Request] = []
+
+        class CapturingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                captured.append(request)
+                return httpx.Response(200, json={"skills": [], "total": 0})
+
+        client = HarnessAPIClient(base_url="http://test", token="t", session_id="sess-1")
+        client._client = httpx.AsyncClient(
+            base_url="http://test",
+            transport=CapturingTransport(),
+            headers={"Authorization": "Bearer t"},
+        )
+        await client.list_skills()
+        assert captured[0].url.params.get("session_id") == "sess-1"
+
+    async def test_list_skills_omits_session_id_when_unset(self):
+        """Without a session_id, no query param is sent (legacy behaviour)."""
+        captured: list[httpx.Request] = []
+
+        class CapturingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                captured.append(request)
+                return httpx.Response(200, json={"skills": [], "total": 0})
+
+        client = HarnessAPIClient(base_url="http://test", token="t")
+        client._client = httpx.AsyncClient(
+            base_url="http://test",
+            transport=CapturingTransport(),
+            headers={"Authorization": "Bearer t"},
+        )
+        await client.list_skills()
+        assert "session_id" not in captured[0].url.params
+
 
 class TestViewSkill:
     async def test_view_skill(self, client_with_transport):

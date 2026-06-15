@@ -238,6 +238,32 @@ def _format_loop_list(rows: list[Any]) -> str:
     return "\n".join(lines)
 
 
+def _skill_invoked_event_data(
+    *,
+    skill_name: str,
+    raw_message: str,
+    staged_at: str | None,
+    session_config: dict | None,
+) -> dict:
+    """Build the ``skill.invoked`` event payload, tagging override use.
+
+    When the session config carries a ``skill_overrides`` entry for the
+    invoked skill, the SkillOpt run/candidate ids are added so rollouts
+    can be joined back to candidates in observability.
+    """
+    data: dict = {
+        "skill": skill_name,
+        "raw_message": raw_message,
+        "staged_at": staged_at,
+    }
+    ov = ((session_config or {}).get("skill_overrides") or {}).get(skill_name)
+    if ov:
+        data["override_source"] = ov.get("source", "skillopt")
+        if ov.get("run_id") is not None:
+            data["skillopt_run_id"] = ov["run_id"]
+        if ov.get("candidate_id") is not None:
+            data["candidate_id"] = ov["candidate_id"]
+    return data
 
 
 # Reminder injected when the deep-research planner ends a turn with
@@ -979,6 +1005,7 @@ class AgentHarness(
                     session_id=str(session.id),
                     api_client=self._api_client,
                     session_factory=self._session_factory,
+                    session_config=session.config,
                     session_store=self._store,
                     sandbox_pool=self._sandbox_pool,
                 )
@@ -1004,11 +1031,12 @@ class AgentHarness(
                                 await self._store.emit_event(
                                     session.id,
                                     EventType.SKILL_INVOKED,
-                                    {
-                                        "skill": skill_name,
-                                        "raw_message": last_user_content,
-                                        "staged_at": staged_at,
-                                    },
+                                    _skill_invoked_event_data(
+                                        skill_name=skill_name,
+                                        raw_message=last_user_content,
+                                        staged_at=staged_at,
+                                        session_config=session.config,
+                                    ),
                                 )
                             except Exception:
                                 logger.exception(

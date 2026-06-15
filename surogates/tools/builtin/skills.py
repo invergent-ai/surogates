@@ -153,16 +153,55 @@ def _settings_from_kwargs(kwargs: dict[str, Any]) -> Any | None:
         return None
 
 
+def _session_skill_overrides(kwargs: dict[str, Any]) -> dict[str, dict] | None:
+    """Return the session-scoped skill overrides from dispatch kwargs.
+
+    Resolved from an explicit ``skill_overrides`` kwarg or, more commonly,
+    from ``session_config['skill_overrides']`` (set at prompt-submission
+    time).  Returns ``None`` when the worker kill switch
+    (``WorkerSettings.skill_overrides_enabled``) is off so the resolver
+    ignores them everywhere uniformly.
+    """
+    session_config = kwargs.get("session_config") or {}
+    overrides = kwargs.get("skill_overrides") or session_config.get("skill_overrides")
+    if not overrides:
+        return None
+    settings = _settings_from_kwargs(kwargs)
+    worker_settings = getattr(settings, "worker", settings)
+    if not getattr(worker_settings, "skill_overrides_enabled", True):
+        return None
+    return overrides
+
+
+def _active_skill_override(kwargs: dict[str, Any], name: str) -> dict | None:
+    """Return the active override entry for *name*, or ``None``.
+
+    Used by the worker-local ``skill_view`` path so a disk-backed skill's
+    re-read of ``SKILL.md`` is replaced by the candidate body while its
+    supporting files keep resolving from the original on-disk tree.
+    """
+    overrides = _session_skill_overrides(kwargs)
+    if not overrides:
+        return None
+    ov = overrides.get(name)
+    if ov and ov.get("content"):
+        return ov
+    return None
+
+
 async def _load_all_skills(tenant: Any, **kwargs: Any) -> list:
     """Load skills from all layers, using DB when a session factory is available."""
     from surogates.tools.loader import ResourceLoader
 
     loader = ResourceLoader.from_settings(_settings_from_kwargs(kwargs))
+    overrides = _session_skill_overrides(kwargs)
     session_factory = kwargs.get("session_factory")
     if session_factory is not None:
         async with session_factory() as db_session:
-            return await loader.load_skills(tenant, db_session=db_session)
-    return await loader.load_skills(tenant)
+            return await loader.load_skills(
+                tenant, db_session=db_session, overrides=overrides,
+            )
+    return await loader.load_skills(tenant, overrides=overrides)
 
 
 # ---------------------------------------------------------------------------
@@ -571,12 +610,26 @@ async def _skill_view_handler(
     if script_files:
         linked_files["scripts"] = script_files
 
+    # Session-scoped override: serve the candidate body for THIS session
+    # while keeping the original skill's supporting-file listing.  Mirrors
+    # the shared-runtime API path (``view_skill``), which serves the patched
+    # ``SkillDef.content``/``description`` and stages original files.
+    override = _active_skill_override(kwargs, name)
+    if override is not None:
+        response_content = override["content"]
+        response_description = (
+            matching_skill.description or frontmatter.get("description", "")
+        )
+    else:
+        response_content = content
+        response_description = frontmatter.get("description", "")
+
     return _build_skill_response(
         name=frontmatter.get("name", name),
-        description=frontmatter.get("description", ""),
+        description=response_description,
         tags=tags,
         related_skills=related_skills,
-        content=content,
+        content=response_content,
         linked_files=linked_files if linked_files else None,
         compatibility=frontmatter.get("compatibility"),
         metadata=metadata if isinstance(metadata, dict) else None,

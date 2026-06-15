@@ -54,6 +54,27 @@ MAX_PROMPT_LENGTH = 200_000
 # ---------------------------------------------------------------------------
 
 
+class SkillOverride(BaseModel):
+    """A session-scoped candidate replacement for one skill's body.
+
+    Only service-account prompt submissions may attach these (see
+    ``_require_service_account``).  The override replaces the skill's
+    ``SKILL.md`` body for THIS session only; supporting files
+    (``scripts/``, ``references/`` …) continue to stage from the
+    published skill source.  Used by the ops Skill-Optimization worker
+    to evaluate a candidate without mutating the catalog or redeploying
+    the agent.
+    """
+
+    content: str = Field(..., min_length=1)
+    description: str | None = None
+    trigger: str | None = None
+    type: str = "skill"
+    source: str = "skillopt"
+    run_id: str | None = None
+    candidate_id: str | None = None
+
+
 class PromptRequest(BaseModel):
     """A single prompt submission.
 
@@ -67,6 +88,7 @@ class PromptRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=MAX_PROMPT_LENGTH)
     idempotency_key: str | None = Field(default=None, max_length=200)
     metadata: dict | None = None
+    skill_overrides: dict[str, SkillOverride] | None = None
 
 
 class PromptAccepted(BaseModel):
@@ -178,6 +200,24 @@ async def _submit_one(
     }
     if body.metadata:
         config["pipeline_metadata"] = body.metadata
+
+    # Session-scoped skill overrides (SkillOpt candidate bodies) are
+    # gated behind the worker kill switch.  When disabled we drop them
+    # rather than persisting state the resolver would ignore — that keeps
+    # the stored config honest about what the session will actually use.
+    if body.skill_overrides:
+        worker_settings = getattr(settings, "worker", settings)
+        if getattr(worker_settings, "skill_overrides_enabled", True):
+            config["skill_overrides"] = {
+                name: ov.model_dump(exclude_none=False)
+                for name, ov in body.skill_overrides.items()
+            }
+        else:
+            logger.warning(
+                "skill_overrides supplied but feature flag disabled; dropping "
+                "(org=%s, keys=%s)",
+                tenant.org_id, sorted(body.skill_overrides),
+            )
 
     try:
         session = await create_agent_session(

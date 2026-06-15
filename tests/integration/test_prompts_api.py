@@ -56,6 +56,30 @@ async def app(session_factory, redis_client, pg_url, redis_url):
     application.state.credential_vault = CredentialVault(
         session_factory, Fernet.generate_key()
     )
+
+    # The prompt routes resolve the target agent via
+    # ``agent_runtime_context_dep``, which reaches for ``runtime_config_cache``
+    # + an ``agent_id`` the bare-token test requests don't supply.  Override
+    # the dependency with a fixed shared-runtime context so the tests exercise
+    # the prompt handler itself rather than agent resolution wiring.
+    from surogates.runtime import (
+        agent_runtime_context_dep,
+        build_agent_runtime_context,
+    )
+
+    def _fixed_runtime_context():
+        return build_agent_runtime_context({
+            "agent_id": TEST_AGENT_ID,
+            "org_id": "00000000-0000-0000-0000-000000000000",
+            "project_id": "test-project",
+            "enabled": True,
+            "version": 1,
+            "storage_key_prefix": "",
+        })
+
+    application.dependency_overrides[agent_runtime_context_dep] = (
+        _fixed_runtime_context
+    )
     return application
 
 
@@ -622,6 +646,80 @@ async def test_sa_session_jwt_writes_shared_memory(
     )
     assert get_resp.status_code == 200
     assert "shared fact for the org pipeline" in get_resp.json()["memory"]
+
+
+async def test_skill_overrides_stored_for_service_account(
+    client: AsyncClient, session_factory, session_store
+):
+    """Service-account submissions persist skill_overrides into config."""
+    org_id = await create_org(session_factory)
+    token = await _issue_token(session_factory, org_id)
+
+    resp = await client.post(
+        "/v1/api/prompts",
+        json={
+            "prompt": "/browser-research compare vendors",
+            "metadata": {"skillopt_run_id": "run-1"},
+            "skill_overrides": {
+                "browser-research": {
+                    "content": "# candidate body",
+                    "run_id": "run-1",
+                    "candidate_id": "cand-2",
+                }
+            },
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 202, resp.text
+
+    sid = UUID(resp.json()["session_id"])
+    session = await session_store.get_session(sid)
+    overrides = session.config["skill_overrides"]
+    assert overrides["browser-research"]["content"] == "# candidate body"
+    assert overrides["browser-research"]["candidate_id"] == "cand-2"
+    # Defaults are materialised so downstream consumers see a complete dict.
+    assert overrides["browser-research"]["source"] == "skillopt"
+    assert overrides["browser-research"]["type"] == "skill"
+    # pipeline_metadata still lands alongside it.
+    assert session.config["pipeline_metadata"] == {"skillopt_run_id": "run-1"}
+
+
+async def test_skill_overrides_dropped_when_flag_disabled(
+    app, client: AsyncClient, session_factory, session_store
+):
+    """With the kill switch off, overrides are not persisted."""
+    # Settings are constructed once at fixture setup, so flip the flag on
+    # the live app rather than via an env var the constructor already read.
+    app.state.settings.worker.skill_overrides_enabled = False
+
+    org_id = await create_org(session_factory)
+    token = await _issue_token(session_factory, org_id)
+
+    resp = await client.post(
+        "/v1/api/prompts",
+        json={
+            "prompt": "hello",
+            "skill_overrides": {"x": {"content": "y"}},
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 202, resp.text
+    sid = UUID(resp.json()["session_id"])
+    session = await session_store.get_session(sid)
+    assert "skill_overrides" not in session.config
+
+
+async def test_skill_overrides_rejected_for_jwt_caller(
+    client: AsyncClient, session_factory
+):
+    """A user JWT (not a service-account token) must be 403 on /v1/api/prompts."""
+    _org_id, user_jwt = await _non_admin_tenant(session_factory)
+    resp = await client.post(
+        "/v1/api/prompts",
+        json={"prompt": "hi", "skill_overrides": {"x": {"content": "y"}}},
+        headers={"Authorization": f"Bearer {user_jwt}"},
+    )
+    assert resp.status_code == 403
 
 
 async def test_submit_batch_accepts_multiple_prompts(

@@ -119,11 +119,18 @@ class HarnessAPIClient:
     # ------------------------------------------------------------------
 
     async def list_skills(self, category: str | None = None) -> str:
-        """List available skills.  Returns JSON string for tool result."""
+        """List available skills.  Returns JSON string for tool result.
+
+        Forwards the client's ``session_id`` (if set) so the API server
+        resolves the session's ``skill_overrides`` and returns the same
+        catalog the worker's slash expansion will resolve against.
+        """
         params: dict[str, Any] = {}
         if category:
             params["category"] = category
-        data = await self._get("/v1/skills", params=params)
+        if self._session_id is not None:
+            params["session_id"] = self._session_id
+        data = await self._get("/v1/skills", params=params or None)
         # Reshape to match the existing skills_list handler response.
         skills = data.get("skills", [])
         return json.dumps({

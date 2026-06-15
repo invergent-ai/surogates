@@ -2,6 +2,22 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+## Execution Todo List
+
+- [x] Task 1: `SkillOverride` schema + `skill_overrides` field on `PromptRequest`
+- [x] Task 2: Feature flag `skill_overrides_enabled`
+- [x] Task 3: Store `skill_overrides` into `session.config` at prompt submission (also repaired the stale `test_prompts_api.py` `app` fixture, which never wired agent resolution — the route now requires an agent; 3 unrelated `/v1/memory` storage path-traversal failures remain pre-existing)
+- [x] Task 4: Loader override layer (`_apply_overrides` + `load_skills(overrides=)`) — note `tests/test_loader.py` (stale `MCPServerDef` import) and 3 `test_resource_loader_bundle.py` cases fail pre-existing, unaffected by the override param (verified by stash)
+- [x] Task 5: API `view_skill` resolves overrides (shared-runtime path) — integration tests use a fake Hub bundle + `RuntimeConfigCache` (requests carry `agent_id`, as the real Work UI/SkillOpt worker do) instead of the dead `platform_skills_dir`
+- [x] Task 6: API `list_skills` honors overrides (catalog completeness)
+- [x] Task 7: `HarnessAPIClient.list_skills` forwards `session_id`
+- [x] Task 8: Slash `/<skill>` expansion uses override content (coverage)
+- [x] Task 9: Audit — enrich `skill.invoked` when an override was used
+- [x] Task 10: Worker-local `skill_view` applies overrides (dedicated-agent path) — the plan's "passing session_config is enough" was incomplete: the non-DB branch of `_skill_view_handler` re-reads `SKILL.md` from disk, so I added `_active_skill_override` and an explicit override branch that serves the candidate body while keeping original supporting-file listing (mirrors the API path)
+- [x] Task 11: Full-suite verification — all touched suites green (91/94 in the prompts+overrides set; the 3 remaining `test_prompts_api.py` failures are the pre-existing `/v1/memory` path-traversal bug, unrelated to this feature). Broader skills/loader/tools (110) and harness (22) suites pass clean.
+
+> **Execution note (discovered during implementation):** the integration-test reference `tests/integration/test_skills_sa_token.py` is stale on this branch — it sets `settings.platform_skills_dir`, a field that no longer exists on `Settings` (platform skills are now bundle-only), so it errors at fixture setup. Tasks 5/6 therefore wire a fake Hub bundle + `RuntimeConfigCache` instead of the dead `platform_skills_dir` path.
+
 **Goal:** Let an authorized service-account prompt submission attach a candidate `SKILL.md` body to a single Surogates session, so that session's `/<skill>` expansion and `skill_view` resolve the candidate content instead of the published skill — without mutating any skill catalog or redeploying the agent.
 
 **Architecture:** A new `skill_overrides` map is stored on `session.config` at prompt-submission time (gated to service accounts + a feature flag). Skill resolution gains a single highest-precedence override layer applied via `dataclasses.replace`, which patches the candidate's `content`/`description`/`trigger` onto the *original* `SkillDef` while preserving its `source` — so supporting-file staging continues to work from the original bundle/storage. The shared-runtime path (API skill routes) and the worker-local path (`_skill_view_handler`) both read the session's overrides and pass them into `ResourceLoader.load_skills(overrides=...)`. The harness audit trail records that an override was used.

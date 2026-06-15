@@ -184,6 +184,7 @@ async def expand_slash_skill(
     session_id: str,
     api_client: Any | None,
     session_factory: Any | None,
+    session_config: dict[str, Any] | None = None,
     session_store: Any | None = None,
     sandbox_pool: Any | None = None,
 ) -> tuple[str, str, str | None, Literal["skill", "expert"]] | None:
@@ -212,6 +213,7 @@ async def expand_slash_skill(
             tenant,
             api_client=api_client,
             session_factory=session_factory,
+            session_config=session_config,
         )
     except Exception:
         logger.debug(
@@ -241,6 +243,7 @@ async def expand_slash_skill(
         session_id=session_id,
         api_client=api_client,
         session_factory=session_factory,
+        session_config=session_config,
     )
 
 
@@ -253,6 +256,7 @@ async def _expand_skill(
     session_id: str,
     api_client: Any | None,
     session_factory: Any | None,
+    session_config: dict[str, Any] | None = None,
 ) -> tuple[str, str, str | None, Literal["skill", "expert"]] | None:
     """Inline a regular skill's body via ``skill_view``.
 
@@ -267,6 +271,7 @@ async def _expand_skill(
             session_id=session_id,
             api_client=api_client,
             session_factory=session_factory,
+            session_config=session_config,
         )
     except Exception:
         logger.debug(
