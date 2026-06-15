@@ -208,4 +208,40 @@ describe("ChatMessage — user bubble attachment chips", () => {
     expect(node.querySelectorAll("img")).toHaveLength(1);
     expect(node.querySelectorAll("button")).toHaveLength(1);
   });
+
+  it("does not render a chip for an image attachment (shown as an inline preview instead)", () => {
+    // The composer now uploads picked images to the workspace, so a sent
+    // image appears in BOTH message.images (inline preview) and
+    // message.attachments (workspace ref). The bubble must render it once,
+    // as the image preview — never also as a file chip.
+    const node = render(
+      <ChatMessage
+        message={userMessage({
+          images: [
+            { data: "data:image/png;base64,xxxx", mimeType: "image/png" },
+          ],
+          attachments: [
+            {
+              path: "uploads/1-0-shot.png",
+              filename: "shot.png",
+              mimeType: "image/png",
+              size: 1024,
+            },
+            {
+              path: "uploads/1-1-notes.txt",
+              filename: "notes.txt",
+              mimeType: "text/plain",
+              size: 42,
+            },
+          ],
+        })}
+      />,
+    );
+
+    expect(node.querySelectorAll("img")).toHaveLength(1);
+    // Only the non-image (notes.txt) attachment gets a chip button.
+    expect(node.querySelectorAll("button")).toHaveLength(1);
+    expect(node.textContent).toContain("notes.txt");
+    expect(node.textContent).not.toContain("shot.png");
+  });
 });
