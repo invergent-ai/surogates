@@ -30,6 +30,7 @@ import type {
   TokenUsage,
 } from "../../types";
 import { useAgentChatAdapterContext } from "../../adapter-context";
+import { splitComposerFiles } from "../../lib/split-composer-files";
 import {
   Context,
   ContextCacheUsage,
@@ -518,32 +519,13 @@ function ChatComposerInner({
       const text = message.text.trim();
       if (!text || disabled) return;
 
-      // Split incoming files by MIME bucket: images go through the
-      // existing vision-inline path (base64 data URL on the message
-      // body), everything else becomes a pending attachment uploaded
-      // to the workspace by the runtime.
-      const images: AgentChatImageAttachment[] = [];
-      const pending: AgentChatPendingAttachment[] = [];
-
-      for (const file of message.files) {
-        if (file.mediaType?.startsWith("image/") && file.url) {
-          images.push({ data: file.url, mimeType: file.mediaType });
-          continue;
-        }
-        if (!file.file) {
-          // Defensive: PromptInputProvider/local both stamp file: on
-          // each item. If a future consumer constructs a FileUIPart
-          // without it, drop the entry rather than pretending we can
-          // upload nothing.
-          continue;
-        }
-        pending.push({
-          file: file.file,
-          filename: file.filename ?? file.file.name,
-          mimeType: file.mediaType ?? file.file.type ?? undefined,
-          size: file.file.size,
-        });
-      }
+      // Split incoming files into the inline-vision image list and the
+      // workspace-upload pending list. Images appear in BOTH: the base64
+      // data URL still drives inline vision, and the same image is queued
+      // as a pending attachment so the runtime persists it to the
+      // workspace ``uploads/`` directory, exactly like a non-image file.
+      // Everything else becomes a pending attachment only.
+      const { images, pending } = splitComposerFiles(message.files);
 
       // Split-aware caps — the <PromptInput maxFiles/maxFileSize> caps
       // are a coarse first line that ignores the image/non-image

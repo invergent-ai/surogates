@@ -37,6 +37,13 @@ export const ChatMessage = memo(function ChatMessage({
   message,
   onFileSelect,
 }: ChatMessageProps) {
+  // Image attachments are rendered as inline previews via
+  // ``message.images`` (the composer routes each picked image into both
+  // the inline-vision list and the workspace-upload list). Skip them
+  // here so the same image does not also appear as a file chip.
+  const fileAttachments = (message.attachments ?? []).filter(
+    (a) => !a.mimeType?.startsWith("image/"),
+  );
   return (
     <Message from="user">
       <MessageContent>
@@ -53,9 +60,9 @@ export const ChatMessage = memo(function ChatMessage({
             ))}
           </div>
         )}
-        {message.attachments && message.attachments.length > 0 && (
+        {fileAttachments.length > 0 && (
           <div className="flex flex-wrap gap-2 mt-2">
-            {message.attachments.map((a, i) => (
+            {fileAttachments.map((a, i) => (
               <AttachmentChip
                 // Stable key across the optimistic → confirmed
                 // transition: the local chip starts without a path
