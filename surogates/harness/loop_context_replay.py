@@ -19,6 +19,68 @@ from surogates.session.events import EventType
 logger = logging.getLogger(__name__)
 
 
+def build_user_message_dict(
+    event_data: dict,
+    *,
+    base_content: str | None = None,
+) -> dict:
+    """Construct the replayed LLM user message for one ``user.message`` event.
+
+    Folds the per-turn ephemeral context — inlined attachment content,
+    view-context note, path-only attachment note, and image vision blocks —
+    onto the user's text, exactly as the conversation history is rebuilt.
+
+    ``base_content`` overrides the event's own ``content``.  The slash-skill
+    and ``/deep-research`` rewrite paths pass the expanded directive here so
+    the skill/delegation body replaces the raw ``/command`` text while the
+    attachment binding for *this* turn survives.  Without that, the rewrite
+    discarded the note/inlined content and the model bound the request to an
+    earlier upload still visible in history instead of the file the user just
+    attached.
+    """
+    content = base_content if base_content is not None else event_data.get("content", "")
+    content = _render_inlined_attachments(content, event_data.get("attachments"))
+    # Fold per-user ephemeral notes (view-context, non-inlined attachments)
+    # into the user content here so the bytes are determined entirely by the
+    # durable event payload.  This keeps the provider's implicit prefix cache
+    # stable across turns -- the previous design inserted the notes mid-array
+    # before the latest user message, which left them present in turn T's
+    # request but absent in turn T+1's prefix.
+    note_parts: list[str] = []
+    view_note = _view_context_note_from_metadata(event_data.get("metadata"))
+    if view_note:
+        note_parts.append(view_note)
+    attachments_note = _attachments_note_from_data(event_data)
+    if attachments_note:
+        note_parts.append(attachments_note)
+    if note_parts:
+        notes_block = "\n\n".join(note_parts)
+        content = f"{notes_block}\n\n{content}" if content else notes_block
+
+    images = event_data.get("images")
+    if images:
+        logger.info(
+            "User message has %d image(s), first mime: %s",
+            len(images),
+            images[0].get("mime_type", "?"),
+        )
+        blocks: list[dict] = [{"type": "text", "text": content}]
+        for img in images:
+            data_url = img["data"]
+            if not data_url.startswith("data:"):
+                mime = img.get("mime_type", "image/png")
+                data_url = f"data:{mime};base64,{data_url}"
+            blocks.append({
+                "type": "image_url",
+                "image_url": {"url": data_url, "detail": "auto"},
+            })
+        user_msg = {"role": "user", "content": blocks}
+        from surogates.harness.image_shrink import shrink_image_parts_in_messages
+        shrink_image_parts_in_messages([user_msg])
+        return user_msg
+    return {"role": "user", "content": content}
+
+
 class ContextReplayMixin:
     async def _prefetch_memory(self, session_id: UUID) -> str | None:
         """Prefetch user memory and snapshot it for the session.
@@ -94,55 +156,7 @@ class ContextReplayMixin:
             etype = event.type
 
             if etype == EventType.USER_MESSAGE.value:
-                content = event.data.get("content", "")
-                content = _render_inlined_attachments(
-                    content, event.data.get("attachments"),
-                )
-                # Fold per-user ephemeral notes (view-context, non-inlined
-                # attachments) into the user content here so the bytes are
-                # determined entirely by the durable event payload.  This
-                # keeps the provider's implicit prefix cache stable across
-                # turns -- the previous design inserted the notes mid-array
-                # before the latest user message, which left them present
-                # in turn T's request but absent in turn T+1's prefix.
-                note_parts: list[str] = []
-                view_note = _view_context_note_from_metadata(
-                    event.data.get("metadata"),
-                )
-                if view_note:
-                    note_parts.append(view_note)
-                attachments_note = _attachments_note_from_data(event.data)
-                if attachments_note:
-                    note_parts.append(attachments_note)
-                if note_parts:
-                    notes_block = "\n\n".join(note_parts)
-                    content = (
-                        f"{notes_block}\n\n{content}" if content else notes_block
-                    )
-                images = event.data.get("images")
-                if images:
-                    logger.info(
-                        "User message has %d image(s), first mime: %s",
-                        len(images),
-                        images[0].get("mime_type", "?"),
-                    )
-                if images:
-                    blocks: list[dict] = [{"type": "text", "text": content}]
-                    for img in images:
-                        data_url = img["data"]
-                        if not data_url.startswith("data:"):
-                            mime = img.get("mime_type", "image/png")
-                            data_url = f"data:{mime};base64,{data_url}"
-                        blocks.append({
-                            "type": "image_url",
-                            "image_url": {"url": data_url, "detail": "auto"},
-                        })
-                    user_msg = {"role": "user", "content": blocks}
-                    from surogates.harness.image_shrink import shrink_image_parts_in_messages
-                    shrink_image_parts_in_messages([user_msg])
-                    messages.append(user_msg)
-                else:
-                    messages.append({"role": "user", "content": content})
+                messages.append(build_user_message_dict(event.data))
 
             elif etype == EventType.LLM_RESPONSE.value:
                 stored_message = event.data.get("message")

@@ -141,6 +141,30 @@ def _latest_user_event_text(events: list[Any]) -> str:
             )
         return (raw or "").strip()
     return ""
+
+
+def _latest_user_event_data(events: list[Any]) -> dict | None:
+    """Return the ``data`` payload of the latest ``USER_MESSAGE`` event.
+
+    Used by the slash-skill / ``/deep-research`` rewrite paths to refold the
+    current turn's attachment note, inlined content, and image blocks onto
+    the rewritten message body via
+    :func:`surogates.harness.loop_context_replay.build_user_message_dict`.
+
+    Returns ``None`` when no ``USER_MESSAGE`` event exists or its payload is
+    not a dict.
+    """
+    for event in reversed(events):
+        event_type = event.type
+        type_value = (
+            event_type.value if hasattr(event_type, "value") else event_type
+        )
+        if type_value != EventType.USER_MESSAGE.value:
+            continue
+        return event.data if isinstance(event.data, dict) else None
+    return None
+
+
 def _last_assistant_message_excerpt(
     messages: list[dict[str, Any]],
     limit: int = 500,

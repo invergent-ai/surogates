@@ -158,6 +158,7 @@ from surogates.harness.loop_messages import (
     _format_bytes,
     _initial_system_message,
     _last_assistant_message_excerpt,
+    _latest_user_event_data,
     _latest_user_event_text,
     _latest_user_message_text,
     _seconds_since,
@@ -207,7 +208,10 @@ from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
 from surogates.harness.loop_arbor import ArborHarvestMixin
 from surogates.harness.loop_board import BoardMixin
 from surogates.harness.loop_code_commands import CodeCommandMixin
-from surogates.harness.loop_context_replay import ContextReplayMixin
+from surogates.harness.loop_context_replay import (
+    ContextReplayMixin,
+    build_user_message_dict,
+)
 from surogates.harness.loop_iteration_summary import IterationSummaryMixin
 from surogates.harness.loop_outcome_commands import OutcomeCommandMixin
 
@@ -264,6 +268,30 @@ def _skill_invoked_event_data(
         if ov.get("candidate_id") is not None:
             data["candidate_id"] = ov["candidate_id"]
     return data
+
+
+def _rewrite_user_content_preserving_attachments(
+    last_user: dict | None,
+    all_events: list,
+    new_text: str,
+) -> None:
+    """Swap a rewritten directive into the latest user message in place,
+    keeping this turn's attachment note, inlined content, and image blocks.
+
+    The slash-skill and ``/deep-research`` paths replace the raw
+    ``/command`` text with an expanded body.  Assigning that body directly
+    drops the per-turn attachment binding that ``_rebuild_messages`` folds
+    into the user content, so the model loses track of which file the user
+    just attached and binds the request to an earlier upload still visible
+    in history.  Rebuilding via ``build_user_message_dict`` with the body as
+    ``base_content`` reattaches the binding.
+    """
+    if last_user is None:
+        return
+    data = _latest_user_event_data(all_events) or {}
+    last_user["content"] = build_user_message_dict(
+        data, base_content=new_text,
+    )["content"]
 
 
 # Reminder injected when the deep-research planner ends a turn with
@@ -985,10 +1013,11 @@ class AgentHarness(
                 last_user_content,
             )
             if deep_research_topic is not None:
-                if last_user is not None:
-                    last_user["content"] = build_deep_research_message(
-                        topic=deep_research_topic,
-                    )
+                _rewrite_user_content_preserving_attachments(
+                    last_user,
+                    all_events,
+                    build_deep_research_message(topic=deep_research_topic),
+                )
                 # The rewritten directive is the planning structure;
                 # skip the SELF-DISCOVER / thinking-gate scaffold.
                 self._skip_pre_llm_scaffold_for_turn = True
@@ -1011,7 +1040,9 @@ class AgentHarness(
                 )
                 if expansion is not None:
                     expanded_text, skill_name, staged_at, kind = expansion
-                    last_user["content"] = expanded_text
+                    _rewrite_user_content_preserving_attachments(
+                        last_user, all_events, expanded_text,
+                    )
                     # The skill body itself is the planning structure;
                     # don't pay for the thinking-gate + SELF-DISCOVER
                     # classifier pair on this turn.
