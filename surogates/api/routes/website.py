@@ -18,13 +18,15 @@ needs to talk to the deployment's agent embedded on a public website:
   headers, so the CSRF header isn't required (GETs are safe by
   CSRF's standard assumption — nothing is mutated).
 
-All authority comes from :class:`WebsiteSettings`.  The agent
-identity for a request is resolved from
-:func:`agent_runtime_context_dep` and exposed through this channel
-when ``website.enabled`` is true.  Origin validation is the
-conjunction of two checks: the configured allow-list (authoritative)
-and the session cookie's ``origin`` claim (anchors a bootstrapped
-session to the embed it came from).  A request must satisfy both.
+The channel on-switch and the origin allow-list come from
+:class:`WebsiteSettings` (global, per-deployment).  The agent identity
+is resolved per-request from the publishable key via
+``channel_routing(website:<key>)`` -- the same mechanism the
+Slack/Telegram adapters use -- so each agent has its own key.  Origin
+validation is the conjunction of two checks: the configured allow-list
+(authoritative) and the session cookie's ``origin`` claim (anchors a
+bootstrapped session to the embed it came from).  A request must
+satisfy both.
 """
 
 from __future__ import annotations
@@ -43,7 +45,6 @@ from sse_starlette.sse import EventSourceResponse
 from surogates.channels.website_keys import (
     PUBLISHABLE_KEY_PREFIX,
     is_publishable_key,
-    verify_publishable_key,
 )
 from surogates.channels.website_origin import (
     normalize_origin,
@@ -62,8 +63,6 @@ from surogates.channels.website_session import (
 )
 from surogates.config import Settings, enqueue_session
 from surogates.runtime import (
-    AgentRuntimeContext,
-    agent_runtime_context_dep,
     rate_limit_dep,
 )
 from surogates.session.events import EventType
@@ -220,45 +219,6 @@ def _clear_session_cookie(response: Response) -> None:
     response.delete_cookie(COOKIE_NAME, path="/")
 
 
-def _verify_publishable_key_from_request(request: Request, settings: Settings) -> None:
-    """Reject any request that does not present the configured key.
-
-    Returns silently on success.  Three failure modes a legitimate
-    embed has already pre-empted by reading its config correctly:
-    HTTP 400 for a missing/malformed Authorization header, HTTP 401
-    for the wrong token shape (e.g. a service-account key) or a
-    mismatched value, HTTP 503 when the deployment is enabled but no
-    key is configured (a misconfiguration the operator must fix).
-    """
-    expected = settings.website.publishable_key
-    if not expected:
-        # Deployment said website.enabled=true but didn't ship a key.
-        # Surfaces this as 503 so the operator notices, rather than
-        # silently letting any bearer through.
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Website channel is enabled but no publishable key is configured.",
-        )
-
-    token = _extract_bearer(request)
-    if not token or not is_publishable_key(token):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=(
-                "Website bootstrap requires a publishable key "
-                f"(prefix {PUBLISHABLE_KEY_PREFIX!r}) in the Authorization header."
-            ),
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    if not verify_publishable_key(token, expected):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid publishable key.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-
 async def _resolve_claims_from_cookie(
     request: Request,
 ) -> WebsiteSessionClaims:
@@ -343,6 +303,35 @@ async def _load_and_authorize_session(
 # ---------------------------------------------------------------------------
 
 
+async def _resolve_website_routing(request: Request) -> dict:
+    """Resolve the owning agent for a website request from its publishable key.
+
+    The ``Authorization: Bearer`` publishable key is both the identifier and
+    the auth: it is looked up in ``channel_routing`` (``website:<key>``) to
+    find ``(org_id, agent_id)`` — the same way the Slack/Telegram adapters
+    resolve their tenant.  A missing or inactive row is indistinguishable from
+    "no such key" and returns 404, so a wrong key cannot enumerate agents.
+    """
+    token = _extract_bearer(request)
+    if not token or not is_publishable_key(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=(
+                "Website bootstrap requires a publishable key "
+                f"(prefix {PUBLISHABLE_KEY_PREFIX!r}) in the Authorization header."
+            ),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    cache = getattr(request.app.state, "channel_routing_cache", None)
+    routing = await cache.get(f"website:{token}") if cache is not None else None
+    if not routing or not routing.get("agent_id") or not routing.get("org_id"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Unknown or inactive website key.",
+        )
+    return routing
+
+
 @router.post(
     "/website/sessions",
     response_model=BootstrapResponse,
@@ -351,19 +340,19 @@ async def _load_and_authorize_session(
 async def bootstrap_website_session(
     request: Request,
     response: Response,
-    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
     _rate: None = Depends(rate_limit_dep),
 ) -> BootstrapResponse:
     """Exchange a publishable key + approved origin for a session cookie.
 
-    Creates a fresh session owned by the deployment's org (no user
-    row), mints the HttpOnly cookie the browser presents on
-    subsequent requests, and returns the CSRF token the browser
-    client echoes in ``X-CSRF-Token``.
+    The publishable key resolves the owning agent via ``channel_routing``
+    (``website:<key>``); the request Origin is checked against the global
+    allow-list.  Creates a fresh session owned by the agent's org (no user
+    row), mints the HttpOnly cookie the browser presents on subsequent
+    requests, and returns the CSRF token echoed in ``X-CSRF-Token``.
     """
     settings = _get_settings(request)
     _require_website_enabled(settings)
-    _verify_publishable_key_from_request(request, settings)
+    routing = await _resolve_website_routing(request)
 
     request_origin = _extract_origin(request)
     allowed = parse_allowed_origins(settings.website.allowed_origins)
@@ -373,19 +362,9 @@ async def bootstrap_website_session(
             detail="Request origin is not in the configured allow-list.",
         )
 
-    if not agent_runtime.org_id:
-        # Visitor sessions need a real org to attach to (memory,
-        # storage, governance are all org-scoped).  A misconfigured
-        # deployment whose tenant context has no org_id cannot honour
-        # the channel contract; surface it explicitly rather than
-        # crashing the SQLAlchemy insert with a NULL constraint failure.
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Website channel is enabled but the tenant has no org_id.",
-        )
-
+    agent_id = routing["agent_id"]
     try:
-        org_uuid = UUID(agent_runtime.org_id)
+        org_uuid = UUID(routing["org_id"])
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -425,7 +404,7 @@ async def bootstrap_website_session(
         session_id=session_id,
         user_id=None,
         org_id=org_uuid,
-        agent_id=agent_runtime.agent_id,
+        agent_id=agent_id,
         channel=WEBSITE_CHANNEL,
         model=settings.llm.model,
         config=config,
@@ -464,7 +443,7 @@ async def bootstrap_website_session(
         session_id=session.id,
         csrf_token=csrf_token,
         expires_at=int(time.time()) + DEFAULT_SESSION_TTL_SECONDS,
-        agent_name=agent_runtime.agent_id,
+        agent_name=agent_id,
     )
 
 
