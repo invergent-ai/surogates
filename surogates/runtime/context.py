@@ -29,7 +29,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-__all__ = ["AgentRuntimeContext", "LLMEndpoint"]
+__all__ = [
+    "AgentRuntimeContext",
+    "LLMEndpoint",
+    "SlashCommandConfig",
+    "SLASH_COMMAND_IDS",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +51,37 @@ class LLMEndpoint:
     model: str
     base_url: str
     api_key_ref: str
+
+
+# Canonical slash-command ids the harness can gate.  Hyphenated to match
+# the user-facing command names (``/auto-research``, ``/deep-research``).
+SLASH_COMMAND_IDS: frozenset[str] = frozenset(
+    {
+        "clear",
+        "compress",
+        "code",
+        "deep-research",
+        "auto-research",
+        "loop",
+        "mission",
+        "goal",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SlashCommandConfig:
+    """Per-agent slash-command availability.
+
+    ``enabled`` is the master switch — when False every slash command is
+    refused.  ``commands`` is the set of individually-enabled canonical
+    command ids (see ``SLASH_COMMAND_IDS``).  The default is fully
+    permissive so an agent whose runtime-config predates this field keeps
+    every command (backward compatible).
+    """
+
+    enabled: bool = True
+    commands: frozenset[str] = SLASH_COMMAND_IDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +141,10 @@ class AgentRuntimeContext:
 
     mcp_server_ids: tuple[str, ...] = ()
     governance: dict = field(default_factory=dict)
+
+    # Per-agent slash-command gating.  Defaults to fully permissive so a
+    # runtime-config payload that predates this field keeps every command.
+    slash_commands: SlashCommandConfig = SlashCommandConfig()
 
     # File-bundle reference.  Both optional so agents that haven't
     # been onboarded to Hub-backed bundles yet still work.

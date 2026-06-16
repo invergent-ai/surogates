@@ -170,3 +170,28 @@ def test_governance_default_is_independent_per_instance():
     assert a.governance == {}
     assert b.governance == {}
     assert a.governance is not b.governance
+
+
+def test_agent_runtime_context_slash_commands_default_is_permissive():
+    from surogates.runtime import AgentRuntimeContext, SlashCommandConfig
+
+    ctx = AgentRuntimeContext(
+        agent_id="a-1",
+        org_id="o-1",
+        project_id="p-1",
+        enabled=True,
+        config_version=1,
+        storage_key_prefix="p-1/a-1",
+    )
+    assert ctx.slash_commands == SlashCommandConfig()
+    assert ctx.slash_commands.enabled is True
+    assert "loop" in ctx.slash_commands.commands
+    assert "clear" in ctx.slash_commands.commands
+
+
+def test_slash_command_config_can_disable_everything():
+    from surogates.runtime import SlashCommandConfig
+
+    cfg = SlashCommandConfig(enabled=False, commands=frozenset())
+    assert cfg.enabled is False
+    assert "loop" not in cfg.commands
