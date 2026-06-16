@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from surogates.harness.model_metadata import get_model_info
 from surogates.harness.prompt_library import PromptLibrary, default_library
+from surogates.runtime.context import SlashCommandConfig
 from surogates.tools.loader import AGENT_SOURCE_PLATFORM
 
 if TYPE_CHECKING:
@@ -99,6 +100,7 @@ class PromptBuilder:
         prompt_library: PromptLibrary | None = None,
         soul_md_content: str | None = None,
         agent_md_content: str | None = None,
+        slash_commands: SlashCommandConfig | None = None,
     ) -> None:
         self.tenant = tenant
         self.skills: list = skills or []
@@ -112,6 +114,16 @@ class PromptBuilder:
         # builder's build() can stay sync.
         self._soul_md_content: str | None = soul_md_content
         self._agent_md_content: str | None = agent_md_content
+        # Per-agent slash-command availability, shared with the dispatch
+        # gate.  Held so model-facing command advertisements can be kept
+        # in sync with runtime availability.  NOTE: the scheduled-loop
+        # child guidance (``loop_wait`` / ``cron_loop``) is deliberately
+        # NOT gated on this — those fragments belong to a session already
+        # running as a loop child and must not vanish when ``/loop``
+        # creation is disabled for the agent.
+        self._slash_commands: SlashCommandConfig = (
+            slash_commands or SlashCommandConfig()
+        )
         # Active sub-agent type for the current session, or None when
         # the session runs with the default identity.  When set, the
         # agent def's system_prompt body replaces the org-level
