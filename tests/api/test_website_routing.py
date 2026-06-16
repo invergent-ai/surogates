@@ -12,7 +12,6 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from surogates.api.routes import website
-from surogates.runtime import rate_limit_dep
 
 
 class _FakeCache:
@@ -41,8 +40,7 @@ def _app(rows, allowed="https://acme.com"):
     app.include_router(website.router, prefix="/v1")
     app.state.settings = _settings(allowed)
     app.state.channel_routing_cache = _FakeCache(rows)
-    # rate limiting is wired from app.state in prod; bypass it in unit tests.
-    app.dependency_overrides[rate_limit_dep] = lambda: None
+    # No rate_limiter on app.state → the website rate-limit helper passes through.
     return app
 
 

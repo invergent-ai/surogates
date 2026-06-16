@@ -38,7 +38,7 @@ import time
 import uuid
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -62,9 +62,6 @@ from surogates.channels.website_session import (
     verify_csrf_token,
 )
 from surogates.config import Settings, enqueue_session
-from surogates.runtime import (
-    rate_limit_dep,
-)
 from surogates.session.events import EventType
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.tenant import agent_session_bucket
@@ -332,6 +329,25 @@ async def _resolve_website_routing(request: Request) -> dict:
     return routing
 
 
+async def _enforce_website_rate_limit(
+    request: Request, org_id: str, agent_id: str,
+) -> None:
+    """Per-tenant rate limit keyed on the agent resolved from the publishable
+    key / session cookie -- so the website channel never needs ``?agent_id=``
+    on the request. Mirrors ``rate_limit_dep`` (same limiter, 60s window,
+    default ceiling, same 429); the per-agent ``governance.rate_limit_rpm``
+    override is intentionally not applied on this anonymous public channel.
+    """
+    limiter = getattr(request.app.state, "rate_limiter", None)
+    if limiter is None:
+        return
+    if not await limiter.try_consume(org_id, agent_id):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="per-tenant rate limit exceeded",
+        )
+
+
 @router.post(
     "/website/sessions",
     response_model=BootstrapResponse,
@@ -340,7 +356,6 @@ async def _resolve_website_routing(request: Request) -> dict:
 async def bootstrap_website_session(
     request: Request,
     response: Response,
-    _rate: None = Depends(rate_limit_dep),
 ) -> BootstrapResponse:
     """Exchange a publishable key + approved origin for a session cookie.
 
@@ -353,6 +368,9 @@ async def bootstrap_website_session(
     settings = _get_settings(request)
     _require_website_enabled(settings)
     routing = await _resolve_website_routing(request)
+    await _enforce_website_rate_limit(
+        request, routing["org_id"], routing["agent_id"],
+    )
 
     request_origin = _extract_origin(request)
     allowed = parse_allowed_origins(settings.website.allowed_origins)
@@ -456,7 +474,6 @@ async def send_website_message(
     session_id: UUID,
     body: SendMessageRequest,
     request: Request,
-    _rate: None = Depends(rate_limit_dep),
 ) -> SendMessageResponse:
     """Send a visitor message to the session, triggering agent processing.
 
@@ -489,6 +506,9 @@ async def send_website_message(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
+    await _enforce_website_rate_limit(
+        request, str(session.org_id), session.agent_id,
+    )
     if session.status not in ("active", "idle", "failed", "paused", "completed"):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
