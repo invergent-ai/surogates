@@ -9,5 +9,5 @@
  * ``SurogatesWidget.mount`` on ``window``.
  */
 export * from './index.js';
-export { mount } from './ui/mount.js';
+export { mount, mountWithPairing } from './ui/mount.js';
 export type { MountConfig, WidgetHandle, WidgetAppearance } from './ui/types.js';

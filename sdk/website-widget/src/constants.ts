@@ -29,6 +29,14 @@ export const PATH_EVENTS = (sessionId: string, after: number) =>
 export const PATH_END = (sessionId: string) =>
   `/v1/website/sessions/${sessionId}/end`;
 
+// Pairing: a key-only embed first resolves its publishable key to the
+// owning ``(agent_id, api_web_url)`` so it knows which agent it is and where
+// to connect.  Served by the ops control plane, not the agent API, hence a
+// separate base URL.
+export const PATH_PAIRING = (key: string) =>
+  `/api/widget/p/${encodeURIComponent(key)}`;
+export const DEFAULT_PAIRING_BASE = 'https://api.surogate.ai';
+
 // Surogates native event type strings the SSE stream carries.  Source
 // of truth: ``surogates/session/events.py``.  Duplicated here so the
 // translator can switch on them without a network of string literals

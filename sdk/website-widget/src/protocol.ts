@@ -22,6 +22,7 @@ import {
   PATH_END,
   PATH_EVENTS,
   PATH_MESSAGES,
+  PATH_PAIRING,
   VERSION_HEADER,
   SDK_VERSION,
 } from './constants.js';
@@ -37,6 +38,41 @@ export interface BootstrapResult {
   csrfToken: string;
   expiresAt: number;
   agentName: string;
+}
+
+export interface PairingResult {
+  agentId: string;
+  apiWebUrl: string;
+}
+
+/**
+ * Resolve a publishable key to its owning ``(agentId, apiWebUrl)`` via the
+ * control-plane pairing endpoint, so a key-only embed can discover which
+ * agent it is and where to bootstrap.  ``doFetchImpl`` is injectable for
+ * tests; defaults to the global ``fetch``.
+ */
+export async function resolvePairing(
+  pairingBase: string,
+  publishableKey: string,
+  doFetchImpl: typeof fetch = fetch,
+): Promise<PairingResult> {
+  const url = pairingBase.replace(/\/+$/, '') + PATH_PAIRING(publishableKey);
+  let response: Response;
+  try {
+    response = await doFetchImpl(url, { method: 'GET' });
+  } catch (cause) {
+    throw new SurogatesNetworkError('Widget pairing request failed', { cause });
+  }
+  if (!response.ok) {
+    throw new SurogatesAuthError('Unknown or inactive widget key', {
+      status: response.status,
+    });
+  }
+  const body = (await response.json()) as {
+    agent_id: string;
+    api_web_url: string;
+  };
+  return { agentId: body.agent_id, apiWebUrl: body.api_web_url };
 }
 
 /**

@@ -15,6 +15,8 @@
 import { render } from 'preact';
 
 import { WebsiteAgent } from '../agent.js';
+import { DEFAULT_PAIRING_BASE } from '../constants.js';
+import { resolvePairing } from '../protocol.js';
 import { WIDGET_STYLES } from './styles.js';
 import type { MountConfig, WidgetHandle } from './types.js';
 import { Widget } from './widget.js';
@@ -37,6 +39,31 @@ function accentForeground(hex: string): string {
   const b = parseInt(full.slice(4, 6), 16);
   const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
   return luminance > 0.62 ? '#0f172a' : '#ffffff';
+}
+
+/**
+ * Key-only entry point. Resolves the publishable key to its agent +
+ * ``api_web_url`` via the control-plane pairing endpoint, then mounts against
+ * that base URL — so an embed can be just ``mountWithPairing({ publishableKey })``
+ * with no hardcoded ``apiUrl``. If ``apiUrl`` is already supplied, pairing is
+ * skipped and this is equivalent to :func:`mount`.
+ */
+export async function mountWithPairing(
+  config: Omit<MountConfig, 'apiUrl'> & { apiUrl?: string },
+): Promise<WidgetHandle> {
+  if (config?.apiUrl) {
+    return mount(config as MountConfig);
+  }
+  if (!config?.publishableKey) {
+    throw new Error(
+      'SurogatesWidget.mountWithPairing: "publishableKey" is required.',
+    );
+  }
+  const { agentId, apiWebUrl } = await resolvePairing(
+    config.pairingUrl ?? DEFAULT_PAIRING_BASE,
+    config.publishableKey,
+  );
+  return mount({ ...config, apiUrl: apiWebUrl, agentId } as MountConfig);
 }
 
 export function mount(config: MountConfig): WidgetHandle {
