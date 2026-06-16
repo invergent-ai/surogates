@@ -16,7 +16,11 @@ from __future__ import annotations
 
 from fastapi import HTTPException, Request
 
-from surogates.runtime.context import AgentRuntimeContext, LLMEndpoint
+from surogates.runtime.context import (
+    AgentRuntimeContext,
+    LLMEndpoint,
+    SlashCommandConfig,
+)
 
 __all__ = ["agent_runtime_context_dep", "build_agent_runtime_context"]
 
@@ -29,6 +33,43 @@ def _opt_llm(blob: dict | None) -> LLMEndpoint | None:
         base_url=blob["base_url"],
         api_key_ref=blob["api_key_ref"],
     )
+
+
+# Wire keys (snake_case) → canonical command ids (hyphenated).
+_SLASH_WIRE_TO_ID: dict[str, str] = {
+    "compress": "compress",
+    "code": "code",
+    "deep_research": "deep-research",
+    "auto_research": "auto-research",
+    "loop": "loop",
+    "mission": "mission",
+    "goal": "goal",
+}
+
+
+def _slash_commands(blob: dict | None) -> SlashCommandConfig:
+    """Project the wire ``slash_commands`` object into a SlashCommandConfig.
+
+    Absent / falsy → the permissive default (every command enabled) so a
+    runtime-config payload that predates this field keeps current
+    behavior.  ``clear`` has no per-command flag and is always included;
+    the master ``enabled`` flag is what gates it.
+
+    This gate is intentionally **fail-OPEN**: a missing or malformed
+    ``slash_commands`` blob re-enables every command rather than locking
+    the agent out.  That keeps a projection bug or an older management
+    plane from silently bricking slash commands — but it also means such
+    a bug surfaces as "a disabled command still works", never as "a
+    working command broke".  The ops side must therefore always emit the
+    object (the route builds it unconditionally from the agent row).
+    """
+    if not blob:
+        return SlashCommandConfig()
+    enabled = bool(blob.get("enabled", True))
+    raw = blob.get("commands") or {}
+    ids = {cid for wire, cid in _SLASH_WIRE_TO_ID.items() if raw.get(wire)}
+    ids.add("clear")
+    return SlashCommandConfig(enabled=enabled, commands=frozenset(ids))
 
 
 def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
@@ -60,6 +101,7 @@ def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
         llm_video=_opt_llm(payload.get("llm_video")),
         mcp_server_ids=tuple(payload.get("mcp_server_ids") or ()),
         governance=dict(payload.get("governance") or {}),
+        slash_commands=_slash_commands(payload.get("slash_commands")),
         # bundle reference.  Empty strings → None
         # (a misconfigured payload that ships "" must not turn into
         # a Hub fetch against an empty ref).

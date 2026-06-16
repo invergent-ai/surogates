@@ -12,7 +12,12 @@ from surogates.runtime.bundle_accessor import AgentFileBundle
 from surogates.runtime.bundle_cache import FileBundleCache
 from surogates.runtime.cache import RuntimeConfigCache
 from surogates.runtime.channel_routing_cache import ChannelRoutingCache
-from surogates.runtime.context import AgentRuntimeContext, LLMEndpoint
+from surogates.runtime.context import (
+    SLASH_COMMAND_IDS,
+    AgentRuntimeContext,
+    LLMEndpoint,
+    SlashCommandConfig,
+)
 from surogates.runtime.hub_client import HubBundleClient
 from surogates.runtime.memory_cache import MemoryCache
 from surogates.runtime.firebase import FirebaseConfig
@@ -57,7 +62,9 @@ __all__ = [
     "PlatformClient",
     "RedisLeaderLock",
     "RuntimeConfigCache",
+    "SLASH_COMMAND_IDS",
     "SYSTEM_SKILLS_REPO",
+    "SlashCommandConfig",
     "SlugResolverCache",
     "SystemBundleCache",
     "TurnConcurrencyGate",

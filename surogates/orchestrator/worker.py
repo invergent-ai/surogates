@@ -1150,6 +1150,7 @@ async def run_worker(settings: Settings) -> None:
             available_tools=effective_tools,
             soul_md_content=soul_md_content,
             agent_md_content=agent_md_content,
+            slash_commands=ctx.slash_commands,
         )
 
         # User / SA / channel-session principals each map to a JWT
@@ -1262,6 +1263,9 @@ async def run_worker(settings: Settings) -> None:
             # it to filter the shared registry's prompt schemas down to
             # this agent's own MCP tools.
             mcp_tool_names=frozenset(discovered_mcp_tools),
+            # Per-agent slash-command gating resolved from the runtime
+            # config; the dispatch gate refuses disabled commands.
+            slash_commands=ctx.slash_commands,
         )
         # Stash the bundle so the dispatcher can
         # aclose its four connection pools at session retirement.

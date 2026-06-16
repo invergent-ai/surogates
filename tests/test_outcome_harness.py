@@ -920,3 +920,60 @@ async def test_outcome_continuation_does_not_complete_session(
 
     assert continued is True
     harness._complete_session.assert_not_called()
+
+
+# ── Slash-command capability gate ──────────────────────────────────────
+
+from surogates.runtime import SlashCommandConfig  # noqa: E402
+
+
+def test_slash_command_name_maps_each_builtin():
+    from surogates.harness.loop import _slash_command_name
+
+    assert _slash_command_name("/compress") == "compress"
+    assert _slash_command_name("/clear") == "clear"
+    assert _slash_command_name("/goal ship it") == "goal"
+    assert _slash_command_name("/mission do x") == "mission"
+    assert _slash_command_name("/auto-research repo=/w x") == "auto-research"
+    assert _slash_command_name("/code fix") == "code"
+    assert _slash_command_name("/loop 5m /x") == "loop"
+    assert _slash_command_name("/deep-research AI safety") == "deep-research"
+    assert _slash_command_name("just a message") is None
+    assert _slash_command_name(None) is None
+
+
+def test_block_reason_allows_when_permissive():
+    harness = _make_harness(FakeStore())
+    assert harness._slash_command_block_reason("/loop 5m /x") is None
+    assert harness._slash_command_block_reason("/clear") is None
+    assert harness._slash_command_block_reason("hello") is None
+
+
+def test_block_reason_master_off_blocks_all():
+    harness = _make_harness(
+        FakeStore(),
+        slash_commands=SlashCommandConfig(enabled=False, commands=frozenset()),
+    )
+    assert (
+        harness._slash_command_block_reason("/clear")
+        == "Slash commands are disabled for this agent."
+    )
+    assert (
+        harness._slash_command_block_reason("/loop x")
+        == "Slash commands are disabled for this agent."
+    )
+
+
+def test_block_reason_per_command_off():
+    cfg = SlashCommandConfig(
+        enabled=True,
+        commands=frozenset(
+            {"clear", "compress", "code", "deep-research", "auto-research", "mission", "goal"}
+        ),  # "loop" omitted
+    )
+    harness = _make_harness(FakeStore(), slash_commands=cfg)
+    assert (
+        harness._slash_command_block_reason("/loop x")
+        == "/loop is disabled for this agent."
+    )
+    assert harness._slash_command_block_reason("/goal x") is None
