@@ -21,6 +21,9 @@ class FakeRedis:
         self.zadds.append((key, mapping))
 
 
+ORG_ID = UUID("00000000-0000-0000-0000-0000000000aa")
+
+
 class FakeSessionStore:
     def __init__(self) -> None:
         self.events: list[tuple[UUID, EventType, dict]] = []
@@ -32,6 +35,13 @@ class FakeSessionStore:
         data: dict,
     ) -> None:
         self.events.append((session_id, event_type, data))
+
+    async def get_session(self, session_id: UUID):
+        # The shared work queue encodes the tenant tuple, so wake_session
+        # reads the row once to recover (org_id, agent_id).
+        return SimpleNamespace(
+            id=session_id, org_id=ORG_ID, agent_id="agent-1",
+        )
 
 
 @pytest.mark.asyncio
@@ -71,5 +81,5 @@ async def test_install_browser_api_dependencies_sets_state_and_callables() -> No
         )
     ]
     assert redis.zadds == [
-        ("surogates:work_queue:agent-1", {session_id: 0}),
+        ("surogates:work_queue", {f"{ORG_ID}|agent-1|{session_id}": 0}),
     ]

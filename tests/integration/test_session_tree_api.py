@@ -45,23 +45,41 @@ async def app(session_factory, redis_client, pg_url, redis_url, tmp_path_factory
     """FastAPI app wired to the test containers."""
     os.environ["SUROGATES_DB_URL"] = pg_url
     os.environ["SUROGATES_REDIS_URL"] = redis_url
-    os.environ["SUROGATES_AGENT_ID"] = _AGENT_ID
 
     from surogates.api.app import create_app
     from surogates.config import Settings
+    from surogates.runtime import (
+        agent_runtime_context_dep,
+        build_agent_runtime_context,
+    )
 
     application = create_app()
     application.state.session_factory = session_factory
     application.state.redis = redis_client
     application.state.session_store = SessionStore(session_factory)
     application.state.settings = Settings()
-    # Guarantee the expected agent_id regardless of env bleed.
-    application.state.settings.agent_id = _AGENT_ID
 
     storage_root = tmp_path_factory.mktemp("tree-api-storage")
     application.state.storage = LocalBackend(base_path=str(storage_root))
     application.state.credential_vault = CredentialVault(
         session_factory, Fernet.generate_key(),
+    )
+
+    # Tree/children routes authorize sessions against the per-request
+    # agent context (shared-runtime); ``agent_id`` no longer lives on
+    # ``Settings``.  Pin it to the value our sessions are created with.
+    def _fixed_runtime_context():
+        return build_agent_runtime_context({
+            "agent_id": _AGENT_ID,
+            "org_id": "00000000-0000-0000-0000-000000000000",
+            "project_id": "test-project",
+            "enabled": True,
+            "version": 1,
+            "storage_key_prefix": "",
+        })
+
+    application.dependency_overrides[agent_runtime_context_dep] = (
+        _fixed_runtime_context
     )
     return application
 

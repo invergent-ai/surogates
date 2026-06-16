@@ -52,8 +52,26 @@ def _make_tenant(asset_root: str) -> TenantContext:
     )
 
 
-def _write_agent(
-    agents_dir: Path,
+class _FakeBundle:
+    """Minimal in-memory stand-in for :class:`AgentFileBundle`.
+
+    Agents now come from the per-tenant Hub bundle's ``agents/<name>/
+    AGENT.md`` subtree rather than a configured on-disk directory.
+    """
+
+    def __init__(self, files: dict[str, str]) -> None:
+        self._files = dict(files)
+
+    async def list(self, prefix: str = "") -> list[str]:
+        return sorted(p for p in self._files if p.startswith(prefix))
+
+    async def read_text(self, path: str) -> str:
+        if path not in self._files:
+            raise LookupError(path)
+        return self._files[path]
+
+
+def _agent_md(
     *,
     name: str,
     description: str = "d",
@@ -64,9 +82,7 @@ def _write_agent(
     policy_profile: str | None = None,
     enabled: bool = True,
     body: str = "Body.",
-) -> None:
-    agent_dir = agents_dir / name
-    agent_dir.mkdir(parents=True, exist_ok=True)
+) -> str:
     lines = ["---", f"name: {name}", f"description: {description}"]
     if tools is not None:
         lines.append("tools: [" + ", ".join(tools) + "]")
@@ -82,15 +98,12 @@ def _write_agent(
         lines.append("enabled: false")
     lines.append("---")
     lines.append(body)
-    (agent_dir / "AGENT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return "\n".join(lines) + "\n"
 
 
-def _loader(tmp_path: Path, agents_dir: Path) -> ResourceLoader:
-    return ResourceLoader(
-        platform_skills_dir=str(tmp_path / "skills_unused"),
-        platform_mcp_dir=str(tmp_path / "mcp_unused"),
-        platform_agents_dir=str(agents_dir),
-    )
+def _bundle_with_agent(**agent_kwargs) -> _FakeBundle:
+    name = agent_kwargs["name"]
+    return _FakeBundle({f"agents/{name}/AGENT.md": _agent_md(**agent_kwargs)})
 
 
 # =========================================================================
@@ -104,16 +117,17 @@ class TestResolveAgentDef:
     async def test_returns_none_when_no_agent_type_set(self, tmp_path: Path):
         session = _make_session()
         tenant = _make_tenant(str(tmp_path / "assets"))
-        loader = _loader(tmp_path, tmp_path / "agents_empty")
+        bundle = _FakeBundle({})
 
-        result = await resolve_agent_def(session, tenant, loader=loader)
+        result = await resolve_agent_def(
+            session, tenant, loader=ResourceLoader(), bundle=bundle,
+        )
         assert result is None
 
     @pytest.mark.asyncio
     async def test_resolves_to_loaded_def(self, tmp_path: Path):
-        agents_dir = tmp_path / "agents"
-        _write_agent(
-            agents_dir, name="code-reviewer",
+        bundle = _bundle_with_agent(
+            name="code-reviewer",
             description="Reviews code",
             tools=["read_file", "search_files"],
             model="claude-sonnet-4-6",
@@ -122,9 +136,10 @@ class TestResolveAgentDef:
 
         session = _make_session(agent_type="code-reviewer")
         tenant = _make_tenant(str(tmp_path / "assets"))
-        loader = _loader(tmp_path, agents_dir)
 
-        result = await resolve_agent_def(session, tenant, loader=loader)
+        result = await resolve_agent_def(
+            session, tenant, loader=ResourceLoader(), bundle=bundle,
+        )
         assert result is not None
         assert result.name == "code-reviewer"
         assert result.description == "Reviews code"
@@ -134,26 +149,26 @@ class TestResolveAgentDef:
 
     @pytest.mark.asyncio
     async def test_unknown_agent_type_returns_none(self, tmp_path: Path):
-        agents_dir = tmp_path / "agents"
-        _write_agent(agents_dir, name="known")
+        bundle = _bundle_with_agent(name="known")
 
         session = _make_session(agent_type="does-not-exist")
         tenant = _make_tenant(str(tmp_path / "assets"))
-        loader = _loader(tmp_path, agents_dir)
 
-        result = await resolve_agent_def(session, tenant, loader=loader)
+        result = await resolve_agent_def(
+            session, tenant, loader=ResourceLoader(), bundle=bundle,
+        )
         assert result is None
 
     @pytest.mark.asyncio
     async def test_disabled_agent_is_not_resolved(self, tmp_path: Path):
-        agents_dir = tmp_path / "agents"
-        _write_agent(agents_dir, name="off", enabled=False)
+        bundle = _bundle_with_agent(name="off", enabled=False)
 
         session = _make_session(agent_type="off")
         tenant = _make_tenant(str(tmp_path / "assets"))
-        loader = _loader(tmp_path, agents_dir)
 
-        result = await resolve_agent_def(session, tenant, loader=loader)
+        result = await resolve_agent_def(
+            session, tenant, loader=ResourceLoader(), bundle=bundle,
+        )
         assert result is None
 
     @pytest.mark.asyncio
@@ -287,9 +302,8 @@ class TestResolveAndApplyEndToEnd:
 
     @pytest.mark.asyncio
     async def test_full_flow_populates_session(self, tmp_path: Path):
-        agents_dir = tmp_path / "agents"
-        _write_agent(
-            agents_dir, name="researcher",
+        bundle = _bundle_with_agent(
+            name="researcher",
             description="Research tasks",
             tools=["read_file", "search_files", "web_search"],
             disallowed_tools=["write_file"],
@@ -300,9 +314,10 @@ class TestResolveAndApplyEndToEnd:
 
         session = _make_session(agent_type="researcher")
         tenant = _make_tenant(str(tmp_path / "assets"))
-        loader = _loader(tmp_path, agents_dir)
 
-        agent = await resolve_agent_def(session, tenant, loader=loader)
+        agent = await resolve_agent_def(
+            session, tenant, loader=ResourceLoader(), bundle=bundle,
+        )
         assert agent is not None
         apply_agent_def_to_session(session, agent)
 
@@ -316,14 +331,14 @@ class TestResolveAndApplyEndToEnd:
     async def test_agent_type_unresolved_leaves_session_config_untouched(
         self, tmp_path: Path,
     ):
-        agents_dir = tmp_path / "agents_empty"
-        agents_dir.mkdir()
+        bundle = _FakeBundle({})
 
         session = _make_session(agent_type="nope")
         tenant = _make_tenant(str(tmp_path / "assets"))
-        loader = _loader(tmp_path, agents_dir)
 
-        agent = await resolve_agent_def(session, tenant, loader=loader)
+        agent = await resolve_agent_def(
+            session, tenant, loader=ResourceLoader(), bundle=bundle,
+        )
         assert agent is None
         # No apply call when resolve returns None; config stays as-is.
         assert session.config == {"agent_type": "nope"}

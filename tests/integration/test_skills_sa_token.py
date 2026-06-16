@@ -12,7 +12,6 @@ create/edit/delete skills.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -27,31 +26,64 @@ from .conftest import create_org, issue_service_account_token
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
+# The skills routes resolve the per-agent Hub bundle from
+# ``?agent_id=<id>`` (shared-runtime); the retired ``platform_skills_dir``
+# no longer exists on ``Settings``.  Requests pin the agent so the fake
+# bundle below is the source of the demo skill.
+AGENT_ID = "default"
 
-def _write_builtin(platform_dir: Path) -> None:
-    """Write a single platform skill at the layout the loader walks."""
-    skill_dir = platform_dir / "demo-skill"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
+
+class _FakeBundle:
+    """In-memory stand-in for an ``AgentFileBundle``.
+
+    Holds ``path -> str`` under the per-agent ``skills/`` layout and
+    exposes the ``list`` / ``read_text`` surface the loader and the
+    skill-file route use.
+    """
+
+    def __init__(self) -> None:
+        self._files: dict[str, str] = {}
+
+    def add(self, path: str, data: str) -> None:
+        self._files[path] = data
+
+    async def list(self, prefix: str = "") -> list[str]:
+        return sorted(p for p in self._files if p.startswith(prefix))
+
+    async def read_text(self, path: str, encoding: str = "utf-8") -> str:
+        if path not in self._files:
+            raise LookupError(path)
+        return self._files[path]
+
+
+class _FakeBundleCache:
+    def __init__(self, bundle: _FakeBundle) -> None:
+        self._bundle = bundle
+
+    async def get(self, agent_id: str) -> _FakeBundle:
+        return self._bundle
+
+
+def _write_builtin(bundle: _FakeBundle) -> None:
+    """Seed a single platform (bundle-backed) skill."""
+    bundle.add(
+        "skills/demo-skill/SKILL.md",
         "---\nname: demo-skill\ndescription: Built-in demo\n---\nBody\n",
-        encoding="utf-8",
     )
 
 
-def _write_builtin_with_root_file(platform_dir: Path) -> None:
+def _write_builtin_with_root_file(bundle: _FakeBundle) -> None:
     """Platform skill with a top-level linked doc next to SKILL.md.
 
     Mirrors the real ``productivity/pptx`` layout where ``editing.md``
     and ``pptxgenjs.md`` sit at the skill root rather than inside one
     of ``references/templates/scripts/assets``.
     """
-    skill_dir = platform_dir / "demo-skill"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
+    bundle.add(
+        "skills/demo-skill/SKILL.md",
         "---\nname: demo-skill\ndescription: Built-in demo\n---\nBody\n",
-        encoding="utf-8",
     )
-    (skill_dir / "editing.md").write_text("root-level doc body", encoding="utf-8")
+    bundle.add("skills/demo-skill/editing.md", "root-level doc body")
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -62,12 +94,12 @@ async def app(
     redis_url,
     tmp_path_factory,
 ):
-    """FastAPI app wired to test containers, with a platform skills dir.
+    """FastAPI app wired to test containers, with a fake Hub bundle.
 
     Mirrors the ``app`` fixture in ``test_agents_api.py`` (same wiring
     for ``session_factory``, ``redis``, storage, and credential vault),
-    then points ``settings.platform_skills_dir`` at a tmp directory we
-    can populate per test.
+    then wires a ``file_bundle_cache`` returning a per-test bundle the
+    requests reach by passing ``?agent_id``.
     """
     os.environ["SUROGATES_DB_URL"] = pg_url
     os.environ["SUROGATES_REDIS_URL"] = redis_url
@@ -80,19 +112,19 @@ async def app(
     application.state.redis = redis_client
     application.state.session_store = SessionStore(session_factory)
 
-    platform_dir = tmp_path_factory.mktemp("skills-sa-platform")
     settings = Settings()
-    settings.platform_skills_dir = str(platform_dir)
     application.state.settings = settings
-    application.state.platform_skills_dir = str(platform_dir)
 
     storage_root = tmp_path_factory.mktemp("skills-sa-storage")
     application.state.storage = LocalBackend(base_path=str(storage_root))
     application.state.credential_vault = CredentialVault(
         session_factory, Fernet.generate_key(),
     )
-    # Stash the platform dir on the app for tests to seed per case.
-    application.state._test_platform_dir = platform_dir
+
+    # Per-test bundle, seeded by each test via ``app.state._test_bundle``.
+    bundle = _FakeBundle()
+    application.state._test_bundle = bundle
+    application.state.file_bundle_cache = _FakeBundleCache(bundle)
     return application
 
 
@@ -107,8 +139,7 @@ async def client(app):
 async def test_sa_token_can_list_skills_at_v1_api(
     app, client: AsyncClient, session_factory,
 ):
-    platform_dir: Path = app.state._test_platform_dir
-    _write_builtin(platform_dir)
+    _write_builtin(app.state._test_bundle)
 
     org_id = await create_org(session_factory)
     sa = await issue_service_account_token(
@@ -116,7 +147,7 @@ async def test_sa_token_can_list_skills_at_v1_api(
     )
 
     response = await client.get(
-        "/v1/api/skills",
+        f"/v1/api/skills?agent_id={AGENT_ID}",
         headers={"Authorization": f"Bearer {sa.token}"},
     )
 
@@ -157,8 +188,7 @@ async def test_read_root_level_skill_file_returns_content(
     even though the listing endpoint advertises root-level files in
     ``linked_files``.
     """
-    platform_dir: Path = app.state._test_platform_dir
-    _write_builtin_with_root_file(platform_dir)
+    _write_builtin_with_root_file(app.state._test_bundle)
 
     org_id = await create_org(session_factory)
     sa = await issue_service_account_token(
@@ -167,7 +197,7 @@ async def test_read_root_level_skill_file_returns_content(
 
     response = await client.get(
         "/v1/api/skills/demo-skill/file",
-        params={"path": "editing.md"},
+        params={"path": "editing.md", "agent_id": AGENT_ID},
         headers={"Authorization": f"Bearer {sa.token}"},
     )
 
@@ -182,8 +212,7 @@ async def test_read_skill_file_rejects_path_traversal(
     app, client: AsyncClient, session_factory,
 ):
     """``..`` in the path must still be refused with 422."""
-    platform_dir: Path = app.state._test_platform_dir
-    _write_builtin_with_root_file(platform_dir)
+    _write_builtin_with_root_file(app.state._test_bundle)
 
     org_id = await create_org(session_factory)
     sa = await issue_service_account_token(
@@ -192,7 +221,7 @@ async def test_read_skill_file_rejects_path_traversal(
 
     response = await client.get(
         "/v1/api/skills/demo-skill/file",
-        params={"path": "../etc/passwd"},
+        params={"path": "../etc/passwd", "agent_id": AGENT_ID},
         headers={"Authorization": f"Bearer {sa.token}"},
     )
 
@@ -204,8 +233,7 @@ async def test_sa_token_rejected_on_v1_skills_without_api_prefix(
     app, client: AsyncClient, session_factory,
 ):
     """Bare SA tokens must NOT reach the JWT-only mount at ``/v1/skills``."""
-    platform_dir: Path = app.state._test_platform_dir
-    _write_builtin(platform_dir)
+    _write_builtin(app.state._test_bundle)
 
     org_id = await create_org(session_factory)
     sa = await issue_service_account_token(

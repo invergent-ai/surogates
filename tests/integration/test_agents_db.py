@@ -27,6 +27,27 @@ from .conftest import create_org, create_user
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
+class _FakeBundle:
+    """Minimal in-memory stand-in for the per-agent Hub bundle.
+
+    Exposes the ``list(prefix)`` / ``read_text(path)`` surface
+    :meth:`ResourceLoader._load_agents_from_bundle` consumes, so tests
+    can supply Layer-1 (platform) sub-agents without an on-disk
+    ``platform_agents_dir`` (which the loader no longer takes).
+    """
+
+    def __init__(self, files: dict[str, str]) -> None:
+        self._files = dict(files)
+
+    async def list(self, prefix: str = "") -> list[str]:
+        return sorted(p for p in self._files if p.startswith(prefix))
+
+    async def read_text(self, path: str) -> str:
+        if path not in self._files:
+            raise LookupError(path)
+        return self._files[path]
+
+
 def _make_tenant(
     asset_root: str, org_id: UUID, user_id: UUID,
 ) -> TenantContext:
@@ -98,11 +119,7 @@ async def test_org_db_layer_loads_rows(
         },
     )
 
-    loader = ResourceLoader(
-        platform_skills_dir=str(tmp_path / "skills"),
-        platform_mcp_dir=str(tmp_path / "mcp"),
-        platform_agents_dir=str(tmp_path / "platform_agents"),
-    )
+    loader = ResourceLoader()
     tenant = _make_tenant(str(tmp_path / "assets"), org_id, user_id)
 
     async with session_factory() as db:
@@ -136,11 +153,7 @@ async def test_disabled_db_agents_are_excluded(
         name="enabled-agent", enabled=True,
     )
 
-    loader = ResourceLoader(
-        platform_skills_dir=str(tmp_path / "skills"),
-        platform_mcp_dir=str(tmp_path / "mcp"),
-        platform_agents_dir=str(tmp_path / "platform_agents"),
-    )
+    loader = ResourceLoader()
     tenant = _make_tenant(str(tmp_path / "assets"), org_id, user_id)
 
     async with session_factory() as db:
@@ -163,13 +176,11 @@ async def test_user_db_overrides_all_other_layers(
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
 
-    # Layer 1: platform filesystem
-    platform_dir = tmp_path / "platform_agents"
-    (platform_dir / "shared").mkdir(parents=True)
-    (platform_dir / "shared" / "AGENT.md").write_text(
-        "---\nname: shared\ndescription: platform version\n---\nPlatform\n",
-        encoding="utf-8",
-    )
+    # Layer 1: platform bundle
+    bundle = _FakeBundle({
+        "agents/shared/AGENT.md":
+            "---\nname: shared\ndescription: platform version\n---\nPlatform\n",
+    })
 
     # Layer 2: user filesystem
     user_fs_dir = (
@@ -196,15 +207,11 @@ async def test_user_db_overrides_all_other_layers(
         system_prompt="UserDB",
     )
 
-    loader = ResourceLoader(
-        platform_skills_dir=str(tmp_path / "skills"),
-        platform_mcp_dir=str(tmp_path / "mcp"),
-        platform_agents_dir=str(platform_dir),
-    )
+    loader = ResourceLoader()
     tenant = _make_tenant(str(tmp_path / "assets"), org_id, user_id)
 
     async with session_factory() as db:
-        agents = await loader.load_agents(tenant, db_session=db)
+        agents = await loader.load_agents(tenant, db_session=db, bundle=bundle)
 
     shared = [a for a in agents if a.name == "shared"]
     assert len(shared) == 1
@@ -242,11 +249,7 @@ async def test_org_db_overrides_user_filesystem(
         system_prompt="Admin",
     )
 
-    loader = ResourceLoader(
-        platform_skills_dir=str(tmp_path / "skills"),
-        platform_mcp_dir=str(tmp_path / "mcp"),
-        platform_agents_dir=str(tmp_path / "platform_agents"),
-    )
+    loader = ResourceLoader()
     tenant = _make_tenant(str(tmp_path / "assets"), org_id, user_id)
 
     async with session_factory() as db:
@@ -264,22 +267,16 @@ async def test_platform_only_when_no_db_or_tenant_files(
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
 
-    platform_dir = tmp_path / "platform_agents"
-    (platform_dir / "only-platform").mkdir(parents=True)
-    (platform_dir / "only-platform" / "AGENT.md").write_text(
-        "---\nname: only-platform\ndescription: platform-only\n---\nP\n",
-        encoding="utf-8",
-    )
+    bundle = _FakeBundle({
+        "agents/only-platform/AGENT.md":
+            "---\nname: only-platform\ndescription: platform-only\n---\nP\n",
+    })
 
-    loader = ResourceLoader(
-        platform_skills_dir=str(tmp_path / "skills"),
-        platform_mcp_dir=str(tmp_path / "mcp"),
-        platform_agents_dir=str(platform_dir),
-    )
+    loader = ResourceLoader()
     tenant = _make_tenant(str(tmp_path / "assets"), org_id, user_id)
 
     async with session_factory() as db:
-        agents = await loader.load_agents(tenant, db_session=db)
+        agents = await loader.load_agents(tenant, db_session=db, bundle=bundle)
 
     only = [a for a in agents if a.name == "only-platform"]
     assert len(only) == 1
@@ -303,11 +300,7 @@ async def test_user_fs_visible_when_no_db_row_exists(
         encoding="utf-8",
     )
 
-    loader = ResourceLoader(
-        platform_skills_dir=str(tmp_path / "skills"),
-        platform_mcp_dir=str(tmp_path / "mcp"),
-        platform_agents_dir=str(tmp_path / "platform_agents"),
-    )
+    loader = ResourceLoader()
     tenant = _make_tenant(str(tmp_path / "assets"), org_id, user_id)
 
     async with session_factory() as db:
@@ -339,11 +332,7 @@ async def test_agents_scoped_to_org(session_factory, tmp_path: Path):
         name="org-a-agent", description="visible to org_a",
     )
 
-    loader = ResourceLoader(
-        platform_skills_dir=str(tmp_path / "skills"),
-        platform_mcp_dir=str(tmp_path / "mcp"),
-        platform_agents_dir=str(tmp_path / "platform_agents"),
-    )
+    loader = ResourceLoader()
     tenant = _make_tenant(str(tmp_path / "assets"), org_a, user_a)
 
     async with session_factory() as db:
@@ -371,11 +360,7 @@ async def test_user_db_rows_scoped_to_user(
         name="b-only", description="belongs to user_b",
     )
 
-    loader = ResourceLoader(
-        platform_skills_dir=str(tmp_path / "skills"),
-        platform_mcp_dir=str(tmp_path / "mcp"),
-        platform_agents_dir=str(tmp_path / "platform_agents"),
-    )
+    loader = ResourceLoader()
     tenant_a = _make_tenant(str(tmp_path / "assets"), org_id, user_a)
 
     async with session_factory() as db:
@@ -412,11 +397,7 @@ async def test_jsonb_config_round_trip(
         },
     )
 
-    loader = ResourceLoader(
-        platform_skills_dir=str(tmp_path / "skills"),
-        platform_mcp_dir=str(tmp_path / "mcp"),
-        platform_agents_dir=str(tmp_path / "platform_agents"),
-    )
+    loader = ResourceLoader()
     tenant = _make_tenant(str(tmp_path / "assets"), org_id, user_id)
 
     async with session_factory() as db:

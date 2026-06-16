@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
 from surogates.harness.budget import IterationBudget
 from surogates.session.events import EventType
 
@@ -83,12 +84,13 @@ class TestSpawnWorker:
 
         redis = _make_redis()
         budget = IterationBudget(max_total=50)
+        org_id = uuid4()
 
         result = await _spawn_worker_handler(
             {"goal": "Fix the auth bug"},
             session_store=store,
             redis=redis,
-            tenant=MagicMock(user_id=uuid4(), org_id=uuid4()),
+            tenant=MagicMock(user_id=uuid4(), org_id=org_id),
             session_id=str(parent_id),
             budget=budget,
         )
@@ -114,9 +116,16 @@ class TestSpawnWorker:
         assert len(spawn_calls) == 1
         assert spawn_calls[0][0][0] == parent_id
 
-        # Enqueued to the parent agent's work queue (not task_queue).
+        # Enqueued to the shared work queue with the encoded tenant tuple.
         redis.zadd.assert_called_once_with(
-            "surogates:work_queue:agent-1", {str(child_id): 0},
+            SHARED_WORK_QUEUE_KEY,
+            {
+                encode_queue_member(
+                    org_id=str(org_id),
+                    agent_id="agent-1",
+                    session_id=str(child_id),
+                ): 0,
+            },
         )
 
     @pytest.mark.asyncio
@@ -211,6 +220,8 @@ class TestSendWorkerMessage:
 
         store = _make_store()
         worker = _make_session(id=worker_id, parent_id=parent_id)
+        org_id = uuid4()
+        worker.org_id = org_id
         store.get_session = AsyncMock(return_value=worker)
 
         redis = _make_redis()
@@ -232,9 +243,16 @@ class TestSendWorkerMessage:
             for c in emit_calls
         )
 
-        # Worker re-enqueued on its agent's queue.
+        # Worker re-enqueued on the shared work queue with its tenant tuple.
         redis.zadd.assert_called_once_with(
-            "surogates:work_queue:agent-test", {str(worker_id): 0},
+            SHARED_WORK_QUEUE_KEY,
+            {
+                encode_queue_member(
+                    org_id=str(org_id),
+                    agent_id="agent-test",
+                    session_id=str(worker_id),
+                ): 0,
+            },
         )
 
     @pytest.mark.asyncio
@@ -390,11 +408,13 @@ class TestWorkerNotification:
         store.emit_event = AsyncMock(return_value=1)
 
         redis = _make_redis()
+        org_id = uuid4()
 
         await notify_parent_on_completion(
             session_store=store,
             worker_session_id=worker_id,
             parent_session_id=parent_id,
+            org_id=str(org_id),
             agent_id="agent-test",
             redis=redis,
         )
@@ -406,9 +426,16 @@ class TestWorkerNotification:
         assert "Auth bug fixed" in emit_call[0][2]["result"]
         assert emit_call[0][2]["worker_id"] == str(worker_id)
 
-        # Parent re-enqueued on its agent's queue.
+        # Parent re-enqueued on the shared work queue with its tenant tuple.
         redis.zadd.assert_called_once_with(
-            "surogates:work_queue:agent-test", {str(parent_id): 0},
+            SHARED_WORK_QUEUE_KEY,
+            {
+                encode_queue_member(
+                    org_id=str(org_id),
+                    agent_id="agent-test",
+                    session_id=str(parent_id),
+                ): 0,
+            },
         )
 
     @pytest.mark.asyncio
@@ -426,6 +453,7 @@ class TestWorkerNotification:
             session_store=store,
             worker_session_id=worker_id,
             parent_session_id=parent_id,
+            org_id=str(uuid4()),
             agent_id="agent-test",
             error="LLM call failed: 429 rate limited",
             redis=redis,
@@ -450,6 +478,7 @@ class TestWorkerNotification:
             session_store=store,
             worker_session_id=uuid4(),
             parent_session_id=uuid4(),
+            org_id=str(uuid4()),
             agent_id="agent-test",
         )
 
@@ -661,19 +690,27 @@ class TestDelegateQueueFix:
         store.get_events = AsyncMock(return_value=[llm_event, complete_event])
 
         redis = _make_redis()
+        org_id = uuid4()
 
         await _delegate_handler(
             {"goal": "Test task"},
             session_store=store,
             redis=redis,
-            tenant=MagicMock(user_id=uuid4(), org_id=uuid4()),
+            tenant=MagicMock(user_id=uuid4(), org_id=org_id),
             session_id=str(parent_id),
             budget=IterationBudget(max_total=50),
         )
 
-        # Must use zadd to the parent agent's work_queue, NOT lpush to task_queue.
+        # Must use zadd to the shared work_queue, NOT lpush to task_queue.
         redis.zadd.assert_called_once_with(
-            "surogates:work_queue:agent-1", {str(child_id): 0},
+            SHARED_WORK_QUEUE_KEY,
+            {
+                encode_queue_member(
+                    org_id=str(org_id),
+                    agent_id="agent-1",
+                    session_id=str(child_id),
+                ): 0,
+            },
         )
         redis.lpush.assert_not_called()
 

@@ -74,7 +74,7 @@ async def app(session_factory, redis_client, pg_url, redis_url):
             "project_id": "test-project",
             "enabled": True,
             "version": 1,
-            "storage_key_prefix": "",
+            "storage_key_prefix": "test-project/default",
         })
 
     application.dependency_overrides[agent_runtime_context_dep] = (

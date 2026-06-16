@@ -125,6 +125,31 @@ async def auth_app(session_factory, redis_client, pg_url, redis_url):
     application.state.credential_vault = CredentialVault(
         session_factory, Fernet.generate_key(),
     )
+
+    # The /v1/auth/login route resolves the target agent via
+    # ``agent_runtime_context_dep`` (for ``agent_runtime.agent_id`` on the
+    # emitted audit event).  The test requests carry ``org_id`` in the body
+    # but no ``agent_id``, so override the dependency with a fixed
+    # shared-runtime context to exercise the login handler itself rather
+    # than agent-resolution wiring.
+    from surogates.runtime import (
+        agent_runtime_context_dep,
+        build_agent_runtime_context,
+    )
+
+    def _fixed_runtime_context():
+        return build_agent_runtime_context({
+            "agent_id": "default",
+            "org_id": "00000000-0000-0000-0000-000000000000",
+            "project_id": "test-project",
+            "enabled": True,
+            "version": 1,
+            "storage_key_prefix": "test-project/default",
+        })
+
+    application.dependency_overrides[agent_runtime_context_dep] = (
+        _fixed_runtime_context
+    )
     return application
 
 

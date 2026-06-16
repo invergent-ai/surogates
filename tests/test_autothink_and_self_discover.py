@@ -53,7 +53,9 @@ def _easy() -> HardTaskClassification:
 
 
 def _hard(category: str) -> HardTaskClassification:
-    return HardTaskClassification(required=True, category=category, reason="llm")
+    return HardTaskClassification(
+        required=True, category=category, reason="llm", needs_scaffold=True,
+    )
 
 
 class TestThinkingGate:

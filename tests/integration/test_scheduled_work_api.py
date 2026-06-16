@@ -27,22 +27,41 @@ _AGENT_ID = "test-agent"
 async def app(session_factory, redis_client, pg_url, redis_url, tmp_path_factory):
     os.environ["SUROGATES_DB_URL"] = pg_url
     os.environ["SUROGATES_REDIS_URL"] = redis_url
-    os.environ["SUROGATES_AGENT_ID"] = _AGENT_ID
 
     from surogates.api.app import create_app
     from surogates.config import Settings
+    from surogates.runtime import (
+        agent_runtime_context_dep,
+        build_agent_runtime_context,
+    )
 
     application = create_app()
     application.state.session_factory = session_factory
     application.state.redis = redis_client
     application.state.session_store = SessionStore(session_factory)
     application.state.settings = Settings()
-    application.state.settings.agent_id = _AGENT_ID
     application.state.storage = LocalBackend(
         base_path=str(tmp_path_factory.mktemp("scheduled-work-api-storage"))
     )
     application.state.credential_vault = CredentialVault(
         session_factory, Fernet.generate_key()
+    )
+
+    # Scheduled-work routes scope schedules to the per-request agent
+    # context (shared-runtime); ``agent_id`` no longer lives on
+    # ``Settings``.  Pin it to the value our schedules are created with.
+    def _fixed_runtime_context():
+        return build_agent_runtime_context({
+            "agent_id": _AGENT_ID,
+            "org_id": "00000000-0000-0000-0000-000000000000",
+            "project_id": "test-project",
+            "enabled": True,
+            "version": 1,
+            "storage_key_prefix": "",
+        })
+
+    application.dependency_overrides[agent_runtime_context_dep] = (
+        _fixed_runtime_context
     )
     return application
 

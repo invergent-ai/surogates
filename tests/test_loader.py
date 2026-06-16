@@ -2,14 +2,32 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from uuid import UUID
 
 import pytest
 
 from surogates.tenant.context import TenantContext
-from surogates.tools.loader import ResourceLoader, SkillDef, MCPServerDef
+from surogates.tools.loader import ResourceLoader, SkillDef
+
+
+class _FakeBundle:
+    """Minimal in-memory stand-in for :class:`AgentFileBundle`.
+
+    Exposes the ``list(prefix)`` / ``read_text(path)`` surface the loader
+    uses for bundle-backed skill layers.
+    """
+
+    def __init__(self, files: dict[str, str]) -> None:
+        self._files = dict(files)
+
+    async def list(self, prefix: str = "") -> list[str]:
+        return sorted(p for p in self._files if p.startswith(prefix))
+
+    async def read_text(self, path: str) -> str:
+        if path not in self._files:
+            raise LookupError(path)
+        return self._files[path]
 
 
 def _make_tenant(asset_root: str) -> TenantContext:
@@ -40,10 +58,7 @@ class TestLoadSkillsFromDir:
             encoding="utf-8",
         )
 
-        loader = ResourceLoader(
-            platform_skills_dir=str(skills_dir),
-            platform_mcp_dir=str(tmp_path / "mcp"),
-        )
+        loader = ResourceLoader()
         # Use the private method directly for unit testing.
         skills = loader._load_skills_from_dir(str(skills_dir), "platform")
         assert len(skills) == 1
@@ -59,10 +74,7 @@ class TestLoadSkillsFromDir:
             encoding="utf-8",
         )
 
-        loader = ResourceLoader(
-            platform_skills_dir=str(skills_dir),
-            platform_mcp_dir=str(tmp_path / "mcp"),
-        )
+        loader = ResourceLoader()
         skills = loader._load_skills_from_dir(str(skills_dir), "platform")
         assert len(skills) == 1
         assert skills[0].name == "auto_name"
@@ -71,18 +83,12 @@ class TestLoadSkillsFromDir:
         empty_dir = tmp_path / "empty_skills"
         empty_dir.mkdir()
 
-        loader = ResourceLoader(
-            platform_skills_dir=str(empty_dir),
-            platform_mcp_dir=str(tmp_path / "mcp"),
-        )
+        loader = ResourceLoader()
         skills = loader._load_skills_from_dir(str(empty_dir), "platform")
         assert skills == []
 
     def test_nonexistent_directory_returns_empty(self, tmp_path: Path):
-        loader = ResourceLoader(
-            platform_skills_dir=str(tmp_path / "nope"),
-            platform_mcp_dir=str(tmp_path / "mcp"),
-        )
+        loader = ResourceLoader()
         skills = loader._load_skills_from_dir(str(tmp_path / "nope"), "platform")
         assert skills == []
 
@@ -105,10 +111,7 @@ class TestLoadSkillsFromDir:
             encoding="utf-8",
         )
 
-        loader = ResourceLoader(
-            platform_skills_dir=str(skills_dir),
-            platform_mcp_dir=str(tmp_path / "mcp"),
-        )
+        loader = ResourceLoader()
 
         skills = loader._load_skills_from_dir(str(skills_dir), "platform")
 
@@ -126,30 +129,29 @@ class TestLoadSkillsFromDir:
 
 
 class TestMergePrecedence:
-    """User > org > platform precedence."""
+    """User bucket files override the (lower-precedence) system bundle.
+
+    The platform-directory layers were retired: Layer 1 is now the system
+    bundle and the user-file layer (Layer 2) is merged on top of it, so a
+    user-file skill shadows a system-bundle skill of the same name.
+    """
 
     @pytest.mark.asyncio
-    async def test_user_overrides_org_and_platform(self, tmp_path: Path):
+    async def test_user_files_override_system_bundle(self, tmp_path: Path):
         org_id = "00000000-0000-0000-0000-000000000001"
         user_id = "00000000-0000-0000-0000-000000000002"
 
-        # Platform skill
-        platform_dir = tmp_path / "platform_skills"
-        platform_dir.mkdir()
-        (platform_dir / "shared_skill.md").write_text(
-            "---\nname: shared\ndescription: platform version\n---\nPlatform body\n",
-            encoding="utf-8",
+        # System bundle skill.
+        system_bundle = _FakeBundle(
+            {
+                "shared/SKILL.md": (
+                    "---\nname: shared\ndescription: platform version\n---\n"
+                    "Platform body\n"
+                ),
+            }
         )
 
-        # Org skill (same name)
-        org_skills_dir = tmp_path / "assets" / org_id / "shared" / "skills"
-        org_skills_dir.mkdir(parents=True)
-        (org_skills_dir / "shared_skill.md").write_text(
-            "---\nname: shared\ndescription: org version\n---\nOrg body\n",
-            encoding="utf-8",
-        )
-
-        # User skill (same name)
+        # User skill (same name) on disk.
         user_skills_dir = tmp_path / "assets" / org_id / "users" / user_id / "skills"
         user_skills_dir.mkdir(parents=True)
         (user_skills_dir / "shared_skill.md").write_text(
@@ -157,119 +159,16 @@ class TestMergePrecedence:
             encoding="utf-8",
         )
 
-        loader = ResourceLoader(
-            platform_skills_dir=str(platform_dir),
-            platform_mcp_dir=str(tmp_path / "mcp"),
-        )
+        loader = ResourceLoader()
 
         tenant = _make_tenant(str(tmp_path / "assets"))
-        skills = await loader.load_skills(tenant)
+        skills = await loader.load_skills(tenant, system_bundle=system_bundle)
 
         # Only one skill named "shared", and it should be the user version.
         shared_skills = [s for s in skills if s.name == "shared"]
         assert len(shared_skills) == 1
         assert shared_skills[0].description == "user version"
         assert shared_skills[0].source == "user"
-
-
-# =========================================================================
-# load_mcp_from_dir
-# =========================================================================
-
-
-class TestLoadMCPFromDir:
-    """MCP server configuration parsing."""
-
-    def test_parses_servers_json(self, tmp_path: Path):
-        mcp_dir = tmp_path / "mcp"
-        mcp_dir.mkdir()
-        servers = {
-            "github": {
-                "transport": "stdio",
-                "command": "github-mcp",
-                "args": ["--token", "abc"],
-            },
-            "slack": {
-                "transport": "http",
-                "url": "http://localhost:8080",
-            },
-        }
-        (mcp_dir / "servers.json").write_text(
-            json.dumps(servers), encoding="utf-8"
-        )
-
-        loader = ResourceLoader(
-            platform_skills_dir=str(tmp_path / "skills"),
-            platform_mcp_dir=str(mcp_dir),
-        )
-        defs = loader._load_mcp_from_dir(str(mcp_dir))
-        assert len(defs) == 2
-
-        names = {d.name for d in defs}
-        assert "github" in names
-        assert "slack" in names
-
-        github = next(d for d in defs if d.name == "github")
-        assert github.transport == "stdio"
-        assert github.command == "github-mcp"
-        assert github.args == ["--token", "abc"]
-
-    def test_parses_individual_files(self, tmp_path: Path):
-        mcp_dir = tmp_path / "mcp"
-        mcp_dir.mkdir()
-        (mcp_dir / "myserver.json").write_text(
-            json.dumps({
-                "name": "my_server",
-                "transport": "stdio",
-                "command": "my-mcp",
-            }),
-            encoding="utf-8",
-        )
-
-        loader = ResourceLoader(
-            platform_skills_dir=str(tmp_path / "skills"),
-            platform_mcp_dir=str(mcp_dir),
-        )
-        defs = loader._load_mcp_from_dir(str(mcp_dir))
-        assert len(defs) == 1
-        assert defs[0].name == "my_server"
-
-    def test_empty_directory_returns_empty(self, tmp_path: Path):
-        mcp_dir = tmp_path / "empty_mcp"
-        mcp_dir.mkdir()
-
-        loader = ResourceLoader(
-            platform_skills_dir=str(tmp_path / "skills"),
-            platform_mcp_dir=str(mcp_dir),
-        )
-        defs = loader._load_mcp_from_dir(str(mcp_dir))
-        assert defs == []
-
-    def test_nonexistent_directory_returns_empty(self, tmp_path: Path):
-        loader = ResourceLoader(
-            platform_skills_dir=str(tmp_path / "skills"),
-            platform_mcp_dir=str(tmp_path / "nope"),
-        )
-        defs = loader._load_mcp_from_dir(str(tmp_path / "nope"))
-        assert defs == []
-
-    def test_mcp_server_def_defaults(self, tmp_path: Path):
-        mcp_dir = tmp_path / "mcp"
-        mcp_dir.mkdir()
-        (mcp_dir / "minimal.json").write_text(
-            json.dumps({"name": "minimal"}),
-            encoding="utf-8",
-        )
-
-        loader = ResourceLoader(
-            platform_skills_dir=str(tmp_path / "skills"),
-            platform_mcp_dir=str(mcp_dir),
-        )
-        defs = loader._load_mcp_from_dir(str(mcp_dir))
-        assert len(defs) == 1
-        assert defs[0].transport == "stdio"
-        assert defs[0].timeout == 120
-        assert defs[0].env == {}
 
 
 # =========================================================================
@@ -280,19 +179,19 @@ class TestLoadMCPFromDir:
 class TestLoadSkillsWithUserIdNone:
     """SA-token callers reach the loader with ``user_id=None``.
 
-    Platform + org-DB layers must still resolve; user-files and user-DB
+    The system-bundle layer must still resolve; user-files and user-DB
     layers must be skipped cleanly without constructing a path containing
     the literal string ``"None"``.
     """
 
     @pytest.mark.asyncio
     async def test_user_id_none_returns_platform_only(self, tmp_path: Path):
-        platform_dir = tmp_path / "platform-skills"
-        skill_dir = platform_dir / "demo"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text(
-            "---\nname: demo\ndescription: Demo skill\n---\nBody\n",
-            encoding="utf-8",
+        system_bundle = _FakeBundle(
+            {
+                "demo/SKILL.md": (
+                    "---\nname: demo\ndescription: Demo skill\n---\nBody\n"
+                ),
+            }
         )
 
         # Booby-trap: a regression that re-introduces ``str(None)`` as a
@@ -320,11 +219,10 @@ class TestLoadSkillsWithUserIdNone:
             asset_root=str(asset_root),
         )
 
-        loader = ResourceLoader(
-            platform_skills_dir=str(platform_dir),
-            platform_mcp_dir=str(tmp_path / "mcp"),
+        loader = ResourceLoader()
+        skills = await loader.load_skills(
+            sa_tenant, db_session=None, system_bundle=system_bundle,
         )
-        skills = await loader.load_skills(sa_tenant, db_session=None)
 
         names = {s.name for s in skills}
         assert "demo" in names

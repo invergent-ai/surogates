@@ -20,6 +20,8 @@ from .conftest import create_org, create_user, issue_service_account_token
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
+TEST_AGENT_ID = "default"
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -53,6 +55,30 @@ async def app(session_factory, redis_client, pg_url, redis_url):
     # Vault for /v1/admin/credentials and MCP credential refs.
     application.state.credential_vault = CredentialVault(
         session_factory, Fernet.generate_key()
+    )
+
+    # Routes resolve the target agent via ``agent_runtime_context_dep``, which
+    # reaches for ``runtime_config_cache`` + an ``agent_id`` the bare-token test
+    # requests don't supply.  Override the dependency with a fixed shared-runtime
+    # context so the tests exercise the route handlers rather than agent
+    # resolution wiring.
+    from surogates.runtime import (
+        agent_runtime_context_dep,
+        build_agent_runtime_context,
+    )
+
+    def _fixed_runtime_context():
+        return build_agent_runtime_context({
+            "agent_id": TEST_AGENT_ID,
+            "org_id": "00000000-0000-0000-0000-000000000000",
+            "project_id": "test-project",
+            "enabled": True,
+            "version": 1,
+            "storage_key_prefix": "",
+        })
+
+    application.dependency_overrides[agent_runtime_context_dep] = (
+        _fixed_runtime_context
     )
 
     return application
@@ -91,7 +117,7 @@ async def _create_scheduled_run_session(app, session_factory, org_id, user_id):
     return await store.create_session(
         user_id=user_id,
         org_id=org_id,
-        agent_id=app.state.settings.agent_id,
+        agent_id=TEST_AGENT_ID,
         channel="scheduled",
         model=app.state.settings.llm.model,
         config={
@@ -976,93 +1002,75 @@ async def test_pause_resume(client: AsyncClient, session_factory):
 # ---------------------------------------------------------------------------
 
 
-def _with_agent_id(app, agent_id: str):
-    """Context manager that pins ``app.state.settings.agent_id`` for a test.
-
-    The shared ``app`` fixture defaults to an empty agent_id, but retry
-    (and resume) re-enqueue via :func:`agent_queue_key` which rejects
-    the empty string.  Tests that exercise the full retry path set a
-    non-empty value for the duration of the test.
-    """
-    import contextlib
-
-    @contextlib.contextmanager
-    def _ctx():
-        original = app.state.settings.agent_id
-        app.state.settings.agent_id = agent_id
-        try:
-            yield
-        finally:
-            app.state.settings.agent_id = original
-
-    return _ctx()
-
-
 async def test_retry_failed_session(client: AsyncClient, session_factory, app):
     """POST /retry on a failed session re-enqueues it and flips to active."""
-    with _with_agent_id(app, "test-agent-retry-1"):
-        _, _, token, _ = await _create_test_tenant(session_factory)
+    _, _, token, _ = await _create_test_tenant(session_factory)
 
-        create_resp = await client.post(
-            "/v1/sessions",
-            json={"model": "gpt-4o"},
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        session_id = create_resp.json()["id"]
+    create_resp = await client.post(
+        "/v1/sessions",
+        json={"model": "gpt-4o"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    session_id = create_resp.json()["id"]
 
-        # Force session into the 'failed' state.
-        store: SessionStore = app.state.session_store
-        await store.update_session_status(UUID(session_id), "failed")
+    # Force session into the 'failed' state.
+    store: SessionStore = app.state.session_store
+    await store.update_session_status(UUID(session_id), "failed")
 
-        # Drain any pre-existing queue entries so we can assert the retry enqueue.
-        from surogates.config import agent_queue_key
-        queue_key = agent_queue_key("test-agent-retry-1")
-        await app.state.redis.delete(queue_key)
+    # Drain any pre-existing entries from the shared work queue so we can
+    # assert the retry enqueue.  Every enqueue lands on a single shared
+    # key; members encode the (org_id, agent_id, session_id) tuple.
+    from surogates.config import SHARED_WORK_QUEUE_KEY, parse_queue_member
+    await app.state.redis.delete(SHARED_WORK_QUEUE_KEY)
 
-        retry_resp = await client.post(
-            f"/v1/sessions/{session_id}/retry",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        assert retry_resp.status_code == 200
-        assert retry_resp.json()["status"] == "active"
+    retry_resp = await client.post(
+        f"/v1/sessions/{session_id}/retry",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert retry_resp.status_code == 200
+    assert retry_resp.json()["status"] == "active"
 
-        # A SESSION_RESUME event with source='user_retry' was emitted.
-        events = await store.get_events(UUID(session_id))
-        resume_events = [e for e in events if e.type == "session.resume"]
-        assert resume_events, "expected a session.resume event"
-        assert resume_events[-1].data.get("source") == "user_retry"
+    # A SESSION_RESUME event with source='user_retry' was emitted.
+    events = await store.get_events(UUID(session_id))
+    resume_events = [e for e in events if e.type == "session.resume"]
+    assert resume_events, "expected a session.resume event"
+    assert resume_events[-1].data.get("source") == "user_retry"
 
-        # Redis queue contains the session id.
-        queued = await app.state.redis.zrange(queue_key, 0, -1)
-        assert any(
-            (member.decode() if isinstance(member, bytes) else member) == session_id
-            for member in queued
-        ), "expected session to be re-enqueued"
+    # Shared work queue contains a member for the session id.
+    queued = await app.state.redis.zrange(SHARED_WORK_QUEUE_KEY, 0, -1)
+    queued_session_ids = [
+        parse_queue_member(
+            member.decode() if isinstance(member, bytes) else member
+        )[2]
+        for member in queued
+    ]
+    assert session_id in queued_session_ids, (
+        "expected session to be re-enqueued"
+    )
 
 
 async def test_retry_paused_session(client: AsyncClient, session_factory, app):
     """Retry also works for paused sessions (same semantics as /resume)."""
-    with _with_agent_id(app, "test-agent-retry-2"):
-        _, _, token, _ = await _create_test_tenant(session_factory)
+    _, _, token, _ = await _create_test_tenant(session_factory)
 
-        create_resp = await client.post(
-            "/v1/sessions",
-            json={"model": "gpt-4o"},
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        session_id = create_resp.json()["id"]
+    create_resp = await client.post(
+        "/v1/sessions",
+        json={"model": "gpt-4o"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    session_id = create_resp.json()["id"]
 
-        await client.post(
-            f"/v1/sessions/{session_id}/pause",
-            headers={"Authorization": f"Bearer {token}"},
-        )
+    await client.post(
+        f"/v1/sessions/{session_id}/pause",
+        headers={"Authorization": f"Bearer {token}"},
+    )
 
-        retry_resp = await client.post(
-            f"/v1/sessions/{session_id}/retry",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        assert retry_resp.status_code == 200
-        assert retry_resp.json()["status"] == "active"
+    retry_resp = await client.post(
+        f"/v1/sessions/{session_id}/retry",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert retry_resp.status_code == 200
+    assert retry_resp.json()["status"] == "active"
 
 
 async def test_retry_active_session_409(client: AsyncClient, session_factory):

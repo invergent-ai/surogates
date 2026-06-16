@@ -132,7 +132,7 @@ def test_shared_runtime_resolves_context_end_to_end():
         "mcp_server_ids": ["m1", "m2"],
         "api_web_url": "https://web.example.com",
     }
-    assert calls == ["/api/agents/a-shared/runtime-config"]
+    assert calls == ["/api/agents/agents/a-shared/runtime-config"]
 
 
 def test_shared_runtime_cache_dedupes_repeated_calls_within_ttl():
@@ -180,7 +180,7 @@ def test_shared_runtime_returns_404_when_platform_returns_404():
         resp = client.get("/echo?agent_id=a-shared")
 
     assert resp.status_code == 404
-    assert "shared runtime" in resp.json()["detail"].lower()
+    assert "not configured" in resp.json()["detail"].lower()
 
 
 def test_shared_runtime_returns_400_when_no_agent_id():

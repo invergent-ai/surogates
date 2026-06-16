@@ -230,6 +230,7 @@ def _warn_if_base_model_missing_from_metadata(model_id: str) -> None:
     logger.warning(
         "Base LLM model %r is not present in surogates.harness.model_metadata "
         "MODEL_CATALOG or aliases; add model metadata so context sizing and capability checks remain accurate.",
+        normalized,
     )
 
 

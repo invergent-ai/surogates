@@ -45,25 +45,30 @@ _DEFAULT_ORIGIN = "https://customer.com"
 # ---------------------------------------------------------------------------
 
 
+_AGENT_ID = "website-test-agent"
+
+
 @pytest_asyncio.fixture(loop_scope="session")
 async def app(session_factory, redis_client, pg_url, redis_url):
     """FastAPI app wired to the test containers.
 
-    ``enqueue_session`` rejects an empty ``agent_id``, so we override
-    ``settings.agent_id`` on the test app.  Setting the env var
-    directly would bleed into other tests that expect the empty default
-    (some existing prompts_api tests rely on ``session.agent_id == ''``
-    matching the server's agent scope).
-
-    Each test creates its own org via ``create_org`` and pokes the
-    resulting UUID into ``settings.org_id`` via ``configure_website``;
-    the bootstrap route reads org_id from settings.
+    The website routes resolve the deployment agent via
+    ``agent_runtime_context_dep`` (shared-runtime); per-tenant fields no
+    longer live on ``Settings``.  We override the dependency with a
+    fixed context whose ``org_id`` is read from a mutable holder on
+    ``app.state`` so each test can attach the org it created (and one
+    test can wipe it to exercise the 503-no-org path) via
+    ``configure_website``.
     """
     os.environ["SUROGATES_DB_URL"] = pg_url
     os.environ["SUROGATES_REDIS_URL"] = redis_url
 
     from surogates.api.app import create_app
     from surogates.config import Settings
+    from surogates.runtime import (
+        agent_runtime_context_dep,
+        build_agent_runtime_context,
+    )
     from surogates.storage.backend import create_backend
 
     application = create_app()
@@ -73,10 +78,6 @@ async def app(session_factory, redis_client, pg_url, redis_url):
         session_factory, redis=redis_client,
     )
     settings = Settings()
-    # In-place attribute override works because pydantic-settings models
-    # are mutable unless explicitly frozen; matches how other places
-    # inject test-scoped config without polluting process env.
-    settings.agent_id = "website-test-agent"
     # ``agent_session_bucket`` requires a non-empty bucket name; the
     # default Settings value is "" because production deployments
     # configure storage at chart install time.  Tests run against the
@@ -86,6 +87,23 @@ async def app(session_factory, redis_client, pg_url, redis_url):
     application.state.storage = create_backend(settings)
     application.state.credential_vault = CredentialVault(
         session_factory, Fernet.generate_key(),
+    )
+
+    # Mutable per-test org id, set by ``configure_website``.
+    application.state.test_org_id = ""
+
+    def _fixed_runtime_context():
+        return build_agent_runtime_context({
+            "agent_id": _AGENT_ID,
+            "org_id": application.state.test_org_id,
+            "project_id": "test-project",
+            "enabled": True,
+            "version": 1,
+            "storage_key_prefix": "",
+        })
+
+    application.dependency_overrides[agent_runtime_context_dep] = (
+        _fixed_runtime_context
     )
     return application
 
@@ -121,7 +139,7 @@ def configure_website(
     app.state.settings.website.enabled = enabled
     app.state.settings.website.publishable_key = key
     app.state.settings.website.allowed_origins = allowed_origins
-    app.state.settings.org_id = str(org_id)
+    app.state.test_org_id = str(org_id)
     return key
 
 
@@ -199,7 +217,7 @@ async def test_bootstrap_503_when_org_id_missing(
     org_id = await create_org(session_factory)
     key = configure_website(app, org_id=org_id)
     # Wipe org_id after the helper sets it.
-    app.state.settings.org_id = ""
+    app.state.test_org_id = ""
     resp = await client.post(
         "/v1/website/sessions",
         headers={"Authorization": f"Bearer {key}", "Origin": _DEFAULT_ORIGIN},

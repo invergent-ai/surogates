@@ -160,6 +160,26 @@ def test_send_message_request_accepts_max_attachments():
 # ---------------------------------------------------------------------------
 
 
+def _agent_runtime(agent_id: str = "agent-1"):
+    """Build the per-request runtime context the route now depends on.
+
+    ``send_message`` reads ``agent_runtime.agent_id`` (resolved per request
+    via ``agent_runtime_context_dep``) instead of process-wide settings.
+    """
+    from surogates.runtime import build_agent_runtime_context
+
+    return build_agent_runtime_context(
+        {
+            "agent_id": agent_id,
+            "org_id": "00000000-0000-0000-0000-000000000000",
+            "project_id": "test-project",
+            "enabled": True,
+            "version": 1,
+            "storage_key_prefix": "",
+        }
+    )
+
+
 def _stub_session(*, status: str = "active"):
     """Build a Session-like object the route helpers will accept."""
     return SimpleNamespace(
@@ -326,6 +346,7 @@ def patched_send_message(monkeypatch):
             body=body,
             request=request,  # type: ignore[arg-type]
             tenant=SimpleNamespace(),  # type: ignore[arg-type]
+            agent_runtime=_agent_runtime(),
         )
         return result, store, active_detector
 

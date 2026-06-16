@@ -56,11 +56,11 @@ class TestHasStageableAssets:
 
 
 # =========================================================================
-# stage_from_tenant_bucket
+# stage_from_object_store
 # =========================================================================
 
 
-class TestStageFromTenantBucket:
+class TestStageFromObjectStore:
     async def test_copies_keys_preserving_relative_paths(
         self, stager: SkillStager, backend: LocalBackend,
     ):
@@ -74,10 +74,10 @@ class TestStageFromTenantBucket:
         session_id = uuid4()
         await backend.create_bucket(STORAGE_BUCKET)
 
-        staged_at = await stager.stage_from_tenant_bucket(
+        staged_at = await stager.stage_from_object_store(
             session_id=session_id,
             skill_name="pptx_builder",
-            tenant_bucket_name=tenant_bucket,
+            source_bucket=tenant_bucket,
             source_prefix=src_prefix,
         )
         assert staged_at.endswith("/.skills/pptx_builder/")
@@ -100,20 +100,20 @@ class TestStageFromTenantBucket:
         session_id = uuid4()
         await backend.create_bucket(STORAGE_BUCKET)
 
-        first = await stager.stage_from_tenant_bucket(
+        first = await stager.stage_from_object_store(
             session_id=session_id,
             skill_name="stable",
-            tenant_bucket_name=tenant_bucket,
+            source_bucket=tenant_bucket,
             source_prefix=src_prefix,
         )
 
         # Source changes after staging — marker short-circuits the copy.
         await backend.write_text(tenant_bucket, f"{src_prefix}/scripts/x.py", "v2")
 
-        second = await stager.stage_from_tenant_bucket(
+        second = await stager.stage_from_object_store(
             session_id=session_id,
             skill_name="stable",
-            tenant_bucket_name=tenant_bucket,
+            source_bucket=tenant_bucket,
             source_prefix=src_prefix,
         )
         assert first == second
@@ -248,6 +248,61 @@ class TestStageSkillForSessionHelper:
 # =========================================================================
 
 
+def _runtime_payload(agent_id: str) -> dict:
+    """Minimal runtime-config payload for ``build_agent_runtime_context``."""
+    return {
+        "agent_id": agent_id,
+        "org_id": "00000000-0000-0000-0000-000000000000",
+        "project_id": "test-project",
+        "enabled": True,
+        "version": 1,
+        "storage_key_prefix": "",
+    }
+
+
+class _FakeRuntimeCache:
+    """Stand-in for ``app.state.runtime_config_cache`` used by the resolver."""
+
+    def __init__(self, agent_id: str) -> None:
+        self._agent_id = agent_id
+
+    async def get(self, agent_id: str) -> dict:
+        if agent_id != self._agent_id:
+            raise LookupError(agent_id)
+        return _runtime_payload(agent_id)
+
+
+def _staging_request(session_store, agent_id: str):
+    """Build a fake ``Request`` that drives ``agent_runtime_context_dep``.
+
+    The resolver reads ``?agent_id=`` and ``app.state.runtime_config_cache``;
+    this wires both so the staging gate resolves the agent without DB access.
+    """
+
+    class _State:
+        pass
+
+    state = _State()
+    state.session_store = session_store
+    state.runtime_config_cache = _FakeRuntimeCache(agent_id)
+    state.slug_resolver_cache = None
+
+    class _App:
+        pass
+
+    app = _App()
+    app.state = state
+
+    class _Request:
+        pass
+
+    req = _Request()
+    req.app = app
+    req.query_params = {"agent_id": agent_id}
+    req.headers = {}
+    return req
+
+
 class TestAuthorizeSessionForStaging:
     """Verifies ``_authorize_session_for_staging`` denies cross-tenant access.
 
@@ -278,18 +333,7 @@ class TestAuthorizeSessionForStaging:
             async def get_session(self, sid):
                 return _FakeSession()
 
-        class _FakeSettings:
-            agent_id = "agent-under-test"
-
-        class _State:
-            session_store = _FakeStore()
-            settings = _FakeSettings()
-
-        class _App:
-            state = _State()
-
-        class _Request:
-            app = _App()
+        request = _staging_request(_FakeStore(), "agent-under-test")
 
         caller = TenantContext(
             org_id=caller_org,
@@ -302,7 +346,7 @@ class TestAuthorizeSessionForStaging:
         # Session exists but belongs to another org → 404 (no existence leak).
         with pytest.raises(HTTPException) as exc:
             await _authorize_session_for_staging(
-                _Request(), caller, session_id,
+                request, caller, session_id,
             )
         assert exc.value.status_code == 404
 
@@ -319,18 +363,7 @@ class TestAuthorizeSessionForStaging:
             async def get_session(self, sid):
                 raise SessionNotFoundError(f"missing: {sid}")
 
-        class _FakeSettings:
-            agent_id = "a"
-
-        class _State:
-            session_store = _RaisingStore()
-            settings = _FakeSettings()
-
-        class _App:
-            state = _State()
-
-        class _Request:
-            app = _App()
+        request = _staging_request(_RaisingStore(), "a")
 
         caller = TenantContext(
             org_id=uuid4(), user_id=uuid4(),
@@ -339,7 +372,7 @@ class TestAuthorizeSessionForStaging:
             asset_root="/tmp/doesnt-matter",
         )
         with pytest.raises(HTTPException) as exc:
-            await _authorize_session_for_staging(_Request(), caller, uuid4())
+            await _authorize_session_for_staging(request, caller, uuid4())
         assert exc.value.status_code == 404
 
     async def test_allows_session_owned_by_caller(self):
@@ -360,18 +393,7 @@ class TestAuthorizeSessionForStaging:
             async def get_session(self, sid):
                 return _FakeSession()
 
-        class _FakeSettings:
-            agent_id = "agent-under-test"
-
-        class _State:
-            session_store = _FakeStore()
-            settings = _FakeSettings()
-
-        class _App:
-            state = _State()
-
-        class _Request:
-            app = _App()
+        request = _staging_request(_FakeStore(), "agent-under-test")
 
         caller = TenantContext(
             org_id=caller_org_id, user_id=uuid4(),
@@ -381,7 +403,7 @@ class TestAuthorizeSessionForStaging:
         )
 
         # Should not raise.
-        await _authorize_session_for_staging(_Request(), caller, session_id)
+        await _authorize_session_for_staging(request, caller, session_id)
 
 
 # =========================================================================
@@ -401,7 +423,7 @@ class TestConcurrentStaging:
     async def test_concurrent_tenant_bucket_stage_copies_once(
         self, tmp_path: Path,
     ):
-        """Same as above, but for ``stage_from_tenant_bucket``."""
+        """Same as above, but for ``stage_from_object_store``."""
         backend = LocalBackend(base_path=str(tmp_path / "storage"))
         stager = SkillStager(backend=backend, storage_bucket=STORAGE_BUCKET)
 
@@ -426,10 +448,10 @@ class TestConcurrentStaging:
 
         import asyncio as _asyncio
         results = await _asyncio.gather(
-            stager.stage_from_tenant_bucket(
+            stager.stage_from_object_store(
                 session_id, "s", tenant, "shared/skills/s",
             ),
-            stager.stage_from_tenant_bucket(
+            stager.stage_from_object_store(
                 session_id, "s", tenant, "shared/skills/s",
             ),
         )
@@ -492,7 +514,7 @@ class TestRedisLockIsUsedWhenProvided:
         session_id = uuid4()
         await backend.create_bucket(STORAGE_BUCKET)
 
-        await stager.stage_from_tenant_bucket(
+        await stager.stage_from_object_store(
             session_id, "k", tenant, "shared/skills/k",
         )
 

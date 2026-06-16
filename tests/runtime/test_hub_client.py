@@ -10,6 +10,7 @@ Tests use a fake ObjectsApi so they don't need a real Hub.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -31,7 +32,8 @@ class _FakeObjectsApi:
             raise FileNotFoundError(path)
         return bytearray(self.objects[path])
 
-    def list_objects(self, user, repository, ref, prefix=None):
+    def list_objects(self, user, repository, ref, prefix=None,
+                     after=None, amount=None):
         self.calls.append(("list", user, repository, ref, prefix))
         keys = [
             k for k in self.objects
@@ -39,6 +41,9 @@ class _FakeObjectsApi:
         ]
         result = MagicMock()
         result.results = [_FakeStat(k) for k in sorted(keys)]
+        # Single-page response — the wrapper paginates while
+        # ``pagination.has_more`` is truthy, so report no more pages.
+        result.pagination = SimpleNamespace(has_more=False, next_offset="")
         return result
 
 
