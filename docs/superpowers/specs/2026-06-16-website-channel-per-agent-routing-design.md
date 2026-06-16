@@ -38,10 +38,17 @@ Embed:  <script …website-widget@2…></script>
 
 1. Pair:  GET  {platform}/api/widget/p/<key>   → { agent_id, api_web_url }   (already live)
 2. Boot:  POST {api_web_url}/v1/website/sessions   (Authorization: Bearer <key> + Origin)
-            → route resolves channel_routing(website:<key>) → (agent_id, org_id, api_web_url)
-            → ✓ active row exists   ✓ Origin == api_web_url   → HttpOnly cookie + CSRF
+            → route resolves channel_routing(website:<key>) → (agent_id, org_id)
+            → ✓ active row exists   ✓ Origin in global allow-list   → HttpOnly cookie + CSRF
 3. Chat:  POST …/sessions/{id}/messages (+ X-CSRF-Token),  GET …/events (SSE)
 ```
+
+> **`api_web_url` (decided 2026-06-16):** it is the **agent's website-API base
+> URL** — where the widget bootstraps (the surogates host serving
+> `/v1/website/*`), *not* the customer's embedding origin. Origin validation
+> stays **global** (`settings.website.allowed_origins`); per-agent origin
+> scoping is deferred. So the routing row carries `(org_id, agent_id,
+> api_web_url=<agent API base>)` and **no** per-agent origin.
 
 **Security model:** the publishable key is both the identifier and the auth at
 bootstrap — resolved+validated via `channel_routing` (key→agent), exactly like

@@ -320,7 +320,15 @@ async def _resolve_website_routing(request: Request) -> dict:
             headers={"WWW-Authenticate": "Bearer"},
         )
     cache = getattr(request.app.state, "channel_routing_cache", None)
-    routing = await cache.get(f"website:{token}") if cache is not None else None
+    if cache is None:
+        # A wired deployment always has this; None means a startup/config
+        # bug. Surface it as 503 (not a misleading 404) so it's debuggable.
+        logger.error("channel_routing_cache is not wired on app.state")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Website channel routing is temporarily unavailable.",
+        )
+    routing = await cache.get(f"website:{token}")
     if not routing or not routing.get("agent_id") or not routing.get("org_id"):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -383,7 +391,7 @@ async def bootstrap_website_session(
     agent_id = routing["agent_id"]
     try:
         org_uuid = UUID(routing["org_id"])
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Tenant org_id is not a valid UUID.",

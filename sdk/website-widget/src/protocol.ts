@@ -68,10 +68,19 @@ export async function resolvePairing(
       status: response.status,
     });
   }
-  const body = (await response.json()) as {
-    agent_id: string;
-    api_web_url: string;
-  };
+  let body: { agent_id?: string; api_web_url?: string };
+  try {
+    body = (await response.json()) as { agent_id?: string; api_web_url?: string };
+  } catch (cause) {
+    throw new SurogatesProtocolError('Pairing returned a non-JSON body', {
+      cause,
+    });
+  }
+  if (typeof body?.agent_id !== 'string' || typeof body?.api_web_url !== 'string') {
+    throw new SurogatesProtocolError(
+      'Pairing response missing agent_id / api_web_url',
+    );
+  }
   return { agentId: body.agent_id, apiWebUrl: body.api_web_url };
 }
 
