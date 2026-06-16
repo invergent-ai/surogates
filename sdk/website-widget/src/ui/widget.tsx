@@ -259,7 +259,12 @@ export function Widget({ agent, config, registerOpenControl, onOpenChange }: Wid
           {ICON_SEND}
         </button>
       </div>
-      <div class="surg-powered">Powered by Surogate</div>
+      <div class="surg-powered">
+        Powered by{' '}
+        <a href="https://surogate.ai/" target="_blank" rel="noopener noreferrer">
+          Surogate
+        </a>
+      </div>
     </div>
   );
 }
