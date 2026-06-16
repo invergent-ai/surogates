@@ -139,6 +139,14 @@ interface ChatThreadProps {
   // When true, the composer's slash menu includes the ``/code`` commands.
   // Forwarded as-is to ChatComposer.
   codeAgentsEnabled?: boolean;
+  // Slash-command capability group. Forwarded as-is to ChatComposer:
+  // ``slashCommandsEnabled`` is the master switch; the rest gate the
+  // always-on lightweight builtins (default shown).
+  slashCommandsEnabled?: boolean;
+  loopsEnabled?: boolean;
+  missionsEnabled?: boolean;
+  goalsEnabled?: boolean;
+  compressEnabled?: boolean;
 
   // Curated research sources from the active deep-research workflow.
   // When non-empty an expandable "Sources" strip renders above the
@@ -2119,6 +2127,11 @@ export function ChatThread({
   deepResearchEnabled = false,
   researchEnabled = false,
   codeAgentsEnabled = false,
+  slashCommandsEnabled = true,
+  loopsEnabled = true,
+  missionsEnabled = true,
+  goalsEnabled = true,
+  compressEnabled = true,
   researchSources = [],
   hideTurnSummary = false,
   agentId,
@@ -2224,6 +2237,11 @@ export function ChatThread({
         deepResearchEnabled={deepResearchEnabled}
         researchEnabled={researchEnabled}
         codeAgentsEnabled={codeAgentsEnabled}
+        slashCommandsEnabled={slashCommandsEnabled}
+        loopsEnabled={loopsEnabled}
+        missionsEnabled={missionsEnabled}
+        goalsEnabled={goalsEnabled}
+        compressEnabled={compressEnabled}
       />
       {onOpenIntegrations && (
         <IntegrationsBandSlot

@@ -51,6 +51,18 @@ export interface AgentChatProps {
    */
   codeAgentsEnabled?: boolean;
   /**
+   * Slash-command capability group (per-agent). `slashCommandsEnabled` is
+   * the master switch — when false the composer hides every builtin slash
+   * command (including `/clear`). The other four gate the always-on
+   * lightweight builtins and default to shown when omitted, so a host that
+   * hasn't wired them keeps the current menu.
+   */
+  slashCommandsEnabled?: boolean;
+  loopsEnabled?: boolean;
+  missionsEnabled?: boolean;
+  goalsEnabled?: boolean;
+  compressEnabled?: boolean;
+  /**
    * Called when the user clicks the integrations band under the composer.
    * Hosts navigate to their Integrations route. When omitted, the band is
    * not rendered.
@@ -83,6 +95,11 @@ export function AgentChat({
   deepResearchEnabled = false,
   researchEnabled = false,
   codeAgentsEnabled = false,
+  slashCommandsEnabled = true,
+  loopsEnabled = true,
+  missionsEnabled = true,
+  goalsEnabled = true,
+  compressEnabled = true,
   onOpenIntegrations,
   onOpenBilling,
 }: AgentChatProps) {
@@ -281,6 +298,11 @@ export function AgentChat({
               deepResearchEnabled={deepResearchEnabled}
               researchEnabled={researchEnabled}
               codeAgentsEnabled={codeAgentsEnabled}
+              slashCommandsEnabled={slashCommandsEnabled}
+              loopsEnabled={loopsEnabled}
+              missionsEnabled={missionsEnabled}
+              goalsEnabled={goalsEnabled}
+              compressEnabled={compressEnabled}
               researchSources={runtime.researchSources}
               hideTurnSummary={hideTurnSummary}
               agentId={agentId}

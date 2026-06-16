@@ -156,6 +156,18 @@ interface ChatComposerProps {
   // in its builtin menu. Gated like ``deepResearchEnabled`` because the
   // host owns the capability.
   codeAgentsEnabled?: boolean;
+  // ── Slash-command capability group (per-agent) ───────────────────
+  // Master switch.  When false the composer hides EVERY builtin slash
+  // command (including ``/clear``) — the harness refuses them all, so
+  // surfacing them would only mislead.  The next four gate the
+  // always-on lightweight builtins; unlike the opt-in flags above they
+  // default to shown (``!== false``) so a host that hasn't wired them
+  // yet keeps the current menu.
+  slashCommandsEnabled?: boolean;
+  loopsEnabled?: boolean;
+  missionsEnabled?: boolean;
+  goalsEnabled?: boolean;
+  compressEnabled?: boolean;
 }
 
 // ── Outer wrapper (provides controlled text state) ───────────────────
@@ -318,6 +330,11 @@ function ChatComposerInner({
   deepResearchEnabled = false,
   researchEnabled = false,
   codeAgentsEnabled = false,
+  slashCommandsEnabled = true,
+  loopsEnabled = true,
+  missionsEnabled = true,
+  goalsEnabled = true,
+  compressEnabled = true,
   viewMode = "simple",
   onViewModeChange,
 }: ChatComposerProps) {
@@ -385,23 +402,47 @@ function ChatComposerInner({
 
   const builtinCommands = useMemo<SlashCommand[]>(
     () => {
+      // Master switch off ⇒ the harness refuses every slash command, so
+      // the menu shows none (including /clear).
+      if (!slashCommandsEnabled) {
+        return [];
+      }
+      // /clear has no per-command flag — it follows the master switch.
       const base: SlashCommand[] = [
         { value: "/clear", label: "/clear", description: "Clear conversation" },
-        { value: "/compress", label: "/compress", description: "Compress context" },
-        { value: "/goal", label: "/goal", description: "Define an outcome goal" },
-        { value: "/goal status", label: "/goal status", description: "Show outcome goal status" },
-        { value: "/goal pause", label: "/goal pause", description: "Pause automatic goal continuation" },
-        { value: "/goal resume", label: "/goal resume", description: "Resume a paused goal" },
-        { value: "/goal clear", label: "/goal clear", description: "Clear the current goal" },
-        { value: "/mission ", label: "/mission", description: "Start an orchestrated rubric-judged mission" },
-        { value: "/mission status", label: "/mission status", description: "Show current mission status" },
-        { value: "/mission pause", label: "/mission pause", description: "Pause the mission evaluator" },
-        { value: "/mission resume", label: "/mission resume", description: "Resume a paused mission" },
-        { value: "/mission cancel", label: "/mission cancel", description: "Cancel the mission" },
-        { value: "/loop", label: "/loop", description: "Schedule recurring prompt" },
-        { value: "/loop list", label: "/loop list", description: "List active loops" },
-        { value: "/loop cancel", label: "/loop cancel", description: "Cancel a loop by ID" },
       ];
+      // The lightweight builtins default to shown; only an explicit
+      // ``false`` (the agent toggled the command off) hides them.
+      if (compressEnabled) {
+        base.push(
+          { value: "/compress", label: "/compress", description: "Compress context" },
+        );
+      }
+      if (goalsEnabled) {
+        base.push(
+          { value: "/goal", label: "/goal", description: "Define an outcome goal" },
+          { value: "/goal status", label: "/goal status", description: "Show outcome goal status" },
+          { value: "/goal pause", label: "/goal pause", description: "Pause automatic goal continuation" },
+          { value: "/goal resume", label: "/goal resume", description: "Resume a paused goal" },
+          { value: "/goal clear", label: "/goal clear", description: "Clear the current goal" },
+        );
+      }
+      if (missionsEnabled) {
+        base.push(
+          { value: "/mission ", label: "/mission", description: "Start an orchestrated rubric-judged mission" },
+          { value: "/mission status", label: "/mission status", description: "Show current mission status" },
+          { value: "/mission pause", label: "/mission pause", description: "Pause the mission evaluator" },
+          { value: "/mission resume", label: "/mission resume", description: "Resume a paused mission" },
+          { value: "/mission cancel", label: "/mission cancel", description: "Cancel the mission" },
+        );
+      }
+      if (loopsEnabled) {
+        base.push(
+          { value: "/loop", label: "/loop", description: "Schedule recurring prompt" },
+          { value: "/loop list", label: "/loop list", description: "List active loops" },
+          { value: "/loop cancel", label: "/loop cancel", description: "Cancel a loop by ID" },
+        );
+      }
       if (deepResearchEnabled) {
         // Trailing space so the user lands on the topic, not the
         // command name -- same pattern as "/mission ".
@@ -435,7 +476,16 @@ function ChatComposerInner({
       }
       return base;
     },
-    [deepResearchEnabled, researchEnabled, codeAgentsEnabled],
+    [
+      slashCommandsEnabled,
+      compressEnabled,
+      goalsEnabled,
+      missionsEnabled,
+      loopsEnabled,
+      deepResearchEnabled,
+      researchEnabled,
+      codeAgentsEnabled,
+    ],
   );
 
   const scheduledExamples = useMemo<SlashCommand[]>(
