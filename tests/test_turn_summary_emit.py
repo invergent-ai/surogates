@@ -409,68 +409,25 @@ async def test_complete_session_skips_drain_without_summarizer() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _complete_session closes the session's browser, like the sandbox
+# _complete_session must NOT close the session's browser. A turn end is
+# not a session end — the browser persists so cookies and page state
+# survive across turns (e.g. a multi-step login driven over several
+# user interactions).
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_complete_session_closes_browser() -> None:
+async def test_complete_session_keeps_browser_alive() -> None:
     store = AsyncMock()
     store.emit_event = AsyncMock()
     store.get_events = AsyncMock(return_value=[])
     store.update_session_status = AsyncMock()
     harness = _make_loop_harness(session_store=store, turn_summarizer=None)
     harness._browser_pool = AsyncMock()
-
-    session = await _call_complete_session(
-        harness, reason="completed", turn_id="t-1",
-    )
-
-    harness._browser_pool.destroy_for_session.assert_awaited_once_with(
-        str(session.id),
-    )
-
-
-@pytest.mark.asyncio
-async def test_complete_session_closes_browser_on_failure_reason() -> None:
-    """A leaked browser pod is worse than a failed turn — cleanup must
-    run regardless of the completion reason, not just on success."""
-    store = AsyncMock()
-    store.emit_event = AsyncMock()
-    store.get_events = AsyncMock(return_value=[])
-    store.update_session_status = AsyncMock()
-    harness = _make_loop_harness(session_store=store, turn_summarizer=None)
-    harness._browser_pool = AsyncMock()
-
-    session = await _call_complete_session(
-        harness, reason="invalid_tool_calls", turn_id="t-1",
-    )
-
-    harness._browser_pool.destroy_for_session.assert_awaited_once_with(
-        str(session.id),
-    )
-
-
-@pytest.mark.asyncio
-async def test_complete_session_swallows_browser_cleanup_error() -> None:
-    """Browser cleanup is best effort — a backend failure must not
-    abort completion (SESSION_COMPLETE still emitted)."""
-    store = AsyncMock()
-    store.emit_event = AsyncMock()
-    store.get_events = AsyncMock(return_value=[])
-    store.update_session_status = AsyncMock()
-    harness = _make_loop_harness(session_store=store, turn_summarizer=None)
-    harness._browser_pool = AsyncMock()
-    harness._browser_pool.destroy_for_session = AsyncMock(
-        side_effect=RuntimeError("backend down"),
-    )
 
     await _call_complete_session(harness, reason="completed", turn_id="t-1")
 
-    assert any(
-        c.args[1] == EventType.SESSION_COMPLETE
-        for c in store.emit_event.await_args_list
-    )
+    harness._browser_pool.destroy_for_session.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

@@ -537,14 +537,12 @@ class ArtifactCompletionMixin:
             except Exception:
                 logger.debug("Sandbox cleanup failed for %s", session.id, exc_info=True)
 
-        # Close any browser session the agent opened this turn. Best
-        # effort — a leaked browser pod is worse than a failed cleanup,
-        # so swallow errors and never block completion on it.
-        if self._browser_pool is not None:
-            try:
-                await self._browser_pool.destroy_for_session(str(session.id))
-            except Exception:
-                logger.debug("Browser cleanup failed for %s", session.id, exc_info=True)
+        # The browser is intentionally NOT torn down here. A turn end is
+        # not a session end: an agent driving a multi-step browser flow
+        # (e.g. logging into a site across several user interactions)
+        # needs cookies and page state to survive between turns. The
+        # browser persists in the session-keyed pool and is reclaimed on
+        # reprovision, explicit browser_close, or worker shutdown.
 
         # Notify memory manager of session end.
         if self._memory_manager is not None:
