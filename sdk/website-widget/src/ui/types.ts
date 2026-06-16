@@ -39,6 +39,12 @@ export interface MountConfig extends WebsiteAgentConfig, WidgetAppearance {
   inline?: boolean;
   /** Open the panel immediately on mount (ignored when ``inline``). */
   openByDefault?: boolean;
+  /**
+   * Control-plane base URL for key-only pairing (``mountWithPairing``).
+   * Defaults to the platform pairing host; override for self-hosted /
+   * local-dev deployments.
+   */
+  pairingUrl?: string;
 }
 
 /** Imperative handle returned by :func:`mount`. */

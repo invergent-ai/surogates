@@ -119,6 +119,16 @@ async def client(app):
         yield c
 
 
+class _FakeRoutingCache:
+    """Minimal stand-in for ``ChannelRoutingCache`` in tests."""
+
+    def __init__(self, rows: dict):
+        self._rows = rows
+
+    async def get(self, key: str):
+        return self._rows.get(key)
+
+
 def configure_website(
     app,
     *,
@@ -129,17 +139,24 @@ def configure_website(
 ) -> str:
     """Set the website-channel settings on *app* and return the publishable key.
 
-    Tests typically need a fresh key per case so a leak between tests
-    can't authenticate a follow-up; passing ``publishable_key=None``
-    mints one.  ``org_id`` is required because the bootstrap route
-    refuses to create sessions when the deployment org isn't set —
-    every test explicitly attaches the org it created.
+    The publishable key now resolves the owning agent through
+    ``channel_routing(website:<key>)``, so we install a fake routing cache
+    mapping the minted key to the test agent + org. ``enabled`` and
+    ``allowed_origins`` stay on ``Settings`` (the global on-switch + origin
+    allow-list are unchanged). Passing ``publishable_key=None`` mints a fresh
+    key so a leak between tests can't authenticate a follow-up.
     """
     key = publishable_key if publishable_key is not None else generate_publishable_key()
     app.state.settings.website.enabled = enabled
-    app.state.settings.website.publishable_key = key
     app.state.settings.website.allowed_origins = allowed_origins
     app.state.test_org_id = str(org_id)
+    app.state.channel_routing_cache = _FakeRoutingCache({
+        f"website:{key}": {
+            "agent_id": _AGENT_ID,
+            "org_id": str(org_id),
+            "api_web_url": allowed_origins,
+        },
+    })
     return key
 
 
@@ -197,27 +214,20 @@ async def test_bootstrap_404_when_channel_disabled(
     assert resp.status_code == 404
 
 
-async def test_bootstrap_503_when_publishable_key_empty(
+async def test_bootstrap_503_when_routing_org_id_malformed(
     app, client: AsyncClient, session_factory,
 ):
-    """website.enabled=true with no key is a misconfig — surface 503."""
-    org_id = await create_org(session_factory)
-    configure_website(app, org_id=org_id, publishable_key="")
-    resp = await client.post(
-        "/v1/website/sessions",
-        headers={"Authorization": "Bearer surg_wk_anything", "Origin": _DEFAULT_ORIGIN},
-    )
-    assert resp.status_code == 503
-
-
-async def test_bootstrap_503_when_org_id_missing(
-    app, client: AsyncClient, session_factory,
-):
-    """Visitor sessions need a real org to attach to."""
+    """A routing row whose org_id isn't a UUID is a provisioning bug → 503."""
     org_id = await create_org(session_factory)
     key = configure_website(app, org_id=org_id)
-    # Wipe org_id after the helper sets it.
-    app.state.test_org_id = ""
+    # Corrupt the routing row's org_id after the helper installs it.
+    app.state.channel_routing_cache = _FakeRoutingCache({
+        f"website:{key}": {
+            "agent_id": _AGENT_ID,
+            "org_id": "not-a-uuid",
+            "api_web_url": _DEFAULT_ORIGIN,
+        },
+    })
     resp = await client.post(
         "/v1/website/sessions",
         headers={"Authorization": f"Bearer {key}", "Origin": _DEFAULT_ORIGIN},
@@ -261,7 +271,8 @@ async def test_bootstrap_rejects_unknown_publishable_key(
 ):
     org_id = await create_org(session_factory)
     configure_website(app, org_id=org_id)  # mints a real key
-    # Present a syntactically-valid but wrong key.
+    # A syntactically-valid but unregistered key has no routing row → 404,
+    # indistinguishable from "channel off" so it can't enumerate agents.
     resp = await client.post(
         "/v1/website/sessions",
         headers={
@@ -269,7 +280,7 @@ async def test_bootstrap_rejects_unknown_publishable_key(
             "Origin": _DEFAULT_ORIGIN,
         },
     )
-    assert resp.status_code == 401
+    assert resp.status_code == 404
 
 
 async def test_bootstrap_rejects_non_publishable_prefix(
