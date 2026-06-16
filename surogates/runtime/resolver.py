@@ -54,6 +54,14 @@ def _slash_commands(blob: dict | None) -> SlashCommandConfig:
     runtime-config payload that predates this field keeps current
     behavior.  ``clear`` has no per-command flag and is always included;
     the master ``enabled`` flag is what gates it.
+
+    This gate is intentionally **fail-OPEN**: a missing or malformed
+    ``slash_commands`` blob re-enables every command rather than locking
+    the agent out.  That keeps a projection bug or an older management
+    plane from silently bricking slash commands — but it also means such
+    a bug surfaces as "a disabled command still works", never as "a
+    working command broke".  The ops side must therefore always emit the
+    object (the route builds it unconditionally from the agent row).
     """
     if not blob:
         return SlashCommandConfig()
