@@ -83,6 +83,7 @@ from surogates.harness.tool_exec import execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.harness.tool_schemas import filter_schemas_for_tenant
 from surogates.harness.title_generator import maybe_generate_session_title
+from surogates.runtime.context import SlashCommandConfig
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import EventType
 
@@ -287,6 +288,35 @@ def _rewrite_user_content_preserving_attachments(
 # ---------------------------------------------------------------------------
 
 
+def _slash_command_name(content: str | None) -> str | None:
+    """Map a user message to the canonical id of the built-in slash
+    command it invokes, or None when it is not a gateable command.
+
+    Mirrors the dispatch matchers in ``AgentHarness.wake`` so the
+    capability gate and the dispatcher agree on what counts as each
+    command.
+    """
+    if not content:
+        return None
+    if content == "/compress":
+        return "compress"
+    if content == "/clear":
+        return "clear"
+    if content == "/goal" or content.startswith("/goal "):
+        return "goal"
+    if content == "/mission" or content.startswith("/mission "):
+        return "mission"
+    if content == "/auto-research" or content.startswith("/auto-research "):
+        return "auto-research"
+    if content == "/code" or content.startswith("/code "):
+        return "code"
+    if content.startswith("/loop"):
+        return "loop"
+    if parse_deep_research_command(content) is not None:
+        return "deep-research"
+    return None
+
+
 class AgentHarness(
     AdvisorMixin,
     BoardMixin,
@@ -352,6 +382,7 @@ class AgentHarness(
         bundle: Any | None = None,
         turn_gate: Any | None = None,
         mcp_tool_names: frozenset[str] | None = None,
+        slash_commands: SlashCommandConfig | None = None,
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
@@ -359,6 +390,11 @@ class AgentHarness(
         # proxy.  The registry is process-wide; this scopes the
         # model-visible schema set to the agent's own MCP tools.
         self._mcp_tool_names: frozenset[str] = frozenset(mcp_tool_names or ())
+        # Per-agent slash-command gating.  Defaults to permissive so a
+        # session resolved before this was wired keeps every command.
+        self._slash_commands: SlashCommandConfig = (
+            slash_commands if slash_commands is not None else SlashCommandConfig()
+        )
         self._llm = llm_client
         self._tenant = tenant
         self._worker_id = worker_id
@@ -713,6 +749,28 @@ class AgentHarness(
                 )
 
     # ------------------------------------------------------------------
+    # Slash-command capability gate
+    # ------------------------------------------------------------------
+
+    def _slash_command_enabled(self, name: str) -> bool:
+        """True when slash command *name* is available for this agent —
+        the master switch is on AND the command is individually enabled."""
+        return (
+            self._slash_commands.enabled
+            and name in self._slash_commands.commands
+        )
+
+    def _slash_command_block_reason(self, content: str | None) -> str | None:
+        """User-facing message when the slash command in *content* is gated
+        off for this agent, else None (allowed, or not a gateable command)."""
+        name = _slash_command_name(content)
+        if name is None or self._slash_command_enabled(name):
+            return None
+        if not self._slash_commands.enabled:
+            return "Slash commands are disabled for this agent."
+        return f"/{name} is disabled for this agent."
+
+    # ------------------------------------------------------------------
     # Entry point
     # ------------------------------------------------------------------
 
@@ -928,6 +986,16 @@ class AgentHarness(
                 None,
             )
             last_user_content = _latest_user_event_text(all_events)
+
+            # Capability gate: refuse slash commands disabled for this
+            # agent (master switch off, or this command individually off)
+            # before the dispatch chain below would handle them.
+            slash_block = self._slash_command_block_reason(last_user_content)
+            if slash_block is not None:
+                await self._emit_loop_response(
+                    session, lease, slash_block, user_content=last_user_content
+                )
+                return
 
             if last_user_content == "/compress":
                 await self._handle_compress_command(
