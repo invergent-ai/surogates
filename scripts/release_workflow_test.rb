@@ -52,4 +52,17 @@ class ReleaseWorkflowTest < Minitest::Test
       refute job.fetch("steps", []).any? { |step| step["uses"] == "softprops/action-gh-release@v2" }
     end
   end
+
+  def test_release_notes_are_generated_from_commit_messages
+    steps = @workflow.fetch("jobs").fetch("release").fetch("steps")
+
+    generate_step = steps.find { |step| step["name"] == "Generate release notes" }
+    refute_nil generate_step, "Expected a release-notes generation step"
+    assert_includes generate_step.fetch("run"), "scripts/release-notes.mjs"
+    assert_path_exists "scripts/release-notes.mjs"
+
+    release_step = steps.find { |step| step["uses"] == "softprops/action-gh-release@v2" }
+    assert_equal "release-notes.md", release_step.fetch("with").fetch("body_path")
+    refute release_step.fetch("with").key?("generate_release_notes")
+  end
 end
