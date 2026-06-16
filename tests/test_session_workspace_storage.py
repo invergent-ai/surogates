@@ -10,7 +10,6 @@ import pytest
 from fastapi import BackgroundTasks, UploadFile
 
 from surogates.api.routes import workspace as workspace_route
-from surogates.jobs.cleanup_sessions import cleanup_orphaned_session_prefixes
 from surogates.api.routes import prompts as prompts_route
 from surogates.api.routes import sessions as sessions_route
 from surogates.artifacts.models import ArtifactKind
@@ -171,6 +170,27 @@ class _Store:
         return [self.session]
 
 
+def _runtime(agent_id: str = "support-bot", org_id: UUID | None = None):
+    """Build the per-request runtime context the routes now depend on.
+
+    ``agent_id`` used to come from process-wide ``settings.agent_id``; it is
+    now resolved per request via ``agent_runtime_context_dep`` and passed
+    into the route as an ``AgentRuntimeContext``.
+    """
+    from surogates.runtime import build_agent_runtime_context
+
+    return build_agent_runtime_context(
+        {
+            "agent_id": agent_id,
+            "org_id": str(org_id or uuid4()),
+            "project_id": "test-project",
+            "enabled": True,
+            "version": 1,
+            "storage_key_prefix": "",
+        }
+    )
+
+
 def _tenant(org_id: UUID, user_id: UUID | None = None) -> TenantContext:
     return TenantContext(
         org_id=org_id,
@@ -192,7 +212,9 @@ def _request(
     browser_registry: _BrowserRegistry | None = None,
     path: str = "/v1/sessions",
 ):
-    settings = Settings(agent_id=store.agent_id)
+    # ``Settings`` is no longer per-tenant — ``agent_id`` is resolved per
+    # request via the runtime context, not from process-wide settings.
+    settings = Settings()
     settings.llm.model = "gpt-test"
     settings.storage.bucket = "ops-agent-bucket"
     return SimpleNamespace(
@@ -222,6 +244,7 @@ async def test_create_web_session_uses_agent_bucket_and_session_path():
         sessions_route.CreateSessionRequest(),
         request,
         _tenant(org_id, user_id),
+        _runtime(store.agent_id, org_id),
     )
 
     assert response.id == store.session.id
@@ -245,6 +268,7 @@ async def test_submit_prompt_uses_agent_bucket_and_session_path():
         prompts_route.PromptRequest(prompt="run this"),
         request=request,
         tenant=tenant,
+        agent_id=store.agent_id,
         service_account_id=service_account_id,
         store=store,
     )
@@ -281,7 +305,8 @@ async def test_delete_session_deletes_session_prefix_not_agent_bucket():
     background_tasks = BackgroundTasks()
 
     await sessions_route.delete_session(
-        session_id, request, background_tasks, _tenant(org_id, uuid4())
+        session_id, request, background_tasks, _tenant(org_id, uuid4()),
+        _runtime("support-bot", org_id),
     )
     # Workspace cleanup runs after the response is sent; in tests we drive
     # the queued task manually so we can assert on its side effects.
@@ -321,7 +346,8 @@ async def test_delete_session_destroys_browser_sandbox():
 
     background_tasks = BackgroundTasks()
     await sessions_route.delete_session(
-        session_id, request, background_tasks, _tenant(org_id, uuid4())
+        session_id, request, background_tasks, _tenant(org_id, uuid4()),
+        _runtime("support-bot", org_id),
     )
 
     assert browser_pool.destroyed_sessions == [str(session_id)]
@@ -440,29 +466,3 @@ async def test_artifact_store_writes_under_session_prefix():
         "ops-agent-bucket",
         f"{session_id}/_artifacts/{meta.artifact_id}/v1.json",
     ) in storage.objects
-
-
-async def test_cleanup_deletes_orphaned_session_prefixes_only():
-    active_id = uuid4()
-    orphan_id = uuid4()
-    storage = _RecordingStorage()
-    storage.keys["ops-agent-bucket"] = [
-        f"{active_id}/keep.txt",
-        f"{orphan_id}/delete.txt",
-        f"{orphan_id}/sub/delete.txt",
-    ]
-
-    deleted = await cleanup_orphaned_session_prefixes(
-        storage,
-        bucket="ops-agent-bucket",
-        storage_key_prefix="",
-        active_session_ids={str(active_id)},
-        dry_run=False,
-    )
-
-    assert deleted == 1
-    assert storage.deleted_buckets == []
-    assert storage.deleted_keys == [
-        ("ops-agent-bucket", f"{orphan_id}/delete.txt"),
-        ("ops-agent-bucket", f"{orphan_id}/sub/delete.txt"),
-    ]

@@ -26,6 +26,7 @@ from surogates.tenant.credentials import CredentialVault
 from .conftest import create_org, create_user
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
+TEST_AGENT_ID = "default"
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +41,10 @@ async def app(session_factory, redis_client, pg_url, redis_url):
 
     from surogates.api.app import create_app
     from surogates.config import Settings
+    from surogates.runtime import (
+        agent_runtime_context_dep,
+        build_agent_runtime_context,
+    )
     from surogates.storage.backend import create_backend
 
     application = create_app()
@@ -51,6 +56,24 @@ async def app(session_factory, redis_client, pg_url, redis_url):
     application.state.storage = create_backend(application.state.settings)
     application.state.credential_vault = CredentialVault(
         session_factory, Fernet.generate_key()
+    )
+
+    # Session-creation + feedback routes resolve the target agent via
+    # ``agent_runtime_context_dep`` (reads ``runtime_config_cache`` + an
+    # ``agent_id`` the bare-token requests don't supply).  Override with a
+    # fixed shared-runtime context so the tests exercise the handlers.
+    def _fixed_runtime_context():
+        return build_agent_runtime_context({
+            "agent_id": TEST_AGENT_ID,
+            "org_id": "00000000-0000-0000-0000-000000000000",
+            "project_id": "test-project",
+            "enabled": True,
+            "version": 1,
+            "storage_key_prefix": "test-project/default",
+        })
+
+    application.dependency_overrides[agent_runtime_context_dep] = (
+        _fixed_runtime_context
     )
     return application
 

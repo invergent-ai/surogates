@@ -106,10 +106,14 @@ async def test_spawn_task_no_parents_eagerly_spawns(
         assert task.current_session_id is not None
         assert task.started_at is not None
 
-    # Enqueue happened on the parent's agent id.
+    # Enqueue happened on the shared work queue; the parent's agent id is
+    # encoded into the queue member (org_id|agent_id|session_id), not the
+    # queue key, after the shared-runtime refactor.
     redis.zadd.assert_called_once()
     queue_key = redis.zadd.call_args[0][0]
-    assert "orchestrator" in queue_key
+    assert queue_key == "surogates:work_queue"
+    member_mapping = redis.zadd.call_args[0][1]
+    assert any("|orchestrator|" in member for member in member_mapping)
 
 
 @pytest.mark.asyncio(loop_scope="session")

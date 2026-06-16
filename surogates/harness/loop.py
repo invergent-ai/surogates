@@ -17,18 +17,14 @@ any crash can be recovered by replaying the log.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import os
 import re
 import traceback
 from datetime import datetime, timezone
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID, uuid4
-
-from pydantic import BaseModel, Field
 
 from surogates.harness.agent_resolver import (
     apply_agent_def_to_session,
@@ -43,7 +39,6 @@ from surogates.harness.expert_routing import (
     classify_hard_task_async,
     merge_extra_body,
     model_supports_thinking_toggle,
-    parse_next_action_complexity,
 )
 from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
 from surogates.harness.self_discover import (
@@ -54,16 +49,6 @@ from surogates.harness.self_discover import (
 from surogates.harness.message_utils import (
     coerce_message_content,
     make_skipped_tool_result,
-    message_to_dict,
-)
-from surogates.harness.outcomes import (
-    DEFAULT_MAX_ITERATIONS,
-    OutcomeState,
-    apply_evaluation,
-    build_evaluator_messages,
-    parse_goal_command,
-    parse_outcome_evaluation,
-    start_outcome,
 )
 from surogates.harness.prompt_cache import SystemPromptCache
 from surogates.harness.rate_limit_guard import ProviderRateLimitGuard
@@ -85,7 +70,6 @@ from surogates.harness.resilience import (
 from surogates.harness.sanitize import (
     cap_delegate_calls,
     deduplicate_tool_calls,
-    strip_budget_warnings,
 )
 from surogates.harness.slash_skill import (
     build_deep_research_message,
@@ -113,30 +97,28 @@ if TYPE_CHECKING:
     from surogates.harness.prompt import PromptBuilder
     from surogates.memory.manager import MemoryManager
     from surogates.sandbox.pool import SandboxPool, sandbox_session_key
-    from surogates.session.models import Event, Session, SessionLease
+    from surogates.session.models import Session, SessionLease
     from surogates.session.store import SessionStore
     from surogates.tools.registry import ToolRegistry
     from surogates.tenant.context import TenantContext
 
 logger = logging.getLogger(__name__)
 
+# Some names below are not used by this module but are re-exported here as a
+# stable import surface for the test suite (`from surogates.harness.loop import ...`);
+# those lines are marked with `# noqa: F401`.
 from surogates.harness.loop_artifacts import (
-    _FENCE_RE,
-    _PROMOTABLE_FENCES,
-    _coerce_modified_to_datetime,
-    _coerce_tool_args,
-    _derive_artifact_name,
+    _FENCE_RE,  # noqa: F401
+    _PROMOTABLE_FENCES,  # noqa: F401
+    _derive_artifact_name,  # noqa: F401
 )
 from surogates.harness.loop_attachments import (
-    _ATTACHMENT_SKIP_HINTS,
-    _attachments_note,
-    _attachments_note_from_data,
-    _render_inlined_attachments,
+    _attachments_note,  # noqa: F401
+    _render_inlined_attachments,  # noqa: F401
 )
 from surogates.harness.loop_constants import (
     DEFAULT_PRESERVE_THINKING,
     DEFAULT_THINKING_BUDGET,
-    _BACKGROUND_DRAIN_TIMEOUT_SECONDS,
     _DYNAMIC_LOOP_EXCLUDED_TOOLS,
     _EMPTY_RESPONSE_NUDGE,
     _LEASE_RENEWAL_INTERVAL_SECONDS,
@@ -154,28 +136,23 @@ from surogates.harness.loop_deep_research import (
     _prior_next_action_complexity,
 )
 from surogates.harness.loop_messages import (
-    _as_aware_utc,
-    _format_bytes,
     _initial_system_message,
-    _last_assistant_message_excerpt,
     _latest_user_event_data,
     _latest_user_event_text,
     _latest_user_message_text,
-    _seconds_since,
-    _should_notify_parent_on_completion,
-    _view_context_note,
-    _view_context_note_from_metadata,
+    _should_notify_parent_on_completion,  # noqa: F401
+    _view_context_note,  # noqa: F401
+    _view_context_note_from_metadata,  # noqa: F401
     maybe_inject_browser_pause,
 )
 from surogates.harness.loop_mission_evaluator import (
-    MissionJudgeParseError,
-    _MissionVerdict,
+    MissionJudgeParseError,  # noqa: F401
+    _MissionVerdict,  # noqa: F401
     _build_mission_judge as _build_mission_judge_impl,
-    _maybe_run_mission_evaluator,
-    _parse_judge_json,
+    _maybe_run_mission_evaluator,  # noqa: F401
+    _parse_judge_json,  # noqa: F401
 )
 from surogates.harness.loop_pending import (
-    _HARNESS_CONTROL_PENDING_EVENT_TYPES,
     _actionable_pending_events,
     _slash_loop_already_processed,
 )
@@ -185,21 +162,10 @@ from surogates.harness.loop_tool_recovery import (
 )
 from surogates.harness.loop_user_action import (
     _USER_ACTION_RESCUE_SYSTEM,
-    _UserActionRescueDecision,
     _generate_user_action_rescue_structured,
 )
 from surogates.harness.loop_vision import (
-    _collapse_text_parts,
-    _configured_vision_model,
-    _describe_image_part,
-    _extract_response_text,
-    _message_has_image_blocks,
-    _messages_have_image_blocks,
     _prepare_messages_for_model_vision_support,
-    _replace_image_blocks_with_descriptions,
-    _strip_image_blocks_from_message,
-    _strip_image_blocks_from_messages,
-    _text_context_for_image_description,
 )
 
 

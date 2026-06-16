@@ -36,7 +36,11 @@ async def test_r2_memory_store_load_empty_returns_zero_version():
     from surogates.memory.r2_store import R2MemoryStore
 
     store = R2MemoryStore(
-        backend=_FakeBackend(), bucket="bk", key="p/users/u/memory.json",
+        backend=_FakeBackend(), bucket="bk",
+        keys={
+            "memory": "p/users/u/memory.json",
+            "user": "p/users/u/user.json",
+        },
     )
     await store.load_from_r2()
     assert store.last_seen_version == 0
@@ -50,7 +54,11 @@ async def test_r2_memory_store_add_writes_envelope():
 
     backend = _FakeBackend()
     store = R2MemoryStore(
-        backend=backend, bucket="bk", key="p/users/u/memory.json",
+        backend=backend, bucket="bk",
+        keys={
+            "memory": "p/users/u/memory.json",
+            "user": "p/users/u/user.json",
+        },
     )
     await store.load_from_r2()
     await store.add("memory", "remember the API base URL is foo.com")
@@ -68,7 +76,11 @@ async def test_r2_memory_store_format_for_system_prompt_includes_entries():
     from surogates.memory.r2_store import R2MemoryStore
 
     store = R2MemoryStore(
-        backend=_FakeBackend(), bucket="bk", key="p/users/u/memory.json",
+        backend=_FakeBackend(), bucket="bk",
+        keys={
+            "memory": "p/users/u/memory.json",
+            "user": "p/users/u/user.json",
+        },
     )
     await store.load_from_r2()
     await store.add("memory", "first remembered fact")
@@ -87,7 +99,7 @@ async def test_r2_memory_store_calls_on_write_after_persist():
     backend = _FakeBackend()
     write_calls: list[dict] = []
 
-    async def on_write(action, *, new_version, conflict_detected):
+    async def on_write(action, *, target, new_version, conflict_detected):
         write_calls.append({
             "action": action,
             "new_version": new_version,
@@ -95,7 +107,11 @@ async def test_r2_memory_store_calls_on_write_after_persist():
         })
 
     store = R2MemoryStore(
-        backend=backend, bucket="bk", key="p/users/u/memory.json",
+        backend=backend, bucket="bk",
+        keys={
+            "memory": "p/users/u/memory.json",
+            "user": "p/users/u/user.json",
+        },
         on_write=on_write,
     )
     await store.load_from_r2()
@@ -116,11 +132,15 @@ async def test_r2_memory_store_detects_conflict_in_callback():
     backend = _FakeBackend()
     seen: list[bool] = []
 
-    async def on_write(action, *, new_version, conflict_detected):
+    async def on_write(action, *, target, new_version, conflict_detected):
         seen.append(conflict_detected)
 
     store = R2MemoryStore(
-        backend=backend, bucket="bk", key="p/users/u/memory.json",
+        backend=backend, bucket="bk",
+        keys={
+            "memory": "p/users/u/memory.json",
+            "user": "p/users/u/user.json",
+        },
         on_write=on_write,
     )
     await store.load_from_r2()  # version 0

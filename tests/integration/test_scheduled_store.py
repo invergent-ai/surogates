@@ -150,7 +150,7 @@ async def test_find_due_across_tenants_skips_already_claimed(
     store = ScheduledSessionStore(session_factory)
     due = datetime.now(timezone.utc) - timedelta(minutes=1)
 
-    await store.create(
+    created = await store.create(
         org_id=org_id, user_id=user_id, agent_id="agent-a",
         name="A", prompt="run", schedule=parse_schedule("10m"),
         source="tool", created_from_session_id=None,
@@ -164,7 +164,13 @@ async def test_find_due_across_tenants_skips_already_claimed(
         worker_id="ticker-2", limit=10,
     )
 
-    assert len(first) == 1
+    # The first call claims our due row (other tenants' due rows left over
+    # from sibling tests in this shared DB may also be claimed — assert on
+    # the row this test created rather than the total count).
+    assert created.id in {row.id for row in first}
+    # The second call sees nothing claimable: the first locked everything
+    # it returned, so our row never reappears.
+    assert created.id not in {row.id for row in second}
     assert second == []
 
 

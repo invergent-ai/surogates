@@ -69,26 +69,6 @@ async def test_resolve_runtime_context_shared_mode_uses_cache():
 
 
 @pytest.mark.asyncio
-async def test_resolve_runtime_context_helm_mode_synthesises_from_settings():
-    """Helm-mode workers have no cache; the helper synthesises the
-    context from process-wide settings.  Mirrors the
-    _legacy_helm_context branch in the api resolver."""
-    from surogates.runtime import resolve_runtime_context_for_session
-
-    settings = SimpleNamespace(
-        runtime_mode="helm", org_id="helm-org", agent_id="helm-agent",
-    )
-    sess = _FakeSessionRow(id=uuid4(), agent_id="helm-agent", org_id=uuid4())
-
-    ctx = await resolve_runtime_context_for_session(
-        sess, cache=None, settings=settings,
-    )
-    assert ctx.agent_id == "helm-agent"
-    assert ctx.org_id == "helm-org"
-    assert ctx.project_id is None
-
-
-@pytest.mark.asyncio
 async def test_resolve_runtime_context_shared_disabled_raises():
     """A row marked enabled=False is an administrative stop; the
     worker must refuse to process the session rather than serve it

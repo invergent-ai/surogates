@@ -38,7 +38,7 @@ async def test_get_runtime_config_happy_path():
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
-        assert request.url.path == "/api/agents/a-1/runtime-config"
+        assert request.url.path == "/api/agents/agents/a-1/runtime-config"
         assert request.headers["Authorization"] == "Bearer secret-token"
         return httpx.Response(200, json=payload)
 

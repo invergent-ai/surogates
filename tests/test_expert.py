@@ -264,10 +264,7 @@ class TestResourceLoaderExperts:
             encoding="utf-8",
         )
 
-        loader = ResourceLoader(
-            platform_skills_dir=str(skills_dir),
-            platform_mcp_dir=str(tmp_path / "mcp"),
-        )
+        loader = ResourceLoader()
         skills = loader._load_skills_from_dir(str(skills_dir), "platform")
 
         assert len(skills) == 1
@@ -305,10 +302,7 @@ class TestResourceLoaderExperts:
             encoding="utf-8",
         )
 
-        loader = ResourceLoader(
-            platform_skills_dir=str(skills_dir),
-            platform_mcp_dir=str(tmp_path / "mcp"),
-        )
+        loader = ResourceLoader()
         skills = loader._load_skills_from_dir(str(skills_dir), "org")
 
         assert len(skills) == 2
@@ -1395,11 +1389,13 @@ class TestWorkerExpertCatalogWiring:
             def __init__(self, **kwargs):
                 init_kwargs.update(kwargs)
 
-            async def load_agents(self, tenant, db_session=None):
+            async def load_agents(self, tenant, db_session=None, bundle=None):
                 assert db_session == "db-session"
                 return loaded_agents
 
-            async def load_skills(self, tenant, db_session=None):
+            async def load_skills(
+                self, tenant, db_session=None, bundle=None, system_bundle=None,
+            ):
                 assert db_session == "db-session"
                 return loaded_skills
 
@@ -1416,21 +1412,15 @@ class TestWorkerExpertCatalogWiring:
         monkeypatch.setattr(worker_mod, "ResourceLoader", FakeResourceLoader)
 
         tenant = SimpleNamespace(org_id=uuid4())
-        settings = SimpleNamespace(
-            platform_agents_dir="/agents",
-            platform_skills_dir="/skills",
-        )
 
         agents, skills = await worker_mod._load_prompt_catalogs(
-            settings=settings,
             tenant=tenant,
             session_factory=FakeSessionFactory(),
         )
 
-        assert init_kwargs == {
-            "platform_agents_dir": "/agents",
-            "platform_skills_dir": "/skills",
-        }
+        # ResourceLoader is now constructed with no per-tenant dir args;
+        # skills/agents come from Hub bundles + DB.
+        assert init_kwargs == {}
         assert agents == loaded_agents
         assert skills == loaded_skills
 

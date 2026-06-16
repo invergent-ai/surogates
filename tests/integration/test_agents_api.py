@@ -42,6 +42,7 @@ async def app(session_factory, redis_client, pg_url, redis_url, tmp_path_factory
     application.state.redis = redis_client
     application.state.session_store = SessionStore(session_factory)
     application.state.settings = Settings()
+    application.state.settings.storage.bucket = f"test-agent-{uuid.uuid4()}"
 
     # Use an isolated tmp directory for storage so tests don't collide with
     # real filesystem state at /tmp/surogates/tenant-assets.

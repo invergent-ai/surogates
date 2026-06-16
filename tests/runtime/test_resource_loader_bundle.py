@@ -46,7 +46,7 @@ async def test_load_skills_overlay_reads_from_bundle_when_present(tmp_path):
         ),
     })
     tenant = _make_tenant(asset_root=str(tmp_path))
-    loader = ResourceLoader(platform_skills_dir=str(tmp_path / "noexist"))
+    loader = ResourceLoader()
     skills = await loader.load_skills(
         tenant, db_session=None, bundle=bundle,
     )
@@ -60,7 +60,7 @@ async def test_load_skills_bundle_none_falls_back_to_filesystem(tmp_path):
     from surogates.tools.loader import ResourceLoader
 
     tenant = _make_tenant(asset_root=str(tmp_path))
-    loader = ResourceLoader(platform_skills_dir=str(tmp_path / "noexist"))
+    loader = ResourceLoader()
     skills = await loader.load_skills(
         tenant, db_session=None, bundle=None,
     )
@@ -79,7 +79,7 @@ async def test_load_agents_overlay_reads_from_bundle_when_present(tmp_path):
         ),
     })
     tenant = _make_tenant(asset_root=str(tmp_path))
-    loader = ResourceLoader(platform_agents_dir=str(tmp_path / "noexist"))
+    loader = ResourceLoader()
     agents = await loader.load_agents(
         tenant, db_session=None, bundle=bundle,
     )

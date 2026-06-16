@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
 
+from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
 from surogates.orchestrator.dispatcher import Orchestrator
 
 
@@ -59,12 +61,19 @@ async def test_lease_held_wake_is_requeued(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session_id = uuid4()
+    org_id = uuid4()
     redis = AsyncMock()
     redis.zadd = AsyncMock()
 
     class LeaseHeldHarness:
         async def wake(self, _session_id):
             return "lease_held"
+
+    session_store = SimpleNamespace(
+        get_session=AsyncMock(
+            return_value=SimpleNamespace(org_id=org_id, agent_id="support-bot"),
+        ),
+    )
 
     monkeypatch.setattr(
         "surogates.orchestrator.dispatcher._LEASE_BUSY_REQUEUE_DELAY",
@@ -73,7 +82,7 @@ async def test_lease_held_wake_is_requeued(
     )
     orchestrator = Orchestrator(
         redis_client=redis,
-        session_store=object(),
+        session_store=session_store,
         harness_factory=lambda _sid: LeaseHeldHarness(),
         agent_id="support-bot",
         queue_key="surogates:work_queue:support-bot",
@@ -83,8 +92,14 @@ async def test_lease_held_wake_is_requeued(
     await orchestrator._process(session_id)
 
     redis.zadd.assert_called_once_with(
-        "surogates:work_queue:support-bot",
-        {str(session_id): 0},
+        SHARED_WORK_QUEUE_KEY,
+        {
+            encode_queue_member(
+                org_id=str(org_id),
+                agent_id="support-bot",
+                session_id=str(session_id),
+            ): 0,
+        },
     )
 
 
@@ -127,6 +142,7 @@ async def test_deferred_rewake_enqueues_once_after_wake_exits(
 ) -> None:
     """A pending rewake flag must produce exactly one enqueue when wake exits."""
     session_id = uuid4()
+    org_id = uuid4()
     redis = AsyncMock()
     redis.zadd = AsyncMock()
 
@@ -134,9 +150,15 @@ async def test_deferred_rewake_enqueues_once_after_wake_exits(
         async def wake(self, _session_id):
             return None
 
+    session_store = SimpleNamespace(
+        get_session=AsyncMock(
+            return_value=SimpleNamespace(org_id=org_id, agent_id="support-bot"),
+        ),
+    )
+
     orchestrator = Orchestrator(
         redis_client=redis,
-        session_store=object(),
+        session_store=session_store,
         harness_factory=lambda _sid: _Harness(),
         agent_id="support-bot",
         queue_key="surogates:work_queue:support-bot",
@@ -150,8 +172,14 @@ async def test_deferred_rewake_enqueues_once_after_wake_exits(
 
     assert session_id not in orchestrator._rewake_pending
     redis.zadd.assert_called_once_with(
-        "surogates:work_queue:support-bot",
-        {str(session_id): 0},
+        SHARED_WORK_QUEUE_KEY,
+        {
+            encode_queue_member(
+                org_id=str(org_id),
+                agent_id="support-bot",
+                session_id=str(session_id),
+            ): 0,
+        },
     )
 
 

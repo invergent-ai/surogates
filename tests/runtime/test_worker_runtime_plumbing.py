@@ -1,9 +1,13 @@
 """Tests for worker-side shared-runtime plumbing.
 
-The worker must wire a PlatformClient +
-RuntimeConfigCache in shared mode exactly like the api's
+The worker wires a PlatformClient +
+RuntimeConfigCache + bundle/memory caches exactly like the api's
 ``_install_shared_runtime_plumbing`` does — the harness_factory will
 pull AgentRuntimeContext through this cache per session.
+
+Like the api side, the worker plumbing is fail-loud:
+``platform_api_url``, ``hub.endpoint`` and a configured
+``storage.bucket`` are mandatory and a misconfig raises at boot.
 """
 
 from __future__ import annotations
@@ -13,16 +17,28 @@ from types import SimpleNamespace
 import pytest
 
 
-def _make_settings(*, runtime_mode: str = "shared",
-                   platform_api_url: str = "https://ops.example.com"):
+def _make_settings(
+    *,
+    platform_api_url: str = "https://ops.example.com",
+    hub_endpoint: str = "https://hub",
+    storage_bucket: str = "test-bucket",
+):
     return SimpleNamespace(
-        runtime_mode=runtime_mode,
         platform_api_url=platform_api_url,
         platform_api_token="t",
         api=SimpleNamespace(rate_limit_rpm=300),
-        hub=SimpleNamespace(endpoint="", username="", password=""),
-        storage=SimpleNamespace(bucket="", memory_bucket=""),
+        hub=SimpleNamespace(
+            endpoint=hub_endpoint, username="", password="",
+        ),
+        storage=SimpleNamespace(bucket=storage_bucket, memory_bucket=""),
     )
+
+
+def _make_state() -> dict:
+    """A worker state dict carrying the dependencies the helper reads:
+    a redis stub and a storage-backend sentinel (so build_memory_cache
+    sees a configured backend)."""
+    return {"redis": _FakeRedis(), "storage_backend": object()}
 
 
 @pytest.mark.asyncio
@@ -33,9 +49,8 @@ async def test_install_worker_runtime_plumbing_wires_client_and_cache():
     )
     from surogates.runtime import PlatformClient, RuntimeConfigCache
 
-    state = {}
-    settings = _make_settings()
-    _install_worker_runtime_plumbing(state, settings)
+    state = _make_state()
+    _install_worker_runtime_plumbing(state, _make_settings())
     try:
         assert isinstance(state["platform_client"], PlatformClient)
         assert isinstance(state["runtime_config_cache"], RuntimeConfigCache)
@@ -45,34 +60,18 @@ async def test_install_worker_runtime_plumbing_wires_client_and_cache():
         assert state["runtime_config_cache"] is None
 
 
-def test_install_worker_runtime_plumbing_helm_mode_skips():
+def test_install_worker_runtime_plumbing_raises_with_empty_url():
+    """Misconfigured shared-mode worker (URL empty) must raise so the
+    first session bootstrap never routes through a nil cache —
+    silently swallowing would route every session through a nil
+    cache."""
     from surogates.orchestrator.worker import _install_worker_runtime_plumbing
 
-    state = {}
-    _install_worker_runtime_plumbing(state, _make_settings(runtime_mode="helm"))
-    assert state["platform_client"] is None
-    assert state["runtime_config_cache"] is None
-
-
-def test_install_worker_runtime_plumbing_shared_with_empty_url_skips_loudly(caplog):
-    """Misconfigured shared-mode worker (URL empty) must log an error
-    and leave the cache None so the first session bootstrap fails
-    fast — silently swallowing would route every session through a
-    nil cache."""
-    import logging
-    from surogates.orchestrator.worker import _install_worker_runtime_plumbing
-
-    state = {}
-    with caplog.at_level(logging.ERROR):
+    state = _make_state()
+    with pytest.raises(RuntimeError, match="SUROGATES_PLATFORM_API_URL"):
         _install_worker_runtime_plumbing(
             state, _make_settings(platform_api_url=""),
         )
-    assert state["platform_client"] is None
-    assert state["runtime_config_cache"] is None
-    assert any(
-        "SUROGATES_PLATFORM_API_URL is empty" in rec.message
-        for rec in caplog.records
-    )
 
 
 class _FakePubsub:
@@ -107,7 +106,7 @@ async def test_install_worker_runtime_plumbing_starts_invalidator_task():
         _stop_worker_invalidator,
     )
 
-    state = {"redis": _FakeRedis()}
+    state = _make_state()
     _install_worker_runtime_plumbing(state, _make_settings())
     _start_worker_invalidator(state)
     try:
@@ -121,37 +120,17 @@ async def test_install_worker_runtime_plumbing_starts_invalidator_task():
 
 
 @pytest.mark.asyncio
-async def test_install_worker_runtime_plumbing_wires_file_bundle_cache(
-    monkeypatch,
-):
-    """worker bootstrap mirrors the api lifespan.
-
-    Same fake-SDK monkeypatch as the api test so the wiring logic
-    can be exercised regardless of CI install state."""
-    import sys
-    import types
-
-    fake_sdk = types.ModuleType("surogate_hub_sdk")
-    fake_sdk.Configuration = lambda **kw: kw
-
-    class _FakeHubClient:
-        def __init__(self, *, configuration):
-            self.objects_api = object()
-            self.config = configuration
-
-    fake_sdk.HubClient = _FakeHubClient
-    monkeypatch.setitem(sys.modules, "surogate_hub_sdk", fake_sdk)
-
+async def test_install_worker_runtime_plumbing_wires_file_bundle_cache():
+    """worker bootstrap mirrors the api lifespan: a FileBundleCache is
+    wired when ``settings.hub.endpoint`` is configured."""
     from surogates.orchestrator.worker import (
         _install_worker_runtime_plumbing,
         _shutdown_worker_runtime_plumbing,
     )
     from surogates.runtime import FileBundleCache
 
-    state = {"redis": _FakeRedis()}
-    settings = _make_settings()
-    settings.hub.endpoint = "https://hub"  # type: ignore[misc]
-    _install_worker_runtime_plumbing(state, settings)
+    state = _make_state()
+    _install_worker_runtime_plumbing(state, _make_settings())
     try:
         assert isinstance(state["file_bundle_cache"], FileBundleCache)
     finally:
@@ -159,33 +138,29 @@ async def test_install_worker_runtime_plumbing_wires_file_bundle_cache(
 
 
 @pytest.mark.asyncio
-async def test_install_worker_runtime_plumbing_exposes_memory_cache_attr():
-    """worker bootstrap exposes the memory_cache
-    state key (None when storage is unconfigured)."""
+async def test_install_worker_runtime_plumbing_wires_memory_cache():
+    """worker bootstrap wires a MemoryCache when storage is
+    configured."""
     from surogates.orchestrator.worker import (
         _install_worker_runtime_plumbing,
         _shutdown_worker_runtime_plumbing,
     )
+    from surogates.runtime import MemoryCache
 
-    state = {"redis": _FakeRedis()}
+    state = _make_state()
     _install_worker_runtime_plumbing(state, _make_settings())
     try:
-        assert "memory_cache" in state
-        assert state["memory_cache"] is None
+        assert isinstance(state["memory_cache"], MemoryCache)
     finally:
         await _shutdown_worker_runtime_plumbing(state)
 
 
-@pytest.mark.asyncio
-async def test_install_worker_runtime_plumbing_invalidator_no_op_when_cache_absent():
-    """Helm-mode workers (no cache) must not start a listener that
-    has nothing to invalidate."""
-    from surogates.orchestrator.worker import (
-        _install_worker_runtime_plumbing,
-        _start_worker_invalidator,
-    )
+def test_start_worker_invalidator_no_op_when_cache_absent():
+    """A worker with no runtime_config_cache wired (e.g. before
+    bootstrap, or a teardown state) must not start a listener that has
+    nothing to invalidate."""
+    from surogates.orchestrator.worker import _start_worker_invalidator
 
-    state = {"redis": _FakeRedis()}
-    _install_worker_runtime_plumbing(state, _make_settings(runtime_mode="helm"))
+    state = {"redis": _FakeRedis()}  # no runtime_config_cache
     _start_worker_invalidator(state)
     assert state.get("runtime_invalidator_task") is None

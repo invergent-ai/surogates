@@ -96,7 +96,7 @@ def test_404_when_platform_returns_lookup_error():
     with TestClient(app) as c:
         r = c.get("/echo?agent_id=a-1")
     assert r.status_code == 404
-    assert "shared runtime" in r.json()["detail"].lower()
+    assert "not configured" in r.json()["detail"].lower()
 
 
 def test_503_when_agent_is_disabled():
@@ -108,26 +108,6 @@ def test_503_when_agent_is_disabled():
         r = c.get("/echo?agent_id=a-1")
     assert r.status_code == 503
     assert "stopped" in r.json()["detail"].lower()
-
-
-def test_helm_mode_falls_back_to_process_wide_settings_agent_id():
-    """When the process-wide ``runtime_mode`` is ``helm``, the per-pod
-    ``settings.agent_id`` IS the tenant — no query param required.
-    The cache loader is still consulted (legacy api pods will be
-    pointed at their own loader in Plan 7 lifecycle migration).
-    """
-    async def loader(agent_id: str) -> dict:
-        return _make_payload(agent_id=agent_id)
-
-    app = _build_app(
-        cache=RuntimeConfigCache(loader=loader),
-        runtime_mode="helm",
-        agent_id="legacy-a",
-    )
-    with TestClient(app) as c:
-        r = c.get("/echo")
-    assert r.status_code == 200
-    assert r.json()["agent_id"] == "legacy-a"
 
 
 def test_shared_mode_does_not_fall_back_to_settings_agent_id():
