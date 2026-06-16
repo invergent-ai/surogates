@@ -102,6 +102,7 @@ export const WIDGET_STYLES = `
   border-radius: 6px;
 }
 .surg-close:hover { opacity: 1; background: rgba(255, 255, 255, 0.18); }
+.surg-close svg { width: 18px; height: 18px; }
 
 .surg-messages {
   flex: 1;
@@ -219,4 +220,6 @@ export const WIDGET_STYLES = `
   padding: 0 0 8px;
   background: #ffffff;
 }
+.surg-powered a { color: inherit; font-weight: 500; text-decoration: none; }
+.surg-powered a:hover { text-decoration: underline; }
 `;
