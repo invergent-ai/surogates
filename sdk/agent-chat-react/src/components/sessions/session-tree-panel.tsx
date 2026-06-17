@@ -26,6 +26,10 @@ import type {
 export interface SessionTreePanelProps {
   adapter: AgentChatAdapter;
   sessionId?: string | null;
+  /**
+   * ID of the currently highlighted session. Defaults to `sessionId`.
+   * Pass `""` (empty string) to clear the active highlight when `sessionId` is set.
+   */
   activeSessionId?: string;
   agentId?: string;
   title?: string;
@@ -487,6 +491,7 @@ export function SessionTreePanel({
       if (parent == null) break;
       current = parent;
     }
+    if (current !== null && !parentOf.has(current)) return null;
     return current;
   }, [activeSessionId, nodes]);
 
