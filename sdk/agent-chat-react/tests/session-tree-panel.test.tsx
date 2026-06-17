@@ -893,13 +893,19 @@ describe("SessionTreePanel", () => {
 
     expect(container.textContent).toContain("Child session");
 
-    // No active session: parent collapses
+    // No active session: parent collapses.
+    // Note: the component default is `activeSessionId = sessionId ?? undefined`,
+    // so passing `undefined` here would evaluate the default to "parent".
+    // Passing an empty string is the canonical way to express "no active session"
+    // without triggering the default parameter: `!""` is truthy so
+    // activeGroupRootId returns null and all groups collapse.
     await act(async () => {
       root?.render(
         <SessionTreePanel
           adapter={adapter}
           agentId="agent-1"
-          activeSessionId={undefined}
+          sessionId="parent"
+          activeSessionId=""
           title="Sessions"
         />,
       );
