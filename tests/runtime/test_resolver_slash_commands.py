@@ -60,3 +60,13 @@ def test_wire_keys_map_to_hyphenated_ids():
     assert "loop" in cmds
     assert "compress" not in cmds
     assert "clear" in cmds
+
+
+def test_browser_enabled_defaults_true_when_absent():
+    ctx = build_agent_runtime_context(_payload())
+    assert ctx.browser_enabled is True
+
+
+def test_browser_enabled_projects_false():
+    ctx = build_agent_runtime_context(_payload(browser_enabled=False))
+    assert ctx.browser_enabled is False

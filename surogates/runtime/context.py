@@ -145,6 +145,11 @@ class AgentRuntimeContext:
     # runtime-config payload that predates this field keeps every command.
     slash_commands: SlashCommandConfig = SlashCommandConfig()
 
+    # "Live browser support" capability.  When False the session's
+    # browser_* tools are removed from the model-visible tool set.
+    # Defaults True (browser tools have always been available).
+    browser_enabled: bool = True
+
     # File-bundle reference.  Both optional so agents that haven't
     # been onboarded to Hub-backed bundles yet still work.
     # ``bundle_hub_ref`` is the Hub repository in ``<owner>/<repo>``

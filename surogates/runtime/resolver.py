@@ -100,6 +100,7 @@ def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
         mcp_server_ids=tuple(payload.get("mcp_server_ids") or ()),
         governance=dict(payload.get("governance") or {}),
         slash_commands=_slash_commands(payload.get("slash_commands")),
+        browser_enabled=bool(payload.get("browser_enabled", True)),
         # bundle reference.  Empty strings → None
         # (a misconfigured payload that ships "" must not turn into
         # a Hub fetch against an empty ref).

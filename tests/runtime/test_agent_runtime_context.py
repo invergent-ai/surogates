@@ -193,3 +193,17 @@ def test_slash_command_config_can_disable_everything():
 
     cfg = SlashCommandConfig(commands=frozenset())
     assert "loop" not in cfg.commands
+
+
+def test_browser_enabled_defaults_true():
+    from surogates.runtime import AgentRuntimeContext
+
+    ctx = AgentRuntimeContext(
+        agent_id="a-1",
+        org_id="o-1",
+        project_id="p-1",
+        enabled=True,
+        config_version=1,
+        storage_key_prefix="p-1/a-1",
+    )
+    assert ctx.browser_enabled is True

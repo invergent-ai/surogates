@@ -1111,6 +1111,17 @@ async def run_worker(settings: Settings) -> None:
         if not attached_kbs:
             effective_tools.discard("kb_list_pages")
             effective_tools.discard("kb_read_page")
+        # "Live browser support" capability: drop the browser_* tools from
+        # the model-visible set when the agent has it turned off.  The
+        # shared browser pool stays wired; this agent's LLM just never
+        # sees the schemas, so the browser pane stays empty.  Derived from
+        # the registry's ``browser`` toolset so it never drifts.
+        if not ctx.browser_enabled:
+            effective_tools.difference_update(
+                e.name
+                for e in tool_registry.get_all()
+                if e.toolset == "browser"
+            )
         # Principal-aware tool-set filtering: ``create_artifact``
         # requires the harness API client (so the session must have a
         # principal AND ``use_api_for_harness_tools`` must be on), and
