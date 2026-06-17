@@ -494,9 +494,13 @@ export function SessionTreePanel({
     const parentOf = new Map<string, string | null>();
     for (const n of nodes) parentOf.set(n.id, n.parentId ?? null);
     // Walk up from the active session to its top-level ancestor.
+    // The visited set guards against corrupt data with circular parentId refs.
+    const visited = new Set<string>();
     let current = activeSessionId;
     let parent = parentOf.get(current);
     while (parent != null) {
+      if (visited.has(parent)) break;
+      visited.add(current);
       current = parent;
       parent = parentOf.get(current);
     }
