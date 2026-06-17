@@ -184,7 +184,6 @@ def test_agent_runtime_context_slash_commands_default_is_permissive():
         storage_key_prefix="p-1/a-1",
     )
     assert ctx.slash_commands == SlashCommandConfig()
-    assert ctx.slash_commands.enabled is True
     assert "loop" in ctx.slash_commands.commands
     assert "clear" in ctx.slash_commands.commands
 
@@ -192,6 +191,5 @@ def test_agent_runtime_context_slash_commands_default_is_permissive():
 def test_slash_command_config_can_disable_everything():
     from surogates.runtime import SlashCommandConfig
 
-    cfg = SlashCommandConfig(enabled=False, commands=frozenset())
-    assert cfg.enabled is False
+    cfg = SlashCommandConfig(commands=frozenset())
     assert "loop" not in cfg.commands

@@ -138,6 +138,14 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         output_cost_per_1k=0.0,
         supports_vision=False,
     ),
+    "glm-5.2": ModelInfo(
+        id="glm-5.2",
+        context_window=1_000_000,
+        max_output_tokens=131_072,
+        input_cost_per_1k=0.0,
+        output_cost_per_1k=0.0,
+        supports_vision=False,
+    ),
     "mimo-v2.5-pro": ModelInfo(
         id="mimo-v2.5-pro",
         context_window=1_048_576,
@@ -207,6 +215,7 @@ _ALIASES: dict[str, str] = {
     "qwen3.7-max": "qwen-3-7-max",
     "xiaomi/mimo-v2.5-pro": "mimo-v2.5-pro",
     "minimax/minimax-m3": "minimax-m3",
+    "z-ai/glm-5.2": "glm-5.2",
 }
 
 

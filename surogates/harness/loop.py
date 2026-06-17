@@ -753,12 +753,8 @@ class AgentHarness(
     # ------------------------------------------------------------------
 
     def _slash_command_enabled(self, name: str) -> bool:
-        """True when slash command *name* is available for this agent —
-        the master switch is on AND the command is individually enabled."""
-        return (
-            self._slash_commands.enabled
-            and name in self._slash_commands.commands
-        )
+        """True when slash command *name* is enabled for this agent."""
+        return name in self._slash_commands.commands
 
     def _slash_command_block_reason(self, content: str | None) -> str | None:
         """User-facing message when the slash command in *content* is gated
@@ -766,8 +762,6 @@ class AgentHarness(
         name = _slash_command_name(content)
         if name is None or self._slash_command_enabled(name):
             return None
-        if not self._slash_commands.enabled:
-            return "Slash commands are disabled for this agent."
         return f"/{name} is disabled for this agent."
 
     # ------------------------------------------------------------------

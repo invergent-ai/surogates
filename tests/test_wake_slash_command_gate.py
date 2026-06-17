@@ -128,7 +128,6 @@ def _without(*omit: str) -> SlashCommandConfig:
     from surogates.runtime import SLASH_COMMAND_IDS
 
     return SlashCommandConfig(
-        enabled=True,
         commands=frozenset(SLASH_COMMAND_IDS - set(omit)),
     )
 
@@ -148,25 +147,6 @@ async def test_disabled_command_refused_in_wake(monkeypatch):
 
     assert _llm_responses(store) == ["/loop is disabled for this agent."]
     harness._handle_loop_command.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_master_off_refused_in_wake(monkeypatch):
-    """Master switch off → even ``/clear`` is refused with the group message."""
-    monkeypatch.setattr(
-        loop_module, "resolve_agent_def", AsyncMock(return_value=None),
-    )
-    session = _session()
-    store = _stub_store(session, [_user_event(10, "/clear")])
-    harness = _harness(
-        store, SlashCommandConfig(enabled=False, commands=frozenset()),
-    )
-    harness._handle_clear_command = AsyncMock()
-
-    await harness.wake(session.id)
-
-    assert _llm_responses(store) == ["Slash commands are disabled for this agent."]
-    harness._handle_clear_command.assert_not_awaited()
 
 
 @pytest.mark.asyncio

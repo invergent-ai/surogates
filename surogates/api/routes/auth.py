@@ -7,7 +7,7 @@ import uuid
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from surogates.audit import (
@@ -83,6 +83,11 @@ class AuthConfigResponse(BaseModel):
 
     self_registration_enabled: bool
     firebase: FirebaseWebConfig | None = None
+    # Enabled built-in slash commands for this agent, as canonical
+    # hyphenated ids (e.g. "loop", "deep-research").  The web SPA hides
+    # disabled commands from the composer menu + navbar.  "clear" has no
+    # flag and is always present.
+    slash_commands: list[str] = Field(default_factory=list)
 
 
 class FirebaseExchangeRequest(BaseModel):
@@ -107,20 +112,26 @@ async def auth_config(
     config is configured for this project so the SPA falls back to
     local login.
     """
+    slash_commands = sorted(agent_runtime.slash_commands.commands)
     cache = getattr(request.app.state, "firebase_config_cache", None)
     project_id = getattr(agent_runtime, "project_id", None)
     if cache is None or not project_id:
         return AuthConfigResponse(
-            self_registration_enabled=False, firebase=None,
+            self_registration_enabled=False,
+            firebase=None,
+            slash_commands=slash_commands,
         )
     try:
         fb = await cache.get(project_id)
     except LookupError:
         return AuthConfigResponse(
-            self_registration_enabled=False, firebase=None,
+            self_registration_enabled=False,
+            firebase=None,
+            slash_commands=slash_commands,
         )
     return AuthConfigResponse(
         self_registration_enabled=True,
+        slash_commands=slash_commands,
         firebase=FirebaseWebConfig(
             api_key=fb.api_key,
             auth_domain=fb.auth_domain,

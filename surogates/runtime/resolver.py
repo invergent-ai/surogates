@@ -52,8 +52,7 @@ def _slash_commands(blob: dict | None) -> SlashCommandConfig:
 
     Absent / falsy → the permissive default (every command enabled) so a
     runtime-config payload that predates this field keeps current
-    behavior.  ``clear`` has no per-command flag and is always included;
-    the master ``enabled`` flag is what gates it.
+    behavior.  ``clear`` has no per-command flag and is always included.
 
     This gate is intentionally **fail-OPEN**: a missing or malformed
     ``slash_commands`` blob re-enables every command rather than locking
@@ -65,11 +64,10 @@ def _slash_commands(blob: dict | None) -> SlashCommandConfig:
     """
     if not blob:
         return SlashCommandConfig()
-    enabled = bool(blob.get("enabled", True))
     raw = blob.get("commands") or {}
     ids = {cid for wire, cid in _SLASH_WIRE_TO_ID.items() if raw.get(wire)}
     ids.add("clear")
-    return SlashCommandConfig(enabled=enabled, commands=frozenset(ids))
+    return SlashCommandConfig(commands=frozenset(ids))
 
 
 def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
