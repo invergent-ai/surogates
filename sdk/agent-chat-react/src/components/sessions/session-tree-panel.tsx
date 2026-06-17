@@ -195,6 +195,7 @@ function TreeNodeRow({
   entry,
   depth,
   activeSessionId,
+  activeGroupRootId,
   canStop,
   canDelete,
   onSelect,
@@ -204,6 +205,7 @@ function TreeNodeRow({
   entry: TreeEntry;
   depth: number;
   activeSessionId: string;
+  activeGroupRootId: string | null;
   canStop: boolean;
   canDelete: boolean;
   onSelect: (sessionId: string) => void;
@@ -217,6 +219,9 @@ function TreeNodeRow({
   // Only child sessions can be stopped from the tree; top-level sessions use
   // the main composer stop control.
   const isChildSession = entry.parentId != null;
+  const isInActiveGroup =
+    activeGroupRootId !== null &&
+    (entry.id === activeGroupRootId || entry.parentId === activeGroupRootId);
   const title = entry.title ?? fallbackSessionTitle(entry);
   const subtitle = [
     formatRunKind(entry.runKind),
@@ -241,7 +246,9 @@ function TreeNodeRow({
           "min-h-11 md:min-h-0",
           isActive
             ? "bg-line text-foreground border-l-primary"
-            : "bg-transparent text-foreground/80 hover:bg-input hover:text-foreground border-l-transparent",
+            : isInActiveGroup
+              ? "bg-line/40 text-foreground/80 hover:bg-input hover:text-foreground border-l-transparent"
+              : "bg-transparent text-foreground/80 hover:bg-input hover:text-foreground border-l-transparent",
         )}
         style={{ paddingLeft: `${depth * 12 + 12}px` }}
       >
@@ -305,6 +312,7 @@ function TreeNodeRow({
             entry={child}
             depth={depth + 1}
             activeSessionId={activeSessionId}
+            activeGroupRootId={activeGroupRootId}
             canStop={canStop}
             canDelete={canDelete}
             onSelect={onSelect}
@@ -465,6 +473,19 @@ export function SessionTreePanel({
 
   const roots = useMemo(() => buildTree(nodes), [nodes]);
 
+  const activeGroupRootId = useMemo<string | null>(() => {
+    if (!activeSessionId) return null;
+    const parentOf = new Map<string, string | null>();
+    for (const n of nodes) parentOf.set(n.id, n.parentId ?? null);
+    let current: string | null = activeSessionId;
+    while (current !== null) {
+      const parent = parentOf.get(current);
+      if (parent == null) break;
+      current = parent;
+    }
+    return current;
+  }, [activeSessionId, nodes]);
+
   const handleSelect = useCallback(
     (id: string) => {
       onSessionSelect?.(id);
@@ -556,6 +577,7 @@ export function SessionTreePanel({
               entry={entry}
               depth={0}
               activeSessionId={activeSessionId ?? ""}
+              activeGroupRootId={activeGroupRootId}
               canStop={Boolean(adapter.stopSession)}
               canDelete={Boolean(adapter.deleteSession)}
               onSelect={handleSelect}

@@ -495,6 +495,251 @@ describe("SessionTreePanel", () => {
     expect(deleteButton?.className).not.toContain("md:opacity-0");
   });
 
+  it("applies in-group tint to children when parent is the active session", async () => {
+    const adapter: AgentChatAdapter = {
+      ...createAdapter([
+        session({ id: "parent", title: "Parent session", agentId: "agent-1" }),
+      ]),
+      async getSessionTree() {
+        return {
+          total: 2,
+          nodes: [
+            {
+              id: "parent",
+              parentId: null,
+              rootSessionId: "parent",
+              depth: 0,
+              agentId: "agent-1",
+              channel: "web",
+              status: "completed",
+              title: "Parent session",
+              model: "surogate",
+              messageCount: 0,
+              toolCallCount: 0,
+              createdAt: "2026-01-01T00:00:00Z",
+              updatedAt: "2026-01-01T00:00:00Z",
+            },
+            {
+              id: "child-1",
+              parentId: "parent",
+              rootSessionId: "parent",
+              depth: 1,
+              agentId: "agent-1",
+              channel: "delegation",
+              status: "completed",
+              title: "Child one",
+              model: "surogate",
+              messageCount: 0,
+              toolCallCount: 0,
+              createdAt: "2026-01-01T00:01:00Z",
+              updatedAt: "2026-01-01T00:01:00Z",
+            },
+          ],
+        };
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <SessionTreePanel
+          adapter={adapter}
+          agentId="agent-1"
+          loadList
+          sessionId="parent"
+          activeSessionId="parent"
+          title="Sessions"
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    const rows = Array.from(container.querySelectorAll<HTMLElement>('[role="button"]'));
+    const parentRow = rows.find((r) => r.textContent?.includes("Parent session"));
+    const childRow = rows.find((r) => r.textContent?.includes("Child one"));
+
+    // Parent is the active node — full gray
+    expect(parentRow?.className).toContain("bg-line");
+    expect(parentRow?.className).not.toContain("bg-line/40");
+    // Child is in the active group but not active — lighter tint
+    expect(childRow?.className).toContain("bg-line/40");
+    expect(childRow?.className).not.toContain("bg-transparent");
+  });
+
+  it("applies in-group tint to parent and siblings when a child is the active session", async () => {
+    const adapter: AgentChatAdapter = {
+      ...createAdapter([
+        session({ id: "parent", title: "Parent session", agentId: "agent-1" }),
+      ]),
+      async getSessionTree() {
+        return {
+          total: 3,
+          nodes: [
+            {
+              id: "parent",
+              parentId: null,
+              rootSessionId: "parent",
+              depth: 0,
+              agentId: "agent-1",
+              channel: "web",
+              status: "completed",
+              title: "Parent session",
+              model: "surogate",
+              messageCount: 0,
+              toolCallCount: 0,
+              createdAt: "2026-01-01T00:00:00Z",
+              updatedAt: "2026-01-01T00:00:00Z",
+            },
+            {
+              id: "child-1",
+              parentId: "parent",
+              rootSessionId: "parent",
+              depth: 1,
+              agentId: "agent-1",
+              channel: "delegation",
+              status: "completed",
+              title: "Child one",
+              model: "surogate",
+              messageCount: 0,
+              toolCallCount: 0,
+              createdAt: "2026-01-01T00:01:00Z",
+              updatedAt: "2026-01-01T00:01:00Z",
+            },
+            {
+              id: "child-2",
+              parentId: "parent",
+              rootSessionId: "parent",
+              depth: 1,
+              agentId: "agent-1",
+              channel: "delegation",
+              status: "completed",
+              title: "Child two",
+              model: "surogate",
+              messageCount: 0,
+              toolCallCount: 0,
+              createdAt: "2026-01-01T00:02:00Z",
+              updatedAt: "2026-01-01T00:02:00Z",
+            },
+          ],
+        };
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <SessionTreePanel
+          adapter={adapter}
+          agentId="agent-1"
+          loadList
+          sessionId="parent"
+          activeSessionId="child-1"
+          title="Sessions"
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    const rows = Array.from(container.querySelectorAll<HTMLElement>('[role="button"]'));
+    const parentRow = rows.find((r) => r.textContent?.includes("Parent session"));
+    const child1Row = rows.find((r) => r.textContent?.includes("Child one"));
+    const child2Row = rows.find((r) => r.textContent?.includes("Child two"));
+
+    // child-1 is active
+    expect(child1Row?.className).toContain("bg-line");
+    expect(child1Row?.className).not.toContain("bg-line/40");
+    // Parent and sibling are in-group
+    expect(parentRow?.className).toContain("bg-line/40");
+    expect(child2Row?.className).toContain("bg-line/40");
+  });
+
+  it("leaves unrelated top-level sessions transparent when there is an active group", async () => {
+    const adapter: AgentChatAdapter = {
+      ...createAdapter([
+        session({ id: "unrelated", title: "Other session", agentId: "agent-1" }),
+      ]),
+      async getSessionTree() {
+        return {
+          total: 3,
+          nodes: [
+            {
+              id: "parent",
+              parentId: null,
+              rootSessionId: "parent",
+              depth: 0,
+              agentId: "agent-1",
+              channel: "web",
+              status: "completed",
+              title: "Parent session",
+              model: "surogate",
+              messageCount: 0,
+              toolCallCount: 0,
+              createdAt: "2026-01-01T00:00:00Z",
+              updatedAt: "2026-01-01T00:00:00Z",
+            },
+            {
+              id: "child-1",
+              parentId: "parent",
+              rootSessionId: "parent",
+              depth: 1,
+              agentId: "agent-1",
+              channel: "delegation",
+              status: "completed",
+              title: "Child one",
+              model: "surogate",
+              messageCount: 0,
+              toolCallCount: 0,
+              createdAt: "2026-01-01T00:01:00Z",
+              updatedAt: "2026-01-01T00:01:00Z",
+            },
+            {
+              id: "unrelated",
+              parentId: null,
+              rootSessionId: "unrelated",
+              depth: 0,
+              agentId: "agent-1",
+              channel: "web",
+              status: "completed",
+              title: "Other session",
+              model: "surogate",
+              messageCount: 0,
+              toolCallCount: 0,
+              createdAt: "2026-01-01T00:03:00Z",
+              updatedAt: "2026-01-01T00:03:00Z",
+            },
+          ],
+        };
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <SessionTreePanel
+          adapter={adapter}
+          agentId="agent-1"
+          loadList
+          sessionId="parent"
+          activeSessionId="parent"
+          title="Sessions"
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    const rows = Array.from(container.querySelectorAll<HTMLElement>('[role="button"]'));
+    const unrelatedRow = rows.find((r) => r.textContent?.includes("Other session"));
+
+    expect(unrelatedRow?.className).toContain("bg-transparent");
+    expect(unrelatedRow?.className).not.toContain("bg-line");
+  });
+
   it("removes a deleted session before the delete refetch completes", async () => {
     const sessions = [
       session({ id: "s-1", title: "First session", agentId: "agent-1" }),
