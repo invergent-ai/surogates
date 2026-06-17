@@ -249,9 +249,9 @@ function TreeNodeRow({
           "group flex items-center gap-2 w-full py-2 pr-2 text-left cursor-pointer transition-colors border-l-2",
           "min-h-11 md:min-h-0",
           isActive
-            ? "bg-line text-foreground border-l-primary"
+            ? "bg-faint/30 dark:bg-[#1e2840] text-foreground border-l-primary"
             : isInActiveGroup
-              ? "bg-line/40 text-foreground/80 hover:bg-input hover:text-foreground border-l-transparent"
+              ? "bg-line/70 dark:bg-line/60 text-foreground/80 hover:bg-input hover:text-foreground border-l-transparent"
               : "bg-transparent text-foreground/80 hover:bg-input hover:text-foreground border-l-transparent",
         )}
         style={{ paddingLeft: `${depth * 12 + 12}px` }}
