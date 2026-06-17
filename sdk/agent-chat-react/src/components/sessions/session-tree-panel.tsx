@@ -195,6 +195,18 @@ function fallbackSessionTitle(entry: AgentChatSessionTreeNode): string {
   return "New session";
 }
 
+// Background / border classes for a tree row, by group state: the active
+// row, a row in the active group, or an unrelated row.
+function rowStateClass(isActive: boolean, isInActiveGroup: boolean): string {
+  if (isActive) {
+    return "bg-faint/30 dark:bg-[#1e2840] text-foreground border-l-primary";
+  }
+  if (isInActiveGroup) {
+    return "bg-line/70 dark:bg-line/60 text-foreground/80 hover:bg-input hover:text-foreground border-l-transparent";
+  }
+  return "bg-transparent text-foreground/80 hover:bg-input hover:text-foreground border-l-transparent";
+}
+
 function TreeNodeRow({
   entry,
   depth,
@@ -252,11 +264,7 @@ function TreeNodeRow({
         className={cn(
           "group flex items-center gap-2 w-full py-2 pr-2 text-left cursor-pointer transition-colors border-l-2",
           "min-h-11 md:min-h-0",
-          isActive
-            ? "bg-faint/30 dark:bg-[#1e2840] text-foreground border-l-primary"
-            : isInActiveGroup
-              ? "bg-line/70 dark:bg-line/60 text-foreground/80 hover:bg-input hover:text-foreground border-l-transparent"
-              : "bg-transparent text-foreground/80 hover:bg-input hover:text-foreground border-l-transparent",
+          rowStateClass(isActive, isInActiveGroup),
         )}
         style={{ paddingLeft: `${depth * 12 + 12}px` }}
       >
@@ -485,14 +493,16 @@ export function SessionTreePanel({
     if (!activeSessionId) return null;
     const parentOf = new Map<string, string | null>();
     for (const n of nodes) parentOf.set(n.id, n.parentId ?? null);
-    let current: string | null = activeSessionId;
-    while (current !== null) {
-      const parent = parentOf.get(current);
-      if (parent == null) break;
+    // Walk up from the active session to its top-level ancestor.
+    let current = activeSessionId;
+    let parent = parentOf.get(current);
+    while (parent != null) {
       current = parent;
+      parent = parentOf.get(current);
     }
-    if (current !== null && !parentOf.has(current)) return null;
-    return current;
+    // `activeSessionId` may not be in the tree (e.g. a session outside the
+    // loaded list); in that case it has no group root.
+    return parentOf.has(current) ? current : null;
   }, [activeSessionId, nodes]);
 
   const handleSelect = useCallback(
