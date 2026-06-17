@@ -740,6 +740,175 @@ describe("SessionTreePanel", () => {
     expect(unrelatedRow?.className).not.toContain("bg-line");
   });
 
+  it("collapses an unrelated parent when the active session moves to a different group", async () => {
+    const treeNodes = [
+      {
+        id: "group-a",
+        parentId: null as string | null,
+        rootSessionId: "group-a",
+        depth: 0,
+        agentId: "agent-1",
+        channel: "web",
+        status: "completed",
+        title: "Group A parent",
+        model: "surogate",
+        messageCount: 0,
+        toolCallCount: 0,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+      },
+      {
+        id: "group-a-child",
+        parentId: "group-a",
+        rootSessionId: "group-a",
+        depth: 1,
+        agentId: "agent-1",
+        channel: "delegation",
+        status: "completed",
+        title: "Group A child",
+        model: "surogate",
+        messageCount: 0,
+        toolCallCount: 0,
+        createdAt: "2026-01-01T00:01:00Z",
+        updatedAt: "2026-01-01T00:01:00Z",
+      },
+      {
+        id: "group-b",
+        parentId: null as string | null,
+        rootSessionId: "group-b",
+        depth: 0,
+        agentId: "agent-1",
+        channel: "web",
+        status: "completed",
+        title: "Group B parent",
+        model: "surogate",
+        messageCount: 0,
+        toolCallCount: 0,
+        createdAt: "2026-01-01T00:02:00Z",
+        updatedAt: "2026-01-01T00:02:00Z",
+      },
+    ];
+    const adapter: AgentChatAdapter = {
+      ...createAdapter([]),
+      async getSessionTree() {
+        return { total: treeNodes.length, nodes: treeNodes };
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    // Active = group-a: child is visible
+    await act(async () => {
+      root?.render(
+        <SessionTreePanel
+          adapter={adapter}
+          agentId="agent-1"
+          sessionId="group-a"
+          activeSessionId="group-a"
+          title="Sessions"
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Group A child");
+
+    // Switch to group-b: group-a should collapse
+    await act(async () => {
+      root?.render(
+        <SessionTreePanel
+          adapter={adapter}
+          agentId="agent-1"
+          sessionId="group-b"
+          activeSessionId="group-b"
+          title="Sessions"
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).not.toContain("Group A child");
+    expect(container.textContent).toContain("Group B parent");
+  });
+
+  it("collapses all parents when there is no active session", async () => {
+    const adapter: AgentChatAdapter = {
+      ...createAdapter([]),
+      async getSessionTree() {
+        return {
+          total: 2,
+          nodes: [
+            {
+              id: "parent",
+              parentId: null,
+              rootSessionId: "parent",
+              depth: 0,
+              agentId: "agent-1",
+              channel: "web",
+              status: "completed",
+              title: "Parent session",
+              model: "surogate",
+              messageCount: 0,
+              toolCallCount: 0,
+              createdAt: "2026-01-01T00:00:00Z",
+              updatedAt: "2026-01-01T00:00:00Z",
+            },
+            {
+              id: "child-1",
+              parentId: "parent",
+              rootSessionId: "parent",
+              depth: 1,
+              agentId: "agent-1",
+              channel: "delegation",
+              status: "completed",
+              title: "Child session",
+              model: "surogate",
+              messageCount: 0,
+              toolCallCount: 0,
+              createdAt: "2026-01-01T00:01:00Z",
+              updatedAt: "2026-01-01T00:01:00Z",
+            },
+          ],
+        };
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    // Active = parent: child visible
+    await act(async () => {
+      root?.render(
+        <SessionTreePanel
+          adapter={adapter}
+          agentId="agent-1"
+          sessionId="parent"
+          activeSessionId="parent"
+          title="Sessions"
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Child session");
+
+    // No active session: parent collapses
+    await act(async () => {
+      root?.render(
+        <SessionTreePanel
+          adapter={adapter}
+          agentId="agent-1"
+          activeSessionId={undefined}
+          title="Sessions"
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).not.toContain("Child session");
+  });
+
   it("removes a deleted session before the delete refetch completes", async () => {
     const sessions = [
       session({ id: "s-1", title: "First session", agentId: "agent-1" }),

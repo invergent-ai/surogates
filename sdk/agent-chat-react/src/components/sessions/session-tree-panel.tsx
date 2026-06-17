@@ -228,6 +228,10 @@ function TreeNodeRow({
     formatSessionTime(entry.updatedAt),
   ].filter(Boolean).join(" · ");
 
+  useEffect(() => {
+    if (hasChildren) setExpanded(isInActiveGroup);
+  }, [isInActiveGroup, hasChildren]);
+
   return (
     <>
       {/* eslint-disable-next-line jsx-a11y/prefer-tag-over-role --
