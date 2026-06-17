@@ -26,6 +26,10 @@ import type {
 export interface SessionTreePanelProps {
   adapter: AgentChatAdapter;
   sessionId?: string | null;
+  /**
+   * ID of the currently highlighted session. Defaults to `sessionId`.
+   * Pass `""` (empty string) to clear the active highlight when `sessionId` is set.
+   */
   activeSessionId?: string;
   agentId?: string;
   title?: string;
@@ -191,10 +195,23 @@ function fallbackSessionTitle(entry: AgentChatSessionTreeNode): string {
   return "New session";
 }
 
+// Background / border classes for a tree row, by group state: the active
+// row, a row in the active group, or an unrelated row.
+function rowStateClass(isActive: boolean, isInActiveGroup: boolean): string {
+  if (isActive) {
+    return "bg-faint/30 dark:bg-[#1e2840] text-foreground border-l-primary";
+  }
+  if (isInActiveGroup) {
+    return "bg-line/70 dark:bg-line/60 text-foreground/80 hover:bg-input hover:text-foreground border-l-transparent";
+  }
+  return "bg-transparent text-foreground/80 hover:bg-input hover:text-foreground border-l-transparent";
+}
+
 function TreeNodeRow({
   entry,
   depth,
   activeSessionId,
+  activeGroupRootId,
   canStop,
   canDelete,
   onSelect,
@@ -204,6 +221,7 @@ function TreeNodeRow({
   entry: TreeEntry;
   depth: number;
   activeSessionId: string;
+  activeGroupRootId: string | null;
   canStop: boolean;
   canDelete: boolean;
   onSelect: (sessionId: string) => void;
@@ -217,11 +235,18 @@ function TreeNodeRow({
   // Only child sessions can be stopped from the tree; top-level sessions use
   // the main composer stop control.
   const isChildSession = entry.parentId != null;
+  const isInActiveGroup =
+    activeGroupRootId !== null &&
+    (entry.id === activeGroupRootId || entry.parentId === activeGroupRootId);
   const title = entry.title ?? fallbackSessionTitle(entry);
   const subtitle = [
     formatRunKind(entry.runKind),
     formatSessionTime(entry.updatedAt),
   ].filter(Boolean).join(" · ");
+
+  useEffect(() => {
+    if (hasChildren) setExpanded(isInActiveGroup);
+  }, [isInActiveGroup, hasChildren]);
 
   return (
     <>
@@ -239,9 +264,7 @@ function TreeNodeRow({
         className={cn(
           "group flex items-center gap-2 w-full py-2 pr-2 text-left cursor-pointer transition-colors border-l-2",
           "min-h-11 md:min-h-0",
-          isActive
-            ? "bg-line text-foreground border-l-primary"
-            : "bg-transparent text-foreground/80 hover:bg-input hover:text-foreground border-l-transparent",
+          rowStateClass(isActive, isInActiveGroup),
         )}
         style={{ paddingLeft: `${depth * 12 + 12}px` }}
       >
@@ -305,6 +328,7 @@ function TreeNodeRow({
             entry={child}
             depth={depth + 1}
             activeSessionId={activeSessionId}
+            activeGroupRootId={activeGroupRootId}
             canStop={canStop}
             canDelete={canDelete}
             onSelect={onSelect}
@@ -465,6 +489,26 @@ export function SessionTreePanel({
 
   const roots = useMemo(() => buildTree(nodes), [nodes]);
 
+  const activeGroupRootId = useMemo<string | null>(() => {
+    if (!activeSessionId) return null;
+    const parentOf = new Map<string, string | null>();
+    for (const n of nodes) parentOf.set(n.id, n.parentId ?? null);
+    // Walk up from the active session to its top-level ancestor.
+    // The visited set guards against corrupt data with circular parentId refs.
+    const visited = new Set<string>();
+    let current = activeSessionId;
+    let parent = parentOf.get(current);
+    while (parent != null) {
+      if (visited.has(parent)) break;
+      visited.add(current);
+      current = parent;
+      parent = parentOf.get(current);
+    }
+    // `activeSessionId` may not be in the tree (e.g. a session outside the
+    // loaded list); in that case it has no group root.
+    return parentOf.has(current) ? current : null;
+  }, [activeSessionId, nodes]);
+
   const handleSelect = useCallback(
     (id: string) => {
       onSessionSelect?.(id);
@@ -556,6 +600,7 @@ export function SessionTreePanel({
               entry={entry}
               depth={0}
               activeSessionId={activeSessionId ?? ""}
+              activeGroupRootId={activeGroupRootId}
               canStop={Boolean(adapter.stopSession)}
               canDelete={Boolean(adapter.deleteSession)}
               onSelect={handleSelect}
