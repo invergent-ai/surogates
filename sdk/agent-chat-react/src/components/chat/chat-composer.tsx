@@ -685,20 +685,22 @@ function ChatComposerInner({
             <SparklesIcon />
             Skills
           </Button>
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent cursor-pointer"
-            onClick={() => {
-              setMenuMode("scheduled");
-              setMenuDismissed(false);
-              setButtonMenuOpen(true);
-            }}
-          >
-            <ClockIcon />
-            Scheduled Tasks
-          </Button>
+          {loopsEnabled && (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent cursor-pointer"
+              onClick={() => {
+                setMenuMode("scheduled");
+                setMenuDismissed(false);
+                setButtonMenuOpen(true);
+              }}
+            >
+              <ClockIcon />
+              Scheduled Tasks
+            </Button>
+          )}
         </div>
       )}
       <PopoverAnchor asChild>
