@@ -101,6 +101,7 @@ class PromptBuilder:
         soul_md_content: str | None = None,
         agent_md_content: str | None = None,
         slash_commands: SlashCommandConfig | None = None,
+        brainstorming_gate: bool = True,
     ) -> None:
         self.tenant = tenant
         self.skills: list = skills or []
@@ -124,6 +125,9 @@ class PromptBuilder:
         self._slash_commands: SlashCommandConfig = (
             slash_commands or SlashCommandConfig()
         )
+        # When False the brainstorming-gate guidance (force a design pass
+        # before creative work) is left out of the system prompt.
+        self._brainstorming_gate: bool = brainstorming_gate
         # Active sub-agent type for the current session, or None when
         # the session runs with the default identity.  When set, the
         # agent def's system_prompt body replaces the org-level
@@ -237,8 +241,12 @@ class PromptBuilder:
             # The brainstorming gate is a separate fragment so it carries its
             # own emphasis and can be disabled independently of the broader
             # skills guidance. It only matters when skill_view is available
-            # because the gate tells the agent to load the brainstorming skill.
-            if "skill_view" in self._available_tools:
+            # because the gate tells the agent to load the brainstorming
+            # skill — and the agent can turn it off via ``brainstorming_gate``.
+            if (
+                "skill_view" in self._available_tools
+                and self._brainstorming_gate
+            ):
                 parts.append(self._prompts.get("guidance/brainstorming_gate"))
         if "ask_user_question" in self._available_tools:
             parts.append(self._prompts.get("guidance/ask_user_question"))

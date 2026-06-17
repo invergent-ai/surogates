@@ -70,3 +70,13 @@ def test_browser_enabled_defaults_true_when_absent():
 def test_browser_enabled_projects_false():
     ctx = build_agent_runtime_context(_payload(browser_enabled=False))
     assert ctx.browser_enabled is False
+
+
+def test_brainstorming_gate_defaults_true_and_projects():
+    assert build_agent_runtime_context(_payload()).brainstorming_gate is True
+    assert (
+        build_agent_runtime_context(
+            _payload(brainstorming_gate=False)
+        ).brainstorming_gate
+        is False
+    )

@@ -1162,6 +1162,7 @@ async def run_worker(settings: Settings) -> None:
             soul_md_content=soul_md_content,
             agent_md_content=agent_md_content,
             slash_commands=ctx.slash_commands,
+            brainstorming_gate=ctx.brainstorming_gate,
         )
 
         # User / SA / channel-session principals each map to a JWT

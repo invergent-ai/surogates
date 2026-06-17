@@ -145,6 +145,12 @@ class AgentRuntimeContext:
     # runtime-config payload that predates this field keeps every command.
     slash_commands: SlashCommandConfig = SlashCommandConfig()
 
+    # When True the system prompt injects the ``brainstorming_gate``
+    # guidance (force a design pass before creative work) alongside the
+    # skills guidance.  Defaults to True so a runtime-config payload that
+    # predates this field keeps the current behavior.
+    brainstorming_gate: bool = True
+
     # "Live browser support" capability.  When False the session's
     # browser_* tools are removed from the model-visible tool set.
     # Defaults True (browser tools have always been available).
