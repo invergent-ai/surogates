@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { surogatesWebChatAdapter } from "@/features/chat";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/app-store";
+import { slashCommandEnabled } from "@/stores/capabilities-slice";
 
 // Width and density are owned by the parent (`AppShell`):
 //   - desktop aside : `data-mode="aside"` + breakpoints `md` (compact, w-14)
@@ -52,6 +53,7 @@ export function SessionSidebar() {
   const sessions = useAppStore((s) => s.sessions);
   const sessionsLoading = useAppStore((s) => s.sessionsLoading);
   const user = useAppStore((s) => s.user);
+  const slashCommands = useAppStore((s) => s.slashCommands);
   const { theme, setTheme } = useTheme();
   const { unreadCount } = useInboxUnreadCount(surogatesWebChatAdapter);
   const viewMode = useChatViewMode();
@@ -236,16 +238,20 @@ export function SessionSidebar() {
             showExpandedBlock,
           )}
         >
-          <MissionsPanel
-            adapter={surogatesWebChatAdapter}
-            onMissionSelect={handleMissionSelect}
-          />
-          <ScheduledWorkPanel
-            adapter={surogatesWebChatAdapter}
-            onSessionSelect={handleSelectSession}
-            onScheduleCancel={handleScheduleChanged}
-            onScheduleRunNow={handleScheduleChanged}
-          />
+          {slashCommandEnabled(slashCommands, "mission") && (
+            <MissionsPanel
+              adapter={surogatesWebChatAdapter}
+              onMissionSelect={handleMissionSelect}
+            />
+          )}
+          {slashCommandEnabled(slashCommands, "loop") && (
+            <ScheduledWorkPanel
+              adapter={surogatesWebChatAdapter}
+              onSessionSelect={handleSelectSession}
+              onScheduleCancel={handleScheduleChanged}
+              onScheduleRunNow={handleScheduleChanged}
+            />
+          )}
         </div>
       </div>
 

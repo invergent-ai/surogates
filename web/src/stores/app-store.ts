@@ -2,13 +2,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 import { create } from "zustand";
+import {
+  type CapabilitiesSlice,
+  createCapabilitiesSlice,
+} from "./capabilities-slice";
 import { createSessionsSlice, type SessionsSlice } from "./sessions-slice";
 import { createUserSlice, type UserSlice } from "./user-slice";
 import { createWorkspaceSlice, type WorkspaceSlice } from "./workspace-slice";
 
 export type AppState = SessionsSlice &
   UserSlice &
-  WorkspaceSlice & {
+  WorkspaceSlice &
+  CapabilitiesSlice & {
     loading: boolean;
     error: string | null;
   };
@@ -19,4 +24,5 @@ export const useAppStore = create<AppState>((...a) => ({
   ...createSessionsSlice(...a),
   ...createUserSlice(...a),
   ...createWorkspaceSlice(...a),
+  ...createCapabilitiesSlice(...a),
 }));

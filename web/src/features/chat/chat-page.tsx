@@ -12,6 +12,7 @@ import { AppShell } from "@/components/app-shell";
 import { SessionSidebar } from "@/components/navbar";
 import { TransparencyBanner } from "@/components/transparency-banner";
 import { useAppStore } from "@/stores/app-store";
+import { slashCommandEnabled } from "@/stores/capabilities-slice";
 import * as sessionsApi from "@/api/sessions";
 import {
   getTransparencyConfig,
@@ -34,12 +35,15 @@ export function ChatPage() {
   const fetchUser = useAppStore((s) => s.fetchUser);
   const sessionsLoading = useAppStore((s) => s.sessionsLoading);
   const upsertSession = useAppStore((s) => s.upsertSession);
+  const fetchCapabilities = useAppStore((s) => s.fetchCapabilities);
+  const slashCommands = useAppStore((s) => s.slashCommands);
 
   // Load initial data on mount
   useEffect(() => {
     void fetchSessions();
     void fetchUser();
-  }, [fetchSessions, fetchUser]);
+    void fetchCapabilities();
+  }, [fetchSessions, fetchUser, fetchCapabilities]);
 
   const chatRouteState = getChatRouteState({
     activeSessionId,
@@ -203,7 +207,21 @@ export function ChatPage() {
               disabled={sessionDeclined}
               onMessagesChange={setChatMessages}
               onOpenIntegrations={() => void navigate({ to: "/integrations" })}
-              codeAgentsEnabled
+              // Hide built-in slash commands the agent has disabled. Unknown
+              // (capabilities not yet loaded) fails open via the helper.
+              compressEnabled={slashCommandEnabled(slashCommands, "compress")}
+              loopsEnabled={slashCommandEnabled(slashCommands, "loop")}
+              missionsEnabled={slashCommandEnabled(slashCommands, "mission")}
+              goalsEnabled={slashCommandEnabled(slashCommands, "goal")}
+              codeAgentsEnabled={slashCommandEnabled(slashCommands, "code")}
+              deepResearchEnabled={slashCommandEnabled(
+                slashCommands,
+                "deep-research",
+              )}
+              researchEnabled={slashCommandEnabled(
+                slashCommands,
+                "auto-research",
+              )}
             />
           </div>
         )}

@@ -163,6 +163,10 @@ export interface FirebaseRuntimeConfig {
 export interface AuthConfigResponse {
   self_registration_enabled: boolean;
   firebase: FirebaseRuntimeConfig | null;
+  // Enabled built-in slash commands (canonical hyphenated ids, e.g.
+  // "loop", "deep-research"). Absent on a fetch error or an older backend
+  // — consumers treat "absent" as "unknown" and fail open (show all).
+  slash_commands?: string[];
 }
 
 /** Fetch the runtime auth config. Falls back to "disabled" on any error
