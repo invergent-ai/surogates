@@ -140,9 +140,7 @@ interface ChatThreadProps {
   // Forwarded as-is to ChatComposer.
   codeAgentsEnabled?: boolean;
   // Slash-command capability group. Forwarded as-is to ChatComposer:
-  // ``slashCommandsEnabled`` is the master switch; the rest gate the
-  // always-on lightweight builtins (default shown).
-  slashCommandsEnabled?: boolean;
+  // these gate the always-on lightweight builtins (default shown).
   loopsEnabled?: boolean;
   missionsEnabled?: boolean;
   goalsEnabled?: boolean;
@@ -2127,7 +2125,6 @@ export function ChatThread({
   deepResearchEnabled = false,
   researchEnabled = false,
   codeAgentsEnabled = false,
-  slashCommandsEnabled = true,
   loopsEnabled = true,
   missionsEnabled = true,
   goalsEnabled = true,
@@ -2237,7 +2234,6 @@ export function ChatThread({
         deepResearchEnabled={deepResearchEnabled}
         researchEnabled={researchEnabled}
         codeAgentsEnabled={codeAgentsEnabled}
-        slashCommandsEnabled={slashCommandsEnabled}
         loopsEnabled={loopsEnabled}
         missionsEnabled={missionsEnabled}
         goalsEnabled={goalsEnabled}

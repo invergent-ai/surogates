@@ -51,13 +51,11 @@ export interface AgentChatProps {
    */
   codeAgentsEnabled?: boolean;
   /**
-   * Slash-command capability group (per-agent). `slashCommandsEnabled` is
-   * the master switch — when false the composer hides every builtin slash
-   * command (including `/clear`). The other four gate the always-on
+   * Slash-command capability group (per-agent). These gate the always-on
    * lightweight builtins and default to shown when omitted, so a host that
-   * hasn't wired them keeps the current menu.
+   * hasn't wired them keeps the current menu. `/clear` has no flag and is
+   * always available; the host owns the capability gate.
    */
-  slashCommandsEnabled?: boolean;
   loopsEnabled?: boolean;
   missionsEnabled?: boolean;
   goalsEnabled?: boolean;
@@ -95,7 +93,6 @@ export function AgentChat({
   deepResearchEnabled = false,
   researchEnabled = false,
   codeAgentsEnabled = false,
-  slashCommandsEnabled = true,
   loopsEnabled = true,
   missionsEnabled = true,
   goalsEnabled = true,
@@ -298,7 +295,6 @@ export function AgentChat({
               deepResearchEnabled={deepResearchEnabled}
               researchEnabled={researchEnabled}
               codeAgentsEnabled={codeAgentsEnabled}
-              slashCommandsEnabled={slashCommandsEnabled}
               loopsEnabled={loopsEnabled}
               missionsEnabled={missionsEnabled}
               goalsEnabled={goalsEnabled}

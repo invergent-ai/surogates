@@ -73,14 +73,13 @@ SLASH_COMMAND_IDS: frozenset[str] = frozenset(
 class SlashCommandConfig:
     """Per-agent slash-command availability.
 
-    ``enabled`` is the master switch — when False every slash command is
-    refused.  ``commands`` is the set of individually-enabled canonical
-    command ids (see ``SLASH_COMMAND_IDS``).  The default is fully
-    permissive so an agent whose runtime-config predates this field keeps
-    every command (backward compatible).
+    ``commands`` is the set of enabled canonical command ids (see
+    ``SLASH_COMMAND_IDS``).  The default is fully permissive so an agent
+    whose runtime-config predates this field keeps every command
+    (backward compatible).  ``clear`` has no per-agent flag and is always
+    present.
     """
 
-    enabled: bool = True
     commands: frozenset[str] = SLASH_COMMAND_IDS
 
 

@@ -157,13 +157,10 @@ interface ChatComposerProps {
   // host owns the capability.
   codeAgentsEnabled?: boolean;
   // ── Slash-command capability group (per-agent) ───────────────────
-  // Master switch.  When false the composer hides EVERY builtin slash
-  // command (including ``/clear``) — the harness refuses them all, so
-  // surfacing them would only mislead.  The next four gate the
-  // always-on lightweight builtins; unlike the opt-in flags above they
-  // default to shown (``!== false``) so a host that hasn't wired them
-  // yet keeps the current menu.
-  slashCommandsEnabled?: boolean;
+  // These gate the always-on lightweight builtins; unlike the opt-in
+  // flags above they default to shown (``!== false``) so a host that
+  // hasn't wired them yet keeps the current menu.  ``/clear`` has no
+  // flag and is always available.
   loopsEnabled?: boolean;
   missionsEnabled?: boolean;
   goalsEnabled?: boolean;
@@ -330,7 +327,6 @@ function ChatComposerInner({
   deepResearchEnabled = false,
   researchEnabled = false,
   codeAgentsEnabled = false,
-  slashCommandsEnabled = true,
   loopsEnabled = true,
   missionsEnabled = true,
   goalsEnabled = true,
@@ -402,12 +398,7 @@ function ChatComposerInner({
 
   const builtinCommands = useMemo<SlashCommand[]>(
     () => {
-      // Master switch off ⇒ the harness refuses every slash command, so
-      // the menu shows none (including /clear).
-      if (!slashCommandsEnabled) {
-        return [];
-      }
-      // /clear has no per-command flag — it follows the master switch.
+      // /clear has no per-command flag and is always available.
       const base: SlashCommand[] = [
         { value: "/clear", label: "/clear", description: "Clear conversation" },
       ];
@@ -477,7 +468,6 @@ function ChatComposerInner({
       return base;
     },
     [
-      slashCommandsEnabled,
       compressEnabled,
       goalsEnabled,
       missionsEnabled,

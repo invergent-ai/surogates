@@ -32,20 +32,19 @@ def test_absent_slash_commands_defaults_permissive():
     assert ctx.slash_commands == SlashCommandConfig()
 
 
-def test_master_off_projects_disabled():
+def test_all_commands_off_keeps_only_clear():
     ctx = build_agent_runtime_context(
-        _payload(slash_commands={"enabled": False, "commands": {}})
+        _payload(slash_commands={"commands": {}})
     )
-    assert ctx.slash_commands.enabled is False
-    # ``clear`` is always present; the master ``enabled`` flag gates it.
-    assert "clear" in ctx.slash_commands.commands
+    # Every flagged command is off, but ``clear`` has no flag and is
+    # always present.
+    assert ctx.slash_commands.commands == frozenset({"clear"})
 
 
 def test_wire_keys_map_to_hyphenated_ids():
     ctx = build_agent_runtime_context(
         _payload(
             slash_commands={
-                "enabled": True,
                 "commands": {
                     "deep_research": True,
                     "auto_research": False,

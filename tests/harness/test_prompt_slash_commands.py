@@ -53,14 +53,14 @@ def test_loop_guidance_present_when_loop_enabled():
 
 def test_dynamic_loop_child_guidance_stays_present_when_loop_creation_disabled():
     frag = default_library().get("guidance/loop_wait")
-    cfg = SlashCommandConfig(enabled=True, commands=frozenset({"clear"}))  # no "loop"
+    cfg = SlashCommandConfig(commands=frozenset({"clear"}))  # no "loop"
     out = _builder(cfg)._tool_guidance_section()
     assert frag in out
 
 
 def test_cron_loop_child_guidance_stays_present_when_loop_creation_disabled():
     frag = default_library().get("guidance/cron_loop")
-    cfg = SlashCommandConfig(enabled=True, commands=frozenset({"clear"}))  # no "loop"
+    cfg = SlashCommandConfig(commands=frozenset({"clear"}))  # no "loop"
     out = _builder(
         cfg,
         tools=frozenset({"loop_complete"}),

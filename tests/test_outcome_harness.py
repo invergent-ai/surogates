@@ -949,24 +949,8 @@ def test_block_reason_allows_when_permissive():
     assert harness._slash_command_block_reason("hello") is None
 
 
-def test_block_reason_master_off_blocks_all():
-    harness = _make_harness(
-        FakeStore(),
-        slash_commands=SlashCommandConfig(enabled=False, commands=frozenset()),
-    )
-    assert (
-        harness._slash_command_block_reason("/clear")
-        == "Slash commands are disabled for this agent."
-    )
-    assert (
-        harness._slash_command_block_reason("/loop x")
-        == "Slash commands are disabled for this agent."
-    )
-
-
 def test_block_reason_per_command_off():
     cfg = SlashCommandConfig(
-        enabled=True,
         commands=frozenset(
             {"clear", "compress", "code", "deep-research", "auto-research", "mission", "goal"}
         ),  # "loop" omitted
