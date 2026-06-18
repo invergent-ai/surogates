@@ -95,6 +95,8 @@ class TestLiveViewWebSocketFrameTypes:
 
 # --- Full-route coverage of proxy_live_view_ws (control-required + RFB proxy) ---
 
+import asyncio
+
 import pytest
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -137,6 +139,9 @@ class _FakeUpstream:
         async def _gen():
             for frame in self._sends:
                 yield frame
+            # Keep the read side open so the client->upstream pump has time to
+            # forward input before the connection is torn down.
+            await asyncio.Event().wait()
         return _gen()
 
     async def send(self, frame) -> None:
@@ -146,16 +151,18 @@ class _FakeUpstream:
         pass
 
 
-def _build_ws_app(monkeypatch, *, control_holder, upstream_sends):
+def _build_ws_app(
+    monkeypatch, *, control_holder, upstream_sends, tenant_user_id=USER_1, prefix=""
+):
     from fastapi import FastAPI
 
     app = FastAPI()
-    app.include_router(browser_mod.router)
+    app.include_router(browser_mod.router, prefix=prefix)
     app.state.browser_resolver = _FakeResolver(_FakeResolved("ws://browser:8080"))
     app.state.browser_control = _FakeControlHeld(control_holder)
 
     async def _fake_auth(_app, *, path, token, cookies, authorization):
-        return _tenant()
+        return _tenant(user_id=tenant_user_id)
 
     monkeypatch.setattr(browser_mod, "authenticate_websocket_tenant", _fake_auth)
 
@@ -190,3 +197,34 @@ def test_live_view_ws_proxies_rfb_for_holder(monkeypatch) -> None:
     with client.websocket_connect(f"/api/sessions/{_SID}/browser/live/?token=t") as ws:
         frame = ws.receive_bytes()
     assert frame.startswith(b"RFB 00")
+
+
+def test_service_account_holder_input_is_forwarded(monkeypatch) -> None:
+    # PROD "take control": the ops proxy connects to the runtime as a service
+    # account (tenant.user_id is None) on the /v1/api path and asserts the
+    # holder via ?owner_user_id=. Input must still be forwarded for that holder
+    # — the gate must key on the effective user, not tenant.user_id.
+    import time
+
+    app, upstream = _build_ws_app(
+        monkeypatch,
+        control_holder="owner-x",
+        upstream_sends=[],
+        tenant_user_id=None,
+        prefix="/v1",
+    )
+    client = TestClient(app)
+    url = f"/v1/api/sessions/{_SID}/browser/live/ws?owner_user_id=owner-x&token=t"
+    handshake = b"RFB 003.008\n\x01\x01"  # 14 client handshake bytes (forwarded raw)
+    pointer = b"\x05\x00\x00\x0a\x00\x0b"  # RFB PointerEvent (type 5) — input
+
+    with client.websocket_connect(url) as ws:
+        ws.send_bytes(handshake + pointer)
+        deadline = time.time() + 3
+        while time.time() < deadline and len(
+            b"".join(c for c in upstream.received if isinstance(c, bytes))
+        ) < len(handshake) + len(pointer):
+            time.sleep(0.02)
+
+    forwarded = b"".join(c for c in upstream.received if isinstance(c, bytes))
+    assert pointer in forwarded, "PointerEvent dropped — live view is read-only"

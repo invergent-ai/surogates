@@ -509,10 +509,12 @@ async def proxy_live_view_ws(
                     # or coalesce RFB messages, so parse the client byte stream and
                     # drop KeyEvent/PointerEvent/ClientCutText when control is no
                     # longer held (e.g. after the control lease's TTL expires).
+                    # Key on ``effective`` (the live-view identity validated at
+                    # connect time) — NOT ``tenant.user_id``, which is None for the
+                    # ops proxy's service-account connection and would drop all
+                    # input, making the live view read-only.
                     input_allowed = (
-                        tenant.user_id is not None
-                        and await control.held_by(str(session_id))
-                        == str(tenant.user_id)
+                        await control.held_by(str(session_id)) == effective
                     )
                     for chunk in rfb_gate.filter_client_bytes(
                         frame,
