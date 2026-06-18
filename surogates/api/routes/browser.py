@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from surogates.browser.client import KernelBrowserClient
 from surogates.browser.control import AcquireOutcome
-from surogates.browser.rfb import RFBClientMessageGate, is_input_frame
+from surogates.browser.rfb import RFBClientMessageGate
 from surogates.session.events import EventType
 from surogates.tenant.auth.middleware import (
     LIVE_VIEW_TOKEN_COOKIE,
@@ -127,21 +127,6 @@ def _live_view_upstream_ws_url(
         return upstream_url
     query = urlencode(_live_view_query_pairs(query_params))
     return f"{upstream_url}?{query}" if query else upstream_url
-
-
-async def _should_forward_client_frame(
-    *,
-    session_id: str,
-    tenant: TenantContext,
-    control,
-    frame: bytes,
-) -> bool:
-    if not is_input_frame(frame):
-        return True
-    if tenant.user_id is None:
-        return False
-    holder = await control.held_by(session_id)
-    return holder == str(tenant.user_id)
 
 
 async def _ensure_live_view_control(

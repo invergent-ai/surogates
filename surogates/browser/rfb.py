@@ -84,13 +84,3 @@ class RFBClientMessageGate:
                 continue
             out.append(message)
         return out
-
-
-def is_input_frame(frame: bytes) -> bool:
-    """Whether a single RFB ClientMessage frame is an input message.
-
-    Retained for the focused ``_should_forward_client_frame`` helper and its
-    unit tests; the production WS proxy uses ``RFBClientMessageGate`` so it is
-    correct across WebSocket frame boundaries.
-    """
-    return bool(frame) and frame[0] in RFB_INPUT_TYPES
