@@ -81,6 +81,51 @@ describe("BrowserLiveView", () => {
     expect(node.querySelector('[data-testid="browser-rfb"]')).not.toBeNull();
   });
 
+  it("zooms the viewport through noVNC scaling (sizing the target, not transforming it)", async () => {
+    const node = await renderView(<BrowserLiveView src={SRC} />);
+    // Zoom controls only appear once connected.
+    await act(async () => {
+      rfbMock.listeners.connect?.(new CustomEvent("connect"));
+    });
+
+    const target = node.querySelector(
+      '[data-testid="browser-rfb"]',
+    ) as HTMLElement;
+    const zoomOut = node.querySelector(
+      '[aria-label="Zoom out"]',
+    ) as HTMLButtonElement;
+    const zoomIn = node.querySelector(
+      '[aria-label="Zoom in"]',
+    ) as HTMLButtonElement;
+    const reset = node.querySelector(
+      '[aria-label="Reset zoom"]',
+    ) as HTMLButtonElement;
+
+    // Fit-to-pane floor: target is exactly the viewport and cannot zoom out.
+    expect(target.style.width).toBe("100%");
+    expect(target.style.height).toBe("100%");
+    expect(zoomOut.disabled).toBe(true);
+    expect(target.style.transform).toBe("");
+
+    await act(async () => zoomIn.click());
+    expect(target.style.width).toBe("150%");
+    expect(target.style.height).toBe("150%");
+    expect(zoomOut.disabled).toBe(false);
+
+    // Clamp at the 3× ceiling: 150 → 200 → 250 → 300, then no further.
+    await act(async () => zoomIn.click());
+    await act(async () => zoomIn.click());
+    await act(async () => zoomIn.click());
+    expect(target.style.width).toBe("300%");
+    expect(zoomIn.disabled).toBe(true);
+    await act(async () => zoomIn.click());
+    expect(target.style.width).toBe("300%");
+
+    await act(async () => reset.click());
+    expect(target.style.width).toBe("100%");
+    expect(zoomOut.disabled).toBe(true);
+  });
+
   it("calls onDisconnect and shows an overlay when the connection drops", async () => {
     const onDisconnect = vi.fn();
     const node = await renderView(
