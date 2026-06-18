@@ -2,8 +2,8 @@
 
 **Date:** 2026-06-18
 **Status:** Approved, ready for planning
-**Scope:** surogates only — backend runtime + SDK (`agent-chat-react`) + web app. Ops/Studio is verify-only.
-**Branch:** `fix/inbox-cross-agent-open-session` (off `master`).
+**Scope:** cross-repo — `surogates` (runtime inbox + SDK `agent-chat-react` + web app) and a one-field `surogate-ops` backend change (expose the agent slug in the runtime config). Ops *frontend* is verify-only.
+**Branches:** `surogates` `fix/inbox-cross-agent-open-session` (off `master`); `surogate-ops` `fix/inbox-cross-agent-open-session` (off `main`).
 
 ## Problem
 
@@ -61,43 +61,50 @@ correct agent. Ops is touched only to stay compatible with the SDK change (verif
 
 ## Design
 
-> **Refinement (during planning):** the same/different-agent decision is made **client-side
-> by comparing agent ids**, not by a backend `is_current` flag. Computing `is_current` on the
-> inbox item would force the user-scoped inbox endpoint to resolve an agent (it currently does
-> not, and its integration tests call it with no agent), breaking that contract. Instead the
-> backend stamps each item with its owner `agent_id` + `agent_web_url`, and exposes the
-> **current** agent id via the already-agent-resolved `/auth/config`. Behavior is identical.
+> **Revision (2026-06-18, after local testing):** the cross-agent URL is built from the
+> owning agent's **slug** (`agent.name`), NOT from `api_web_url`. Investigation (DB + code)
+> showed `api_web_url` in the runtime config is **never populated** — no code path writes it
+> into the runtime-config blob, and it is null for every agent — so the originally-specced
+> new-tab path (using `agent_web_url`) could never fire, in any environment. The agent's
+> hosted page is slug-based: `https://<slug>.<domain>/chat/<id>` (confirmed in prod, e.g.
+> `https://pdf-reader-2u6vbt.cloud.surogate.ai/chat/<id>`). The same/different-agent decision
+> is still made client-side by comparing agent ids (via `/auth/config`'s `agent_id`).
+> **Unaffected by this revision (already built):** `/auth/config` returning `agent_id`
+> (Design 2 below) and the list/tree decoupling (Design 4).
 
-### 1. Backend — stamp owner agent on inbox items + expose current agent
-Two additive, non-breaking changes:
+### 1. Backend — expose the owner agent's slug + stamp it on inbox items
+Cross-repo: the slug lives in **ops** (`agent.name`); the surogates runtime only knows the
+agent id, so ops must surface the slug in the runtime config it serves.
 
-- **Inbox items** (`surogates/api/routes/inbox.py`): serialize `agent_id` (owner, from the
-  item's `session.agent_id`) and `agent_web_url` (owner agent's `api_web_url`, read from that
-  agent's runtime config via the runtime-config cache keyed by `agent_id`). The serializer
-  currently takes only `item`; the list path batches `session_id -> agent_id` (one query) and
-  dedupes the per-owner-agent `api_web_url` cache lookups; single-item paths resolve one each.
-  The endpoint stays **user-scoped** — no agent resolution added, no contract change.
-- **Current agent** (`surogates/api/routes/auth.py`): add `agent_id` to `AuthConfigResponse`
-  (the `/auth/config` handler already resolves the agent via `agent_runtime_context_dep`, so
-  `agent_runtime.agent_id` is in hand). This is how the web learns its own agent id.
+- **ops** (`surogate_ops/server/routes/agent_runtime.py`): add the agent's slug (`agent.name`)
+  to the runtime-config response (`AgentRuntimeConfigResponse`). The handler already loads the
+  `Agent` row, so it is a one-field addition. This lets the surogates runtime learn an agent's
+  slug from its (cached) runtime config.
+- **surogates** (`surogates/api/routes/inbox.py`): the runtime-config payload now carries the
+  slug; stamp `agent_slug` (owner, from that agent's runtime-config payload, best-effort/None
+  on cache miss) on each inbox item alongside `agent_id`. (Replaces the always-null
+  `agent_web_url`.) The list path still batches `session_id -> agent_id` and dedupes the
+  per-owner-agent slug lookups. The inbox endpoint stays **user-scoped**.
+- **Current agent** (`surogates/api/routes/auth.py`): `/auth/config` returns `agent_id` —
+  DONE, unchanged by this revision.
 
 ### 2. SDK — carry the fields and pass the item to the handler
-- Add optional `agentId?: string | null`, `agentWebUrl?: string | null` to
-  `AgentChatInboxItem` (`types.ts`); map them in the web and ops `api/inbox.ts` response
-  mappers (ops may leave them undefined).
-- `InboxPanel`'s Open-session button calls `onSessionSelect?.(item.sessionId, item)` —
-  adding the full item as an **optional second argument**. The `onSessionSelect` prop type
-  becomes `(sessionId: string, item?: AgentChatInboxItem) => void`. This is backward
-  compatible: an existing `(sessionId) => …` handler (ops) remains assignable and untouched.
+- Add optional `agentId?: string | null` and **`agentSlug?: string | null`** to
+  `AgentChatInboxItem` (`types.ts`); map them in the **web** `api/inbox.ts` response mapper.
+  (ops frontend is a separate repo on the published SDK — verify-only, no ops mapper change.)
+- `InboxPanel`'s Open-session button calls `onSessionSelect?.(item.sessionId, item)` (item as
+  an optional 2nd arg) — DONE for `agentId` + the callback; this revision swaps the
+  `agentWebUrl` field for `agentSlug`.
 
-### 3. Web — route by comparing the item's agent to the current agent
-- The web stores its **current agent id** from `/auth/config` (the capabilities fetch it
-  already makes on load).
-- `handleSessionSelect` (`web/src/features/inbox/inbox-page.tsx`) becomes `(sessionId, item?)`:
-  - If `item?.agentId && item.agentId !== currentAgentId && item.agentWebUrl` →
-    `window.open(\`${item.agentWebUrl}/chat/${sessionId}\`, "_blank", "noopener")` (new tab,
-    owner's app).
-  - Otherwise (same agent, or fields absent) → today's in-place behavior:
+### 3. Web — build the owner's URL from the current host + slug
+- The web stores its **current agent id** from `/auth/config` (DONE).
+- `handleSessionSelect(sessionId, item?)`:
+  - If `item?.agentId && currentAgentId && item.agentId !== currentAgentId && item.agentSlug`
+    AND the current host is a `<slug>.<domain>` form (has a parseable multi-label domain, not
+    `localhost`): derive `domain` from `window.location.host` (drop the current first label),
+    then `window.open(\`${protocol}//${item.agentSlug}.${domain}/chat/${sessionId}\`, "_blank",
+    "noopener")`.
+  - Otherwise (same agent, missing slug, or no derivable domain — e.g. localhost) → in-place
     `setActiveSession(sessionId)` + `navigate({ to: "/chat/$sessionId" })`.
 
 ### 4. Secondary hardening — decouple list from tree (SDK)
@@ -109,33 +116,40 @@ fetch itself fails. A failed active-session tree must not blank the list.
 
 ## Error handling / edge cases
 
-- Different agent but `agent_web_url` missing/null → fall back to in-place (never worse than today).
-- Item agent fields absent, or current agent id unknown (ops, pre-deploy items) → in-place.
+- Different agent but `agent_slug` missing/null, OR no derivable domain (e.g. `localhost`,
+  single-label host) → fall back to in-place (never worse than today).
+- Item agent fields absent, or current agent id unknown (pre-deploy items) → in-place.
   Fully backward compatible.
 - `window.open` blocked by a popup blocker → acceptable; it fires from a direct user click, so
   browsers normally allow it. No special handling planned.
 
 ## Testing
 
-- **Backend:** the inbox serializer includes `agent_id` + `agent_web_url` (owner) on items;
-  an item whose session belongs to another agent serializes that agent's id + `agent_web_url`.
-  `/auth/config` returns the current `agent_id`.
-- **SDK:** `InboxPanel` passes the item as the 2nd arg to `onSessionSelect`;
-  `SessionTreePanel` still renders the list when `getSessionTree` rejects (list 200, tree
-  404 → list shown, no blank).
-- **Web:** the handler calls `window.open` with `\`${agentWebUrl}/chat/${sessionId}\`` for a
-  different-agent item and navigates in place for a same-agent item; falls back to in-place
-  when `agentWebUrl` is absent.
+- **ops:** the runtime-config response includes the agent's slug (`name`).
+- **surogates backend:** the inbox serializer includes `agent_id` + `agent_slug` (owner) on
+  items; an item whose session belongs to another agent serializes that agent's id + slug.
+  `/auth/config` returns the current `agent_id` (done).
+- **SDK:** `InboxPanel` passes the item as the 2nd arg to `onSessionSelect` (done);
+  `AgentChatInboxItem` carries `agentSlug`; `SessionTreePanel` still renders the list when
+  `getSessionTree` rejects (done).
+- **Web:** no component test harness — verify by typecheck + manual. Handler builds
+  `<protocol>//<agentSlug>.<domain>/chat/<sessionId>` from `window.location` for a
+  different-agent item (when a domain is derivable), navigates in place for a same-agent item,
+  and falls back to in-place when the slug or domain is unavailable.
 
 ## Local testing caveat
 
-`agent_web_url` points at the cluster/prod host, so the *new tab itself* will not load on
-localhost. Locally we verify the logic (correct branch + the URL passed to `window.open`);
-the real cross-agent tab is confirmed in a prod-like environment.
+The web app runs at `localhost:5174` locally (no `<slug>.<domain>` host), so the domain is not
+derivable and a cross-agent click correctly falls back to **in-place** — the new tab cannot be
+exercised locally. The cross-agent tab is confirmed in a prod-like environment (web served at
+`<slug>.cloud.surogate.ai`). Locally, verify: cross-agent detection (agent ids differ), the
+in-place fallback, and the list-no-blank fix.
 
 ## Cross-repo note
 
-Per the standing rule, chat-menu / SDK / adapter changes are checked in both ops and the web
-app. Here the SDK `InboxPanel` and `AgentChatInboxItem` changes are backward compatible, ops's
-inbox is per-agent (no cross-agent case), and ops's `onSessionSelect` handler stays valid — so
-ops needs verification only, not a behavioral change.
+This revision touches **two repos**: `surogate-ops` (expose the agent slug in the runtime
+config) and `surogates` (carry the slug through the inbox + build the URL in web). Per the
+standing rule, the shared SDK change is backward compatible; the ops *frontend* inbox is
+per-agent (no cross-agent case) and stays verify-only — the only ops change is the backend
+runtime-config field. Branches: `surogates` off `master`, `surogate-ops` off `main` (both
+`fix/inbox-cross-agent-open-session`).
