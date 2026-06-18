@@ -69,30 +69,35 @@ async def _resolve_agent_fields(
 ) -> dict:
     """Map session_id -> {"agent_id", "agent_slug"} for serialization.
 
-    `agent_slug` is best-effort: an absent cache or any per-agent lookup
-    failure leaves it None so the item still serializes (the web then falls
-    back to in-place). The distinct per-owner-agent lookups run concurrently.
+    `agent_slug` is best-effort: an absent cache or a cache miss (LookupError)
+    leaves it None so the item still serializes (the web then falls back to
+    in-place). Other errors propagate, matching the cache's other callers, so
+    a real management-plane failure is not silently masked. The distinct
+    per-owner-agent lookups run concurrently.
     """
     store = request.app.state.session_store
     agent_by_session = await store.get_agent_ids_for_sessions(session_ids)
     cache = getattr(request.app.state, "runtime_config_cache", None)
     distinct_agents = list(dict.fromkeys(agent_by_session.values()))
-    slug_by_agent: dict[str, str | None] = dict.fromkeys(distinct_agents)
-    if cache is not None and distinct_agents:
-        payloads = await asyncio.gather(
-            *(cache.get(agent_id) for agent_id in distinct_agents),
-            return_exceptions=True,
-        )
-        for agent_id, payload in zip(distinct_agents, payloads):
-            if isinstance(payload, dict):
-                slug_by_agent[agent_id] = payload.get("slug")
+
+    async def _slug(agent_id: str) -> str | None:
+        if cache is None:
+            return None
+        try:
+            payload = await cache.get(agent_id)
+        except LookupError:
+            return None
+        return payload.get("slug")
+
+    slugs = await asyncio.gather(*(_slug(agent_id) for agent_id in distinct_agents))
+    slug_by_agent = dict(zip(distinct_agents, slugs))
     return {
         sid: {"agent_id": agent_id, "agent_slug": slug_by_agent.get(agent_id)}
         for sid, agent_id in agent_by_session.items()
     }
 
 
-async def _agent_fields_for(request: Request, session_id) -> dict:
+async def _agent_fields_for(request: Request, session_id: UUID) -> dict:
     """Agent fields for one inbox item's session (single-item serialize path)."""
     fields = await _resolve_agent_fields(request, [session_id])
     return fields.get(session_id, {})
