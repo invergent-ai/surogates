@@ -72,18 +72,22 @@ responsive.
 - The harness holds no CDP of its own — the agent drives chromium via kernel-images-api
   REST (`/playwright/execute`, `/computer/*`).
 - `control.py` acquire/release is a Redis lock; it touches CDP not at all today.
+- Browser tools already short-circuit while the Redis control lock exists:
+  `_resolve_session_browser` returns `paused_by_user` before `browser_pool.ensure`, and
+  `browser_close` has the same lock check. The harness also injects a one-time pause
+  notice telling the agent to wait.
 
 **Consequence:** a CDP-free login window needs no forced CDP teardown. It needs only that
-**the agent issues no `/playwright/execute` calls while a human holds control** (the
-natural takeover state). Combined with the already-clean launch flags, the login window is
-clean.
+**all browser/CDP entry points keep honoring the existing control lock** so the agent
+issues no `/playwright/execute` calls while a human holds control. Combined with the
+already-clean launch flags, the login window is clean.
 
 ## Architecture
 
 ```
 human ─ noVNC canvas (SDK)
       ─wss /api/sessions/{id}/browser/live/… ─ ops `websocket_live_browser` (token auth)
-      ─ runtime/harness WS proxy (RFB input-frame gating by control owner)
+      ─ runtime/harness WS proxy (control-required stream; RFB input gating as defense-in-depth)
       ─ websockify :8080 (pod) ─ x11vnc ─ Xorg :1 ◀ chromium
 ```
 
@@ -106,16 +110,19 @@ automation, suspended only while control is held.
 ### 2. Harness — `surogates/` (mostly already built)
 - `api/routes/browser.py` already proxies an RFB-over-WS upstream with input-frame gating
   (`_should_forward_client_frame` → `rfb.is_input_frame` types 4/5/6 forwarded only to the
-  control holder; framebuffer-update requests pass through for view-only). Verify against a
-  real websockify upstream; **harden `is_input_frame` for WS-frame vs RFB-message
-  boundaries** (websockify may split/coalesce the RFB byte stream across WS frames —
-  parse the RFB stream rather than assuming one WS frame = one RFB PDU).
+  control holder). The live stream itself already requires browser control; non-holders
+  should keep using `preview.png`, not a view-only RFB session. Verify against a real
+  websockify upstream; **harden input gating for WS-frame vs RFB-message boundaries**
+  (websockify may split/coalesce the RFB byte stream across WS frames — parse the RFB
+  client stream rather than assuming one WS frame = one RFB PDU).
 - Keep `live_view_url = ws://<svc>:443 → :8080` (`kubernetes.py`
   `SERVICE_PORT_LIVE_VIEW=443`, `TARGET_PORT_LIVE_VIEW=8080`).
-- **New logic (the only "crux" work): suspend the agent's browser tool calls while
-  `control.held_by(session)` is set**, so no `/playwright/execute` runs during human
-  control. Enforced at the agent's browser-tool dispatch / the `acquire` path; released on
-  `release` or lease expiry (TTL 60s).
+- **Verify and preserve the existing agent suspend path:** browser tools currently reject
+  with `paused_by_user` while `browser_control.get(session)` is set, avoiding
+  `browser_pool.ensure` and therefore avoiding `/playwright/execute`. Cover every
+  browser/CDP call path in tests, including screenshot/state/close and any direct
+  `KernelBrowserClient` usage. Current behavior is reject-with-guidance, not queue.
+  Release and TTL expiry naturally resume the tools.
 
 ### 3. Ops live-view proxy — `surogate-ops` `surogate_ops/server/routes/sessions.py`
 - **Delete** the neko-specific iframe plumbing: `_inject_ws_token_interceptor` /
@@ -127,26 +134,30 @@ automation, suspended only while control is held.
 
 ### 4. SDK — `sdk/agent-chat-react`
 - Replace the `<iframe>` in `components/browser/browser-live-view.tsx` with a
-  **`@novnc/novnc`** RFB canvas connecting to the live-view WS. View-only unless
-  `hasUserControl` (server still enforces). Drop `pwd=admin` from `browserLiveViewUrl`
-  (`work-agent-chat-adapter.ts`); keep the `token` query param for WS auth.
+  **`@novnc/novnc`** RFB canvas connecting to the live-view WS only after
+  `hasUserControl`; the server also enforces this and closes non-holder streams. Drop
+  `pwd=admin` from `browserLiveViewUrl` (`work-agent-chat-adapter.ts`); keep the `token`
+  query param for WS auth.
 - `browser-pane.tsx` control gating (`canUseLiveView = hasUserControl && liveViewUrl`)
   stays.
 
 ## Control flow (existing, unchanged)
 
 `POST /browser/control {acquire|release}` → Redis lock (`control.py`). Live view requires
-control (`_ensure_live_view_control`). Input frames forwarded only to the holder; other
-watchers are view-only. The new agent-suspend behavior hangs off the same acquire/release.
+control (`_ensure_live_view_control` for HTTP and equivalent WS checks); non-holders get
+preview snapshots instead of an RFB stream. Input-frame gating remains defense-in-depth
+inside the WS proxy. Agent browser tools already reject with `paused_by_user` while the
+same lock is held, and resume after release or TTL expiry.
 
 ## Testing
 
 - **Unit:** RFB input-frame gating, including split/coalesced WS frames (new boundary
   handling).
 - **Integration:** noVNC client through the full proxy chain (ops → runtime → websockify →
-  x11vnc): frames render; input is dropped without control, delivered with control.
-- **Agent-suspend:** while control is held, `/playwright/execute` calls are rejected/queued;
-  resume on release.
+  x11vnc): frames render for the control holder; non-holders cannot open the RFB stream
+  and still receive preview snapshots.
+- **Agent-suspend:** while control is held, browser tools return `paused_by_user` and do
+  not call `/playwright/execute`; resume on release or TTL expiry.
 - **Acceptance:** a human take-control session completes a real Google login (no CDP
   attached during the login), then the agent resumes and observes the logged-in state.
 
@@ -154,9 +165,10 @@ watchers are view-only. The new agent-suspend behavior hangs off the same acquir
 
 - **RFB framing over WS** — confirm websockify's framing and whether the harness must
   buffer/parse the RFB stream to gate input correctly. (Mitigation in §2.)
-- **Agent-suspend mechanism** — confirm where browser-tool dispatch can be gated on
-  `control.held_by`; ensure the agent loop tolerates a suspended browser tool gracefully
-  (the session already emits `inbox.input_required` and waits on takeover).
+- **Agent-suspend coverage** — the mechanism exists in browser-tool preflight and
+  `browser_close`; confirm there are no direct browser/CDP paths that bypass it, and ensure
+  the agent loop tolerates `paused_by_user` gracefully (the harness already injects a
+  browser-pause notice and waits on takeover).
 - **x11vnc perf** — tune encoding/quality at `1280x720`; validate interactive latency on a
   login form through the full proxy chain.
 
