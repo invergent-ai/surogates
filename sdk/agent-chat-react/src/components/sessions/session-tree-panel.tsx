@@ -399,11 +399,19 @@ export function SessionTreePanel({
           sessionId && adapter.getSessionTree
             ? adapter.getSessionTree({ sessionId })
             : Promise.resolve(null);
-        const [sessionList, sessionTree] = await Promise.all([
+        const [listResult, treeResult] = await Promise.allSettled([
           sessionListPromise,
           sessionTreePromise,
         ]);
         if (!mounted.current || currentRequestId !== requestId.current) return;
+        // The list is the panel's backbone; only a list failure is fatal.
+        if (loadList && listResult.status === "rejected") {
+          throw listResult.reason;
+        }
+        const sessionList =
+          listResult.status === "fulfilled" ? listResult.value : null;
+        const sessionTree =
+          treeResult.status === "fulfilled" ? treeResult.value : null;
         let nextNodes = mergeTreeNodes([
           sessionList?.sessions.map(sessionToTreeNode) ?? [],
           sessionTree?.nodes ?? [],

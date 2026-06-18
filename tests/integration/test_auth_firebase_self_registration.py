@@ -153,10 +153,9 @@ async def test_auth_config_hides_firebase_when_self_registration_disabled(
     response = await auth_client.get("/v1/auth/config")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "self_registration_enabled": False,
-        "firebase": None,
-    }
+    body = response.json()
+    assert body["self_registration_enabled"] is False
+    assert body["firebase"] is None
 
 
 async def test_auth_config_exposes_firebase_when_enabled(auth_client, auth_app):

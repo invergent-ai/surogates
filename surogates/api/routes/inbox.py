@@ -64,7 +64,47 @@ def _decode_cursor(cursor: str | None) -> tuple[datetime, int] | None:
         ) from exc
 
 
-def _serialize_item(item) -> dict:
+async def _resolve_agent_fields(
+    request: Request, session_ids: list[UUID]
+) -> dict:
+    """Map session_id -> {"agent_id", "agent_slug"} for serialization.
+
+    `agent_slug` is best-effort: an absent cache or a cache miss (LookupError)
+    leaves it None so the item still serializes (the web then falls back to
+    in-place). Other errors propagate, matching the cache's other callers, so
+    a real management-plane failure is not silently masked. The distinct
+    per-owner-agent lookups run concurrently.
+    """
+    store = request.app.state.session_store
+    agent_by_session = await store.get_agent_ids_for_sessions(session_ids)
+    cache = getattr(request.app.state, "runtime_config_cache", None)
+    distinct_agents = list(dict.fromkeys(agent_by_session.values()))
+
+    async def _slug(agent_id: str) -> str | None:
+        if cache is None:
+            return None
+        try:
+            payload = await cache.get(agent_id)
+        except LookupError:
+            return None
+        return payload.get("slug")
+
+    slugs = await asyncio.gather(*(_slug(agent_id) for agent_id in distinct_agents))
+    slug_by_agent = dict(zip(distinct_agents, slugs))
+    return {
+        sid: {"agent_id": agent_id, "agent_slug": slug_by_agent.get(agent_id)}
+        for sid, agent_id in agent_by_session.items()
+    }
+
+
+async def _agent_fields_for(request: Request, session_id: UUID) -> dict:
+    """Agent fields for one inbox item's session (single-item serialize path)."""
+    fields = await _resolve_agent_fields(request, [session_id])
+    return fields.get(session_id, {})
+
+
+def _serialize_item(item, agent_fields: dict | None = None) -> dict:
+    fields = agent_fields or {}
     return {
         "id": item.id,
         "org_id": str(item.org_id),
@@ -83,6 +123,8 @@ def _serialize_item(item) -> dict:
         "responded_at": item.responded_at.isoformat()
         if item.responded_at
         else None,
+        "agent_id": fields.get("agent_id"),
+        "agent_slug": fields.get("agent_slug"),
     }
 
 
@@ -121,8 +163,14 @@ async def list_inbox(
         if len(items) == limit
         else None
     )
+    agent_fields = await _resolve_agent_fields(
+        request, [item.session_id for item in items]
+    )
     return {
-        "items": [_serialize_item(item) for item in items],
+        "items": [
+            _serialize_item(item, agent_fields.get(item.session_id))
+            for item in items
+        ],
         "next_cursor": next_cursor,
     }
 
@@ -205,7 +253,7 @@ async def get_inbox_item(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Inbox item not found.",
         )
-    return _serialize_item(item)
+    return _serialize_item(item, await _agent_fields_for(request, item.session_id))
 
 
 @router.post("/{item_id}/read")
@@ -223,7 +271,7 @@ async def mark_inbox_item_read(
             detail="Inbox item not found.",
         )
     item = await store.mark_inbox_read(item_id=item_id, user_id=tenant.user_id)
-    return _serialize_item(item)
+    return _serialize_item(item, await _agent_fields_for(request, item.session_id))
 
 
 @router.post("/{item_id}/ack")
@@ -256,7 +304,7 @@ async def acknowledge_inbox_item(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
-    return _serialize_item(item)
+    return _serialize_item(item, await _agent_fields_for(request, item.session_id))
 
 
 @router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -351,4 +399,4 @@ async def respond_to_inbox_item(
             detail=str(exc),
         ) from exc
     await _wake_session_from_request(request, item.session_id)
-    return _serialize_item(item)
+    return _serialize_item(item, await _agent_fields_for(request, item.session_id))
