@@ -69,26 +69,33 @@ async def _resolve_agent_fields(
 ) -> dict:
     """Map session_id -> {"agent_id", "agent_slug"} for serialization.
 
-    `agent_slug` is best-effort: a runtime-config cache miss leaves it
-    None so the item still serializes (the web then falls back to in-place).
+    `agent_slug` is best-effort: an absent cache or any per-agent lookup
+    failure leaves it None so the item still serializes (the web then falls
+    back to in-place). The distinct per-owner-agent lookups run concurrently.
     """
     store = request.app.state.session_store
-    agent_by_session = await store.get_agent_ids_for_sessions(list(session_ids))
+    agent_by_session = await store.get_agent_ids_for_sessions(session_ids)
     cache = getattr(request.app.state, "runtime_config_cache", None)
-    slug_by_agent: dict[str, str | None] = {}
-    out: dict = {}
-    for sid, agent_id in agent_by_session.items():
-        if agent_id not in slug_by_agent:
-            slug = None
-            if cache is not None:
-                try:
-                    payload = await cache.get(agent_id)
-                    slug = payload.get("slug")
-                except LookupError:
-                    slug = None
-            slug_by_agent[agent_id] = slug
-        out[sid] = {"agent_id": agent_id, "agent_slug": slug_by_agent[agent_id]}
-    return out
+    distinct_agents = list(dict.fromkeys(agent_by_session.values()))
+    slug_by_agent: dict[str, str | None] = dict.fromkeys(distinct_agents)
+    if cache is not None and distinct_agents:
+        payloads = await asyncio.gather(
+            *(cache.get(agent_id) for agent_id in distinct_agents),
+            return_exceptions=True,
+        )
+        for agent_id, payload in zip(distinct_agents, payloads):
+            if isinstance(payload, dict):
+                slug_by_agent[agent_id] = payload.get("slug")
+    return {
+        sid: {"agent_id": agent_id, "agent_slug": slug_by_agent.get(agent_id)}
+        for sid, agent_id in agent_by_session.items()
+    }
+
+
+async def _agent_fields_for(request: Request, session_id) -> dict:
+    """Agent fields for one inbox item's session (single-item serialize path)."""
+    fields = await _resolve_agent_fields(request, [session_id])
+    return fields.get(session_id, {})
 
 
 def _serialize_item(item, agent_fields: dict | None = None) -> dict:
@@ -241,8 +248,7 @@ async def get_inbox_item(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Inbox item not found.",
         )
-    agent_fields = await _resolve_agent_fields(request, [item.session_id])
-    return _serialize_item(item, agent_fields.get(item.session_id))
+    return _serialize_item(item, await _agent_fields_for(request, item.session_id))
 
 
 @router.post("/{item_id}/read")
@@ -260,8 +266,7 @@ async def mark_inbox_item_read(
             detail="Inbox item not found.",
         )
     item = await store.mark_inbox_read(item_id=item_id, user_id=tenant.user_id)
-    agent_fields = await _resolve_agent_fields(request, [item.session_id])
-    return _serialize_item(item, agent_fields.get(item.session_id))
+    return _serialize_item(item, await _agent_fields_for(request, item.session_id))
 
 
 @router.post("/{item_id}/ack")
@@ -294,8 +299,7 @@ async def acknowledge_inbox_item(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
-    agent_fields = await _resolve_agent_fields(request, [item.session_id])
-    return _serialize_item(item, agent_fields.get(item.session_id))
+    return _serialize_item(item, await _agent_fields_for(request, item.session_id))
 
 
 @router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -390,5 +394,4 @@ async def respond_to_inbox_item(
             detail=str(exc),
         ) from exc
     await _wake_session_from_request(request, item.session_id)
-    agent_fields = await _resolve_agent_fields(request, [item.session_id])
-    return _serialize_item(item, agent_fields.get(item.session_id))
+    return _serialize_item(item, await _agent_fields_for(request, item.session_id))
