@@ -521,6 +521,41 @@ async def test_sse_stream_emits_snapshot_and_nudge_for_new_item(
     assert "task_complete" in response.text
 
 
+class _FakeRuntimeCache:
+    """Minimal stand-in for ``app.state.runtime_config_cache``.
+
+    Returns a valid runtime-config payload for ``agent_id`` and raises
+    ``LookupError`` for everything else, mirroring the real cache's
+    contract.
+    """
+
+    def __init__(self, agent_id: str) -> None:
+        self._agent_id = agent_id
+
+    async def get(self, agent_id: str) -> dict:
+        if agent_id != self._agent_id:
+            raise LookupError(agent_id)
+        return {
+            "agent_id": agent_id,
+            "org_id": "00000000-0000-0000-0000-000000000000",
+            "project_id": "test-project",
+            "enabled": True,
+            "version": 1,
+            "storage_key_prefix": "",
+        }
+
+
+async def test_auth_config_returns_current_agent_id(client, app):
+    # Seed the runtime-config cache so agent_runtime_context_dep can resolve
+    # "test-agent" without a live management-plane connection.
+    app.state.runtime_config_cache = _FakeRuntimeCache("test-agent")
+
+    response = await client.get("/v1/auth/config?agent_id=test-agent")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["agent_id"] == "test-agent"
+
+
 async def test_ask_user_question_response_flips_inbox_to_responded(
     client,
     session_factory,

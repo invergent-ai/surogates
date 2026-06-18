@@ -81,6 +81,7 @@ class FirebaseWebConfig(BaseModel):
 class AuthConfigResponse(BaseModel):
     """Runtime auth shape exposed by ``GET /v1/auth/config``."""
 
+    agent_id: str
     self_registration_enabled: bool
     firebase: FirebaseWebConfig | None = None
     # Enabled built-in slash commands for this agent, as canonical
@@ -117,6 +118,7 @@ async def auth_config(
     project_id = getattr(agent_runtime, "project_id", None)
     if cache is None or not project_id:
         return AuthConfigResponse(
+            agent_id=agent_runtime.agent_id,
             self_registration_enabled=False,
             firebase=None,
             slash_commands=slash_commands,
@@ -125,11 +127,13 @@ async def auth_config(
         fb = await cache.get(project_id)
     except LookupError:
         return AuthConfigResponse(
+            agent_id=agent_runtime.agent_id,
             self_registration_enabled=False,
             firebase=None,
             slash_commands=slash_commands,
         )
     return AuthConfigResponse(
+        agent_id=agent_runtime.agent_id,
         self_registration_enabled=True,
         slash_commands=slash_commands,
         firebase=FirebaseWebConfig(
