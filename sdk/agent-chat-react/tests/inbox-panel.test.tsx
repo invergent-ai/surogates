@@ -569,7 +569,7 @@ describe("InboxPanel", () => {
     const calls: Array<{ id: string; agentId?: string | null; agentSlug?: string | null }> = [];
     const items = [inboxItem({ id: 1, title: "Done" })];
     items[0].agentId = "other-agent";
-    items[0].agentSlug = "other-agent";
+    items[0].agentSlug = "other-agent-slug";
     const adapter = createAdapter(items);
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -590,7 +590,7 @@ describe("InboxPanel", () => {
     await act(async () => { row?.click(); await Promise.resolve(); });
     const openBtn = container.querySelector<HTMLButtonElement>('button[aria-label="Open session"]');
     await act(async () => { openBtn?.click(); await Promise.resolve(); });
-    expect(calls).toEqual([{ id: "session-1", agentId: "other-agent", agentSlug: "other-agent" }]);
+    expect(calls).toEqual([{ id: "session-1", agentId: "other-agent", agentSlug: "other-agent-slug" }]);
   });
 
   it("deletes the selected inbox item and clears the detail pane", async () => {

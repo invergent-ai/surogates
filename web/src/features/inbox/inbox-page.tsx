@@ -18,6 +18,9 @@ function crossAgentChatUrl(agentSlug: string, sessionId: string): string | null 
   const { protocol, host } = window.location;
   const dot = host.indexOf(".");
   if (dot <= 0) return null; // localhost / single-label host → not derivable
+  // IPv4 host (e.g. LAN dev at 192.168.x.x:5174) has dots but no real domain
+  // to subdomain — fall back to in-place like localhost.
+  if (/^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(host)) return null;
   const domain = host.slice(dot + 1);
   return `${protocol}//${agentSlug}.${domain}/chat/${sessionId}`;
 }
