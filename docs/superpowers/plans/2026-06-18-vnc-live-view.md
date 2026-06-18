@@ -28,16 +28,20 @@
 - Create: `images/browser/supervisor/x11vnc.conf`, `images/browser/supervisor/websockify.conf` — supervised live-view services.
 - Create: `images/browser/test_live_view_rfb.py` — build-and-verify integration check.
 
-**Harness (`/work/surogates`)** — verify-only, no behavior change expected.
+**Harness (`/work/surogates`)** — mostly verification, plus RFB stream-gating hardening.
+- Modify: `surogates/browser/rfb.py` — replace single-frame `is_input_frame` assumptions with a buffered RFB client-message gate.
+- Modify: `surogates/api/routes/browser.py` — keep one gate instance per live-view WS connection and filter client bytes before forwarding upstream.
+- Test: `tests/test_browser_rfb.py` — split/coalesced RFB message coverage.
 - Modify (tests): `tests/test_browser_route_ws.py` — RFB-upstream + control-required coverage.
 - Modify (tests): `tests/test_browser_tools.py` — agent-suspend coverage across every browser tool entry point.
 
 **Ops proxy (`/work/surogate-ops`)**
 - Modify: `surogate_ops/server/routes/sessions.py` — delete neko iframe rewrite/interceptor + neko asset proxying; keep the RFB WS proxy + auth + state/control/preview/DELETE.
-- Modify (tests): `tests/test_live_browser_proxy.py` (new or existing) — WS proxy still authenticates and proxies; HTML interceptor gone.
+- Modify (tests): `tests/test_sessions_live_proxy.py` — existing live-session/browser proxy coverage; assert the HTML interceptor is gone and the RFB WS proxy remains.
 
 **SDK (`/work/surogates/sdk/agent-chat-react`)**
-- Modify: `package.json` — add `@novnc/novnc`.
+- Modify: `package.json` — add `@novnc/novnc` and `@types/novnc__novnc`.
+- Modify: `/work/surogates/pnpm-lock.yaml` — workspace lockfile updated by pnpm.
 - Modify: `src/components/browser/browser-live-view.tsx` — `<iframe>` → noVNC RFB canvas.
 - Modify: `src/components/browser/browser-pane.tsx` — pass a `wss://` URL; mount RFB only when `hasUserControl`.
 - Modify (consumer): `frontend/src/features/work/work-agent-chat-adapter.ts` (in `/work/surogate-ops`) — `browserLiveViewUrl` drops `pwd=admin`, returns the WS path.
@@ -172,7 +176,7 @@ git commit -m "feat(browser-image): serve live view as RFB-over-WebSocket via x1
 
 ---
 
-## Phase B — Harness: verify the RFB path and agent-suspend (no behavior change)
+## Phase B — Harness: verify suspend behavior and harden RFB gating
 
 ### Task B1: Agent-suspend coverage across every browser tool
 
@@ -190,30 +194,74 @@ git commit -m "feat(browser-image): serve live view as RFB-over-WebSocket via x1
 import json
 import pytest
 
-# Names of every browser tool entry point that must honor the control lock.
-SUSPENDED_TOOLS = [
-    "browser_navigate", "browser_act", "browser_extract",
-    "browser_screenshot", "browser_state", "browser_close",
-]
+# Minimal valid args for every registered browser tool entry point.
+BROWSER_TOOL_ARGS = {
+    "browser_navigate": {"url": "https://example.com"},
+    "browser_get_state": {},
+    "browser_screenshot": {},
+    "browser_click": {"x": 10, "y": 10},
+    "browser_type": {"text": "hello"},
+    "browser_press_key": {"keys": ["Enter"]},
+    "browser_scroll": {"x": 10, "y": 10, "delta_y": 100},
+    "browser_drag": {"path": [[10, 10], [20, 20]]},
+    "browser_wait": {"ms": 1},
+    "browser_close": {},
+}
 
-@pytest.mark.parametrize("tool_name", SUSPENDED_TOOLS)
-async def test_browser_tool_paused_while_user_holds_control(tool_name, browser_tool_env):
-    # browser_tool_env: fixture that wires a fake browser_control whose
-    # .get(session_id) returns a ControlEntry (lock held). See conftest.
-    env = browser_tool_env(control_held=True)
-    result = await env.invoke(tool_name)
+@pytest.mark.parametrize("tool_name", BROWSER_TOOL_NAMES)
+async def test_browser_tool_paused_while_user_holds_control(
+    tool_name,
+    tenant,
+    tmp_path,
+) -> None:
+    from surogates.governance.policy import GovernanceGate, PolicyDecision
+    from surogates.tools.registry import ToolRegistry
+    from surogates.tools.router import ToolRouter
+    from surogates.tools.runtime import ToolRuntime
+
+    class AllowAll(GovernanceGate):
+        def __init__(self) -> None:
+            pass
+
+        def check(self, *args: Any, **kwargs: Any) -> PolicyDecision:
+            return PolicyDecision(
+                allowed=True,
+                reason="test",
+                tool_name=str(args[0]),
+            )
+
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    pool = FakePool()
+
+    result = await ToolRouter(
+        registry=registry,
+        sandbox_pool=None,  # type: ignore[arg-type]
+        governance=AllowAll(),
+    ).execute(
+        name=tool_name,
+        arguments=BROWSER_TOOL_ARGS[tool_name],
+        tenant=tenant,
+        session_id=uuid4(),
+        browser_pool=pool,
+        browser_control=FakeControlStore(holder="user-holding-control"),
+        workspace_path=str(tmp_path),
+        _client_factory=lambda endpoint: FakeClient(),
+    )
     payload = json.loads(result)
     assert payload.get("error") == "paused_by_user", (
         f"{tool_name} ran while the user held control"
     )
+    assert pool.ensures == []
+    assert pool.destroyed == []
 ```
 
-If `browser_tool_env` does not yet exist, add a fixture in `tests/conftest.py` that constructs the tool dependencies with a fake `browser_control` (an object with `async def get(self, sid)` returning a truthy `ControlEntry` when `control_held` else `None`, and `async def held_by(self, sid)`), and an `invoke(tool_name)` helper that calls the tool with a minimal valid arg set.
+Use the existing `BROWSER_TOOL_NAMES`, `FakePool`, `FakeControlStore`, `FakeClient`, and `tenant` fixture in `tests/test_browser_tools.py`. Do not invent tool names (`browser_act`, `browser_extract`, `browser_state`) — they are not registered in this repo.
 
 - [ ] **Step 2: Run it to verify it fails (or surfaces a gap)**
 
 Run: `cd /work/surogates && python -m pytest tests/test_browser_tools.py -k paused_while_user -v`
-Expected: PASS for tools already gated; **FAIL for any tool path that bypasses `_resolve_session_browser`/the lock check** — that failure is the deliverable (it names the gap).
+Expected: PASS for tools already gated; FAIL for any tool path that bypasses `_resolve_session_browser`/the lock check — that failure names the gap.
 
 - [ ] **Step 3: Close any gap found**
 
@@ -229,13 +277,13 @@ For each failing tool, add the same preflight guard the others use, immediately 
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `cd /work/surogates && python -m pytest tests/test_browser_tools.py -k paused_while_user -v`
-Expected: PASS for every tool in `SUSPENDED_TOOLS`.
+Expected: PASS for every tool in `BROWSER_TOOL_NAMES`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 cd /work/surogates
-git add tests/test_browser_tools.py tests/conftest.py surogates/tools/builtin/browser.py
+git add tests/test_browser_tools.py surogates/tools/builtin/browser.py
 git commit -m "test(browser): assert all browser tools suspend while user holds control"
 ```
 
@@ -268,7 +316,7 @@ async def test_live_view_ws_proxies_rfb_for_holder(ws_proxy_env):
     assert frames[0].startswith(b"RFB 00")
 ```
 
-Add a `ws_proxy_env` fixture to `tests/conftest.py` that builds a Starlette test app mounting the `browser` router with fakes for `browser_resolver`, `browser_control`, and a stub upstream WS server (or monkeypatch `_connect_live_view_ws` to return an async iterable yielding `upstream_sends`).
+Add a local `ws_proxy_env` fixture in `tests/test_browser_route_ws.py` that builds a Starlette test app mounting the `browser` router with fakes for `browser_resolver`, `browser_control`, and a stub upstream WS server (or monkeypatch `_connect_live_view_ws` to return an async iterable yielding `upstream_sends`).
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -288,11 +336,192 @@ Expected: PASS.
 
 ```bash
 cd /work/surogates
-git add tests/test_browser_route_ws.py tests/conftest.py
+git add tests/test_browser_route_ws.py
 git commit -m "test(browser): live-view WS proxy is control-required and proxies RFB frames"
 ```
 
-> **Note for the implementer:** `_should_forward_client_frame` gates input by inspecting `frame[0]` against RFB types `{4,5,6}`. With websockify, a WS frame may not align with one RFB message — but the WS *open* is already control-gated (only the holder can connect), so a mis-gate cannot grant a non-holder input. The only residual case is input arriving after the 60s control TTL expires on an already-open socket; treat tightening this (parsing the RFB client stream) as a **low-priority** follow-up, not a blocker.
+### Task B3: Parse client-side RFB messages across WS frame boundaries
+
+**Files:**
+- Modify: `surogates/browser/rfb.py`
+- Modify: `surogates/api/routes/browser.py`
+- Test: `tests/test_browser_rfb.py`
+- Test: `tests/test_browser_route_ws.py`
+
+**Interfaces:**
+- Produces: a per-connection gate that forwards handshake bytes immediately, buffers complete RFB ClientMessages after the x11vnc no-auth handshake, and drops only input messages (`KeyEvent`, `PointerEvent`, `ClientCutText`) when the caller no longer holds browser control.
+- Consumes: `_should_forward_client_frame` currently returns one boolean for one WS frame. Replace that call site with chunk filtering so split and coalesced RFB messages are handled correctly.
+
+- [ ] **Step 1: Write failing RFB parser tests**
+
+```python
+# tests/test_browser_rfb.py
+from surogates.browser.rfb import RFBClientMessageGate
+
+def test_gate_forwards_split_pointer_event_only_when_complete():
+    gate = RFBClientMessageGate()
+    # x11vnc no-auth client-side handshake: ProtocolVersion, selected None security,
+    # ClientInit. These bytes are not RFB ClientMessages and must pass through.
+    assert gate.filter_client_bytes(b"RFB 003.008\n\x01\x01", input_allowed=True) == [
+        b"RFB 003.008\n\x01\x01",
+    ]
+
+    assert gate.filter_client_bytes(b"\x05\x00", input_allowed=True) == []
+    assert gate.filter_client_bytes(b"\x00\x0a\x00\x0b", input_allowed=True) == [
+        b"\x05\x00\x00\x0a\x00\x0b",
+    ]
+
+def test_gate_drops_input_after_control_expires_but_keeps_framebuffer_requests():
+    gate = RFBClientMessageGate()
+    assert gate.filter_client_bytes(b"RFB 003.008\n\x01\x01", input_allowed=True)
+
+    update_request = b"\x03\x00\x00\x00\x00\x00\x10\x00\x10\x00"
+    pointer_event = b"\x05\x01\x00\x0a\x00\x0b"
+    assert gate.filter_client_bytes(
+        update_request + pointer_event,
+        input_allowed=False,
+    ) == [update_request]
+
+def test_gate_handles_coalesced_key_and_cut_text_input():
+    gate = RFBClientMessageGate()
+    assert gate.filter_client_bytes(b"RFB 003.008\n\x01\x01", input_allowed=True)
+
+    key_event = b"\x04\x01\x00\x00\x00\x00\xff\r"
+    cut_text = b"\x06\x00\x00\x00\x00\x00\x00\x05hello"
+    assert gate.filter_client_bytes(key_event + cut_text, input_allowed=False) == []
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `cd /work/surogates && python -m pytest tests/test_browser_rfb.py -k gate -v`
+Expected: FAIL because `RFBClientMessageGate` does not exist.
+
+- [ ] **Step 3: Implement the buffered RFB client-message gate**
+
+```python
+# surogates/browser/rfb.py
+"""RFB ClientMessage parsing for live-view WebSocket proxying."""
+
+from __future__ import annotations
+
+RFB_INPUT_TYPES: frozenset[int] = frozenset({4, 5, 6})
+_HANDSHAKE_CLIENT_BYTES = 14  # ProtocolVersion(12) + SecurityType(1) + ClientInit(1)
+
+
+def _client_message_len(buffer: bytes) -> int | None:
+    if not buffer:
+        return None
+    message_type = buffer[0]
+    if message_type == 0:
+        return 20
+    if message_type == 2:
+        if len(buffer) < 4:
+            return None
+        return 4 + int.from_bytes(buffer[2:4], "big") * 4
+    if message_type == 3:
+        return 10
+    if message_type == 4:
+        return 8
+    if message_type == 5:
+        return 6
+    if message_type == 6:
+        if len(buffer) < 8:
+            return None
+        return 8 + int.from_bytes(buffer[4:8], "big")
+    return 1
+
+
+class RFBClientMessageGate:
+    def __init__(self) -> None:
+        self._handshake_remaining = _HANDSHAKE_CLIENT_BYTES
+        self._buffer = bytearray()
+
+    def filter_client_bytes(
+        self,
+        data: bytes,
+        *,
+        input_allowed: bool,
+    ) -> list[bytes]:
+        if not data:
+            return []
+        out: list[bytes] = []
+        view = memoryview(data)
+        if self._handshake_remaining:
+            n = min(self._handshake_remaining, len(view))
+            out.append(bytes(view[:n]))
+            self._handshake_remaining -= n
+            view = view[n:]
+            if not view:
+                return out
+
+        self._buffer.extend(view)
+        while self._buffer:
+            length = _client_message_len(bytes(self._buffer))
+            if length is None or len(self._buffer) < length:
+                break
+            message = bytes(self._buffer[:length])
+            del self._buffer[:length]
+            if message[0] in RFB_INPUT_TYPES and not input_allowed:
+                continue
+            out.append(message)
+        return out
+
+
+def is_input_frame(frame: bytes) -> bool:
+    """Compatibility helper for existing focused tests."""
+    return bool(frame) and frame[0] in RFB_INPUT_TYPES
+```
+
+- [ ] **Step 4: Use the gate in the live-view WS proxy**
+
+In `surogates/api/routes/browser.py`, import `RFBClientMessageGate` and create one gate inside `proxy_live_view_ws` before `client_to_upstream`:
+
+```python
+from surogates.browser.rfb import RFBClientMessageGate, is_input_frame
+```
+
+```python
+    rfb_gate = RFBClientMessageGate()
+
+    async def client_to_upstream() -> None:
+        try:
+            while True:
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    return
+                frame = _live_view_client_payload(message)
+                if frame is None:
+                    continue
+                if isinstance(frame, bytes):
+                    input_allowed = (
+                        tenant.user_id is not None
+                        and await control.held_by(str(session_id)) == str(tenant.user_id)
+                    )
+                    for chunk in rfb_gate.filter_client_bytes(
+                        frame,
+                        input_allowed=input_allowed,
+                    ):
+                        await upstream.send(chunk)
+                    continue
+                await upstream.send(frame)
+        except WebSocketDisconnect:
+            return
+```
+
+After this change, `_should_forward_client_frame` can remain for its focused unit tests, but the production WS path must use `RFBClientMessageGate`.
+
+- [ ] **Step 5: Run parser and WS helper tests**
+
+Run: `cd /work/surogates && python -m pytest tests/test_browser_rfb.py tests/test_browser_route_ws.py -v`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+cd /work/surogates
+git add surogates/browser/rfb.py surogates/api/routes/browser.py tests/test_browser_rfb.py tests/test_browser_route_ws.py
+git commit -m "fix(browser): gate RFB input across WebSocket frame boundaries"
+```
 
 ---
 
@@ -302,7 +531,7 @@ git commit -m "test(browser): live-view WS proxy is control-required and proxies
 
 **Files:**
 - Modify: `/work/surogate-ops/surogate_ops/server/routes/sessions.py`
-- Test: `/work/surogate-ops/tests/test_live_browser_proxy.py`
+- Test: `/work/surogate-ops/tests/test_sessions_live_proxy.py`
 
 **Interfaces:**
 - Consumes (kept): `websocket_live_browser` (RFB WS proxy at `/{session_id}/browser/live/{path}`), `verify_ws_token`, and the `browser/state`, `browser/control`, `browser/preview.png`, `DELETE /browser` routes.
@@ -311,7 +540,7 @@ git commit -m "test(browser): live-view WS proxy is control-required and proxies
 - [ ] **Step 1: Write the failing test**
 
 ```python
-# /work/surogate-ops/tests/test_live_browser_proxy.py
+# /work/surogate-ops/tests/test_sessions_live_proxy.py
 import surogate_ops.server.routes.sessions as s
 
 def test_neko_html_interceptor_is_gone():
@@ -328,7 +557,7 @@ def test_rfb_ws_proxy_and_auth_are_kept():
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cd /work/surogate-ops && python -m pytest tests/test_live_browser_proxy.py -v`
+Run: `cd /work/surogate-ops && python -m pytest tests/test_sessions_live_proxy.py -k neko_html_interceptor -v`
 Expected: FAIL on `test_neko_html_interceptor_is_gone` (symbols still present).
 
 - [ ] **Step 3: Delete the neko plumbing**
@@ -340,14 +569,14 @@ In `surogate_ops/server/routes/sessions.py`:
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `cd /work/surogate-ops && python -m pytest tests/test_live_browser_proxy.py -v`
+Run: `cd /work/surogate-ops && python -m pytest tests/test_sessions_live_proxy.py -k "neko_html_interceptor or rfb_ws_proxy" -v`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 cd /work/surogate-ops
-git add surogate_ops/server/routes/sessions.py tests/test_live_browser_proxy.py
+git add surogate_ops/server/routes/sessions.py tests/test_sessions_live_proxy.py
 git commit -m "refactor(sessions): drop neko iframe rewrite; keep RFB live-view WS proxy"
 ```
 
@@ -369,6 +598,7 @@ git commit -m "refactor(sessions): drop neko iframe rewrite; keep RFB live-view 
 ```ts
 // __tests__/work-agent-chat-adapter.test.ts
 it("browserLiveViewUrl omits the neko password", () => {
+  const adapter = createWorkAgentChatAdapter("agent-1");
   const url = adapter.browserLiveViewUrl("sess-123");
   expect(url).not.toContain("pwd=admin");
   expect(url).toContain("/browser/live/");
@@ -420,7 +650,8 @@ git commit -m "feat(work): live-view url drops neko password for RFB transport"
 
 ```bash
 cd /work/surogates/sdk/agent-chat-react
-npm install @novnc/novnc@^1.5.0
+pnpm add @novnc/novnc@^1.7.0
+pnpm add -D @types/novnc__novnc@^1.6.0
 ```
 
 - [ ] **Step 2: Write the failing test**
@@ -510,7 +741,7 @@ Expected: no type errors; `dist/` rebuilt.
 
 ```bash
 cd /work/surogates
-git add sdk/agent-chat-react/package.json sdk/agent-chat-react/package-lock.json sdk/agent-chat-react/src/components/browser/
+git add sdk/agent-chat-react/package.json pnpm-lock.yaml sdk/agent-chat-react/src/components/browser/
 git commit -m "feat(agent-chat): render browser live view with noVNC RFB canvas"
 ```
 
@@ -600,7 +831,6 @@ Expected: `neko` STOPPED/absent; `x11vnc` and `websockify` RUNNING.
 
 ## Self-Review
 
-- **Spec coverage:** Image (Phase A), harness verify + agent-suspend (Phase B), ops neko-removal (Phase C), SDK noVNC (Phase D), acceptance incl. real Google login (Phase E) — every spec section maps to a task. Out-of-scope items (residential IP, profile reuse) are intentionally excluded.
+- **Spec coverage:** Image (Phase A), harness agent-suspend verification plus RFB stream-gating hardening (Phase B), ops neko-removal (Phase C), SDK noVNC (Phase D), acceptance incl. real Google login (Phase E) — every spec section maps to a task. Out-of-scope items (residential IP, profile reuse) are intentionally excluded.
 - **Placeholders:** none — every code/conf/command step carries real content; the only "verify, maybe no change" tasks (B2, D3) are explicit about that and still produce a test deliverable.
-- **Type/name consistency:** `BrowserLiveViewProps {src, testId}` preserved (D2/D3); `paused_by_user` used consistently (B1); `browserLiveViewUrl` shape consistent (D1/D2); `live_view_url`/`:8080` consistent (A1/B2).
-- **Known follow-up (not a blocker):** RFB input-frame gating across WS-frame boundaries after control TTL expiry (noted in B2).
+- **Type/name consistency:** `BrowserLiveViewProps {src, testId}` preserved (D2/D3); `paused_by_user` used consistently (B1); `RFBClientMessageGate` covers split/coalesced client messages (B3); `browserLiveViewUrl` shape consistent (D1/D2); `live_view_url`/`:8080` consistent (A1/B2/B3).
