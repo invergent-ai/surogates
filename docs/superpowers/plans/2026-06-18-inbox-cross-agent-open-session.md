@@ -28,7 +28,7 @@
 - `sdk/agent-chat-react/src/types.ts` — `AgentChatInboxItem` gains `agentId?`, `agentWebUrl?`.
 - `sdk/agent-chat-react/src/components/inbox/inbox-panel.tsx` — pass item to `onSessionSelect`.
 - `sdk/agent-chat-react/src/components/sessions/session-tree-panel.tsx` — decouple list/tree fetch.
-- `web/src/api/inbox.ts`, `surogate-ops/frontend/src/api/inbox.ts` — map the new fields.
+- `web/src/api/inbox.ts` — map the new fields. (ops is a separate repo on the published SDK and is verify-only; no ops change.)
 - `web/src/api/auth.ts`, `web/src/stores/capabilities-slice.ts` — read + store current `agentId`.
 - `web/src/features/inbox/inbox-page.tsx` — agent-aware routing.
 - `sdk/agent-chat-react/tests/inbox-panel.test.tsx`, `tests/session-tree-panel.test.tsx` — SDK tests.
@@ -319,7 +319,7 @@ git commit -m "feat(auth): return current agent_id from /auth/config"
 **Files:**
 - Modify: `sdk/agent-chat-react/src/types.ts`
 - Modify: `sdk/agent-chat-react/src/components/inbox/inbox-panel.tsx`
-- Modify: `web/src/api/inbox.ts`, `surogate-ops/frontend/src/api/inbox.ts`
+- Modify: `web/src/api/inbox.ts`
 - Test: `sdk/agent-chat-react/tests/inbox-panel.test.tsx`
 
 **Interfaces:**
@@ -391,7 +391,7 @@ In `web/src/api/inbox.ts` `toInboxItem` (line ~37), add to the returned object:
     agentWebUrl: item.agent_web_url ?? null,
 ```
 
-And add `agent_id?: string | null; agent_web_url?: string | null;` to that file's `InboxItemResponse` interface. Do the same in `surogate-ops/frontend/src/api/inbox.ts` (so ops compiles; ops will simply carry nulls).
+And add `agent_id?: string | null; agent_web_url?: string | null;` to that file's `InboxItemResponse` interface. Do NOT touch the ops repo: `surogate-ops` is a separate repo on the published SDK; the optional fields require no ops mapper change and ops's inbox is per-agent (verify-only).
 
 - [ ] **Step 6: Run the test to verify it passes**
 
@@ -401,7 +401,7 @@ Expected: PASS, including the existing inbox-panel tests.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add sdk/agent-chat-react/src/types.ts sdk/agent-chat-react/src/components/inbox/inbox-panel.tsx web/src/api/inbox.ts surogate-ops/frontend/src/api/inbox.ts sdk/agent-chat-react/tests/inbox-panel.test.tsx
+git add sdk/agent-chat-react/src/types.ts sdk/agent-chat-react/src/components/inbox/inbox-panel.tsx web/src/api/inbox.ts sdk/agent-chat-react/tests/inbox-panel.test.tsx
 git commit -m "feat(agent-chat): pass inbox item (with owner agent) to onSessionSelect"
 ```
 
