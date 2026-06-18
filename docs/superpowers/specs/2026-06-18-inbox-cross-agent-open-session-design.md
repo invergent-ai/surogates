@@ -61,36 +61,44 @@ correct agent. Ops is touched only to stay compatible with the SDK change (verif
 
 ## Design
 
-### 1. Backend — stamp agent identity on inbox items
-`_serialize_item` (`surogates/api/routes/inbox.py`) gains three fields, all derivable
-server-side:
-- `agent_id` — the owner, from the item's `session.agent_id`.
-- `agent_web_url` — the owner agent's `api_web_url`, read from that agent's runtime config
-  (`AgentRuntimeContext.api_web_url`, populated from the platform payload; same value the
-  Slack channel uses). Resolved via the runtime-config cache keyed by `agent_id`.
-- `is_current` — `session.agent_id == <request's resolved agent_id>` (the runtime already
-  resolves the request's agent via `agent_runtime_context_dep`).
+> **Refinement (during planning):** the same/different-agent decision is made **client-side
+> by comparing agent ids**, not by a backend `is_current` flag. Computing `is_current` on the
+> inbox item would force the user-scoped inbox endpoint to resolve an agent (it currently does
+> not, and its integration tests call it with no agent), breaking that contract. Instead the
+> backend stamps each item with its owner `agent_id` + `agent_web_url`, and exposes the
+> **current** agent id via the already-agent-resolved `/auth/config`. Behavior is identical.
 
-The serializer currently takes only `item`; it will need the request's resolved agent id and
-a way to resolve `agent_id -> (api_web_url)` and `agent_id -> session.agent_id`. The list
-endpoint already has `request` (hence the runtime-config cache) and loads items; the plan
-will thread the resolved agent id and look up each owner agent's config (batched/cached).
+### 1. Backend — stamp owner agent on inbox items + expose current agent
+Two additive, non-breaking changes:
+
+- **Inbox items** (`surogates/api/routes/inbox.py`): serialize `agent_id` (owner, from the
+  item's `session.agent_id`) and `agent_web_url` (owner agent's `api_web_url`, read from that
+  agent's runtime config via the runtime-config cache keyed by `agent_id`). The serializer
+  currently takes only `item`; the list path batches `session_id -> agent_id` (one query) and
+  dedupes the per-owner-agent `api_web_url` cache lookups; single-item paths resolve one each.
+  The endpoint stays **user-scoped** — no agent resolution added, no contract change.
+- **Current agent** (`surogates/api/routes/auth.py`): add `agent_id` to `AuthConfigResponse`
+  (the `/auth/config` handler already resolves the agent via `agent_runtime_context_dep`, so
+  `agent_runtime.agent_id` is in hand). This is how the web learns its own agent id.
 
 ### 2. SDK — carry the fields and pass the item to the handler
-- Add optional `agentId?: string | null`, `agentWebUrl?: string | null`,
-  `isCurrent?: boolean` to `AgentChatInboxItem` (`types.ts`); map them in the web and ops
-  `api/inbox.ts` response mappers (ops may leave them undefined).
+- Add optional `agentId?: string | null`, `agentWebUrl?: string | null` to
+  `AgentChatInboxItem` (`types.ts`); map them in the web and ops `api/inbox.ts` response
+  mappers (ops may leave them undefined).
 - `InboxPanel`'s Open-session button calls `onSessionSelect?.(item.sessionId, item)` —
   adding the full item as an **optional second argument**. The `onSessionSelect` prop type
   becomes `(sessionId: string, item?: AgentChatInboxItem) => void`. This is backward
   compatible: an existing `(sessionId) => …` handler (ops) remains assignable and untouched.
 
-### 3. Web — route based on the item
-`handleSessionSelect` (`web/src/features/inbox/inbox-page.tsx`) becomes
-`(sessionId, item?)`:
-- If `item?.isCurrent === false && item.agentWebUrl` → `window.open(\`${item.agentWebUrl}/chat/${sessionId}\`, "_blank", "noopener")` (new tab, owner's app).
-- Otherwise (same agent, or fields absent) → today's in-place behavior:
-  `setActiveSession(sessionId)` + `navigate({ to: "/chat/$sessionId" })`.
+### 3. Web — route by comparing the item's agent to the current agent
+- The web stores its **current agent id** from `/auth/config` (the capabilities fetch it
+  already makes on load).
+- `handleSessionSelect` (`web/src/features/inbox/inbox-page.tsx`) becomes `(sessionId, item?)`:
+  - If `item?.agentId && item.agentId !== currentAgentId && item.agentWebUrl` →
+    `window.open(\`${item.agentWebUrl}/chat/${sessionId}\`, "_blank", "noopener")` (new tab,
+    owner's app).
+  - Otherwise (same agent, or fields absent) → today's in-place behavior:
+    `setActiveSession(sessionId)` + `navigate({ to: "/chat/$sessionId" })`.
 
 ### 4. Secondary hardening — decouple list from tree (SDK)
 In `SessionTreePanel.refetch` (`sdk/.../components/sessions/session-tree-panel.tsx`), stop
@@ -102,15 +110,16 @@ fetch itself fails. A failed active-session tree must not blank the list.
 ## Error handling / edge cases
 
 - Different agent but `agent_web_url` missing/null → fall back to in-place (never worse than today).
-- `is_current` / item fields absent (ops, pre-deploy items) → in-place. Fully backward compatible.
+- Item agent fields absent, or current agent id unknown (ops, pre-deploy items) → in-place.
+  Fully backward compatible.
 - `window.open` blocked by a popup blocker → acceptable; it fires from a direct user click, so
   browsers normally allow it. No special handling planned.
 
 ## Testing
 
-- **Backend:** `_serialize_item` includes `agent_id`, `agent_web_url`, `is_current`; an item
-  whose session belongs to another agent serializes `is_current=false` with that agent's
-  `agent_web_url`; a same-agent item serializes `is_current=true`.
+- **Backend:** the inbox serializer includes `agent_id` + `agent_web_url` (owner) on items;
+  an item whose session belongs to another agent serializes that agent's id + `agent_web_url`.
+  `/auth/config` returns the current `agent_id`.
 - **SDK:** `InboxPanel` passes the item as the 2nd arg to `onSessionSelect`;
   `SessionTreePanel` still renders the list when `getSessionTree` rejects (list 200, tree
   404 → list shown, no blank).
