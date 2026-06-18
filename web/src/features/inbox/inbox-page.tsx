@@ -26,7 +26,7 @@ export function InboxPage() {
   }, [fetchSessions, fetchUser, fetchCapabilities]);
 
   function handleSessionSelect(sessionId: string, item?: AgentChatInboxItem) {
-    if (item?.agentId && item.agentId !== currentAgentId && item.agentWebUrl) {
+    if (item?.agentId && currentAgentId && item.agentId !== currentAgentId && item.agentWebUrl) {
       window.open(`${item.agentWebUrl}/chat/${sessionId}`, "_blank", "noopener");
       return;
     }
