@@ -10,6 +10,20 @@
 
 **Spec:** `docs/superpowers/specs/2026-06-18-vnc-live-view-design.md`
 
+## Progress
+
+Updated before each commit. `[x]` done · `[~]` in progress · `[ ]` not started.
+
+- [~] A1 — Image: x11vnc + websockify on :8080, neko disabled (RFB-handshake test)
+- [ ] B1 — Harness: agent-suspend coverage across every browser tool
+- [ ] B2 — Harness: buffered RFB client-message gate (`rfb.py`) + per-connection gate in WS proxy
+- [ ] B3 — Harness: live-view WS proxy control-required against an RFB upstream
+- [ ] C1 — Ops: delete neko HTML-rewrite/interceptor; keep RFB WS proxy + auth
+- [ ] D1 — SDK: `browserLiveViewUrl` drops `pwd=admin`
+- [ ] D2 — SDK: `BrowserLiveView` noVNC RFB canvas
+- [ ] D3 — SDK: mount RFB only under control; `browser-pane` wiring
+- [ ] E1 — End-to-end: build/deploy + acceptance (manual)
+
 ## Global Constraints
 
 - Conventional Commits (`type(scope): subject`); **no `Co-Authored-By` trailer**; **never reference plan/task/phase/step numbers** in code comments or commit messages.
