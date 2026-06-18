@@ -156,3 +156,102 @@ class TestLiveViewWebSocketFrameTypes:
 
     def test_preserves_browser_binary_frames_for_upstream(self) -> None:
         assert _live_view_client_payload({"bytes": b"\x04frame"}) == b"\x04frame"
+
+
+# --- Full-route coverage of proxy_live_view_ws (control-required + RFB proxy) ---
+
+import pytest
+from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+
+import surogates.api.routes.browser as browser_mod
+
+
+class _FakeEndpoint:
+    def __init__(self, live_view_url: str) -> None:
+        self.live_view_url = live_view_url
+
+
+class _FakeResolved:
+    def __init__(self, live_view_url: str) -> None:
+        self.endpoint = _FakeEndpoint(live_view_url)
+
+
+class _FakeResolver:
+    def __init__(self, resolved: _FakeResolved | None) -> None:
+        self._resolved = resolved
+
+    async def resolve(self, session_id: str, expected_org_id: str | None = None):
+        return self._resolved
+
+
+class _FakeControlHeld:
+    def __init__(self, holder: str | None) -> None:
+        self._holder = holder
+
+    async def held_by(self, session_id: str) -> str | None:
+        return self._holder
+
+
+class _FakeUpstream:
+    def __init__(self, sends: list[bytes]) -> None:
+        self._sends = list(sends)
+        self.received: list[bytes | str] = []
+
+    def __aiter__(self):
+        async def _gen():
+            for frame in self._sends:
+                yield frame
+        return _gen()
+
+    async def send(self, frame) -> None:
+        self.received.append(frame)
+
+    async def close(self) -> None:
+        pass
+
+
+def _build_ws_app(monkeypatch, *, control_holder, upstream_sends):
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(browser_mod.router)
+    app.state.browser_resolver = _FakeResolver(_FakeResolved("ws://browser:8080"))
+    app.state.browser_control = _FakeControlHeld(control_holder)
+
+    async def _fake_auth(_app, *, path, token, cookies, authorization):
+        return _tenant()
+
+    monkeypatch.setattr(browser_mod, "authenticate_websocket_tenant", _fake_auth)
+
+    upstream = _FakeUpstream(upstream_sends)
+
+    async def _fake_connect(url: str):
+        return upstream
+
+    monkeypatch.setattr(browser_mod, "_connect_live_view_ws", _fake_connect)
+    return app, upstream
+
+
+_SID = "00000000-0000-0000-0000-0000000000aa"
+
+
+def test_live_view_ws_rejects_non_control_holder(monkeypatch) -> None:
+    app, _ = _build_ws_app(monkeypatch, control_holder="someone-else", upstream_sends=[])
+    client = TestClient(app)
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(f"/api/sessions/{_SID}/browser/live/?token=t"):
+            pass
+    assert exc.value.code == 4403
+
+
+def test_live_view_ws_proxies_rfb_for_holder(monkeypatch) -> None:
+    app, _ = _build_ws_app(
+        monkeypatch,
+        control_holder=str(USER_1),
+        upstream_sends=[b"RFB 003.008\n"],
+    )
+    client = TestClient(app)
+    with client.websocket_connect(f"/api/sessions/{_SID}/browser/live/?token=t") as ws:
+        frame = ws.receive_bytes()
+    assert frame.startswith(b"RFB 00")
