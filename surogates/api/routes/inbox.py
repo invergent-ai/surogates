@@ -67,27 +67,27 @@ def _decode_cursor(cursor: str | None) -> tuple[datetime, int] | None:
 async def _resolve_agent_fields(
     request: Request, session_ids: list[UUID]
 ) -> dict:
-    """Map session_id -> {"agent_id", "agent_web_url"} for serialization.
+    """Map session_id -> {"agent_id", "agent_slug"} for serialization.
 
-    `agent_web_url` is best-effort: a runtime-config cache miss leaves it
+    `agent_slug` is best-effort: a runtime-config cache miss leaves it
     None so the item still serializes (the web then falls back to in-place).
     """
     store = request.app.state.session_store
     agent_by_session = await store.get_agent_ids_for_sessions(list(session_ids))
     cache = getattr(request.app.state, "runtime_config_cache", None)
-    url_by_agent: dict[str, str | None] = {}
+    slug_by_agent: dict[str, str | None] = {}
     out: dict = {}
     for sid, agent_id in agent_by_session.items():
-        if agent_id not in url_by_agent:
-            web_url = None
+        if agent_id not in slug_by_agent:
+            slug = None
             if cache is not None:
                 try:
                     payload = await cache.get(agent_id)
-                    web_url = payload.get("api_web_url")
+                    slug = payload.get("slug")
                 except LookupError:
-                    web_url = None
-            url_by_agent[agent_id] = web_url
-        out[sid] = {"agent_id": agent_id, "agent_web_url": url_by_agent[agent_id]}
+                    slug = None
+            slug_by_agent[agent_id] = slug
+        out[sid] = {"agent_id": agent_id, "agent_slug": slug_by_agent[agent_id]}
     return out
 
 
@@ -112,7 +112,7 @@ def _serialize_item(item, agent_fields: dict | None = None) -> dict:
         if item.responded_at
         else None,
         "agent_id": fields.get("agent_id"),
-        "agent_web_url": fields.get("agent_web_url"),
+        "agent_slug": fields.get("agent_slug"),
     }
 
 

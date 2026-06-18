@@ -21,15 +21,15 @@ def _item(session_id):
 
 def test_serialize_item_includes_agent_fields():
     sid = uuid.uuid4()
-    out = _serialize_item(_item(sid), {"agent_id": "agent-x", "agent_web_url": "https://x.example"})
+    out = _serialize_item(_item(sid), {"agent_id": "agent-x", "agent_slug": "agent-x-slug"})
     assert out["agent_id"] == "agent-x"
-    assert out["agent_web_url"] == "https://x.example"
+    assert out["agent_slug"] == "agent-x-slug"
 
 
 def test_serialize_item_defaults_agent_fields_to_none():
     out = _serialize_item(_item(uuid.uuid4()))
     assert out["agent_id"] is None
-    assert out["agent_web_url"] is None
+    assert out["agent_slug"] is None
 
 
 class _FakeStore:
@@ -40,12 +40,12 @@ class _FakeStore:
 
 
 class _FakeCache:
-    def __init__(self, urls):
-        self._urls = urls
+    def __init__(self, slugs):
+        self._slugs = slugs
     async def get(self, agent_id):
-        if agent_id not in self._urls:
+        if agent_id not in self._slugs:
             raise LookupError(agent_id)
-        return {"api_web_url": self._urls[agent_id]}
+        return {"slug": self._slugs[agent_id]}
 
 
 def _request(store, cache):
@@ -54,16 +54,16 @@ def _request(store, cache):
 
 
 @pytest.mark.asyncio
-async def test_resolve_agent_fields_maps_owner_and_url():
+async def test_resolve_agent_fields_maps_owner_and_slug():
     sid = uuid.uuid4()
-    req = _request(_FakeStore({sid: "agent-x"}), _FakeCache({"agent-x": "https://x.example"}))
+    req = _request(_FakeStore({sid: "agent-x"}), _FakeCache({"agent-x": "agent-x-slug"}))
     fields = await _resolve_agent_fields(req, [sid])
-    assert fields[sid] == {"agent_id": "agent-x", "agent_web_url": "https://x.example"}
+    assert fields[sid] == {"agent_id": "agent-x", "agent_slug": "agent-x-slug"}
 
 
 @pytest.mark.asyncio
-async def test_resolve_agent_fields_url_none_on_cache_miss():
+async def test_resolve_agent_fields_slug_none_on_cache_miss():
     sid = uuid.uuid4()
     req = _request(_FakeStore({sid: "agent-x"}), _FakeCache({}))
     fields = await _resolve_agent_fields(req, [sid])
-    assert fields[sid] == {"agent_id": "agent-x", "agent_web_url": None}
+    assert fields[sid] == {"agent_id": "agent-x", "agent_slug": None}
