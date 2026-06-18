@@ -548,9 +548,12 @@ class _FakeRuntimeCache:
 async def test_auth_config_returns_current_agent_id(client, app):
     # Seed the runtime-config cache so agent_runtime_context_dep can resolve
     # "test-agent" without a live management-plane connection.
+    original = getattr(app.state, "runtime_config_cache", None)
     app.state.runtime_config_cache = _FakeRuntimeCache("test-agent")
-
-    response = await client.get("/v1/auth/config?agent_id=test-agent")
+    try:
+        response = await client.get("/v1/auth/config?agent_id=test-agent")
+    finally:
+        app.state.runtime_config_cache = original
 
     assert response.status_code == 200, response.text
     assert response.json()["agent_id"] == "test-agent"
