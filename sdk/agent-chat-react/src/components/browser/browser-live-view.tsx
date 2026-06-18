@@ -16,9 +16,15 @@ interface BrowserLiveViewProps {
 type ConnectionState = "connecting" | "connected" | "disconnected";
 
 // The live-view URL is an http(s) asset path; noVNC needs the ws(s) scheme.
+// Only http(s) is rewritten — an already-ws(s) URL is passed through so
+// ws: (local/non-SSL) is not forced to wss:.
 function toWsUrl(src: string): string {
   const url = new URL(src, window.location.href);
-  url.protocol = url.protocol === "http:" ? "ws:" : "wss:";
+  if (url.protocol === "http:") {
+    url.protocol = "ws:";
+  } else if (url.protocol === "https:") {
+    url.protocol = "wss:";
+  }
   return url.toString();
 }
 

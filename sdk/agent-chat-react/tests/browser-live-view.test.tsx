@@ -67,6 +67,15 @@ describe("BrowserLiveView", () => {
     );
   });
 
+  it("passes an existing ws:// url through unchanged", async () => {
+    await renderView(
+      <BrowserLiveView src="ws://localhost:8888/api/sessions/s1/browser/live/?token=t" />,
+    );
+    expect(rfbMock.connect).toHaveBeenCalledWith(
+      "ws://localhost:8888/api/sessions/s1/browser/live/?token=t",
+    );
+  });
+
   it("renders a canvas container with the rfb test id", async () => {
     const node = await renderView(<BrowserLiveView src={SRC} />);
     expect(node.querySelector('[data-testid="browser-rfb"]')).not.toBeNull();
