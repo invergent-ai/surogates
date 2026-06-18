@@ -19,8 +19,8 @@ Updated before each commit. `[x]` done · `[~]` in progress · `[ ]` not started
 - [x] B2 — Harness: live-view WS proxy control-required against an RFB upstream — verified: 4403 for non-holder, RFB banner proxied for holder (no production change)
 - [x] B3 — Harness: parse client-side RFB messages across WS frame boundaries (`RFBClientMessageGate`) — verified: split/coalesced input gating; WS proxy uses a per-connection gate (85 browser tests green)
 - [x] C1 — Ops: delete neko HTML-rewrite/interceptor; keep RFB WS proxy + auth — deleted the whole `get_live_browser_asset` GET route + orphaned cookie helpers (ruff clean, 25 ops tests pass); lands in `surogate-ops`
-- [~] D1 — SDK: `browserLiveViewUrl` drops `pwd=admin`
-- [ ] D2 — SDK: `BrowserLiveView` noVNC RFB canvas
+- [x] D1 — SDK: `browserLiveViewUrl` drops `pwd=admin` — verified (15 frontend tests pass); lands in `surogate-ops`
+- [~] D2 — SDK: `BrowserLiveView` noVNC RFB canvas
 - [ ] D3 — SDK: mount RFB only under control; `browser-pane` wiring
 - [ ] E1 — End-to-end: build/deploy + acceptance (manual)
 
