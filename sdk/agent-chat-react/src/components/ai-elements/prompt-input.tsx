@@ -940,7 +940,7 @@ export const PromptInput = ({
         ref={formRef}
         {...props}
       >
-        <InputGroup className="overflow-hidden rounded-3xl border border-input bg-white px-3 py-1 shadow-sm dark:bg-card dark:shadow-none dark:ring-1 dark:ring-white/5 has-[textarea]:rounded-3xl has-[>[data-align=block-end]]:rounded-3xl has-[>[data-align=block-start]]:rounded-3xl">
+        <InputGroup className="overflow-hidden rounded-3xl border border-input bg-white px-4 py-2 shadow-sm dark:bg-card dark:shadow-none dark:ring-1 dark:ring-white/5 has-[textarea]:rounded-3xl has-[>[data-align=block-end]]:rounded-3xl has-[>[data-align=block-start]]:rounded-3xl">
           {children}
         </InputGroup>
       </form>
@@ -1158,7 +1158,7 @@ export const PromptInputButton = ({
   const button = (
     <InputGroupButton
       className={cn(
-        "rounded-sm border border-input/70 text-foreground hover:bg-accent",
+        "rounded-sm border border-input/70 text-foreground bg-accent",
         newSize === "icon-sm" && "size-9",
         className
       )}
@@ -1197,18 +1197,6 @@ export const PromptInputActionMenu = (props: PromptInputActionMenuProps) => (
 );
 
 export type PromptInputActionMenuTriggerProps = PromptInputButtonProps;
-
-export const PromptInputActionMenuTrigger = ({
-  className,
-  children,
-  ...props
-}: PromptInputActionMenuTriggerProps) => (
-  <DropdownMenuTrigger asChild>
-    <PromptInputButton className={className} {...props}>
-      {children ?? <PlusIcon className="size-4" />}
-    </PromptInputButton>
-  </DropdownMenuTrigger>
-);
 
 export type PromptInputActionMenuContentProps = ComponentProps<
   typeof DropdownMenuContent
@@ -1275,7 +1263,7 @@ export const PromptInputSubmit = ({
   return (
     <InputGroupButton
       aria-label={isGenerating ? "Stop" : "Submit"}
-      className={cn("rounded-full", className)}
+      className={cn("rounded-full bg-amber-400 hover:bg-amber-400 text-black", className)}
       onClick={handleClick}
       size={size}
       type={isGenerating && onStop ? "button" : "submit"}
