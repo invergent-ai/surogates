@@ -1,9 +1,11 @@
 # Surogates Agent Browser — kernel-images-derived per-session browser pod.
 #
-# Minimal additions on top of upstream:
-#   - zstd for Phase D profile sync compression
-#   - lower-cost Neko live-view capture defaults
-#   - Surogates branding for the embedded Neko live-view shell
+# Additions on top of upstream onkernel/chromium-headful:
+#   - zstd for profile sync compression
+#   - x11vnc + websockify: RFB-over-WebSocket live view on :8080
+#   - neko disabled — its WebRTC live view needs UDP/TURN the cluster cannot
+#     provide; x11vnc attaches to the existing Xorg :1 and websockify bridges it
+#     to the :8080 WebSocket the harness already proxies as live_view_url
 #   - Surogates OCI labels
 
 ARG UPSTREAM=docker.io/onkernel/chromium-headful@sha256:b7c0151ee94df4b5a5873605389727db456dbd7c98da74efa29c40eb238ac573
@@ -18,8 +20,10 @@ ENV CHROMIUM_FLAGS="--no-sandbox"
 
 USER root
 
+# zstd for profile sync; x11vnc + websockify for the RFB-over-WebSocket live
+# view. neko is forced off so it cannot contend for :8080 (websockify binds it).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends zstd \
+    && apt-get install -y --no-install-recommends zstd x11vnc websockify \
     && mkdir -p /var/log/supervisord \
         /etc/envoy/certs \
         /usr/local/share/ca-certificates \
@@ -35,34 +39,12 @@ RUN apt-get update \
         /run \
         /recordings \
         /kernel-envoy-proxy.crt \
-    && sed -i 's/^autostart=false$/autostart=true/' \
+    && sed -i 's/^autostart=.*$/autostart=false/' \
         /etc/supervisor/conf.d/services/neko.conf \
-    && sed -i 's/screen: "1920x1080@25"/screen: "1280x720@10"/' \
-        /etc/neko/neko.yaml \
     && rm -rf /var/lib/apt/lists/*
 
-COPY images/browser/logo.svg /var/www/img/logo.surogates.svg
-
-RUN cp /var/www/img/logo.surogates.svg /var/www/img/logo.b42d8ab7.svg \
-    && cp /var/www/js/app.32920cec.js /var/www/js/app.surogates.js \
-    && cp /var/www/js/app-legacy.5a69f29c.js /var/www/js/app-legacy.surogates.js \
-    && sed -i 's|img/logo.b42d8ab7.svg|img/logo.surogates.svg|g' \
-        /var/www/js/app.surogates.js \
-        /var/www/js/app-legacy.surogates.js \
-    && sed -i \
-        -e 's#<title>Kernel</title>#<title>Surogates Browser</title>#' \
-        -e 's|<meta name="theme-color" content="#81B300">|<meta name="theme-color" content="#FFB000">|' \
-        -e 's|<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,[^"]*">|<link rel="icon" type="image/svg+xml" href="img/logo.b42d8ab7.svg">|' \
-        -e 's|href="img/logo.b42d8ab7.svg"|href="img/logo.surogates.svg"|' \
-        -e 's|src="js/app.32920cec.js"|src="js/app.surogates.js"|' \
-        -e 's|src="js/app-legacy.5a69f29c.js"|src="js/app-legacy.surogates.js"|' \
-        /var/www/index.html \
-    && chown kernel:kernel \
-        /var/www/img/logo.surogates.svg \
-        /var/www/img/logo.b42d8ab7.svg \
-        /var/www/js/app.surogates.js \
-        /var/www/js/app-legacy.surogates.js \
-        /var/www/index.html
+COPY images/browser/supervisor/x11vnc.conf /etc/supervisor/conf.d/services/x11vnc.conf
+COPY images/browser/supervisor/websockify.conf /etc/supervisor/conf.d/services/websockify.conf
 
 # Keep the upstream runtime user. The headful wrapper starts supervisord as root
 # and the Chromium launcher drops privileges internally with runuser.

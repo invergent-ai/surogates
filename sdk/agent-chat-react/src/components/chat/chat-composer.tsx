@@ -44,6 +44,7 @@ import {
   ContextTrigger,
 } from "../ai-elements/context";
 import { Button } from "../ui/button";
+import { ButtonGroup } from "../ui/button-group";
 import {
   Item,
   ItemActions,
@@ -892,42 +893,37 @@ function ChatComposerInner({
             </PromptInputTools>
             <div className="flex items-center gap-2">
               {onViewModeChange && (
-                <div
-                  role="group"
+                <ButtonGroup
                   aria-label="Chat view mode"
-                  className="inline-flex overflow-hidden rounded-md border border-border"
+                  className="overflow-hidden rounded-md border border-border"
                 >
-                  <button
+                  <Button
                     type="button"
+                    size="xs"
+                    className="capitalize font-normal"
+                    variant={viewMode === "simple" ? "secondary" : "ghost"}
                     aria-pressed={viewMode === "simple"}
                     onClick={() => onViewModeChange("simple")}
-                    className={
-                      viewMode === "simple"
-                        ? "bg-accent px-2 py-1 text-xs text-foreground"
-                        : "px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
-                    }
                   >
                     Simple
-                  </button>
-                  <button
+                  </Button>
+                  <Button
                     type="button"
+                    size="xs"
+                    className="capitalize font-normal"
+                    variant={viewMode === "expert" ? "secondary" : "ghost"}
                     aria-pressed={viewMode === "expert"}
                     onClick={() => onViewModeChange("expert")}
-                    className={
-                      viewMode === "expert"
-                        ? "bg-accent px-2 py-1 text-xs text-foreground"
-                        : "px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
-                    }
                   >
                     Advanced
-                  </button>
-                </div>
+                  </Button>
+                </ButtonGroup>
               )}
               {!disabled && (
                 <PromptInputSubmit
                   status={status}
                   onStop={onStop}
-                  className="md:size-8"
+                  className="size-10"
                 />
               )}
             </div>

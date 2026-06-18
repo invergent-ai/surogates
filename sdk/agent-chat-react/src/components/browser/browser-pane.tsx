@@ -118,8 +118,8 @@ export function BrowserPane({
   // Control is a separate, user-driven concern (toggled via
   // BrowserControlBar's "Take/Return control" button). The inline live
   // view also requires control, so blindly releasing here would tear
-  // down both iframes and trigger 4403 close codes on every subsequent
-  // reconnect inside the 60s TTL window.
+  // down both RFB live views and trigger 4403 close codes on every
+  // subsequent reconnect inside the 60s TTL window.
   const handleFullscreenOpenChange = useCallback(
     (open: boolean) => {
       setFullscreenOpen(open);
@@ -132,7 +132,7 @@ export function BrowserPane({
   // TTL never lapses under us. acquireBrowserControl for the same user
   // returns `refreshed` and resets the TTL — no extra API surface
   // needed. The interval is gated on canUseLiveView so it stops as
-  // soon as the iframe unmounts (e.g., session change).
+  // soon as the live view unmounts (e.g., session change).
   useEffect(() => {
     if (!canUseLiveView || !hasControlAdapter) return;
     const handle = window.setInterval(() => {
@@ -216,7 +216,10 @@ export function BrowserPane({
               Browser closed.
             </div>
           ) : canUseLiveView ? (
-            <BrowserLiveView src={liveViewUrl} />
+            <BrowserLiveView
+              src={liveViewUrl}
+              onDisconnect={() => setLocalControlActive(false)}
+            />
           ) : previewSnapshot ? (
             <BrowserPreviewImage
               src={previewSnapshot.src}
@@ -272,7 +275,8 @@ export function BrowserPane({
             {canUseLiveView ? (
               <BrowserLiveView
                 src={liveViewUrl}
-                testId="browser-fullscreen-iframe"
+                testId="browser-fullscreen-rfb"
+                onDisconnect={() => setLocalControlActive(false)}
               />
             ) : previewSnapshot ? (
               <BrowserPreviewImage
