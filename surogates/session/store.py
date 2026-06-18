@@ -182,6 +182,20 @@ class SessionStore:
             raise SessionNotFoundError(f"session {session_id} not found")
         return Session.model_validate(row)
 
+    async def get_agent_ids_for_sessions(
+        self, session_ids: list[UUID]
+    ) -> dict[UUID, str]:
+        """Map each session id to its owning agent id (one query)."""
+        if not session_ids:
+            return {}
+        async with self._sf() as db:
+            result = await db.execute(
+                select(SessionRow.id, SessionRow.agent_id).where(
+                    SessionRow.id.in_(session_ids)
+                )
+            )
+            return {row.id: str(row.agent_id) for row in result.all()}
+
     async def update_session_status(self, session_id: UUID, status: str) -> None:
         """Set a session's status and touch ``updated_at``."""
         async with self._sf() as db:
