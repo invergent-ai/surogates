@@ -915,6 +915,25 @@ describe("SessionTreePanel", () => {
     expect(container.textContent).not.toContain("Child session");
   });
 
+  it("keeps the list when the active session's tree fetch fails", async () => {
+    const sessions = [session({ id: "s-1", title: "First session", agentId: "agent-1" })];
+    const adapter: AgentChatAdapter = {
+      ...createAdapter(sessions),
+      async listSessions() { return { sessions, total: sessions.length }; },
+      async getSessionTree() { throw new Error("404 not found"); },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        <SessionTreePanel adapter={adapter} loadList sessionId="foreign-session" activeSessionId="foreign-session" />,
+      );
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("First session");
+  });
+
   it("removes a deleted session before the delete refetch completes", async () => {
     const sessions = [
       session({ id: "s-1", title: "First session", agentId: "agent-1" }),
