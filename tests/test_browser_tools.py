@@ -737,3 +737,51 @@ class TestRouterDispatch:
             _client_factory=lambda endpoint: FakeClient(),
         )
         assert json.loads(result)["url"] == "https://example.com"
+
+
+# Every browser tool entry point must short-circuit to ``paused_by_user`` while
+# the user holds the browser-control lock, so no ``/playwright/execute`` (CDP)
+# call runs during a human takeover. (handler_name, minimal valid args).
+BROWSER_SUSPEND_HANDLERS = [
+    ("_browser_navigate_handler", {"url": "https://example.com"}),
+    ("_browser_get_state_handler", {}),
+    ("_browser_screenshot_handler", {}),
+    ("_browser_click_handler", {"x": 10, "y": 10}),
+    ("_browser_type_handler", {"text": "hello"}),
+    ("_browser_press_key_handler", {"keys": ["Enter"]}),
+    ("_browser_scroll_handler", {"x": 10, "y": 10, "delta_y": 100}),
+    ("_browser_drag_handler", {"path": [[10, 10], [20, 20]]}),
+    ("_browser_wait_handler", {"ms": 1}),
+    ("_browser_close_handler", {}),
+]
+
+
+@pytest.mark.parametrize("handler_name, args", BROWSER_SUSPEND_HANDLERS)
+async def test_browser_tool_suspends_while_user_holds_control(
+    handler_name: str, args: dict[str, Any], tenant
+) -> None:
+    import inspect
+
+    import surogates.tools.builtin.browser as browser_tools
+
+    handler = getattr(browser_tools, handler_name)
+    pool = FakePool()
+    candidate_kwargs = {
+        "tenant": tenant,
+        "session_id": uuid4(),
+        "browser_pool": pool,
+        "browser_control": FakeControlStore(holder="other-user"),
+        "_client_factory": lambda endpoint: FakeClient(),
+    }
+    params = inspect.signature(handler).parameters
+    kwargs = {k: v for k, v in candidate_kwargs.items() if k in params}
+
+    result = await handler(args, **kwargs)
+
+    body = json.loads(result)
+    assert body["error"] == "paused_by_user", (
+        f"{handler_name} ran while the user held browser control"
+    )
+    # The guard must fire before any browser provisioning or teardown.
+    assert pool.ensures == []
+    assert pool.destroyed == []
