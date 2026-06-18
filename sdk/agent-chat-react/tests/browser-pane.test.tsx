@@ -4,6 +4,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserPane } from "../src/components/browser/browser-pane";
 import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
 
+vi.mock("@novnc/novnc", () => ({
+  default: vi.fn().mockImplementation(() => ({
+    disconnect: vi.fn(),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    viewOnly: false,
+    scaleViewport: false,
+  })),
+}));
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
 
@@ -67,15 +77,15 @@ describe("BrowserPane", () => {
       />,
     );
 
-    expect(node.querySelector('[data-testid="browser-iframe"]')).toBeNull();
+    expect(node.querySelector('[data-testid="browser-rfb"]')).toBeNull();
 
     await flushPreview();
 
     const preview = node.querySelector<HTMLImageElement>(
       '[data-testid="browser-preview-image"]',
     );
-    const iframe = node.querySelector<HTMLIFrameElement>(
-      '[data-testid="browser-iframe"]',
+    const iframe = node.querySelector<HTMLDivElement>(
+      '[data-testid="browser-rfb"]',
     );
     expect(preview?.getAttribute("src")).toBe(
       "data:image/png;base64,cHJldmlldw==",
@@ -110,8 +120,8 @@ describe("BrowserPane", () => {
     const preview = document.body.querySelector<HTMLImageElement>(
       '[data-testid="browser-fullscreen-preview-image"]',
     );
-    const iframe = document.body.querySelector<HTMLIFrameElement>(
-      '[data-testid="browser-fullscreen-iframe"]',
+    const iframe = document.body.querySelector<HTMLDivElement>(
+      '[data-testid="browser-fullscreen-rfb"]',
     );
 
     expect(dialog).not.toBeNull();
@@ -135,7 +145,7 @@ describe("BrowserPane", () => {
     expect(node.textContent).toContain("user-A has control");
     expect(node.textContent).toContain("Take control");
     expect(
-      node.querySelector<HTMLIFrameElement>('[data-testid="browser-iframe"]'),
+      node.querySelector<HTMLDivElement>('[data-testid="browser-rfb"]'),
     ).toBeNull();
     await flushPreview();
     expect(
@@ -200,10 +210,8 @@ describe("BrowserPane", () => {
     expect(dialog).not.toBeNull();
     expect(dialog?.textContent).toContain("Browser");
     expect(
-      document.body.querySelector<HTMLIFrameElement>(
-        '[data-testid="browser-fullscreen-iframe"]',
-      )?.getAttribute("src"),
-    ).toBe("about:blank#browser-live");
+      document.body.querySelector('[data-testid="browser-fullscreen-rfb"]'),
+    ).not.toBeNull();
   });
 
   it("does NOT release browser control when the fullscreen dialog closes", async () => {
@@ -248,8 +256,8 @@ describe("BrowserPane", () => {
 
     // Inline live view must still be mounted (default testid).
     expect(
-      node.querySelector<HTMLIFrameElement>(
-        '[data-testid="browser-iframe"]',
+      node.querySelector<HTMLDivElement>(
+        '[data-testid="browser-rfb"]',
       ),
     ).not.toBeNull();
     // And no release was issued.
@@ -501,7 +509,7 @@ describe("BrowserPane", () => {
     );
 
     expect(node.textContent).toMatch(/browser preview is unavailable/i);
-    expect(node.querySelector('[data-testid="browser-iframe"]')).toBeNull();
+    expect(node.querySelector('[data-testid="browser-rfb"]')).toBeNull();
     expect(
       node.querySelector('button[aria-label="Open browser preview"]'),
     ).toBeNull();

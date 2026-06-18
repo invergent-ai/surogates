@@ -9,13 +9,7 @@ export default defineConfig({
   },
   test: {
     environment: "happy-dom",
-    setupFiles: ["./vitest.setup.ts"],
-    include: [
-      "tests/**/*.test.ts",
-      "tests/**/*.test.tsx",
-      "src/**/*.test.ts",
-      "src/**/*.test.tsx",
-    ],
+    include: ["tests/**/*.test.ts", "tests/**/*.test.tsx"],
     coverage: {
       provider: "v8",
       reporter: ["text", "html"],

@@ -1,10 +1,19 @@
-import { useEffect, useRef } from "react";
-import RFB from "@novnc/novnc";
+import { useEffect, useRef, useState } from "react";
+import type RFB from "@novnc/novnc";
 
 interface BrowserLiveViewProps {
   src: string;
   testId?: string;
+  /**
+   * Called when the RFB connection drops *unexpectedly* (server close on
+   * control-lease expiry, network blip, security failure) — not on intentional
+   * unmount. ``clean`` mirrors noVNC's ``disconnect`` detail. The pane uses
+   * this to drop local control state and fall back to the preview snapshot.
+   */
+  onDisconnect?: (clean: boolean) => void;
 }
+
+type ConnectionState = "connecting" | "connected" | "disconnected";
 
 // The live-view URL is an http(s) asset path; noVNC needs the ws(s) scheme.
 function toWsUrl(src: string): string {
@@ -16,23 +25,74 @@ function toWsUrl(src: string): string {
 export function BrowserLiveView({
   src,
   testId = "browser-rfb",
+  onDisconnect,
 }: BrowserLiveViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  // Keep the latest callback in a ref so the connection effect depends only on
+  // ``src`` — a new ``onDisconnect`` identity must not tear down the session.
+  const onDisconnectRef = useRef(onDisconnect);
+  onDisconnectRef.current = onDisconnect;
+  const [state, setState] = useState<ConnectionState>("connecting");
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-    const rfb = new RFB(container, toWsUrl(src), { wsProtocols: ["binary"] });
-    rfb.viewOnly = false;
-    rfb.scaleViewport = true;
-    return () => rfb.disconnect();
+    setState("connecting");
+
+    let rfb: RFB | undefined;
+    let disposed = false;
+
+    const handleConnect = () => setState("connected");
+    const handleDisconnect = (event: CustomEvent<{ clean: boolean }>) => {
+      setState("disconnected");
+      onDisconnectRef.current?.(event.detail?.clean ?? false);
+    };
+
+    // noVNC is browser-only (touches WebSocket/canvas at module load), so it is
+    // imported lazily — the component stays safe to import in SSR/tests that do
+    // not mount it.
+    void import("@novnc/novnc")
+      .then(({ default: RFBImpl }) => {
+        if (disposed || !containerRef.current) return;
+        const instance = new RFBImpl(containerRef.current, toWsUrl(src), {
+          wsProtocols: ["binary"],
+        });
+        instance.viewOnly = false;
+        instance.scaleViewport = true;
+        instance.addEventListener("connect", handleConnect);
+        instance.addEventListener("disconnect", handleDisconnect);
+        rfb = instance;
+      })
+      .catch(() => {
+        if (!disposed) setState("disconnected");
+      });
+
+    return () => {
+      // Detach listeners *before* disconnect() so an intentional unmount
+      // (session change / control released) does not fire onDisconnect —
+      // only externally-driven drops should.
+      disposed = true;
+      if (rfb) {
+        rfb.removeEventListener("connect", handleConnect);
+        rfb.removeEventListener("disconnect", handleDisconnect);
+        rfb.disconnect();
+      }
+    };
   }, [src]);
 
   return (
-    <div
-      ref={containerRef}
-      data-testid={testId}
-      className="h-full w-full bg-black"
-    />
+    <div className="relative h-full w-full bg-black">
+      <div ref={containerRef} data-testid={testId} className="h-full w-full" />
+      {state !== "connected" && (
+        <div
+          data-testid="browser-rfb-overlay"
+          className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/70 text-sm text-muted-foreground"
+        >
+          {state === "connecting"
+            ? "Connecting to browser…"
+            : "Live view disconnected — take control again to reconnect."}
+        </div>
+      )}
+    </div>
   );
 }

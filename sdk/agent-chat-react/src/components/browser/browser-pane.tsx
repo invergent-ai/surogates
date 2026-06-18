@@ -216,7 +216,10 @@ export function BrowserPane({
               Browser closed.
             </div>
           ) : canUseLiveView ? (
-            <BrowserLiveView src={liveViewUrl} />
+            <BrowserLiveView
+              src={liveViewUrl}
+              onDisconnect={() => setLocalControlActive(false)}
+            />
           ) : previewSnapshot ? (
             <BrowserPreviewImage
               src={previewSnapshot.src}
@@ -273,6 +276,7 @@ export function BrowserPane({
               <BrowserLiveView
                 src={liveViewUrl}
                 testId="browser-fullscreen-rfb"
+                onDisconnect={() => setLocalControlActive(false)}
               />
             ) : previewSnapshot ? (
               <BrowserPreviewImage
