@@ -566,10 +566,10 @@ describe("InboxPanel", () => {
   });
 
   it("passes the inbox item to onSessionSelect", async () => {
-    const calls: Array<{ id: string; agentId?: string | null }> = [];
+    const calls: Array<{ id: string; agentId?: string | null; agentSlug?: string | null }> = [];
     const items = [inboxItem({ id: 1, title: "Done" })];
     items[0].agentId = "other-agent";
-    items[0].agentWebUrl = "https://other.example";
+    items[0].agentSlug = "other-agent";
     const adapter = createAdapter(items);
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -579,7 +579,7 @@ describe("InboxPanel", () => {
         <InboxPanel
           adapter={adapter}
           onSessionSelect={(sessionId, item) =>
-            calls.push({ id: sessionId, agentId: item?.agentId })
+            calls.push({ id: sessionId, agentId: item?.agentId, agentSlug: item?.agentSlug })
           }
         />,
       );
@@ -590,7 +590,7 @@ describe("InboxPanel", () => {
     await act(async () => { row?.click(); await Promise.resolve(); });
     const openBtn = container.querySelector<HTMLButtonElement>('button[aria-label="Open session"]');
     await act(async () => { openBtn?.click(); await Promise.resolve(); });
-    expect(calls).toEqual([{ id: "session-1", agentId: "other-agent" }]);
+    expect(calls).toEqual([{ id: "session-1", agentId: "other-agent", agentSlug: "other-agent" }]);
   });
 
   it("deletes the selected inbox item and clears the detail pane", async () => {

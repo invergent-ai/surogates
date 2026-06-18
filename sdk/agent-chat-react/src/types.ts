@@ -445,7 +445,7 @@ export interface AgentChatInboxItem {
   readAt: string | null;
   respondedAt: string | null;
   agentId?: string | null;
-  agentWebUrl?: string | null;
+  agentSlug?: string | null;
 }
 
 export interface AgentChatInboxList {

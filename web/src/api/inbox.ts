@@ -28,7 +28,7 @@ interface InboxItemResponse {
   read_at: string | null;
   responded_at: string | null;
   agent_id?: string | null;
-  agent_web_url?: string | null;
+  agent_slug?: string | null;
 }
 
 interface InboxListResponse {
@@ -54,7 +54,7 @@ function toInboxItem(item: InboxItemResponse): AgentChatInboxItem {
     readAt: item.read_at,
     respondedAt: item.responded_at,
     agentId: item.agent_id ?? null,
-    agentWebUrl: item.agent_web_url ?? null,
+    agentSlug: item.agent_slug ?? null,
   };
 }
 
