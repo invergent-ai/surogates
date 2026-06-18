@@ -13,7 +13,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 import {
   HoverCard,
@@ -63,7 +62,6 @@ import {
   ArrowUpIcon,
   ImageIcon,
   Monitor,
-  PlusIcon,
   SquareIcon,
   XIcon,
 } from "lucide-react";
