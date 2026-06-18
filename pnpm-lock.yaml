@@ -111,9 +111,6 @@ importers:
       '@types/node':
         specifier: ^24.10.1
         version: 24.12.2
-      '@types/novnc__novnc':
-        specifier: ^1.6.0
-        version: 1.6.0
       '@types/react':
         specifier: ^19.2.5
         version: 19.2.14
@@ -2016,9 +2013,6 @@ packages:
 
   '@types/node@24.12.2':
     resolution: {integrity: sha512-A1sre26ke7HDIuY/M23nd9gfB+nrmhtYyMINbjI1zHJxYteKR6qSMX56FsmjMcDb3SMcjJg5BiRRgOCC/yBD0g==}
-
-  '@types/novnc__novnc@1.6.0':
-    resolution: {integrity: sha512-kIH/PQACbf9qj6whiSXRKECpyzgs6IFNVsW4wohyqQUZfQHdLhuGRMLi9XEhBiISSh0lKCSbBa7kScuPu9Gk+Q==}
 
   '@types/qs@6.15.0':
     resolution: {integrity: sha512-JawvT8iBVWpzTrz3EGw9BTQFg3BQNmwERdKE22vlTxawwtbyUSlMppvZYKLZzB5zgACXdXxbD3m1bXaMqP/9ow==}
@@ -5637,8 +5631,6 @@ snapshots:
   '@types/node@24.12.2':
     dependencies:
       undici-types: 7.16.0
-
-  '@types/novnc__novnc@1.6.0': {}
 
   '@types/qs@6.15.0': {}
 

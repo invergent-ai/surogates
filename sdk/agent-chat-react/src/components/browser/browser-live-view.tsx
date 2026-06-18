@@ -1,5 +1,6 @@
+/// <reference path="../../novnc.d.ts" />
 import { useEffect, useRef, useState } from "react";
-import type RFB from "@novnc/novnc";
+import type { NoVncClient } from "@novnc/novnc";
 
 interface BrowserLiveViewProps {
   src: string;
@@ -45,22 +46,23 @@ export function BrowserLiveView({
     if (!container) return;
     setState("connecting");
 
-    let rfb: RFB | undefined;
+    let rfb: NoVncClient | undefined;
     let disposed = false;
 
     const handleConnect = () => setState("connected");
-    const handleDisconnect = (event: CustomEvent<{ clean: boolean }>) => {
+    const handleDisconnect = (event: Event) => {
+      const detail = (event as CustomEvent<{ clean: boolean }>).detail;
       setState("disconnected");
-      onDisconnectRef.current?.(event.detail?.clean ?? false);
+      onDisconnectRef.current?.(detail?.clean ?? false);
     };
 
     // noVNC is browser-only (touches WebSocket/canvas at module load), so it is
     // imported lazily — the component stays safe to import in SSR/tests that do
     // not mount it.
     void import("@novnc/novnc")
-      .then(({ default: RFBImpl }) => {
+      .then((mod) => {
         if (disposed || !containerRef.current) return;
-        const instance = new RFBImpl(containerRef.current, toWsUrl(src), {
+        const instance = new mod.default(containerRef.current, toWsUrl(src), {
           wsProtocols: ["binary"],
         });
         instance.viewOnly = false;
