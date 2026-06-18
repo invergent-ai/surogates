@@ -10,6 +10,18 @@ import { SessionSidebar } from "@/components/navbar";
 import { surogatesWebChatAdapter } from "@/features/chat";
 import { useAppStore } from "@/stores/app-store";
 
+// Build the owning agent's hosted-page URL from THIS app's host: prod serves
+// each agent at <slug>.<domain> (e.g. agent.cloud.surogate.ai), so swap the
+// current first label for the owner's slug. Returns null when the host has no
+// derivable domain (e.g. localhost:5174 in dev) — caller falls back to in-place.
+function crossAgentChatUrl(agentSlug: string, sessionId: string): string | null {
+  const { protocol, host } = window.location;
+  const dot = host.indexOf(".");
+  if (dot <= 0) return null; // localhost / single-label host → not derivable
+  const domain = host.slice(dot + 1);
+  return `${protocol}//${agentSlug}.${domain}/chat/${sessionId}`;
+}
+
 export function InboxPage() {
   const navigate = useNavigate();
   const fetchSessions = useAppStore((state) => state.fetchSessions);
@@ -26,9 +38,17 @@ export function InboxPage() {
   }, [fetchSessions, fetchUser, fetchCapabilities]);
 
   function handleSessionSelect(sessionId: string, item?: AgentChatInboxItem) {
-    if (item?.agentId && currentAgentId && item.agentId !== currentAgentId && item.agentSlug) {
-      window.open(`/${item.agentSlug}/chat/${sessionId}`, "_blank", "noopener");
-      return;
+    if (
+      item?.agentId &&
+      currentAgentId &&
+      item.agentId !== currentAgentId &&
+      item.agentSlug
+    ) {
+      const url = crossAgentChatUrl(item.agentSlug, sessionId);
+      if (url) {
+        window.open(url, "_blank", "noopener");
+        return;
+      }
     }
     setActiveSession(sessionId);
     void navigate({ to: "/chat/$sessionId", params: { sessionId } });
