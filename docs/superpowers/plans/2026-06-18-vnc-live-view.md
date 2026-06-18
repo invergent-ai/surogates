@@ -21,7 +21,7 @@ Updated before each commit. `[x]` done · `[~]` in progress · `[ ]` not started
 - [x] C1 — Ops: delete neko HTML-rewrite/interceptor; keep RFB WS proxy + auth — deleted the whole `get_live_browser_asset` GET route + orphaned cookie helpers (ruff clean, 25 ops tests pass); lands in `surogate-ops`
 - [x] D1 — SDK: `browserLiveViewUrl` drops `pwd=admin` — verified (15 frontend tests pass); lands in `surogate-ops`
 - [x] D2 — SDK: `BrowserLiveView` noVNC RFB canvas — verified: RFB connects to wss:// url; tests + tsup build (ESM/CJS/DTS) green. Note: bare `@novnc/novnc` import + type shim (1.7 exports vs @types path)
-- [~] D3 — SDK: mount RFB only under control; `browser-pane` wiring
+- [x] D3 — SDK: mount RFB only under control; `browser-pane` wiring — verified: RFB mounts only after Take control; renamed stale fullscreen testId; 350 SDK tests green
 - [ ] E1 — End-to-end: build/deploy + acceptance (manual)
 
 ## Global Constraints
