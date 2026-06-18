@@ -20,6 +20,7 @@ import {
   PlusIcon,
   SparklesIcon,
   TerminalIcon,
+  type LucideIcon,
 } from "lucide-react";
 import type { PromptInputMessage } from "../ai-elements/prompt-input";
 import { useProviderAttachments } from "../ai-elements/prompt-input";
@@ -70,12 +71,13 @@ import {
 } from "../ui/popover";
 import {
   Command,
-  CommandEmpty,
-  CommandInput,
   CommandItem,
   CommandList,
 } from "../ui/command";
-import { Skeleton } from "../ui/skeleton";
+import {
+  ComposerCommandMenu,
+  type ComposerMenuMode,
+} from "./composer-command-menu";
 
 // ── Slash command entry ──────────────────────────────────────────────
 
@@ -225,6 +227,35 @@ function formatBytes(n?: number): string {
   return `${n} B`;
 }
 
+// ── Expert-mode menu trigger ─────────────────────────────────────────
+//
+// The three buttons that open the slash menu in a pre-selected scope are
+// identical bar their icon, label and target mode, so they share one
+// presentational button.
+
+function ComposerMenuButton({
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  icon: LucideIcon;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <Button
+      type="button"
+      variant="secondary"
+      size="sm"
+      className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent cursor-pointer"
+      onClick={onClick}
+    >
+      <Icon />
+      {label}
+    </Button>
+  );
+}
+
 function AttachmentPreviewStrip() {
   const attachments = useProviderAttachments();
   if (attachments.files.length === 0) return null;
@@ -343,9 +374,7 @@ function ChatComposerInner({
   const [adapterCommands, setAdapterCommands] = useState<SlashCommand[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [buttonMenuOpen, setButtonMenuOpen] = useState(false);
-  const [menuMode, setMenuMode] = useState<
-    "commands" | "skills" | "scheduled" | "all"
-  >("all");
+  const [menuMode, setMenuMode] = useState<ComposerMenuMode>("all");
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [menuDismissed, setMenuDismissed] = useState(false);
   const showSlashMenu = !menuDismissed && (textInput.value.startsWith("/") || buttonMenuOpen);
@@ -532,6 +561,12 @@ function ChatComposerInner({
     });
   }, []);
 
+  const openMenu = useCallback((mode: ComposerMenuMode) => {
+    setMenuMode(mode);
+    setMenuDismissed(false);
+    setButtonMenuOpen(true);
+  }, []);
+
   const handleCommandSelect = useCallback(
     (commandValue: string) => {
       textInput.setInput(`${commandValue} `);
@@ -657,49 +692,22 @@ function ChatComposerInner({
       <AttachmentPreviewStrip />
       {viewMode === "expert" && !disabled && (
         <div className="flex flex-wrap items-center justify-end gap-2 px-1 pb-2">
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent cursor-pointer"
-            onClick={() => {
-              setMenuMode("commands");
-              setMenuDismissed(false);
-              setButtonMenuOpen(true);
-            }}
-          >
-            <TerminalIcon />
-            Commands
-          </Button>
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent cursor-pointer"
-            onClick={() => {
-              setMenuMode("skills");
-              setMenuDismissed(false);
-              setButtonMenuOpen(true);
-            }}
-          >
-            <SparklesIcon />
-            Skills
-          </Button>
+          <ComposerMenuButton
+            icon={TerminalIcon}
+            label="Commands"
+            onClick={() => openMenu("commands")}
+          />
+          <ComposerMenuButton
+            icon={SparklesIcon}
+            label="Skills"
+            onClick={() => openMenu("skills")}
+          />
           {loopsEnabled && (
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              className="rounded-sm -uppercase font-display bg-white dark:bg-accent border-2 border-accent cursor-pointer"
-              onClick={() => {
-                setMenuMode("scheduled");
-                setMenuDismissed(false);
-                setButtonMenuOpen(true);
-              }}
-            >
-              <ClockIcon />
-              Scheduled Tasks
-            </Button>
+            <ComposerMenuButton
+              icon={ClockIcon}
+              label="Scheduled Tasks"
+              onClick={() => openMenu("scheduled")}
+            />
           )}
         </div>
       )}
@@ -926,163 +934,17 @@ function ChatComposerInner({
           </PromptInputFooter>
         </PromptInput>
       </PopoverAnchor>
-      <PopoverContent
-        side="top"
-        align="start"
-        className="overflow-hidden rounded-xl p-0"
-        style={{ width: "var(--radix-popover-trigger-width)" }}
-        onCloseAutoFocus={(e) => e.preventDefault()}
-        onEscapeKeyDown={() => {
-          // Escape is the canonical "back out of the popup, keep
-          // typing in the chat" gesture.  Click-outside is
-          // deliberately NOT routed here — if the user clicked some
-          // other widget on the page they expect focus to land
-          // wherever they clicked, not snap back to the textarea.
-          focusTextareaAtEnd();
-        }}
-      >
-        {/*
-          Native shadcn / cmdk command palette: the CommandInput owns
-          focus while the popup is open, cmdk runs the filter
-          (matching ``value`` plus the ``keywords`` we pass per item,
-          so descriptions count toward matches), and cmdk handles
-          arrow keys / Enter / scroll-into-view itself.  The CommandInput
-          mirrors the textarea so the chat input still reflects the
-          query and sending the message still works the same way.
-        */}
-        <Command>
-          {menuMode === "skills" ? (
-            <CommandInput placeholder="Search skills..." />
-          ) : menuMode === "scheduled" ? (
-            <CommandInput placeholder="Search scheduled tasks..." />
-          ) : (
-            <CommandInput
-              placeholder="Type a command or search..."
-              value={searchQuery}
-              onValueChange={handleSearchChange}
-            />
-          )}
-          <CommandList>
-            {/*
-              While skills are still being fetched ``adapterCommands`` is
-              empty, so cmdk would otherwise flash "No skills found." until
-              the request resolves. Suppress the empty state and show
-              skeleton rows instead so the menu reads as "loading" on its
-              very first open rather than "empty".
-            */}
-            {!(
-              skillsLoading &&
-              (menuMode === "skills" || menuMode === "all")
-            ) && (
-              <CommandEmpty>
-                {menuMode === "skills"
-                  ? "No skills found."
-                  : menuMode === "scheduled"
-                  ? "No scheduled tasks found."
-                  : "No commands found."}
-              </CommandEmpty>
-            )}
-            {(menuMode === "skills" || menuMode === "all") &&
-              skillsLoading &&
-              adapterCommands.length === 0 &&
-              [0, 1, 2].map((i) => (
-                <div
-                  key={`skill-skeleton-${i}`}
-                  className="grid grid-cols-[12rem_1fr] items-baseline gap-3 px-2 py-2"
-                  aria-hidden="true"
-                >
-                  <Skeleton className="h-4 w-28" />
-                  <Skeleton className="h-3 w-full max-w-[16rem]" />
-                </div>
-              ))}
-            {menuMode === "scheduled" &&
-              scheduledExamples.map((cmd) => (
-                <CommandItem
-                  key={cmd.value}
-                  value={cmd.value}
-                  keywords={[cmd.description]}
-                  onSelect={() => handleCommandSelect(cmd.value)}
-                  className="grid grid-cols-[14rem_1fr] items-baseline gap-3 [&_svg]:hidden"
-                >
-                  <span
-                    className="font-mono font-semibold text-foreground truncate"
-                    title={cmd.label}
-                  >
-                    {cmd.label}
-                  </span>
-                  <span
-                    className="min-w-0 truncate text-sm text-muted-foreground"
-                    title={cmd.description}
-                  >
-                    {cmd.description}
-                  </span>
-                </CommandItem>
-              ))}
-            {(menuMode === "commands" || menuMode === "all") &&
-              builtinCommands.map((cmd) => (
-                <CommandItem
-                  key={cmd.value}
-                  value={cmd.value}
-                  keywords={[cmd.description]}
-                  onSelect={() => handleCommandSelect(cmd.value)}
-                  className="grid grid-cols-[12rem_1fr] items-baseline gap-3 [&_svg]:hidden"
-                >
-                  <span
-                    className="font-mono font-semibold text-foreground truncate"
-                    title={cmd.label}
-                  >
-                    {cmd.label}
-                  </span>
-                  <span
-                    className="min-w-0 truncate text-sm text-muted-foreground"
-                    title={cmd.description}
-                  >
-                    {cmd.description}
-                  </span>
-                </CommandItem>
-              ))}
-            {(menuMode === "skills" || menuMode === "all") &&
-              adapterCommands.map((cmd) => (
-                <CommandItem
-                  key={cmd.value}
-                  value={cmd.value}
-                  // Including "expert" as a fuzzy-match keyword lets the
-                  // user type "/expert" to list every specialist at once.
-                  keywords={
-                    cmd.isExpert
-                      ? [cmd.description, "expert"]
-                      : [cmd.description]
-                  }
-                  onSelect={() => handleCommandSelect(cmd.value)}
-                  className="grid grid-cols-[12rem_1fr] items-baseline gap-3 [&_svg]:hidden"
-                >
-                  <span
-                    className="inline-flex items-center gap-1.5 min-w-0 max-w-full"
-                    title={cmd.label}
-                  >
-                    <span className="font-mono font-semibold text-foreground truncate">
-                      {cmd.label}
-                    </span>
-                    {cmd.isExpert && (
-                      <span
-                        className="shrink-0 rounded-sm bg-primary/10 px-1 text-[9px] font-semibold uppercase tracking-wider text-primary"
-                        aria-label="Expert specialist"
-                      >
-                        expert
-                      </span>
-                    )}
-                  </span>
-                  <span
-                    className="min-w-0 truncate text-sm text-muted-foreground"
-                    title={cmd.description}
-                  >
-                    {cmd.description}
-                  </span>
-                </CommandItem>
-              ))}
-          </CommandList>
-        </Command>
-      </PopoverContent>
+      <ComposerCommandMenu
+        menuMode={menuMode}
+        searchQuery={searchQuery}
+        onSearchChange={handleSearchChange}
+        skillsLoading={skillsLoading}
+        builtinCommands={builtinCommands}
+        adapterCommands={adapterCommands}
+        scheduledExamples={scheduledExamples}
+        onCommandSelect={handleCommandSelect}
+        onEscapeDismiss={focusTextareaAtEnd}
+      />
     </Popover>
   );
 }
