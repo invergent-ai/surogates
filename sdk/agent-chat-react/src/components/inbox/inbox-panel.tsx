@@ -39,7 +39,7 @@ export interface InboxPanelProps {
   title?: string;
   selectedId?: number | null;
   onSelectedIdChange?: (itemId: number | null) => void;
-  onSessionSelect?: (sessionId: string) => void;
+  onSessionSelect?: (sessionId: string, item?: AgentChatInboxItem) => void;
   hideHeader?: boolean;
   limit?: number;
 }
@@ -181,7 +181,7 @@ function InboxDetailActions({
   item: AgentChatInboxItem;
   adapter: InboxAdapter;
   onDeleted: (itemId: number) => Promise<void>;
-  onSessionSelect?: (sessionId: string) => void;
+  onSessionSelect?: (sessionId: string, item?: AgentChatInboxItem) => void;
   children?: ReactNode;
 }) {
   const [deleting, setDeleting] = useState(false);
@@ -201,7 +201,7 @@ function InboxDetailActions({
       <Button
         type="button"
         size="sm"
-        onClick={() => onSessionSelect?.(item.sessionId)}
+        onClick={() => onSessionSelect?.(item.sessionId, item)}
         aria-label="Open session"
       >
         <ExternalLinkIcon className="size-3.5" />
@@ -237,7 +237,7 @@ function InputRequiredDetail({
   adapter: InboxAdapter;
   onUpdated: (item: AgentChatInboxItem) => void;
   onDeleted: (itemId: number) => Promise<void>;
-  onSessionSelect?: (sessionId: string) => void;
+  onSessionSelect?: (sessionId: string, item?: AgentChatInboxItem) => void;
 }) {
   const questions = Array.isArray(item.payload.questions)
     ? (item.payload.questions as Array<{
@@ -342,7 +342,7 @@ function AckDetail({
   adapter: InboxAdapter;
   onUpdated: (item: AgentChatInboxItem) => void;
   onDeleted: (itemId: number) => Promise<void>;
-  onSessionSelect?: (sessionId: string) => void;
+  onSessionSelect?: (sessionId: string, item?: AgentChatInboxItem) => void;
 }) {
   async function acknowledge() {
     onUpdated(await adapter.acknowledgeInboxItem({ itemId: item.id }));
@@ -399,7 +399,7 @@ function GovernanceDetail({
   adapter: InboxAdapter;
   onUpdated: (item: AgentChatInboxItem) => void;
   onDeleted: (itemId: number) => Promise<void>;
-  onSessionSelect?: (sessionId: string) => void;
+  onSessionSelect?: (sessionId: string, item?: AgentChatInboxItem) => void;
 }) {
   async function decide(decision: "approve" | "reject") {
     onUpdated(
@@ -467,7 +467,7 @@ function ActionRequiredDetail({
   adapter: InboxAdapter;
   onUpdated: (item: AgentChatInboxItem) => void;
   onDeleted: (itemId: number) => Promise<void>;
-  onSessionSelect?: (sessionId: string) => void;
+  onSessionSelect?: (sessionId: string, item?: AgentChatInboxItem) => void;
 }) {
   const [submitting, setSubmitting] = useState(false);
   const actionType =
@@ -530,7 +530,7 @@ function ProgressDetail({
   adapter: InboxAdapter;
   onUpdated: (item: AgentChatInboxItem) => void;
   onDeleted: (itemId: number) => Promise<void>;
-  onSessionSelect?: (sessionId: string) => void;
+  onSessionSelect?: (sessionId: string, item?: AgentChatInboxItem) => void;
 }) {
   async function acknowledge() {
     onUpdated(await adapter.acknowledgeInboxItem({ itemId: item.id }));
@@ -591,7 +591,7 @@ function InboxDetail({
   adapter: InboxAdapter;
   onUpdated: (item: AgentChatInboxItem) => void;
   onDeleted: (itemId: number) => Promise<void>;
-  onSessionSelect?: (sessionId: string) => void;
+  onSessionSelect?: (sessionId: string, item?: AgentChatInboxItem) => void;
 }) {
   const Icon = kindIcon(item.kind);
 

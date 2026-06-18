@@ -444,6 +444,8 @@ export interface AgentChatInboxItem {
   updatedAt: string;
   readAt: string | null;
   respondedAt: string | null;
+  agentId?: string | null;
+  agentWebUrl?: string | null;
 }
 
 export interface AgentChatInboxList {
