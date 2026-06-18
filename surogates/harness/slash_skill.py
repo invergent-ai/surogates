@@ -187,6 +187,7 @@ async def expand_slash_skill(
     session_config: dict[str, Any] | None = None,
     session_store: Any | None = None,
     sandbox_pool: Any | None = None,
+    credential_vault: Any | None = None,
 ) -> tuple[str, str, str | None, Literal["skill", "expert"]] | None:
     """Try to expand a ``/<name> args...`` user message.
 
@@ -233,6 +234,7 @@ async def expand_slash_skill(
             tool_registry=tools,
             session_store=session_store,
             sandbox_pool=sandbox_pool,
+            credential_vault=credential_vault,
         )
 
     return await _expand_skill(
@@ -310,6 +312,7 @@ async def _expand_expert(
     tool_registry: Any,
     session_store: Any | None,
     sandbox_pool: Any | None,
+    credential_vault: Any | None = None,
 ) -> tuple[str, str, str | None, Literal["skill", "expert"]] | None:
     """Run the expert mini-loop and inline the deliverable.
 
@@ -331,6 +334,7 @@ async def _expand_expert(
             tool_registry=tool_registry,
             session_store=session_store,
             sandbox_pool=sandbox_pool,
+            credential_vault=credential_vault,
         )
         outcome = await service.consult(expert=expert, task=args)
     except Exception:

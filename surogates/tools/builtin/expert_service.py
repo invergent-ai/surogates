@@ -16,6 +16,50 @@ from surogates.tools.loader import SkillDef
 logger = logging.getLogger(__name__)
 
 
+def _model_id_from_endpoint(endpoint: str | None) -> str | None:
+    """Extract the deployed-model id from a ``/proxy/services/_model/{id}`` path.
+
+    Experts served through the platform proxy carry an endpoint like
+    ``/proxy/services/_model/<uuid>/v1``; the per-model credential the
+    proxy expects is keyed by that ``<uuid>``.  Returns ``None`` for any
+    other endpoint shape (self-hosted, dstack legacy) so the caller falls
+    back to its default credential.
+    """
+    if not endpoint:
+        return None
+    marker = "/_model/"
+    idx = endpoint.find(marker)
+    if idx == -1:
+        return None
+    return endpoint[idx + len(marker):].split("/", 1)[0] or None
+
+
+async def resolve_expert_api_key(
+    credential_vault: Any, tenant: Any, expert: SkillDef,
+) -> str | None:
+    """Resolve the platform credential scoped to the expert's model.
+
+    The expert mini-loop calls ``/proxy/services/_model/{id}``, which the
+    proxy gates on an ``sk-agent`` key scoped to that model — the same
+    ``vault://byo_model_{id}_key`` credential the platform mints when a
+    model is served.  Resolve it from the vault; return ``None`` on any
+    miss so the loop falls back to its existing behaviour.
+    """
+    model_id = _model_id_from_endpoint(expert.expert_endpoint)
+    org_id = getattr(tenant, "org_id", None)
+    if credential_vault is None or model_id is None or org_id is None:
+        return None
+    try:
+        return await credential_vault.resolve_ref(
+            f"vault://byo_model_{model_id}_key", org_id=org_id,
+        )
+    except Exception:
+        logger.debug(
+            "expert key resolution failed for model %s", model_id, exc_info=True,
+        )
+        return None
+
+
 @dataclass(frozen=True, slots=True)
 class ExpertConsultationResult:
     """Result returned from an expert consultation."""
@@ -39,6 +83,7 @@ class ExpertConsultationService:
         session_store: Any | None = None,
         tool_router: Any | None = None,
         sandbox_pool: Any | None = None,
+        credential_vault: Any | None = None,
     ) -> None:
         self._tenant = tenant
         self._session_id = session_id
@@ -46,6 +91,7 @@ class ExpertConsultationService:
         self._session_store = session_store
         self._tool_router = tool_router
         self._sandbox_pool = sandbox_pool
+        self._credential_vault = credential_vault
 
     async def consult(
         self,
@@ -74,6 +120,9 @@ class ExpertConsultationService:
             )
 
         try:
+            api_key = await resolve_expert_api_key(
+                self._credential_vault, self._tenant, expert,
+            )
             result, iterations_used = await run_expert_loop(
                 expert=expert,
                 task=task,
@@ -83,6 +132,7 @@ class ExpertConsultationService:
                 tenant=self._tenant,
                 session_id=self._session_id,
                 session_store=self._session_store,
+                api_key=api_key,
             )
             await record_expert_outcome(
                 session_store=self._session_store,

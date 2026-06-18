@@ -65,6 +65,7 @@ async def run_expert_loop(
     tenant: Any,
     session_id: UUID,
     session_store: Any | None = None,
+    api_key: str | None = None,
 ) -> tuple[str, int]:
     """Run a scoped agent loop using the expert's configured model.
 
@@ -128,7 +129,7 @@ async def run_expert_loop(
     server_base_url = getattr(load_settings(), "platform_api_url", None)
     client = AsyncOpenAI(
         base_url=_absolute_endpoint(expert.expert_endpoint, server_base_url),
-        api_key=_resolve_api_key(tenant, expert),
+        api_key=api_key or _resolve_api_key(tenant, expert),
     )
 
     gen_kwargs, gen_extra = _generation_kwargs(expert.expert_generation)
