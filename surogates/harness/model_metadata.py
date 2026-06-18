@@ -210,7 +210,7 @@ _ALIASES: dict[str, str] = {
     "zai/glm-5.1": "glm-5.1",
     "z-ai/glm-5.1": "glm-5.1",
     "zai-org/GLM-5.1": "glm-5.1",
-    "@preset/glm-5-1": "glm-5.1",
+    "@preset/glm-5-2": "glm-5.2",
     "@preset/qwen-3-7-max": "qwen-3-7-max",
     "qwen3.7-max": "qwen-3-7-max",
     "xiaomi/mimo-v2.5-pro": "mimo-v2.5-pro",
