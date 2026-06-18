@@ -1,7 +1,7 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { InboxPanel } from "@invergent/agent-chat-react";
+import { type AgentChatInboxItem, InboxPanel } from "@invergent/agent-chat-react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useEffect } from "react";
 
@@ -14,15 +14,22 @@ export function InboxPage() {
   const navigate = useNavigate();
   const fetchSessions = useAppStore((state) => state.fetchSessions);
   const fetchUser = useAppStore((state) => state.fetchUser);
+  const fetchCapabilities = useAppStore((state) => state.fetchCapabilities);
   const setActiveSession = useAppStore((state) => state.setActiveSession);
+  const currentAgentId = useAppStore((s) => s.agentId);
   const search = useSearch({ strict: false }) as { item?: number };
 
   useEffect(() => {
     void fetchSessions();
     void fetchUser();
-  }, [fetchSessions, fetchUser]);
+    void fetchCapabilities();
+  }, [fetchSessions, fetchUser, fetchCapabilities]);
 
-  function handleSessionSelect(sessionId: string) {
+  function handleSessionSelect(sessionId: string, item?: AgentChatInboxItem) {
+    if (item?.agentId && item.agentId !== currentAgentId && item.agentWebUrl) {
+      window.open(`${item.agentWebUrl}/chat/${sessionId}`, "_blank", "noopener");
+      return;
+    }
     setActiveSession(sessionId);
     void navigate({ to: "/chat/$sessionId", params: { sessionId } });
   }

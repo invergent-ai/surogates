@@ -15,6 +15,7 @@ import { fetchAuthConfig } from "@/api/auth";
 // "clear") is the authoritative enabled set.
 export type CapabilitiesSlice = {
   slashCommands: string[] | null;
+  agentId: string | null;
 
   fetchCapabilities: () => Promise<void>;
 };
@@ -26,12 +27,13 @@ export const createCapabilitiesSlice: StateCreator<
   CapabilitiesSlice
 > = (set) => ({
   slashCommands: null,
+  agentId: null,
 
   fetchCapabilities: async () => {
     // ``fetchAuthConfig`` already degrades to a safe fallback on error
-    // (no ``slash_commands`` field), which maps to ``null`` here.
+    // (no ``slash_commands`` / ``agent_id`` fields), which map to ``null``.
     const config = await fetchAuthConfig();
-    set({ slashCommands: config.slash_commands ?? null });
+    set({ slashCommands: config.slash_commands ?? null, agentId: config.agent_id ?? null });
   },
 });
 
