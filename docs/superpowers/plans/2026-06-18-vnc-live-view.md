@@ -14,8 +14,8 @@
 
 Updated before each commit. `[x]` done · `[~]` in progress · `[ ]` not started.
 
-- [~] A1 — Image: x11vnc + websockify on :8080, neko disabled (RFB-handshake test)
-- [ ] B1 — Harness: agent-suspend coverage across every browser tool
+- [x] A1 — Image: x11vnc + websockify on :8080, neko disabled (RFB-handshake test) — verified: `RFB 003.008` on :8080, neko STOPPED
+- [~] B1 — Harness: agent-suspend coverage across every browser tool
 - [ ] B2 — Harness: buffered RFB client-message gate (`rfb.py`) + per-connection gate in WS proxy
 - [ ] B3 — Harness: live-view WS proxy control-required against an RFB upstream
 - [ ] C1 — Ops: delete neko HTML-rewrite/interceptor; keep RFB WS proxy + auth
