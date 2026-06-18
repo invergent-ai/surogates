@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from surogates.browser.client import KernelBrowserClient
 from surogates.browser.control import AcquireOutcome
-from surogates.browser.rfb import is_input_frame
+from surogates.browser.rfb import RFBClientMessageGate, is_input_frame
 from surogates.session.events import EventType
 from surogates.tenant.auth.middleware import (
     LIVE_VIEW_TOKEN_COOKIE,
@@ -508,6 +508,8 @@ async def proxy_live_view_ws(
         subprotocol="binary" if "binary" in requested_protocols else None,
     )
 
+    rfb_gate = RFBClientMessageGate()
+
     async def client_to_upstream() -> None:
         try:
             while True:
@@ -517,16 +519,23 @@ async def proxy_live_view_ws(
                 frame = _live_view_client_payload(message)
                 if frame is None:
                     continue
-                allowed = True
                 if isinstance(frame, bytes):
-                    allowed = await _should_forward_client_frame(
-                        session_id=str(session_id),
-                        tenant=tenant,
-                        control=control,
-                        frame=frame,
+                    # Gate input across WS frame boundaries: websockify may split
+                    # or coalesce RFB messages, so parse the client byte stream and
+                    # drop KeyEvent/PointerEvent/ClientCutText when control is no
+                    # longer held (e.g. after the control lease's TTL expires).
+                    input_allowed = (
+                        tenant.user_id is not None
+                        and await control.held_by(str(session_id))
+                        == str(tenant.user_id)
                     )
-                if allowed:
-                    await upstream.send(frame)
+                    for chunk in rfb_gate.filter_client_bytes(
+                        frame,
+                        input_allowed=input_allowed,
+                    ):
+                        await upstream.send(chunk)
+                    continue
+                await upstream.send(frame)
         except WebSocketDisconnect:
             return
 

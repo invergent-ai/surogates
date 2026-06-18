@@ -17,8 +17,8 @@ Updated before each commit. `[x]` done · `[~]` in progress · `[ ]` not started
 - [x] A1 — Image: x11vnc + websockify on :8080, neko disabled (RFB-handshake test) — verified: `RFB 003.008` on :8080, neko STOPPED
 - [x] B1 — Harness: agent-suspend coverage across every browser tool — verified: all 10 `_browser_*_handler`s return `paused_by_user` under the control lock (no production change; guards already present)
 - [x] B2 — Harness: live-view WS proxy control-required against an RFB upstream — verified: 4403 for non-holder, RFB banner proxied for holder (no production change)
-- [~] B3 — Harness: parse client-side RFB messages across WS frame boundaries (`RFBClientMessageGate`)
-- [ ] C1 — Ops: delete neko HTML-rewrite/interceptor; keep RFB WS proxy + auth
+- [x] B3 — Harness: parse client-side RFB messages across WS frame boundaries (`RFBClientMessageGate`) — verified: split/coalesced input gating; WS proxy uses a per-connection gate (85 browser tests green)
+- [~] C1 — Ops: delete neko HTML-rewrite/interceptor; keep RFB WS proxy + auth
 - [ ] D1 — SDK: `browserLiveViewUrl` drops `pwd=admin`
 - [ ] D2 — SDK: `BrowserLiveView` noVNC RFB canvas
 - [ ] D3 — SDK: mount RFB only under control; `browser-pane` wiring
