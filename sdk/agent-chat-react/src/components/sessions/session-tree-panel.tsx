@@ -405,7 +405,7 @@ export function SessionTreePanel({
         ]);
         if (!mounted.current || currentRequestId !== requestId.current) return;
         // The list is the panel's backbone; only a list failure is fatal.
-        if (loadList && adapter.listSessions && listResult.status === "rejected") {
+        if (loadList && listResult.status === "rejected") {
           throw listResult.reason;
         }
         const sessionList =
