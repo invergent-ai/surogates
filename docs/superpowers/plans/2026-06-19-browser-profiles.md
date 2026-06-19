@@ -14,11 +14,18 @@
 - [x] **Task 8** — harness capture route
 - [x] **Task 9** — ops `/api/browser-profiles` proxy
 - [x] **Task 10** — ops session-create accepts `browser_profile_id`
-- [x] **Task 11** — SDK adapter `listBrowserProfiles` + `BrowserLiveView` export _(ops work-adapter impl pending on the ops branch)_
+- [x] **Task 11** — SDK adapter `listBrowserProfiles` + `BrowserLiveView` export (+ ops work-adapter impl)
 - [x] **Task 12** — SDK chat-composer profile selector popover
-- [ ] **Task 13** — Studio `api/browser-profiles.ts` client _(in progress)_
-- [ ] **Task 14** — Studio "Browser Profiles" manager section
-- [ ] **Task 15** — Studio "Set up authentication" dialog
+- [x] **Task 13** — Studio `api/browser-profiles.ts` client
+- [x] **Task 14** — Studio "Browser Profiles" manager section
+- [x] **Task 15** — Studio "Set up authentication" dialog
+
+**Post-plan extensions (to make the feature reachable end-to-end):**
+
+- [x] **E1** — Harness routes **dual-mounted** (`/v1` + `/v1/api`) so the web app (`/v1/browser-profiles`, its proxy strips `/api`) and the ops proxy (`/v1/api/browser-profiles`) both resolve.
+- [x] **E2** — SDK **prop forwarding**: `AgentChat` → `ChatThread` → `ChatComposer` thread `browserProfileId`/`onSelectBrowserProfile` (the selector was otherwise unreachable in any host).
+- [x] **E3** — **Studio work surface** wired: profile state → `AgentChat` selector props + `browser_profile_id` into ops session-create.
+- [x] **E4** — **Agent web app** (`/work/surogates/web`) wired: adapter `listBrowserProfiles`, composer selector + `config.browser.profile_id` on session-create, and a "Browser Profiles" settings tab with the live-view setup dialog.
 
 **Goal:** Let a user save a browser's login/cookie state under a named, private "profile" and reuse it across agent tasks, capturing auth by logging in by hand over the CDP-free VNC live view.
 
