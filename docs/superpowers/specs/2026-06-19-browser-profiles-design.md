@@ -1,7 +1,7 @@
 # Browser profiles for persistent authentication — design
 
 - **Date:** 2026-06-19
-- **Status:** Approved (design) — pending implementation plan
+- **Status:** Approved (design) — amended after implementation-context review
 - **Scope:** Per-user, reusable browser login state ("profiles") for managed-agent browsing
 - **Repos:** `surogates` (harness owns the table, capture/inject, setup session, SDK selector) + `surogate-ops` (thin proxy API + Studio settings manager)
 
@@ -54,6 +54,12 @@ S3/R2 `TenantStorage` and the Fernet-encrypted `CredentialVault`.
   next to `sessions`/`credentials`; capture/inject and the setup session run in the
   harness. `surogate-ops` is a thin authenticated proxy, exactly like `/api/sessions`
   and browser control already are.
+- **Principal model: human user or per-user service account.** Work-chat requests reach
+  the harness through `ops-chat-{org}-{ops_user_id}` service-account tokens, so the
+  harness often has `tenant.user_id = null`. Profiles therefore use the same principal
+  ownership pattern as scheduled sessions: exactly one of `user_id` or
+  `service_account_id` is set. In Studio/Work, profiles are private to the caller's
+  per-user service account.
 - **Setup session: a real `Session` with `channel="browser_setup"`** that provisions a
   browser but does not start the agent harness, and grants the creating user control
   immediately. Reuses the entire existing live-view / RFB-input-gate / control-lease /
@@ -79,26 +85,33 @@ Studio settings (ops frontend)            Chat composer (SDK)
 
 ## Data model
 
-New table in the **surogates DB** (`surogates/db/models.py`), following `Credential`
-conventions (UUID pk, `org_id`/`user_id` scoping, server-default timestamps):
+New table in the **surogates DB** (`surogates/db/models.py`), following the existing
+principal-owned table pattern (UUID pk, `org_id` + user-or-service-account scoping,
+server-default timestamps):
 
 ```
 browser_profiles
   id                 uuid pk
   org_id             uuid  fk orgs            not null
-  user_id            uuid  fk users           not null    # owner; private to this user
+  user_id            uuid  fk users           null        # direct harness user owner
+  service_account_id uuid  fk service_accounts null       # ops-chat owner
   name               text                     not null    # "Personal Profile"
+  source             text                     not null default 'manual_vnc'
   storage_state_enc  bytea                    null        # Fernet(storage_state JSON); null until first capture
   cookie_domains     jsonb                    not null default '[]'   # ["google.com", ...] for the UI
   created_at         timestamptz              not null default now()
   last_used_at       timestamptz              null
-  unique (org_id, user_id, name)
+  check exactly one of (user_id, service_account_id) is non-null
+  unique (org_id, user_id, name) where user_id is not null
+  unique (org_id, service_account_id, name) where service_account_id is not null
 ```
 
 - `storage_state_enc` holds the sensitive blob (cookies + per-origin localStorage),
   encrypted with the existing `CredentialVault` Fernet key. Never leaves the harness.
 - `cookie_domains` is non-sensitive metadata, derived from the captured cookies, stored
   plaintext so the manager UI renders the domain list + favicons without decrypting.
+- `source` is the v1 seam for future imported/local/full-dir profiles. v1 writes
+  `manual_vnc` only.
 - Alembic migration in `surogates/db/migrations` (and the embedded-migration path the
   `surogate-ops migrate` CLI runs against `surogates_database_url`).
 
@@ -109,12 +122,15 @@ browser_profiles
   `context.storage_state()` → `{cookies, origins:[{origin, localStorage}]}`. Encrypt to
   `storage_state_enc`; derive `cookie_domains` from the cookie set; persist. Reading
   cookies via CDP *after* the human has logged in does not disturb the established
-  session.
+  session. This is the only permitted CDP call while the user-control lease is held:
+  normal browser tools still reject with `paused_by_user`, but the setup-only capture
+  route may call `KernelBrowserClient` directly after verifying the caller owns both the
+  profile and the setup session's control lease.
 - **Inject** (agent task): when `session.config.browser.profile_id` is set, the harness —
   immediately after the browser pool provisions/leases the pod and **before any
-  navigation** — decrypts the blob and applies it (`add_cookies` + seed `localStorage`
-  per origin) into the fresh context. The agent then drives normally, already
-  authenticated. Updates `last_used_at`.
+  navigation, registry publish, or `browser.provisioned` event** — decrypts the blob and
+  applies it (`add_cookies` + seed `localStorage` per origin) into the fresh context.
+  The agent then drives normally, already authenticated. Updates `last_used_at`.
 
 ## Component changes
 
@@ -122,30 +138,42 @@ browser_profiles
 
 - **`db/models.py` + migration:** the `browser_profiles` table.
 - **`browser/profiles.py` (new):** `BrowserProfileStore` — CRUD scoped to `(org_id,
-  user_id)`; encrypt/decrypt via the vault; `capture(session_id, profile_id)` and
-  `storage_state_for(profile_id)`.
+  principal)` where principal is `user_id` or `service_account_id`; encrypt/decrypt via
+  the vault; `capture_setup_session(session_id, profile_id, owner_user_id)` and
+  `storage_state_for(profile_id, principal)`.
 - **`api/routes/browser_profiles.py` (new):** router under `/v1/api/browser-profiles`:
   - `GET /` — list caller's profiles (metadata only).
-  - `POST /` — create `{name?}`.
+  - `POST /` — create `{name?}` with `source="manual_vnc"`.
   - `DELETE /{id}` — delete profile + blob.
   - `POST /{id}/setup-session` — create the `browser_setup` session, return `session_id`
-    (+ control granted to the caller).
+    (+ control granted to the caller). Body accepts `{setup_spec?: {proxy?: null}}`;
+    v1 stores it on `session.config.browser.setup_spec` as the future proxy seam and
+    rejects any non-null `proxy` until egress-proxy support exists.
   - `POST /{id}/capture?session_id=…` — export `storage_state` from that session's
-    browser and save. **Requires the caller to hold the control lease** on the session.
+    browser and save. Requires: profile principal matches caller; session
+    `channel == "browser_setup"`; session config names the same `profile_id`; and the
+    caller holds the control lease.
 - **Session provisioning:** `channel="browser_setup"` creates a session that provisions a
-  browser and grants control but does not run the agent loop; a server-side TTL
-  (~15 min) auto-closes and discards. Browser-pool `ensure()` reads
-  `config.browser.profile_id` and injects `storage_state` before returning the endpoint.
+  browser and grants control but does not run the agent loop. Implementation detail:
+  create the `Session` row without adding an initial `user.message` or enqueueing a
+  harness wake, then call `BrowserPool.ensure()` from the setup route and acquire the
+  `BrowserControlStore` lease for the setup owner. A server-side TTL (~15 min)
+  auto-closes and discards. Browser-pool `ensure()` reads `config.browser.profile_id`
+  and injects `storage_state` before returning the endpoint.
+- **`browser/client.py`:** add small public helpers on `KernelBrowserClient` for
+  `storage_state()` and `apply_storage_state(state)` instead of reaching into its private
+  `_playwright_execute()` from route code.
 - **`tools/builtin/browser.py`:** inject-before-navigate happens at provision, so the
   tools are unchanged beyond getting an already-seeded context.
 
 ### 2. Ops — `surogate-ops/`
 
-- **`server/routes/browser_profiles.py` (new):** thin proxy under `/api/browser-profiles`
+- **`surogate_ops/server/routes/browser_profiles.py` (new):** thin proxy under
+  `/api/browser-profiles`
   — one passthrough per harness route, authenticated with the per-user ops-chat service
   account (mirrors `/api/sessions`). Resolves the user's org/SA the same way
   `create_live_session` does.
-- **`server/routes/sessions.py`:** `POST /api/sessions` accepts an optional
+- **`surogate_ops/server/routes/sessions.py`:** `POST /api/sessions` accepts an optional
   `browser_profile_id` and stamps it into `config.browser.profile_id`.
 - The existing live-view / control / preview / DELETE browser routes are reused
   unchanged for the setup session (they already key on `session_id`).
@@ -177,8 +205,8 @@ browser_profiles
 
 1. User clicks **Set up authentication** (settings) or **Set up** (chat selector).
 2. Ops `POST /api/browser-profiles/{id}/setup-session` → harness creates a
-   `browser_setup` session, provisions a browser, grants the user control; returns
-   `session_id`.
+   `browser_setup` session owned by the caller's principal, provisions a browser, grants
+   the user control using the ops user id as `owner_user_id`; returns `session_id`.
 3. The live view opens (existing VNC transport) with control pre-granted and a ~15-min
    countdown.
 4. User logs in by hand (CDP-free input over RFB).
@@ -200,10 +228,14 @@ browser_profiles
 
 - `storage_state_enc` is encrypted at rest and **never** returned to any client; it flows
   only harness → browser pod.
-- Every route re-scopes to `(org_id, user_id)`; a profile is unreadable cross-user even
-  with a guessed id.
+- Every route re-scopes to `(org_id, principal)` where principal is either the harness
+  `user_id` or the caller's per-user `service_account_id`; a profile is unreadable
+  cross-user even with a guessed id.
 - Capture requires the caller to **hold the control lease** on the setup session — no
   exporting another user's live browser.
+- Capture is restricted to `browser_setup` sessions bound to the target profile. It
+  cannot export arbitrary normal agent sessions, even if a user temporarily holds their
+  control lease.
 - Setup-session TTL auto-discards on expiry; "Save" is the only persist path.
 - Deleting a profile does not touch already-injected running sessions; it only prevents
   future attachment.
@@ -211,11 +243,15 @@ browser_profiles
 
 ## Testing
 
-- **Harness:** profile CRUD `(org_id,user_id)` scoping; capture-requires-control;
-  inject-before-navigate ordering; vault encrypt/decrypt round-trip; `cookie_domains`
-  derivation; setup-session TTL discard.
-- **Ops:** proxy auth (per-user SA) + `(org,user)` scoping; `browser_profile_id` stamped
-  into session config on create.
+- **Harness:** profile CRUD `(org_id, principal)` scoping for both direct users and
+  service accounts; setup-session creation does not enqueue a harness wake;
+  capture-requires-control and rejects non-`browser_setup` sessions; capture route is the
+  only allowed CDP exception while control is held; inject-before-registry/event/navigate
+  ordering; vault encrypt/decrypt round-trip; `cookie_domains` derivation; setup-session
+  TTL discard.
+- **Ops:** proxy auth through the caller's per-user service account; profile manager
+  responses isolated per ops user; `browser_profile_id` stamped into session config on
+  create.
 - **SDK:** selector render/select + adapter wiring; profile flows into session create.
 - **Studio:** manager render, create/rename/delete, setup-dialog open.
 - TDD throughout — failing test first.
