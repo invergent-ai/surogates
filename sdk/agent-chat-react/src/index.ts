@@ -10,6 +10,7 @@ export {
 export { FetchSseEventStream } from "./runtime/fetch-sse-stream";
 export type { FetchSseEventStreamOptions } from "./runtime/fetch-sse-stream";
 export { MessageResponse } from "./components/ai-elements/message";
+export { BrowserLiveView } from "./components/browser/browser-live-view";
 export { ComposioConnectCard } from "./components/connections/composio-connect-card";
 export type { ComposioConnectCardProps } from "./components/connections/composio-connect-card";
 export { IntegrationsBand } from "./components/connections/integrations-band";
@@ -74,6 +75,7 @@ export type {
   AgentChatArtifactMeta,
   AgentChatArtifactKind,
   AgentChatArtifactPayload,
+  AgentChatBrowserProfile,
   AgentChatChartArtifactSpec,
   CodingAgentConnection,
   AgentChatAskUserQuestionArgs,

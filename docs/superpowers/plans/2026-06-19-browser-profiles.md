@@ -12,9 +12,9 @@
 - [x] **Task 6** — harness `/v1/api/browser-profiles` CRUD router
 - [x] **Task 7** — harness setup-session route + `browser_setup` channel
 - [x] **Task 8** — harness capture route
-- [ ] **Task 9** — ops `/api/browser-profiles` proxy _(in progress)_
-- [ ] **Task 10** — ops session-create accepts `browser_profile_id`
-- [ ] **Task 11** — SDK adapter `listBrowserProfiles` + create wiring
+- [x] **Task 9** — ops `/api/browser-profiles` proxy
+- [x] **Task 10** — ops session-create accepts `browser_profile_id`
+- [ ] **Task 11** — SDK adapter `listBrowserProfiles` + `BrowserLiveView` export _(in progress)_
 - [ ] **Task 12** — SDK chat-composer profile selector popover
 - [ ] **Task 13** — Studio `api/browser-profiles.ts` client
 - [ ] **Task 14** — Studio "Browser Profiles" manager section

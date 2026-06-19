@@ -525,6 +525,15 @@ export interface AgentChatBrowserState {
   controlOwner: string | null;
 }
 
+export interface AgentChatBrowserProfile {
+  id: string;
+  name: string;
+  cookieDomains: string[];
+  hasState: boolean;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
 export interface AgentChatBrowserPreviewSnapshot {
   src: string;
   capturedAt?: string;
@@ -949,6 +958,8 @@ export interface AgentChatAdapter {
   acquireBrowserControl(sessionId: string): Promise<AgentChatBrowserControlResponse>;
   releaseBrowserControl(sessionId: string): Promise<void>;
   browserLiveViewUrl(sessionId: string): string;
+  /** List the caller's saved browser profiles (optional capability). */
+  listBrowserProfiles?(): Promise<AgentChatBrowserProfile[]>;
   /**
    * Permanently terminate the session's browser sandbox (destroys the
    * pod / container, drops the registry entry). Optional — when
