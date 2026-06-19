@@ -10,9 +10,11 @@ from typing import Any, Callable
 from uuid import UUID, uuid4
 
 from surogates.browser.base import (
+    BrowserCreditsExhaustedError,
     BrowserEndpoint,
     BrowserSpec,
     BrowserUnavailableError,
+    browser_credits_exhausted_result,
     browser_unavailable_result,
 )
 from surogates.browser.client import KernelBrowserClient
@@ -104,6 +106,10 @@ async def _resolve_session_browser(
             user_id=str(getattr(tenant, "user_id", "")) if tenant is not None else "",
             spec=browser_spec,
         )
+    except BrowserCreditsExhaustedError as exc:
+        # Subclass of BrowserUnavailableError — must be caught first so
+        # the user gets top-up guidance, not "infra is broken".
+        return browser_credits_exhausted_result(exc.reason)
     except BrowserUnavailableError as exc:
         return browser_unavailable_result(exc.reason)
     return result.browser_id, result.endpoint, result.snapshot_cache

@@ -11,6 +11,7 @@ purely an access pattern.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 
 import sqlalchemy as sa
@@ -60,6 +61,26 @@ class OpsKBWikiPage(OpsBase):
     page_type: Mapped[str] = mapped_column(sa.String(32))
     title: Mapped[str] = mapped_column(sa.String(512))
     size_bytes: Mapped[int] = mapped_column(sa.Integer)
+
+
+class OpsCreditBalance(OpsBase):
+    """Mirror of surogate-ops ``credit_balances`` table.
+
+    One row per (project, resource). The browser-minutes gate reads the
+    ``browser_minutes`` row to decide whether a session may provision a
+    new browser pod. ``plan_remaining`` is the lose-it-or-use-it cycle
+    bucket; ``topup_remaining`` is purchased credit that rolls over.
+    Their sum is the spendable balance. ``cycle_end`` lets the gate stay
+    lenient at a month boundary the writer side hasn't refreshed yet.
+    """
+    __tablename__ = "credit_balances"
+
+    id: Mapped[str] = mapped_column(sa.String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(sa.String(36))
+    resource: Mapped[str] = mapped_column(sa.String(32))
+    plan_remaining: Mapped[int] = mapped_column(sa.BigInteger)
+    topup_remaining: Mapped[int] = mapped_column(sa.BigInteger)
+    cycle_end: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True))
 
 
 # M2M: agent_knowledge_bases. Two-column join table; we model it as a

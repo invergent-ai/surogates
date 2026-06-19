@@ -20,6 +20,10 @@ from surogates.session.events import EventType
 logger = logging.getLogger(__name__)
 
 EventEmitter = Callable[[str, str, dict[str, Any]], Awaitable[None]]
+# Use-time browser-minutes gate. Called with ``org_id`` before a *new*
+# pod is provisioned; raises ``BrowserCreditsExhaustedError`` when the
+# project is out of minutes. ``None`` disables the gate entirely.
+CreditGuard = Callable[[str], Awaitable[None]]
 
 
 @dataclass(slots=True)
@@ -46,10 +50,12 @@ class BrowserPool:
         backend: BrowserBackend,
         registry: BrowserRegistry,
         event_emitter: EventEmitter | None = None,
+        credit_guard: CreditGuard | None = None,
     ) -> None:
         self._backend = backend
         self._registry = registry
         self._emit = event_emitter
+        self._credit_guard = credit_guard
         self._mapping: dict[str, _Slot] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
@@ -92,6 +98,13 @@ class BrowserPool:
                     EventType.BROWSER_DESTROYED.value,
                     {"session_id": session_id, "browser_id": stale_browser_id},
                 )
+
+            # Use-time enforcement: a new pod is about to start, so this
+            # is where browser-minutes are gated. Reusing an
+            # already-running pod above is never blocked — only fresh
+            # provisions. Raises BrowserCreditsExhaustedError when empty.
+            if self._credit_guard is not None:
+                await self._credit_guard(org_id)
 
             browser_id, endpoint = await self._backend.provision(
                 spec,
