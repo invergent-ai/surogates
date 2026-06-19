@@ -29,8 +29,10 @@ export function BrowserProfileSetupDialog({
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
   const [remaining, setRemaining] = useState(0);
   const [saving, setSaving] = useState(false);
+  const [phase, setPhase] = useState<"starting" | "ready">("starting");
   const startedRef = useRef(false);
 
+  // Start the setup session exactly once per open.
   useEffect(() => {
     if (!open || startedRef.current) return;
     startedRef.current = true;
@@ -48,6 +50,53 @@ export function BrowserProfileSetupDialog({
     };
   }, [open, profileId, onOpenChange]);
 
+  // Provisioning is worker-driven (async), so poll until the browser is up
+  // before mounting the live view — otherwise it would connect to an
+  // unprovisioned session, disconnect, and tear the dialog down.
+  useEffect(() => {
+    if (!sessionId || phase === "ready") return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const state = await surogatesWebChatAdapter.getBrowserState(sessionId);
+        if (
+          !cancelled &&
+          state &&
+          (state.status === "live" || state.status === "user-control")
+        ) {
+          setPhase("ready");
+          return;
+        }
+      } catch {
+        /* keep polling */
+      }
+      if (!cancelled) timer = window.setTimeout(poll, 1500);
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [sessionId, phase]);
+
+  // Keep the 60s control lease alive (this dialog renders BrowserLiveView
+  // directly, without BrowserPane's heartbeat) so input doesn't go read-only
+  // mid-login. Re-acquire immediately on ready, then every 25s.
+  useEffect(() => {
+    if (!sessionId || phase !== "ready") return;
+    const beat = () => {
+      void surogatesWebChatAdapter
+        .acquireBrowserControl(sessionId)
+        .catch(() => {});
+    };
+    beat();
+    const h = window.setInterval(beat, 25_000);
+    return () => window.clearInterval(h);
+  }, [sessionId, phase]);
+
+  // Countdown to the server-side TTL.
   useEffect(() => {
     if (!expiresAt) return;
     const tick = () =>
@@ -65,7 +114,8 @@ export function BrowserProfileSetupDialog({
   }, [remaining, expiresAt, onOpenChange]);
 
   const liveViewUrl = useMemo(
-    () => (sessionId ? surogatesWebChatAdapter.browserLiveViewUrl(sessionId) : ""),
+    () =>
+      sessionId ? surogatesWebChatAdapter.browserLiveViewUrl(sessionId) : "",
     [sessionId],
   );
 
@@ -98,17 +148,21 @@ export function BrowserProfileSetupDialog({
                 {mmss}
               </span>
             )}
-            <Button size="sm" onClick={handleSave} disabled={!sessionId || saving}>
+            <Button
+              size="sm"
+              onClick={handleSave}
+              disabled={phase !== "ready" || saving}
+            >
               {saving ? "Saving…" : "Save authentication and close"}
             </Button>
           </div>
         </DialogHeader>
         <div className="min-h-0 flex-1 bg-black">
-          {liveViewUrl ? (
+          {phase === "ready" && liveViewUrl ? (
             <BrowserLiveView
               src={liveViewUrl}
               testId="browser-profile-setup-rfb"
-              onDisconnect={() => onOpenChange(false)}
+              onDisconnect={() => setPhase("starting")}
             />
           ) : (
             <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
