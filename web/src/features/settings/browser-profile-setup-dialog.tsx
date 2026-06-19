@@ -31,6 +31,10 @@ export function BrowserProfileSetupDialog({
   const [saving, setSaving] = useState(false);
   const [phase, setPhase] = useState<"starting" | "ready">("starting");
   const startedRef = useRef(false);
+  // ``onOpenChange`` is a fresh arrow each render; ref it so effects don't
+  // re-run (and re-create the session) on the parent's re-renders.
+  const onOpenChangeRef = useRef(onOpenChange);
+  onOpenChangeRef.current = onOpenChange;
 
   // Start the setup session exactly once per open.
   useEffect(() => {
@@ -43,12 +47,12 @@ export function BrowserProfileSetupDialog({
       })
       .catch(() => {
         toast.error("Couldn't start the setup browser.");
-        onOpenChange(false);
+        onOpenChangeRef.current(false);
       });
     return () => {
       startedRef.current = false;
     };
-  }, [open, profileId, onOpenChange]);
+  }, [open, profileId]);
 
   // Provisioning is worker-driven (async), so poll until the browser is up
   // before mounting the live view — otherwise it would connect to an
@@ -96,22 +100,24 @@ export function BrowserProfileSetupDialog({
     return () => window.clearInterval(h);
   }, [sessionId, phase]);
 
-  // Countdown to the server-side TTL.
+  // Countdown to the server-side TTL, closing only when it actually elapses.
+  // The expiry decision uses the freshly-computed ``r`` — not the ``remaining``
+  // state — so it can't fire on the first render (where ``remaining`` is still
+  // its initial 0 the instant ``expiresAt`` is set).
   useEffect(() => {
     if (!expiresAt) return;
-    const tick = () =>
-      setRemaining(Math.max(0, Math.round((expiresAt - Date.now()) / 1000)));
+    const tick = () => {
+      const r = Math.max(0, Math.round((expiresAt - Date.now()) / 1000));
+      setRemaining(r);
+      if (r <= 0) {
+        toast.info("Setup session expired.");
+        onOpenChangeRef.current(false);
+      }
+    };
     tick();
     const h = window.setInterval(tick, 1000);
     return () => window.clearInterval(h);
   }, [expiresAt]);
-
-  useEffect(() => {
-    if (expiresAt && remaining === 0) {
-      toast.info("Setup session expired.");
-      onOpenChange(false);
-    }
-  }, [remaining, expiresAt, onOpenChange]);
 
   const liveViewUrl = useMemo(
     () =>
