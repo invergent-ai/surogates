@@ -143,7 +143,7 @@ export function BrowserProfileSetupDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-dvh w-screen max-w-none flex-col gap-0 rounded-none border-0 bg-background p-0">
+      <DialogContent className="flex h-dvh w-screen max-w-none sm:max-w-none flex-col gap-0 rounded-none border-0 bg-background p-0">
         <DialogHeader className="h-12 shrink-0 flex-row items-center justify-between border-b border-line px-4">
           <DialogTitle className="text-sm">
             Set up browser authentication
