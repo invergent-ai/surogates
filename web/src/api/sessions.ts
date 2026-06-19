@@ -30,10 +30,12 @@ export interface BrowserControlResponse {
 export async function listSessions(params?: {
   limit?: number;
   offset?: number;
+  includeDescendants?: boolean;
 }): Promise<SessionListResponse> {
   const search = new URLSearchParams();
   if (params?.limit != null) search.append("limit", String(params.limit));
   if (params?.offset != null) search.append("offset", String(params.offset));
+  if (params?.includeDescendants) search.append("include_descendants", "true");
 
   const response = await authFetch(`/api/v1/sessions?${search}`);
   if (!response.ok) {

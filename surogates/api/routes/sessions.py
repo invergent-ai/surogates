@@ -1179,8 +1179,14 @@ async def list_sessions(
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
     limit: int = 50,
     offset: int = 0,
+    include_descendants: bool = False,
 ) -> ListSessionsResponse:
-    """List the authenticated user's sessions for this agent, newest first."""
+    """List the authenticated user's sessions for this agent, newest first.
+
+    With ``include_descendants`` the delegation subtree of each returned root
+    rides along (the chat sidebar uses this to show collapsed children);
+    pagination still applies to roots only.
+    """
     store = _get_session_store(request)
     settings = request.app.state.settings
 
@@ -1197,12 +1203,12 @@ async def list_sessions(
         agent_id=agent_runtime.agent_id,
         limit=limit,
         offset=offset,
+        include_descendants=include_descendants,
     )
 
-    # For total count we fetch one extra page to determine if there are more.
-    # A production system would use COUNT(*) but this avoids a second query
-    # for the common case.
-    total = offset + len(sessions)
+    # Pagination is over roots; any descendants ride along with their root, so
+    # the "is there another page" heuristic counts roots only.
+    total = offset + sum(1 for s in sessions if s.parent_id is None)
 
     return ListSessionsResponse(sessions=sessions, total=total)
 

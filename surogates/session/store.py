@@ -17,6 +17,7 @@ from uuid import UUID
 
 from sqlalchemy import and_, not_, select, text, update, delete, func, or_, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from surogates.db.models import (
     Event as EventRow,
@@ -62,6 +63,12 @@ _INBOX_EVENTS = frozenset({
     EventType.INBOX_GOVERNANCE_GATE,
     EventType.INBOX_PROGRESS_CHECKIN,
 })
+
+# Safety cap on descendants appended to a session-list page (see
+# list_sessions(include_descendants=True)).  Far above any real sidebar tree;
+# guards against a pathological delegation forest (e.g. an automated loop)
+# returning thousands of rows on every poll.
+_MAX_LISTED_DESCENDANTS = 1000
 
 
 class SessionStore:
@@ -495,14 +502,20 @@ class SessionStore:
         service_account_id: UUID | None = None,
         limit: int = 50,
         offset: int = 0,
+        include_descendants: bool = False,
     ) -> list[Session]:
         """Return top-level sessions for a principal within an org, newest first.
 
-        Delegation children (``parent_id IS NOT NULL``) are excluded --
-        they belong under their parent in the session tree, not as
-        siblings in the main sidebar list.  The tree endpoint
-        (:func:`get_session_tree`) surfaces them when the parent is
-        opened.
+        Delegation children (``parent_id IS NOT NULL``) are excluded from the
+        page itself -- they belong under their parent in the session tree, not
+        as siblings in the main sidebar list.  The tree endpoint
+        (:func:`get_session_tree`) surfaces them when the parent is opened.
+
+        When *include_descendants* is set, each returned root's delegation
+        subtree (any depth) is appended to the result so a caller that renders
+        the tree (the chat sidebar) can show a collapsed-children indicator
+        without a separate per-session tree fetch.  Pagination still applies to
+        roots only; descendants ride along with their root.
         """
         if (user_id is None) == (service_account_id is None):
             raise ValueError("list_sessions requires exactly one principal id")
@@ -525,8 +538,46 @@ class SessionStore:
                 .limit(limit)
                 .offset(offset)
             )
-            rows = result.scalars().all()
-        return [Session.model_validate(r) for r in rows]
+            roots = result.scalars().all()
+            sessions = list(roots)
+            if include_descendants and roots:
+                # Walk the delegation forest down from this page of roots and
+                # append every descendant (any depth).  A child inherits its
+                # root's org/agent (see create_child_session), so seeding the
+                # walk with the roots is what scopes it; the org filter on the
+                # final fetch is belt-and-suspenders.
+                subtree = (
+                    select(SessionRow.id)
+                    .where(SessionRow.id.in_([r.id for r in roots]))
+                    .cte("subtree", recursive=True)
+                )
+                child = aliased(SessionRow)
+                subtree = subtree.union_all(
+                    select(child.id)
+                    .join(subtree, child.parent_id == subtree.c.id)
+                    # Stop the walk at archived nodes: pruning their whole
+                    # subtree keeps an active grandchild of an archived child
+                    # from arriving with a parent that isn't in the list (the
+                    # SDK's buildTree would render such an orphan as a root).
+                    .where(child.status != "archived")
+                )
+                desc_result = await db.execute(
+                    select(SessionRow)
+                    .join(subtree, SessionRow.id == subtree.c.id)
+                    .where(
+                        SessionRow.parent_id.is_not(None),
+                        SessionRow.org_id == org_id,
+                        SessionRow.status != "archived",
+                    )
+                    # Oldest-first so a parent always precedes its (later-created)
+                    # children; with the cap below, truncation then drops the
+                    # deepest leaves first and can't strand a child whose parent
+                    # was cut.
+                    .order_by(SessionRow.created_at.asc())
+                    .limit(_MAX_LISTED_DESCENDANTS)
+                )
+                sessions.extend(desc_result.scalars().all())
+        return [Session.model_validate(r) for r in sessions]
 
     # ------------------------------------------------------------------
     # Event log
