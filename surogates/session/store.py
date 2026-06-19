@@ -15,7 +15,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, not_, select, text, update, delete, func, or_, tuple_
+from sqlalchemy import and_, bindparam, not_, select, text, update, delete, func, or_, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import (
@@ -495,14 +495,20 @@ class SessionStore:
         service_account_id: UUID | None = None,
         limit: int = 50,
         offset: int = 0,
+        include_descendants: bool = False,
     ) -> list[Session]:
         """Return top-level sessions for a principal within an org, newest first.
 
-        Delegation children (``parent_id IS NOT NULL``) are excluded --
-        they belong under their parent in the session tree, not as
-        siblings in the main sidebar list.  The tree endpoint
-        (:func:`get_session_tree`) surfaces them when the parent is
-        opened.
+        Delegation children (``parent_id IS NOT NULL``) are excluded from the
+        page itself -- they belong under their parent in the session tree, not
+        as siblings in the main sidebar list.  The tree endpoint
+        (:func:`get_session_tree`) surfaces them when the parent is opened.
+
+        When *include_descendants* is set, each returned root's delegation
+        subtree (any depth) is appended to the result so a caller that renders
+        the tree (the chat sidebar) can show a collapsed-children indicator
+        without a separate per-session tree fetch.  Pagination still applies to
+        roots only; descendants ride along with their root.
         """
         if (user_id is None) == (service_account_id is None):
             raise ValueError("list_sessions requires exactly one principal id")
@@ -525,8 +531,44 @@ class SessionStore:
                 .limit(limit)
                 .offset(offset)
             )
-            rows = result.scalars().all()
-        return [Session.model_validate(r) for r in rows]
+            roots = result.scalars().all()
+            sessions = list(roots)
+            if include_descendants and roots:
+                root_ids = [r.id for r in roots]
+                # Walk the delegation forest down from this page of roots and
+                # collect descendant ids (any depth).  A child inherits its
+                # root's org/agent (see create_child_session), so staying within
+                # the returned roots is what scopes the walk.
+                descendant_ids = (
+                    (
+                        await db.execute(
+                            text(
+                                "WITH RECURSIVE subtree AS ("
+                                "  SELECT id, parent_id FROM sessions "
+                                "  WHERE id IN :root_ids "
+                                "  UNION ALL "
+                                "  SELECT s.id, s.parent_id FROM sessions s "
+                                "  JOIN subtree st ON s.parent_id = st.id"
+                                ") "
+                                "SELECT id FROM subtree WHERE parent_id IS NOT NULL"
+                            ).bindparams(bindparam("root_ids", expanding=True)),
+                            {"root_ids": root_ids},
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if descendant_ids:
+                    desc_result = await db.execute(
+                        select(SessionRow)
+                        .where(
+                            SessionRow.id.in_(descendant_ids),
+                            SessionRow.status != "archived",
+                        )
+                        .order_by(SessionRow.created_at.desc())
+                    )
+                    sessions.extend(desc_result.scalars().all())
+        return [Session.model_validate(r) for r in sessions]
 
     # ------------------------------------------------------------------
     # Event log

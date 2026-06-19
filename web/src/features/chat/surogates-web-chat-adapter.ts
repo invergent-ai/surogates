@@ -40,6 +40,9 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     const response = await sessionsApi.listSessions({
       limit: input.limit,
       offset: input.offset,
+      // The sidebar renders the delegation tree, so it needs each root's
+      // children to show the collapse arrow even when the root isn't active.
+      includeDescendants: true,
     });
     return {
       sessions: response.sessions.map(toAgentChatSession),

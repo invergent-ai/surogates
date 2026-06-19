@@ -611,6 +611,44 @@ async def test_list_sessions_excludes_delegation_children(
     assert child.id not in listed_ids
 
 
+async def test_list_sessions_includes_descendants_when_requested(
+    session_store, session_factory,
+):
+    """include_descendants appends each root's delegation subtree (any depth)
+    so the sidebar can render collapsed children; default stays roots-only."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+
+    top = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+    )
+    child = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+        parent_id=top.id, channel="delegation",
+    )
+    grandchild = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+        parent_id=child.id, channel="delegation",
+    )
+
+    listed = await session_store.list_sessions(
+        org_id=org_id, user_id=user_id, agent_id="test-agent",
+        include_descendants=True,
+    )
+    listed_ids = {s.id for s in listed}
+    assert {top.id, child.id, grandchild.id} <= listed_ids
+
+    default_ids = {
+        s.id
+        for s in await session_store.list_sessions(
+            org_id=org_id, user_id=user_id, agent_id="test-agent",
+        )
+    }
+    assert top.id in default_ids
+    assert child.id not in default_ids
+    assert grandchild.id not in default_ids
+
+
 async def test_release_stale_lease_only_touches_expired(
     session_store, session_factory,
 ):
