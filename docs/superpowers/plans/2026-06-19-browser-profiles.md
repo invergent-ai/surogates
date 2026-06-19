@@ -9,8 +9,8 @@
 - [x] **Task 3** — `KernelBrowserClient` storage_state helpers
 - [x] **Task 4** — inject storage_state at provision in `BrowserPool.ensure()`
 - [x] **Task 5** — resolve `profile_id` → spec.storage_state at the tool layer
-- [ ] **Task 6** — harness `/v1/api/browser-profiles` CRUD router _(in progress)_
-- [ ] **Task 7** — harness setup-session route + `browser_setup` channel
+- [x] **Task 6** — harness `/v1/api/browser-profiles` CRUD router
+- [ ] **Task 7** — harness setup-session route + `browser_setup` channel _(in progress)_
 - [ ] **Task 8** — harness capture route
 - [ ] **Task 9** — ops `/api/browser-profiles` proxy
 - [ ] **Task 10** — ops session-create accepts `browser_profile_id`
