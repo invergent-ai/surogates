@@ -786,22 +786,35 @@ class AgentHarness(
         if not owner:
             return
         sid = str(session.id)
-        if session.status in ("completed", "failed"):
-            await self._browser_pool.destroy_for_session(sid)
-            return
 
-        from surogates.browser.base import BrowserSpec
-
-        ttl = int(browser_cfg.get("setup_ttl_seconds") or 15 * 60)
-        # No profile injection: the user logs in by hand from a fresh context.
-        await self._browser_pool.ensure(
-            session_id=sid,
-            org_id=str(session.org_id),
-            user_id=str(owner),
-            spec=BrowserSpec(active_deadline_seconds=ttl),
+        # Take the session lease so two workers can't double-provision or race
+        # provision-vs-teardown for the same setup session. A no-op (skip) when
+        # another worker already holds it.
+        lease = await self._store.try_acquire_lease(
+            session.id, self._worker_id, ttl_seconds=_LEASE_TTL_SECONDS
         )
-        if self._browser_control is not None:
-            await self._browser_control.acquire(sid, str(owner))
+        if lease is None:
+            return
+        try:
+            if session.status in ("completed", "failed"):
+                await self._browser_pool.destroy_for_session(sid)
+                return
+
+            from surogates.browser.base import BrowserSpec
+
+            ttl = int(browser_cfg.get("setup_ttl_seconds") or 15 * 60)
+            # No profile injection: the user logs in by hand from a fresh
+            # context.
+            await self._browser_pool.ensure(
+                session_id=sid,
+                org_id=str(session.org_id),
+                user_id=str(owner),
+                spec=BrowserSpec(active_deadline_seconds=ttl),
+            )
+            if self._browser_control is not None:
+                await self._browser_control.acquire(sid, str(owner))
+        finally:
+            await self._store.release_lease(session.id, lease.lease_token)
 
     async def wake(self, session_id: UUID) -> str | None:
         """Entry point.  Acquire lease, replay events, run loop, release lease."""
