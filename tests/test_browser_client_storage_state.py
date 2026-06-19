@@ -39,4 +39,8 @@ async def test_apply_storage_state_adds_cookies(monkeypatch):
     await client.apply_storage_state(state)
     assert "addCookies" in captured["code"]
     assert json.dumps(state["cookies"]) in captured["code"]
+    # The kernel-images execute wrapper already binds ``context``; redeclaring
+    # it is a SyntaxError that aborts the injection (profile cookies never land
+    # and browser provisioning fails). Guard against reintroducing the shadow.
+    assert "const context" not in captured["code"]
     await client.close()
