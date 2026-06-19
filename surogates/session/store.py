@@ -64,6 +64,12 @@ _INBOX_EVENTS = frozenset({
     EventType.INBOX_PROGRESS_CHECKIN,
 })
 
+# Safety cap on descendants appended to a session-list page (see
+# list_sessions(include_descendants=True)).  Far above any real sidebar tree;
+# guards against a pathological delegation forest (e.g. an automated loop)
+# returning thousands of rows on every poll.
+_MAX_LISTED_DESCENDANTS = 1000
+
 
 class SessionStore:
     """Async, PostgreSQL-backed store for sessions, events, leases, and cursors.
@@ -557,13 +563,18 @@ class SessionStore:
                 )
                 desc_result = await db.execute(
                     select(SessionRow)
+                    .join(subtree, SessionRow.id == subtree.c.id)
                     .where(
-                        SessionRow.id.in_(select(subtree.c.id)),
                         SessionRow.parent_id.is_not(None),
                         SessionRow.org_id == org_id,
                         SessionRow.status != "archived",
                     )
-                    .order_by(SessionRow.created_at.desc())
+                    # Oldest-first so a parent always precedes its (later-created)
+                    # children; with the cap below, truncation then drops the
+                    # deepest leaves first and can't strand a child whose parent
+                    # was cut.
+                    .order_by(SessionRow.created_at.asc())
+                    .limit(_MAX_LISTED_DESCENDANTS)
                 )
                 sessions.extend(desc_result.scalars().all())
         return [Session.model_validate(r) for r in sessions]
