@@ -649,6 +649,40 @@ async def test_list_sessions_includes_descendants_when_requested(
     assert grandchild.id not in default_ids
 
 
+async def test_list_sessions_descendants_prune_archived_subtree(
+    session_store, session_factory,
+):
+    """The descendant walk stops at archived nodes so an active grandchild of
+    an archived child is not returned as an orphan (its parent would be absent
+    from the list, which the sidebar would render as a spurious root)."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+
+    top = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+    )
+    child = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+        parent_id=top.id, channel="delegation",
+    )
+    grandchild = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+        parent_id=child.id, channel="delegation",
+    )
+    await session_store.update_session_status(child.id, "archived")
+
+    listed_ids = {
+        s.id
+        for s in await session_store.list_sessions(
+            org_id=org_id, user_id=user_id, agent_id="test-agent",
+            include_descendants=True,
+        )
+    }
+    assert top.id in listed_ids
+    assert child.id not in listed_ids  # archived
+    assert grandchild.id not in listed_ids  # pruned with its archived parent
+
+
 async def test_release_stale_lease_only_touches_expired(
     session_store, session_factory,
 ):

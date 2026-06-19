@@ -547,7 +547,13 @@ class SessionStore:
                 )
                 child = aliased(SessionRow)
                 subtree = subtree.union_all(
-                    select(child.id).join(subtree, child.parent_id == subtree.c.id)
+                    select(child.id)
+                    .join(subtree, child.parent_id == subtree.c.id)
+                    # Stop the walk at archived nodes: pruning their whole
+                    # subtree keeps an active grandchild of an archived child
+                    # from arriving with a parent that isn't in the list (the
+                    # SDK's buildTree would render such an orphan as a root).
+                    .where(child.status != "archived")
                 )
                 desc_result = await db.execute(
                     select(SessionRow)
