@@ -125,6 +125,8 @@ interface ChatThreadProps {
   canShowBrowser?: boolean;
   browserProfileId?: string | null;
   onSelectBrowserProfile?: (id: string | null) => void;
+  browserProfilesEnabled?: boolean;
+  browserProfileLocked?: boolean;
   canShowWorkspace?: boolean;
   // Simple/Expert view-mode toggle — also threaded into AssistantGroup
   // in B9 to gate the actual render path. When omitted, the composer
@@ -2123,6 +2125,8 @@ export function ChatThread({
   canShowBrowser = false,
   browserProfileId,
   onSelectBrowserProfile,
+  browserProfilesEnabled = false,
+  browserProfileLocked = false,
   canShowWorkspace = false,
   viewMode = "simple",
   onViewModeChange,
@@ -2234,6 +2238,8 @@ export function ChatThread({
         canShowBrowser={canShowBrowser}
         browserProfileId={browserProfileId}
         onSelectBrowserProfile={onSelectBrowserProfile}
+        browserProfilesEnabled={browserProfilesEnabled}
+        browserProfileLocked={browserProfileLocked}
         canShowWorkspace={canShowWorkspace}
         viewMode={viewMode}
         onViewModeChange={onViewModeChange}

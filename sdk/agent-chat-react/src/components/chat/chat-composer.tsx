@@ -137,8 +137,21 @@ interface ChatComposerProps {
   canShowBrowser?: boolean;
   /** Currently-selected browser profile id (drives the active style). */
   browserProfileId?: string | null;
-  /** When provided (with ``canShowBrowser``), renders the profile selector. */
+  /** When provided (with ``browserProfilesEnabled``), renders the profile selector. */
   onSelectBrowserProfile?: (id: string | null) => void;
+  /**
+   * When true, the browser-profile selector is shown. Unlike ``canShowBrowser``
+   * (which is only true once a browser pane is live) this is a static agent
+   * capability, so the selector is available *before* a session starts — the
+   * only point at which a profile can actually be bound to the session.
+   */
+  browserProfilesEnabled?: boolean;
+  /**
+   * When true, the profile choice is locked: a session is already active, so
+   * the selector renders disabled with an explanatory tooltip. A profile is
+   * bound at session creation and cannot be changed mid-session.
+   */
+  browserProfileLocked?: boolean;
   /** When false (default), the workspace toggle button is omitted entirely. */
   canShowWorkspace?: boolean;
 
@@ -363,6 +376,8 @@ function ChatComposerInner({
   canShowBrowser = false,
   browserProfileId,
   onSelectBrowserProfile,
+  browserProfilesEnabled = false,
+  browserProfileLocked = false,
   canShowWorkspace = false,
   deepResearchEnabled = false,
   researchEnabled = false,
@@ -823,9 +838,26 @@ function ChatComposerInner({
                   <GlobeIcon className="size-4" />
                 </PromptInputButton>
               )}
-              {canShowBrowser &&
+              {browserProfilesEnabled &&
                 onSelectBrowserProfile &&
-                adapter.listBrowserProfiles && (
+                adapter.listBrowserProfiles &&
+                (browserProfileLocked ? (
+                  // A profile is bound at session creation; once a session is
+                  // active the choice can't change. Render disabled (via
+                  // aria-disabled, not the `disabled` attribute, so the
+                  // tooltip still shows on hover) with an explanation.
+                  <PromptInputButton
+                    aria-label="Select browser profile"
+                    aria-disabled
+                    aria-pressed={!!browserProfileId}
+                    tooltip="A browser profile must be chosen before starting the session"
+                    className={`cursor-not-allowed opacity-50 ${
+                      browserProfileId ? "bg-accent text-foreground" : ""
+                    }`}
+                  >
+                    <IdCardIcon className="size-4" />
+                  </PromptInputButton>
+                ) : (
                   <Popover
                     open={profileMenuOpen}
                     onOpenChange={setProfileMenuOpen}
@@ -880,7 +912,7 @@ function ChatComposerInner({
                       </Command>
                     </PopoverContent>
                   </Popover>
-                )}
+                ))}
               {canShowWorkspace && onToggleWorkspace && (
                 <PromptInputButton
                   aria-label={
