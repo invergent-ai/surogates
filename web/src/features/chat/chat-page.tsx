@@ -131,12 +131,15 @@ export function ChatPage() {
     [fetchSessions, navigate, setActiveSession],
   );
 
+  const [browserProfileId, setBrowserProfileId] = useState<string | null>(null);
+
   const chatAdapter = useMemo<AgentChatAdapter>(
     () => ({
       ...surogatesWebChatAdapter,
       async createSession(input) {
         const rawSession = await sessionsApi.createSession({
           system: input.system,
+          browserProfileId: browserProfileId ?? undefined,
         });
         upsertSession(rawSession);
         handleSessionChange(rawSession.id);
@@ -154,7 +157,7 @@ export function ChatPage() {
         return toAgentChatSession(rawSession);
       },
     }),
-    [handleSessionChange, upsertSession],
+    [handleSessionChange, upsertSession, browserProfileId],
   );
 
   const handleDisclosureConfirmed = useCallback(() => {
@@ -207,6 +210,8 @@ export function ChatPage() {
               disabled={sessionDeclined}
               onMessagesChange={setChatMessages}
               onOpenIntegrations={() => void navigate({ to: "/integrations" })}
+              browserProfileId={browserProfileId}
+              onSelectBrowserProfile={setBrowserProfileId}
               // Hide built-in slash commands the agent has disabled. Unknown
               // (capabilities not yet loaded) fails open via the helper.
               compressEnabled={slashCommandEnabled(slashCommands, "compress")}

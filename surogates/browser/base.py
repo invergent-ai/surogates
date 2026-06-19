@@ -106,6 +106,9 @@ class BrowserSpec:
     workspace_path: str | None = None
     workspace_source_ref: str | None = None
     env: dict[str, str] = field(default_factory=dict)
+    # When set, the pool injects this Playwright storage_state into the fresh
+    # context at provision time (before registry publish / navigation).
+    storage_state: dict | None = None
 
 
 class BrowserBackend(Protocol):

@@ -77,6 +77,7 @@ async def _resolve_session_browser(
     spec: BrowserSpec | None = None,
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
+    browser_profile_store: Any = None,
 ) -> tuple[str, BrowserEndpoint, dict[str, dict[str, Any]]] | str:
     if browser_pool is None or session_id is None:
         return browser_unavailable_result("browser pool not configured")
@@ -100,6 +101,56 @@ async def _resolve_session_browser(
                 else None
             ),
         )
+
+        # Attach a saved browser profile's login state, if one is bound to the
+        # session. The pool injects it into the fresh context at provision. The
+        # store rides on the pool (set at worker construction); an explicit
+        # ``browser_profile_store`` overrides it for tests.
+        store = browser_profile_store or getattr(
+            browser_pool, "browser_profile_store", None
+        )
+        profile_id = (session_config or {}).get("browser", {}).get("profile_id")
+        if profile_id and store is not None:
+            org_id = getattr(tenant, "org_id", None)
+            service_account_id = getattr(tenant, "service_account_id", None)
+            if service_account_id is None:
+                sa_raw = (session_config or {}).get("service_account_id")
+                if sa_raw:
+                    service_account_id = UUID(str(sa_raw))
+            # SA-owned profiles (the ops-chat path) take precedence; the store
+            # requires exactly one principal, so null the user when an SA is set.
+            user_id = (
+                None
+                if service_account_id is not None
+                else getattr(tenant, "user_id", None)
+            )
+            if (user_id is not None) ^ (service_account_id is not None):
+                try:
+                    state = await store.storage_state_for(
+                        UUID(str(profile_id)),
+                        org_id,
+                        user_id=user_id,
+                        service_account_id=service_account_id,
+                    )
+                    if state is not None:
+                        browser_spec.storage_state = state
+                        await store.touch_last_used(
+                            UUID(str(profile_id)),
+                            org_id,
+                            user_id=user_id,
+                            service_account_id=service_account_id,
+                        )
+                except Exception:
+                    # Fail open to a fresh browser rather than crashing the
+                    # tool — e.g. the encryption key was rotated and the blob
+                    # can no longer be decrypted.
+                    logger.warning(
+                        "Could not load browser profile %s; "
+                        "provisioning a fresh browser",
+                        profile_id,
+                        exc_info=True,
+                    )
+
         result = await browser_pool.ensure(
             session_id=sid,
             org_id=str(getattr(tenant, "org_id", "")) if tenant is not None else "",

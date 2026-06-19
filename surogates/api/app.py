@@ -18,6 +18,7 @@ from surogates.db.engine import async_engine_from_settings, async_session_factor
 from surogates.harness.prompt_library import default_library as default_prompt_library
 from surogates.session.store import SessionStore
 from surogates.storage.backend import create_backend
+from surogates.browser.profiles import BrowserProfileStore
 from surogates.tenant.credentials import CredentialVault
 
 logger = logging.getLogger(__name__)
@@ -135,11 +136,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.encryption_key,
         app.state.session_factory,
     )
+    app.state.browser_profile_store = (
+        BrowserProfileStore(
+            app.state.session_factory,
+            encryption_key=settings.encryption_key.encode("utf-8"),
+        )
+        if settings.encryption_key
+        else None
+    )
 
     from surogates.channels.pairing import PairingStore
 
     app.state.pairing_store = PairingStore(redis=app.state.redis)
     _install_browser_api_dependencies(app, settings)
+
+    # Read-only ops DB connection so the browser-minutes credit guard works on
+    # the API side too — the browser_setup pre-check returns a clean 402 instead
+    # of the worker silently failing to provision. Skipped when unconfigured
+    # (OSS/self-hosted), same as the worker.
+    if settings.ops_db.url:
+        from surogates.db.ops_engine import init_ops_engine
+
+        init_ops_engine(
+            settings.ops_db.url,
+            pool_size=settings.ops_db.pool_size,
+            pool_overflow=settings.ops_db.pool_overflow,
+        )
 
     # Per-request resolution goes through ``agent_runtime_context_dep``
     # which reads the caches wired below.
@@ -648,6 +670,7 @@ def create_app() -> FastAPI:
         auth,
         board,
         browser,
+        browser_profiles,
         coding_agents,
         composio,
         events,
@@ -706,6 +729,16 @@ def create_app() -> FastAPI:
     app.include_router(workspace.router, prefix="/v1", tags=["workspace"])
     app.include_router(artifacts.router, prefix="/v1", tags=["artifacts"])
     app.include_router(browser.router, prefix="/v1", tags=["browser"])
+    # Dual-mount like the feedback router: the web app reaches these as
+    # ``/api/v1/browser-profiles`` (its dev proxy strips the leading ``/api`` →
+    # ``/v1/browser-profiles``), while the ops proxy uses the SA-token path
+    # ``/v1/api/browser-profiles``.
+    app.include_router(
+        browser_profiles.router, prefix="/v1", tags=["browser-profiles"]
+    )
+    app.include_router(
+        browser_profiles.router, prefix="/v1/api", tags=["browser-profiles"]
+    )
     app.include_router(
         ask_user_question.router, prefix="/v1", tags=["ask_user_question"],
     )

@@ -26,6 +26,7 @@ from surogates.harness.prompt_library import default_library as default_prompt_l
 from surogates.health import infrastructure_readiness, start_health_server
 from surogates.browser.control import BrowserControlStore
 from surogates.browser.pool import BrowserPool
+from surogates.browser.profiles import BrowserProfileStore
 from surogates.browser.process import ProcessBrowserBackend
 from surogates.browser.registry import BrowserRegistry
 from surogates.memory.manager import MemoryManager
@@ -716,6 +717,14 @@ async def run_worker(settings: Settings) -> None:
         registry=browser_registry,
         event_emitter=_emit_browser_event,
         credit_guard=assert_browser_minutes_available,
+        browser_profile_store=(
+            BrowserProfileStore(
+                session_factory,
+                encryption_key=settings.encryption_key.encode("utf-8"),
+            )
+            if settings.encryption_key
+            else None
+        ),
     )
     logger.info("Agent browser ready (backend=%s)", settings.browser.backend)
 

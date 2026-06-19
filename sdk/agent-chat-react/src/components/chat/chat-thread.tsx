@@ -123,6 +123,8 @@ interface ChatThreadProps {
   showWorkspace?: boolean;
   onToggleWorkspace?: () => void;
   canShowBrowser?: boolean;
+  browserProfileId?: string | null;
+  onSelectBrowserProfile?: (id: string | null) => void;
   canShowWorkspace?: boolean;
   // Simple/Expert view-mode toggle — also threaded into AssistantGroup
   // in B9 to gate the actual render path. When omitted, the composer
@@ -2119,6 +2121,8 @@ export function ChatThread({
   showWorkspace = false,
   onToggleWorkspace,
   canShowBrowser = false,
+  browserProfileId,
+  onSelectBrowserProfile,
   canShowWorkspace = false,
   viewMode = "simple",
   onViewModeChange,
@@ -2228,6 +2232,8 @@ export function ChatThread({
         showWorkspace={showWorkspace}
         onToggleWorkspace={onToggleWorkspace}
         canShowBrowser={canShowBrowser}
+        browserProfileId={browserProfileId}
+        onSelectBrowserProfile={onSelectBrowserProfile}
         canShowWorkspace={canShowWorkspace}
         viewMode={viewMode}
         onViewModeChange={onViewModeChange}

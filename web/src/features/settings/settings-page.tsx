@@ -12,6 +12,7 @@ import {
 import { toast } from "sonner";
 import { CodingAgentsPanel } from "@invergent/agent-chat-react";
 import { surogatesWebChatAdapter } from "@/features/chat";
+import { BrowserProfilesTab } from "./browser-profiles-tab";
 import { useAppStore } from "@/stores/app-store";
 import {
   updateCurrentUser,
@@ -152,6 +153,9 @@ export function SettingsPage() {
                 Connected Channels
               </TabsTrigger>
               <TabsTrigger value="coding-agents">Coding Agents</TabsTrigger>
+              <TabsTrigger value="browser-profiles">
+                Browser Profiles
+              </TabsTrigger>
             </TabsList>
 
             {/* ── Profile ── */}
@@ -307,6 +311,10 @@ export function SettingsPage() {
             {/* ── Coding Agents ── */}
             <TabsContent value="coding-agents">
               <CodingAgentsPanel adapter={surogatesWebChatAdapter} />
+            </TabsContent>
+
+            <TabsContent value="browser-profiles">
+              <BrowserProfilesTab />
             </TabsContent>
           </Tabs>
         </div>
