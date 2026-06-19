@@ -36,9 +36,16 @@ export function BrowserProfileSetupDialog({
   const onOpenChangeRef = useRef(onOpenChange);
   onOpenChangeRef.current = onOpenChange;
 
-  // Start the setup session exactly once per open.
+  // Start the setup session exactly once per open. The guard is reset on close
+  // (not in effect cleanup) so a later reopen starts fresh — resetting in
+  // cleanup would let React StrictMode's mount→unmount→mount create two setup
+  // sessions, i.e. two billed browsers.
   useEffect(() => {
-    if (!open || startedRef.current) return;
+    if (!open) {
+      startedRef.current = false;
+      return;
+    }
+    if (startedRef.current) return;
     startedRef.current = true;
     createSetupSession(profileId)
       .then((res) => {
@@ -49,14 +56,13 @@ export function BrowserProfileSetupDialog({
         toast.error("Couldn't start the setup browser.");
         onOpenChangeRef.current(false);
       });
-    return () => {
-      startedRef.current = false;
-    };
   }, [open, profileId]);
 
-  // Provisioning is worker-driven (async), so poll until the browser is up
-  // before mounting the live view — otherwise it would connect to an
-  // unprovisioned session, disconnect, and tear the dialog down.
+  // Provisioning is worker-driven (async), so poll until the browser is up,
+  // then take the control lease *before* flipping to "ready" — only then do we
+  // mount the live view. The harness 403s the live-view WebSocket unless the
+  // caller already holds control, so mounting it first would drop the RFB
+  // connection on every render and loop forever on "Connecting…".
   useEffect(() => {
     if (!sessionId || phase === "ready") return;
     let cancelled = false;
@@ -70,8 +76,11 @@ export function BrowserProfileSetupDialog({
           state &&
           (state.status === "live" || state.status === "user-control")
         ) {
-          setPhase("ready");
-          return;
+          await surogatesWebChatAdapter.acquireBrowserControl(sessionId);
+          if (!cancelled) {
+            setPhase("ready");
+            return;
+          }
         }
       } catch {
         /* keep polling */
@@ -85,9 +94,9 @@ export function BrowserProfileSetupDialog({
     };
   }, [sessionId, phase]);
 
-  // Keep the 60s control lease alive (this dialog renders BrowserLiveView
-  // directly, without BrowserPane's heartbeat) so input doesn't go read-only
-  // mid-login. Re-acquire immediately on ready, then every 25s.
+  // The readiness gate already took the control lease; renew it here every 25s
+  // (the lease is 60s) so input doesn't go read-only mid-login — this dialog
+  // renders BrowserLiveView directly, without BrowserPane's control bar.
   useEffect(() => {
     if (!sessionId || phase !== "ready") return;
     const beat = () => {
