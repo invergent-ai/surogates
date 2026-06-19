@@ -9,7 +9,7 @@ from uuid import UUID
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from surogates.db.models import BrowserProfile
@@ -209,5 +209,11 @@ class BrowserProfileStore:
                         BrowserProfile.org_id == org_id,
                         clause,
                     )
-                    .values(last_used_at=datetime.now(timezone.utc))
+                    # ``last_used_at`` is a naive ``timestamp without time
+                    # zone`` column (like ``created_at``); a tz-aware
+                    # ``datetime.now(timezone.utc)`` can't be encoded into it
+                    # (asyncpg raises "can't subtract offset-naive and
+                    # offset-aware datetimes"). Use the server clock, matching
+                    # ``created_at``'s ``server_default=func.now()``.
+                    .values(last_used_at=func.now())
                 )
