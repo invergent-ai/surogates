@@ -19,6 +19,10 @@ class _FakeStore:
         return list(self.rows)
 
     async def create(self, org_id, *, user_id, service_account_id, name):
+        if any(r.name == name for r in self.rows):
+            from sqlalchemy.exc import IntegrityError
+
+            raise IntegrityError("INSERT", {}, Exception("unique violation"))
         row = BrowserProfileRow(
             uuid.uuid4(), name, "manual_vnc", [],
             datetime.now(timezone.utc), None, False,
@@ -83,6 +87,14 @@ def test_create_then_list_returns_metadata_only():
     assert [p["name"] for p in listed] == ["Personal"]
 
 
+def test_create_duplicate_name_returns_409():
+    store = _FakeStore()
+    client = TestClient(_app(store))
+    assert client.post("/browser-profiles", json={"name": "Work"}).status_code == 201
+    dup = client.post("/browser-profiles", json={"name": "Work"})
+    assert dup.status_code == 409
+
+
 def test_rename_and_delete():
     store = _FakeStore()
     client = TestClient(_app(store))
@@ -113,11 +125,14 @@ class _StorageStub:
         return f"/tmp/{bucket}/{sid}"
 
 
-def test_setup_session_creates_browser_setup_without_wake():
+def test_setup_session_creates_browser_setup_and_wakes():
+    # Provisioning is worker-driven: the API creates the browser_setup session
+    # (stamping the owner into config) and wakes it — the worker's loop does the
+    # actual provision + control grant.
     store = _FakeStore()
     app = _app(store)
     created = {}
-    waked = {"called": False}
+    waked = {"sid": None}
 
     row = asyncio.run(
         store.create(uuid.uuid4(), user_id=None, service_account_id=uuid.uuid4(), name="P")
@@ -133,21 +148,11 @@ def test_setup_session_creates_browser_setup_without_wake():
 
             return _S()
 
-    async def _ensure(**kw):
-        return None
-
-    class _Control:
-        async def acquire(self, sid, uid):
-            from surogates.browser.control import AcquireOutcome, ControlEntry
-
-            return AcquireOutcome.GRANTED, ControlEntry(
-                uid, datetime.now(timezone.utc)
-            )
+    async def _wake(sid):
+        waked["sid"] = sid
 
     app.state.session_store = _SessionStore()
-    app.state.browser_pool = type("P", (), {"ensure": staticmethod(_ensure)})()
-    app.state.browser_control = _Control()
-    app.state.session_wake = lambda sid: waked.update(called=True)
+    app.state.session_wake = _wake
     app.state.storage = _StorageStub(created)
     app.state.settings = _SettingsStub()
 
@@ -159,7 +164,8 @@ def test_setup_session_creates_browser_setup_without_wake():
     assert resp.status_code == 200
     assert created["channel"] == "browser_setup"
     assert created["config"]["browser"]["profile_id"] == str(row.id)
-    assert waked["called"] is False
+    assert created["config"]["browser"]["setup_owner_user_id"] == "ops-user"
+    assert waked["sid"] == str(created["session_id"])
     assert "session_id" in resp.json()
     assert "expires_at" in resp.json()
 
@@ -208,6 +214,7 @@ def test_capture_saves_storage_state(monkeypatch):
     app = _app(store)
     row = _seed_profile(store)
     sid = uuid.uuid4()
+    teardown = {"status": None, "waked": None}
 
     class _SessionStore:
         async def get_session(self, _sid):
@@ -216,6 +223,9 @@ def test_capture_saves_storage_state(monkeypatch):
                 config = {"browser": {"profile_id": str(row.id)}}
 
             return _S()
+
+        async def update_session_status(self, _sid, status):
+            teardown["status"] = status
 
     class _Control:
         async def held_by(self, _sid):
@@ -244,10 +254,14 @@ def test_capture_saves_storage_state(monkeypatch):
         async def close(self):
             pass
 
+    async def _wake(_sid):
+        teardown["waked"] = _sid
+
     monkeypatch.setattr(bp, "KernelBrowserClient", _Client)
     app.state.session_store = _SessionStore()
     app.state.browser_control = _Control()
     app.state.browser_resolver = _Resolver()
+    app.state.session_wake = _wake
 
     client = TestClient(app)
     resp = client.post(
@@ -259,3 +273,7 @@ def test_capture_saves_storage_state(monkeypatch):
     assert resp.json()["has_state"] is True
     # The encrypted blob is never exposed in the response.
     assert "storage_state_enc" not in resp.json()
+    # Teardown: the session is flipped terminal and re-woken so the worker
+    # (which owns the pool) releases the browser.
+    assert teardown["status"] == "completed"
+    assert teardown["waked"] == str(sid)

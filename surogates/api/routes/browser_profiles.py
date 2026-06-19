@@ -7,18 +7,22 @@ The router is dual-mounted (``/v1`` and ``/v1/api``) so both the web app
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 
-from surogates.browser.base import BrowserCreditsExhaustedError, BrowserSpec
 from surogates.browser.client import KernelBrowserClient
 from surogates.browser.profiles import BrowserProfileRow
 from surogates.session.provisioning import create_agent_session
+from surogates.session.store import SessionNotFoundError
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -96,12 +100,17 @@ async def create_profile(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> BrowserProfileOut:
     user_id, sa_id = _principal(tenant)
-    row = await _store(request).create(
-        tenant.org_id,
-        user_id=user_id,
-        service_account_id=sa_id,
-        name=(body.name or "Profile").strip() or "Profile",
-    )
+    try:
+        row = await _store(request).create(
+            tenant.org_id,
+            user_id=user_id,
+            service_account_id=sa_id,
+            name=(body.name or "Profile").strip() or "Profile",
+        )
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409, detail="A profile with that name already exists."
+        ) from exc
     return BrowserProfileOut.of(row)
 
 
@@ -172,8 +181,11 @@ async def create_setup_session(
             status_code=400, detail="Egress proxy is not yet supported."
         )
 
-    # Create a browser-only session: no harness wake is enqueued, so the agent
-    # loop never runs — the human drives the browser through the live view.
+    # Create the browser_setup session and wake it. Provisioning + the control
+    # grant happen in the **worker** — the only process that owns a BrowserPool
+    # and the fleet credentials — whose loop short-circuits browser_setup
+    # sessions (provision + grant control, no agent loop). The owner travels in
+    # the config so the worker can grant control to the right user.
     settings = request.app.state.settings
     session = await create_agent_session(
         store=request.app.state.session_store,
@@ -185,27 +197,17 @@ async def create_setup_session(
         channel="browser_setup",
         model=settings.llm.model,
         config={
-            "browser": {"profile_id": str(profile_id), "setup_spec": setup_spec}
+            "browser": {
+                "profile_id": str(profile_id),
+                "setup_spec": setup_spec,
+                "setup_owner_user_id": owner,
+                "setup_ttl_seconds": _SETUP_TTL_SECONDS,
+            }
         },
         service_account_id=sa_id,
     )
     sid = str(session.id)
-
-    pool = request.app.state.browser_pool
-    try:
-        await pool.ensure(
-            session_id=sid,
-            org_id=str(tenant.org_id),
-            user_id=owner,
-            spec=BrowserSpec(active_deadline_seconds=_SETUP_TTL_SECONDS),
-        )
-    except BrowserCreditsExhaustedError as exc:
-        # ``ensure`` runs the browser-minutes credit guard before provisioning,
-        # so a setup browser meters minutes like any live browser. Surface a
-        # top-up signal instead of a 500.
-        raise HTTPException(status_code=402, detail=str(exc)) from exc
-
-    await request.app.state.browser_control.acquire(sid, owner)
+    await request.app.state.session_wake(sid)
 
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=_SETUP_TTL_SECONDS)
     return {"session_id": sid, "expires_at": expires_at.isoformat()}
@@ -234,9 +236,10 @@ async def capture_profile(
             status_code=403, detail="Capture requires an owner user id."
         )
 
-    session = await request.app.state.session_store.get_session(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        session = await request.app.state.session_store.get_session(session_id)
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
     # Capture is restricted to the dedicated setup session bound to this
     # profile — it cannot export an arbitrary agent session even if the caller
     # transiently holds its control lease.
@@ -273,4 +276,18 @@ async def capture_profile(
         service_account_id=sa_id,
         storage_state=state,
     )
+
+    # Release the setup browser promptly: flip the session terminal and re-wake
+    # so the worker (which owns the pool) destroys it instead of letting it idle
+    # to its pod deadline. Best-effort — the pod TTL is the backstop.
+    try:
+        await request.app.state.session_store.update_session_status(
+            session_id, "completed"
+        )
+        await request.app.state.session_wake(str(session_id))
+    except Exception:
+        logger.warning(
+            "browser_setup teardown wake failed for %s", session_id, exc_info=True
+        )
+
     return BrowserProfileOut.of(row)

@@ -768,6 +768,41 @@ class AgentHarness(
     # Entry point
     # ------------------------------------------------------------------
 
+    async def _run_browser_setup(self, session: "Session") -> None:
+        """Provision (or release) the interactive browser for a setup session.
+
+        The browser is provisioned here — in the worker, the only process that
+        owns a ``BrowserPool`` and the fleet credentials — rather than from the
+        API. No agent loop runs: the human logs in through the live view and the
+        ``/browser-profiles/{id}/capture`` route exports the result. Capture (or
+        cancel) flips the session to a terminal status and re-enqueues it, which
+        brings us back here to destroy the browser instead of provisioning it,
+        so it stops billing well before its pod deadline.
+        """
+        if self._browser_pool is None:
+            return
+        browser_cfg = (session.config or {}).get("browser", {})
+        owner = browser_cfg.get("setup_owner_user_id")
+        if not owner:
+            return
+        sid = str(session.id)
+        if session.status in ("completed", "failed"):
+            await self._browser_pool.destroy_for_session(sid)
+            return
+
+        from surogates.browser.base import BrowserSpec
+
+        ttl = int(browser_cfg.get("setup_ttl_seconds") or 15 * 60)
+        # No profile injection: the user logs in by hand from a fresh context.
+        await self._browser_pool.ensure(
+            session_id=sid,
+            org_id=str(session.org_id),
+            user_id=str(owner),
+            spec=BrowserSpec(active_deadline_seconds=ttl),
+        )
+        if self._browser_control is not None:
+            await self._browser_control.acquire(sid, str(owner))
+
     async def wake(self, session_id: UUID) -> str | None:
         """Entry point.  Acquire lease, replay events, run loop, release lease."""
         from surogates.trace import new_span
@@ -815,6 +850,13 @@ class AgentHarness(
                 "wake step=fetch_session session=%s", session_id,
             )
             session = await self._store.get_session(session_id)
+
+            # A browser-setup session is interactive-only: provision a fresh
+            # browser + grant the user control on the first wake, and release it
+            # once capture/cancel flips the status to terminal. No LLM loop runs.
+            if session.channel == "browser_setup":
+                await self._run_browser_setup(session)
+                return None
 
             # Bail out if the session was already paused/completed/failed
             # before this wake cycle -- prevents re-running a session

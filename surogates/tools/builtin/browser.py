@@ -125,19 +125,30 @@ async def _resolve_session_browser(
                 else getattr(tenant, "user_id", None)
             )
             if (user_id is not None) ^ (service_account_id is not None):
-                state = await store.storage_state_for(
-                    UUID(str(profile_id)),
-                    org_id,
-                    user_id=user_id,
-                    service_account_id=service_account_id,
-                )
-                if state is not None:
-                    browser_spec.storage_state = state
-                    await store.touch_last_used(
+                try:
+                    state = await store.storage_state_for(
                         UUID(str(profile_id)),
                         org_id,
                         user_id=user_id,
                         service_account_id=service_account_id,
+                    )
+                    if state is not None:
+                        browser_spec.storage_state = state
+                        await store.touch_last_used(
+                            UUID(str(profile_id)),
+                            org_id,
+                            user_id=user_id,
+                            service_account_id=service_account_id,
+                        )
+                except Exception:
+                    # Fail open to a fresh browser rather than crashing the
+                    # tool — e.g. the encryption key was rotated and the blob
+                    # can no longer be decrypted.
+                    logger.warning(
+                        "Could not load browser profile %s; "
+                        "provisioning a fresh browser",
+                        profile_id,
+                        exc_info=True,
                     )
 
         result = await browser_pool.ensure(
