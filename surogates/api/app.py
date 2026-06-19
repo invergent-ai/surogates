@@ -150,6 +150,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.pairing_store = PairingStore(redis=app.state.redis)
     _install_browser_api_dependencies(app, settings)
 
+    # Read-only ops DB connection so the browser-minutes credit guard works on
+    # the API side too — the browser_setup pre-check returns a clean 402 instead
+    # of the worker silently failing to provision. Skipped when unconfigured
+    # (OSS/self-hosted), same as the worker.
+    if settings.ops_db.url:
+        from surogates.db.ops_engine import init_ops_engine
+
+        init_ops_engine(
+            settings.ops_db.url,
+            pool_size=settings.ops_db.pool_size,
+            pool_overflow=settings.ops_db.pool_overflow,
+        )
+
     # Per-request resolution goes through ``agent_runtime_context_dep``
     # which reads the caches wired below.
     _install_shared_runtime_plumbing(app, settings)

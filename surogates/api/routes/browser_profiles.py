@@ -15,8 +15,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 
+from surogates.browser.base import BrowserCreditsExhaustedError
 from surogates.browser.client import KernelBrowserClient
 from surogates.browser.profiles import BrowserProfileRow
+from surogates.db.ops_credits import assert_browser_minutes_available
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -180,6 +182,14 @@ async def create_setup_session(
         raise HTTPException(
             status_code=400, detail="Egress proxy is not yet supported."
         )
+
+    # Pre-check browser-minutes so the user gets a clean 402 instead of the
+    # worker silently failing to provision (the live view would never connect).
+    # No-ops when the ops DB isn't configured.
+    try:
+        await assert_browser_minutes_available(str(tenant.org_id))
+    except BrowserCreditsExhaustedError as exc:
+        raise HTTPException(status_code=402, detail=str(exc)) from exc
 
     # Create the browser_setup session and wake it. Provisioning + the control
     # grant happen in the **worker** — the only process that owns a BrowserPool

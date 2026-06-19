@@ -170,6 +170,28 @@ def test_setup_session_creates_browser_setup_and_wakes():
     assert "expires_at" in resp.json()
 
 
+def test_setup_session_402_when_out_of_minutes(monkeypatch):
+    from surogates.browser.base import BrowserCreditsExhaustedError
+
+    store = _FakeStore()
+    app = _app(store)
+    row = asyncio.run(
+        store.create(uuid.uuid4(), user_id=None, service_account_id=uuid.uuid4(), name="P")
+    )
+
+    async def _exhausted(_org_id):
+        raise BrowserCreditsExhaustedError("This project is out of browsing minutes.")
+
+    monkeypatch.setattr(bp, "assert_browser_minutes_available", _exhausted)
+
+    client = TestClient(app)
+    resp = client.post(
+        f"/browser-profiles/{row.id}/setup-session",
+        json={"owner_user_id": "ops-user"},
+    )
+    assert resp.status_code == 402
+
+
 def _seed_profile(store):
     return asyncio.run(
         store.create(uuid.uuid4(), user_id=None, service_account_id=uuid.uuid4(), name="P")
