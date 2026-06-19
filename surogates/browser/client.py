@@ -171,6 +171,39 @@ return {
         self._invalidate_snapshot_cache()
         return result
 
+    async def storage_state(self) -> dict[str, Any]:
+        """Export the live context's cookies + per-origin localStorage."""
+
+        code = "return await page.context().storageState();"
+        result = await self._playwright_execute(code)
+        return result or {"cookies": [], "origins": []}
+
+    async def apply_storage_state(self, state: dict[str, Any]) -> None:
+        """Inject cookies (and best-effort localStorage) into the live context.
+
+        Cookies are applied directly to the existing context. localStorage is
+        seeded per origin (best effort): a fresh context cannot be created on an
+        already-running browser, so we navigate to each origin and set its items.
+        """
+
+        cookies_json = json.dumps(state.get("cookies", []) or [])
+        origins_json = json.dumps(state.get("origins", []) or [])
+        code = (
+            "const context = page.context();\n"
+            f"await context.addCookies({cookies_json});\n"
+            f"for (const o of {origins_json}) {{\n"
+            "  try {\n"
+            "    await page.goto(o.origin, {waitUntil: 'domcontentloaded'});\n"
+            "    await page.evaluate((items) => {\n"
+            "      for (const it of items) localStorage.setItem(it.name, it.value);\n"
+            "    }, o.localStorage || []);\n"
+            "  } catch (e) { /* best-effort per origin */ }\n"
+            "}\n"
+            "return true;"
+        )
+        await self._playwright_execute(code)
+        self._invalidate_snapshot_cache()
+
     async def get_state(
         self,
         *,
