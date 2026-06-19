@@ -14,6 +14,7 @@ from surogates.browser.base import (
     BrowserSpec,
     BrowserStatus,
 )
+from surogates.browser.client import KernelBrowserClient
 from surogates.browser.registry import BrowserEntry, BrowserRegistry
 from surogates.session.events import EventType
 
@@ -112,6 +113,15 @@ class BrowserPool:
                 org_id=org_id,
                 user_id=user_id,
             )
+            # Inject saved login state into the fresh context *before* the
+            # registry publish and the provisioned event, so the agent's first
+            # navigation already sees the cookies. Only runs on a new provision.
+            if spec.storage_state:
+                client = KernelBrowserClient(endpoint.rest_url)
+                try:
+                    await client.apply_storage_state(spec.storage_state)
+                finally:
+                    await client.close()
             slot = _Slot(browser_id=browser_id, endpoint=endpoint, snapshot_cache={})
             self._mapping[session_id] = slot
             await self._registry.set(
