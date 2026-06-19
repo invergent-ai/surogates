@@ -14,9 +14,9 @@
 - [x] **Task 8** — harness capture route
 - [x] **Task 9** — ops `/api/browser-profiles` proxy
 - [x] **Task 10** — ops session-create accepts `browser_profile_id`
-- [ ] **Task 11** — SDK adapter `listBrowserProfiles` + `BrowserLiveView` export _(in progress)_
-- [ ] **Task 12** — SDK chat-composer profile selector popover
-- [ ] **Task 13** — Studio `api/browser-profiles.ts` client
+- [x] **Task 11** — SDK adapter `listBrowserProfiles` + `BrowserLiveView` export _(ops work-adapter impl pending on the ops branch)_
+- [x] **Task 12** — SDK chat-composer profile selector popover
+- [ ] **Task 13** — Studio `api/browser-profiles.ts` client _(in progress)_
 - [ ] **Task 14** — Studio "Browser Profiles" manager section
 - [ ] **Task 15** — Studio "Set up authentication" dialog
 

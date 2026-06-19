@@ -16,6 +16,7 @@ import {
   FolderIcon,
   GlobeIcon,
   HardDriveIcon,
+  IdCardIcon,
   PaperclipIcon,
   PlusIcon,
   SparklesIcon,
@@ -25,6 +26,7 @@ import {
 import type { PromptInputMessage } from "../ai-elements/prompt-input";
 import { useProviderAttachments } from "../ai-elements/prompt-input";
 import type {
+  AgentChatBrowserProfile,
   AgentChatImageAttachment,
   AgentChatPendingAttachment,
   AgentChatSlashCommand,
@@ -133,6 +135,10 @@ interface ChatComposerProps {
   onToggleWorkspace?: () => void;
   /** When false (default), the browser toggle button is omitted entirely. */
   canShowBrowser?: boolean;
+  /** Currently-selected browser profile id (drives the active style). */
+  browserProfileId?: string | null;
+  /** When provided (with ``canShowBrowser``), renders the profile selector. */
+  onSelectBrowserProfile?: (id: string | null) => void;
   /** When false (default), the workspace toggle button is omitted entirely. */
   canShowWorkspace?: boolean;
 
@@ -355,6 +361,8 @@ function ChatComposerInner({
   showWorkspace = false,
   onToggleWorkspace,
   canShowBrowser = false,
+  browserProfileId,
+  onSelectBrowserProfile,
   canShowWorkspace = false,
   deepResearchEnabled = false,
   researchEnabled = false,
@@ -367,6 +375,25 @@ function ChatComposerInner({
   onViewModeChange,
 }: ChatComposerProps) {
   const { adapter } = useAgentChatAdapterContext();
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [browserProfiles, setBrowserProfiles] = useState<
+    AgentChatBrowserProfile[]
+  >([]);
+  useEffect(() => {
+    if (!profileMenuOpen || !adapter.listBrowserProfiles) return;
+    let cancelled = false;
+    void adapter
+      .listBrowserProfiles()
+      .then((p) => {
+        if (!cancelled) setBrowserProfiles(p);
+      })
+      .catch(() => {
+        if (!cancelled) setBrowserProfiles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [profileMenuOpen, adapter]);
   const { textInput, attachments } = usePromptInputController();
   const status = isRunning ? "streaming" : disabled ? "error" : "ready";
 
@@ -796,6 +823,64 @@ function ChatComposerInner({
                   <GlobeIcon className="size-4" />
                 </PromptInputButton>
               )}
+              {canShowBrowser &&
+                onSelectBrowserProfile &&
+                adapter.listBrowserProfiles && (
+                  <Popover
+                    open={profileMenuOpen}
+                    onOpenChange={setProfileMenuOpen}
+                  >
+                    <PopoverTrigger asChild>
+                      <PromptInputButton
+                        aria-label="Select browser profile"
+                        aria-pressed={!!browserProfileId}
+                        className={
+                          browserProfileId
+                            ? "bg-accent text-foreground"
+                            : undefined
+                        }
+                      >
+                        <IdCardIcon className="size-4" />
+                      </PromptInputButton>
+                    </PopoverTrigger>
+                    <PopoverContent
+                      side="top"
+                      align="start"
+                      className="w-64 overflow-hidden rounded-xl p-1"
+                    >
+                      <Command>
+                        <CommandList>
+                          <CommandItem
+                            onSelect={() => {
+                              setProfileMenuOpen(false);
+                              onSelectBrowserProfile(null);
+                            }}
+                            className="gap-3 rounded-md px-3 py-2"
+                          >
+                            No profile
+                          </CommandItem>
+                          {browserProfiles.map((p) => (
+                            <CommandItem
+                              key={p.id}
+                              onSelect={() => {
+                                setProfileMenuOpen(false);
+                                onSelectBrowserProfile(p.id);
+                              }}
+                              className="gap-3 rounded-md px-3 py-2"
+                            >
+                              {p.name}
+                              {browserProfileId === p.id && (
+                                <span className="ml-auto text-xs text-muted-foreground">
+                                  Active
+                                </span>
+                              )}
+                            </CommandItem>
+                          ))}
+                        </CommandList>
+                      </Command>
+                    </PopoverContent>
+                  </Popover>
+                )}
               {canShowWorkspace && onToggleWorkspace && (
                 <PromptInputButton
                   aria-label={
