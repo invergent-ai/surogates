@@ -330,6 +330,27 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     return url.pathname + url.search;
   },
 
+  async listBrowserProfiles() {
+    const response = await authFetch("/api/v1/browser-profiles");
+    if (!response.ok) throw new Error("Failed to list browser profiles");
+    const data = (await response.json()) as Array<{
+      id: string;
+      name: string;
+      cookie_domains: string[];
+      has_state: boolean;
+      created_at: string;
+      last_used_at: string | null;
+    }>;
+    return data.map((p) => ({
+      id: p.id,
+      name: p.name,
+      cookieDomains: p.cookie_domains,
+      hasState: p.has_state,
+      createdAt: p.created_at,
+      lastUsedAt: p.last_used_at,
+    }));
+  },
+
   // ---- Composio connections (end-user OAuth) --------------------------
   async listComposioConnections() {
     return composioApi.listComposioConnections();

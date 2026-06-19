@@ -54,10 +54,17 @@ export async function getSession(sessionId: string): Promise<Session> {
 export async function createSession(
   body: SessionCreateRequest,
 ): Promise<Session> {
+  const { browserProfileId, ...rest } = body;
+  // The harness reads ``config.browser.profile_id`` to inject the saved login
+  // state when it provisions the session's browser.
+  const payload: Record<string, unknown> = { ...rest };
+  if (browserProfileId) {
+    payload.config = { browser: { profile_id: browserProfileId } };
+  }
   const response = await authFetch("/api/v1/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify(payload),
   });
   if (!response.ok) throw new Error("Failed to create session");
   return (await response.json()) as Session;

@@ -23,6 +23,8 @@ export interface Session {
 
 export interface SessionCreateRequest {
   system?: string;
+  /** Saved browser profile to attach; sent as ``config.browser.profile_id``. */
+  browserProfileId?: string;
 }
 
 export interface SessionEvent {
