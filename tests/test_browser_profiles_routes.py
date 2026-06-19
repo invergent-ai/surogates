@@ -162,3 +162,100 @@ def test_setup_session_creates_browser_setup_without_wake():
     assert waked["called"] is False
     assert "session_id" in resp.json()
     assert "expires_at" in resp.json()
+
+
+def _seed_profile(store):
+    return asyncio.run(
+        store.create(uuid.uuid4(), user_id=None, service_account_id=uuid.uuid4(), name="P")
+    )
+
+
+def test_capture_rejects_non_setup_session():
+    store = _FakeStore()
+    app = _app(store)
+    row = _seed_profile(store)
+
+    async def _async(v):
+        return v
+
+    class _SessionStore:
+        async def get_session(self, _sid):
+            class _S:
+                channel = "web"  # not browser_setup
+                config = {"browser": {"profile_id": str(row.id)}}
+
+            return _S()
+
+    app.state.session_store = _SessionStore()
+    app.state.browser_control = type(
+        "C", (), {"held_by": staticmethod(lambda sid: _async("ops-user"))}
+    )()
+    app.state.browser_resolver = type(
+        "R", (), {"resolve": staticmethod(lambda sid, expected_org_id=None: _async(object()))}
+    )()
+
+    client = TestClient(app)
+    resp = client.post(
+        f"/api/browser-profiles/{row.id}/capture",
+        params={"session_id": str(uuid.uuid4())},
+        json={"owner_user_id": "ops-user"},
+    )
+    assert resp.status_code == 409
+
+
+def test_capture_saves_storage_state(monkeypatch):
+    store = _FakeStore()
+    app = _app(store)
+    row = _seed_profile(store)
+    sid = uuid.uuid4()
+
+    class _SessionStore:
+        async def get_session(self, _sid):
+            class _S:
+                channel = "browser_setup"
+                config = {"browser": {"profile_id": str(row.id)}}
+
+            return _S()
+
+    class _Control:
+        async def held_by(self, _sid):
+            return "ops-user"
+
+    class _Resolver:
+        async def resolve(self, _sid, expected_org_id=None):
+            from surogates.browser.base import BrowserEndpoint
+            from surogates.browser.resolver import ResolvedBrowser
+
+            return ResolvedBrowser(
+                session_id=str(sid),
+                endpoint=BrowserEndpoint("http://browser", "ws://cdp", "ws://live"),
+            )
+
+    class _Client:
+        def __init__(self, rest_url):
+            assert rest_url == "http://browser"
+
+        async def storage_state(self):
+            return {
+                "cookies": [{"name": "SID", "domain": ".google.com"}],
+                "origins": [],
+            }
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(bp, "KernelBrowserClient", _Client)
+    app.state.session_store = _SessionStore()
+    app.state.browser_control = _Control()
+    app.state.browser_resolver = _Resolver()
+
+    client = TestClient(app)
+    resp = client.post(
+        f"/api/browser-profiles/{row.id}/capture",
+        params={"session_id": str(sid)},
+        json={"owner_user_id": "ops-user"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["has_state"] is True
+    # The encrypted blob is never exposed in the response.
+    assert "storage_state_enc" not in resp.json()

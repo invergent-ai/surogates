@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from surogates.browser.base import BrowserCreditsExhaustedError, BrowserSpec
+from surogates.browser.client import KernelBrowserClient
 from surogates.browser.profiles import BrowserProfileRow
 from surogates.session.provisioning import create_agent_session
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -203,3 +204,68 @@ async def create_setup_session(
 
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=_SETUP_TTL_SECONDS)
     return {"session_id": sid, "expires_at": expires_at.isoformat()}
+
+
+class CaptureRequest(BaseModel):
+    owner_user_id: str | None = None
+
+
+@router.post("/api/browser-profiles/{profile_id}/capture")
+async def capture_profile(
+    profile_id: UUID,
+    session_id: UUID,
+    body: CaptureRequest,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> BrowserProfileOut:
+    user_id, sa_id = _principal(tenant)
+    store = _store(request)
+
+    owner = body.owner_user_id or (
+        str(tenant.user_id) if tenant.user_id else None
+    )
+    if not owner:
+        raise HTTPException(
+            status_code=403, detail="Capture requires an owner user id."
+        )
+
+    session = await request.app.state.session_store.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    # Capture is restricted to the dedicated setup session bound to this
+    # profile — it cannot export an arbitrary agent session even if the caller
+    # transiently holds its control lease.
+    if session.channel != "browser_setup":
+        raise HTTPException(status_code=409, detail="Not a browser-setup session.")
+    bound = str((session.config or {}).get("browser", {}).get("profile_id"))
+    if bound != str(profile_id):
+        raise HTTPException(
+            status_code=409, detail="Session is not bound to this profile."
+        )
+
+    holder = await request.app.state.browser_control.held_by(str(session_id))
+    if holder != owner:
+        raise HTTPException(status_code=403, detail="Caller does not hold control.")
+
+    resolved = await request.app.state.browser_resolver.resolve(
+        str(session_id), expected_org_id=str(tenant.org_id)
+    )
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="No browser for session")
+
+    # The only CDP call permitted while a user-control lease is held: export the
+    # post-login cookies + storage the human just established.
+    client = KernelBrowserClient(resolved.endpoint.rest_url)
+    try:
+        state = await client.storage_state()
+    finally:
+        await client.close()
+
+    row = await store.save_capture(
+        profile_id,
+        tenant.org_id,
+        user_id=user_id,
+        service_account_id=sa_id,
+        storage_state=state,
+    )
+    return BrowserProfileOut.of(row)

@@ -11,8 +11,8 @@
 - [x] **Task 5** — resolve `profile_id` → spec.storage_state at the tool layer
 - [x] **Task 6** — harness `/v1/api/browser-profiles` CRUD router
 - [x] **Task 7** — harness setup-session route + `browser_setup` channel
-- [ ] **Task 8** — harness capture route _(in progress)_
-- [ ] **Task 9** — ops `/api/browser-profiles` proxy
+- [x] **Task 8** — harness capture route
+- [ ] **Task 9** — ops `/api/browser-profiles` proxy _(in progress)_
 - [ ] **Task 10** — ops session-create accepts `browser_profile_id`
 - [ ] **Task 11** — SDK adapter `listBrowserProfiles` + create wiring
 - [ ] **Task 12** — SDK chat-composer profile selector popover
