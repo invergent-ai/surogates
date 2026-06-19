@@ -12,7 +12,7 @@
 
 - **Capture model:** cookies + Playwright `storage_state` only (no full `user-data-dir` sync in v1).
 - **Principal model:** every profile is owned by exactly one principal — `user_id` XOR `service_account_id` — enforced by a DB CHECK constraint; ops-originated calls own profiles by the per-user `ops-chat-{org}-{ops_user_id}` service account (the harness sees `tenant.user_id = null`, `tenant.service_account_id` set).
-- **Surogates DB schema is created via `Base.metadata.create_all`** (`surogates/db/engine.py:run_migrations`) — adding the ORM model is sufficient; there is **no** Alembic migration file for the surogates DB. Tests build schema with `Base.metadata.create_all`.
+- **Surogates DB schema is created via `Base.metadata.create_all`** (`surogates/db/engine.py:run_migrations`) — adding the ORM model is sufficient; there is **no** Alembic migration file for the surogates DB today. Tests build schema with `Base.metadata.create_all`.
 - **No `uv run` in `/work/surogate-ops`** — it reinstalls the pinned `surogates` wheel and clobbers the local dev install. Run ops Python via `/work/surogate-ops/.venv/bin/python -m pytest`. Run harness Python via `/work/surogates/.venv/bin/python -m pytest`.
 - **Branch per change; Conventional Commits** (`type(scope): subject`); **no `Co-Authored-By` trailer**; **never** reference Plan/Task/Phase/Step numbers in code comments or commit messages.
 - `storage_state_enc` is encrypted at rest with the existing Fernet key (`SUROGATES_ENCRYPTION_KEY`) and is **never** returned to any client.
@@ -32,8 +32,8 @@
 - `surogates/tools/builtin/browser.py` — resolve `profile_id` → spec.storage_state (modify).
 - `surogates/api/routes/browser_profiles.py` — `/v1/api/browser-profiles` router (create).
 - `surogates/api/app.py` — build `browser_profile_store`, include router, wire tool dep (modify).
-- `surogates/session/provisioning.py` — `browser_setup` channel helper if needed (modify).
-- `tests/test_browser_profiles_store.py`, `tests/test_browser_profiles_routes.py`, `tests/test_browser_client_storage_state.py`, `tests/test_browser_pool_inject.py`, `tests/test_browser_tools_profile_inject.py` (create).
+- `surogates/session/provisioning.py` — read only for setup-session workspace requirements; do not modify unless implementation shows a real need.
+- `tests/integration/test_browser_profiles_store.py`, `tests/test_browser_profiles_routes.py`, `tests/test_browser_client_storage_state.py`, `tests/test_browser_pool_inject.py`, `tests/test_browser_tools_profile_inject.py` (create).
 
 **Ops — `/work/surogate-ops`**
 - `surogate_ops/server/routes/browser_profiles.py` — `/api/browser-profiles` proxy (create).
@@ -43,6 +43,7 @@
 
 **SDK — `/work/surogates/sdk/agent-chat-react`**
 - `src/types.ts` — `AgentChatBrowserProfile`, adapter `listBrowserProfiles` (modify).
+- `src/index.ts` — export `BrowserLiveView` for the Studio setup dialog (modify).
 - `src/components/chat/chat-composer.tsx` — profile selector popover (modify).
 - `tests/browser-profile-selector.test.tsx` (create).
 
@@ -59,12 +60,12 @@
 
 **Files:**
 - Modify: `surogates/db/models.py`
-- Test: `tests/test_browser_profiles_store.py`
+- Test: `tests/integration/test_browser_profiles_store.py`
 
 **Interfaces:**
 - Produces: `BrowserProfile` ORM model, table `browser_profiles`, columns `id, org_id, user_id, service_account_id, name, source, storage_state_enc, cookie_domains, created_at, last_used_at`.
 
-- [ ] **Step 1: Write the failing test** — `tests/test_browser_profiles_store.py`
+- [ ] **Step 1: Write the failing test** — `tests/integration/test_browser_profiles_store.py`
 
 ```python
 import uuid
@@ -93,7 +94,7 @@ async def test_browser_profile_persists_for_service_account_principal(session_fa
     assert row.storage_state_enc is None
 ```
 
-This test relies on the existing `session_factory` fixture in `tests/integration/conftest.py` (it runs `Base.metadata.create_all`). Place the new test under `tests/integration/` if your conftest only exposes `session_factory` there; otherwise import the fixture path the repo uses. Confirm with `grep -n "def session_factory" tests/integration/conftest.py`.
+This test relies on the existing `session_factory` fixture in `tests/integration/conftest.py` (it runs `Base.metadata.create_all`), so keep it under `tests/integration/`.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -627,6 +628,12 @@ from surogates.browser.base import BrowserSpec, BrowserEndpoint, BrowserStatus
 from surogates.browser.pool import BrowserPool
 
 
+def _make_recording_emitter(order):
+    async def _emit(session_id, event_type, data):
+        order.append("event")
+    return _emit
+
+
 class _FakeBackend:
     async def provision(self, spec, *, session_id, org_id, user_id):
         return "bid-1", BrowserEndpoint(
@@ -669,7 +676,7 @@ async def test_inject_applies_state_before_registry_publish(monkeypatch):
     assert applied["state"]["cookies"][0]["name"] == "SID"
 ```
 
-Add a tiny helper at the top of the test file that builds whatever `event_emitter` shape `BrowserPool.__init__` expects — inspect the real constructor first with `grep -n "def __init__" surogates/browser/pool.py` and mirror its parameters. The assertion that matters is `order.index("apply") < order.index("registry")`.
+The helper above matches `BrowserPool`'s current `event_emitter(session_id, event_type, data)` shape.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -878,6 +885,25 @@ class _FakeStore:
                                 datetime.now(timezone.utc), None, False)
         self.rows.append(row)
         return row
+    async def rename(self, profile_id, org_id, *, user_id, service_account_id, name):
+        for i, row in enumerate(self.rows):
+            if row.id == profile_id:
+                from dataclasses import replace
+                self.rows[i] = replace(row, name=name)
+                return True
+        return False
+    async def delete(self, profile_id, org_id, *, user_id, service_account_id):
+        before = len(self.rows)
+        self.rows = [r for r in self.rows if r.id != profile_id]
+        return len(self.rows) != before
+    async def save_capture(self, profile_id, org_id, *, user_id, service_account_id, storage_state):
+        for i, row in enumerate(self.rows):
+            if row.id == profile_id:
+                from dataclasses import replace
+                updated = replace(row, has_state=True, cookie_domains=["google.com"])
+                self.rows[i] = updated
+                return updated
+        raise KeyError("profile not found")
 
 
 def _app(store, *, user_id=None, sa_id=uuid.uuid4()):
@@ -926,7 +952,7 @@ from pydantic import BaseModel
 
 from surogates.browser.profiles import BrowserProfileRow
 from surogates.tenant.context import TenantContext
-from surogates.api.deps import get_current_tenant  # confirm exact import path
+from surogates.tenant.auth.middleware import get_current_tenant
 
 router = APIRouter()
 
@@ -1029,18 +1055,22 @@ async def delete_profile(
     )
 ```
 
-Confirm the real import path of `get_current_tenant` with `grep -rn "def get_current_tenant\|get_current_tenant" surogates/api | head` and fix the import. Mirror exactly how `surogates/api/routes/browser.py` imports it.
+Use the real tenant import path from `surogates/api/routes/browser.py`:
+
+```python
+from surogates.tenant.auth.middleware import get_current_tenant
+```
 
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `cd /work/surogates && .venv/bin/python -m pytest tests/test_browser_profiles_routes.py -v`
 Expected: PASS.
 
-- [ ] **Step 5: Include the router** — in `surogates/api/app.py`, where `browser` routes are included (`grep -n "routes.browser\|include_router" surogates/api/app.py`), add:
+- [ ] **Step 5: Include the router** — in `surogates/api/app.py`, import `browser_profiles` alongside `browser`, then mount it with the same `/v1` prefix pattern used by `browser.router`. The route file defines both `/api/browser-profiles...` and `/v1/api/browser-profiles...` paths for direct unit tests, but the production app should mount through `/v1`:
 
 ```python
 from surogates.api.routes import browser_profiles
-app.include_router(browser_profiles.router)
+app.include_router(browser_profiles.router, prefix="/v1", tags=["browser-profiles"])
 ```
 
 - [ ] **Step 6: Commit**
@@ -1096,7 +1126,19 @@ def test_setup_session_creates_browser_setup_without_wake(monkeypatch):
     app.state.browser_pool = type("P", (), {"ensure": staticmethod(_ensure)})()
     app.state.browser_control = _Control()
     app.state.session_wake = lambda sid: waked.update(called=True)
-    # storage/settings stubs as needed by create_agent_session — see Step 3
+
+    class _Storage:
+        async def create_bucket(self, bucket):
+            created["bucket"] = bucket
+        def resolve_workspace_path(self, bucket, sid):
+            return f"/tmp/{bucket}/{sid}"
+
+    class _Settings:
+        storage = type("S", (), {"bucket": "test-bucket", "key_prefix": ""})()
+        llm = type("L", (), {"model": "gpt-4o"})()
+
+    app.state.storage = _Storage()
+    app.state.settings = _Settings()
 
     client = TestClient(app)
     resp = client.post(
@@ -1109,7 +1151,7 @@ def test_setup_session_creates_browser_setup_without_wake(monkeypatch):
     assert "session_id" in resp.json() and "expires_at" in resp.json()
 ```
 
-This test will need `create_agent_session`'s storage/settings dependencies stubbed. Before writing the final assertions, read `surogates/session/provisioning.py:create_agent_session` and stub `app.state.storage` (needs `create_bucket`, `resolve_workspace_path`) and `app.state.settings` (needs `storage.bucket`, `llm.model`) — or, preferred, factor the setup-session body to call a thin internal `_create_browser_setup_session(...)` you can unit-test directly with a fake `session_store`. Keep the assertion `created["channel"] == "browser_setup"` and `waked["called"] is False`.
+The fakes above cover `create_agent_session`'s concrete dependencies: `storage.create_bucket`, `storage.resolve_workspace_path`, `settings.storage.bucket`, `settings.storage.key_prefix`, and `settings.llm.model`.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -1190,7 +1232,7 @@ async def create_setup_session(
     return {"session_id": sid, "expires_at": expires_at.isoformat()}
 ```
 
-Confirm `BrowserSpec` exposes `active_deadline_seconds` (it does, per `surogates/browser/base.py`). If `create_agent_session` rejects an unknown `agent_id`, pass a sentinel that the provisioning path tolerates, or relax it — verify by reading the function; the only requirement is a `browser_setup` session row with the profile id in config.
+`BrowserSpec.active_deadline_seconds` already exists in `surogates/browser/base.py`, and `create_agent_session` persists the supplied `agent_id` without resolving it, so `body.agent_id or "browser-setup"` is sufficient for the setup row.
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -1248,9 +1290,61 @@ def test_capture_rejects_non_setup_session(monkeypatch):
         json={"owner_user_id": "ops-user"},
     )
     assert resp.status_code == 409  # not a browser_setup session
+
+
+def test_capture_saves_storage_state(monkeypatch):
+    store = _FakeStore()
+    app = _app(store)
+    import asyncio
+    row = asyncio.get_event_loop().run_until_complete(
+        store.create(uuid.uuid4(), user_id=None, service_account_id=uuid.uuid4(), name="P")
+    )
+    sid = uuid.uuid4()
+
+    class _SessionStore:
+        async def get_session(self, _sid):
+            class _S:
+                channel = "browser_setup"
+                config = {"browser": {"profile_id": str(row.id)}}
+            return _S()
+
+    class _Control:
+        async def held_by(self, _sid):
+            return "ops-user"
+
+    class _Resolver:
+        async def resolve(self, _sid, expected_org_id=None):
+            from surogates.browser.resolver import ResolvedBrowser
+            from surogates.browser.base import BrowserEndpoint
+            return ResolvedBrowser(
+                session_id=str(sid),
+                endpoint=BrowserEndpoint("http://browser", "ws://cdp", "ws://live"),
+            )
+
+    class _Client:
+        def __init__(self, rest_url):
+            assert rest_url == "http://browser"
+        async def storage_state(self):
+            return {"cookies": [{"name": "SID", "domain": ".google.com"}], "origins": []}
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(bp, "KernelBrowserClient", _Client)
+    app.state.session_store = _SessionStore()
+    app.state.browser_control = _Control()
+    app.state.browser_resolver = _Resolver()
+
+    client = TestClient(app)
+    resp = client.post(
+        f"/api/browser-profiles/{row.id}/capture",
+        params={"session_id": str(sid)},
+        json={"owner_user_id": "ops-user"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["has_state"] is True
 ```
 
-Add an `async def _async(v): return v` helper. The happy-path test (separate) should stub a resolver returning an endpoint, `held_by` returning the owner, a `browser_setup` session whose config names the profile, and a `KernelBrowserClient` whose `storage_state()` returns a fixed dict, then assert `save_capture` was called and the response `has_state is True`. Monkeypatch `bp.KernelBrowserClient` like Task 4 monkeypatches the pool's client.
+The second test monkeypatches `bp.KernelBrowserClient`, stubs the resolver with a real `ResolvedBrowser`, and asserts the metadata response never exposes encrypted state.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -1311,7 +1405,7 @@ async def capture_profile(
     return BrowserProfileOut.of(row)
 ```
 
-Confirm `resolved.endpoint.rest_url` matches what `browser_resolver.resolve(...)` returns in `surogates/api/routes/browser.py` (the resolver returns a resolved object with `.endpoint`). Adjust attribute access to match.
+`browser_resolver.resolve(...)` returns `ResolvedBrowser`, whose endpoint is available at `resolved.endpoint.rest_url`.
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -1360,6 +1454,8 @@ async def test_list_forwards_to_harness(monkeypatch):
             calls["method"] = method
             calls["path"] = path
             return 200, [{"id": "p1", "name": "P"}]
+        async def aclose(self):
+            calls["closed"] = True
 
     async def _fake_build(agent_id, request, ops_session, **kw):
         return _Client()
@@ -1371,6 +1467,7 @@ async def test_list_forwards_to_harness(monkeypatch):
     )
     assert calls["method"] == "GET"
     assert calls["path"].endswith("/browser-profiles")
+    assert calls["closed"] is True
     assert result[0]["name"] == "P"
 ```
 
@@ -1379,7 +1476,7 @@ async def test_list_forwards_to_harness(monkeypatch):
 Run: `cd /work/surogate-ops && .venv/bin/python -m pytest tests/test_browser_profiles_proxy.py -v`
 Expected: FAIL — module/function not found.
 
-- [ ] **Step 3: Implement** — `surogate_ops/server/routes/browser_profiles.py`. Mirror `post_live_browser_control` (sessions.py) for the client build + forward, and `create_live_session` for the SA name/credential. Reuse the helpers by importing them from `routes.sessions`:
+- [ ] **Step 3: Implement** — `surogate_ops/server/routes/browser_profiles.py`. Mirror `post_live_browser_control` (sessions.py) for the client build + forward, and `create_live_session` for the SA name/credential. Reuse the real imports and helpers from `routes.sessions`; `_forward_json` handles request errors, non-2xx propagation, and `client.aclose()`:
 
 ```python
 """Per-user proxy for harness browser-profile routes."""
@@ -1390,10 +1487,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import get_current_subject  # match sessions.py import
-from db.session import get_session              # match sessions.py import
+from surogate_ops.core.db.engine import get_session
+from surogate_ops.server.auth.authentication import get_current_subject
 from routes.sessions import (
     _build_live_agent_client,
+    _forward_json,
     _ops_chat_service_account_name,
     _ops_chat_credential_name,
     _resolve_live_agent,
@@ -1417,8 +1515,7 @@ async def _client(agent_id, request, ops_session, current_subject):
 
 async def _forward_list(*, agent_id, request, ops_session, subject):
     client = await _client(agent_id, request, ops_session, subject)
-    _status, payload = await client.request_json("GET", _HARNESS_PREFIX)
-    return payload
+    return await _forward_json(client, "GET", _HARNESS_PREFIX)
 
 
 @router.get("")
@@ -1439,8 +1536,7 @@ async def create_profile(
     subject: str = Depends(get_current_subject),
 ):
     client = await _client(agent_id, request, ops_session, subject)
-    _status, payload = await client.request_json("POST", _HARNESS_PREFIX, json_body=body)
-    return payload
+    return await _forward_json(client, "POST", _HARNESS_PREFIX, json_body=body)
 
 
 @router.patch("/{profile_id}")
@@ -1450,10 +1546,10 @@ async def rename_profile(
     subject: str = Depends(get_current_subject),
 ):
     client = await _client(agent_id, request, ops_session, subject)
-    _status, payload = await client.request_json(
+    return await _forward_json(
+        client,
         "PATCH", f"{_HARNESS_PREFIX}/{profile_id}", json_body=body,
     )
-    return payload
 
 
 @router.delete("/{profile_id}", status_code=204)
@@ -1463,7 +1559,7 @@ async def delete_profile(
     subject: str = Depends(get_current_subject),
 ):
     client = await _client(agent_id, request, ops_session, subject)
-    await client.request_json("DELETE", f"{_HARNESS_PREFIX}/{profile_id}")
+    await _forward_json(client, "DELETE", f"{_HARNESS_PREFIX}/{profile_id}")
 
 
 @router.post("/{profile_id}/setup-session")
@@ -1473,11 +1569,11 @@ async def setup_session(
     subject: str = Depends(get_current_subject),
 ):
     client = await _client(agent_id, request, ops_session, subject)
-    _status, payload = await client.request_json(
+    return await _forward_json(
+        client,
         "POST", f"{_HARNESS_PREFIX}/{profile_id}/setup-session",
         json_body={**body, "owner_user_id": subject, "agent_id": agent_id},
     )
-    return payload
 
 
 @router.post("/{profile_id}/capture")
@@ -1488,15 +1584,15 @@ async def capture(
     subject: str = Depends(get_current_subject),
 ):
     client = await _client(agent_id, request, ops_session, subject)
-    _status, payload = await client.request_json(
+    return await _forward_json(
+        client,
         "POST", f"{_HARNESS_PREFIX}/{profile_id}/capture",
         params={"session_id": session_id},
         json_body={**body, "owner_user_id": subject},
     )
-    return payload
 ```
 
-Fix the imports (`get_current_subject`, `get_session`, and whether `_resolve_current_ops_user_id` exists) to match `routes/sessions.py` exactly — read its import block first.
+The imports above match `surogate_ops/server/routes/sessions.py`; use those fully qualified paths.
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -1581,6 +1677,7 @@ git commit -m "feat(browser-profiles): stamp browser_profile_id into session con
 
 **Files:**
 - Modify: `sdk/agent-chat-react/src/types.ts` (`AgentChatBrowserProfile`, adapter method)
+- Modify: `sdk/agent-chat-react/src/index.ts` (export `BrowserLiveView`)
 - Modify: `/work/surogate-ops/frontend/src/features/work/work-agent-chat-adapter.ts` (impl + create)
 - Test: `sdk/agent-chat-react/tests/browser-profile-selector.test.tsx` (adapter typing covered indirectly in Task 12)
 
@@ -1615,7 +1712,13 @@ In the `AgentChatAdapter` interface, beside the other browser methods, add:
 Run: `cd /work/surogates/sdk/agent-chat-react && npx tsc --noEmit`
 Expected: PASS (no usages yet; pure type addition).
 
-- [ ] **Step 3: Implement in the ops work adapter** — in `/work/surogate-ops/frontend/src/features/work/work-agent-chat-adapter.ts`, add (mirroring the existing `getBrowserState` fetch style, scoping by `agentId`):
+- [ ] **Step 3: Export the live-view component for Studio setup** — in `sdk/agent-chat-react/src/index.ts`, add:
+
+```typescript
+export { BrowserLiveView } from "./components/browser/browser-live-view";
+```
+
+- [ ] **Step 4: Implement in the ops work adapter** — in `/work/surogate-ops/frontend/src/features/work/work-agent-chat-adapter.ts`, add (mirroring the existing `getBrowserState` fetch style, scoping by `agentId`):
 
 ```typescript
 async listBrowserProfiles() {
@@ -1634,15 +1737,18 @@ async listBrowserProfiles() {
 },
 ```
 
-- [ ] **Step 4: Typecheck the ops frontend**
+- [ ] **Step 5: Typecheck the SDK and ops frontend**
+
+Run: `cd /work/surogates/sdk/agent-chat-react && npx tsc --noEmit`
+Expected: PASS.
 
 Run: `cd /work/surogate-ops/frontend && npm run typecheck`
 Expected: PASS.
 
-- [ ] **Step 5: Commit (two repos)**
+- [ ] **Step 6: Commit (two repos)**
 
 ```bash
-cd /work/surogates && git add sdk/agent-chat-react/src/types.ts && \
+cd /work/surogates && git add sdk/agent-chat-react/src/types.ts sdk/agent-chat-react/src/index.ts && \
   git commit -m "feat(browser-profiles): add listBrowserProfiles adapter capability"
 cd /work/surogate-ops && git add frontend/src/features/work/work-agent-chat-adapter.ts && \
   git commit -m "feat(browser-profiles): implement listBrowserProfiles in work adapter"
@@ -1660,29 +1766,70 @@ cd /work/surogate-ops && git add frontend/src/features/work/work-agent-chat-adap
 - Consumes: `adapter.listBrowserProfiles` (Task 11), `Popover`/`Command` (already imported in chat-composer), `useAgentChatAdapterContext`.
 - Produces: new composer props `browserProfileId?: string | null`, `onSelectBrowserProfile?: (id: string | null) => void`; a `UserCircleIcon`/`IdCardIcon` `PromptInputButton` rendered next to the globe button when `canShowBrowser`.
 
-- [ ] **Step 1: Write the failing test** — `sdk/agent-chat-react/tests/browser-profile-selector.test.tsx`. Follow `tests/browser-live-view.test.tsx` conventions (createRoot + act). Render `ChatComposer` inside an adapter provider whose `listBrowserProfiles` resolves to two profiles; open the popover; assert both names render and clicking one fires `onSelectBrowserProfile` with its id. Use the existing test harness/provider util the other composer tests use — find it with `grep -rln "AgentChatAdapterProvider\|renderComposer" tests/`.
+- [ ] **Step 1: Write the failing test** — `sdk/agent-chat-react/tests/browser-profile-selector.test.tsx`. Follow the existing composer tests' `createRoot` + `AgentChatAdapterProvider` pattern:
 
 ```typescript
-// Skeleton — adapt the provider wrapper to the existing composer tests:
-it("lists profiles and selects one", async () => {
-  const onSelect = vi.fn();
-  const profiles = [
-    { id: "p1", name: "Personal", cookieDomains: [], hasState: true,
-      createdAt: "", lastUsedAt: null },
-    { id: "p2", name: "Work", cookieDomains: [], hasState: false,
-      createdAt: "", lastUsedAt: null },
-  ];
-  const node = await renderComposer({
-    canShowBrowser: true,
-    onSelectBrowserProfile: onSelect,
-    adapter: { listBrowserProfiles: async () => profiles },
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { AgentChatAdapterProvider, NO_BROWSER_ADAPTER } from "../src/adapter-context";
+import { ChatComposer } from "../src/components/chat/chat-composer";
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+let root: Root | null = null;
+let container: HTMLDivElement | null = null;
+
+afterEach(() => {
+  if (root) act(() => root?.unmount());
+  root = null;
+  container?.remove();
+  container = null;
+});
+
+async function renderComposer(onSelectBrowserProfile: (id: string | null) => void) {
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const adapter = {
+    ...NO_BROWSER_ADAPTER,
+    async listBrowserProfiles() {
+      return [
+        { id: "p1", name: "Personal", cookieDomains: [], hasState: true, createdAt: "", lastUsedAt: null },
+        { id: "p2", name: "Work", cookieDomains: [], hasState: false, createdAt: "", lastUsedAt: null },
+      ];
+    },
+  };
+  await act(async () => {
+    root?.render(
+      <AgentChatAdapterProvider value={{ adapter, sessionId: "s-1" }}>
+        <ChatComposer
+          onSend={vi.fn()}
+          onStop={vi.fn()}
+          isRunning={false}
+          canShowBrowser
+          onSelectBrowserProfile={onSelectBrowserProfile}
+        />
+      </AgentChatAdapterProvider>,
+    );
   });
-  const trigger = node.querySelector('[aria-label="Select browser profile"]') as HTMLElement;
-  await act(async () => trigger.click());
-  const work = [...node.querySelectorAll('[role="option"]')]
-    .find((el) => el.textContent?.includes("Work")) as HTMLElement;
-  await act(async () => work.click());
-  expect(onSelect).toHaveBeenCalledWith("p2");
+  return container;
+}
+
+describe("browser profile selector", () => {
+  it("lists profiles and selects one", async () => {
+    const onSelect = vi.fn();
+    const node = await renderComposer(onSelect);
+    const trigger = node.querySelector('[aria-label="Select browser profile"]') as HTMLElement;
+    await act(async () => trigger.click());
+    await act(async () => { await Promise.resolve(); });
+    expect(node.textContent).toContain("Personal");
+    expect(node.textContent).toContain("Work");
+    const work = [...node.querySelectorAll('[cmdk-item]')]
+      .find((el) => el.textContent?.includes("Work")) as HTMLElement;
+    await act(async () => work.click());
+    expect(onSelect).toHaveBeenCalledWith("p2");
+  });
 });
 ```
 
@@ -1782,10 +1929,10 @@ git commit -m "feat(browser-profiles): add profile selector to chat composer"
 - Consumes: the `request`/`authFetch` wrapper pattern from `frontend/src/api/sessions.ts`.
 - Produces: `listBrowserProfiles(agentId)`, `createBrowserProfile(agentId, name)`, `renameBrowserProfile(agentId, id, name)`, `deleteBrowserProfile(agentId, id)`, `createSetupSession(agentId, id)`, `captureProfile(agentId, id, sessionId)`, and a `BrowserProfile` type.
 
-- [ ] **Step 1: Implement** — `/work/surogate-ops/frontend/src/api/browser-profiles.ts` (reuse the same `authFetch`/error helper `sessions.ts` uses — import from the shared module it lives in):
+- [ ] **Step 1: Implement** — `/work/surogate-ops/frontend/src/api/browser-profiles.ts` (reuse the same `authFetch` import that `frontend/src/api/sessions.ts` uses):
 
 ```typescript
-import { authFetch } from "./client"; // match the import sessions.ts uses
+import { authFetch } from "@/api/auth";
 
 export interface BrowserProfile {
   id: string;
@@ -1856,7 +2003,7 @@ export async function captureProfile(agentId: string, id: string, sessionId: str
 }
 ```
 
-Fix the `authFetch` import path to match `sessions.ts` (`grep -n "authFetch" frontend/src/api/sessions.ts`).
+The `authFetch` import path above matches `frontend/src/api/sessions.ts`.
 
 - [ ] **Step 2: Typecheck**
 
@@ -2048,8 +2195,8 @@ Expected: PASS (the setup dialog import resolves once Task 15 lands — do Task 
 - Create: `/work/surogate-ops/frontend/src/features/settings/browser-profile-setup-dialog.tsx`
 
 **Interfaces:**
-- Consumes: `createSetupSession`, `captureProfile` (Task 13); the work adapter / `BrowserPane` for the live view; `Dialog` from `@/components/ui/dialog`.
-- Produces: `<BrowserProfileSetupDialog agentId profileId open onOpenChange onSaved />` — starts a setup session, renders the live `BrowserPane` with control, shows a TTL countdown, and a "Save authentication and close" button that calls `captureProfile`.
+- Consumes: `createSetupSession`, `captureProfile` (Task 13); the work adapter's `browserLiveViewUrl(sessionId)` plus the SDK-exported `BrowserLiveView` from Task 11; `Dialog` from `@/components/ui/dialog`.
+- Produces: `<BrowserProfileSetupDialog agentId profileId open onOpenChange onSaved />` — starts a setup session, renders the live VNC view with pre-granted control, shows a TTL countdown, and a "Save authentication and close" button that calls `captureProfile`.
 
 - [ ] **Step 1: Implement** — `/work/surogate-ops/frontend/src/features/settings/browser-profile-setup-dialog.tsx`:
 
@@ -2063,7 +2210,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { createSetupSession, captureProfile } from "@/api/browser-profiles";
 import { createWorkAgentChatAdapter } from "@/features/work/work-agent-chat-adapter";
-import { BrowserPane } from "@invergent/agent-chat-react";
+import { BrowserLiveView } from "@invergent/agent-chat-react";
 
 interface Props {
   agentId: string;
@@ -2115,6 +2262,7 @@ export function BrowserProfileSetupDialog(
   }, [remaining, expiresAt, onOpenChange]);
 
   const adapter = useMemo(() => createWorkAgentChatAdapter(agentId), [agentId]);
+  const liveViewUrl = sessionId ? adapter.browserLiveViewUrl(sessionId) : "";
 
   async function handleSave() {
     if (!sessionId) return;
@@ -2147,12 +2295,11 @@ export function BrowserProfileSetupDialog(
           </div>
         </DialogHeader>
         <div className="min-h-0 flex-1 bg-black">
-          {sessionId ? (
-            <BrowserPane
-              sessionId={sessionId}
-              state={{ status: "user-control", controlOwner: null, liveViewPath: "" }}
-              adapter={adapter}
-              onClose={() => onOpenChange(false)}
+          {liveViewUrl ? (
+            <BrowserLiveView
+              src={liveViewUrl}
+              testId="browser-profile-setup-rfb"
+              onDisconnect={() => onOpenChange(false)}
             />
           ) : (
             <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
@@ -2166,7 +2313,7 @@ export function BrowserProfileSetupDialog(
 }
 ```
 
-Verify the real exports: `BrowserPane` from `@invergent/agent-chat-react`, the work-adapter factory name (`grep -n "export" frontend/src/features/work/work-agent-chat-adapter.ts`), and `BrowserPane`'s required `state`/`adapter` prop shapes (it may auto-acquire control via the adapter's `acquireBrowserControl` — confirm against `browser-pane.tsx`). Adjust the `state` seed and props to match.
+Task 11 exports `BrowserLiveView`; `createWorkAgentChatAdapter(agentId)` already exposes `browserLiveViewUrl(sessionId)`. The setup route pre-grants control, so rendering `BrowserLiveView` directly avoids `BrowserPane`'s local “Take control” state gate.
 
 - [ ] **Step 2: Typecheck**
 
@@ -2212,4 +2359,4 @@ git commit -m "feat(browser-profiles): add Studio profile manager and setup dial
 
 **Deploy note (not a task):** the harness changes ship in the runtime image (`runtime-api`/`runtime-worker`); ops changes ship in the ops image; SDK/Studio ship in the next web build. Run `surogate-ops migrate upgrade` once after the runtime image rolls to create `browser_profiles`.
 
-**Open verification points flagged inline for the implementer** (confirm against real code before finalizing each task): exact import path of `get_current_tenant`; `BrowserPool.__init__` parameter names; `browser_resolver.resolve(...)` return attribute (`.endpoint.rest_url`); `create_agent_session` tolerance of a synthetic `agent_id`; `authFetch` import path; `BrowserPane` prop shapes and whether it self-acquires control.
+**Resolved local-code assumptions baked into the plan:** `get_current_tenant` imports from `surogates.tenant.auth.middleware`; `BrowserPool` accepts `event_emitter(session_id, event_type, data)` and optional `credit_guard`; `browser_resolver.resolve(...)` returns `ResolvedBrowser.endpoint.rest_url`; `create_agent_session` stores the supplied `agent_id` without resolving it; ops frontend imports `authFetch` from `@/api/auth`; Studio setup uses SDK-exported `BrowserLiveView` directly because `BrowserPane` has a local control gate.
