@@ -8,8 +8,8 @@
 - [x] **Task 2** — `BrowserProfileStore`
 - [x] **Task 3** — `KernelBrowserClient` storage_state helpers
 - [x] **Task 4** — inject storage_state at provision in `BrowserPool.ensure()`
-- [ ] **Task 5** — resolve `profile_id` → spec.storage_state at the tool layer _(in progress)_
-- [ ] **Task 6** — harness `/v1/api/browser-profiles` CRUD router
+- [x] **Task 5** — resolve `profile_id` → spec.storage_state at the tool layer
+- [ ] **Task 6** — harness `/v1/api/browser-profiles` CRUD router _(in progress)_
 - [ ] **Task 7** — harness setup-session route + `browser_setup` channel
 - [ ] **Task 8** — harness capture route
 - [ ] **Task 9** — ops `/api/browser-profiles` proxy
@@ -750,9 +750,19 @@ git commit -m "feat(browser-profiles): inject storage_state at provision before 
 
 ## Task 5: Resolve `profile_id` → spec.storage_state at the tool layer
 
+> **Implementation note (deviation):** `browser_pool`/`browser_control` are threaded
+> as params through the entire `worker → loop → streaming_executor → tool_exec → router`
+> chain (~13 hops). Rather than thread a new `browser_profile_store` param the same way
+> (fragile, ~20 edits), the store is attached to the `BrowserPool` instance
+> (`pool.browser_profile_store`, built in `worker.py` beside the pool), and
+> `_resolve_session_browser` reads it off the `browser_pool` it already receives. The
+> function keeps an optional `browser_profile_store` param that overrides the pool's, used
+> only by tests.
+
 **Files:**
-- Modify: `surogates/tools/builtin/browser.py` (`_resolve_session_browser`)
-- Modify: `surogates/api/app.py` and the harness tool-dispatch wiring to pass `browser_profile_store`
+- Modify: `surogates/tools/builtin/browser.py` (`_resolve_session_browser` reads the store off the pool)
+- Modify: `surogates/browser/pool.py` (`BrowserPool.browser_profile_store` attribute)
+- Modify: `surogates/orchestrator/worker.py` (build the store, pass to the pool)
 - Test: `tests/test_browser_tools_profile_inject.py`
 
 **Interfaces:**

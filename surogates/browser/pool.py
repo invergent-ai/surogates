@@ -52,11 +52,16 @@ class BrowserPool:
         registry: BrowserRegistry,
         event_emitter: EventEmitter | None = None,
         credit_guard: CreditGuard | None = None,
+        browser_profile_store: Any | None = None,
     ) -> None:
         self._backend = backend
         self._registry = registry
         self._emit = event_emitter
         self._credit_guard = credit_guard
+        # Read by the browser tool layer to inject a session's saved login
+        # state at provision; public so handlers reach it via the pool they
+        # already hold (avoids threading the store through the executor chain).
+        self.browser_profile_store = browser_profile_store
         self._mapping: dict[str, _Slot] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
