@@ -5,8 +5,8 @@
 ## Implementation Progress
 
 - [x] **Task 1** — `BrowserProfile` model
-- [ ] **Task 2** — `BrowserProfileStore` _(in progress)_
-- [ ] **Task 3** — `KernelBrowserClient` storage_state helpers
+- [x] **Task 2** — `BrowserProfileStore`
+- [ ] **Task 3** — `KernelBrowserClient` storage_state helpers _(in progress)_
 - [ ] **Task 4** — inject storage_state at provision in `BrowserPool.ensure()`
 - [ ] **Task 5** — resolve `profile_id` → spec.storage_state at the tool layer
 - [ ] **Task 6** — harness `/v1/api/browser-profiles` CRUD router

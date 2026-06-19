@@ -18,6 +18,7 @@ from surogates.db.engine import async_engine_from_settings, async_session_factor
 from surogates.harness.prompt_library import default_library as default_prompt_library
 from surogates.session.store import SessionStore
 from surogates.storage.backend import create_backend
+from surogates.browser.profiles import BrowserProfileStore
 from surogates.tenant.credentials import CredentialVault
 
 logger = logging.getLogger(__name__)
@@ -134,6 +135,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.credential_vault = _build_vault(
         settings.encryption_key,
         app.state.session_factory,
+    )
+    app.state.browser_profile_store = (
+        BrowserProfileStore(
+            app.state.session_factory,
+            encryption_key=settings.encryption_key.encode("utf-8"),
+        )
+        if settings.encryption_key
+        else None
     )
 
     from surogates.channels.pairing import PairingStore
