@@ -11,6 +11,7 @@ import {
   listBrowserProfiles,
 } from "@/api/browser-profiles";
 
+import { BrowserProfileCreateDialog } from "./browser-profile-create-dialog";
 import { BrowserProfileSetupDialog } from "./browser-profile-setup-dialog";
 
 function formatDate(iso: string): string {
@@ -21,7 +22,7 @@ function formatDate(iso: string): string {
 export function BrowserProfilesTab() {
   const [profiles, setProfiles] = useState<BrowserProfile[]>([]);
   const [loading, setLoading] = useState(false);
-  const [creating, setCreating] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
   const [removeId, setRemoveId] = useState<string | null>(null);
   const [setupId, setSetupId] = useState<string | null>(null);
 
@@ -37,15 +38,12 @@ export function BrowserProfilesTab() {
     refresh();
   }, [refresh]);
 
-  async function handleCreate() {
-    setCreating(true);
+  async function handleCreate(name: string) {
     try {
-      await createBrowserProfile(`Profile ${profiles.length + 1}`);
+      await createBrowserProfile(name || `Profile ${profiles.length + 1}`);
       refresh();
     } catch {
       toast.error("Couldn't create profile — that name may already exist.");
-    } finally {
-      setCreating(false);
     }
   }
 
@@ -71,7 +69,7 @@ export function BrowserProfilesTab() {
             Preserve browser state and login sessions across tasks.
           </p>
         </div>
-        <Button size="sm" onClick={handleCreate} disabled={creating}>
+        <Button size="sm" onClick={() => setCreateOpen(true)}>
           <Plus className="size-4" /> Create Profile
         </Button>
       </div>
@@ -124,6 +122,12 @@ export function BrowserProfilesTab() {
           ))}
         </div>
       )}
+
+      <BrowserProfileCreateDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        onCreate={handleCreate}
+      />
 
       <ConfirmDialog
         open={!!removeId}
