@@ -212,6 +212,11 @@ export function ChatPage() {
               onOpenIntegrations={() => void navigate({ to: "/integrations" })}
               browserProfileId={browserProfileId}
               onSelectBrowserProfile={setBrowserProfileId}
+              // The web app has no per-agent browser-capability flag, so the
+              // picker is always offered; selecting a profile for a non-browser
+              // agent is a harmless no-op. Shown before the session starts and
+              // locked once it is active (the SDK handles the lock).
+              browserProfilesEnabled
               // Hide built-in slash commands the agent has disabled. Unknown
               // (capabilities not yet loaded) fails open via the helper.
               compressEnabled={slashCommandEnabled(slashCommands, "compress")}

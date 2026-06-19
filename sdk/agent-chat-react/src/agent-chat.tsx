@@ -32,11 +32,15 @@ export interface AgentChatProps {
   onComposerError?: (err: ChatComposerError) => void;
   /**
    * Browser-profile selection (host-managed). When ``onSelectBrowserProfile``
-   * is provided and the browser is available, the composer shows a profile
-   * picker; the host threads the chosen id into session creation.
+   * is provided and ``browserProfilesEnabled`` is set, the composer shows a
+   * profile picker; the host threads the chosen id into session creation.
+   * The picker is shown before a session exists (a profile can only be bound
+   * at creation) and is locked once a session is active.
    */
   browserProfileId?: string | null;
   onSelectBrowserProfile?: (id: string | null) => void;
+  /** Whether this agent supports a live browser (gates the profile picker). */
+  browserProfilesEnabled?: boolean;
   /**
    * Per-agent capability flag.  When true, the composer surfaces the
    * ``/deep-research`` slash command in its builtin menu.  Off by
@@ -99,6 +103,7 @@ export function AgentChat({
   onComposerError,
   browserProfileId,
   onSelectBrowserProfile,
+  browserProfilesEnabled = false,
   deepResearchEnabled = false,
   researchEnabled = false,
   codeAgentsEnabled = false,
@@ -295,6 +300,8 @@ export function AgentChat({
               onComposerError={onComposerError}
               browserProfileId={browserProfileId}
               onSelectBrowserProfile={onSelectBrowserProfile}
+              browserProfilesEnabled={browserProfilesEnabled}
+              browserProfileLocked={!!sessionId}
               showBrowser={showBrowser}
               onToggleBrowser={handleToggleBrowser}
               showWorkspace={showWorkspace}
