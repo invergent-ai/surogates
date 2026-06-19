@@ -17,6 +17,20 @@ class BrowserUnavailableError(RuntimeError):
         self.classification = classification
 
 
+class BrowserCreditsExhaustedError(BrowserUnavailableError):
+    """Raised when the project has no web-browsing minutes left.
+
+    Distinct from a plain :class:`BrowserUnavailableError` because the
+    remedy is the user's, not ours: top up or upgrade. Subclasses
+    ``BrowserUnavailableError`` so any call site that only knows about
+    the parent still degrades gracefully, but the tool layer catches it
+    first to render top-up guidance instead of "infra is broken".
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason, classification="credits")
+
+
 def browser_unavailable_result(
     reason: str,
     *,
@@ -37,6 +51,26 @@ def browser_unavailable_result(
     if tools_affected:
         payload["tools_affected"] = tools_affected
     return json.dumps(payload)
+
+
+def browser_credits_exhausted_result(reason: str) -> str:
+    """Return the JSON tool body for an exhausted web-browsing balance.
+
+    Unlike :func:`browser_unavailable_result`, this is not an infra
+    failure: the user can fix it. The guidance reflects that so the
+    agent reports a top-up prompt instead of "infrastructure is broken".
+    """
+
+    return json.dumps({
+        "error": "browser_credits_exhausted",
+        "reason": reason,
+        "guidance": (
+            "This project is out of web-browsing minutes, so no browser "
+            "can be started. Do not retry browser_* tools. Tell the user "
+            "to top up web-browsing minutes or upgrade their plan in "
+            "Settings → Billing; continue with non-browser tools if you can."
+        ),
+    })
 
 
 class BrowserStatus(str, Enum):

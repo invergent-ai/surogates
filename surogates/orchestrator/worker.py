@@ -703,10 +703,19 @@ async def run_worker(settings: Settings) -> None:
         except Exception:
             logger.exception("Failed to emit browser event %s", event_type)
 
+    # Use-time browser-minutes gate. Reads the ops ``credit_balances``
+    # row before provisioning a new browser pod and refuses when the
+    # project is out of minutes. It self-disables when the ops DB is
+    # not configured (see ``assert_browser_minutes_available``), so it
+    # is safe to wire unconditionally — the ops engine is initialized
+    # just below for the KB tools and resolved lazily by the guard.
+    from surogates.db.ops_credits import assert_browser_minutes_available
+
     browser_pool = BrowserPool(
         backend=browser_backend,
         registry=browser_registry,
         event_emitter=_emit_browser_event,
+        credit_guard=assert_browser_minutes_available,
     )
     logger.info("Agent browser ready (backend=%s)", settings.browser.backend)
 

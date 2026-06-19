@@ -282,6 +282,27 @@ class TestNavigateHandler:
         body = json.loads(result)
         assert body["error"] == "browser_unavailable"
 
+    async def test_returns_credits_exhausted_with_topup_guidance(
+        self, tenant,
+    ) -> None:
+        from surogates.browser.base import BrowserCreditsExhaustedError
+        from surogates.tools.builtin.browser import _browser_navigate_handler
+
+        class OutOfMinutesPool(FakePool):
+            async def ensure(self, *a: Any, **k: Any) -> Any:
+                raise BrowserCreditsExhaustedError("no minutes left")
+
+        result = await _browser_navigate_handler(
+            {"url": "https://example.com"},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=OutOfMinutesPool(),
+            browser_control=FakeControlStore(),
+        )
+        body = json.loads(result)
+        assert body["error"] == "browser_credits_exhausted"
+        assert "Settings → Billing" in body["guidance"]
+
 
 class TestGetStateHandler:
     async def test_returns_tree(self, tenant) -> None:

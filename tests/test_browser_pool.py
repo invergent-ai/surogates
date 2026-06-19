@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from surogates.browser.base import (
+    BrowserCreditsExhaustedError,
     BrowserEndpoint,
     BrowserSpec,
     BrowserStatus,
@@ -115,6 +116,57 @@ class TestEnsure:
             pass
         else:
             raise AssertionError("BrowserUnavailableError was not raised")
+
+
+class TestCreditGuard:
+    async def test_guard_runs_before_provision_and_blocks(self) -> None:
+        backend = FakeBackend()
+        seen: list[str] = []
+
+        async def guard(org_id: str) -> None:
+            seen.append(org_id)
+            raise BrowserCreditsExhaustedError("out of minutes")
+
+        pool = BrowserPool(  # type: ignore[arg-type]
+            backend=backend, registry=FakeRegistry(), credit_guard=guard,
+        )
+        try:
+            await pool.ensure("sess-1", "org-x", "u", BrowserSpec())
+        except BrowserCreditsExhaustedError:
+            pass
+        else:
+            raise AssertionError("BrowserCreditsExhaustedError was not raised")
+        assert seen == ["org-x"]
+        assert backend.provisions == 0  # gated before any pod started
+
+    async def test_guard_allows_provision_when_it_passes(self) -> None:
+        backend = FakeBackend()
+
+        async def guard(org_id: str) -> None:
+            return None
+
+        pool = BrowserPool(  # type: ignore[arg-type]
+            backend=backend, registry=FakeRegistry(), credit_guard=guard,
+        )
+        result = await pool.ensure("sess-1", "o", "u", BrowserSpec())
+        assert result.newly_provisioned is True
+        assert backend.provisions == 1
+
+    async def test_guard_not_consulted_on_reuse(self) -> None:
+        backend = FakeBackend()
+        calls: list[str] = []
+
+        async def guard(org_id: str) -> None:
+            calls.append(org_id)
+
+        pool = BrowserPool(  # type: ignore[arg-type]
+            backend=backend, registry=FakeRegistry(), credit_guard=guard,
+        )
+        await pool.ensure("sess-1", "o", "u", BrowserSpec())
+        await pool.ensure("sess-1", "o", "u", BrowserSpec())
+        # Guard runs only for the fresh provision, not the reuse.
+        assert calls == ["o"]
+        assert backend.provisions == 1
 
 
 class TestDestroy:
