@@ -15,8 +15,9 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, bindparam, not_, select, text, update, delete, func, or_, tuple_
+from sqlalchemy import and_, not_, select, text, update, delete, func, or_, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from surogates.db.models import (
     Event as EventRow,
@@ -534,40 +535,31 @@ class SessionStore:
             roots = result.scalars().all()
             sessions = list(roots)
             if include_descendants and roots:
-                root_ids = [r.id for r in roots]
                 # Walk the delegation forest down from this page of roots and
-                # collect descendant ids (any depth).  A child inherits its
-                # root's org/agent (see create_child_session), so staying within
-                # the returned roots is what scopes the walk.
-                descendant_ids = (
-                    (
-                        await db.execute(
-                            text(
-                                "WITH RECURSIVE subtree AS ("
-                                "  SELECT id, parent_id FROM sessions "
-                                "  WHERE id IN :root_ids "
-                                "  UNION ALL "
-                                "  SELECT s.id, s.parent_id FROM sessions s "
-                                "  JOIN subtree st ON s.parent_id = st.id"
-                                ") "
-                                "SELECT id FROM subtree WHERE parent_id IS NOT NULL"
-                            ).bindparams(bindparam("root_ids", expanding=True)),
-                            {"root_ids": root_ids},
-                        )
-                    )
-                    .scalars()
-                    .all()
+                # append every descendant (any depth).  A child inherits its
+                # root's org/agent (see create_child_session), so seeding the
+                # walk with the roots is what scopes it; the org filter on the
+                # final fetch is belt-and-suspenders.
+                subtree = (
+                    select(SessionRow.id)
+                    .where(SessionRow.id.in_([r.id for r in roots]))
+                    .cte("subtree", recursive=True)
                 )
-                if descendant_ids:
-                    desc_result = await db.execute(
-                        select(SessionRow)
-                        .where(
-                            SessionRow.id.in_(descendant_ids),
-                            SessionRow.status != "archived",
-                        )
-                        .order_by(SessionRow.created_at.desc())
+                child = aliased(SessionRow)
+                subtree = subtree.union_all(
+                    select(child.id).join(subtree, child.parent_id == subtree.c.id)
+                )
+                desc_result = await db.execute(
+                    select(SessionRow)
+                    .where(
+                        SessionRow.id.in_(select(subtree.c.id)),
+                        SessionRow.parent_id.is_not(None),
+                        SessionRow.org_id == org_id,
+                        SessionRow.status != "archived",
                     )
-                    sessions.extend(desc_result.scalars().all())
+                    .order_by(SessionRow.created_at.desc())
+                )
+                sessions.extend(desc_result.scalars().all())
         return [Session.model_validate(r) for r in sessions]
 
     # ------------------------------------------------------------------
