@@ -110,45 +110,89 @@ async def _resolve_session_browser(
             browser_pool, "browser_profile_store", None
         )
         profile_id = (session_config or {}).get("browser", {}).get("profile_id")
-        if profile_id and store is not None:
-            org_id = getattr(tenant, "org_id", None)
-            service_account_id = getattr(tenant, "service_account_id", None)
-            if service_account_id is None:
-                sa_raw = (session_config or {}).get("service_account_id")
-                if sa_raw:
-                    service_account_id = UUID(str(sa_raw))
-            # SA-owned profiles (the ops-chat path) take precedence; the store
-            # requires exactly one principal, so null the user when an SA is set.
-            user_id = (
-                None
-                if service_account_id is not None
-                else getattr(tenant, "user_id", None)
-            )
-            if (user_id is not None) ^ (service_account_id is not None):
-                try:
-                    state = await store.storage_state_for(
-                        UUID(str(profile_id)),
-                        org_id,
-                        user_id=user_id,
-                        service_account_id=service_account_id,
-                    )
-                    if state is not None:
-                        browser_spec.storage_state = state
-                        await store.touch_last_used(
+        if profile_id:
+            # Every miss below leaves the browser unauthenticated, which looks
+            # identical to "no profile bound" to the user. Log each branch so a
+            # logged-out session is diagnosable (store missing vs principal
+            # unresolved vs profile not found vs decrypt failure).
+            if store is None:
+                logger.warning(
+                    "Session %s is bound to browser profile %s but the worker "
+                    "has no profile store (encryption_key unset?); the browser "
+                    "will start unauthenticated",
+                    sid,
+                    profile_id,
+                )
+            else:
+                org_id = getattr(tenant, "org_id", None)
+                service_account_id = getattr(tenant, "service_account_id", None)
+                if service_account_id is None:
+                    sa_raw = (session_config or {}).get("service_account_id")
+                    if sa_raw:
+                        service_account_id = UUID(str(sa_raw))
+                # SA-owned profiles (the ops-chat path) take precedence; the
+                # store requires exactly one principal, so null the user when
+                # an SA is set.
+                user_id = (
+                    None
+                    if service_account_id is not None
+                    else getattr(tenant, "user_id", None)
+                )
+                if (user_id is not None) ^ (service_account_id is not None):
+                    try:
+                        state = await store.storage_state_for(
                             UUID(str(profile_id)),
                             org_id,
                             user_id=user_id,
                             service_account_id=service_account_id,
                         )
-                except Exception:
-                    # Fail open to a fresh browser rather than crashing the
-                    # tool — e.g. the encryption key was rotated and the blob
-                    # can no longer be decrypted.
+                        if state is not None:
+                            browser_spec.storage_state = state
+                            logger.info(
+                                "Loaded browser profile %s for session %s "
+                                "(%d cookies)",
+                                profile_id,
+                                sid,
+                                len(state.get("cookies", []) or []),
+                            )
+                            await store.touch_last_used(
+                                UUID(str(profile_id)),
+                                org_id,
+                                user_id=user_id,
+                                service_account_id=service_account_id,
+                            )
+                        else:
+                            logger.warning(
+                                "Browser profile %s not found for session %s "
+                                "(org=%s user_id=%s service_account_id=%s); the "
+                                "browser will start unauthenticated",
+                                profile_id,
+                                sid,
+                                org_id,
+                                user_id,
+                                service_account_id,
+                            )
+                    except Exception:
+                        # Fail open to a fresh browser rather than crashing the
+                        # tool — e.g. the encryption key was rotated and the
+                        # blob can no longer be decrypted.
+                        logger.warning(
+                            "Could not load browser profile %s for session %s; "
+                            "provisioning a fresh browser",
+                            profile_id,
+                            sid,
+                            exc_info=True,
+                        )
+                else:
                     logger.warning(
-                        "Could not load browser profile %s; "
-                        "provisioning a fresh browser",
+                        "Browser profile %s bound to session %s but its "
+                        "principal could not be resolved (user_id=%s "
+                        "service_account_id=%s); the browser will start "
+                        "unauthenticated",
                         profile_id,
-                        exc_info=True,
+                        sid,
+                        user_id,
+                        service_account_id,
                     )
 
         result = await browser_pool.ensure(
