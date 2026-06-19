@@ -181,9 +181,18 @@ return {
     async def apply_storage_state(self, state: dict[str, Any]) -> None:
         """Inject cookies (and best-effort localStorage) into the live context.
 
-        Cookies are applied directly to the existing context. localStorage is
-        seeded per origin (best effort): a fresh context cannot be created on an
-        already-running browser, so we navigate to each origin and set its items.
+        Cookies are applied first, in one ``addCookies`` call — they are the
+        primary auth carrier and land atomically. localStorage can only be
+        written while the page is on the matching origin, and a fresh context
+        can't be created on an already-running browser, so each origin is seeded
+        by navigating to it and writing its items.
+
+        Those per-origin navigations run **sequentially** inside the single
+        ``_playwright_execute`` call, which shares one 60s budget — a profile
+        spanning many origins can approach that timeout. Cookies are already in
+        place by then, so a partial localStorage seed degrades gracefully rather
+        than losing the session; per-origin failures (origins that block
+        navigation) are swallowed for the same reason.
         """
 
         cookies_json = json.dumps(state.get("cookies", []) or [])
