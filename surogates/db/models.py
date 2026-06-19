@@ -594,6 +594,71 @@ class ScheduledSession(Base):
 
 
 # ---------------------------------------------------------------------------
+# Browser Profiles
+# ---------------------------------------------------------------------------
+
+
+class BrowserProfile(Base):
+    """A reusable, encrypted browser login state owned by one principal.
+
+    Like ``ScheduledSession``, a profile is owned by exactly one principal —
+    a human ``user_id`` or a ``service_account_id`` (the ops-chat SA that
+    work-chat requests authenticate as). The CHECK enforces the XOR.
+    """
+
+    __tablename__ = "browser_profiles"
+    __table_args__ = (
+        CheckConstraint(
+            "(user_id IS NOT NULL)::int + (service_account_id IS NOT NULL)::int = 1",
+            name="ck_browser_profiles_one_principal",
+        ),
+        Index(
+            "uq_browser_profiles_user_name",
+            "org_id",
+            "user_id",
+            "name",
+            unique=True,
+            postgresql_where=text("user_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_browser_profiles_sa_name",
+            "org_id",
+            "service_account_id",
+            "name",
+            unique=True,
+            postgresql_where=text("service_account_id IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
+    )
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    service_account_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("service_accounts.id"), nullable=True
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'manual_vnc'")
+    )
+    storage_state_enc: Mapped[Optional[bytes]] = mapped_column(
+        LargeBinary, nullable=True
+    )
+    cookie_domains: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now()
+    )
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+
+
+# ---------------------------------------------------------------------------
 # Service Accounts
 # ---------------------------------------------------------------------------
 

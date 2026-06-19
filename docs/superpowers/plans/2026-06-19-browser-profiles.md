@@ -2,6 +2,24 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+## Implementation Progress
+
+- [x] **Task 1** — `BrowserProfile` model
+- [ ] **Task 2** — `BrowserProfileStore` _(in progress)_
+- [ ] **Task 3** — `KernelBrowserClient` storage_state helpers
+- [ ] **Task 4** — inject storage_state at provision in `BrowserPool.ensure()`
+- [ ] **Task 5** — resolve `profile_id` → spec.storage_state at the tool layer
+- [ ] **Task 6** — harness `/v1/api/browser-profiles` CRUD router
+- [ ] **Task 7** — harness setup-session route + `browser_setup` channel
+- [ ] **Task 8** — harness capture route
+- [ ] **Task 9** — ops `/api/browser-profiles` proxy
+- [ ] **Task 10** — ops session-create accepts `browser_profile_id`
+- [ ] **Task 11** — SDK adapter `listBrowserProfiles` + create wiring
+- [ ] **Task 12** — SDK chat-composer profile selector popover
+- [ ] **Task 13** — Studio `api/browser-profiles.ts` client
+- [ ] **Task 14** — Studio "Browser Profiles" manager section
+- [ ] **Task 15** — Studio "Set up authentication" dialog
+
 **Goal:** Let a user save a browser's login/cookie state under a named, private "profile" and reuse it across agent tasks, capturing auth by logging in by hand over the CDP-free VNC live view.
 
 **Architecture:** The surogates harness owns a `browser_profiles` table (surogates DB) plus capture/inject and a standalone `browser_setup` session; `surogate-ops` is a thin per-user-service-account proxy; the SDK adds a profile selector to the chat composer; Studio settings get a profile manager. Capture exports Playwright `storage_state` after a human login; inject applies it into a fresh context at browser-provision time, before registry publish / `browser.provisioned` / first navigation.
