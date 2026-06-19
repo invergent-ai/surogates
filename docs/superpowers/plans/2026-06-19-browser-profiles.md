@@ -684,7 +684,7 @@ Expected: FAIL — `TypeError: __init__() got an unexpected keyword argument 'st
     storage_state: dict | None = None
 ```
 
-- [ ] **Step 4: Inject in `ensure()`** — in `surogates/browser/pool.py`, in the new-provision branch, immediately after `backend.provision(...)` returns and **before** `self._registry.set(...)`:
+- [ ] **Step 4: Inject in `ensure()`** — in `surogates/browser/pool.py`, in the new-provision branch, immediately after `backend.provision(...)` returns and **before** `self._registry.set(...)`. Note: the new-provision branch now **opens** with `await self._credit_guard(org_id)` (the browser-minutes gate added in `feat(browser): gate browser-minutes at pod provision`); your injection goes strictly after `backend.provision(...)`, so the guard is unaffected:
 
 ```python
         browser_id, endpoint = await self._backend.provision(
@@ -1121,7 +1121,7 @@ Expected: FAIL — route does not exist.
 ```python
 from datetime import datetime, timedelta, timezone
 from surogates.session.provisioning import create_agent_session
-from surogates.browser.base import BrowserSpec
+from surogates.browser.base import BrowserSpec, BrowserCreditsExhaustedError
 
 _SETUP_TTL_SECONDS = 15 * 60
 
@@ -1172,11 +1172,18 @@ async def create_setup_session(
     # Provision a bare browser (empty profile → no injection) and grant control.
     # Deliberately do NOT enqueue_session / session_wake: no agent loop runs.
     pool = request.app.state.browser_pool
-    await pool.ensure(
-        session_id=sid, org_id=str(tenant.org_id),
-        user_id=owner,
-        spec=BrowserSpec(active_deadline_seconds=_SETUP_TTL_SECONDS),
-    )
+    try:
+        await pool.ensure(
+            session_id=sid, org_id=str(tenant.org_id),
+            user_id=owner,
+            spec=BrowserSpec(active_deadline_seconds=_SETUP_TTL_SECONDS),
+        )
+    except BrowserCreditsExhaustedError as exc:
+        # ``ensure`` runs the browser-minutes credit guard before provisioning,
+        # so a setup browser meters minutes like any live browser (this resolves
+        # the spec's setup-session credit-metering open question). Surface a
+        # top-up signal instead of a 500.
+        raise HTTPException(status_code=402, detail=str(exc)) from exc
     await request.app.state.browser_control.acquire(sid, owner)
 
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=_SETUP_TTL_SECONDS)
@@ -2200,6 +2207,8 @@ git commit -m "feat(browser-profiles): add Studio profile manager and setup dial
 - Deferred seams (`source`, `setup_spec.proxy` rejected) → Tasks 1, 7.
 
 **Deviations from the spec, by design:** the spec's "Alembic migration in surogates/db/migrations" is replaced by a plain model addition because the harness applies schema via `Base.metadata.create_all` (`run_migrations`). No behavior change — the table still ships via `surogate-ops migrate upgrade`.
+
+**Already landed (prerequisite, not a task):** `feat(browser): gate browser-minutes at pod provision, not session start` adds a `CreditGuard` to `BrowserPool.ensure()` and `BrowserCreditsExhaustedError` to `surogates/browser/base.py`. This resolves the spec's setup-session credit-metering open question — the `browser_setup` browser (Task 7) meters minutes through the same guard automatically — and Tasks 4/5 build on the `ensure()`/`browser.py` that commit already touched (merge alongside, don't revert).
 
 **Deploy note (not a task):** the harness changes ship in the runtime image (`runtime-api`/`runtime-worker`); ops changes ship in the ops image; SDK/Studio ship in the next web build. Run `surogate-ops migrate upgrade` once after the runtime image rolls to create `browser_profiles`.
 
