@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -94,3 +95,70 @@ def test_rename_and_delete():
     deleted = client.delete(f"/api/browser-profiles/{pid}")
     assert deleted.status_code == 204
     assert client.get("/api/browser-profiles").json() == []
+
+
+class _SettingsStub:
+    storage = type("S", (), {"bucket": "test-bucket", "key_prefix": ""})()
+    llm = type("L", (), {"model": "gpt-4o"})()
+
+
+class _StorageStub:
+    def __init__(self, sink):
+        self._sink = sink
+
+    async def create_bucket(self, bucket):
+        self._sink["bucket"] = bucket
+
+    def resolve_workspace_path(self, bucket, sid):
+        return f"/tmp/{bucket}/{sid}"
+
+
+def test_setup_session_creates_browser_setup_without_wake():
+    store = _FakeStore()
+    app = _app(store)
+    created = {}
+    waked = {"called": False}
+
+    row = asyncio.run(
+        store.create(uuid.uuid4(), user_id=None, service_account_id=uuid.uuid4(), name="P")
+    )
+
+    class _SessionStore:
+        async def create_session(self, **kw):
+            created.update(kw)
+
+            class _S:
+                id = kw["session_id"]
+                config = kw["config"]
+
+            return _S()
+
+    async def _ensure(**kw):
+        return None
+
+    class _Control:
+        async def acquire(self, sid, uid):
+            from surogates.browser.control import AcquireOutcome, ControlEntry
+
+            return AcquireOutcome.GRANTED, ControlEntry(
+                uid, datetime.now(timezone.utc)
+            )
+
+    app.state.session_store = _SessionStore()
+    app.state.browser_pool = type("P", (), {"ensure": staticmethod(_ensure)})()
+    app.state.browser_control = _Control()
+    app.state.session_wake = lambda sid: waked.update(called=True)
+    app.state.storage = _StorageStub(created)
+    app.state.settings = _SettingsStub()
+
+    client = TestClient(app)
+    resp = client.post(
+        f"/api/browser-profiles/{row.id}/setup-session",
+        json={"owner_user_id": "ops-user", "agent_id": "agent-1"},
+    )
+    assert resp.status_code == 200
+    assert created["channel"] == "browser_setup"
+    assert created["config"]["browser"]["profile_id"] == str(row.id)
+    assert waked["called"] is False
+    assert "session_id" in resp.json()
+    assert "expires_at" in resp.json()
