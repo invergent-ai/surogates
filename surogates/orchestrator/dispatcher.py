@@ -846,6 +846,13 @@ class Orchestrator:
             logger.exception("Orphan sweep failed; continuing")
             return 0
         for session in orphans:
+            # browser_setup sessions are interactive and have no agent loop to
+            # recover; their lifecycle is the pod TTL + the capture/cancel
+            # teardown. They sit ``active`` and leaseless by design, so the
+            # sweeper would otherwise re-wake them every cycle and re-provision
+            # the browser out from under the live view.
+            if getattr(session, "channel", None) == "browser_setup":
+                continue
             try:
                 await self.session_store.emit_event(
                     session.id,

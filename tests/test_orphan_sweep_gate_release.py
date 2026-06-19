@@ -183,6 +183,45 @@ async def test_sweep_does_not_drive_gate_below_zero(
 
 
 @pytest.mark.asyncio
+async def test_sweep_skips_browser_setup_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """browser_setup sessions sit ``active`` and leaseless by design (an
+    interactive login, no agent loop). The sweeper must skip them — recovering
+    one would re-wake it and re-provision the browser out from under the live
+    view."""
+    enqueue = AsyncMock()
+    monkeypatch.setattr(
+        "surogates.orchestrator.dispatcher.enqueue_session", enqueue
+    )
+
+    org_id = uuid4()
+    normal = SimpleNamespace(
+        id=uuid4(), org_id=org_id, agent_id="agent-X", channel="web"
+    )
+    setup = SimpleNamespace(
+        id=uuid4(), org_id=org_id, agent_id="agent-X", channel="browser_setup"
+    )
+    session_store = AsyncMock()
+    session_store.find_orphaned_sessions = AsyncMock(return_value=[setup, normal])
+    session_store.emit_event = AsyncMock()
+    session_store.release_stale_lease = AsyncMock(return_value=True)
+
+    orchestrator = _make_orchestrator(
+        session_store=session_store, redis=_FakeQueueRedis(), gate=None
+    )
+    recovered = await orchestrator._sweep_orphans_once(
+        stale_seconds=60, reason="orchestrator_sweeper",
+    )
+
+    assert recovered == 1  # only the normal session
+    assert enqueue.await_count == 1
+    emitted = {call.args[0] for call in session_store.emit_event.await_args_list}
+    assert normal.id in emitted
+    assert setup.id not in emitted
+
+
+@pytest.mark.asyncio
 async def test_sweep_without_gate_still_recovers(
     monkeypatch: pytest.MonkeyPatch,
 ):
