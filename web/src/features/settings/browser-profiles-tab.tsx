@@ -40,10 +40,10 @@ export function BrowserProfilesTab() {
   async function handleCreate() {
     setCreating(true);
     try {
-      await createBrowserProfile("Personal Profile");
+      await createBrowserProfile(`Profile ${profiles.length + 1}`);
       refresh();
     } catch {
-      toast.error("Couldn't create profile.");
+      toast.error("Couldn't create profile — that name may already exist.");
     } finally {
       setCreating(false);
     }
