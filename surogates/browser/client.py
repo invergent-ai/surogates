@@ -198,8 +198,12 @@ return {
         cookies_json = json.dumps(state.get("cookies", []) or [])
         origins_json = json.dumps(state.get("origins", []) or [])
         code = (
-            "const context = page.context();\n"
-            f"await context.addCookies({cookies_json});\n"
+            # The kernel-images execute wrapper already binds ``context`` in
+            # scope; redeclaring it is a SyntaxError ("Identifier 'context' has
+            # already been declared") that aborts the whole injection. Use a
+            # local name instead.
+            "const ctx = page.context();\n"
+            f"await ctx.addCookies({cookies_json});\n"
             f"for (const o of {origins_json}) {{\n"
             "  try {\n"
             "    await page.goto(o.origin, {waitUntil: 'domcontentloaded'});\n"
