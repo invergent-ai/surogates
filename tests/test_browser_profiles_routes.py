@@ -73,28 +73,28 @@ def _app(store, *, user_id=None, sa_id=None):
 def test_create_then_list_returns_metadata_only():
     store = _FakeStore()
     client = TestClient(_app(store))
-    created = client.post("/api/browser-profiles", json={"name": "Personal"})
+    created = client.post("/browser-profiles", json={"name": "Personal"})
     assert created.status_code == 201
     body = created.json()
     assert body["name"] == "Personal"
     assert body["has_state"] is False
     assert "storage_state_enc" not in body
-    listed = client.get("/api/browser-profiles").json()
+    listed = client.get("/browser-profiles").json()
     assert [p["name"] for p in listed] == ["Personal"]
 
 
 def test_rename_and_delete():
     store = _FakeStore()
     client = TestClient(_app(store))
-    pid = client.post("/api/browser-profiles", json={"name": "P"}).json()["id"]
+    pid = client.post("/browser-profiles", json={"name": "P"}).json()["id"]
     renamed = client.patch(
-        f"/api/browser-profiles/{pid}", json={"name": "Renamed"}
+        f"/browser-profiles/{pid}", json={"name": "Renamed"}
     )
     assert renamed.status_code == 200
-    assert client.get("/api/browser-profiles").json()[0]["name"] == "Renamed"
-    deleted = client.delete(f"/api/browser-profiles/{pid}")
+    assert client.get("/browser-profiles").json()[0]["name"] == "Renamed"
+    deleted = client.delete(f"/browser-profiles/{pid}")
     assert deleted.status_code == 204
-    assert client.get("/api/browser-profiles").json() == []
+    assert client.get("/browser-profiles").json() == []
 
 
 class _SettingsStub:
@@ -153,7 +153,7 @@ def test_setup_session_creates_browser_setup_without_wake():
 
     client = TestClient(app)
     resp = client.post(
-        f"/api/browser-profiles/{row.id}/setup-session",
+        f"/browser-profiles/{row.id}/setup-session",
         json={"owner_user_id": "ops-user", "agent_id": "agent-1"},
     )
     assert resp.status_code == 200
@@ -196,7 +196,7 @@ def test_capture_rejects_non_setup_session():
 
     client = TestClient(app)
     resp = client.post(
-        f"/api/browser-profiles/{row.id}/capture",
+        f"/browser-profiles/{row.id}/capture",
         params={"session_id": str(uuid.uuid4())},
         json={"owner_user_id": "ops-user"},
     )
@@ -251,7 +251,7 @@ def test_capture_saves_storage_state(monkeypatch):
 
     client = TestClient(app)
     resp = client.post(
-        f"/api/browser-profiles/{row.id}/capture",
+        f"/browser-profiles/{row.id}/capture",
         params={"session_id": str(sid)},
         json={"owner_user_id": "ops-user"},
     )

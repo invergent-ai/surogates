@@ -1,4 +1,9 @@
-"""Browser-profile CRUD + setup/capture routes (mounted under ``/v1``)."""
+"""Browser-profile CRUD + setup/capture routes.
+
+The router is dual-mounted (``/v1`` and ``/v1/api``) so both the web app
+(``/v1/browser-profiles`` after its proxy strips ``/api``) and the ops proxy
+(``/v1/api/browser-profiles``) resolve, mirroring the feedback router.
+"""
 
 from __future__ import annotations
 
@@ -73,7 +78,7 @@ def _store(request: Request):
     return store
 
 
-@router.get("/api/browser-profiles")
+@router.get("/browser-profiles")
 async def list_profiles(
     request: Request, tenant: TenantContext = Depends(get_current_tenant)
 ) -> list[BrowserProfileOut]:
@@ -84,7 +89,7 @@ async def list_profiles(
     return [BrowserProfileOut.of(r) for r in rows]
 
 
-@router.post("/api/browser-profiles", status_code=201)
+@router.post("/browser-profiles", status_code=201)
 async def create_profile(
     body: CreateProfileRequest,
     request: Request,
@@ -100,7 +105,7 @@ async def create_profile(
     return BrowserProfileOut.of(row)
 
 
-@router.patch("/api/browser-profiles/{profile_id}")
+@router.patch("/browser-profiles/{profile_id}")
 async def rename_profile(
     profile_id: UUID,
     body: RenameProfileRequest,
@@ -120,7 +125,7 @@ async def rename_profile(
     return {"renamed": True}
 
 
-@router.delete("/api/browser-profiles/{profile_id}", status_code=204)
+@router.delete("/browser-profiles/{profile_id}", status_code=204)
 async def delete_profile(
     profile_id: UUID,
     request: Request,
@@ -138,7 +143,7 @@ class SetupSessionRequest(BaseModel):
     setup_spec: dict | None = None
 
 
-@router.post("/api/browser-profiles/{profile_id}/setup-session")
+@router.post("/browser-profiles/{profile_id}/setup-session")
 async def create_setup_session(
     profile_id: UUID,
     body: SetupSessionRequest,
@@ -210,7 +215,7 @@ class CaptureRequest(BaseModel):
     owner_user_id: str | None = None
 
 
-@router.post("/api/browser-profiles/{profile_id}/capture")
+@router.post("/browser-profiles/{profile_id}/capture")
 async def capture_profile(
     profile_id: UUID,
     session_id: UUID,

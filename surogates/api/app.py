@@ -716,8 +716,15 @@ def create_app() -> FastAPI:
     app.include_router(workspace.router, prefix="/v1", tags=["workspace"])
     app.include_router(artifacts.router, prefix="/v1", tags=["artifacts"])
     app.include_router(browser.router, prefix="/v1", tags=["browser"])
+    # Dual-mount like the feedback router: the web app reaches these as
+    # ``/api/v1/browser-profiles`` (its dev proxy strips the leading ``/api`` →
+    # ``/v1/browser-profiles``), while the ops proxy uses the SA-token path
+    # ``/v1/api/browser-profiles``.
     app.include_router(
         browser_profiles.router, prefix="/v1", tags=["browser-profiles"]
+    )
+    app.include_router(
+        browser_profiles.router, prefix="/v1/api", tags=["browser-profiles"]
     )
     app.include_router(
         ask_user_question.router, prefix="/v1", tags=["ask_user_question"],
