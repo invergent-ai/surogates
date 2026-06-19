@@ -31,10 +31,21 @@ export function BrowserProfileSetupDialog({
   const [saving, setSaving] = useState(false);
   const [phase, setPhase] = useState<"starting" | "ready">("starting");
   const startedRef = useRef(false);
+  // ``onOpenChange`` is a fresh arrow each render; ref it so effects don't
+  // re-run (and re-create the session) on the parent's re-renders.
+  const onOpenChangeRef = useRef(onOpenChange);
+  onOpenChangeRef.current = onOpenChange;
 
-  // Start the setup session exactly once per open.
+  // Start the setup session exactly once per open. The guard is reset on close
+  // (not in effect cleanup) so a later reopen starts fresh — resetting in
+  // cleanup would let React StrictMode's mount→unmount→mount create two setup
+  // sessions, i.e. two billed browsers.
   useEffect(() => {
-    if (!open || startedRef.current) return;
+    if (!open) {
+      startedRef.current = false;
+      return;
+    }
+    if (startedRef.current) return;
     startedRef.current = true;
     createSetupSession(profileId)
       .then((res) => {
@@ -43,16 +54,15 @@ export function BrowserProfileSetupDialog({
       })
       .catch(() => {
         toast.error("Couldn't start the setup browser.");
-        onOpenChange(false);
+        onOpenChangeRef.current(false);
       });
-    return () => {
-      startedRef.current = false;
-    };
-  }, [open, profileId, onOpenChange]);
+  }, [open, profileId]);
 
-  // Provisioning is worker-driven (async), so poll until the browser is up
-  // before mounting the live view — otherwise it would connect to an
-  // unprovisioned session, disconnect, and tear the dialog down.
+  // Provisioning is worker-driven (async), so poll until the browser is up,
+  // then take the control lease *before* flipping to "ready" — only then do we
+  // mount the live view. The harness 403s the live-view WebSocket unless the
+  // caller already holds control, so mounting it first would drop the RFB
+  // connection on every render and loop forever on "Connecting…".
   useEffect(() => {
     if (!sessionId || phase === "ready") return;
     let cancelled = false;
@@ -66,8 +76,11 @@ export function BrowserProfileSetupDialog({
           state &&
           (state.status === "live" || state.status === "user-control")
         ) {
-          setPhase("ready");
-          return;
+          await surogatesWebChatAdapter.acquireBrowserControl(sessionId);
+          if (!cancelled) {
+            setPhase("ready");
+            return;
+          }
         }
       } catch {
         /* keep polling */
@@ -81,9 +94,9 @@ export function BrowserProfileSetupDialog({
     };
   }, [sessionId, phase]);
 
-  // Keep the 60s control lease alive (this dialog renders BrowserLiveView
-  // directly, without BrowserPane's heartbeat) so input doesn't go read-only
-  // mid-login. Re-acquire immediately on ready, then every 25s.
+  // The readiness gate already took the control lease; renew it here every 25s
+  // (the lease is 60s) so input doesn't go read-only mid-login — this dialog
+  // renders BrowserLiveView directly, without BrowserPane's control bar.
   useEffect(() => {
     if (!sessionId || phase !== "ready") return;
     const beat = () => {
@@ -96,22 +109,24 @@ export function BrowserProfileSetupDialog({
     return () => window.clearInterval(h);
   }, [sessionId, phase]);
 
-  // Countdown to the server-side TTL.
+  // Countdown to the server-side TTL, closing only when it actually elapses.
+  // The expiry decision uses the freshly-computed ``r`` — not the ``remaining``
+  // state — so it can't fire on the first render (where ``remaining`` is still
+  // its initial 0 the instant ``expiresAt`` is set).
   useEffect(() => {
     if (!expiresAt) return;
-    const tick = () =>
-      setRemaining(Math.max(0, Math.round((expiresAt - Date.now()) / 1000)));
+    const tick = () => {
+      const r = Math.max(0, Math.round((expiresAt - Date.now()) / 1000));
+      setRemaining(r);
+      if (r <= 0) {
+        toast.info("Setup session expired.");
+        onOpenChangeRef.current(false);
+      }
+    };
     tick();
     const h = window.setInterval(tick, 1000);
     return () => window.clearInterval(h);
   }, [expiresAt]);
-
-  useEffect(() => {
-    if (expiresAt && remaining === 0) {
-      toast.info("Setup session expired.");
-      onOpenChange(false);
-    }
-  }, [remaining, expiresAt, onOpenChange]);
 
   const liveViewUrl = useMemo(
     () =>
@@ -137,7 +152,7 @@ export function BrowserProfileSetupDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-dvh w-screen max-w-none flex-col gap-0 rounded-none border-0 bg-background p-0">
+      <DialogContent className="flex h-dvh w-screen max-w-none sm:max-w-none flex-col gap-0 rounded-none border-0 bg-background p-0">
         <DialogHeader className="h-12 shrink-0 flex-row items-center justify-between border-b border-line px-4">
           <DialogTitle className="text-sm">
             Set up browser authentication
