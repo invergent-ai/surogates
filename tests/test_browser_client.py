@@ -233,6 +233,7 @@ class TestGetState:
                                 "y": 20,
                                 "width": 50,
                                 "height": 30,
+                                "backend_node_id": 42,
                             }
                         ],
                     },
@@ -245,6 +246,66 @@ class TestGetState:
         assert cached["y"] == 20 + 30 // 2
         assert cached["role"] == "button"
         assert cached["name"] == "Go"
+        assert cached["backend_node_id"] == 42
+        assert cached["nth"] == 0
+
+    async def test_get_state_assigns_backend_node_id_and_nth(
+        self, client_with_transport
+    ) -> None:
+        client, handlers = client_with_transport
+        handlers.append(
+            (
+                "POST",
+                "/playwright/execute",
+                200,
+                {
+                    "success": True,
+                    "result": {
+                        "url": "u",
+                        "title": "t",
+                        "viewport": {"width": 100, "height": 100},
+                        "nodes": [
+                            {
+                                "role": "button",
+                                "name": "Add",
+                                "x": 0,
+                                "y": 0,
+                                "width": 10,
+                                "height": 10,
+                                "backend_node_id": 7,
+                            },
+                            {
+                                "role": "button",
+                                "name": "Add",
+                                "x": 20,
+                                "y": 0,
+                                "width": 10,
+                                "height": 10,
+                                "backend_node_id": 9,
+                            },
+                            {
+                                "role": "link",
+                                "name": "Add",
+                                "x": 40,
+                                "y": 0,
+                                "width": 10,
+                                "height": 10,
+                            },
+                        ],
+                    },
+                },
+            )
+        )
+        await client.get_state()
+        # nth disambiguates duplicate (role, name) pairs; a different role
+        # restarts the counter.
+        assert client._snapshot_cache["@e1"]["nth"] == 0
+        assert client._snapshot_cache["@e1"]["backend_node_id"] == 7
+        assert client._snapshot_cache["@e2"]["nth"] == 1
+        assert client._snapshot_cache["@e2"]["backend_node_id"] == 9
+        assert client._snapshot_cache["@e3"]["nth"] == 0
+        # A missing backend_node_id is preserved as None for the fallback path.
+        assert client._snapshot_cache["@e3"]["backend_node_id"] is None
 
     async def test_get_state_overwrites_old_cache(self, client_with_transport) -> None:
         client, handlers = client_with_transport
@@ -438,17 +499,24 @@ class TestClickType:
             ("POST", "/playwright/execute", 200, {"success": True, "result": True})
         )
         await client.click_at(120, 240)
-        assert client._snapshot_cache == {}
+        # Explicit-coordinate clicks no longer invalidate cached refs; only
+        # navigation does.
+        assert client._snapshot_cache == {"@e1": {"x": 1, "y": 1, "role": "button", "name": "Go"}}
 
-    async def test_click_ref_uses_playwright_viewport_coordinates(
+    async def test_click_ref_resolves_via_cdp_at_action_time(
         self, client_with_transport
     ) -> None:
         client, _handlers = client_with_transport
+        # The cached center (50/60) is stale on a dynamic page; the live center
+        # is recomputed via CDP, so the JS must resolve by backend node id and
+        # never click the frozen coordinates.
         client._snapshot_cache["@e3"] = {
             "x": 50,
             "y": 60,
             "role": "button",
             "name": "Go",
+            "backend_node_id": 314,
+            "nth": 0,
         }
         captured: list[dict[str, Any]] = []
 
@@ -468,24 +536,27 @@ class TestClickType:
         await client.click_ref("@e3")
         assert captured[0]["path"] == "/playwright/execute"
         code = captured[0]["body"]["code"]
-        assert "page.mouse.click" in code
-        assert "50" in code
-        assert "60" in code
+        assert "newCDPSession" in code
+        assert "DOM.resolveNode" in code
+        assert "backendNodeId: __bid" in code
+        assert "314" in code
+        assert "Accessibility.getFullAXTree" in code
+        assert "elementFromPoint" in code
+        assert "page.mouse.click(res.cx, res.cy" in code
+        # The ref path must not invalidate the cache so a follow-up type works.
+        assert "@e3" in client._snapshot_cache
 
-    async def test_click_ref_unknown_raises(self, client_with_transport) -> None:
-        client, _ = client_with_transport
-        with pytest.raises(KeyError, match="@e99"):
-            await client.click_ref("@e99")
-
-    async def test_click_waits_for_network_after_request(
+    async def test_click_ref_passes_button_and_num_clicks(
         self, client_with_transport
     ) -> None:
-        client, _ = client_with_transport
+        client, _handlers = client_with_transport
         client._snapshot_cache["@e1"] = {
-            "x": 10,
-            "y": 20,
+            "x": 1,
+            "y": 1,
             "role": "button",
             "name": "Go",
+            "backend_node_id": 5,
+            "nth": 0,
         }
         captured: list[dict[str, Any]] = []
 
@@ -499,7 +570,67 @@ class TestClickType:
         client._http = httpx.AsyncClient(
             base_url=client.rest_url, transport=CapturingTransport()
         )
-        await client.click_ref("@e1")
+        await client.click_ref("@e1", button="right", num_clicks=2)
+        code = captured[0]["body"]["code"]
+        assert '"right"' in code
+        assert "clickCount: 2" in code
+
+    async def test_ref_fallback_uses_role_name_nth(
+        self, client_with_transport
+    ) -> None:
+        client, _handlers = client_with_transport
+        # A null backend node id forces the role/name/nth healing path.
+        client._snapshot_cache["@e2"] = {
+            "x": 5,
+            "y": 5,
+            "role": "link",
+            "name": "Profile",
+            "backend_node_id": None,
+            "nth": 3,
+        }
+        captured: list[dict[str, Any]] = []
+
+        class CapturingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(
+                self, request: httpx.Request
+            ) -> httpx.Response:
+                captured.append({"body": json.loads(request.content)})
+                return httpx.Response(200, json={"success": True, "result": True})
+
+        client._http = httpx.AsyncClient(
+            base_url=client.rest_url, transport=CapturingTransport()
+        )
+        await client.click_ref("@e2")
+        code = captured[0]["body"]["code"]
+        # backend node id is null -> the fast-path resolveNode is gated off.
+        assert "const __bid = null;" in code
+        assert "Accessibility.getFullAXTree" in code
+        assert '"link"' in code
+        assert '"Profile"' in code
+        assert "matches[3]" in code
+
+    async def test_click_ref_unknown_raises(self, client_with_transport) -> None:
+        client, _ = client_with_transport
+        with pytest.raises(KeyError, match="@e99"):
+            await client.click_ref("@e99")
+
+    async def test_click_waits_for_network_after_request(
+        self, client_with_transport
+    ) -> None:
+        client, _ = client_with_transport
+        captured: list[dict[str, Any]] = []
+
+        class CapturingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(
+                self, request: httpx.Request
+            ) -> httpx.Response:
+                captured.append({"body": json.loads(request.content)})
+                return httpx.Response(200, json={"success": True, "result": True})
+
+        client._http = httpx.AsyncClient(
+            base_url=client.rest_url, transport=CapturingTransport()
+        )
+        await client.click_at(10, 20)
         code = captured[0]["body"]["code"]
         assert "page.on('request'" in code
         assert "page.mouse.click" in code
@@ -527,7 +658,7 @@ class TestClickType:
         assert "page.mouse.down" in code
         assert "waitForLoadState" not in code
 
-    async def test_type_text_invalidates_cache(self, client_with_transport) -> None:
+    async def test_type_text_keeps_cache(self, client_with_transport) -> None:
         client, handlers = client_with_transport
         client._snapshot_cache["@e1"] = {
             "x": 1,
@@ -537,31 +668,57 @@ class TestClickType:
         }
         handlers.append(("POST", "/computer/type", 200, {"ok": True}))
         await client.type_text("hello")
-        assert client._snapshot_cache == {}
+        # Typing must not invalidate refs; a click→type on the same ref has to
+        # keep working without a fresh browser_get_state.
+        assert "@e1" in client._snapshot_cache
 
-    async def test_type_into_ref_clicks_first(self, client_with_transport) -> None:
-        client, handlers = client_with_transport
+    async def test_type_into_ref_clicks_via_cdp_then_types(
+        self, client_with_transport
+    ) -> None:
+        client, _handlers = client_with_transport
         client._snapshot_cache["@e2"] = {
             "x": 30,
             "y": 40,
             "role": "textbox",
             "name": "Email",
+            "backend_node_id": 88,
+            "nth": 0,
         }
-        handlers.append(
-            ("POST", "/playwright/execute", 200, {"success": True, "result": True})
+        seen: list[dict[str, Any]] = []
+
+        class TracingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(
+                self, request: httpx.Request
+            ) -> httpx.Response:
+                body = (
+                    json.loads(request.content) if request.content else {}
+                )
+                seen.append({"path": request.url.path, "body": body})
+                if request.url.path == "/playwright/execute":
+                    return httpx.Response(200, json={"success": True, "result": True})
+                return httpx.Response(200, json={"ok": True})
+
+        client._http = httpx.AsyncClient(
+            base_url=client.rest_url, transport=TracingTransport()
         )
-        handlers.append(("POST", "/computer/type", 200, {"ok": True}))
         await client.type_into_ref("@e2", "test@example.com")
-        assert client._snapshot_cache == {}
+        # First a CDP click to focus the field, then the type call.
+        assert seen[0]["path"] == "/playwright/execute"
+        assert "newCDPSession" in seen[0]["body"]["code"]
+        assert seen[1]["path"] == "/computer/type"
+        assert seen[1]["body"]["text"] == "test@example.com"
+        # The ref must survive so a follow-up action can reuse it.
+        assert "@e2" in client._snapshot_cache
 
 
 class TestSmallActions:
-    async def test_press_key_single(self, client_with_transport) -> None:
+    async def test_press_key_keeps_cache(self, client_with_transport) -> None:
         client, handlers = client_with_transport
         client._snapshot_cache["@e1"] = {"x": 1, "y": 1, "role": "button", "name": "Go"}
         handlers.append(("POST", "/computer/press_key", 200, {"ok": True}))
         await client.press_key("Enter")
-        assert client._snapshot_cache == {}
+        # Pressing a key must not invalidate refs.
+        assert "@e1" in client._snapshot_cache
 
     async def test_press_key_chord(self, client_with_transport) -> None:
         client, _handlers = client_with_transport
@@ -601,7 +758,10 @@ class TestSmallActions:
         )
         position = await client.scroll_at(640, 400, delta_y=300)
         assert position["scroll_y"] == 300
-        assert client._snapshot_cache == {}
+        # Scrolling preserves refs: elements (and their backend node ids)
+        # persist and a ref's click center is recomputed at action time, so a
+        # scroll no longer forces a re-snapshot. Only navigation invalidates.
+        assert "@e1" in client._snapshot_cache
 
     async def test_drag(self, client_with_transport) -> None:
         client, handlers = client_with_transport

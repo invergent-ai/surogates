@@ -101,6 +101,7 @@ for (const el of Array.from(root.querySelectorAll('*'))) {
   if (style.visibility === 'hidden' || style.display === 'none') continue;
   const bbox = el.getBoundingClientRect();
   if (!bbox || bbox.width <= 0 || bbox.height <= 0) continue;
+  el.setAttribute('data-sg-i', String(out.length));
   out.push({
     role: roleOf(el),
     name: nameOf(el),
@@ -110,6 +111,7 @@ for (const el of Array.from(root.querySelectorAll('*'))) {
     height: Math.round(bbox.height),
     depth: depthOf(el),
     children_count: el.children ? el.children.length : 0,
+    idx: out.length,
   });
 }
 return {
@@ -117,6 +119,11 @@ return {
   nodes: out,
 };
 }, __surogatesSelector);
+const __cdp = await page.context().newCDPSession(page);
+const __doc = await __cdp.send('DOM.getDocument', {depth: -1, pierce: true});
+const __map = {};
+(function walk(n){ if(!n) return; const a=n.attributes||[]; for(let i=0;i<a.length;i+=2){ if(a[i]==='data-sg-i'){ __map[a[i+1]] = n.backendNodeId; } } for(const c of (n.children||[])) walk(c); if(n.contentDocument) walk(n.contentDocument); })(__doc.root);
+for (const node of __surogatesSnapshot.nodes) { node.backend_node_id = (node.idx!=null && __map[String(node.idx)]!=null) ? __map[String(node.idx)] : null; }
 return {
   url: page.url(),
   title: await page.title(),
@@ -299,13 +306,22 @@ return {
         else:
             raise ValueError(f"unsupported click_type: {click_type}")
         await self._playwright_execute(code)
-        self._invalidate_snapshot_cache()
 
     async def click_ref(self, ref: str, **kwargs: Any) -> None:
-        """Click the cached center point for a `browser_get_state` ref."""
+        """Re-locate a `browser_get_state` ref and click its live center.
+
+        Refs are two-tier: a CDP backend node id is tried first, then a
+        role/name/nth lookup in the accessibility tree heals the ref when the
+        DOM has re-rendered. The element's center is recomputed at action time,
+        so the click lands correctly on dynamic pages.
+        """
 
         entry = self._resolve_ref(ref)
-        await self.click_at(int(entry["x"]), int(entry["y"]), **kwargs)
+        await self._act_click_on_entry(
+            entry,
+            button=kwargs.get("button", "left"),
+            num_clicks=kwargs.get("num_clicks", 1),
+        )
 
     async def type_text(self, text: str, *, delay_ms: int = 0) -> None:
         """Type text into the currently focused element."""
@@ -315,13 +331,11 @@ return {
             body["delay"] = delay_ms
         response = await self._http.post("/computer/type", json=body)
         response.raise_for_status()
-        self._invalidate_snapshot_cache()
 
     async def type_into_ref(self, ref: str, text: str, **kwargs: Any) -> None:
-        """Click a cached ref to focus it, then type text."""
+        """Re-locate a ref, click it to focus, then type text."""
 
-        entry = self._resolve_ref(ref)
-        await self.click_at(int(entry["x"]), int(entry["y"]))
+        await self._act_click_on_entry(self._resolve_ref(ref))
         await self.type_text(text, **kwargs)
 
     async def press_key(self, *keys: str, duration_ms: int = 0) -> None:
@@ -332,7 +346,6 @@ return {
             body["duration"] = duration_ms
         response = await self._http.post("/computer/press_key", json=body)
         response.raise_for_status()
-        self._invalidate_snapshot_cache()
 
     async def scroll_at(
         self, x: int, y: int, *, delta_x: int = 0, delta_y: int = 0
@@ -360,7 +373,9 @@ return await page.evaluate(() => ({{
 }}));
 """
         result = await self._playwright_execute(code)
-        self._invalidate_snapshot_cache()
+        # Scrolling only moves the viewport; the elements (and their backend
+        # node ids) persist, and a ref's click center is recomputed at action
+        # time — so refs survive a scroll and need no re-snapshot.
         return result if isinstance(result, dict) else {}
 
     async def drag(self, path: list[tuple[int, int]], *, button: str = "left") -> None:
@@ -463,12 +478,122 @@ return await page.evaluate(() => ({{
             )
         return entry
 
+    async def _act_click_on_entry(
+        self,
+        entry: dict[str, Any],
+        *,
+        button: str = "left",
+        num_clicks: int = 1,
+    ) -> None:
+        """Resolve a cache entry two-tier and click its live center."""
+
+        code = self._build_ref_click_js(entry, button, num_clicks)
+        await self._playwright_execute(code)
+
+    def _build_ref_click_js(
+        self,
+        entry: dict[str, Any],
+        button: str,
+        num_clicks: int,
+    ) -> str:
+        """Build the JS that re-locates a cached ref and clicks it.
+
+        Tier one is a CDP ``DOM.resolveNode`` on the snapshot's backend node id;
+        tier two heals the ref by matching role + normalized name + nth in the
+        accessibility tree. The clicked center is computed at action time, after
+        ``scrollIntoView``, with a covering-element guard.
+        """
+
+        backend_node_id = entry.get("backend_node_id")
+        bid_lit = json.dumps(backend_node_id)
+        role_lit = json.dumps(str(entry.get("role", "")))
+        name_lit = json.dumps(str(entry.get("name", "")))
+        nth_lit = json.dumps(int(entry.get("nth", 0)))
+        ref_lit = json.dumps(str(entry.get("ref", "")))
+        button_lit = json.dumps(button)
+        click_opts = (
+            f"{{button: {button_lit}, clickCount: {int(num_clicks)}}}"
+            if num_clicks != 1
+            else f"{{button: {button_lit}}}"
+        )
+        return f"""
+const cdp = await page.context().newCDPSession(page);
+let objectId = null;
+const __bid = {bid_lit};
+if (__bid !== null) {{
+  try {{
+    const r = await cdp.send('DOM.resolveNode', {{backendNodeId: __bid}});
+    objectId = (r && r.object && r.object.objectId) ? r.object.objectId : null;
+  }} catch (e) {{ objectId = null; }}
+}}
+if (!objectId) {{
+  const ax = await cdp.send('Accessibility.getFullAXTree');
+  const target = {role_lit};
+  const wantName = {name_lit};
+  const matches = [];
+  for (const n of (ax.nodes || [])) {{
+    if (n.ignored) continue;
+    if (!n.role || n.role.value !== target) continue;
+    const nm = (n.name && n.name.value != null) ? String(n.name.value) : '';
+    const norm = nm.replace(/\\s+/g, ' ').trim().slice(0, 240);
+    if (norm !== wantName) continue;
+    if (n.backendDOMNodeId == null) continue;
+    matches.push(n.backendDOMNodeId);
+  }}
+  const pick = matches[{nth_lit}] != null ? matches[{nth_lit}] : matches[0];
+  if (pick != null) {{
+    try {{
+      const r = await cdp.send('DOM.resolveNode', {{backendNodeId: pick}});
+      objectId = (r && r.object && r.object.objectId) ? r.object.objectId : null;
+    }} catch (e) {{ objectId = null; }}
+  }}
+}}
+if (!objectId) {{
+  throw new Error("Unknown ref " + {ref_lit} + "; the element is gone — call browser_get_state to refresh refs");
+}}
+const probe = await cdp.send('Runtime.callFunctionOn', {{
+  objectId: objectId,
+  returnByValue: true,
+  functionDeclaration: function () {{
+    this.scrollIntoView({{block: 'center', inline: 'center'}});
+    const r = this.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return {{ok: false}};
+    const cx = Math.round(r.left + r.width / 2);
+    const cy = Math.round(r.top + r.height / 2);
+    let cover = null;
+    const hit = document.elementFromPoint(cx, cy);
+    if (hit && hit !== this && !this.contains(hit) && !hit.contains(this)) {{
+      const cls = (hit.className && typeof hit.className === 'string')
+        ? hit.className.split(/\\s+/)[0] : '';
+      cover = hit.tagName.toLowerCase()
+        + (hit.id ? '#' + hit.id : '')
+        + (cls ? '.' + cls : '');
+    }}
+    return {{ok: true, cx: cx, cy: cy, cover: cover}};
+  }}.toString(),
+}});
+const res = (probe && probe.result && probe.result.value) ? probe.result.value : {{ok: false}};
+if (!res.ok) {{
+  throw new Error("ref element not visible; call browser_get_state to refresh refs");
+}}
+if (res.cover) {{
+  throw new Error("ref click blocked: covered by <" + res.cover + ">. Dismiss that element, then browser_get_state and retry.");
+}}
+await page.mouse.click(res.cx, res.cy, {click_opts});
+await page.waitForTimeout(150);
+return true;
+"""
+
     def _build_tree_and_cache(
         self,
         nodes: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
         tree: list[dict[str, Any]] = []
         cache: dict[str, dict[str, Any]] = {}
+        # 0-based occurrence counter per (role, name) so a cache entry can be
+        # re-located in the accessibility tree even when its backend node id is
+        # gone — the nth match disambiguates duplicate (role, name) pairs.
+        nth_counts: dict[tuple[str, str], int] = {}
 
         for index, node in enumerate(nodes, start=1):
             ref = f"@e{index}"
@@ -480,6 +605,9 @@ return await page.evaluate(() => ({{
             center_y = y + height // 2
             role = str(node.get("role", ""))
             name = str(node.get("name", ""))
+            backend_node_id = node.get("backend_node_id")
+            nth = nth_counts.get((role, name), 0)
+            nth_counts[(role, name)] = nth + 1
 
             entry: dict[str, Any] = {
                 "ref": ref,
@@ -500,6 +628,8 @@ return await page.evaluate(() => ({{
                 "y": center_y,
                 "role": role,
                 "name": name,
+                "backend_node_id": backend_node_id,
+                "nth": nth,
             }
             if intent is not None:
                 cache_entry["intent"] = intent
