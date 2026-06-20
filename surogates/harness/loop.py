@@ -178,6 +178,7 @@ from surogates.harness.loop_code_commands import CodeCommandMixin
 from surogates.harness.loop_context_replay import (
     ContextReplayMixin,
     build_user_message_dict,
+    coalesce_user_messages,
 )
 from surogates.harness.loop_iteration_summary import IterationSummaryMixin
 from surogates.harness.loop_outcome_commands import OutcomeCommandMixin
@@ -660,6 +661,40 @@ class AgentHarness(
         return any(
             not (event.data or {}).get("synthetic") for event in events
         )
+
+    async def _collect_steer_messages(
+        self,
+        session_id: UUID,
+        after_event_id: int,
+    ) -> tuple[dict | None, int]:
+        """Pull user messages that arrived past the steer cursor.
+
+        Reads non-synthetic ``user.message`` events appended after
+        ``after_event_id``, renders each through the same path replay uses
+        (:func:`build_user_message_dict`), and coalesces them into one user
+        turn so a burst of follow-ups becomes a single steered turn.
+
+        Returns ``(coalesced_message_or_None, new_cursor)``.  The cursor
+        advances to the highest event id seen even when every message was
+        synthetic, so synthetic events (mission continuations, harness
+        nudges) are never re-examined and never steer.
+        """
+        events = await self._store.get_events(
+            session_id,
+            after=after_event_id,
+            types=[EventType.USER_MESSAGE],
+        )
+        if not events:
+            return None, after_event_id
+        new_cursor = max(event.id for event in events)
+        rendered = [
+            build_user_message_dict(event.data)
+            for event in events
+            if not (event.data or {}).get("synthetic")
+        ]
+        if not rendered:
+            return None, new_cursor
+        return coalesce_user_messages(rendered), new_cursor
 
     async def _abort_iteration_with_pause(
         self,
