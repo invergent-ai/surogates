@@ -16,7 +16,7 @@
 - [x] Task 4: Stop dropping the buffered response in the staleness guard
 - [x] Task 5: Boundary injector, steer cursor, turn-metadata reset (`loop.py` + `llm_call.py`)
 - [x] Task 6: Drain a follow-up at completion instead of completing + re-waking
-- [ ] Task 7: Full-suite regression sweep
+- [x] Task 7: Full-suite regression sweep
 
 ## Global Constraints
 
