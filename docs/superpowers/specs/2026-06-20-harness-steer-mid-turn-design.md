@@ -1,7 +1,7 @@
 # Steer the agent mid-turn without stopping it
 
 **Date:** 2026-06-20
-**Status:** Design approved, ready for planning
+**Status:** Design reviewed, ready for planning
 **Component:** `surogates` harness (`surogates/harness/loop.py`)
 
 ## Problem
@@ -48,7 +48,8 @@ control where the steer message sits in the reconstructed history.
   is (durable write + enqueue/signal). Fix ordering entirely inside the harness:
   the boundary injector appends at the right place live, and the rebuild applies a
   deterministic re-sequencing rule so replay produces the same order. No new
-  storage, no new delivery path, no dedup, fully durable, all logic in one module.
+  storage, no new delivery path, no dedup, fully durable, and scoped to harness
+  loop/replay code.
 
 ## Components
 
@@ -57,15 +58,16 @@ orchestrator, and the DB schema are **untouched**.
 
 | Component | Location | Change |
 |---|---|---|
-| Iteration boundary injector | `loop.py` `_run_loop` | At each iteration top, pull new `user.message` events past a cursor, coalesce, append as one user turn, advance the cursor |
+| Steer-message builder | `loop_context_replay.py` | Add a shared helper that coalesces one or more `user.message` events using the existing `build_user_message_dict(...)` path, preserving attachments, view context, and images |
+| Iteration boundary injector | `loop.py` `_run_loop` | At each iteration top, pull new `user.message` events past the steer cursor, coalesce, append as one user turn, reset turn metadata, advance the cursor |
 | Staleness guard | `loop.py` `_should_abort_before_llm_response` | Abort **only** on a real interrupt (Stop/pause/lease-loss); no longer drop on "newer user.message" |
 | Completion-branch drain | `loop.py` `_run_loop`, the `if not tool_calls_raw:` branch | Emit the final response, then check the cursor — if a follow-up is pending, inject + `continue` instead of completing |
-| Replay re-sequencer | `_rebuild_messages` | Defer a `user.message` that landed mid-iteration to that iteration's close, so rebuild order == live order |
+| Replay re-sequencer | `loop_context_replay.py` `ContextReplayMixin._rebuild_messages` | Defer a `user.message` that landed mid-iteration to that iteration's close, so rebuild order == live order |
 
 ## The incorporation cursor
 
-The whole anti-double-incorporation mechanism is the durable log plus a single
-integer cursor — no new state or table.
+The whole anti-double-incorporation mechanism is the durable log plus a
+per-wake in-memory steer cursor — no new state or table.
 
 - **Init:** at wake start, `cursor = max(id of user.message events already present
   in the replayed history)`, computed from `all_events` (already passed into
@@ -77,6 +79,13 @@ integer cursor — no new state or table.
   same real-vs-synthetic filter `_has_stranded_user_message` uses — mission
   continuations and harness nudges are not steer messages and keep their existing
   handling.
+
+This cursor is deliberately separate from the durable `session_cursors` harness
+cursor. The durable cursor still means "events fully processed for crash
+recovery" and is advanced today by tool-result and completion paths. The steer
+cursor means only "real user messages already incorporated into the current
+in-memory `messages` list." Keeping them separate avoids coupling mid-turn
+steering to crash-recovery cursor advancement.
 
 Note the distinction from the existing mid-loop synthetic injections
 (length-continuation `loop.py:1911-1927`, deep-research delegate nudge): those
@@ -96,8 +105,9 @@ cursor — it does **not** emit a new event.
 [iteration 3 boundary]
   1. interrupt check        → no Stop pending, continue
   2. injector: events after cursor? → yes: ["...check Z"]  (non-synthetic)
-  3. append to messages as one user turn; advance cursor
-  4. llm.request → model sees "check Z" and adapts → keeps going
+  3. append to messages as one coalesced user turn; advance steer cursor
+  4. reset per-turn metadata (`turn_id`, turn-local iteration index)
+  5. llm.request → model sees "check Z" and adapts → keeps going
 ```
 
 No abort, no re-wake — one continuous wake. The interrupt check runs **before**
@@ -112,6 +122,26 @@ user("also check Z")            ← injected at the boundary, AFTER the tool res
 llm.request                     ← next iteration
 ```
 
+The injector must not construct bare text messages by hand. It should reuse the
+same rendering path as replay (`build_user_message_dict(...)`) and then coalesce
+the rendered messages in event order:
+
+- Text-only messages join with a clear blank-line separator.
+- If any message is multimodal, the coalesced content becomes a multimodal block
+  list, preserving every text and `image_url` block in order.
+- Attachments and view-context metadata are already folded by
+  `build_user_message_dict(...)`, so this also preserves "steer with attached
+  file/image" behavior.
+
+When a steer message is incorporated, the harness is now serving a new user turn
+inside the same wake. Generate a fresh `turn_id` and reset the turn-local
+`iteration_index` to 0 for subsequent `llm.request`, `llm.thinking`,
+`llm.response`, iteration-summary, turn-summary, and final-summary events. The
+overall iteration budget remains wake-scoped; only the UI/correlation metadata is
+per user turn. This means `_run_loop` likely needs a separate
+`turn_iteration_index` counter instead of relying on the wake-wide `iteration -
+1` value everywhere.
+
 ## Replay re-sequencing rule (Edit 3)
 
 The log still has the steer message physically between the tool call and tool
@@ -121,16 +151,30 @@ result. On rebuild, apply:
 > iteration's `llm.request` and its tool results (or its `llm.response` if the
 > iteration had no tool calls) — is deferred to that iteration's close.
 
-`llm.request` / `llm.response` events carry `turn_id` and `iteration_index`, so
-the rebuild can detect a mid-iteration message and slide it down to the boundary,
-producing the exact order the live run produced. Live path and replay path always
-agree, and tool-call/tool-result adjacency is never broken.
+`llm.request` / `llm.response` events carry `turn_id` and `iteration_index`, but
+current `tool.result` events do **not**. The rebuild should therefore close a
+tool-calling iteration by using the `tool_call_id`s stored on the
+`llm.response.message.tool_calls` payload, then watching subsequent
+`tool.result.tool_call_id` events until every expected id has appeared. For a
+non-tool iteration, the `llm.response` closes the iteration immediately.
 
 Implementation shape: while folding events in id order, track open/closed
-iteration state. On `llm.request`, the iteration opens; buffer any `user.message`
-seen while open; flush the buffer at iteration close (last `tool.result` for that
-iteration, or the `llm.response` when there are no tool calls). A `user.message`
-seen while no iteration is open keeps its natural placement.
+iteration state.
+
+- On `llm.request`, the iteration opens and an empty deferred-user buffer starts.
+- Any non-synthetic `user.message` seen while an iteration is open is buffered,
+  not appended immediately.
+- On `llm.response`, append the assistant message. If it has no tool calls,
+  coalesce and flush the deferred users immediately after that response. If it
+  has tool calls, remember the expected tool-call ids and keep the deferred users
+  buffered.
+- On each `tool.result`, append the tool result and mark its `tool_call_id` as
+  complete. When all expected ids for the open iteration are complete, coalesce
+  and flush the deferred users after the final tool result.
+- A `user.message` seen while no iteration is open keeps its natural placement.
+
+Live path and replay path always agree, and tool-call/tool-result adjacency is
+never broken.
 
 ## Edge cases
 
@@ -148,6 +192,9 @@ seen while no iteration is open keeps its natural placement.
 - **Budget exhausted with a pending follow-up.** The existing final-summary path
   runs; the durable message sits past the cursor and is handled on the next wake.
   Unchanged.
+- **Turn metadata.** A follow-up incorporated into the same wake gets a new
+  `turn_id`, and its first post-injection model call has `iteration_index = 0`.
+  Existing iteration-budget accounting is unchanged.
 
 ## Cost & non-goals
 
@@ -176,10 +223,21 @@ seen while no iteration is open keeps its natural placement.
    (regression guard).
 6. **Completion drain:** a follow-up arriving as the final answer lands → the
    final response is emitted **and** the follow-up continues the same wake.
+7. **Turn metadata reset:** after a mid-wake steer, the next `llm.request` /
+   `llm.response` pair has a new `turn_id` and `iteration_index == 0`.
+8. **Attachment/image steer:** a queued follow-up with attachments or images is
+   injected and replayed with the same rendered content shape as an ordinary
+   `user.message`.
 
-## Open item to verify during planning
+## Verified during design review
 
-The design assumes `_rebuild_messages` reconstructs the message list by iterating
-events in id order, which makes Edit 3 a localized change there. If the rebuild
-works differently, Edit 3 attaches to a different spot — the design holds
-regardless, only the integration point moves.
+- `_rebuild_messages` is implemented by `ContextReplayMixin` in
+  `surogates/harness/loop_context_replay.py`, not directly in `loop.py`.
+- `_rebuild_messages` already reconstructs by iterating events in id order, so
+  Edit 3 is localized there.
+- Normal `send_message` emits a durable `user.message` and enqueues the session;
+  the Redis interrupt channel is used by explicit pause/delete-style actions, not
+  by ordinary follow-up messages.
+- Tool-result events currently lack `turn_id` / `iteration_index`, so replay must
+  use the `llm.response.message.tool_calls[*].id` set to identify the final
+  result for a tool-calling iteration.
