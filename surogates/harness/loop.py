@@ -1311,6 +1311,24 @@ class AgentHarness(
         self._pending_iteration_summary_tasks = {}
         self._completed_iteration_summaries = {}
 
+        # Steer cursor: highest user-message event already folded into the
+        # replayed ``messages``.  Mid-wake real follow-ups past this cursor
+        # are incorporated at iteration boundaries (see the loop top).  Kept
+        # separate from the durable session cursor, which tracks crash
+        # recovery, not in-memory message incorporation.
+        steer_cursor = max(
+            (
+                event.id
+                for event in (all_events or [])
+                if event.type == EventType.USER_MESSAGE.value
+            ),
+            default=0,
+        )
+        # Iteration index is reported per user turn, not per wake.  When a
+        # steer message starts a new turn mid-wake, this base advances so the
+        # new turn's first model call reports iteration_index 0.
+        turn_base_iteration = 0
+
         iteration = 0
         length_continuation_count = 0
         length_continuation_prefix = ""  # accumulated partial response across length retries
@@ -1428,6 +1446,31 @@ class AgentHarness(
                 await self._abort_iteration_with_pause(session, saga)
                 return
 
+            # --- Mid-turn steering ---
+            # Fold in any real user messages that arrived since the last
+            # boundary as one coalesced new user turn, then keep going in
+            # the same wake.  The interrupt check above already ran, so an
+            # explicit Stop always wins over a steer.
+            steer_message, steer_cursor = await self._collect_steer_messages(
+                session.id, steer_cursor,
+            )
+            if steer_message is not None:
+                messages.append(steer_message)
+                turn_id = str(uuid4())
+                turn_base_iteration = iteration - 1
+                self._pending_iteration_summary_tasks = {}
+                self._completed_iteration_summaries = {}
+                logger.info(
+                    "Session %s: incorporated steer message at iteration %d "
+                    "(new turn_id=%s)",
+                    session.id, iteration, turn_id,
+                )
+
+            # Turn-local iteration index: resets to 0 whenever a steer
+            # message starts a new turn, while ``iteration`` keeps climbing
+            # for budget/loop control.
+            turn_iteration_index = iteration - 1 - turn_base_iteration
+
             # --- Checkpoint: reset per-turn dedup in sandbox ---
             if self._checkpoints_enabled and self._sandbox_pool:
                 try:
@@ -1468,6 +1511,7 @@ class AgentHarness(
                     session, messages, system_prompt, lease,
                     cost_tracker=cost_tracker,
                     turn_id=turn_id,
+                    iteration_index=turn_iteration_index,
                 )
                 return
 
@@ -1480,7 +1524,7 @@ class AgentHarness(
                     "model": model_id,
                     "iteration": iteration,
                     "turn_id": turn_id,
-                    "iteration_index": iteration - 1,
+                    "iteration_index": turn_iteration_index,
                 },
             )
 
@@ -1648,6 +1692,7 @@ class AgentHarness(
                     create_kwargs=create_kwargs,
                     iteration=iteration,
                     turn_id=turn_id,
+                    iteration_index=turn_iteration_index,
                     llm_client=self._llm,
                     store=self._store,
                     streaming_enabled=self._streaming_enabled,
@@ -1704,7 +1749,7 @@ class AgentHarness(
                     {
                         "reasoning": reasoning_text,
                         "turn_id": turn_id,
-                        "iteration_index": iteration - 1,
+                        "iteration_index": turn_iteration_index,
                     },
                 )
                 # Strip thinking blocks from content before storing.
@@ -1851,7 +1896,7 @@ class AgentHarness(
                 return
 
             response_data["turn_id"] = turn_id
-            response_data["iteration_index"] = iteration - 1
+            response_data["iteration_index"] = turn_iteration_index
             event_id = await self._store.emit_event(
                 session.id,
                 EventType.LLM_RESPONSE,
@@ -2132,7 +2177,7 @@ class AgentHarness(
                 await self._maybe_summarize_iteration(
                     session_id=session.id,
                     turn_id=turn_id,
-                    iteration_index=iteration - 1,
+                    iteration_index=turn_iteration_index,
                     reasoning_text=reasoning_text or "",
                     tool_calls=[],
                     started_at=iteration_started_at,
@@ -2435,7 +2480,7 @@ class AgentHarness(
             await self._maybe_summarize_iteration(
                 session_id=session.id,
                 turn_id=turn_id,
-                iteration_index=iteration - 1,
+                iteration_index=turn_iteration_index,
                 reasoning_text=reasoning_text or "",
                 tool_calls=tool_calls_raw or [],
                 started_at=iteration_started_at,
@@ -2474,6 +2519,7 @@ class AgentHarness(
             session, messages, system_prompt, lease,
             cost_tracker=cost_tracker,
             turn_id=turn_id,
+            iteration_index=max(iteration - 1 - turn_base_iteration, 0),
         )
 
         # --- Saga finalization ---
@@ -3626,6 +3672,7 @@ class AgentHarness(
         *,
         cost_tracker: SessionCostTracker | None = None,
         turn_id: str | None = None,
+        iteration_index: int | None = None,
     ) -> None:
         """Request one final LLM response with no tools when the budget is exhausted.
 
@@ -3692,6 +3739,7 @@ class AgentHarness(
                 create_kwargs=create_kwargs,
                 iteration=self._budget.used + 1,
                 turn_id=turn_id,
+                iteration_index=iteration_index,
                 llm_client=self._llm,
                 store=self._store,
                 streaming_enabled=self._streaming_enabled,
@@ -3740,7 +3788,11 @@ class AgentHarness(
             }
             if turn_id is not None:
                 final_payload["turn_id"] = turn_id
-                final_payload["iteration_index"] = max(self._budget.used - 1, 0)
+                final_payload["iteration_index"] = (
+                    max(int(iteration_index), 0)
+                    if iteration_index is not None
+                    else max(self._budget.used - 1, 0)
+                )
             await self._store.emit_event(
                 session.id,
                 EventType.LLM_RESPONSE,
