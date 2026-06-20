@@ -61,19 +61,29 @@ def _stamp_turn_meta(
     *,
     iteration: int,
     turn_id: str | None,
+    iteration_index: int | None = None,
 ) -> dict[str, Any]:
     """Add ``turn_id`` and ``iteration_index`` to an LLM event payload.
 
     No-op when ``turn_id`` is ``None`` (callers that haven't opted into
     the Simple chat-mode summary plumbing). Returns the same payload
     dict to allow inline use at emit sites.
+
+    ``iteration_index`` lets the caller supply a turn-local index — used
+    by mid-turn steering, where a follow-up incorporated into a running
+    wake starts a new user turn whose indices reset to 0 even though the
+    wake-wide ``iteration`` counter keeps climbing. When omitted, the
+    index is derived from the 1-based ``iteration`` as before.
     """
     if turn_id is not None:
         payload["turn_id"] = turn_id
         # iteration is 1-based in this module; the SDK consumes a
         # 0-based ``iteration_index`` keyed off the message order, so
         # clamp at zero defensively.
-        payload["iteration_index"] = max(int(iteration) - 1, 0)
+        if iteration_index is None:
+            payload["iteration_index"] = max(int(iteration) - 1, 0)
+        else:
+            payload["iteration_index"] = max(int(iteration_index), 0)
     return payload
 
 
@@ -437,6 +447,7 @@ async def call_llm_with_retry(
     ) = None,
     rate_limit_guard: Any | None = None,
     turn_id: str | None = None,
+    iteration_index: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Call the LLM with retry, backoff, rate-limit handling, and credential rotation.
 
@@ -502,6 +513,7 @@ async def call_llm_with_retry(
                     set_streaming_enabled=set_streaming_enabled,
                     on_tool_call_complete=active_on_tool_call_complete,
                     turn_id=turn_id,
+                    iteration_index=iteration_index,
                 )
             else:
                 result = await call_llm_non_streaming(
@@ -623,6 +635,7 @@ async def call_llm_with_retry(
                         },
                         iteration=iteration,
                         turn_id=turn_id,
+                        iteration_index=iteration_index,
                     ),
                 )
                 if on_stream_retry is not None:
@@ -1005,6 +1018,7 @@ async def call_llm_streaming(
     set_streaming_enabled: Callable[[bool], None],
     on_tool_call_complete: Callable[[dict[str, Any]], None] | None = None,
     turn_id: str | None = None,
+    iteration_index: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Call the LLM with ``stream=True``, emit deltas, return full message + usage.
 
@@ -1021,6 +1035,7 @@ async def call_llm_streaming(
             interrupt_check=interrupt_check,
             on_tool_call_complete=on_tool_call_complete,
             turn_id=turn_id,
+            iteration_index=iteration_index,
         )
     except PartialToolCallStreamError:
         raise
@@ -1066,6 +1081,7 @@ async def call_llm_streaming_inner(
     interrupt_check: Callable[[], bool] | None = None,
     on_tool_call_complete: Callable[[dict[str, Any]], None] | None = None,
     turn_id: str | None = None,
+    iteration_index: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Inner streaming implementation.
 
@@ -1328,6 +1344,7 @@ async def call_llm_streaming_inner(
                         {"reasoning": reasoning_text, "iteration": iteration},
                         iteration=iteration,
                         turn_id=turn_id,
+                        iteration_index=iteration_index,
                     ),
                 )
 
@@ -1346,6 +1363,7 @@ async def call_llm_streaming_inner(
                             {"content": visible_delta, "iteration": iteration},
                             iteration=iteration,
                             turn_id=turn_id,
+                            iteration_index=iteration_index,
                         ),
                     )
 
@@ -1465,6 +1483,7 @@ async def call_llm_streaming_inner(
                 {"content": tail_delta, "iteration": iteration},
                 iteration=iteration,
                 turn_id=turn_id,
+                iteration_index=iteration_index,
             ),
         )
 

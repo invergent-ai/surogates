@@ -178,6 +178,7 @@ from surogates.harness.loop_code_commands import CodeCommandMixin
 from surogates.harness.loop_context_replay import (
     ContextReplayMixin,
     build_user_message_dict,
+    coalesce_user_messages,
 )
 from surogates.harness.loop_iteration_summary import IterationSummaryMixin
 from surogates.harness.loop_outcome_commands import OutcomeCommandMixin
@@ -596,45 +597,6 @@ class AgentHarness(
         from surogates.tools.utils.interrupt import set_interrupt
         set_interrupt(False)
 
-    async def _should_abort_before_llm_response(
-        self,
-        session: Session,
-        llm_request_event_id: int,
-    ) -> bool:
-        """Return True if this iteration must drop its buffered response.
-
-        Detects two races that can otherwise leak a buffered response into
-        the wrong turn:
-
-        - An explicit interrupt was raised (lease loss, channel pause,
-          new-message-while-busy nudge from the API).
-        - A new ``user.message`` was appended after this iteration's own
-          ``llm.request`` event — meaning the user moved on to a new turn
-          while the stream or end-of-turn judge was still in flight.
-
-        When a stale user message is detected the interrupt flag is also
-        set so the cleanup path runs identically for both causes.
-        """
-        if self._check_interrupt():
-            return True
-        newer = await self._store.get_events(
-            session.id,
-            after=llm_request_event_id,
-            types=[EventType.USER_MESSAGE],
-            limit=1,
-        )
-        if newer:
-            logger.info(
-                "Session %s: dropping stale buffered response — user "
-                "message %s arrived after llm.request %s",
-                session.id,
-                newer[0].id,
-                llm_request_event_id,
-            )
-            self.interrupt("stale response — newer user message in log")
-            return True
-        return False
-
     async def _has_stranded_user_message(self, session_id: UUID) -> bool:
         """Return True if a real user message landed past the harness cursor.
 
@@ -660,6 +622,40 @@ class AgentHarness(
         return any(
             not (event.data or {}).get("synthetic") for event in events
         )
+
+    async def _collect_steer_messages(
+        self,
+        session_id: UUID,
+        after_event_id: int,
+    ) -> tuple[dict | None, int]:
+        """Pull user messages that arrived past the steer cursor.
+
+        Reads non-synthetic ``user.message`` events appended after
+        ``after_event_id``, renders each through the same path replay uses
+        (:func:`build_user_message_dict`), and coalesces them into one user
+        turn so a burst of follow-ups becomes a single steered turn.
+
+        Returns ``(coalesced_message_or_None, new_cursor)``.  The cursor
+        advances to the highest event id seen even when every message was
+        synthetic, so synthetic events (mission continuations, harness
+        nudges) are never re-examined and never steer.
+        """
+        events = await self._store.get_events(
+            session_id,
+            after=after_event_id,
+            types=[EventType.USER_MESSAGE],
+        )
+        if not events:
+            return None, after_event_id
+        new_cursor = max(event.id for event in events)
+        rendered = [
+            build_user_message_dict(event.data)
+            for event in events
+            if not (event.data or {}).get("synthetic")
+        ]
+        if not rendered:
+            return None, new_cursor
+        return coalesce_user_messages(rendered), new_cursor
 
     async def _abort_iteration_with_pause(
         self,
@@ -1315,6 +1311,24 @@ class AgentHarness(
         self._pending_iteration_summary_tasks = {}
         self._completed_iteration_summaries = {}
 
+        # Steer cursor: highest user-message event already folded into the
+        # replayed ``messages``.  Mid-wake real follow-ups past this cursor
+        # are incorporated at iteration boundaries (see the loop top).  Kept
+        # separate from the durable session cursor, which tracks crash
+        # recovery, not in-memory message incorporation.
+        steer_cursor = max(
+            (
+                event.id
+                for event in (all_events or [])
+                if event.type == EventType.USER_MESSAGE.value
+            ),
+            default=0,
+        )
+        # Iteration index is reported per user turn, not per wake.  When a
+        # steer message starts a new turn mid-wake, this base advances so the
+        # new turn's first model call reports iteration_index 0.
+        turn_base_iteration = 0
+
         iteration = 0
         length_continuation_count = 0
         length_continuation_prefix = ""  # accumulated partial response across length retries
@@ -1432,6 +1446,31 @@ class AgentHarness(
                 await self._abort_iteration_with_pause(session, saga)
                 return
 
+            # --- Mid-turn steering ---
+            # Fold in any real user messages that arrived since the last
+            # boundary as one coalesced new user turn, then keep going in
+            # the same wake.  The interrupt check above already ran, so an
+            # explicit Stop always wins over a steer.
+            steer_message, steer_cursor = await self._collect_steer_messages(
+                session.id, steer_cursor,
+            )
+            if steer_message is not None:
+                messages.append(steer_message)
+                turn_id = str(uuid4())
+                turn_base_iteration = iteration - 1
+                self._pending_iteration_summary_tasks = {}
+                self._completed_iteration_summaries = {}
+                logger.info(
+                    "Session %s: incorporated steer message at iteration %d "
+                    "(new turn_id=%s)",
+                    session.id, iteration, turn_id,
+                )
+
+            # Turn-local iteration index: resets to 0 whenever a steer
+            # message starts a new turn, while ``iteration`` keeps climbing
+            # for budget/loop control.
+            turn_iteration_index = iteration - 1 - turn_base_iteration
+
             # --- Checkpoint: reset per-turn dedup in sandbox ---
             if self._checkpoints_enabled and self._sandbox_pool:
                 try:
@@ -1472,19 +1511,20 @@ class AgentHarness(
                     session, messages, system_prompt, lease,
                     cost_tracker=cost_tracker,
                     turn_id=turn_id,
+                    iteration_index=turn_iteration_index,
                 )
                 return
 
             # 1. Emit LLM_REQUEST event.
             model_id = self._current_model or session.model or self._default_model
-            llm_request_event_id = await self._store.emit_event(
+            await self._store.emit_event(
                 session.id,
                 EventType.LLM_REQUEST,
                 {
                     "model": model_id,
                     "iteration": iteration,
                     "turn_id": turn_id,
-                    "iteration_index": iteration - 1,
+                    "iteration_index": turn_iteration_index,
                 },
             )
 
@@ -1652,6 +1692,7 @@ class AgentHarness(
                     create_kwargs=create_kwargs,
                     iteration=iteration,
                     turn_id=turn_id,
+                    iteration_index=turn_iteration_index,
                     llm_client=self._llm,
                     store=self._store,
                     streaming_enabled=self._streaming_enabled,
@@ -1708,7 +1749,7 @@ class AgentHarness(
                     {
                         "reasoning": reasoning_text,
                         "turn_id": turn_id,
-                        "iteration_index": iteration - 1,
+                        "iteration_index": turn_iteration_index,
                     },
                 )
                 # Strip thinking blocks from content before storing.
@@ -1845,20 +1886,17 @@ class AgentHarness(
                 elif inbox_rescue_kind == "action_required":
                     response_data["action_required_rescue"] = True
 
-            # 4a. Interrupt / staleness guard.  The stream and any judge
-            # LLM call above can take several seconds.  If a new
-            # user.message has been appended (or the interrupt flag was
-            # set) while we were busy, the buffered response belongs to a
-            # turn the user has already abandoned — drop it instead of
-            # attributing it to the next user message.
-            if await self._should_abort_before_llm_response(
-                session, llm_request_event_id,
-            ):
+            # 4a. Interrupt guard.  Abort only on an explicit interrupt
+            # (Stop / pause / lease loss).  A user.message that arrived
+            # mid-stream is no longer dropped — it is folded in as a new
+            # user turn at the next iteration boundary by the steer
+            # injector, so the buffered response is delivered, not discarded.
+            if self._check_interrupt():
                 await self._abort_iteration_with_pause(session, saga)
                 return
 
             response_data["turn_id"] = turn_id
-            response_data["iteration_index"] = iteration - 1
+            response_data["iteration_index"] = turn_iteration_index
             event_id = await self._store.emit_event(
                 session.id,
                 EventType.LLM_RESPONSE,
@@ -2139,11 +2177,32 @@ class AgentHarness(
                 await self._maybe_summarize_iteration(
                     session_id=session.id,
                     turn_id=turn_id,
-                    iteration_index=iteration - 1,
+                    iteration_index=turn_iteration_index,
                     reasoning_text=reasoning_text or "",
                     tool_calls=[],
                     started_at=iteration_started_at,
                 )
+
+                # Before completing, fold in any follow-up that arrived while
+                # this final response was being produced.  Deliver the
+                # response (already emitted + appended above), then keep the
+                # wake going as a new user turn instead of completing and
+                # re-waking.
+                followup, steer_cursor = await self._collect_steer_messages(
+                    session.id, steer_cursor,
+                )
+                if followup is not None:
+                    messages.append(followup)
+                    turn_id = str(uuid4())
+                    turn_base_iteration = iteration
+                    self._pending_iteration_summary_tasks = {}
+                    self._completed_iteration_summaries = {}
+                    logger.info(
+                        "Session %s: follow-up arrived at completion; "
+                        "continuing as a new turn (turn_id=%s)",
+                        session.id, turn_id,
+                    )
+                    continue
 
                 # A response without tool calls completes the current
                 # objective.  Follow-up messages revive the session into a
@@ -2442,7 +2501,7 @@ class AgentHarness(
             await self._maybe_summarize_iteration(
                 session_id=session.id,
                 turn_id=turn_id,
-                iteration_index=iteration - 1,
+                iteration_index=turn_iteration_index,
                 reasoning_text=reasoning_text or "",
                 tool_calls=tool_calls_raw or [],
                 started_at=iteration_started_at,
@@ -2481,6 +2540,7 @@ class AgentHarness(
             session, messages, system_prompt, lease,
             cost_tracker=cost_tracker,
             turn_id=turn_id,
+            iteration_index=max(iteration - 1 - turn_base_iteration, 0),
         )
 
         # --- Saga finalization ---
@@ -3633,6 +3693,7 @@ class AgentHarness(
         *,
         cost_tracker: SessionCostTracker | None = None,
         turn_id: str | None = None,
+        iteration_index: int | None = None,
     ) -> None:
         """Request one final LLM response with no tools when the budget is exhausted.
 
@@ -3699,6 +3760,7 @@ class AgentHarness(
                 create_kwargs=create_kwargs,
                 iteration=self._budget.used + 1,
                 turn_id=turn_id,
+                iteration_index=iteration_index,
                 llm_client=self._llm,
                 store=self._store,
                 streaming_enabled=self._streaming_enabled,
@@ -3747,7 +3809,11 @@ class AgentHarness(
             }
             if turn_id is not None:
                 final_payload["turn_id"] = turn_id
-                final_payload["iteration_index"] = max(self._budget.used - 1, 0)
+                final_payload["iteration_index"] = (
+                    max(int(iteration_index), 0)
+                    if iteration_index is not None
+                    else max(self._budget.used - 1, 0)
+                )
             await self._store.emit_event(
                 session.id,
                 EventType.LLM_RESPONSE,
