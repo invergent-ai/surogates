@@ -666,11 +666,37 @@ class TestClickType:
             "role": "textbox",
             "name": "Email",
         }
-        handlers.append(("POST", "/computer/type", 200, {"ok": True}))
+        handlers.append(
+            ("POST", "/playwright/execute", 200, {"success": True, "result": True})
+        )
         await client.type_text("hello")
         # Typing must not invalidate refs; a click→type on the same ref has to
         # keep working without a fresh browser_get_state.
         assert "@e1" in client._snapshot_cache
+
+    async def test_type_text_uses_cdp_keyboard(self, client_with_transport) -> None:
+        client, _handlers = client_with_transport
+        captured: list[dict[str, Any]] = []
+
+        class CapturingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(
+                self, request: httpx.Request
+            ) -> httpx.Response:
+                captured.append(
+                    {"path": request.url.path, "body": json.loads(request.content)}
+                )
+                return httpx.Response(200, json={"success": True, "result": True})
+
+        client._http = httpx.AsyncClient(
+            base_url=client.rest_url, transport=CapturingTransport()
+        )
+        await client.type_text("hi there")
+        # The kernel /computer/type endpoint is bypassed entirely: OS-level
+        # keystrokes never reach contenteditable editors, so typing must go
+        # through Playwright's CDP keyboard.
+        assert captured[0]["path"] == "/playwright/execute"
+        assert "keyboard.type" in captured[0]["body"]["code"]
+        assert "hi there" in captured[0]["body"]["code"]
 
     async def test_type_into_ref_clicks_via_cdp_then_types(
         self, client_with_transport
@@ -702,11 +728,12 @@ class TestClickType:
             base_url=client.rest_url, transport=TracingTransport()
         )
         await client.type_into_ref("@e2", "test@example.com")
-        # First a CDP click to focus the field, then the type call.
+        # First a CDP click to focus the field, then a CDP keyboard type.
         assert seen[0]["path"] == "/playwright/execute"
         assert "newCDPSession" in seen[0]["body"]["code"]
-        assert seen[1]["path"] == "/computer/type"
-        assert seen[1]["body"]["text"] == "test@example.com"
+        assert seen[1]["path"] == "/playwright/execute"
+        assert "keyboard.type" in seen[1]["body"]["code"]
+        assert "test@example.com" in seen[1]["body"]["code"]
         # The ref must survive so a follow-up action can reuse it.
         assert "@e2" in client._snapshot_cache
 
@@ -715,7 +742,9 @@ class TestSmallActions:
     async def test_press_key_keeps_cache(self, client_with_transport) -> None:
         client, handlers = client_with_transport
         client._snapshot_cache["@e1"] = {"x": 1, "y": 1, "role": "button", "name": "Go"}
-        handlers.append(("POST", "/computer/press_key", 200, {"ok": True}))
+        handlers.append(
+            ("POST", "/playwright/execute", 200, {"success": True, "result": True})
+        )
         await client.press_key("Enter")
         # Pressing a key must not invalidate refs.
         assert "@e1" in client._snapshot_cache
@@ -729,13 +758,17 @@ class TestSmallActions:
                 self, request: httpx.Request
             ) -> httpx.Response:
                 captured.append(json.loads(request.content))
-                return httpx.Response(200, json={"ok": True})
+                return httpx.Response(200, json={"success": True, "result": True})
 
         client._http = httpx.AsyncClient(
             base_url=client.rest_url, transport=CapturingTransport()
         )
-        await client.press_key("Ctrl+l")
-        assert captured[0]["keys"] == ["Ctrl+l"]
+        # Casual modifier names normalize to Playwright's vocabulary and the
+        # keys join into a single chord pressed via the CDP keyboard.
+        await client.press_key("Ctrl", "a")
+        code = captured[0]["code"]
+        assert "keyboard.press" in code
+        assert "Control+a" in code
 
     async def test_scroll_at(self, client_with_transport) -> None:
         client, handlers = client_with_transport

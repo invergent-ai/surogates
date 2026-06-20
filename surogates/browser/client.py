@@ -31,6 +31,24 @@ class KernelBrowserClient:
             "spinbutton",
         }
     )
+    # Casual / xdotool key names a model is likely to emit, mapped to the
+    # Playwright vocabulary used by keyboard.press(). Applied per key before
+    # the keys are joined into a chord. Unlisted keys (letters, "Enter",
+    # "Shift", "ArrowUp", "F5", …) already match Playwright and pass through.
+    _KEY_ALIASES: dict[str, str] = {
+        "ctrl": "Control",
+        "control": "Control",
+        "cmd": "Meta",
+        "command": "Meta",
+        "super": "Meta",
+        "win": "Meta",
+        "opt": "Alt",
+        "option": "Alt",
+        "esc": "Escape",
+        "del": "Delete",
+        "return": "Enter",
+        "space": " ",
+    }
     _CONSENT_ACTION_RE = re.compile(
         r"^("
         r"accept(?:\s+(?:all|toate|cookies|all\s+cookies))?|"
@@ -324,13 +342,23 @@ return {
         )
 
     async def type_text(self, text: str, *, delay_ms: int = 0) -> None:
-        """Type text into the currently focused element."""
+        """Type text into the currently focused element.
 
-        body: dict[str, Any] = {"text": text, "smooth": False}
-        if delay_ms:
-            body["delay"] = delay_ms
-        response = await self._http.post("/computer/type", json=body)
-        response.raise_for_status()
+        Goes through Playwright's ``keyboard.type`` rather than the kernel
+        ``/computer/type`` endpoint: that endpoint sends OS-level (xdotool)
+        keystrokes that never reach contenteditable rich-text editors — e.g.
+        x.com's Draft.js composer silently drops them while the endpoint still
+        returns 200, so every ``typed: true`` was a lie. CDP key events are
+        delivered to the focused element and trigger its input handling, so
+        the text actually lands.
+        """
+
+        opts = {"delay": delay_ms} if delay_ms else {}
+        code = (
+            f"await page.keyboard.type({json.dumps(text)}, {json.dumps(opts)});\n"
+            "return true;"
+        )
+        await self._playwright_execute(code)
 
     async def type_into_ref(self, ref: str, text: str, **kwargs: Any) -> None:
         """Re-locate a ref, click it to focus, then type text."""
@@ -339,13 +367,24 @@ return {
         await self.type_text(text, **kwargs)
 
     async def press_key(self, *keys: str, duration_ms: int = 0) -> None:
-        """Press one key or key chord."""
+        """Press one key or key chord (e.g. ``Enter`` or ``Control+a``).
 
-        body: dict[str, Any] = {"keys": list(keys)}
-        if duration_ms:
-            body["duration"] = duration_ms
-        response = await self._http.post("/computer/press_key", json=body)
-        response.raise_for_status()
+        Like :meth:`type_text`, uses Playwright's ``keyboard.press`` instead of
+        the kernel ``/computer/press_key`` endpoint so the key reaches the
+        focused DOM element rather than the OS-level X display. Multiple keys
+        are normalized to the Playwright vocabulary and joined into one chord
+        (``"Ctrl", "a"`` -> ``"Control+a"``).
+        """
+
+        if not keys:
+            raise ValueError("press_key requires at least one key")
+        chord = "+".join(self._KEY_ALIASES.get(k.lower(), k) for k in keys)
+        opts = {"delay": duration_ms} if duration_ms else {}
+        code = (
+            f"await page.keyboard.press({json.dumps(chord)}, {json.dumps(opts)});\n"
+            "return true;"
+        )
+        await self._playwright_execute(code)
 
     async def scroll_at(
         self, x: int, y: int, *, delta_x: int = 0, delta_y: int = 0
