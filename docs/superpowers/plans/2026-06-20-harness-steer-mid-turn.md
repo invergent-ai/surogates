@@ -24,9 +24,11 @@
 |---|---|---|
 | `surogates/harness/loop_context_replay.py` | Message replay + the user-message renderer | Add `coalesce_user_messages`; re-sequence mid-iteration `user.message` in `_rebuild_messages` |
 | `surogates/harness/loop.py` | The wake loop (`_run_loop`), the staleness guard | Add `_collect_steer_messages`; simplify the staleness guard; wire the boundary injector, steer cursor, turn-metadata reset, and completion drain |
+| `surogates/harness/llm_call.py` | Streaming LLM event metadata | Let callers pass a turn-local `iteration_index` override so `llm.delta` retry/stream events match the active steered turn |
 | `tests/test_steer_coalesce.py` | New | Unit tests for `coalesce_user_messages` |
 | `tests/test_steer_replay_resequence.py` | New | Unit tests for the `_rebuild_messages` re-sequencer |
 | `tests/test_steer_collect.py` | New | Unit tests for `_collect_steer_messages` |
+| `tests/test_steer_turn_meta.py` | New | Unit tests for turn-local metadata stamping in `llm_call.py` |
 | `tests/test_steer_loop.py` | New | Loop-level tests for injection, completion drain, turn-metadata, Stop precedence |
 
 ---
@@ -722,12 +724,15 @@ git commit -m "feat(harness): deliver buffered response instead of dropping on n
 At each iteration boundary, fold in queued steer messages as one new user turn and keep the same wake going. Reset `turn_id` and the turn-local iteration index when a steer message is incorporated so per-turn correlation in the UI stays correct.
 
 **Files:**
-- Modify: `surogates/harness/loop.py` — `_run_loop` (init block ~1306-1320; loop top ~1418-1489; the three `iteration - 1` payload sites at ~1487, ~1861, ~2142)
+- Modify: `surogates/harness/llm_call.py` — `_stamp_turn_meta` and `call_llm_with_retry` metadata plumbing
+- Modify: `surogates/harness/loop.py` — `_run_loop` (init block ~1306-1320; loop top ~1418-1489; every turn-metadata payload/call site that currently uses `iteration - 1`), `_request_final_summary`
+- Test: `tests/test_steer_turn_meta.py` (create)
 - Test: `tests/test_steer_loop.py` (create)
 
 **Interfaces:**
 - Consumes: `_collect_steer_messages` (Task 3); `all_events` param (existing); `EventType.USER_MESSAGE`; `uuid4` (already imported).
-- Produces: two new `_run_loop` locals — `steer_cursor: int` and `turn_base_iteration: int` — plus `turn_iteration_index` used in event payloads. No external signature change.
+- Produces: two new `_run_loop` locals — `steer_cursor: int` and `turn_base_iteration: int` — plus `turn_iteration_index` used in event payloads.
+- Produces: `call_llm_with_retry(..., iteration_index: int | None = None, ...)` and `_request_final_summary(..., iteration_index: int | None = None, ...)`. Existing callers keep the old behavior when the new argument is omitted.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -963,6 +968,43 @@ async def test_initial_user_message_not_re_incorporated(monkeypatch):
     assert first_after >= 50
 ```
 
+Also create `tests/test_steer_turn_meta.py`:
+
+```python
+"""LLM streaming metadata can use a turn-local iteration index."""
+from __future__ import annotations
+
+from surogates.harness.llm_call import _stamp_turn_meta
+
+
+def test_stamp_turn_meta_accepts_turn_local_iteration_index():
+    payload = {"content": "delta"}
+    out = _stamp_turn_meta(
+        payload,
+        iteration=9,
+        turn_id="turn-2",
+        iteration_index=0,
+    )
+    assert out is payload
+    assert out == {
+        "content": "delta",
+        "turn_id": "turn-2",
+        "iteration_index": 0,
+    }
+
+
+def test_stamp_turn_meta_falls_back_to_iteration_when_no_override():
+    payload = {}
+    _stamp_turn_meta(payload, iteration=3, turn_id="turn-1")
+    assert payload == {"turn_id": "turn-1", "iteration_index": 2}
+
+
+def test_stamp_turn_meta_noops_without_turn_id_even_with_override():
+    payload = {}
+    _stamp_turn_meta(payload, iteration=3, turn_id=None, iteration_index=0)
+    assert payload == {}
+```
+
 Note: the non-streaming path calls the **module-level** `execute_tool_calls`
 (imported in `loop.py` from `surogates.harness.tool_exec`, called around line
 2292), so the test patches `surogates.harness.loop.execute_tool_calls` — the
@@ -986,14 +1028,80 @@ Run: `grep -n "execute_tool_calls(" surogates/harness/loop.py`
 Expected: the call site around line 2292 in `_run_loop`. The behavioral
 assertions (turn_id / iteration_index) do not depend on tool internals.
 
-- [ ] **Step 3: Seed the steer cursor and turn-base at loop init**
+- [ ] **Step 3: Run tests to verify metadata override is missing**
+
+Run: `pytest tests/test_steer_turn_meta.py -v`
+Expected: FAIL with `TypeError: _stamp_turn_meta() got an unexpected keyword argument 'iteration_index'`.
+
+- [ ] **Step 4: Add turn-local metadata support to `llm_call.py`**
+
+In `surogates/harness/llm_call.py`, change `_stamp_turn_meta` from:
+
+```python
+def _stamp_turn_meta(
+    payload: dict[str, Any],
+    *,
+    iteration: int,
+    turn_id: str | None,
+) -> dict[str, Any]:
+```
+
+to:
+
+```python
+def _stamp_turn_meta(
+    payload: dict[str, Any],
+    *,
+    iteration: int,
+    turn_id: str | None,
+    iteration_index: int | None = None,
+) -> dict[str, Any]:
+```
+
+Then replace its body with:
+
+```python
+    if turn_id is not None:
+        payload["turn_id"] = turn_id
+        if iteration_index is None:
+            payload["iteration_index"] = max(int(iteration) - 1, 0)
+        else:
+            payload["iteration_index"] = max(int(iteration_index), 0)
+    return payload
+```
+
+In the `call_llm_with_retry(...)` signature, add `iteration_index: int | None = None`
+immediately after `turn_id: str | None = None`.
+
+Every `_stamp_turn_meta(...)` call in `llm_call.py` must pass the override:
+
+```python
+_stamp_turn_meta(
+    {...},
+    iteration=iteration,
+    turn_id=turn_id,
+    iteration_index=iteration_index,
+)
+```
+
+Use this search to verify all call sites were updated:
+
+Run: `grep -n "_stamp_turn_meta(" surogates/harness/llm_call.py`
+Expected: one function definition plus every call block containing `iteration_index=iteration_index`.
+
+- [ ] **Step 5: Run metadata tests to verify they pass**
+
+Run: `pytest tests/test_steer_turn_meta.py -v`
+Expected: PASS (3 passed)
+
+- [ ] **Step 6: Seed the steer cursor and turn-base at loop init**
 
 In `surogates/harness/loop.py`, in `_run_loop`, just after `turn_id = str(uuid4())` (line 1306) and the `self._turn_started_at` assignment, add:
 
 ```python
-        # Steer cursor: highest real user-message event already folded into
-        # the replayed ``messages``.  Mid-wake follow-ups past this cursor are
-        # incorporated at iteration boundaries (see the loop top).  Kept
+        # Steer cursor: highest user-message event already folded into the
+        # replayed ``messages``.  Mid-wake real follow-ups past this cursor
+        # are incorporated at iteration boundaries (see the loop top).  Kept
         # separate from the durable session cursor, which tracks crash
         # recovery, not in-memory message incorporation.
         steer_cursor = max(
@@ -1010,7 +1118,7 @@ In `surogates/harness/loop.py`, in `_run_loop`, just after `turn_id = str(uuid4(
         turn_base_iteration = 0
 ```
 
-- [ ] **Step 4: Inject queued messages at the loop top + reset turn metadata**
+- [ ] **Step 7: Inject queued messages at the loop top + reset turn metadata**
 
 In `_run_loop`, at the loop top, **after** the interrupt check block (lines 1430-1433) and **before** the checkpoint reset (line 1435), insert:
 
@@ -1027,6 +1135,8 @@ In `_run_loop`, at the loop top, **after** the interrupt check block (lines 1430
                 messages.append(steer_message)
                 turn_id = str(uuid4())
                 turn_base_iteration = iteration - 1
+                self._pending_iteration_summary_tasks = {}
+                self._completed_iteration_summaries = {}
                 logger.info(
                     "Session %s: incorporated steer message at iteration %d "
                     "(new turn_id=%s)",
@@ -1034,31 +1144,70 @@ In `_run_loop`, at the loop top, **after** the interrupt check block (lines 1430
                 )
 ```
 
-- [ ] **Step 5: Report iteration index per turn**
+- [ ] **Step 8: Report iteration index per turn**
 
-In `_run_loop`, replace the three `iteration - 1` payload expressions with the turn-local index. First compute it once per iteration — add immediately after the steer block from Step 4:
+In `_run_loop`, replace every user-turn metadata payload expression that reports
+`iteration - 1` with the turn-local index. First compute it once per iteration —
+add immediately after the steer block from Step 7:
 
 ```python
             turn_iteration_index = iteration - 1 - turn_base_iteration
 ```
 
-Then update the three sites:
+Then update these sites:
 
-1. LLM_REQUEST payload (line ~1487): change `"iteration_index": iteration - 1,` to `"iteration_index": turn_iteration_index,`
-2. LLM_RESPONSE payload (line ~1861): change `response_data["iteration_index"] = iteration - 1` to `response_data["iteration_index"] = turn_iteration_index`
-3. `_maybe_summarize_iteration` call (line ~2142): change `iteration_index=iteration - 1,` to `iteration_index=turn_iteration_index,`
+1. Main-loop `call_llm_with_retry(...)` call: add `iteration_index=turn_iteration_index,` next to `turn_id=turn_id,`.
+2. LLM_REQUEST payload (line ~1487): change `"iteration_index": iteration - 1,` to `"iteration_index": turn_iteration_index,`.
+3. Manual LLM_THINKING payload (line ~1711): change `"iteration_index": iteration - 1,` to `"iteration_index": turn_iteration_index,`.
+4. LLM_RESPONSE payload (line ~1861): change `response_data["iteration_index"] = iteration - 1` to `response_data["iteration_index"] = turn_iteration_index`.
+5. No-tool `_maybe_summarize_iteration(...)` call (line ~2142): change `iteration_index=iteration - 1,` to `iteration_index=turn_iteration_index,`.
+6. Tool-result `_maybe_summarize_iteration(...)` call (line ~2445): change `iteration_index=iteration - 1,` to `iteration_index=turn_iteration_index,`.
+7. Budget-exhaustion `_request_final_summary(...)` call inside the `if not self._budget.consume()` branch: add `iteration_index=turn_iteration_index,`.
+8. Budget-exhaustion `_request_final_summary(...)` call after the `while` loop: add `iteration_index=max(iteration - 1 - turn_base_iteration, 0),`.
 
 (The wake-wide `iteration` counter still drives the budget and loop control; only the reported index is turn-local.)
 
-- [ ] **Step 6: Run the new and existing loop tests**
+- [ ] **Step 9: Thread the turn-local index through `_request_final_summary`**
 
-Run: `pytest tests/test_steer_loop.py tests/test_loop_turn_id.py -v`
+In `surogates/harness/loop.py`, update `_request_final_summary(...)` so the
+signature includes the optional index:
+
+```python
+        turn_id: str | None = None,
+        iteration_index: int | None = None,
+```
+
+In the `_request_final_summary` internal `call_llm_with_retry(...)` call, add:
+
+```python
+                iteration_index=iteration_index,
+```
+
+Replace:
+
+```python
+                final_payload["iteration_index"] = max(self._budget.used - 1, 0)
+```
+
+with:
+
+```python
+                final_payload["iteration_index"] = (
+                    max(int(iteration_index), 0)
+                    if iteration_index is not None
+                    else max(self._budget.used - 1, 0)
+                )
+```
+
+- [ ] **Step 10: Run the new and existing loop tests**
+
+Run: `pytest tests/test_steer_turn_meta.py tests/test_steer_loop.py tests/test_loop_turn_id.py -v`
 Expected: PASS. `test_loop_turn_id.py` still passes because with no steer messages `turn_base_iteration` stays 0, so `turn_iteration_index == iteration - 1` exactly as before.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
-git add surogates/harness/loop.py tests/test_steer_loop.py
+git add surogates/harness/llm_call.py surogates/harness/loop.py tests/test_steer_turn_meta.py tests/test_steer_loop.py
 git commit -m "feat(harness): fold queued user messages into the running wake at boundaries"
 ```
 
@@ -1146,6 +1295,8 @@ In `surogates/harness/loop.py`, in the no-tool-calls branch, **after** `_maybe_s
                     messages.append(followup)
                     turn_id = str(uuid4())
                     turn_base_iteration = iteration
+                    self._pending_iteration_summary_tasks = {}
+                    self._completed_iteration_summaries = {}
                     logger.info(
                         "Session %s: follow-up arrived at completion; "
                         "continuing as a new turn (turn_id=%s)",
@@ -1163,7 +1314,7 @@ Expected: PASS (all steer-loop tests)
 
 - [ ] **Step 5: Run the broader harness suite for regressions**
 
-Run: `pytest tests/test_loop_turn_id.py tests/test_wake_stranded_user_message.py tests/test_board_replay_hydration.py tests/harness/ -v`
+Run: `pytest tests/test_steer_turn_meta.py tests/test_loop_turn_id.py tests/test_wake_stranded_user_message.py tests/test_board_replay_hydration.py tests/harness/ -v`
 Expected: PASS
 
 - [ ] **Step 6: Commit**
@@ -1186,7 +1337,8 @@ A final guard that the change did not disturb adjacent harness behavior.
 Run:
 ```bash
 pytest tests/test_steer_coalesce.py tests/test_steer_replay_resequence.py \
-       tests/test_steer_collect.py tests/test_steer_loop.py \
+       tests/test_steer_collect.py tests/test_steer_turn_meta.py \
+       tests/test_steer_loop.py \
        tests/test_loop_turn_id.py tests/test_wake_stranded_user_message.py \
        tests/test_board_replay_hydration.py tests/test_loop_tool_recovery.py \
        tests/harness/ tests/integration/test_attachment_history_replay.py -v
@@ -1201,7 +1353,7 @@ Expected: PASS (or only pre-existing failures unrelated to this change — if an
 - [ ] **Step 3: Final review of the diff**
 
 Run: `git log --oneline master..HEAD` and `git diff master --stat`
-Confirm the diff touches only `surogates/harness/loop.py`, `surogates/harness/loop_context_replay.py`, and the four new test files — no changes to `send_message`, the orchestrator, the Redis interrupt channel, or any DB schema, per the design's non-goals.
+Confirm the diff touches only `surogates/harness/loop.py`, `surogates/harness/loop_context_replay.py`, `surogates/harness/llm_call.py`, and the five new test files — no changes to `send_message`, the orchestrator, the Redis interrupt channel, or any DB schema, per the design's non-goals.
 
 ---
 
@@ -1213,7 +1365,7 @@ Confirm the diff touches only `surogates/harness/loop.py`, `surogates/harness/lo
 - **Steer cursor, separate from durable cursor** → Task 5 (local `steer_cursor`).
 - **Non-synthetic filter** → Tasks 2 and 3.
 - **Replay re-sequencing via `tool_call_id` set** → Task 2.
-- **Turn-metadata reset (`turn_id`, turn-local `iteration_index`)** → Tasks 5 and 6.
+- **Turn-metadata reset (`turn_id`, turn-local `iteration_index`)** → Tasks 5 and 6, including `llm.delta`, `llm.thinking`, `llm.request`, `llm.response`, iteration-summary, and final-summary payloads.
 - **Attachment/image steer** → covered by reusing `build_user_message_dict` (Tasks 3) + multimodal coalescing (Task 1), exercised in `test_steer_coalesce.py` and `test_steer_collect.py`.
 - **Completion drain** → Task 6.
 - **Non-goals (no API/orchestrator/schema change)** → verified in Task 7 Step 3.
