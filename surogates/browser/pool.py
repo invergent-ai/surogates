@@ -76,6 +76,26 @@ class BrowserPool:
         lock = await self._session_lock(session_id)
         async with lock:
             slot = self._mapping.get(session_id)
+            if slot is None:
+                # Shared-runtime sessions can move between workers, so this
+                # worker's local map may miss a browser another worker
+                # provisioned. Reattach from the shared registry before
+                # provisioning a fresh (blank) one — otherwise the session
+                # loses its page (lands on the browser's default start page)
+                # and the live pod leaks. The status check below validates the
+                # reattached slot and reprovisions if the pod is really gone.
+                entry = await self._registry.get(session_id)
+                if entry is not None and entry.browser_id:
+                    slot = _Slot(
+                        browser_id=entry.browser_id,
+                        endpoint=BrowserEndpoint(
+                            rest_url=entry.rest_url,
+                            cdp_url=entry.cdp_url,
+                            live_view_url=entry.live_view_url,
+                        ),
+                        snapshot_cache={},
+                    )
+                    self._mapping[session_id] = slot
             if slot is not None:
                 status = await self._backend.status(slot.browser_id)
                 if status == BrowserStatus.RUNNING:
@@ -138,6 +158,7 @@ class BrowserPool:
                     cdp_url=endpoint.cdp_url,
                     live_view_url=endpoint.live_view_url,
                     provisioned_at=datetime.now(timezone.utc),
+                    browser_id=browser_id,
                 )
             )
             await self._emit_event(

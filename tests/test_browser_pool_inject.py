@@ -28,6 +28,9 @@ async def test_inject_applies_state_before_registry_publish(monkeypatch):
         async def set(self, entry):
             order.append("registry")
 
+        async def get(self, session_id):
+            return None
+
     applied = {}
 
     class _FakeClient:
