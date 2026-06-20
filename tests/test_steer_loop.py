@@ -228,3 +228,46 @@ async def test_initial_user_message_not_re_incorporated(monkeypatch):
     # get_events was queried with after >= 50 (cursor seeded from all_events)
     first_after = store.get_events.await_args_list[0].kwargs["after"]
     assert first_after >= 50
+
+
+@pytest.mark.asyncio
+async def test_followup_at_completion_continues_instead_of_completing(monkeypatch):
+    # iter1 returns a final response (no tool calls); a follow-up is waiting,
+    # so the wake must NOT complete — it continues as a new turn and iter2
+    # produces the real final response.
+    store = AsyncMock()
+    store.emit_event = AsyncMock(side_effect=range(100, 300))
+    # boundary query at iter1 top: nothing; completion drain at iter1: a
+    # follow-up; boundary query at iter2 top: nothing; drain at iter2: none.
+    store.get_events = AsyncMock(side_effect=[
+        [],                              # iter1 loop-top steer check
+        [_steer_event(60, "one more thing")],  # iter1 completion drain
+        [],                              # iter2 loop-top steer check
+        [],                              # iter2 completion drain
+    ])
+    store.execute = AsyncMock(return_value=None)
+    harness = _make_loop_harness(session_store=store)
+
+    emits = await _drive(
+        harness,
+        responses=[_final_response("first answer"), _final_response("second answer")],
+        monkeypatch=monkeypatch,
+    )
+    # completion happened exactly once, after the second response
+    assert harness._complete_session.await_count == 1
+    req_payloads = [p for t, p in emits if t == EventType.LLM_REQUEST]
+    assert len(req_payloads) == 2
+    assert req_payloads[0]["turn_id"] != req_payloads[1]["turn_id"]
+    assert req_payloads[1]["iteration_index"] == 0
+
+
+@pytest.mark.asyncio
+async def test_no_followup_completes_normally(monkeypatch):
+    store = AsyncMock()
+    store.emit_event = AsyncMock(side_effect=range(100, 300))
+    store.get_events = AsyncMock(return_value=[])  # never any steer messages
+    store.execute = AsyncMock(return_value=None)
+    harness = _make_loop_harness(session_store=store)
+
+    await _drive(harness, responses=[_final_response("done")], monkeypatch=monkeypatch)
+    assert harness._complete_session.await_count == 1

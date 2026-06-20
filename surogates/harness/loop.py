@@ -2183,6 +2183,27 @@ class AgentHarness(
                     started_at=iteration_started_at,
                 )
 
+                # Before completing, fold in any follow-up that arrived while
+                # this final response was being produced.  Deliver the
+                # response (already emitted + appended above), then keep the
+                # wake going as a new user turn instead of completing and
+                # re-waking.
+                followup, steer_cursor = await self._collect_steer_messages(
+                    session.id, steer_cursor,
+                )
+                if followup is not None:
+                    messages.append(followup)
+                    turn_id = str(uuid4())
+                    turn_base_iteration = iteration
+                    self._pending_iteration_summary_tasks = {}
+                    self._completed_iteration_summaries = {}
+                    logger.info(
+                        "Session %s: follow-up arrived at completion; "
+                        "continuing as a new turn (turn_id=%s)",
+                        session.id, turn_id,
+                    )
+                    continue
+
                 # A response without tool calls completes the current
                 # objective.  Follow-up messages revive the session into a
                 # new objective rather than keeping completed work "active".
