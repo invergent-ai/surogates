@@ -177,19 +177,55 @@ class ContextReplayMixin:
 
         ``LLM_DELTA`` events are likewise skipped; the full response is
         captured in the subsequent ``LLM_RESPONSE`` event.
+
+        Mid-turn steering: a real ``user.message`` can land in the log
+        while an LLM iteration is still open (mid-stream, or while its
+        tool calls are running), because the API appends it the instant
+        it arrives.  Such a message is deferred to the iteration's close
+        and coalesced, so the rebuilt order matches the live
+        boundary-injection order and never splits a tool-call / tool
+        result pair.  ``tool.result`` events carry no iteration marker,
+        so an open tool-calling iteration is closed by tracking the
+        ``tool_calls[*].id`` set from its ``llm.response`` until every id
+        has a matching result.
         """
         messages: list[dict] = []
+        iteration_open = False
+        awaiting_tool_ids: set[str] = set()
+        deferred_users: list[dict] = []
+
+        def _flush_deferred() -> None:
+            nonlocal deferred_users
+            if deferred_users:
+                messages.append(coalesce_user_messages(deferred_users))
+                deferred_users = []
 
         for event in events:
             etype = event.type
 
-            if etype == EventType.USER_MESSAGE.value:
-                messages.append(build_user_message_dict(event.data))
+            if etype == EventType.LLM_REQUEST.value:
+                iteration_open = True
+                awaiting_tool_ids = set()
+
+            elif etype == EventType.USER_MESSAGE.value:
+                rendered = build_user_message_dict(event.data)
+                if iteration_open and not (event.data or {}).get("synthetic"):
+                    deferred_users.append(rendered)
+                else:
+                    messages.append(rendered)
 
             elif etype == EventType.LLM_RESPONSE.value:
                 stored_message = event.data.get("message")
                 if stored_message is not None:
                     messages.append(stored_message)
+                tool_calls = (stored_message or {}).get("tool_calls") or []
+                ids = {tc.get("id") for tc in tool_calls if tc.get("id")}
+                if ids:
+                    awaiting_tool_ids = ids
+                else:
+                    iteration_open = False
+                    awaiting_tool_ids = set()
+                    _flush_deferred()
 
             elif etype == EventType.TOOL_RESULT.value:
                 messages.append({
@@ -197,6 +233,11 @@ class ContextReplayMixin:
                     "tool_call_id": event.data.get("tool_call_id", ""),
                     "content": event.data.get("content", ""),
                 })
+                if awaiting_tool_ids:
+                    awaiting_tool_ids.discard(event.data.get("tool_call_id"))
+                    if not awaiting_tool_ids:
+                        iteration_open = False
+                        _flush_deferred()
 
             elif etype == EventType.ADVISOR_RESULT.value and event.data.get("content"):
                 messages.append({
@@ -224,6 +265,12 @@ class ContextReplayMixin:
                 compacted = event.data.get("compacted_messages")
                 if compacted is not None:
                     messages = list(compacted)
+                    # The compacted snapshot already contains any earlier
+                    # steered turn in its proper place; drop the buffer and
+                    # close the window so it is not re-appended.
+                    deferred_users = []
+                    iteration_open = False
+                    awaiting_tool_ids = set()
 
             # Worker coordination events — injected as synthetic user
             # messages so the coordinator LLM sees worker results.
@@ -261,6 +308,10 @@ class ContextReplayMixin:
                     })
 
             # LLM_THINKING and LLM_DELTA are intentionally skipped.
+
+        # Flush any users deferred by an iteration that never closed (the
+        # log ends mid-tool-execution because this is an in-progress wake).
+        _flush_deferred()
 
         # Strip stale budget warnings from replayed tool results.
         strip_budget_warnings(messages)

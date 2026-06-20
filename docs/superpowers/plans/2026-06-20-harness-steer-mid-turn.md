@@ -11,7 +11,7 @@
 ## Progress
 
 - [x] Task 1: `coalesce_user_messages` helper
-- [ ] Task 2: Replay re-sequencer in `_rebuild_messages`
+- [x] Task 2: Replay re-sequencer in `_rebuild_messages`
 - [ ] Task 3: `_collect_steer_messages` harness helper
 - [ ] Task 4: Stop dropping the buffered response in the staleness guard
 - [ ] Task 5: Boundary injector, steer cursor, turn-metadata reset (`loop.py` + `llm_call.py`)
