@@ -597,45 +597,6 @@ class AgentHarness(
         from surogates.tools.utils.interrupt import set_interrupt
         set_interrupt(False)
 
-    async def _should_abort_before_llm_response(
-        self,
-        session: Session,
-        llm_request_event_id: int,
-    ) -> bool:
-        """Return True if this iteration must drop its buffered response.
-
-        Detects two races that can otherwise leak a buffered response into
-        the wrong turn:
-
-        - An explicit interrupt was raised (lease loss, channel pause,
-          new-message-while-busy nudge from the API).
-        - A new ``user.message`` was appended after this iteration's own
-          ``llm.request`` event — meaning the user moved on to a new turn
-          while the stream or end-of-turn judge was still in flight.
-
-        When a stale user message is detected the interrupt flag is also
-        set so the cleanup path runs identically for both causes.
-        """
-        if self._check_interrupt():
-            return True
-        newer = await self._store.get_events(
-            session.id,
-            after=llm_request_event_id,
-            types=[EventType.USER_MESSAGE],
-            limit=1,
-        )
-        if newer:
-            logger.info(
-                "Session %s: dropping stale buffered response — user "
-                "message %s arrived after llm.request %s",
-                session.id,
-                newer[0].id,
-                llm_request_event_id,
-            )
-            self.interrupt("stale response — newer user message in log")
-            return True
-        return False
-
     async def _has_stranded_user_message(self, session_id: UUID) -> bool:
         """Return True if a real user message landed past the harness cursor.
 
@@ -1512,7 +1473,7 @@ class AgentHarness(
 
             # 1. Emit LLM_REQUEST event.
             model_id = self._current_model or session.model or self._default_model
-            llm_request_event_id = await self._store.emit_event(
+            await self._store.emit_event(
                 session.id,
                 EventType.LLM_REQUEST,
                 {
@@ -1880,15 +1841,12 @@ class AgentHarness(
                 elif inbox_rescue_kind == "action_required":
                     response_data["action_required_rescue"] = True
 
-            # 4a. Interrupt / staleness guard.  The stream and any judge
-            # LLM call above can take several seconds.  If a new
-            # user.message has been appended (or the interrupt flag was
-            # set) while we were busy, the buffered response belongs to a
-            # turn the user has already abandoned — drop it instead of
-            # attributing it to the next user message.
-            if await self._should_abort_before_llm_response(
-                session, llm_request_event_id,
-            ):
+            # 4a. Interrupt guard.  Abort only on an explicit interrupt
+            # (Stop / pause / lease loss).  A user.message that arrived
+            # mid-stream is no longer dropped — it is folded in as a new
+            # user turn at the next iteration boundary by the steer
+            # injector, so the buffered response is delivered, not discarded.
+            if self._check_interrupt():
                 await self._abort_iteration_with_pause(session, saga)
                 return
 
