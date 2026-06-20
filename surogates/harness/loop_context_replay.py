@@ -81,6 +81,34 @@ def build_user_message_dict(
     return {"role": "user", "content": content}
 
 
+def coalesce_user_messages(messages: list[dict]) -> dict:
+    """Merge one or more rendered user-message dicts into a single user turn.
+
+    Both the live boundary injector and the replay re-sequencer pass the
+    same rendered messages here so a steered turn looks byte-identical
+    whether it was injected live or reconstructed from the event log.
+
+    Text-only messages join with a blank-line separator. If any message
+    is multimodal (its ``content`` is a block list), the result is a
+    single block list preserving every text and image block in order.
+    """
+    if len(messages) == 1:
+        return messages[0]
+
+    if any(isinstance(m.get("content"), list) for m in messages):
+        blocks: list[dict] = []
+        for m in messages:
+            content = m.get("content")
+            if isinstance(content, list):
+                blocks.extend(content)
+            elif content:
+                blocks.append({"type": "text", "text": content})
+        return {"role": "user", "content": blocks}
+
+    text = "\n\n".join(m.get("content") or "" for m in messages if m.get("content"))
+    return {"role": "user", "content": text}
+
+
 class ContextReplayMixin:
     async def _prefetch_memory(self, session_id: UUID) -> str | None:
         """Prefetch user memory and snapshot it for the session.

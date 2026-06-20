@@ -8,6 +8,16 @@
 
 **Tech Stack:** Python 3.12, asyncio, pytest (`asyncio_mode = "auto"`), SQLAlchemy event store.
 
+## Progress
+
+- [x] Task 1: `coalesce_user_messages` helper
+- [ ] Task 2: Replay re-sequencer in `_rebuild_messages`
+- [ ] Task 3: `_collect_steer_messages` harness helper
+- [ ] Task 4: Stop dropping the buffered response in the staleness guard
+- [ ] Task 5: Boundary injector, steer cursor, turn-metadata reset (`loop.py` + `llm_call.py`)
+- [ ] Task 6: Drain a follow-up at completion instead of completing + re-waking
+- [ ] Task 7: Full-suite regression sweep
+
 ## Global Constraints
 
 - **Repo:** `/work/surogates`. Default branch `master`. Work on branch `feat/harness-steer-mid-turn` (already created).
