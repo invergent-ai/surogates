@@ -25,6 +25,10 @@ class BrowserEntry:
     cdp_url: str
     live_view_url: str
     provisioned_at: datetime
+    # Backend handle for the live browser (fleet pod / container id). Needed to
+    # reattach to — or tear down — an existing browser from a worker that did
+    # not provision it; defaulted for backwards-compat with older entries.
+    browser_id: str = ""
 
     def to_json(self) -> str:
         payload = asdict(self)
@@ -44,6 +48,7 @@ class BrowserEntry:
             cdp_url=payload["cdp_url"],
             live_view_url=payload["live_view_url"],
             provisioned_at=datetime.fromisoformat(payload["provisioned_at"]),
+            browser_id=payload.get("browser_id", ""),
         )
 
 

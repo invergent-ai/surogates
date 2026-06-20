@@ -95,6 +95,45 @@ class TestEnsure:
         assert result.newly_provisioned is False
         assert backend.provisions == 1
 
+    async def test_reattaches_from_registry_when_local_map_misses(self) -> None:
+        # Shared-runtime sessions move between workers. A worker whose local
+        # map misses the browser must reattach from the shared registry, not
+        # provision a fresh (blank) pod — otherwise the session lands on the
+        # browser's default start page and the live pod leaks.
+        registry = FakeRegistry()  # shared across both "workers"
+        backend_a = FakeBackend()
+        pool_a = BrowserPool(backend=backend_a, registry=registry)  # type: ignore[arg-type]
+        first = await pool_a.ensure("sess-1", "o", "u", BrowserSpec())
+        assert first.browser_id == "b1"
+        assert registry.entries["sess-1"].browser_id == "b1"
+
+        # Different worker: fresh pool (empty map), its own backend, same registry.
+        backend_b = FakeBackend()
+        pool_b = BrowserPool(backend=backend_b, registry=registry)  # type: ignore[arg-type]
+        result = await pool_b.ensure("sess-1", "o", "u", BrowserSpec())
+
+        assert result.newly_provisioned is False  # reattached, not reprovisioned
+        assert result.browser_id == "b1"
+        assert result.endpoint.rest_url == first.endpoint.rest_url
+        assert backend_b.provisions == 0  # no fresh pod -> no default-page reset
+
+    async def test_reattach_reprovisions_when_registry_browser_dead(self) -> None:
+        # If the registry-tracked browser is actually gone, fall through to a
+        # clean destroy + reprovision rather than reusing a dead pod.
+        registry = FakeRegistry()
+        backend_a = FakeBackend()
+        pool_a = BrowserPool(backend=backend_a, registry=registry)  # type: ignore[arg-type]
+        await pool_a.ensure("sess-1", "o", "u", BrowserSpec())
+
+        backend_b = FakeBackend()
+        backend_b.status_overrides["b1"] = BrowserStatus.FAILED
+        pool_b = BrowserPool(backend=backend_b, registry=registry)  # type: ignore[arg-type]
+        result = await pool_b.ensure("sess-1", "o", "u", BrowserSpec())
+
+        assert result.newly_provisioned is True
+        assert backend_b.provisions == 1
+        assert backend_b.destroys == ["b1"]
+
     async def test_stale_status_reprovisions(self) -> None:
         backend = FakeBackend()
         pool = BrowserPool(backend=backend, registry=FakeRegistry())  # type: ignore[arg-type]
