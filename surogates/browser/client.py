@@ -418,19 +418,27 @@ return await page.evaluate(() => ({{
         return result if isinstance(result, dict) else {}
 
     async def drag(self, path: list[tuple[int, int]], *, button: str = "left") -> None:
-        """Drag the mouse along a path of viewport coordinates."""
+        """Drag the mouse along a path of viewport coordinates.
+
+        Goes through Playwright's mouse rather than the kernel
+        ``/computer/drag_mouse`` endpoint: that endpoint's xdotool coordinates
+        don't map onto the page's CSS-pixel viewport — a drag aimed at y=400
+        lands near y=224 — so it grabs the wrong element. Playwright's mouse is
+        pixel-accurate against the viewport, matching ``click_at``/``scroll_at``.
+        """
 
         if len(path) < 2:
             raise ValueError("drag path must contain at least two points")
-        body: dict[str, Any] = {
-            "path": [list(point) for point in path],
-            "smooth": False,
-        }
-        if button != "left":
-            body["button"] = button
-        response = await self._http.post("/computer/drag_mouse", json=body)
-        response.raise_for_status()
-        self._invalidate_snapshot_cache()
+        button_lit = json.dumps(button)
+        steps = [f"await page.mouse.move({int(path[0][0])}, {int(path[0][1])});"]
+        steps.append(f"await page.mouse.down({{button: {button_lit}}});")
+        for x, y in path[1:]:
+            steps.append(f"await page.mouse.move({int(x)}, {int(y)});")
+        steps.append(f"await page.mouse.up({{button: {button_lit}}});")
+        steps.append("return true;")
+        # Two-tier refs re-resolve at action time, so a drag — like click and
+        # scroll — does not invalidate the snapshot cache.
+        await self._playwright_execute("\n".join(steps))
 
     async def wait(self, ms: int) -> None:
         """Sleep without changing browser state or cached refs."""
@@ -443,9 +451,15 @@ return await page.evaluate(() => ({{
         region: dict[str, int] | None = None,
         annotate: bool = False,
         save_path: str | None = None,
-        viewport_only: bool = False,
     ) -> dict[str, Any]:
-        """Capture a PNG screenshot, optionally with numbered ref overlays."""
+        """Capture a PNG screenshot, optionally with numbered ref overlays.
+
+        Always captures through Playwright's ``page.screenshot`` rather than
+        the kernel ``/computer/screenshot`` endpoint: that endpoint grabs the
+        whole X framebuffer (e.g. 3840x2160) instead of the page viewport
+        (e.g. 1905x1984), so the bytes are the wrong size and any ref-overlay
+        annotations — positioned in CSS pixels — would not line up.
+        """
 
         annotations: list[dict[str, Any]] | None = None
         if annotate:
@@ -455,32 +469,24 @@ return await page.evaluate(() => ({{
             await self._inject_overlay(annotations)
 
         try:
-            if save_path is not None or viewport_only:
-                options: dict[str, Any] = {}
-                if save_path is not None:
-                    options["path"] = save_path
-                if region is not None:
-                    options["clip"] = {
-                        "x": region["x"],
-                        "y": region["y"],
-                        "width": region["width"],
-                        "height": region["height"],
-                    }
-                encoded = await self._playwright_execute(
-                    "const options = "
-                    + json.dumps(options)
-                    + ";\n"
-                    + "const data = await page.screenshot(options);\n"
-                    + "return data.toString('base64');"
-                )
-                result: dict[str, Any] = {"png_bytes": base64.b64decode(encoded)}
-            else:
-                response = await self._http.post(
-                    "/computer/screenshot",
-                    json={} if region is None else {"region": region},
-                )
-                response.raise_for_status()
-                result = {"png_bytes": response.content}
+            options: dict[str, Any] = {}
+            if save_path is not None:
+                options["path"] = save_path
+            if region is not None:
+                options["clip"] = {
+                    "x": region["x"],
+                    "y": region["y"],
+                    "width": region["width"],
+                    "height": region["height"],
+                }
+            encoded = await self._playwright_execute(
+                "const options = "
+                + json.dumps(options)
+                + ";\n"
+                + "const data = await page.screenshot(options);\n"
+                + "return data.toString('base64');"
+            )
+            result: dict[str, Any] = {"png_bytes": base64.b64decode(encoded)}
             if annotations is not None:
                 result["annotations"] = annotations
             return result

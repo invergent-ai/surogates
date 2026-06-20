@@ -511,7 +511,7 @@ class TestPreviewEndpoint:
         assert response.headers["cache-control"] == "no-store"
         assert response.content == b"\x89PNG\r\n\x1a\npreview"
         assert seen == ["http://browser-x.svc:10001"]
-        assert screenshot_kwargs == [{"viewport_only": True}]
+        assert screenshot_kwargs == [{}]
 
     async def test_preview_unknown_session_returns_404(self, app_factory) -> None:
         build, _resolver, _control = app_factory

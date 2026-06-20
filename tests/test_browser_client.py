@@ -797,11 +797,34 @@ class TestSmallActions:
         assert "@e1" in client._snapshot_cache
 
     async def test_drag(self, client_with_transport) -> None:
-        client, handlers = client_with_transport
+        client, _handlers = client_with_transport
         client._snapshot_cache["@e1"] = {"x": 1, "y": 1, "role": "button", "name": "Go"}
-        handlers.append(("POST", "/computer/drag_mouse", 200, {"ok": True}))
+        captured: list[dict[str, Any]] = []
+
+        class CapturingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(
+                self, request: httpx.Request
+            ) -> httpx.Response:
+                captured.append(
+                    {"path": request.url.path, "body": json.loads(request.content)}
+                )
+                return httpx.Response(200, json={"success": True, "result": True})
+
+        client._http = httpx.AsyncClient(
+            base_url=client.rest_url, transport=CapturingTransport()
+        )
         await client.drag([(10, 10), (200, 200)])
-        assert client._snapshot_cache == {}
+        # Drag goes through Playwright's mouse (down → move → up), not the kernel
+        # /computer/drag_mouse endpoint whose xdotool coords miss the target.
+        assert captured[0]["path"] == "/playwright/execute"
+        code = captured[0]["body"]["code"]
+        assert "mouse.down" in code
+        assert "mouse.move(10, 10)" in code
+        assert "mouse.move(200, 200)" in code
+        assert "mouse.up" in code
+        # Two-tier refs re-resolve at action time, so a drag no longer forces a
+        # re-snapshot — the ref survives like it does for click/scroll.
+        assert "@e1" in client._snapshot_cache
 
     async def test_wait_sleeps(self, client_with_transport) -> None:
         client, _ = client_with_transport
@@ -816,7 +839,15 @@ class TestScreenshot:
     async def test_screenshot_returns_png_bytes(self, client_with_transport) -> None:
         client, handlers = client_with_transport
         handlers.append(
-            ("POST", "/computer/screenshot", 200, PNG_MAGIC + b"fakepngbody")
+            (
+                "POST",
+                "/playwright/execute",
+                200,
+                {
+                    "success": True,
+                    "result": base64.b64encode(PNG_MAGIC + b"fakepngbody").decode(),
+                },
+            )
         )
         result = await client.screenshot()
         assert result["png_bytes"].startswith(PNG_MAGIC)
@@ -848,7 +879,7 @@ class TestScreenshot:
             transport=httpx.MockTransport(handler),
         )
 
-        result = await client.screenshot(viewport_only=True)
+        result = await client.screenshot()
 
         assert result["png_bytes"] == PNG_MAGIC + b"viewport"
         assert seen_paths == ["/playwright/execute"]
@@ -906,9 +937,16 @@ class TestScreenshot:
                 self, request: httpx.Request
             ) -> httpx.Response:
                 seen_paths.append(request.url.path)
-                if request.url.path == "/computer/screenshot":
-                    return httpx.Response(200, content=PNG_MAGIC + b"img")
                 if request.url.path == "/playwright/execute":
+                    payload = json.loads(request.content.decode())
+                    if "page.screenshot" in payload["code"]:
+                        return httpx.Response(
+                            200,
+                            json={
+                                "success": True,
+                                "result": base64.b64encode(PNG_MAGIC + b"img").decode(),
+                            },
+                        )
                     return httpx.Response(200, json={"success": True, "result": True})
                 return httpx.Response(404)
 
@@ -917,8 +955,11 @@ class TestScreenshot:
         )
         result = await client.screenshot(annotate=True)
 
-        assert seen_paths.count("/playwright/execute") == 2
-        assert seen_paths.count("/computer/screenshot") == 1
+        # Overlay inject, page.screenshot capture, overlay remove — all via CDP;
+        # the /computer/screenshot framebuffer grab is gone.
+        assert seen_paths.count("/playwright/execute") == 3
+        assert seen_paths.count("/computer/screenshot") == 0
+        assert result["png_bytes"] == PNG_MAGIC + b"img"
         assert result["annotations"] == [
             {"ref": "@e1", "label": 1, "role": "button", "name": "Go"},
             {"ref": "@e2", "label": 2, "role": "link", "name": "Help"},
