@@ -319,9 +319,10 @@ function TreeNodeRow({
         {canDelete && (
           <button
             type="button"
-            className={`p-2 md:p-1 rounded opacity-60 ${
-              entry.awaitingInput ? "md:opacity-0" : "md:opacity-50"
-            } md:group-hover:opacity-100 md:focus-visible:opacity-100 hover:bg-destructive/10 hover:text-destructive transition-all`}
+            className={cn(
+              "p-2 md:p-1 rounded opacity-60 md:group-hover:opacity-100 md:focus-visible:opacity-100 hover:bg-destructive/10 hover:text-destructive transition-all",
+              entry.awaitingInput ? "md:opacity-0" : "md:opacity-50",
+            )}
             onClick={(e) => {
               e.stopPropagation();
               onDelete(entry.id);
