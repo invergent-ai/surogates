@@ -184,12 +184,6 @@ export interface AgentChatSession {
   estimatedCostUsd?: number | string;
   createdAt?: string;
   updatedAt?: string;
-  /**
-   * Whether this session is currently blocked waiting on the user (an
-   * unanswered question or a pending approval). Optional; surfaced by ops to
-   * drive the "needs you" indicator. Unset by the web app.
-   */
-  awaitingInput?: boolean | null;
 }
 
 export interface AgentChatSessionList {
@@ -213,8 +207,6 @@ export interface AgentChatSessionTreeNode {
   toolCallCount?: number;
   createdAt: string;
   updatedAt: string;
-  /** Mirrors {@link AgentChatSession.awaitingInput} for the tree view. */
-  awaitingInput?: boolean | null;
 }
 
 export interface AgentChatSessionTree {

@@ -94,7 +94,7 @@ function treeFingerprint(nodes: AgentChatSessionTreeNode[]): string {
           n.runKind ?? ""
         }:${n.title ?? ""}:${n.messageCount ?? 0}:${n.toolCallCount ?? 0}:${
           n.updatedAt
-        }:${n.awaitingInput ?? false}`,
+        }`,
     )
     .join("|");
 }
@@ -114,7 +114,6 @@ function sessionToTreeNode(session: AgentChatSession): AgentChatSessionTreeNode 
     toolCallCount: session.toolCallCount,
     createdAt: session.createdAt ?? timestamp,
     updatedAt: session.updatedAt ?? timestamp,
-    awaitingInput: session.awaitingInput ?? null,
   };
 }
 
@@ -307,22 +306,10 @@ function TreeNodeRow({
             <SquareIcon className="w-3 h-3" fill="currentColor" />
           </button>
         )}
-        {entry.awaitingInput && (
-          <span
-            className="flex items-center justify-center p-2 md:p-1 shrink-0 md:group-hover:hidden"
-            aria-label="Waiting for your input"
-            title="Waiting for your input"
-          >
-            <span className="size-2 rounded-full bg-amber-500" />
-          </span>
-        )}
         {canDelete && (
           <button
             type="button"
-            className={cn(
-              "p-2 md:p-1 rounded opacity-60 md:group-hover:opacity-100 md:focus-visible:opacity-100 hover:bg-destructive/10 hover:text-destructive transition-all",
-              entry.awaitingInput ? "md:opacity-0" : "md:opacity-50",
-            )}
+            className="p-2 md:p-1 rounded opacity-60 md:opacity-50 md:group-hover:opacity-100 md:focus-visible:opacity-100 hover:bg-destructive/10 hover:text-destructive transition-all"
             onClick={(e) => {
               e.stopPropagation();
               onDelete(entry.id);
