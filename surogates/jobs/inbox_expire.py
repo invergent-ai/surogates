@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SWEEP_INTERVAL_SECONDS = 300.0
 _TERMINAL_SESSION_STATUSES = frozenset({"completed", "failed", "archived"})
+# Acknowledge-only kinds are informational — they have nothing to act on against
+# a live session, so a terminal session must not auto-expire them. They persist
+# until the operator reads or acknowledges them.
+_ACKNOWLEDGE_ONLY_KINDS = frozenset({"task_complete", "progress_checkin"})
 
 
 async def expire_inbox_items(session_store) -> int:
@@ -31,6 +35,7 @@ async def expire_inbox_items(session_store) -> int:
             .where(
                 InboxItem.status == "pending",
                 InboxItem.session_id.in_(terminal_sessions),
+                InboxItem.kind.notin_(_ACKNOWLEDGE_ONLY_KINDS),
             )
             .values(
                 status="expired",

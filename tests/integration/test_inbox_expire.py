@@ -84,6 +84,49 @@ async def test_sweeper_does_not_touch_active_sessions(
     assert item.status == "pending"
 
 
+async def test_sweeper_does_not_expire_acknowledge_only_kinds(
+    session_factory,
+    session_store,
+):
+    """task_complete / progress_checkin are acknowledge-only (informational):
+    they have nothing to act on against a live session, so terminal-session
+    expiry must not touch them, unlike input_required."""
+    session = await _create_user_session(session_factory, session_store)
+    await session_store.emit_event(
+        session.id,
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": "tc-q",
+            "questions": [{"prompt": "Continue?"}],
+            "context": "",
+        },
+    )
+    await session_store.emit_event(
+        session.id,
+        EventType.INBOX_TASK_COMPLETE,
+        {"outcome": "success", "summary": "All done."},
+    )
+    async with session_store._sf() as db:
+        await db.execute(
+            update(Session)
+            .where(Session.id == session.id)
+            .values(status="completed")
+        )
+        await db.commit()
+
+    await expire_inbox_items(session_store)
+
+    async with session_store._sf() as db:
+        rows = (
+            await db.execute(
+                select(InboxItem).where(InboxItem.session_id == session.id)
+            )
+        ).scalars().all()
+    by_kind = {r.kind: r.status for r in rows}
+    assert by_kind["input_required"] == "expired"
+    assert by_kind["task_complete"] == "pending"
+
+
 async def test_sweeper_does_not_touch_responded_items(
     session_factory,
     session_store,
