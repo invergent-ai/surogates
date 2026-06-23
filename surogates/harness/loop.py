@@ -2788,7 +2788,9 @@ class AgentHarness(
             return None
         if session.parent_id is not None or session.channel == "scheduled":
             return None
-        if session.user_id is None:
+        # Route for either principal: user sessions (agent chat) and
+        # service-account sessions (ops chats) both get the judge rescue.
+        if session.user_id is None and session.service_account_id is None:
             return None
 
         decision = await self._judge_final_response_user_action(
