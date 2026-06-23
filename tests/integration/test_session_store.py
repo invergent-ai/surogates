@@ -6,7 +6,9 @@ import asyncio
 import uuid
 
 import pytest
+from sqlalchemy import select
 
+from surogates.db.models import InboxItem
 from surogates.session.events import EventType
 from surogates.session.store import LeaseNotHeldError, SessionNotFoundError
 
@@ -904,3 +906,40 @@ async def _backdate(session_factory, session_id, *, seconds: int) -> None:
             {"s": seconds, "sid": session_id},
         )
         await db.commit()
+
+
+async def test_inbox_item_created_for_service_account_session(
+    session_store, session_factory,
+):
+    """A service-account-owned session (user_id NULL) still produces an inbox
+    item, stamped with service_account_id instead of user_id."""
+    org_id = await create_org(session_factory)
+    issued = await issue_service_account_token(session_factory, org_id)
+
+    session = await session_store.create_session(
+        user_id=None,
+        org_id=org_id,
+        agent_id="test-agent",
+        service_account_id=issued.id,
+        channel="api",
+    )
+    await session_store.emit_event(
+        session.id,
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": "tc_1",
+            "questions": [{"prompt": "Pick one", "choices": []}],
+            "context": "",
+        },
+    )
+
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                select(InboxItem).where(InboxItem.session_id == session.id)
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].service_account_id == issued.id
+    assert rows[0].user_id is None
+    assert rows[0].kind == "input_required"

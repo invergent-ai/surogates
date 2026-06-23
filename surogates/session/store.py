@@ -634,7 +634,10 @@ class SessionStore:
 
             if event_type in _INBOX_EVENTS:
                 session_row = await db.get(SessionRow, session_id)
-                if session_row is not None and session_row.user_id is not None:
+                if session_row is not None and (
+                    session_row.user_id is not None
+                    or session_row.service_account_id is not None
+                ):
                     inbox_row = build_inbox_row(
                         event_type=event_type,
                         event_data=redacted_data,
@@ -644,6 +647,7 @@ class SessionStore:
                         item = InboxItem(
                             org_id=session_row.org_id,
                             user_id=session_row.user_id,
+                            service_account_id=session_row.service_account_id,
                             session_id=session_id,
                             source_event_id=event_id,
                             kind=inbox_row.kind,
@@ -654,11 +658,14 @@ class SessionStore:
                         )
                         db.add(item)
                         await db.flush()
-                        inbox_publish = (
-                            item.id,
-                            inbox_row.kind,
-                            session_row.user_id,
-                        )
+                        # Live publish keys off the user; service-account items
+                        # (ops) surface on inbox refresh, not via the live badge.
+                        if session_row.user_id is not None:
+                            inbox_publish = (
+                                item.id,
+                                inbox_row.kind,
+                                session_row.user_id,
+                            )
 
             await db.commit()
 
