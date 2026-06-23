@@ -363,6 +363,10 @@ class InboxItem(Base):
         ),
         Index("idx_inbox_org_created", "org_id", "created_at"),
         Index("idx_inbox_session", "session_id"),
+        CheckConstraint(
+            "(user_id IS NOT NULL)::int + (service_account_id IS NOT NULL)::int = 1",
+            name="ck_inbox_items_one_principal",
+        ),
     )
 
     id: Mapped[int] = mapped_column(
