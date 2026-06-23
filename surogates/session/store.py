@@ -658,14 +658,15 @@ class SessionStore:
                         )
                         db.add(item)
                         await db.flush()
-                        # Live publish keys off the user; service-account items
-                        # (ops) surface on inbox refresh, not via the live badge.
-                        if session_row.user_id is not None:
-                            inbox_publish = (
-                                item.id,
-                                inbox_row.kind,
-                                session_row.user_id,
-                            )
+                        # Publish to the owner's inbox channel, keyed by the
+                        # session's principal (a user, or a service account for
+                        # ops chats), so the live unread badge updates for both.
+                        principal_id = (
+                            session_row.user_id
+                            or session_row.service_account_id
+                        )
+                        if principal_id is not None:
+                            inbox_publish = (item.id, inbox_row.kind, principal_id)
 
             await db.commit()
 
@@ -681,10 +682,10 @@ class SessionStore:
 
         # Notify inbox subscribers after commit so consumers can read the row.
         if inbox_publish is not None and self._redis is not None:
-            item_id, kind, user_id = inbox_publish
+            item_id, kind, principal_id = inbox_publish
             try:
                 await self._redis.publish(
-                    f"surogates:inbox:{user_id}",
+                    f"surogates:inbox:{principal_id}",
                     f"{item_id}:{kind}",
                 )
             except Exception:
