@@ -137,16 +137,16 @@ git commit -m "feat(inbox): allow service-account-owned inbox items"
 **Repo:** `surogates` (SDK source `sdk/agent-chat-react`).
 
 **Files:**
-- Modify: `sdk/agent-chat-react/src/types.ts` — add optional `needsInput?: boolean | null` to `AgentChatSessionTreeNode` (and carry it through `sessionToTreeNode` if mapped there).
-- Modify: `sdk/agent-chat-react/src/components/sessions/session-tree-panel.tsx` — in `TreeRow`, the action slot currently always-renders a faint delete button (`Trash2Icon`, ~line 309, `opacity-50 md:group-hover:opacity-100`). When `entry.needsInput` is true, render an **amber notification glyph** in that slot by default and reveal the delete button on hover instead (so no extra width is added and delete stays reachable).
+- Modify: `sdk/agent-chat-react/src/types.ts` — add optional `awaitingInput?: boolean | null` to `AgentChatSessionTreeNode` (and carry it through `sessionToTreeNode` if mapped there).
+- Modify: `sdk/agent-chat-react/src/components/sessions/session-tree-panel.tsx` — in `TreeRow`, the action slot currently always-renders a faint delete button (`Trash2Icon`, ~line 309, `opacity-50 md:group-hover:opacity-100`). When `entry.awaitingInput` is true, render an **amber notification glyph** in that slot by default and reveal the delete button on hover instead (so no extra width is added and delete stays reachable).
 - Test: `sdk/agent-chat-react/tests/session-tree-panel.test.tsx`.
 
 **Interfaces:**
-- Produces: `AgentChatSessionTreeNode.needsInput?: boolean | null`; the row shows the amber glyph when set. Web ignores it (its adapter never sets it).
+- Produces: `AgentChatSessionTreeNode.awaitingInput?: boolean | null`; the row shows the amber glyph when set. Web ignores it (its adapter never sets it).
 
-- [ ] **Step 1:** Add `needsInput?: boolean | null` to the session-tree node type; thread it through any node-mapping (`sessionToTreeNode`) as a pass-through of the adapter-provided field.
-- [ ] **Step 2: Failing test** — render `SessionTreePanel` with a node where `needsInput: true`; assert an element with the notify affordance (e.g. `aria-label="Waiting for your input"`) is present and the delete button is hidden until hover; a node without it shows the delete button as today.
-- [ ] **Step 3:** Implement the conditional render in `TreeRow`'s action slot (amber glyph when `needsInput`, hover → delete). Use amber to match ops' existing attention color.
+- [ ] **Step 1:** Add `awaitingInput?: boolean | null` to the session-tree node type; thread it through any node-mapping (`sessionToTreeNode`) as a pass-through of the adapter-provided field.
+- [ ] **Step 2: Failing test** — render `SessionTreePanel` with a node where `awaitingInput: true`; assert an element with the notify affordance (e.g. `aria-label="Waiting for your input"`) is present and the delete button is hidden until hover; a node without it shows the delete button as today.
+- [ ] **Step 3:** Implement the conditional render in `TreeRow`'s action slot (amber glyph when `awaitingInput`, hover → delete). Use amber to match ops' existing attention color.
 - [ ] **Step 4:** `npm test --prefix sdk/agent-chat-react -- session-tree-panel` (PASS); `npx tsc --noEmit` clean.
 - [ ] **Step 5: Commit** — `git commit -m "feat(agent-chat): session row can show a needs-input indicator"`.
 
@@ -159,15 +159,15 @@ git commit -m "feat(inbox): allow service-account-owned inbox items"
 **Repo:** `surogate-ops` (branch off latest `main`).
 
 **Files:**
-- Modify: `surogate_ops/core/surogates_client.py` — `list_agent_sessions` (~984): add a per-session `needs_input` boolean = "this session has a `pending` `inbox_items` row of kind `input_required`/`governance_gate`, for the operator's service account." Add a helper `count_attention_sessions(agent_id, org_id, service_account_id) -> int` (distinct sessions with such a pending item) for the agents list.
-- Modify: `surogate_ops/server/routes/sessions.py` — the sessions-list route maps `needs_input` onto each session DTO; resolve the operator's `ops-chat` service-account id (reuse `_ensure_ops_chat_service_account`, ~292) to scope it. Add/extend the agents-list route to include each agent's attention count.
+- Modify: `surogate_ops/core/surogates_client.py` — `list_agent_sessions` (~984): add a per-session `awaiting_input` boolean = "this session has a `pending` `inbox_items` row of kind `input_required`/`governance_gate`, for the operator's service account." Add a helper `count_attention_sessions(agent_id, org_id, service_account_id) -> int` (distinct sessions with such a pending item) for the agents list.
+- Modify: `surogate_ops/server/routes/sessions.py` — the sessions-list route maps `awaiting_input` onto each session DTO; resolve the operator's `ops-chat` service-account id (reuse `_ensure_ops_chat_service_account`, ~292) to scope it. Add/extend the agents-list route to include each agent's attention count.
 - Test: ops backend tests mirroring existing `surogates_client` DB tests.
 
 **Interfaces:**
 - Consumes (Task 1): `inbox_items` rows now exist for service-account sessions, with `status` and `service_account_id`.
-- Produces: session DTO gains `needs_input: bool`; agents list gains a per-agent attention count.
+- Produces: session DTO gains `awaiting_input: bool`; agents list gains a per-agent attention count.
 
-- [ ] **Step 1: Failing test** — seed a service-account session with a `pending` `input_required` inbox item; assert `list_agent_sessions(... service_account_id=<sa>)` marks that session `needs_input=True` and others `False`; assert it flips to `False` once the item is `responded`. (Mirror existing ops DB-test fixtures.)
+- [ ] **Step 1: Failing test** — seed a service-account session with a `pending` `input_required` inbox item; assert `list_agent_sessions(... service_account_id=<sa>)` marks that session `awaiting_input=True` and others `False`; assert it flips to `False` once the item is `responded`. (Mirror existing ops DB-test fixtures.)
 - [ ] **Step 2: Run, verify FAIL.**
 - [ ] **Step 3:** Implement the per-session pending lookup (LEFT JOIN / EXISTS against `inbox_items` filtered `status='pending'`, `kind IN ('input_required','governance_gate')`, `service_account_id = :sa`) and the agent attention count. Scope strictly by the operator's service account.
 - [ ] **Step 4: Run, verify PASS.**
@@ -181,11 +181,11 @@ git commit -m "feat(inbox): allow service-account-owned inbox items"
 
 **Files:**
 - Modify: the agents-list nav component (the left nav listing Copilot / Salt Agent / etc. — locate via the live "online" dot; candidates under `surogate_ops/frontend/src/features/work/`). When an agent's attention count > 0, render the count **in place of** the green "live" dot; otherwise the live dot as today.
-- Modify: `surogate_ops/frontend/src/features/work/work-navbar-agent-item.tsx` (renders `<SessionTreePanel>`) and the adapter `work-agent-chat-adapter.ts` `listSessions` mapping — pass each session's `needs_input` through to `AgentChatSessionTreeNode.needsInput` so the SDK row shows the glyph.
+- Modify: `surogate_ops/frontend/src/features/work/work-navbar-agent-item.tsx` (renders `<SessionTreePanel>`) and the adapter `work-agent-chat-adapter.ts` `listSessions` mapping — pass each session's `awaiting_input` through to `AgentChatSessionTreeNode.awaitingInput` so the SDK row shows the glyph.
 - Remove: the "Inbox" nav entry + its route/page wiring (`work-agent-inbox-page.tsx` and the nav link to it).
-- Test: ops frontend tests for the agent-count rendering and that a `needs_input` session shows the glyph.
+- Test: ops frontend tests for the agent-count rendering and that a `awaiting_input` session shows the glyph.
 
-- [ ] **Step 1:** Map `needs_input` through the ops `listSessions` adapter into `needsInput` on the tree node.
+- [ ] **Step 1:** Map `awaiting_input` through the ops `listSessions` adapter into `awaitingInput` on the tree node.
 - [ ] **Step 2:** Agents-list: count-replaces-live-dot when attention > 0 (assumption: "needs attention" implies the agent is live, so hiding the live dot loses no info — confirm while wiring).
 - [ ] **Step 3:** Remove the Inbox nav item + page.
 - [ ] **Step 4:** Run ops frontend tests + typecheck (PASS).
@@ -209,6 +209,6 @@ git commit -m "feat(inbox): allow service-account-owned inbox items"
 
 **Placeholder scan:** Tasks 3/4 reference "mirror existing ops tests" and "locate the agents-list nav component via the live dot" — the ops test harness and the exact agents-list file weren't pinned at plan time; the implementer resolves them against the current ops tree. Task 1 (and the SDK row slot at session-tree-panel.tsx ~309) are concrete.
 
-**Type consistency:** `needs_input` (backend/DTO, snake) ↔ `needsInput` (SDK `AgentChatSessionTreeNode`, camel) is the one mapping boundary, mapped in the ops adapter (Task 4 Step 1). `service_account_id: UUID` is the scoping param in Task 3, matching `InboxItem.service_account_id` from Task 1.
+**Type consistency:** `awaiting_input` (backend/DTO, snake) ↔ `awaitingInput` (SDK `AgentChatSessionTreeNode`, camel) is the one mapping boundary, mapped in the ops adapter (Task 4 Step 1). `service_account_id: UUID` is the scoping param in Task 3, matching `InboxItem.service_account_id` from Task 1.
 
 **Cross-repo sequencing:** SDK change (Task 2) is published from the surogates PR before ops (Task 4) bumps and uses it — captured in Global Constraints + Task 4 header.
