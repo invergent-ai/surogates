@@ -35,7 +35,10 @@ from surogates.db.models import (
 from surogates.harness.next_action import strip_next_action_blocks
 from surogates.harness.redact import redact_sensitive_data
 from surogates.session.events import EventType
-from surogates.session.inbox_payload import build_inbox_row
+from surogates.session.inbox_payload import (
+    ACKNOWLEDGE_ONLY_KINDS,
+    build_inbox_row,
+)
 from surogates.session.models import Event, Session, SessionLease
 
 logger = logging.getLogger(__name__)
@@ -63,11 +66,6 @@ _INBOX_EVENTS = frozenset({
     EventType.INBOX_GOVERNANCE_GATE,
     EventType.INBOX_PROGRESS_CHECKIN,
 })
-
-# Inbox-item kinds that are purely informational (acknowledge-only): redundant
-# while the operator is actively watching the session, so they are not created
-# if there's a live viewer. Kinds that need a response are always created.
-_PRESENCE_SUPPRESSED_KINDS = frozenset({"task_complete", "progress_checkin"})
 
 # Safety cap on descendants appended to a session-list page (see
 # list_sessions(include_descendants=True)).  Far above any real sidebar tree;
@@ -645,6 +643,26 @@ class SessionStore:
         counter_clause = _build_counter_update_clause(event_type, redacted_data)
         inbox_publish: tuple[int, str, UUID] | None = None
 
+        # Build the inbox row and run the presence check up front, before the
+        # DB transaction below, so the Redis NUMSUB round-trip doesn't hold a
+        # pooled DB connection open. Acknowledge-only notifications are skipped
+        # while the operator is actively watching the session (a live viewer);
+        # kinds that need a response are always created.
+        inbox_row = (
+            build_inbox_row(
+                event_type=event_type,
+                event_data=redacted_data,
+                session_id=str(session_id),
+            )
+            if event_type in _INBOX_EVENTS
+            else None
+        )
+        suppress_for_viewer = (
+            inbox_row is not None
+            and inbox_row.kind in ACKNOWLEDGE_ONLY_KINDS
+            and await self._session_has_live_viewer(session_id)
+        )
+
         async with self._sf() as db:
             db.add(row)
             await db.flush()  # assigns row.id via BIGSERIAL
@@ -656,50 +674,34 @@ class SessionStore:
                 {"id": session_id},
             )
 
-            if event_type in _INBOX_EVENTS:
+            if inbox_row is not None and not suppress_for_viewer:
                 session_row = await db.get(SessionRow, session_id)
                 if session_row is not None and (
                     session_row.user_id is not None
                     or session_row.service_account_id is not None
                 ):
-                    inbox_row = build_inbox_row(
-                        event_type=event_type,
-                        event_data=redacted_data,
-                        session_id=str(session_id),
+                    item = InboxItem(
+                        org_id=session_row.org_id,
+                        user_id=session_row.user_id,
+                        service_account_id=session_row.service_account_id,
+                        session_id=session_id,
+                        source_event_id=event_id,
+                        kind=inbox_row.kind,
+                        title=inbox_row.title,
+                        body=inbox_row.body,
+                        payload=inbox_row.payload,
+                        action_ref=inbox_row.action_ref,
                     )
-                    # Acknowledge-only notifications are redundant while the
-                    # operator is actively watching the session, so skip them
-                    # when there's a live viewer. Other kinds always land in the
-                    # inbox (they need a response).
-                    suppress_for_viewer = (
-                        inbox_row is not None
-                        and inbox_row.kind in _PRESENCE_SUPPRESSED_KINDS
-                        and await self._session_has_live_viewer(session_id)
+                    db.add(item)
+                    await db.flush()
+                    # Publish to the owner's inbox channel, keyed by the
+                    # session's principal (a user, or a service account for ops
+                    # chats), so the live unread badge updates for both. The
+                    # one-principal CHECK guarantees this is non-null.
+                    principal_id = (
+                        session_row.user_id or session_row.service_account_id
                     )
-                    if inbox_row is not None and not suppress_for_viewer:
-                        item = InboxItem(
-                            org_id=session_row.org_id,
-                            user_id=session_row.user_id,
-                            service_account_id=session_row.service_account_id,
-                            session_id=session_id,
-                            source_event_id=event_id,
-                            kind=inbox_row.kind,
-                            title=inbox_row.title,
-                            body=inbox_row.body,
-                            payload=inbox_row.payload,
-                            action_ref=inbox_row.action_ref,
-                        )
-                        db.add(item)
-                        await db.flush()
-                        # Publish to the owner's inbox channel, keyed by the
-                        # session's principal (a user, or a service account for
-                        # ops chats), so the live unread badge updates for both.
-                        principal_id = (
-                            session_row.user_id
-                            or session_row.service_account_id
-                        )
-                        if principal_id is not None:
-                            inbox_publish = (item.id, inbox_row.kind, principal_id)
+                    inbox_publish = (item.id, inbox_row.kind, principal_id)
 
             await db.commit()
 
