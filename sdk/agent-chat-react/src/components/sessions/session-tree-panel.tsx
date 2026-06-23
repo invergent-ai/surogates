@@ -94,7 +94,7 @@ function treeFingerprint(nodes: AgentChatSessionTreeNode[]): string {
           n.runKind ?? ""
         }:${n.title ?? ""}:${n.messageCount ?? 0}:${n.toolCallCount ?? 0}:${
           n.updatedAt
-        }`,
+        }:${n.awaitingInput ?? false}`,
     )
     .join("|");
 }
