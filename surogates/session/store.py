@@ -64,6 +64,11 @@ _INBOX_EVENTS = frozenset({
     EventType.INBOX_PROGRESS_CHECKIN,
 })
 
+# Inbox-item kinds that are purely informational (acknowledge-only): redundant
+# while the operator is actively watching the session, so they are not created
+# if there's a live viewer. Kinds that need a response are always created.
+_PRESENCE_SUPPRESSED_KINDS = frozenset({"task_complete", "progress_checkin"})
+
 # Safety cap on descendants appended to a session-list page (see
 # list_sessions(include_descendants=True)).  Far above any real sidebar tree;
 # guards against a pathological delegation forest (e.g. an automated loop)
@@ -188,6 +193,25 @@ class SessionStore:
         if row is None:
             raise SessionNotFoundError(f"session {session_id} not found")
         return Session.model_validate(row)
+
+    async def _session_has_live_viewer(self, session_id: UUID) -> bool:
+        """Whether a client is actively streaming this session's events.
+
+        Viewers SUBSCRIBE to ``surogates:session:{id}`` for the session-event
+        SSE, so a non-zero ``PUBSUB NUMSUB`` means someone is watching (NUMSUB
+        counts exact subscribers only, not the pattern subscribers used
+        elsewhere). Best-effort: any failure reports "no viewer" so a
+        notification is never dropped on a Redis hiccup.
+        """
+        if self._redis is None:
+            return False
+        try:
+            counts = await self._redis.pubsub_numsub(
+                f"surogates:session:{session_id}"
+            )
+            return any(count > 0 for _channel, count in counts)
+        except Exception:
+            return False
 
     async def get_agent_ids_for_sessions(
         self, session_ids: list[UUID]
@@ -643,7 +667,16 @@ class SessionStore:
                         event_data=redacted_data,
                         session_id=str(session_id),
                     )
-                    if inbox_row is not None:
+                    # Acknowledge-only notifications are redundant while the
+                    # operator is actively watching the session, so skip them
+                    # when there's a live viewer. Other kinds always land in the
+                    # inbox (they need a response).
+                    suppress_for_viewer = (
+                        inbox_row is not None
+                        and inbox_row.kind in _PRESENCE_SUPPRESSED_KINDS
+                        and await self._session_has_live_viewer(session_id)
+                    )
+                    if inbox_row is not None and not suppress_for_viewer:
                         item = InboxItem(
                             org_id=session_row.org_id,
                             user_id=session_row.user_id,
