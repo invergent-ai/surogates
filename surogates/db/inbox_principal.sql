@@ -16,3 +16,8 @@ DO $$ BEGIN
         CHECK ((user_id IS NOT NULL)::int + (service_account_id IS NOT NULL)::int = 1);
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
+
+-- Index the service-account inbox query (ops scopes by service_account_id +
+-- status, ordered by created_at), mirroring idx_inbox_user_status_created.
+CREATE INDEX IF NOT EXISTS idx_inbox_sa_status_created
+    ON inbox_items (service_account_id, status, created_at);

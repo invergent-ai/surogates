@@ -361,6 +361,13 @@ class InboxItem(Base):
             "created_at",
             postgresql_using="btree",
         ),
+        Index(
+            "idx_inbox_sa_status_created",
+            "service_account_id",
+            "status",
+            "created_at",
+            postgresql_using="btree",
+        ),
         Index("idx_inbox_org_created", "org_id", "created_at"),
         Index("idx_inbox_session", "session_id"),
         CheckConstraint(
