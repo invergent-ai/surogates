@@ -105,6 +105,24 @@ So ops behaves exactly like agent chat, not just for explicit tool calls.
 
 ---
 
+### Task 2.5: acknowledge-only items persist until read/acknowledged  ✅
+
+Stops informational items vanishing on the expiry timer; "read it" dismisses it.
+
+**Files:** `surogates/jobs/inbox_expire.py`, `tests/integration/test_inbox_expire.py`;
+`surogate-ops/frontend/.../work-agent-inbox-page.tsx`.
+
+- [x] **surogates** — the expiry sweep excludes `task_complete` / `progress_checkin`
+  (`_ACKNOWLEDGE_ONLY_KINDS`): they have nothing to act on against a live session, so a
+  terminal session no longer auto-expires them. They persist until read or acknowledged.
+  TDD: a terminal session expires its `input_required` but keeps its `task_complete`.
+- [x] **ops** — Active list hides *read* acknowledge-only items (`showsInActive`): reading a
+  `task_complete` (the existing `markInboxItemRead` on select) drops it from Active **without**
+  moving it to History — it just clears. The Acknowledge button still routes to History
+  (status `acknowledged`). Items needing a response are unaffected.
+- Skipped a frontend unit test (no existing test harness for this page; helper is a pure,
+  tsc-checked display filter) — verified live instead.
+
 ### Task 3: Verify + ship
 
 - [x] surogates inbox store tests (2/2) + ops inbox/session tests (72/72) green.
