@@ -66,6 +66,25 @@ published `@invergent/agent-chat-react` SDK (ops consumes the published build). 
 
 ---
 
+### Task 1.5: surogates — same judge-rescue for service-account sessions  ✅
+
+So ops behaves exactly like agent chat, not just for explicit tool calls.
+
+**Files:** `surogates/harness/loop.py`, `tests/test_harness_resilience.py`.
+
+- [x] **Guard** — `_maybe_route_final_response_to_inbox` gated the final-response judge rescue
+  on `if session.user_id is None: return None`, so plain-text "needs you" answers (and
+  plain-text questions the agent didn't route through `ask_user_question`) never became inbox
+  items for ops. Changed to `if session.user_id is None and session.service_account_id is None:
+  return None`. Sub-agent (`parent_id`) and `scheduled` sessions stay excluded. The only live
+  call site is the main loop; the other (`_maybe_convert_final_response_to_ask_user_question`)
+  is dead code.
+- [x] **Test** — TDD: a service-account session with a plain-text "sign in" final answer now
+  routes to `action_required` (failed before the guard change, passes after); existing
+  user-session rescue tests still pass.
+- **Cost note:** the judge LLM call now also runs on every final plain-text response for ops
+  sessions — accepted to match agent-chat behaviour.
+
 ### Task 2: surogate-ops — scope the inbox by the operator's service account  ✅
 
 **Files:** `surogate_ops/core/surogates_client.py`, `surogate_ops/server/routes/sessions.py`.
