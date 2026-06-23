@@ -116,10 +116,12 @@ Stops informational items vanishing on the expiry timer; "read it" dismisses it.
   (`_ACKNOWLEDGE_ONLY_KINDS`): they have nothing to act on against a live session, so a
   terminal session no longer auto-expires them. They persist until read or acknowledged.
   TDD: a terminal session expires its `input_required` but keeps its `task_complete`.
-- [x] **ops** — Active list hides *read* acknowledge-only items (`showsInActive`): reading a
-  `task_complete` (the existing `markInboxItemRead` on select) drops it from Active **without**
-  moving it to History — it just clears. The Acknowledge button still routes to History
-  (status `acknowledged`). Items needing a response are unaffected.
+- [x] **ops** — clicking a notification only **previews** it (it stays in Active). Opening the
+  chat from a `task_complete` / `progress_checkin` (`openChatAndDismiss`) **expires** the item
+  (SA-scoped soft-delete → `expired`), so it clears from Active and, since expired items aren't
+  listed, it isn't kept in History either. The Acknowledge button still files it to History
+  (`acknowledged`). Items needing a response (input_required / governance_gate /
+  action_required) are unaffected. (Earlier wiring dismissed on the preview click — corrected.)
 - Skipped a frontend unit test (no existing test harness for this page; helper is a pure,
   tsc-checked display filter) — verified live instead.
 
