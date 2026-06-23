@@ -128,6 +128,26 @@ Stops informational items vanishing on the expiry timer; "read it" dismisses it.
 - Skipped a frontend unit test (no existing test harness for this page; helper is a pure,
   tsc-checked display filter) — verified live instead.
 
+### Task 2.6: don't notify for a session you're actively watching  ✅
+
+The cleanest form of the acknowledge-only UX: rather than create the notification
+and dismiss it, **don't create it** if the operator is already watching the session.
+
+- [x] **surogates** — in `store.emit_event`, for `task_complete` / `progress_checkin`
+  (`_PRESENCE_SUPPRESSED_KINDS`) only, skip creating the item when the session has a **live
+  viewer**. Presence reuses the existing session-event SSE: viewers `SUBSCRIBE` to
+  `surogates:session:{id}`, so `PUBSUB NUMSUB > 0` means someone is watching
+  (`_session_has_live_viewer`, best-effort — defaults to "create" on any Redis error so a
+  notification is never dropped). Ops viewers count too: ops proxies the chat stream to the
+  same surogates `/v1/api/sessions/{id}/events` endpoint. NUMSUB counts exact subscribers
+  only, so the pattern subscribers used elsewhere don't create false positives.
+  Kinds that need a response (input_required / governance / action) are always created. TDD:
+  with a live viewer, a `task_complete` is suppressed while an `input_required` is still made.
+- [x] **ops** — removed the chat-page "dismiss on item-stream event" effect (it was the
+  while-viewing case, now handled at creation). Kept the on-open dismissal for items created
+  while you were away. Net model: **watching → never notified; away → notified, persists
+  until you open the session or acknowledge.**
+
 ### Task 3: Verify + ship
 
 - [x] surogates inbox store tests (2/2) + ops inbox/session tests (72/72) green.
