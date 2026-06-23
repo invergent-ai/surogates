@@ -124,6 +124,35 @@ describe("SessionTreePanel", () => {
     expect(container.textContent).not.toContain("completed");
   });
 
+  it("shows a needs-input indicator only on a session that is waiting", async () => {
+    const adapter = createAdapter([
+      session({ id: "s-1", title: "Waiting session", agentId: "agent-1", awaitingInput: true }),
+      session({ id: "s-2", title: "Idle session", agentId: "agent-1", awaitingInput: false }),
+    ]);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <SessionTreePanel
+          adapter={adapter}
+          agentId="agent-1"
+          loadList
+          title="Sessions"
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    const indicators = container.querySelectorAll(
+      '[aria-label="Waiting for your input"]',
+    );
+    expect(indicators.length).toBe(1);
+    expect(container.textContent).toContain("Waiting session");
+    expect(container.textContent).toContain("Idle session");
+  });
+
   it("suppresses the header row when hideHeader is set", async () => {
     const adapter = createAdapter([
       session({
