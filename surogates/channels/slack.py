@@ -46,6 +46,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.channels.base import MessageEvent, MessageType, SendResult
+from surogates.channels.channel_observations import append_channel_observation
 from surogates.channels.dedup import MessageDeduplicator
 from surogates.channels.delivery import DeliveryService
 from surogates.channels.identity import get_or_create_channel_session, resolve_identity
@@ -657,6 +658,55 @@ class SlackAdapter:
         return await self._slack_http_get(url, team_id=team_id)
 
     # ------------------------------------------------------------------
+    # Channel context-building (firehose ingestion)
+    # ------------------------------------------------------------------
+
+    def _follow_enabled_channel(self, channel_id: str) -> bool:
+        """Whether firehose ingestion is enabled for this Slack channel.
+
+        Reads an env allowlist so this adapter path is self-contained; the
+        ops settings layer replaces this body with the runtime settings-cache
+        lookup (per-channel ``mate_channel_settings.follow_enabled``).
+        """
+        import os
+
+        allow = os.environ.get("SUROGATES_MATE_FOLLOW_CHANNELS", "")
+        return channel_id in {c.strip() for c in allow.split(",") if c.strip()}
+
+    async def _ingest_channel_observation(
+        self,
+        *,
+        channel_id: str,
+        team_id: str,
+        text: str,
+        user_id: str,
+        user_name: str,
+        ts: str,
+    ) -> None:
+        """Record a non-mention channel message as a NON-WAKING observation.
+
+        Appends to Redis and deliberately does not create a session, emit a
+        session event, or enqueue the worker.
+        """
+        if not text or not text.strip():
+            return
+        await append_channel_observation(
+            self._redis,
+            agent_id=self._agent_id,
+            channel_id=channel_id,
+            observation={
+                "content": text,
+                "ts": ts,
+                "source": {
+                    "platform": "slack",
+                    "chat_id": channel_id,
+                    "user_id": user_id,
+                    "user_name": user_name,
+                },
+            },
+        )
+
+    # ------------------------------------------------------------------
     # Main message processing pipeline (12 steps from Hermes)
     # ------------------------------------------------------------------
 
@@ -739,6 +789,15 @@ class SlackAdapter:
                 should_process = reply_to_bot_thread or in_mentioned_thread or has_session
 
         if not should_process:
+            if self._follow_enabled_channel(channel_id) and not is_dm:
+                await self._ingest_channel_observation(
+                    channel_id=channel_id,
+                    team_id=team_id,
+                    text=text,
+                    user_id=user_id,
+                    user_name=await self._resolve_user_name(user_id, channel_id),
+                    ts=ts,
+                )
             return
 
         # Step 9: Strip bot mention, track mentioned threads.
