@@ -188,6 +188,28 @@ class PlatformClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def get_mate_channel_settings(
+        self, agent_id: str, platform: str, channel_id: str,
+    ) -> dict | None:
+        """Fetch effective Mate settings for a channel.
+
+        Returns the JSON dict on 200, ``None`` on 404 (no agent / treated as
+        defaults-off by the caller).  Raises :class:`PlatformAuthError` on 401
+        and ``httpx.HTTPStatusError`` on any other non-2xx -- same contract as
+        :meth:`get_channel_routing`.
+        """
+        resp = await self._client.get(
+            f"/api/mate/runtime/{agent_id}/{platform}/{channel_id}",
+        )
+        if resp.status_code == 404:
+            return None
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401) for mate settings",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
     async def mint_composio_session(
         self, agent_id: str, user_id: str,
     ) -> dict | None:
