@@ -72,3 +72,23 @@ async def test_drains_queued_observations_before_prefetch():
     assert p is not None
     assert "ci red" in p.prefetch("ci")
     assert redis.items == []
+
+
+@pytest.mark.asyncio
+async def test_follow_enabled_override_true_builds_even_without_config_flag():
+    s = _session(config={"slack_channel_id": "C123"})  # no mate_follow flag
+    p = await build_channel_provider(
+        s, storage_backend=object(), bucket="b", redis_client=_Redis(),
+        follow_enabled=True,
+    )
+    assert p is not None
+
+
+@pytest.mark.asyncio
+async def test_follow_enabled_override_false_blocks_even_with_config_flag():
+    s = _session()  # config has mate_follow=True
+    p = await build_channel_provider(
+        s, storage_backend=object(), bucket="b", redis_client=_Redis(),
+        follow_enabled=False,
+    )
+    assert p is None

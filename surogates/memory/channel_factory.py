@@ -31,9 +31,19 @@ async def build_channel_provider(
     storage_backend: Any,
     bucket: str,
     redis_client: Any,
+    follow_enabled: bool | None = None,
 ) -> ChannelMemoryProvider | None:
-    """Return a loaded ChannelMemoryProvider, or None if not applicable."""
-    if not channel_follow_enabled(session):
+    """Return a loaded ChannelMemoryProvider, or None if not applicable.
+
+    ``follow_enabled`` is the resolved per-channel setting from the ops
+    control plane; when ``None`` the local default gate is consulted.
+    """
+    enabled = (
+        follow_enabled
+        if follow_enabled is not None
+        else channel_follow_enabled(session)
+    )
+    if not enabled:
         return None
     channel_id = _channel_id_for(session)
     if not channel_id:

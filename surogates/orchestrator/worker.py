@@ -1096,11 +1096,25 @@ async def run_worker(settings: Settings) -> None:
             channel_provider = None
             try:
                 from surogates.memory.channel_factory import build_channel_provider
+
+                mate_cache = worker_state.get("mate_settings_cache")
+                follow_enabled = None
+                _cfg = getattr(session, "config", None) or {}
+                _channel_id = _cfg.get("slack_channel_id")
+                if mate_cache is not None and _channel_id:
+                    from surogates.runtime.mate_settings_cache import mate_cache_key
+                    _key = mate_cache_key(
+                        str(session.agent_id), session.channel, _channel_id,
+                    )
+                    _settings = await mate_cache.get(_key)
+                    if _settings is not None:
+                        follow_enabled = bool(_settings.get("follow_enabled"))
                 channel_provider = await build_channel_provider(
                     session,
                     storage_backend=storage_backend,
                     bucket=mem_bucket,
                     redis_client=redis_client,
+                    follow_enabled=follow_enabled,
                 )
             except Exception:
                 logger.warning("Channel memory provider setup failed", exc_info=True)
