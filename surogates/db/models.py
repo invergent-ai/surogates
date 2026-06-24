@@ -16,6 +16,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     LargeBinary,
     Numeric,
     Sequence,
@@ -32,6 +33,34 @@ from sqlalchemy.orm import (
     mapped_column,
     relationship,
 )
+from sqlalchemy.types import TypeDecorator
+
+
+class GUID(TypeDecorator):
+    """Platform-independent UUID column.
+
+    Native ``UUID`` on Postgres (prod); ``String(36)`` with ``uuid.UUID``
+    coercion on SQLite so a model using it is unit-testable in isolation
+    without a Postgres engine.  Postgres DDL/behaviour is unchanged.
+    """
+
+    impl = String(36)
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(UUID(as_uuid=True))
+        return dialect.type_descriptor(String(36))
+
+    def process_bind_param(self, value, dialect):
+        if value is None or dialect.name == "postgresql":
+            return value
+        return str(value)
+
+    def process_result_value(self, value, dialect):
+        if value is None or isinstance(value, uuid.UUID):
+            return value
+        return uuid.UUID(str(value))
 
 
 class Base(DeclarativeBase):
@@ -622,10 +651,13 @@ class AmbientScheduleRow(Base):
         Index("idx_ambient_schedules_lock", "locked_until"),
     )
 
+    # Portable Postgres types: UUID/JSONB on Postgres (prod), String/JSON on
+    # SQLite so this table is unit-testable in isolation.  The Postgres DDL is
+    # unchanged.
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        GUID(), primary_key=True, default=uuid.uuid4,
     )
-    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    org_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
     agent_id: Mapped[str] = mapped_column(Text, nullable=False)
     platform: Mapped[str] = mapped_column(Text, nullable=False)
     channel_id: Mapped[str] = mapped_column(Text, nullable=False)
@@ -633,12 +665,12 @@ class AmbientScheduleRow(Base):
     # (provenance + the slack_channel_id/team_id source for the ambient
     # session config).
     source_session_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), nullable=True
+        GUID(), nullable=True,
     )
     # The dedicated ambient session reused across ticks (created lazily by
     # the materializer; channel="ambient").
     ambient_session_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), nullable=True
+        GUID(), nullable=True,
     )
     cadence_seconds: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="1800"
@@ -654,7 +686,7 @@ class AmbientScheduleRow(Base):
         DateTime(timezone=True), nullable=True
     )
     config: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+        JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=dict,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
