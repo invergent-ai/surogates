@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 
 def _channel_id_for(session: Any) -> str | None:
+    # Both the user-facing channel session and the dedicated ambient session
+    # (channel="ambient") carry slack_channel_id, so an ambient session loads
+    # the SAME channel-memory bank and gets full channel recall.
     config = getattr(session, "config", None) or {}
     return config.get("slack_channel_id")
 

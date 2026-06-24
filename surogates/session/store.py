@@ -726,6 +726,11 @@ class SessionStore:
             if channel == "web":
                 return
 
+            # Ambient sessions reason privately; their only outbound path is
+            # the gated mate_ambient_post tool. Never auto-deliver them.
+            if channel == "ambient":
+                return
+
             # Build channel-specific destination from session config.
             destination: dict[str, Any] = {}
             if channel == "slack":
