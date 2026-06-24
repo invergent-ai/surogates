@@ -1096,19 +1096,42 @@ async def run_worker(settings: Settings) -> None:
             channel_provider = None
             try:
                 from surogates.memory.channel_factory import build_channel_provider
+                from surogates.runtime.mate_settings_cache import mate_cache_key
 
                 mate_cache = worker_state.get("mate_settings_cache")
-                follow_enabled = None
                 _cfg = getattr(session, "config", None) or {}
                 _channel_id = _cfg.get("slack_channel_id")
+                _is_ambient = session.channel == "ambient"
+                # Ambient sessions carry a slack channel_id but channel="ambient";
+                # their settings live under the "slack" platform key.
+                _platform = "slack" if _is_ambient else session.channel
+                follow_enabled = None
                 if mate_cache is not None and _channel_id:
-                    from surogates.runtime.mate_settings_cache import mate_cache_key
-                    _key = mate_cache_key(
-                        str(session.agent_id), session.channel, _channel_id,
+                    _settings = await mate_cache.get(
+                        mate_cache_key(str(session.agent_id), _platform, _channel_id),
                     )
-                    _settings = await mate_cache.get(_key)
                     if _settings is not None:
                         follow_enabled = bool(_settings.get("follow_enabled"))
+                        # On a real Slack channel wake, reconcile the channel's
+                        # ambient schedule from its settings (create/deactivate).
+                        if session.channel == "slack":
+                            from surogates.ambient.store import AmbientScheduleStore
+                            from surogates.ambient.reconcile import (
+                                reconcile_ambient_schedule,
+                            )
+                            await reconcile_ambient_schedule(
+                                AmbientScheduleStore(session_factory),
+                                settings_dict=_settings,
+                                org_id=session.org_id,
+                                agent_id=str(session.agent_id),
+                                platform="slack",
+                                channel_id=_channel_id,
+                                source_session_id=session.id,
+                                team_id=_cfg.get("slack_team_id", ""),
+                            )
+                # The dedicated ambient session always gets channel recall.
+                if _is_ambient:
+                    follow_enabled = True
                 channel_provider = await build_channel_provider(
                     session,
                     storage_backend=storage_backend,
@@ -1176,6 +1199,10 @@ async def run_worker(settings: Settings) -> None:
         if not attached_kbs:
             effective_tools.discard("kb_list_pages")
             effective_tools.discard("kb_read_page")
+        # mate_ambient_post is only meaningful inside a dedicated ambient
+        # review session; hide it from every other session.
+        if session.channel != "ambient":
+            effective_tools.discard("mate_ambient_post")
         # "Live browser support" capability: drop the browser_* tools from
         # the model-visible set when the agent has it turned off.  The
         # shared browser pool stays wired; this agent's LLM just never
