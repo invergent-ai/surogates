@@ -1074,6 +1074,25 @@ async def run_worker(settings: Settings) -> None:
             memory_store = MemoryStore(memory_dir=memory_dir)
         memory_manager = MemoryManager(memory_store)
 
+        # Channel-scoped memory: for follow-enabled channel sessions, attach
+        # an internal provider so non-mention activity builds durable context
+        # without crowding out a tenant's external memory backend.  Requires
+        # the R2 storage path (mem_bucket is defined only on that branch).
+        if memory_cache is not None:
+            channel_provider = None
+            try:
+                from surogates.memory.channel_factory import build_channel_provider
+                channel_provider = await build_channel_provider(
+                    session,
+                    storage_backend=storage_backend,
+                    bucket=mem_bucket,
+                    redis_client=redis_client,
+                )
+            except Exception:
+                logger.warning("Channel memory provider setup failed", exc_info=True)
+            if channel_provider is not None:
+                memory_manager.add_provider(channel_provider, internal=True)
+
         # Resolve the per-session file bundle once and share it
         # across the catalog load and the PromptBuilder content
         # pre-load.  ``None`` is acceptable for agents that haven't
