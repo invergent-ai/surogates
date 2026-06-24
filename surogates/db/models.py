@@ -594,6 +594,78 @@ class ScheduledSession(Base):
 
 
 # ---------------------------------------------------------------------------
+# Ambient schedules (Surogate Mate)
+# ---------------------------------------------------------------------------
+
+
+class AmbientScheduleRow(Base):
+    """One ambient-review schedule per followed channel.
+
+    Deliberately NOT reusing ``scheduled_sessions``: that table requires a
+    ``user_id XOR service_account_id`` principal, which a system-owned,
+    userless channel schedule has no natural value for.  This table reuses
+    the platform-ticker's claim/lock pattern (``locked_by`` / ``locked_until``
+    + ``SELECT FOR UPDATE SKIP LOCKED``) without the principal constraint.
+    """
+
+    __tablename__ = "ambient_schedules"
+    __table_args__ = (
+        UniqueConstraint(
+            "agent_id", "platform", "channel_id",
+            name="uq_ambient_schedules_channel",
+        ),
+        Index(
+            "idx_ambient_schedules_due",
+            "status", "next_run_at",
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index("idx_ambient_schedules_lock", "locked_until"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The shared channel session this ambient schedule was created from
+    # (provenance + the slack_channel_id/team_id source for the ambient
+    # session config).
+    source_session_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    # The dedicated ambient session reused across ticks (created lazily by
+    # the materializer; channel="ambient").
+    ambient_session_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    cadence_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1800"
+    )
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="active"
+    )
+    next_run_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    locked_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    locked_until: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    config: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        server_default=func.now(), onupdate=func.now(),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Browser Profiles
 # ---------------------------------------------------------------------------
 
