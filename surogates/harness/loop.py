@@ -2461,20 +2461,17 @@ class AgentHarness(
 
             # 9. Check if compression is needed.
             if self._compressor.should_compress(messages, system_prompt):
-                # Memory manager: extract insights before compression.
+                # Memory manager: extract insights before compression and feed
+                # them into the summary so they survive compaction.
+                pre_compress_text = ""
                 if self._memory_manager is not None:
                     try:
                         pre_compress_text = self._memory_manager.on_pre_compress(messages)
-                        if pre_compress_text:
-                            logger.debug(
-                                "Session %s: memory pre-compress extracted %d chars",
-                                session.id, len(pre_compress_text),
-                            )
                     except Exception:
                         logger.debug("Memory manager on_pre_compress failed", exc_info=True)
 
                 compressed, summary_data = await self._compressor.compress(
-                    messages, self._llm,
+                    messages, self._llm, pre_compress_guidance=pre_compress_text,
                 )
                 await self._store.emit_event(
                     session.id,
