@@ -110,6 +110,10 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "idea_tree": ToolLocation.HARNESS,
     "dispatch_experiments": ToolLocation.HARNESS,
     "merge_experiment": ToolLocation.HARNESS,
+    # Surogate Mate ambient post — handler needs the redis client, the
+    # delivery service, and the per-session ambient caps; none exist in a
+    # sandbox pod, so it runs in the worker process.
+    "mate_ambient_post": ToolLocation.HARNESS,
     # Sandbox (code execution, file mutation, need isolation)
     "terminal": ToolLocation.SANDBOX,
     "read_file": ToolLocation.SANDBOX,
