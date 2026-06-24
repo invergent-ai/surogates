@@ -285,6 +285,9 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     channel_routing_cache = build_channel_routing_cache(
         settings=settings, platform_client=client,
     )
+    mate_settings_cache = build_mate_settings_cache(
+        settings=settings, platform_client=client,
+    )
 
     app.state.platform_client = client
     app.state.runtime_config_cache = cache
@@ -294,6 +297,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     app.state.file_bundle_cache = file_bundle_cache
     app.state.memory_cache = memory_cache
     app.state.channel_routing_cache = channel_routing_cache
+    app.state.mate_settings_cache = mate_settings_cache
     app.state.system_bundle_cache = system_bundle_cache
     app.state.runtime_invalidator_task = asyncio.create_task(
         run_invalidator(
@@ -305,6 +309,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
             memory_cache=memory_cache,
             channel_routing_cache=channel_routing_cache,
             system_bundle_cache=system_bundle_cache,
+            mate_settings_cache=mate_settings_cache,
         ),
         name="surogates-runtime-invalidator",
     )
@@ -371,6 +376,23 @@ def build_channel_routing_cache(*, settings, platform_client):
         return await platform_client.get_channel_routing(kind, identifier)
 
     return ChannelRoutingCache(loader=_loader, ttl_seconds=30.0)
+
+
+def build_mate_settings_cache(*, settings, platform_client):
+    """Construct a :class:`MateSettingsCache`.
+
+    Loader splits ``"<agent_id>:<platform>:<channel_id>"`` into the three
+    :meth:`PlatformClient.get_mate_channel_settings` args.
+    """
+    from surogates.runtime import MateSettingsCache
+
+    async def _loader(key: str) -> dict | None:
+        agent_id, platform, channel_id = key.split(":", 2)
+        return await platform_client.get_mate_channel_settings(
+            agent_id, platform, channel_id,
+        )
+
+    return MateSettingsCache(loader=_loader, ttl_seconds=30.0)
 
 
 def build_file_bundle_cache(*, settings, runtime_config_cache):

@@ -494,7 +494,9 @@ def _install_worker_runtime_plumbing(state: dict, settings) -> None:
         build_memory_cache,
         build_system_bundle_cache,
     )
-    from surogates.runtime import PlatformClient, RuntimeConfigCache
+    from surogates.runtime import (
+        MateSettingsCache, PlatformClient, RuntimeConfigCache,
+    )
 
     if not settings.platform_api_url:
         raise RuntimeError(
@@ -509,8 +511,18 @@ def _install_worker_runtime_plumbing(state: dict, settings) -> None:
     runtime_config_cache = RuntimeConfigCache(
         loader=client.get_runtime_config, ttl_seconds=1.0,
     )
+
+    async def _mate_loader(key: str) -> dict | None:
+        agent_id, platform, channel_id = key.split(":", 2)
+        return await client.get_mate_channel_settings(
+            agent_id, platform, channel_id,
+        )
+
     state["platform_client"] = client
     state["runtime_config_cache"] = runtime_config_cache
+    state["mate_settings_cache"] = MateSettingsCache(
+        loader=_mate_loader, ttl_seconds=30.0,
+    )
     state["file_bundle_cache"] = build_file_bundle_cache(
         settings=settings, runtime_config_cache=runtime_config_cache,
     )
@@ -539,6 +551,7 @@ async def _shutdown_worker_runtime_plumbing(state: dict) -> None:
     state["file_bundle_cache"] = None
     state["memory_cache"] = None
     state["system_bundle_cache"] = None
+    state["mate_settings_cache"] = None
 
 
 def _start_worker_invalidator(state: dict) -> None:
@@ -565,6 +578,7 @@ def _start_worker_invalidator(state: dict) -> None:
             file_bundle_cache=state.get("file_bundle_cache"),
             memory_cache=state.get("memory_cache"),
             system_bundle_cache=state.get("system_bundle_cache"),
+            mate_settings_cache=state.get("mate_settings_cache"),
         ),
         name="surogates-worker-runtime-invalidator",
     )
