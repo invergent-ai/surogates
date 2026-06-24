@@ -29,7 +29,6 @@ import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
-from uuid import UUID
 
 try:
     from slack_bolt.async_app import AsyncApp
@@ -166,13 +165,11 @@ class SlackAdapter:
         # Approval tracking.
         self._approval_resolved: Dict[str, bool] = {}
 
-        # Bot message tracking — respond to thread replies without @mention.
-        self._bot_message_ts: set[str] = set()
-        self._BOT_TS_MAX = 5000
-
-        # Threads where bot was @mentioned — auto-respond to all subsequent.
-        self._mentioned_threads: set[str] = set()
-        self._MENTIONED_THREADS_MAX = 5000
+        # Routing + mention state (Redis-backed so it survives pod restarts
+        # and is shared across replicas): session-key map, mentioned threads,
+        # and bot-authored message timestamps.
+        from surogates.channels.slack_state import SlackAdapterState
+        self._state = SlackAdapterState(redis_client, agent_id=agent_id)
 
         # Assistant thread metadata.
         self._assistant_threads: Dict[Tuple[str, str], Dict[str, str]] = {}
@@ -185,9 +182,6 @@ class SlackAdapter:
         # Background delivery task.
         self._delivery_task: asyncio.Task | None = None
 
-        # Session key → session_id cache (lost on restart, rebuilt on @mention).
-        self._session_map: Dict[str, UUID] = {}
-        self._SESSION_MAP_MAX = 10000
         self._USER_NAME_CACHE_MAX = 5000
 
         self._running = False
@@ -352,13 +346,9 @@ class SlackAdapter:
 
         sent_ts = result.get("ts") if result else None
         if sent_ts:
-            self._bot_message_ts.add(sent_ts)
+            await self._state.mark_bot_message(sent_ts)
             if thread_ts:
-                self._bot_message_ts.add(thread_ts)
-            if len(self._bot_message_ts) > self._BOT_TS_MAX:
-                self._bot_message_ts = set(
-                    sorted(self._bot_message_ts, reverse=True)[:self._BOT_TS_MAX // 2]
-                )
+                await self._state.mark_bot_message(thread_ts)
 
         return SendResult(success=True, message_id=sent_ts)
 
@@ -467,10 +457,10 @@ class SlackAdapter:
     # Active session check
     # ------------------------------------------------------------------
 
-    def _has_active_session_for_thread(
+    async def _has_active_session_for_thread(
         self, channel_id: str, thread_ts: str, user_id: str,
     ) -> bool:
-        """Check if there's an active session for this thread."""
+        """Check if there's a known session for this thread (Redis-backed)."""
         source = SessionSource(
             platform="slack",
             chat_id=channel_id,
@@ -479,7 +469,7 @@ class SlackAdapter:
             thread_id=thread_ts,
         )
         key = build_session_key(source)
-        return key in self._session_map
+        return await self._state.get_session(key) is not None
 
     # ------------------------------------------------------------------
     # Assistant thread lifecycle
@@ -786,9 +776,9 @@ class SlackAdapter:
             elif is_mentioned:
                 should_process = True
             else:
-                reply_to_bot_thread = is_thread_reply and event_thread_ts in self._bot_message_ts
-                in_mentioned_thread = event_thread_ts in self._mentioned_threads
-                has_session = self._has_active_session_for_thread(
+                reply_to_bot_thread = is_thread_reply and await self._state.is_bot_message(event_thread_ts or "")
+                in_mentioned_thread = await self._state.is_mentioned_thread(event_thread_ts or "")
+                has_session = await self._has_active_session_for_thread(
                     channel_id, event_thread_ts or "", user_id,
                 )
                 should_process = reply_to_bot_thread or in_mentioned_thread or has_session
@@ -809,17 +799,13 @@ class SlackAdapter:
         if is_mentioned and bot_uid:
             text = text.replace(f"<@{bot_uid}>", "").strip()
             if event_thread_ts:
-                self._mentioned_threads.add(event_thread_ts)
-                if len(self._mentioned_threads) > self._MENTIONED_THREADS_MAX:
-                    self._mentioned_threads = set(
-                        list(self._mentioned_threads)[-self._MENTIONED_THREADS_MAX // 2:]
-                    )
+                await self._state.mark_mentioned_thread(event_thread_ts)
 
         if not text and not event.get("files"):
             return
 
         # Step 10: Thread context fetching.
-        if is_thread_reply and not self._has_active_session_for_thread(
+        if is_thread_reply and not await self._has_active_session_for_thread(
             channel_id, event_thread_ts or "", user_id,
         ):
             context = await self._fetch_thread_context(
@@ -903,11 +889,7 @@ class SlackAdapter:
             },
             session_factory=self._sf,
         )
-        self._session_map[session_key] = session_id
-        if len(self._session_map) > self._SESSION_MAP_MAX:
-            keys = list(self._session_map.keys())
-            for k in keys[: len(keys) // 2]:
-                self._session_map.pop(k, None)
+        await self._state.remember_session(session_key, str(session_id))
 
         should_react = is_dm or is_mentioned
         if should_react:
