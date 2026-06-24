@@ -8,6 +8,7 @@ from surogates.ambient.prompt import build_ambient_prompt
 from surogates.ambient.store import AmbientSchedule
 from surogates.ambient.tasks_probe import recent_task_changes
 from surogates.config import enqueue_session
+from surogates.session.store import SessionNotFoundError
 
 
 async def materialize_ambient_tick(
@@ -28,10 +29,24 @@ async def materialize_ambient_tick(
     """
     ambient_session_id = schedule.ambient_session_id
     if ambient_session_id is None:
+        # Inherit the source channel session's principal so the ambient
+        # session discovers the SAME toolset as a normal turn (internal +
+        # MCP + Composio, treated uniformly).  Falls back to userless when the
+        # source session is gone (then only internal builtins are available).
+        principal_user_id = None
+        principal_sa_id = None
+        if schedule.source_session_id is not None:
+            try:
+                src = await session_store.get_session(schedule.source_session_id)
+                principal_user_id = src.user_id
+                principal_sa_id = src.service_account_id
+            except SessionNotFoundError:
+                pass
         ambient_session_id = uuid4()
         await session_store.create_session(
             session_id=ambient_session_id,
-            user_id=None,
+            user_id=principal_user_id,
+            service_account_id=principal_sa_id,
             org_id=schedule.org_id,
             agent_id=schedule.agent_id,
             channel="ambient",

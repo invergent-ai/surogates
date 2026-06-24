@@ -6,6 +6,7 @@ def test_prompt_mentions_tool_and_silence():
     assert "mate_ambient_post" in p
     assert "#ops" in p
     assert "nothing" in p.lower() or "stay silent" in p.lower()
+    assert "connected tools" in p.lower()
 
 
 def test_prompt_includes_task_changes():

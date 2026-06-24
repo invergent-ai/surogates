@@ -13,8 +13,9 @@ def build_ambient_prompt(*, channel_label: str, task_changes: list[str]) -> str:
         f"[Ambient review of {channel_label}] This is an automated review, "
         "not a message from a teammate. No one is waiting on you.",
         "",
-        "Using your recalled channel memory and recent activity, decide whether "
-        "anything genuinely warrants a proactive message right now — for example:",
+        "Using your recalled channel memory, recent activity, and your connected "
+        "tools, decide whether anything genuinely warrants a proactive message "
+        "right now — for example:",
         "- a thread you're involved in went quiet with an open question,",
         "- a delegated task changed state (done / blocked) worth reporting,",
         "- something relevant surfaced that the channel should know.",

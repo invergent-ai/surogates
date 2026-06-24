@@ -6,12 +6,20 @@ from surogates.ambient.materialize import materialize_ambient_tick
 from surogates.ambient.store import AmbientSchedule
 
 
+class _Src:
+    user_id = "u-7"
+    service_account_id = None
+
+
 class FakeSessionStore:
     def __init__(self):
         self.created = []
         self.synthetic = []
-    async def create_session(self, *, session_id, user_id, org_id, agent_id, channel, model, config):
-        self.created.append((session_id, channel, config))
+    async def get_session(self, session_id):
+        return _Src()
+    async def create_session(self, *, session_id, user_id, service_account_id=None,
+                             org_id, agent_id, channel, model, config):
+        self.created.append((session_id, channel, config, user_id))
     async def emit_synthetic_user_message(self, session_id, *, content, synthetic, metadata=None):
         self.synthetic.append((session_id, content, synthetic)); return 1
 
@@ -53,6 +61,8 @@ async def test_creates_ambient_session_and_injects_prompt(monkeypatch):
         session_factory=None, settings=FakeSettings(), redis=None,
     )
     assert any(c[1] == "ambient" and c[2].get("slack_channel_id") == "C1" for c in store.created)
+    # Inherited the source session's principal (so MCP/Composio discovery runs).
+    assert store.created[0][3] == "u-7"
     assert store.synthetic and store.synthetic[0][2] == "ambient_tick"
     assert enqueued == [sid]
     assert amb.fired and amb.fired[0][1] == sid
