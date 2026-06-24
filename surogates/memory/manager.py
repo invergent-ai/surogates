@@ -90,16 +90,19 @@ class MemoryManager:
 
     # -- Registration -------------------------------------------------------
 
-    def add_provider(self, provider: MemoryProvider) -> None:
+    def add_provider(self, provider: MemoryProvider, *, internal: bool = False) -> None:
         """Register a memory provider.
 
-        Built-in provider (name ``"builtin"``) is always accepted.
-        Only **one** external (non-builtin) provider is allowed -- a second
-        attempt is rejected with a warning.
+        Built-in provider (name ``"builtin"``) is always accepted.  Internal
+        providers (``internal=True``) are always-on platform capacity (e.g.
+        channel memory) and do not count against the external limit.  Only
+        **one** external (non-builtin, non-internal) provider is allowed -- a
+        second attempt is rejected with a warning.
         """
         is_builtin = provider.name == "builtin"
+        counts_as_external = not is_builtin and not internal
 
-        if not is_builtin:
+        if counts_as_external:
             if self._has_external:
                 existing = next(
                     (p.name for p in self._providers if p.name != "builtin"), "unknown"
