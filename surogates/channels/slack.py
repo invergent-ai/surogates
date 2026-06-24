@@ -137,6 +137,7 @@ class SlackAdapter:
         session_factory: async_sessionmaker[AsyncSession],
         redis_client: Redis,
         agent_id: str,
+        mate_settings_cache: Any = None,
     ) -> None:
         self._slack_settings = slack_settings
         self._api_settings = api_settings
@@ -145,6 +146,7 @@ class SlackAdapter:
         self._sf = session_factory
         self._redis = redis_client
         self._agent_id = agent_id
+        self._mate_settings_cache = mate_settings_cache
         self._pairing = PairingStore(redis=redis_client)
 
         # Slack SDK objects.
@@ -661,17 +663,20 @@ class SlackAdapter:
     # Channel context-building (firehose ingestion)
     # ------------------------------------------------------------------
 
-    def _follow_enabled_channel(self, channel_id: str) -> bool:
+    async def _follow_enabled_channel(self, channel_id: str) -> bool:
         """Whether firehose ingestion is enabled for this Slack channel.
 
-        Reads an env allowlist so this adapter path is self-contained; the
-        ops settings layer replaces this body with the runtime settings-cache
-        lookup (per-channel ``mate_channel_settings.follow_enabled``).
+        Consults the runtime :class:`MateSettingsCache` (TTL + pub/sub
+        invalidated).  Safe default OFF when no cache is wired.
         """
-        import os
-
-        allow = os.environ.get("SUROGATES_MATE_FOLLOW_CHANNELS", "")
-        return channel_id in {c.strip() for c in allow.split(",") if c.strip()}
+        cache = getattr(self, "_mate_settings_cache", None)
+        if cache is None:
+            return False
+        from surogates.runtime.mate_settings_cache import mate_cache_key
+        settings = await cache.get(
+            mate_cache_key(self._agent_id, "slack", channel_id),
+        )
+        return bool(settings and settings.get("follow_enabled"))
 
     async def _ingest_channel_observation(
         self,
@@ -789,7 +794,7 @@ class SlackAdapter:
                 should_process = reply_to_bot_thread or in_mentioned_thread or has_session
 
         if not should_process:
-            if self._follow_enabled_channel(channel_id) and not is_dm:
+            if not is_dm and await self._follow_enabled_channel(channel_id):
                 await self._ingest_channel_observation(
                     channel_id=channel_id,
                     team_id=team_id,

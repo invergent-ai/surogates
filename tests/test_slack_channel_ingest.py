@@ -57,15 +57,25 @@ async def test_ingest_skips_empty_text(monkeypatch):
     assert redis.pushed == []
 
 
-def test_follow_gate_reads_env_allowlist(monkeypatch):
-    adapter = SlackAdapter.__new__(SlackAdapter)
-    monkeypatch.setenv("SUROGATES_MATE_FOLLOW_CHANNELS", "C1, C2")
-    assert adapter._follow_enabled_channel("C1") is True
-    assert adapter._follow_enabled_channel("C2") is True
-    assert adapter._follow_enabled_channel("C9") is False
+class _MateCache:
+    def __init__(self, mapping): self._m = mapping
+    async def get(self, key): return self._m.get(key)
 
 
-def test_follow_gate_disabled_when_unset(monkeypatch):
+@pytest.mark.asyncio
+async def test_follow_gate_true_from_cache():
     adapter = SlackAdapter.__new__(SlackAdapter)
-    monkeypatch.delenv("SUROGATES_MATE_FOLLOW_CHANNELS", raising=False)
-    assert adapter._follow_enabled_channel("C1") is False
+    adapter._agent_id = "agent-1"
+    adapter._mate_settings_cache = _MateCache(
+        {"agent-1:slack:C1": {"follow_enabled": True}},
+    )
+    assert await adapter._follow_enabled_channel("C1") is True
+    assert await adapter._follow_enabled_channel("C2") is False
+
+
+@pytest.mark.asyncio
+async def test_follow_gate_false_without_cache():
+    adapter = SlackAdapter.__new__(SlackAdapter)
+    adapter._agent_id = "agent-1"
+    adapter._mate_settings_cache = None
+    assert await adapter._follow_enabled_channel("C1") is False
