@@ -243,3 +243,21 @@ def test_pool_not_touched_for_non_agent_channels():
         mcp_pool=pool,
     )
     pool.invalidate_agent.assert_not_called()
+
+
+def test_mate_settings_changed_is_subscribed():
+    from surogates.runtime.invalidator import INVALIDATION_CHANNELS
+
+    assert "mate_settings_changed:" in INVALIDATION_CHANNELS
+
+
+def test_handler_routes_mate_settings_changed_to_mate_cache():
+    from surogates.runtime.invalidator import handle_invalidation_message
+
+    cache = MagicMock()
+    handle_invalidation_message(
+        channel="mate_settings_changed:a1:slack:C1",
+        payload=b"",
+        mate_settings_cache=cache,
+    )
+    cache.invalidate.assert_called_once_with("a1:slack:C1")
