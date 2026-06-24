@@ -81,6 +81,20 @@ class AmbientScheduleStore:
                 )
                 db.add(row)
             else:
+                # No-op reconcile is the common case (every channel wake calls
+                # ensure): skip the UPDATE entirely when nothing changed so a
+                # busy channel doesn't write to this table on every mention.
+                unchanged = (
+                    row.status == "active"
+                    and row.cadence_seconds == cadence_seconds
+                    and row.config == config
+                    and (
+                        source_session_id is None
+                        or row.source_session_id == source_session_id
+                    )
+                )
+                if unchanged:
+                    return AmbientSchedule.model_validate(row)
                 row.cadence_seconds = cadence_seconds
                 row.status = "active"
                 if source_session_id is not None:

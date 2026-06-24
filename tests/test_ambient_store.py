@@ -75,6 +75,52 @@ async def test_mark_fired_advances_and_sets_session(store):
 
 
 @pytest.mark.asyncio
+async def test_ensure_skips_write_when_unchanged(store):
+    import datetime as _dt
+    import sqlalchemy as sa
+
+    org = uuid.uuid4()
+    a = await store.ensure(
+        org_id=org, agent_id="ag", platform="slack", channel_id="C1",
+        source_session_id=None, cadence_seconds=900, config={"x": 1},
+    )
+
+    async def _updated_at():
+        async with store._sf() as db:
+            return (
+                await db.execute(
+                    sa.select(AmbientScheduleRow.updated_at)
+                    .where(AmbientScheduleRow.id == a.id)
+                )
+            ).scalar_one()
+
+    # Stamp a sentinel; a real write advances updated_at via onupdate.
+    sentinel = _dt.datetime(2000, 1, 1)
+    async with store._sf() as db:
+        await db.execute(
+            sa.update(AmbientScheduleRow)
+            .where(AmbientScheduleRow.id == a.id)
+            .values(updated_at=sentinel)
+        )
+        await db.commit()
+    base = await _updated_at()
+
+    # Identical ensure -> no write -> updated_at unchanged.
+    await store.ensure(
+        org_id=org, agent_id="ag", platform="slack", channel_id="C1",
+        source_session_id=None, cadence_seconds=900, config={"x": 1},
+    )
+    assert await _updated_at() == base
+
+    # Changed cadence -> writes -> updated_at advances.
+    await store.ensure(
+        org_id=org, agent_id="ag", platform="slack", channel_id="C1",
+        source_session_id=None, cadence_seconds=1800, config={"x": 1},
+    )
+    assert await _updated_at() != base
+
+
+@pytest.mark.asyncio
 async def test_deactivate_pauses(store):
     org = uuid.uuid4()
     sched = await store.ensure(
