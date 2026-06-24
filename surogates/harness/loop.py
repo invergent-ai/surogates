@@ -2444,6 +2444,7 @@ class AgentHarness(
                             break
                     assistant_content = assistant_message.get("content", "") or ""
                     self._memory_manager.sync_all(user_content, assistant_content)
+                    await self._memory_manager.flush_async_providers()
                 except Exception:
                     logger.debug("Memory manager sync_all failed", exc_info=True)
 

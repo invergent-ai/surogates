@@ -379,6 +379,29 @@ class MemoryManager:
                     provider.name, e,
                 )
 
+    async def flush_async_providers(self) -> None:
+        """Flush providers that expose an async flush method.
+
+        The base MemoryProvider contract is sync for compatibility, but
+        internal providers may need awaited persistence after a turn.
+        Failures are isolated so one provider never blocks the others.
+        """
+        import inspect
+
+        for provider in self._providers:
+            flush = getattr(provider, "flush", None)
+            if flush is None:
+                continue
+            try:
+                result = flush()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as e:
+                logger.debug(
+                    "Memory provider '%s' flush failed: %s",
+                    provider.name, e,
+                )
+
     def initialize_all(self, session_id: str = "", **kwargs) -> None:
         """Initialize all providers."""
         for provider in self._providers:
