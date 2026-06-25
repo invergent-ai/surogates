@@ -187,13 +187,11 @@ def _make_config(
     require_mention: bool = True,
     free_response_channels: set[str] | None = None,
     allow_bots: str = "none",
-    follow_enabled: bool = False,
 ) -> dict:
     return {
         "require_mention": require_mention,
         "free_response_channels": free_response_channels or set(),
         "allow_bots": allow_bots,
-        "follow_enabled": follow_enabled,
     }
 
 
@@ -205,6 +203,7 @@ def _make_deps(
     identity: _FakeIdentity | None = _FakeIdentity(),
     session_id: UUID = SESSION_ID,
     pairing_sender: Any = None,
+    follow_enabled: Any = None,
 ) -> PipelineDeps:
     store = _FakeSessionStore()
     store._next_session_id = session_id
@@ -270,6 +269,7 @@ def _make_deps(
         resolve_identity=resolve_id,
         session_factory=None,
         pairing_sender=pairing_sender or _default_sender,
+        follow_enabled=follow_enabled,
     )
     # Expose internals for assertions.
     deps._firehose_calls = firehose_calls  # type: ignore[attr-defined]
@@ -314,11 +314,15 @@ async def test_a_dm_is_processed():
 
 @pytest.mark.asyncio
 async def test_b_channel_non_mention_require_mention_follow_on_firehoses():
-    """(b) channel non-mention + require_mention + follow → firehose, no session/enqueue."""
+    """(b) channel non-mention + require_mention + follow resolver → firehose, no session/enqueue."""
     msg = _make_msg(is_dm=False, is_mention=False, ts="2.0", identifier="C99")
     routing = _make_routing()
-    config = _make_config(require_mention=True, follow_enabled=True)
-    deps = _make_deps()
+    config = _make_config(require_mention=True)
+
+    async def _follow_on(agent_id: str, platform: str, channel_id: str) -> bool:
+        return True
+
+    deps = _make_deps(follow_enabled=_follow_on)
 
     pipeline = ChannelInboundPipeline()
     result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
@@ -332,11 +336,15 @@ async def test_b_channel_non_mention_require_mention_follow_on_firehoses():
 
 @pytest.mark.asyncio
 async def test_b_channel_non_mention_require_mention_follow_off_drops():
-    """Non-mention + require_mention + follow off → DROPPED, no firehose."""
+    """Non-mention + require_mention + follow resolver returning False → DROPPED, no firehose."""
     msg = _make_msg(is_dm=False, is_mention=False, ts="3.0", identifier="C99")
     routing = _make_routing()
-    config = _make_config(require_mention=True, follow_enabled=False)
-    deps = _make_deps()
+    config = _make_config(require_mention=True)
+
+    async def _follow_off(agent_id: str, platform: str, channel_id: str) -> bool:
+        return False
+
+    deps = _make_deps(follow_enabled=_follow_off)
 
     pipeline = ChannelInboundPipeline()
     result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
@@ -351,16 +359,20 @@ async def test_b_channel_non_mention_require_mention_follow_off_drops():
 async def test_empty_non_mention_channel_drops_not_firehosed():
     """Empty non-mention channel msg → DROPPED, never a firehose observation.
 
-    Even with follow on, an empty body (no text, no media) must drop before
-    the firehose branch.
+    Even with follow resolver enabled, an empty body (no text, no media) must
+    drop before the firehose branch.
     """
     msg = _make_msg(
         is_dm=False, is_mention=False, ts="3.5", identifier="C99",
         text="", media_urls=[],
     )
     routing = _make_routing()
-    config = _make_config(require_mention=True, follow_enabled=True)
-    deps = _make_deps()
+    config = _make_config(require_mention=True)
+
+    async def _follow_on(agent_id: str, platform: str, channel_id: str) -> bool:
+        return True
+
+    deps = _make_deps(follow_enabled=_follow_on)
 
     pipeline = ChannelInboundPipeline()
     result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
@@ -908,3 +920,211 @@ async def test_allow_bots_all_string_processes_bot_message_regression():
     assert result == InboundOutcome.PROCESSED, (
         f"allow_bots='all' must still pass bot messages through; got {result}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Follow resolver (deps.follow_enabled) gate tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_firehose_when_follow_enabled():
+    """Non-DM, non-mention channel message → FIREHOSED when deps.follow_enabled returns True."""
+    msg = _make_msg(is_dm=False, is_mention=False, ts="200.0", identifier="C_FOLLOW")
+    routing = _make_routing()
+    config = _make_config(require_mention=True)
+
+    resolver_calls: list[tuple[str, str, str]] = []
+
+    async def _follow_resolver(agent_id: str, platform: str, channel_id: str) -> bool:
+        resolver_calls.append((agent_id, platform, channel_id))
+        return True
+
+    deps = _make_deps(follow_enabled=_follow_resolver)
+
+    pipeline = ChannelInboundPipeline()
+    result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
+
+    assert result == InboundOutcome.FIREHOSED
+    assert deps._firehose_calls, "firehose_append must be called"
+    assert not deps._sessions_created
+    assert not deps._enqueued
+    # Verify resolver received the right args.
+    assert resolver_calls == [(AGENT_ID, "slack", "C_FOLLOW")]
+    call = deps._firehose_calls[0]
+    assert call["agent_id"] == AGENT_ID
+    assert call["channel_id"] == "C_FOLLOW"
+
+
+@pytest.mark.asyncio
+async def test_dropped_when_follow_disabled():
+    """Non-DM, non-mention → DROPPED when follow resolver returns False."""
+    msg = _make_msg(is_dm=False, is_mention=False, ts="201.0", identifier="C_NOFOLLOW")
+    routing = _make_routing()
+    config = _make_config(require_mention=True)
+
+    async def _follow_resolver(agent_id: str, platform: str, channel_id: str) -> bool:
+        return False
+
+    deps = _make_deps(follow_enabled=_follow_resolver)
+
+    pipeline = ChannelInboundPipeline()
+    result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
+
+    assert result == InboundOutcome.DROPPED
+    assert not deps._firehose_calls
+    assert not deps._sessions_created
+    assert not deps._enqueued
+
+
+@pytest.mark.asyncio
+async def test_dropped_when_no_follow_resolver():
+    """Non-DM, non-mention → DROPPED when deps.follow_enabled is None (safe default)."""
+    msg = _make_msg(is_dm=False, is_mention=False, ts="202.0", identifier="C_NORESOLVER")
+    routing = _make_routing()
+    config = _make_config(require_mention=True)
+
+    # follow_enabled=None is the default in _make_deps
+    deps = _make_deps(follow_enabled=None)
+
+    pipeline = ChannelInboundPipeline()
+    result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
+
+    assert result == InboundOutcome.DROPPED
+    assert not deps._firehose_calls
+    assert not deps._sessions_created
+    assert not deps._enqueued
+
+
+@pytest.mark.asyncio
+async def test_dm_unaffected_by_follow():
+    """DMs are processed regardless of follow resolver value."""
+    msg = _make_msg(is_dm=True, ts="203.0", identifier="D_DM")
+    routing = _make_routing()
+    config = _make_config()
+
+    async def _follow_resolver(agent_id: str, platform: str, channel_id: str) -> bool:
+        # Should NOT be called for DMs — they go through the PROCESSED path.
+        raise AssertionError("follow resolver must not be called for DMs")
+
+    deps = _make_deps(follow_enabled=_follow_resolver)
+
+    pipeline = ChannelInboundPipeline()
+    result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
+
+    assert result == InboundOutcome.PROCESSED
+    assert deps._sessions_created
+    assert deps._enqueued
+
+
+@pytest.mark.asyncio
+async def test_mention_unaffected_by_follow():
+    """Mentioned messages are processed regardless of follow resolver value."""
+    msg = _make_msg(is_dm=False, is_mention=True, ts="204.0", identifier="C_MENTION")
+    routing = _make_routing()
+    config = _make_config(require_mention=True)
+
+    async def _follow_resolver(agent_id: str, platform: str, channel_id: str) -> bool:
+        raise AssertionError("follow resolver must not be called for mentions")
+
+    deps = _make_deps(follow_enabled=_follow_resolver)
+
+    pipeline = ChannelInboundPipeline()
+    result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
+
+    assert result == InboundOutcome.PROCESSED
+    assert deps._sessions_created
+    assert deps._enqueued
+
+
+# ---------------------------------------------------------------------------
+# _resolve_follow unit tests (via runner._make_deps_factory internals)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_follow_true():
+    """Mate cache returning follow_enabled=True → resolver returns True."""
+    from surogates.runtime.mate_settings_cache import MateSettingsCache, mate_cache_key
+
+    entries: dict[str, dict] = {
+        mate_cache_key("agent-1", "slack", "C_ABC"): {"follow_enabled": True},
+    }
+
+    async def _loader(key: str) -> dict | None:
+        return entries.get(key)
+
+    cache = MateSettingsCache(loader=_loader, ttl_seconds=30.0)
+
+    async def _resolve_follow(agent_id: str, platform: str, channel_id: str) -> bool:
+        if not channel_id:
+            return False
+        s = await cache.get(mate_cache_key(agent_id, platform, channel_id))
+        return bool(s and s.get("follow_enabled"))
+
+    result = await _resolve_follow("agent-1", "slack", "C_ABC")
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_follow_false_value():
+    """Mate cache returning follow_enabled=False → resolver returns False."""
+    from surogates.runtime.mate_settings_cache import MateSettingsCache, mate_cache_key
+
+    async def _loader(key: str) -> dict | None:
+        return {"follow_enabled": False}
+
+    cache = MateSettingsCache(loader=_loader, ttl_seconds=30.0)
+
+    async def _resolve_follow(agent_id: str, platform: str, channel_id: str) -> bool:
+        if not channel_id:
+            return False
+        s = await cache.get(mate_cache_key(agent_id, platform, channel_id))
+        return bool(s and s.get("follow_enabled"))
+
+    result = await _resolve_follow("agent-1", "slack", "C_XYZ")
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_follow_none():
+    """Mate cache returning None → resolver returns False."""
+    from surogates.runtime.mate_settings_cache import MateSettingsCache, mate_cache_key
+
+    async def _loader(key: str) -> dict | None:
+        return None
+
+    cache = MateSettingsCache(loader=_loader, ttl_seconds=30.0)
+
+    async def _resolve_follow(agent_id: str, platform: str, channel_id: str) -> bool:
+        if not channel_id:
+            return False
+        s = await cache.get(mate_cache_key(agent_id, platform, channel_id))
+        return bool(s and s.get("follow_enabled"))
+
+    result = await _resolve_follow("agent-1", "slack", "C_MISSING")
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_follow_empty_channel():
+    """Empty channel_id → resolver returns False without hitting the cache."""
+    from surogates.runtime.mate_settings_cache import MateSettingsCache, mate_cache_key
+
+    loader_calls: list[str] = []
+
+    async def _loader(key: str) -> dict | None:
+        loader_calls.append(key)
+        return {"follow_enabled": True}
+
+    cache = MateSettingsCache(loader=_loader, ttl_seconds=30.0)
+
+    async def _resolve_follow(agent_id: str, platform: str, channel_id: str) -> bool:
+        if not channel_id:
+            return False
+        s = await cache.get(mate_cache_key(agent_id, platform, channel_id))
+        return bool(s and s.get("follow_enabled"))
+
+    result = await _resolve_follow("agent-1", "slack", "")
+    assert result is False
+    assert not loader_calls, "loader must not be called when channel_id is empty"

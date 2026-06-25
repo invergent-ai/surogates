@@ -15,6 +15,13 @@ Design constraints:
 - Replay-stable: identical ``(platform_user_id, identifier, thread_key)``
   tuples produce the same ``session_key`` via :func:`build_session_key`
   regardless of how many times the pipeline runs.
+
+The firehose gate uses ``deps.follow_enabled`` — an async resolver
+``(agent_id, platform, channel_id) → bool`` — rather than a static config
+key.  The resolver is wired by :func:`~surogates.channels.runner.run_channels`
+using :class:`~surogates.runtime.mate_settings_cache.MateSettingsCache` so
+the "follow this channel" toggle is live without a process restart (within
+the cache TTL).
 """
 
 from __future__ import annotations
@@ -139,6 +146,10 @@ _ResolveIdentity = Callable[..., Awaitable[Any]]
 #: Callable type for the pairing sender (platform-specific prompt).
 _PairingSender = Callable[[str, str, str], Awaitable[None]]
 
+#: Callable type for the follow-enabled resolver.
+#: Args: (agent_id, platform, channel_id) → bool
+_FollowEnabled = Callable[[str, str, str], Awaitable[bool]]
+
 
 @dataclass
 class PipelineDeps:
@@ -178,6 +189,13 @@ class PipelineDeps:
     pairing_sender:
         Platform-specific coroutine ``(platform_user_id, user_name, code) →
         None`` that delivers the pairing prompt to the user.
+    follow_enabled:
+        Async resolver ``(agent_id, platform, channel_id) → bool`` that
+        returns ``True`` when the agent has enabled follow mode for this
+        channel.  When ``None``, non-mention non-DM messages are DROPPED
+        (safe default: no firehose without an explicit follow subscription).
+        Wired by :func:`~surogates.channels.runner.run_channels` via
+        :class:`~surogates.runtime.mate_settings_cache.MateSettingsCache`.
     """
 
     session_store: Any
@@ -190,6 +208,7 @@ class PipelineDeps:
     resolve_identity: _ResolveIdentity
     session_factory: Any
     pairing_sender: _PairingSender
+    follow_enabled: _FollowEnabled | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -239,8 +258,6 @@ class ChannelInboundPipeline:
             * ``free_response_channels`` (set[str]) — channel identifiers
               that bypass the mention gate.
             * ``allow_bots`` (str) — ``"none"`` / ``"mentions"`` / ``"all"``.
-            * ``follow_enabled`` (bool) — append non-mention messages as
-              channel observations instead of dropping them silently.
 
         deps:
             Injected dependencies (session store, Redis, state, pairing, …).
@@ -293,8 +310,14 @@ class ChannelInboundPipeline:
             should_process = await self._check_thread_gates(msg, routing, deps, config)
 
         if not should_process:
-            # Not gated for processing — optionally firehose.
-            if not msg.is_dm and config.get("follow_enabled", False):
+            # Not gated for processing — optionally firehose when the agent
+            # has enabled follow mode for this channel (resolved from
+            # MateSettingsCache, not from a static config key).
+            if (
+                not msg.is_dm
+                and deps.follow_enabled is not None
+                and await deps.follow_enabled(routing.agent_id, routing.platform, msg.identifier)
+            ):
                 await deps.firehose_append(
                     deps.redis,
                     agent_id=routing.agent_id,

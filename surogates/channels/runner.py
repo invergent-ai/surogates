@@ -45,6 +45,7 @@ def _make_deps_factory(
     session_store: Any,
     redis: Any,
     session_factory: Any,
+    mate_settings_cache: Any = None,
 ) -> Any:
     """Return a deps_factory for :class:`ChannelWebhookDispatcher`.
 
@@ -64,8 +65,24 @@ def _make_deps_factory(
     no-op stub — the pipeline still creates the pairing code; only the
     delivery of the prompt to the user is skipped until the platform
     implements the method.
+
+    ``follow_enabled`` resolver
+    ---------------------------
+    Built from ``mate_settings_cache`` (a
+    :class:`~surogates.runtime.mate_settings_cache.MateSettingsCache`).
+    When ``mate_settings_cache`` is ``None`` the resolver is omitted and
+    non-mention non-DM messages are always DROPPED — follow toggles propagate
+    within the cache TTL (30 s) without a process restart.
     """
+    from surogates.runtime.mate_settings_cache import mate_cache_key
+
     pairing = PairingStore(redis)
+
+    async def _resolve_follow(agent_id: str, platform: str, channel_id: str) -> bool:
+        if mate_settings_cache is None or not channel_id:
+            return False
+        s = await mate_settings_cache.get(mate_cache_key(agent_id, platform, channel_id))
+        return bool(s and s.get("follow_enabled"))
 
     def _factory(kind: str, routing: Any, creds: dict, platform: Any) -> PipelineDeps:
         state = SlackAdapterState(redis, agent_id=routing.agent_id)
@@ -99,6 +116,7 @@ def _make_deps_factory(
             resolve_identity=resolve_identity,
             session_factory=session_factory,
             pairing_sender=_pairing_sender,
+            follow_enabled=_resolve_follow,
         )
 
     return _factory
@@ -114,6 +132,7 @@ def build_channels_app(
     cache: Any,
     delivery_service: Any,
     session_store: Any,
+    mate_settings_cache: Any = None,
     registry: ChannelRegistry | None = None,
 ) -> tuple[FastAPI, ChannelDeliveryDispatcher, ChannelWebhookReconciler]:
     """Construct the channel webhook FastAPI app and related dispatchers.
@@ -140,6 +159,11 @@ def build_channels_app(
         dispatcher.
     session_store:
         :class:`~surogates.session.store.SessionStore`.
+    mate_settings_cache:
+        :class:`~surogates.runtime.mate_settings_cache.MateSettingsCache` used
+        to resolve per-channel follow settings for the firehose gate.  When
+        ``None`` (e.g. in tests that don't need follow), non-mention non-DM
+        messages are always DROPPED.
     registry:
         Optional :class:`ChannelRegistry` override (defaults to the
         module-level singleton).  Pass a private registry in tests to avoid
@@ -160,6 +184,7 @@ def build_channels_app(
         session_store=session_store,
         redis=redis,
         session_factory=session_factory,
+        mate_settings_cache=mate_settings_cache,
     )
 
     dispatcher = ChannelWebhookDispatcher(
@@ -221,7 +246,7 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
     from surogates.session.store import SessionStore
     from surogates.tenant.credentials import CredentialVault
 
-    from surogates.api.app import build_channel_routing_cache
+    from surogates.api.app import build_channel_routing_cache, build_mate_settings_cache
 
     # Self-register built-in platform adapters so the registry is populated
     # before we call enabled_platforms.  The import is a no-op if no
@@ -248,6 +273,7 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
         token=settings.platform_api_token,
     )
     cache = build_channel_routing_cache(settings=settings, platform_client=client)
+    mate_cache = build_mate_settings_cache(settings=settings, platform_client=client)
 
     delivery_service = DeliveryService(session_factory=sf, redis_client=redis)
 
@@ -260,7 +286,10 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
         cache=cache,
         delivery_service=delivery_service,
         session_store=session_store,
+        mate_settings_cache=mate_cache,
     )
+    # Follow toggles propagate within the mate_settings_cache TTL (30 s)
+    # without a process restart; no separate invalidator loop is needed here.
 
     # Determine which platforms to run delivery loops for.
     from surogates.channels.registry import registry as _registry
