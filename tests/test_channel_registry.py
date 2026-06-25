@@ -68,7 +68,7 @@ class _FakePlatform:
     def verify(self, request, body, *, creds) -> bool | VerificationResult:
         return True
 
-    def parse(self, body) -> InboundMessage | None:
+    def parse(self, body, *, creds=None) -> InboundMessage | None:
         return _make_inbound_message()
 
     async def send(self, item, *, creds) -> SendResult:

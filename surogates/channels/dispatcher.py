@@ -286,9 +286,22 @@ class ChannelWebhookDispatcher:
 
             # ----------------------------------------------------------------
             # Step 8: Parse into a normalised message.
+            #
+            # creds are forwarded as an optional keyword argument so platforms
+            # that need async credential-dependent initialisation (e.g. Slack
+            # auth.test for bot_user_id) can receive them without requiring a
+            # separate pre-flight call.  Platforms whose parse does not accept
+            # creds silently ignore the kwarg via their own signature.
+            #
+            # parse may return a coroutine (async platforms).  We await
+            # defensively — same pattern used for verify above.
             # ----------------------------------------------------------------
             try:
-                msg = platform.parse(body)
+                msg_or_coro = platform.parse(body, creds=creds)
+                if inspect.isawaitable(msg_or_coro):
+                    msg = await msg_or_coro
+                else:
+                    msg = msg_or_coro
             except Exception:
                 logger.warning(
                     "[dispatcher] parse raised on %s:%s", platform.kind, identifier,
@@ -299,6 +312,24 @@ class ChannelWebhookDispatcher:
             if msg is None:
                 # Non-message event (reaction, edit, etc.) — ack and move on.
                 return Response(status_code=200)
+
+            # ----------------------------------------------------------------
+            # Step 8b: Optional enrich hook (e.g. async user name resolution).
+            #
+            # If the platform declares an ``enrich`` method, call it with the
+            # parsed message and the resolved creds.  The enriched message
+            # replaces the original before it reaches the pipeline.
+            # ----------------------------------------------------------------
+            enrich = getattr(platform, "enrich", None)
+            if enrich is not None:
+                try:
+                    msg = await enrich(msg, creds=creds)
+                except Exception:
+                    logger.warning(
+                        "[dispatcher] enrich raised on %s:%s — using unenriched message",
+                        platform.kind, identifier,
+                        exc_info=True,
+                    )
 
             # ----------------------------------------------------------------
             # Step 9: Run inbound pipeline.

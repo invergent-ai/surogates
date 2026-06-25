@@ -104,7 +104,7 @@ class _FakePlatform:
     def verify(self, request, body, *, creds) -> bool | VerificationResult:
         return self._verify_return
 
-    def parse(self, body) -> InboundMessage | None:
+    def parse(self, body, *, creds=None) -> InboundMessage | None:
         self.parse_calls.append(body)
         return self._parse_return
 
@@ -565,7 +565,7 @@ class TestMalformedBody:
         """Verified request with valid JSON but platform.parse raises → 400."""
         platform = _FakePlatform()
 
-        def _bad_parse(body):
+        def _bad_parse(body, *, creds=None):
             raise ValueError("Cannot parse message")
 
         platform.parse = _bad_parse
@@ -654,3 +654,140 @@ class TestHandleNonMessageUpdate:
             )
         assert r.status_code == 200
         assert len(pipeline.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Enrich hook
+# ---------------------------------------------------------------------------
+
+
+class _FakePlatformWithEnrich(_FakePlatform):
+    """Platform that declares an async enrich hook."""
+
+    kind = "fake_enrich"
+
+    def route_path(self, identifier=None) -> str:
+        return "/channels/fake_enrich/{app_id}"
+
+    def __init__(self):
+        super().__init__()
+        self.enrich_calls: list[Any] = []
+        self._enriched_msg: InboundMessage | None = None
+        self._enrich_raises: bool = False
+
+    async def enrich(self, msg: InboundMessage, *, creds: dict) -> InboundMessage:
+        self.enrich_calls.append((msg, creds))
+        if self._enrich_raises:
+            raise RuntimeError("enrich blew up")
+        # Return the pre-configured enriched message, or a modified copy.
+        if self._enriched_msg is not None:
+            return self._enriched_msg
+        import dataclasses
+        return dataclasses.replace(msg, user_name="enriched_user")
+
+
+class TestEnrichHook:
+    """dispatcher calls platform.enrich when present, passes result to pipeline."""
+
+    def _make_app_with_enrich(
+        self,
+        platform: _FakePlatformWithEnrich | None = None,
+    ) -> tuple[Any, _FakePlatformWithEnrich, _FakeCache, _FakeVault, _FakePipeline]:
+        platform = platform or _FakePlatformWithEnrich()
+        cache = _FakeCache(data={
+            f"fake_enrich:{IDENTIFIER}": {
+                "org_id": ORG_ID,
+                "agent_id": AGENT_ID,
+                "config": {"require_mention": False},
+            }
+        })
+        vault = _FakeVault()
+        pipeline = _FakePipeline()
+        reg = ChannelRegistry()
+        reg.register(platform)
+        settings = _settings(enabled_kinds={"fake_enrich"})
+        dispatcher = ChannelWebhookDispatcher(
+            cache=cache,
+            vault=vault,
+            pipeline=pipeline,
+            deps_factory=_deps_factory,
+            settings=settings,
+            registry=reg,
+        )
+        app = dispatcher.build_app()
+        return app, platform, cache, vault, pipeline
+
+    async def test_enrich_is_called_when_platform_has_enrich(self):
+        """When platform.enrich exists, dispatcher calls it before pipeline."""
+        app, platform, _, _, pipeline = self._make_app_with_enrich()
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://test") as c:
+            r = await c.post(f"/channels/fake_enrich/{IDENTIFIER}", json={"text": "hi"})
+
+        assert r.status_code == 200
+        assert len(platform.enrich_calls) == 1
+
+    async def test_enriched_message_reaches_pipeline(self):
+        """pipeline.handle receives the enriched message returned by enrich."""
+        platform = _FakePlatformWithEnrich()
+        enriched = _make_msg(user_name="enriched_user")
+        platform._enriched_msg = enriched
+        app, platform, _, _, pipeline = self._make_app_with_enrich(platform=platform)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://test") as c:
+            await c.post(f"/channels/fake_enrich/{IDENTIFIER}", json={"text": "hi"})
+
+        assert len(pipeline.calls) == 1
+        assert pipeline.calls[0]["msg"].user_name == "enriched_user"
+
+    async def test_platform_without_enrich_still_works(self):
+        """A platform without enrich has its parse result forwarded directly."""
+        app, platform, _, _, pipeline = _make_app()  # uses _FakePlatform (no enrich)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://test") as c:
+            r = await c.post(KNOWN_URL, json={"text": "hi"})
+
+        assert r.status_code == 200
+        assert len(pipeline.calls) == 1
+        # Original parse_return user_name should reach pipeline unchanged.
+        assert pipeline.calls[0]["msg"].user_name == "alice"
+
+    async def test_enrich_called_with_creds(self):
+        """enrich receives the resolved creds dict."""
+        app, platform, _, vault, _ = self._make_app_with_enrich()
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://test") as c:
+            await c.post(f"/channels/fake_enrich/{IDENTIFIER}", json={"text": "hi"})
+
+        assert len(platform.enrich_calls) == 1
+        _, enrich_creds = platform.enrich_calls[0]
+        # Creds must be a dict (vault resolves them to fake-token-value).
+        assert isinstance(enrich_creds, dict)
+
+    async def test_enrich_raising_does_not_drop_message(self):
+        """An enrich that RAISES must NOT drop the message.
+
+        The dispatcher logs the error and falls through with the UNENRICHED
+        message. Guards the ``except Exception`` fall-through in the dispatcher's
+        enrich step against future refactors.
+        """
+        platform = _FakePlatformWithEnrich()
+        # parse returns the default fake message (user_name="alice").
+        platform._parse_return = _make_msg(user_name="alice")
+        platform._enrich_raises = True
+        app, platform, _, _, pipeline = self._make_app_with_enrich(platform=platform)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://test") as c:
+            r = await c.post(f"/channels/fake_enrich/{IDENTIFIER}", json={"text": "hi"})
+
+        # The request still succeeds and the pipeline runs exactly once.
+        assert r.status_code == 200
+        assert len(platform.enrich_calls) == 1
+        assert len(pipeline.calls) == 1
+        # The message reaching the pipeline is the ORIGINAL (pre-enrich) one.
+        assert pipeline.calls[0]["msg"].user_name == "alice"
