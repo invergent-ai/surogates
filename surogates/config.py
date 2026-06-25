@@ -532,11 +532,29 @@ class WebsiteSettings(BaseSettings):
 
 
 class ChannelKindSettings(BaseSettings):
-    """Per-kind enablement block inside ``ChannelsSettings``."""
+    """Per-kind enablement block inside ``ChannelsSettings``.
 
-    model_config = {"env_prefix": ""}
+    Subclassed per platform so each block carries a kind-scoped
+    ``env_prefix`` (``SUROGATES_CHANNELS_<KIND>_``).  A shared empty prefix
+    would make every kind read a single bare ``ENABLED`` env var — they would
+    all flip together, and the ``SUROGATES_CHANNELS_<KIND>_ENABLED`` keys the
+    YAML loader emits would be ignored, so no platform could be enabled via
+    config at all.
+    """
 
     enabled: bool = False
+
+
+class SlackChannelSettings(ChannelKindSettings):
+    model_config = {"env_prefix": "SUROGATES_CHANNELS_SLACK_"}
+
+
+class TelegramChannelSettings(ChannelKindSettings):
+    model_config = {"env_prefix": "SUROGATES_CHANNELS_TELEGRAM_"}
+
+
+class WebsiteChannelSettings(ChannelKindSettings):
+    model_config = {"env_prefix": "SUROGATES_CHANNELS_WEBSITE_"}
 
 
 class ChannelsSettings(BaseSettings):
@@ -567,9 +585,9 @@ class ChannelsSettings(BaseSettings):
 
     # Per-kind enablement.  Keys are platform kind slugs; presence +
     # ``enabled=True`` activates the platform.  Absent key → disabled.
-    slack: ChannelKindSettings = Field(default_factory=ChannelKindSettings)
-    telegram: ChannelKindSettings = Field(default_factory=ChannelKindSettings)
-    website: ChannelKindSettings = Field(default_factory=ChannelKindSettings)
+    slack: SlackChannelSettings = Field(default_factory=SlackChannelSettings)
+    telegram: TelegramChannelSettings = Field(default_factory=TelegramChannelSettings)
+    website: WebsiteChannelSettings = Field(default_factory=WebsiteChannelSettings)
 
     def get(self, kind: str, default: Any = None) -> Any:
         """Dict-like access so ``enabled_platforms(settings)`` works.

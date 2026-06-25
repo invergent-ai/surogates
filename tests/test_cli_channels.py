@@ -175,6 +175,73 @@ class TestChannelsSettings:
         assert isinstance(s.channels, ChannelsSettings)
 
 
+class TestChannelsSettingsEnvEnablement:
+    """Per-kind enablement is independent and reads the kind-scoped env var.
+
+    Regression: a shared ``ChannelKindSettings`` with an empty ``env_prefix``
+    read a bare ``ENABLED`` (colliding across kinds) and never saw the
+    ``SUROGATES_CHANNELS_<KIND>_ENABLED`` key produced by the YAML loader, so
+    no platform could ever be enabled via config — the channels process mounted
+    zero routes and silently delivered nothing.
+    """
+
+    def test_slack_enabled_without_telegram(self, monkeypatch):
+        monkeypatch.setenv("SUROGATES_CHANNELS_SLACK_ENABLED", "true")
+        monkeypatch.delenv("SUROGATES_CHANNELS_TELEGRAM_ENABLED", raising=False)
+        from surogates.config import ChannelsSettings
+        s = ChannelsSettings()
+        assert s.slack.enabled is True
+        assert s.telegram.enabled is False
+
+    def test_telegram_enabled_without_slack(self, monkeypatch):
+        monkeypatch.setenv("SUROGATES_CHANNELS_TELEGRAM_ENABLED", "true")
+        monkeypatch.delenv("SUROGATES_CHANNELS_SLACK_ENABLED", raising=False)
+        from surogates.config import ChannelsSettings
+        s = ChannelsSettings()
+        assert s.telegram.enabled is True
+        assert s.slack.enabled is False
+
+    def test_disabled_by_default(self, monkeypatch):
+        monkeypatch.delenv("SUROGATES_CHANNELS_SLACK_ENABLED", raising=False)
+        monkeypatch.delenv("SUROGATES_CHANNELS_TELEGRAM_ENABLED", raising=False)
+        monkeypatch.delenv("SUROGATES_CHANNELS_WEBSITE_ENABLED", raising=False)
+        from surogates.config import ChannelsSettings
+        s = ChannelsSettings()
+        assert s.slack.enabled is False
+        assert s.telegram.enabled is False
+        assert s.website.enabled is False
+
+
+class TestBuiltinPlatformRegistration:
+    """``import surogates.channels.platforms`` registers every built-in.
+
+    ``run_channels`` imports the *package* for its registration side effect and
+    then asks the registry which platforms are enabled.  Tested in a fresh
+    interpreter so a submodule another test already imported can't mask an empty
+    package ``__init__`` (the regression: the package imported nothing, the
+    registry stayed empty, and the channels process mounted zero routes).
+    """
+
+    def test_package_import_registers_slack_and_telegram(self):
+        import subprocess
+        import sys
+
+        code = (
+            "import surogates.channels.platforms\n"
+            "from surogates.channels.registry import registry\n"
+            "print(sorted(registry._platforms))\n"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        kinds = out.stdout.strip()
+        assert "slack" in kinds, out.stderr
+        assert "telegram" in kinds, out.stderr
+
+
 class TestChannelsSettingsEnabledPlatforms:
     """ChannelsSettings integrates with ChannelRegistry.enabled_platforms."""
 
