@@ -1046,3 +1046,30 @@ class TestTelegramBotFiltering:
         assert result.is_bot is False, (
             f"Human message must have is_bot=False; got {result.is_bot!r}"
         )
+
+    def test_bot_message_with_empty_bot_username_returns_none(self):
+        """from.is_bot=True, bot_username='' (resolution failed) → None (loop safety)."""
+        update = _bot_message(bot_username_in_from="other_bot", text="hi from bot")
+        result = parse(update, bot_username="")
+        assert result is None, (
+            "When bot_username is empty (resolution failed), all bot messages must be dropped; "
+            f"got {result!r}"
+        )
+
+    def test_own_bot_message_case_insensitive_returns_none(self):
+        """Own bot's username matched case-insensitively → None."""
+        update = _own_bot_message(bot_username_in_from="My_Test_Bot")
+        result = parse(update, bot_username="@my_test_bot")
+        assert result is None, (
+            "Own bot's message (case-insensitive username match) must return None; "
+            f"got {result!r}"
+        )
+
+    def test_bot_message_different_bot_empty_username_unknown_own_id_returns_none(self):
+        """from.is_bot=True, sender='other_bot', bot_username='' → None (safety: drop all bots)."""
+        update = _bot_message(bot_username_in_from="other_bot", text="i am some bot")
+        result = parse(update, bot_username="")
+        assert result is None, (
+            "With empty bot_username, even a different-named bot message must be dropped; "
+            f"got {result!r}"
+        )

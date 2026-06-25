@@ -664,18 +664,23 @@ class ChannelDeliveryDispatcher:
             await self._delivery.mark_delivered(
                 item.id, provider_message_id=result.message_id
             )
-            # FIX 2: Mark the sent message (and its thread, if any) as
-            # bot-authored so the inbound pipeline's _check_thread_gates
-            # can bypass the mention gate for follow-up replies.
+            # Mark the sent message (and its thread, if any) as bot-authored.
+            # Best-effort: a Redis error here must NOT re-mark the item as failed.
             if self._redis is not None and result.message_id:
-                from surogates.channels.slack_state import SlackAdapterState
-                agent_id: str = resolved.get("agent_id", "")
-                if agent_id:
-                    state = SlackAdapterState(self._redis, agent_id=agent_id)
-                    await state.mark_bot_message(result.message_id)
-                    thread_ts: str | None = item.destination.get("thread_ts")
-                    if thread_ts:
-                        await state.mark_bot_message(thread_ts)
+                try:
+                    from surogates.channels.slack_state import SlackAdapterState
+                    agent_id: str = resolved.get("agent_id", "")
+                    if agent_id:
+                        state = SlackAdapterState(self._redis, agent_id=agent_id)
+                        await state.mark_bot_message(result.message_id)
+                        thread: str | None = item.destination.get("thread_ts") or item.destination.get("message_thread_id")
+                        if thread:
+                            await state.mark_bot_message(thread)
+                except Exception:
+                    logger.warning(
+                        "[delivery] mark_bot_message failed for outbox %d — ignoring (best-effort)",
+                        item.id,
+                    )
         else:
             error = result.error or "send failed"
             await self._delivery.mark_failed(item.id, error)

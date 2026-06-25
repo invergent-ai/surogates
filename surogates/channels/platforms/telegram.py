@@ -205,10 +205,11 @@ def _parse(body: dict, *, bot_username: str) -> InboundMessage | None:
     if sender_is_bot:
         clean_bot = bot_username.lstrip("@").lower()
         sender_username = (from_user.get("username") or "").lower()
-        if clean_bot and sender_username == clean_bot:
-            # Own bot's message — drop entirely.
+        # Loop safety: drop if (a) we can't identify our own bot username
+        # (resolution failed → empty), OR (b) this IS our own bot's message.
+        if (not clean_bot) or (sender_username == clean_bot):
             return None
-        # Another bot's message — mark is_bot=True but do NOT drop here.
+        # A different bot's message — mark is_bot=True.
         is_bot = True
 
     # ------------------------------------------------------------------

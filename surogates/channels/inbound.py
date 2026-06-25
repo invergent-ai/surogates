@@ -276,7 +276,7 @@ class ChannelInboundPipeline:
         # Human messages (is_bot=False) are always unaffected.
         # ------------------------------------------------------------------
         if msg.is_bot:
-            allow_bots: str = config.get("allow_bots", "none")
+            allow_bots: str = (config.get("allow_bots") or "none")
             if allow_bots == "none":
                 return InboundOutcome.DROPPED
             if allow_bots == "mentions" and not msg.is_mention:

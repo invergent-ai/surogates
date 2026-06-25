@@ -1476,3 +1476,55 @@ class TestSlackBotFiltering:
         assert result.is_bot is False, (
             f"Human message must have is_bot=False; got {result.is_bot!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# FIX 2 (Slack): loop-safety — empty bot_user_id must drop all bot messages
+# ---------------------------------------------------------------------------
+
+
+class TestSlackBotLoopSafety:
+    """Loop safety: when bot_user_id is empty (auth.test failed), drop ALL bot messages."""
+
+    def _bot_evt(self, user: str = "UOTHER", bot_id: str = "B999") -> dict:
+        return {
+            "type": "event_callback",
+            "api_app_id": APP_ID,
+            "event": {
+                "type": "message",
+                "user": user,
+                "bot_id": bot_id,
+                "text": "bot says something",
+                "channel": "C1",
+                "channel_type": "channel",
+                "ts": "1700000300.000001",
+            },
+        }
+
+    def test_bot_message_with_empty_bot_user_id_returns_none(self):
+        """bot_id set, bot_user_id='' (resolution failed) → None (loop safety: can't attribute, drop)."""
+        body = self._bot_evt(user="UOTHER", bot_id="B999")
+        result = parse(body, bot_user_id="")
+        assert result is None, (
+            "When bot_user_id is empty (resolution failed), all bot messages must be dropped; "
+            f"got {result!r}"
+        )
+
+    def test_bot_message_own_user_id_returns_none(self):
+        """bot_id set, user==bot_user_id → None (own bot's message)."""
+        body = self._bot_evt(user=BOT_USER_ID, bot_id="B123")
+        result = parse(body, bot_user_id=BOT_USER_ID)
+        assert result is None, (
+            f"Own bot's message (user==bot_user_id) must return None; got {result!r}"
+        )
+
+    def test_bot_message_different_bot_known_id_returns_is_bot_true(self):
+        """bot_id set, user != bot_user_id, bot_user_id known → InboundMessage(is_bot=True)."""
+        body = self._bot_evt(user="UDIFFERENT", bot_id="B123")
+        result = parse(body, bot_user_id="UOURBOT")
+        assert result is not None, (
+            "A different bot's message with known bot_user_id must pass through; got None"
+        )
+        assert result.is_bot is True, (
+            f"Different bot's message must have is_bot=True; got {result.is_bot!r}"
+        )

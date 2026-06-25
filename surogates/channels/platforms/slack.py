@@ -281,12 +281,12 @@ def parse(body: dict, *, bot_user_id: str) -> InboundMessage | None:
     subtype = event.get("subtype", "")
     user_id_raw: str = event.get("user", "")
 
-    # Own-bot message: user matches the bot's own user_id → always drop.
-    if bool(bot_user_id) and user_id_raw == bot_user_id:
-        return None
-
     is_bot: bool = False
     if bot_id or subtype == "bot_message":
+        # Loop safety: drop if (a) we can't identify our own bot id (resolution
+        # failed → empty string), OR (b) this IS our own bot's message.
+        if (not bot_user_id) or (user_id_raw == bot_user_id):
+            return None
         # Another bot's message. If there's no user field we can't route it.
         if not user_id_raw:
             return None

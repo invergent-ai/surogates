@@ -814,3 +814,97 @@ async def test_allow_bots_does_not_affect_human_messages():
     assert result == InboundOutcome.PROCESSED, (
         f"Human message must not be affected by allow_bots='none'; got {result}"
     )
+
+
+@pytest.mark.asyncio
+async def test_allow_bots_empty_string_drops_bot_message():
+    """allow_bots='' (empty string from provisioner) must behave like 'none' → DROPPED."""
+    msg = InboundMessage(
+        kind="text",
+        identifier="C_BOT_EMPTY",
+        thread_key=None,
+        platform_user_id="BOT_U2",
+        user_name="SomeBot",
+        text="hello from bot",
+        media_urls=[],
+        media_types=[],
+        is_dm=True,
+        is_mention=False,
+        ts="70.0",
+        is_bot=True,
+        source={},
+    )
+    routing = _make_routing()
+    config = _make_config(require_mention=False)
+    config["allow_bots"] = ""  # empty string — the bug condition
+    deps = _make_deps()
+
+    pipeline = ChannelInboundPipeline()
+    result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
+
+    assert result == InboundOutcome.DROPPED, (
+        f"allow_bots='' must be treated as 'none' and drop bot messages; got {result}"
+    )
+    assert not deps._sessions_created
+
+
+@pytest.mark.asyncio
+async def test_allow_bots_key_absent_drops_bot_message():
+    """No allow_bots key in config (missing key) → default 'none' → DROPPED."""
+    msg = InboundMessage(
+        kind="text",
+        identifier="C_BOT_ABSENT",
+        thread_key=None,
+        platform_user_id="BOT_U3",
+        user_name="AnotherBot",
+        text="bot chatter",
+        media_urls=[],
+        media_types=[],
+        is_dm=True,
+        is_mention=False,
+        ts="71.0",
+        is_bot=True,
+        source={},
+    )
+    routing = _make_routing()
+    config = _make_config(require_mention=False)
+    config.pop("allow_bots", None)  # ensure key is absent
+    deps = _make_deps()
+
+    pipeline = ChannelInboundPipeline()
+    result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
+
+    assert result == InboundOutcome.DROPPED, (
+        f"Missing allow_bots key must default to 'none' → DROPPED; got {result}"
+    )
+    assert not deps._sessions_created
+
+
+@pytest.mark.asyncio
+async def test_allow_bots_all_string_processes_bot_message_regression():
+    """Regression: allow_bots='all' must still pass bot messages through after the fix."""
+    msg = InboundMessage(
+        kind="text",
+        identifier="C_BOT_ALL",
+        thread_key=None,
+        platform_user_id="BOT_U4",
+        user_name="AllowedBot",
+        text="allowed bot message",
+        media_urls=[],
+        media_types=[],
+        is_dm=True,
+        is_mention=False,
+        ts="72.0",
+        is_bot=True,
+        source={},
+    )
+    routing = _make_routing()
+    config = _make_config(allow_bots="all", require_mention=False)
+    deps = _make_deps()
+
+    pipeline = ChannelInboundPipeline()
+    result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
+
+    assert result == InboundOutcome.PROCESSED, (
+        f"allow_bots='all' must still pass bot messages through; got {result}"
+    )
