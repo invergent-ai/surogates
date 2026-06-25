@@ -422,13 +422,14 @@ class TestEnqueueChannelDeliveryIncludesIdentifier:
                 pass
             async def get(self, model, pk):
                 # Return a fake session row with channel='slack' and the config.
+                # Keys match what inbound.py writes: {platform}_channel_id,
+                # {platform}_thread_key, channel_identifier.
                 from types import SimpleNamespace
                 return SimpleNamespace(
                     channel="slack",
                     config={
                         "slack_channel_id": "C123",
-                        "slack_thread_ts": "1234.5678",
-                        "slack_team_id": "T001",
+                        "slack_thread_key": "1234.5678",
                         "channel_identifier": "A_SLACK_APP",
                     },
                 )
@@ -469,3 +470,151 @@ class TestEnqueueChannelDeliveryIncludesIdentifier:
             f"channel_identifier missing from slack destination: {dest}"
         )
         assert dest["channel_identifier"] == "A_SLACK_APP"
+
+
+# ---------------------------------------------------------------------------
+# Seam tests: pipeline-written keys → store reads → send-consumable destination
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_store(channel: str, config: dict) -> "object":
+    """Return a bare SessionStore wired with a fake session row."""
+    import unittest.mock as mock
+    from surogates.session import store as store_mod
+
+    class _FakeSF:
+        def __call__(self):
+            return _FakeSF()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def get(self, model, pk):
+            from types import SimpleNamespace
+            return SimpleNamespace(channel=channel, config=config)
+
+        async def add(self, obj):
+            pass
+
+        async def commit(self):
+            pass
+
+    ss = object.__new__(store_mod.SessionStore)
+    ss._sf = _FakeSF()
+    ss._channel_cache = {}
+    return ss
+
+
+async def _capture_destination(channel: str, config: dict) -> dict:
+    """Run _enqueue_channel_delivery with the given config and return destination."""
+    import unittest.mock as mock
+    from surogates.session.events import EventType
+
+    captured: list[dict] = []
+
+    class _FakeOutboxCapture:
+        def __init__(self, **kw):
+            captured.append(dict(kw))
+
+        id = None
+
+    ss = _make_fake_store(channel, config)
+    with mock.patch("surogates.db.models.DeliveryOutbox", _FakeOutboxCapture):
+        await ss._enqueue_channel_delivery(
+            session_id=uuid4(),
+            event_id=1,
+            event_type=EventType.LLM_RESPONSE,
+            data={"message": {"content": "seam test"}},
+        )
+
+    assert len(captured) == 1, f"Expected one outbox row, got {len(captured)}"
+    return captured[0]["destination"]
+
+
+class TestDeliverySeamPipelineKeys:
+    """Seam tests: config keys written by inbound.py → destination consumed by send().
+
+    The pipeline (inbound.py ~line 347) writes:
+        {platform}_channel_id, {platform}_thread_key, channel_identifier
+
+    SlackPlatform.send reads: destination["channel_id"], destination.get("thread_ts")
+    TelegramPlatform.send reads: destination["chat_id"], destination.get("message_thread_id")
+
+    store.py _enqueue_channel_delivery must translate between the two.
+    """
+
+    async def test_slack_pipeline_keys_produce_nonempty_channel_id(self):
+        """Pipeline writes slack_channel_id → destination["channel_id"] is non-empty."""
+        config = {
+            "slack_channel_id": "C1SEAM",
+            "slack_thread_key": "123.45",
+            "channel_identifier": "A0X_SEAM",
+        }
+        dest = await _capture_destination("slack", config)
+        assert dest.get("channel_id"), (
+            f"destination['channel_id'] is empty or missing; got: {dest!r}\n"
+            "This is the seam bug: store reads 'slack_channel_id' but must map it to 'channel_id'."
+        )
+        assert dest["channel_id"] == "C1SEAM"
+
+    async def test_slack_pipeline_keys_produce_thread_ts(self):
+        """Pipeline writes slack_thread_key → destination["thread_ts"] is set."""
+        config = {
+            "slack_channel_id": "C1SEAM",
+            "slack_thread_key": "123.45",
+            "channel_identifier": "A0X_SEAM",
+        }
+        dest = await _capture_destination("slack", config)
+        assert dest.get("thread_ts") == "123.45", (
+            f"destination['thread_ts'] should be '123.45'; got: {dest.get('thread_ts')!r}\n"
+            "store must read 'slack_thread_key' (not 'slack_thread_ts')."
+        )
+
+    async def test_slack_no_stale_team_id_key(self):
+        """Pipeline never writes slack_team_id; destination must not include it."""
+        config = {
+            "slack_channel_id": "C1SEAM",
+            "slack_thread_key": "123.45",
+            "channel_identifier": "A0X_SEAM",
+        }
+        dest = await _capture_destination("slack", config)
+        # team_id is not consumed by SlackPlatform.send and was never written
+        # by the pipeline; it should not appear in the destination.
+        assert "team_id" not in dest, (
+            f"destination must not contain 'team_id' (never written by pipeline): {dest!r}"
+        )
+
+    async def test_telegram_pipeline_keys_produce_nonempty_chat_id(self):
+        """Pipeline writes telegram_channel_id → destination["chat_id"] is non-empty.
+
+        This is the CRITICAL bug: store was reading 'telegram_chat_id' but the
+        pipeline writes 'telegram_channel_id', so chat_id was always ''.
+        """
+        config = {
+            "telegram_channel_id": "-100123456789",
+            "telegram_thread_key": "42",
+            "channel_identifier": "@my_bot",
+        }
+        dest = await _capture_destination("telegram", config)
+        assert dest.get("chat_id"), (
+            f"destination['chat_id'] is empty or missing; got: {dest!r}\n"
+            "CRITICAL seam bug: store reads 'telegram_chat_id' but pipeline writes "
+            "'telegram_channel_id'."
+        )
+        assert dest["chat_id"] == "-100123456789"
+
+    async def test_telegram_pipeline_keys_produce_message_thread_id(self):
+        """Pipeline writes telegram_thread_key → destination["message_thread_id"] is set."""
+        config = {
+            "telegram_channel_id": "-100123456789",
+            "telegram_thread_key": "42",
+            "channel_identifier": "@my_bot",
+        }
+        dest = await _capture_destination("telegram", config)
+        assert dest.get("message_thread_id") == "42", (
+            f"destination['message_thread_id'] should be '42'; got: {dest.get('message_thread_id')!r}\n"
+            "store must read 'telegram_thread_key' and emit 'message_thread_id'."
+        )

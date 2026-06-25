@@ -736,20 +736,19 @@ class SessionStore:
             if channel == "slack":
                 destination = {
                     "channel_id": config.get("slack_channel_id", ""),
-                    "thread_ts": config.get("slack_thread_ts"),
-                    "team_id": config.get("slack_team_id", ""),
+                    "thread_ts": config.get("slack_thread_key"),
                     "channel_identifier": config.get("channel_identifier", ""),
                 }
             elif channel == "teams":
                 destination = {
-                    "conversation_id": config.get("teams_conversation_id", ""),
-                    "activity_id": config.get("teams_activity_id"),
+                    "conversation_id": config.get("teams_channel_id", ""),
+                    "activity_id": config.get("teams_thread_key"),
                     "channel_identifier": config.get("channel_identifier", ""),
                 }
             elif channel == "telegram":
                 destination = {
-                    "chat_id": config.get("telegram_chat_id", ""),
-                    "reply_to_message_id": config.get("telegram_reply_to"),
+                    "chat_id": config.get("telegram_channel_id", ""),
+                    "message_thread_id": config.get("telegram_thread_key"),
                     "channel_identifier": config.get("channel_identifier", ""),
                 }
             else:

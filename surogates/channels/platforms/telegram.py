@@ -431,7 +431,8 @@ class TelegramPlatform:
         ----------
         item:
             Outbox item with ``destination`` (``chat_id``, optional
-            ``reply_to_message_id``) and ``payload`` (``content``).
+            ``message_thread_id`` for Telegram forum topics) and ``payload``
+            (``content``).
         creds:
             Credential dict with ``bot_token``.
 
@@ -447,14 +448,14 @@ class TelegramPlatform:
 
         chat_id = item.destination.get("chat_id")
         text: str = item.payload.get("content", "")
-        reply_to: Any = item.destination.get("reply_to_message_id")
+        message_thread_id: Any = item.destination.get("message_thread_id")
 
         payload: dict[str, Any] = {
             "chat_id": chat_id,
             "text": text,
         }
-        if reply_to is not None:
-            payload["reply_to_message_id"] = reply_to
+        if message_thread_id is not None:
+            payload["message_thread_id"] = message_thread_id
 
         try:
             async with httpx.AsyncClient() as client:

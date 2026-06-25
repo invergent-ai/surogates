@@ -693,14 +693,14 @@ async def test_send_posts_send_message_to_correct_chat():
 
 
 @pytest.mark.asyncio
-async def test_send_includes_reply_to_message_id():
-    """send includes reply_to_message_id in the sendMessage call when present."""
+async def test_send_includes_message_thread_id():
+    """send includes message_thread_id in the sendMessage call when present (Telegram forum topics)."""
     import json as _json
 
     platform = TelegramPlatform()
     item = SimpleNamespace(
-        destination={"chat_id": 111, "reply_to_message_id": 42},
-        payload={"content": "A reply"},
+        destination={"chat_id": 111, "message_thread_id": 42},
+        payload={"content": "A thread reply"},
     )
     creds = {"bot_token": BOT_TOKEN}
     captured: dict = {}
@@ -716,7 +716,7 @@ async def test_send_includes_reply_to_message_id():
         captured["body"] = _json.loads(mock_router.calls[0].request.content)
 
     assert result.success is True
-    assert captured["body"].get("reply_to_message_id") == 42
+    assert captured["body"].get("message_thread_id") == 42
 
 
 @pytest.mark.asyncio
