@@ -659,11 +659,11 @@ def _make_dispatcher_with_redis(
 
 
 class TestMarkBotMessageAfterDelivery:
-    """FIX 2: After a successful send, mark_bot_message is called in SlackAdapterState."""
+    """FIX 2: After a successful send, mark_bot_message is called in ChannelAdapterState."""
 
     async def test_successful_send_marks_bot_message_for_message_id(self):
         """After successful delivery, state.is_bot_message(result.message_id) is True."""
-        from surogates.channels.slack_state import SlackAdapterState
+        from surogates.channels.channel_state import ChannelAdapterState
 
         fake_redis = _FakeRedis()
         agent_id = "agent-x"
@@ -685,14 +685,14 @@ class TestMarkBotMessageAfterDelivery:
         await dispatcher.deliver_batch(platform)
 
         # Check that the bot message was marked in state for that agent
-        state = SlackAdapterState(fake_redis, agent_id=agent_id)
+        state = ChannelAdapterState(fake_redis, agent_id=agent_id, platform="slack")
         assert await state.is_bot_message("sent-msg-ts-001"), (
             "After successful delivery, is_bot_message(result.message_id) must be True"
         )
 
     async def test_successful_send_marks_bot_message_for_thread_ts(self):
         """If destination has thread_ts, that thread_ts is also marked as a bot message."""
-        from surogates.channels.slack_state import SlackAdapterState
+        from surogates.channels.channel_state import ChannelAdapterState
 
         fake_redis = _FakeRedis()
         agent_id = "agent-y"
@@ -717,7 +717,7 @@ class TestMarkBotMessageAfterDelivery:
         )
         await dispatcher.deliver_batch(platform)
 
-        state = SlackAdapterState(fake_redis, agent_id=agent_id)
+        state = ChannelAdapterState(fake_redis, agent_id=agent_id, platform="slack")
         assert await state.is_bot_message("reply-msg-001"), (
             "reply message_id must be marked as bot message"
         )
@@ -727,7 +727,7 @@ class TestMarkBotMessageAfterDelivery:
 
     async def test_failed_send_does_not_mark_bot_message(self):
         """A failed send must NOT mark any bot message."""
-        from surogates.channels.slack_state import SlackAdapterState
+        from surogates.channels.channel_state import ChannelAdapterState
 
         fake_redis = _FakeRedis()
         agent_id = "agent-z"
@@ -890,7 +890,7 @@ class TestMarkBotMessageAfterDelivery:
 
     async def test_mark_bot_message_error_does_not_cause_mark_failed(self):
         """A Redis error during mark_bot_message must NOT propagate or trigger mark_failed."""
-        from surogates.channels.slack_state import SlackAdapterState
+        from surogates.channels.channel_state import ChannelAdapterState
 
         class _ErrorRedis:
             """Redis fake whose set always raises."""
@@ -930,7 +930,7 @@ class TestMarkBotMessageAfterDelivery:
 
     async def test_telegram_message_thread_id_is_marked_as_bot_message(self):
         """Telegram destination with message_thread_id → thread is marked as bot message."""
-        from surogates.channels.slack_state import SlackAdapterState
+        from surogates.channels.channel_state import ChannelAdapterState
 
         fake_redis = _FakeRedis()
         agent_id = "agent-x"
@@ -953,14 +953,14 @@ class TestMarkBotMessageAfterDelivery:
         )
         await dispatcher.deliver_batch(platform)
 
-        state = SlackAdapterState(fake_redis, agent_id=agent_id)
+        state = ChannelAdapterState(fake_redis, agent_id=agent_id, platform="slack")
         assert await state.is_bot_message("99"), (
             "message_thread_id from Telegram destination must be marked as bot message"
         )
 
     async def test_slack_thread_ts_still_marked_as_bot_message(self):
         """Regression: Slack thread_ts in destination must still be marked as bot message."""
-        from surogates.channels.slack_state import SlackAdapterState
+        from surogates.channels.channel_state import ChannelAdapterState
 
         fake_redis = _FakeRedis()
         agent_id = "agent-x"
@@ -983,7 +983,7 @@ class TestMarkBotMessageAfterDelivery:
         )
         await dispatcher.deliver_batch(platform)
 
-        state = SlackAdapterState(fake_redis, agent_id=agent_id)
+        state = ChannelAdapterState(fake_redis, agent_id=agent_id, platform="slack")
         assert await state.is_bot_message("slack-thread-001"), (
             "thread_ts from Slack destination must still be marked as bot message"
         )

@@ -89,7 +89,7 @@ class _FakeRedis:
 
 
 class _FakeState:
-    """SlackAdapterState-compatible fake (Redis-less for tests)."""
+    """ChannelAdapterState-compatible fake (Redis-less for tests)."""
 
     def __init__(self) -> None:
         self._sessions: dict[str, str] = {}
