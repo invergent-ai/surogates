@@ -157,6 +157,34 @@ class PlatformClient:
         resp.raise_for_status()
         return resp.json()["agent_id"]
 
+    async def list_channel_routings(self, kind: str) -> list[dict]:
+        """Fetch all routing records for an inbound channel kind.
+
+        Returns a list of routing dicts (each with at least
+        ``channel_identifier``, ``org_id``, ``agent_id``) on 200; returns an
+        empty list on 404 (no routings configured for this kind — a normal
+        state for a newly-deployed platform).
+
+        * :class:`PlatformAuthError` on 401 — operations problem.
+        * ``httpx.HTTPStatusError`` on any other non-2xx.
+        """
+        try:
+            resp = await self._client.get(
+                f"/api/channels/by-kind/{kind}",
+            )
+        except httpx.HTTPError as exc:
+            raise exc
+
+        if resp.status_code == 404:
+            return []
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
     async def get_channel_routing(
         self, kind: str, identifier: str,
     ) -> dict | None:

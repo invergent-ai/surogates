@@ -40,7 +40,7 @@ from surogates.channels.inbound import ChannelInboundPipeline, PipelineDeps
 from surogates.channels.registry import ChannelPlatform, ChannelRegistry, VerificationResult
 from surogates.channels.resolve import resolve_tenant
 
-__all__ = ["ChannelWebhookDispatcher", "ChannelDeliveryDispatcher"]
+__all__ = ["ChannelWebhookDispatcher", "ChannelDeliveryDispatcher", "ChannelWebhookReconciler"]
 
 logger = logging.getLogger(__name__)
 
@@ -472,3 +472,205 @@ class ChannelDeliveryDispatcher:
         else:
             error = result.error or "send failed"
             await self._delivery.mark_failed(item.id, error)
+
+
+# ---------------------------------------------------------------------------
+# Webhook self-registration reconciler
+# ---------------------------------------------------------------------------
+
+
+class ChannelWebhookReconciler:
+    """Registers (and re-registers) webhooks for ``api``-registration platforms.
+
+    On startup :meth:`register_all` is called for each enabled platform whose
+    ``descriptor.webhook_registration == "api"`` (e.g. Telegram).  Platforms
+    with ``"manual"`` registration (e.g. Slack — the operator registers the
+    URL in the developer console) are silently skipped.
+
+    :meth:`run` then subscribes to ``channel_routing_changed:<kind>:<identifier>``
+    Redis pub/sub messages and calls :meth:`handle_routing_change` for each so a
+    newly-provisioned channel's webhook is registered without a full restart.
+
+    Constructor parameters
+    ----------------------
+    platform_client:
+        ``PlatformClient`` (or compatible) with an async
+        ``list_channel_routings(kind) -> list[dict]`` method.
+    vault:
+        Credential vault with ``async resolve_ref(ref, *, org_id) -> str | None``.
+    public_url:
+        Base URL at which the channel dispatcher is reachable from the internet
+        (e.g. ``"https://channels.surogate.ai"``).  Trailing slash is stripped
+        before appending ``route_path``.
+    settings:
+        Application settings; passed to ``registry.enabled_platforms(settings)``
+        to determine which platforms are active.
+    registry:
+        :class:`~surogates.channels.registry.ChannelRegistry` to query platforms
+        from.  Defaults to the module-level singleton when not supplied.
+    """
+
+    def __init__(
+        self,
+        *,
+        platform_client: Any,
+        vault: Any,
+        public_url: str,
+        settings: Any,
+        registry: ChannelRegistry | None = None,
+    ) -> None:
+        if registry is None:
+            from surogates.channels.registry import registry as _default_registry
+            registry = _default_registry
+        self._platform_client = platform_client
+        self._vault = vault
+        self._public_url = public_url.rstrip("/")
+        self._settings = settings
+        self._registry = registry
+
+    # ------------------------------------------------------------------
+    # Core testable methods
+    # ------------------------------------------------------------------
+
+    async def register_all(self, platform: ChannelPlatform) -> None:
+        """Register webhooks for every active routing of *platform*.
+
+        Skips platforms with ``descriptor.webhook_registration != "api"``.
+        Per-identifier failures are logged and skipped — they never abort
+        the rest of the batch.
+        """
+        if platform.descriptor.webhook_registration != "api":
+            return
+
+        routings = await self._platform_client.list_channel_routings(platform.kind)
+        for routing in routings:
+            identifier: str = routing.get("channel_identifier", "")
+            if not identifier:
+                logger.warning(
+                    "[reconcile] %s routing row missing channel_identifier — skipped",
+                    platform.kind,
+                )
+                continue
+            org_id: str = routing.get("org_id", "")
+            try:
+                await self._register_one(platform, identifier, org_id)
+            except Exception:
+                logger.exception(
+                    "[reconcile] Failed to register webhook for %s:%s — skipping",
+                    platform.kind, identifier,
+                )
+
+    async def handle_routing_change(self, kind: str, identifier: str) -> None:
+        """Re-register the webhook for a single *kind*/*identifier* pair.
+
+        Looks up the platform from the registry.  Silently returns if the
+        platform is not enabled or not ``api``-registration.
+        """
+        platform = self._registry.get(kind)
+        if platform is None:
+            logger.debug(
+                "[reconcile] routing_change for unknown kind %r — no platform registered",
+                kind,
+            )
+            return
+        if platform.descriptor.webhook_registration != "api":
+            return
+
+        # Fetch the current routing row so we have the org_id for vault lookup.
+        routings = await self._platform_client.list_channel_routings(kind)
+        routing = next(
+            (r for r in routings if r.get("channel_identifier") == identifier),
+            None,
+        )
+        if routing is None:
+            logger.debug(
+                "[reconcile] routing_change for %s:%s — no routing row found (deprovisioned?)",
+                kind, identifier,
+            )
+            return
+
+        org_id: str = routing.get("org_id", "")
+        try:
+            await self._register_one(platform, identifier, org_id)
+        except Exception:
+            logger.exception(
+                "[reconcile] Failed to re-register webhook for %s:%s",
+                kind, identifier,
+            )
+
+    # ------------------------------------------------------------------
+    # Long-running pubsub loop (thin — all logic in the two methods above)
+    # ------------------------------------------------------------------
+
+    async def run(self, redis: Any) -> None:
+        """Start-up loop: register all, then subscribe to routing changes.
+
+        1. Calls :meth:`register_all` for every enabled ``api`` platform.
+        2. Subscribes to ``channel_routing_changed:<kind>:<identifier>``
+           pub/sub messages and calls :meth:`handle_routing_change` for each.
+
+        Runs until cancelled (e.g. FastAPI lifespan shutdown).
+        """
+        enabled = [
+            p for p in self._registry.enabled_platforms(self._settings)
+            if p.descriptor.webhook_registration == "api"
+        ]
+
+        for platform in enabled:
+            try:
+                await self.register_all(platform)
+            except Exception:
+                logger.exception(
+                    "[reconcile] register_all failed for %s — continuing",
+                    platform.kind,
+                )
+
+        pubsub = redis.pubsub()
+        try:
+            await pubsub.psubscribe("channel_routing_changed:*")
+            async for msg in pubsub.listen():
+                if msg.get("type") != "pmessage":
+                    continue
+                channel = msg.get("channel") or ""
+                if isinstance(channel, bytes):
+                    channel = channel.decode()
+                # channel name format: channel_routing_changed:<kind>:<identifier>
+                # Strip the fixed prefix then split on the FIRST colon only so
+                # identifiers that themselves contain colons (e.g. "telegram:@bot"
+                # isn't our case, but guarded defensively) are handled correctly.
+                suffix = channel.removeprefix("channel_routing_changed:")
+                if ":" not in suffix:
+                    continue
+                kind, identifier = suffix.split(":", 1)
+                if not kind or not identifier:
+                    continue
+                try:
+                    await self.handle_routing_change(kind, identifier)
+                except Exception:
+                    logger.exception(
+                        "[reconcile] handle_routing_change raised for %s:%s",
+                        kind, identifier,
+                    )
+        finally:
+            try:
+                await pubsub.aclose()
+            except Exception:  # noqa: BLE001 — best-effort teardown
+                pass
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    async def _register_one(
+        self, platform: ChannelPlatform, identifier: str, org_id: str,
+    ) -> None:
+        """Resolve creds and call ``platform.descriptor.register_webhook``."""
+        creds = await resolve_channel_credentials(
+            vault=self._vault,
+            kind=platform.kind,
+            identifier=identifier,
+            org_id=org_id,
+            refs=platform.descriptor.vault_refs(identifier),
+        )
+        url = self._public_url + platform.route_path(identifier)
+        await platform.descriptor.register_webhook(identifier, url, creds)
