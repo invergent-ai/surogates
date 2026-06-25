@@ -168,7 +168,7 @@ class PipelineDeps:
     state:
         Adapter state object exposing ``is_mentioned_thread``,
         ``mark_mentioned_thread``, ``get_session``, and ``remember_session``.
-        Compatible with :class:`~surogates.channels.slack_state.SlackAdapterState`.
+        Compatible with :class:`~surogates.channels.channel_state.ChannelAdapterState`.
     pairing:
         :class:`~surogates.channels.pairing.PairingStore` instance.
     firehose_append:

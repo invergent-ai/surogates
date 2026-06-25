@@ -668,10 +668,10 @@ class ChannelDeliveryDispatcher:
             # Best-effort: a Redis error here must NOT re-mark the item as failed.
             if self._redis is not None and result.message_id:
                 try:
-                    from surogates.channels.slack_state import SlackAdapterState
+                    from surogates.channels.channel_state import ChannelAdapterState
                     agent_id: str = resolved.get("agent_id", "")
                     if agent_id:
-                        state = SlackAdapterState(self._redis, agent_id=agent_id)
+                        state = ChannelAdapterState(self._redis, agent_id=agent_id, platform=platform.kind)
                         await state.mark_bot_message(result.message_id)
                         thread: str | None = item.destination.get("thread_ts") or item.destination.get("message_thread_id")
                         if thread:

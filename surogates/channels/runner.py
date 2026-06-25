@@ -32,7 +32,7 @@ from surogates.channels.identity import get_or_create_channel_session, resolve_i
 from surogates.channels.inbound import ChannelInboundPipeline, PipelineDeps
 from surogates.channels.pairing import PairingStore
 from surogates.channels.registry import ChannelRegistry
-from surogates.channels.slack_state import SlackAdapterState
+from surogates.channels.channel_state import ChannelAdapterState
 from surogates.config import enqueue_session
 
 logger = logging.getLogger(__name__)
@@ -85,7 +85,7 @@ def _make_deps_factory(
         return bool(s and s.get("follow_enabled"))
 
     def _factory(kind: str, routing: Any, creds: dict, platform: Any) -> PipelineDeps:
-        state = SlackAdapterState(redis, agent_id=routing.agent_id)
+        state = ChannelAdapterState(redis, agent_id=routing.agent_id, platform=kind)
 
         send_pairing_prompt = getattr(platform, "send_pairing_prompt", None)
 
