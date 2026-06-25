@@ -101,6 +101,26 @@ def cmd_mcp_proxy(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_channels(args: argparse.Namespace) -> None:
+    """Start the channel webhook service (inbound + delivery + reconciler)."""
+    from surogates.channels.runner import run_channels
+    from surogates.config import load_settings
+
+    settings = load_settings()
+    _configure_logging(settings.log_level)
+
+    kind: str | None = getattr(args, "kind", None)
+
+    logger = logging.getLogger("surogates.channels")
+    logger.info(
+        "Starting channel webhook service on port %d%s",
+        settings.channels.port,
+        f" (kind={kind})" if kind else "",
+    )
+
+    asyncio.run(run_channels(settings, kind=kind))
+
+
 def cmd_migrate(args: argparse.Namespace) -> None:
     """Run database migrations."""
     from surogates.config import load_settings
@@ -138,6 +158,17 @@ def build_parser() -> argparse.ArgumentParser:
     # surogate migrate
     sub.add_parser("migrate", help="Run database migrations")
 
+    # surogate channels [kind]
+    channels_parser = sub.add_parser(
+        "channels", help="Start the channel webhook service",
+    )
+    channels_parser.add_argument(
+        "kind",
+        nargs="?",
+        default=None,
+        help="Optional platform kind to restrict delivery loops (e.g. 'slack')",
+    )
+
     return parser
 
 
@@ -146,6 +177,7 @@ COMMANDS = {
     "worker": cmd_worker,
     "mcp-proxy": cmd_mcp_proxy,
     "migrate": cmd_migrate,
+    "channels": cmd_channels,
 }
 
 

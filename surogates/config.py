@@ -531,6 +531,56 @@ class WebsiteSettings(BaseSettings):
     session_message_cap: int = 0
 
 
+class ChannelKindSettings(BaseSettings):
+    """Per-kind enablement block inside ``ChannelsSettings``."""
+
+    model_config = {"env_prefix": ""}
+
+    enabled: bool = False
+
+
+class ChannelsSettings(BaseSettings):
+    """Webhook channel service configuration.
+
+    ``port`` is the HTTP port the channel webhook dispatcher listens on.
+    ``public_url`` is the externally reachable base URL used by the
+    :class:`ChannelWebhookReconciler` when registering webhooks with
+    platforms that support API-driven registration (e.g. Telegram).
+
+    Per-kind enablement is expressed as nested sub-blocks keyed by the
+    platform ``kind`` string (``"slack"``, ``"telegram"``, …).  Each
+    block needs at minimum ``enabled: bool`` which is what
+    :meth:`ChannelRegistry.enabled_platforms` checks via::
+
+        channels_config = settings.channels   # this object
+        cfg = channels_config.get(kind)       # dict.get → ChannelKindSettings
+        if cfg is not None and cfg.enabled: ...
+
+    ``ChannelsSettings`` exposes ``get(kind)`` so it can be used as a
+    dict by ``enabled_platforms`` without wrapping it in a plain dict.
+    """
+
+    model_config = {"env_prefix": "SUROGATES_CHANNELS_"}
+
+    port: int = 8001
+    public_url: str = ""
+
+    # Per-kind enablement.  Keys are platform kind slugs; presence +
+    # ``enabled=True`` activates the platform.  Absent key → disabled.
+    slack: ChannelKindSettings = Field(default_factory=ChannelKindSettings)
+    telegram: ChannelKindSettings = Field(default_factory=ChannelKindSettings)
+    website: ChannelKindSettings = Field(default_factory=ChannelKindSettings)
+
+    def get(self, kind: str, default: Any = None) -> Any:
+        """Dict-like access so ``enabled_platforms(settings)`` works.
+
+        :class:`ChannelRegistry.enabled_platforms` calls
+        ``channels_config.get(kind)`` — this allows ``settings.channels``
+        to be passed directly.
+        """
+        return getattr(self, kind, default)
+
+
 class GovernanceSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_GOVERNANCE_"}
 
@@ -614,6 +664,7 @@ class Settings(BaseSettings):
     slack: SlackSettings = Field(default_factory=SlackSettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
     website: WebsiteSettings = Field(default_factory=WebsiteSettings)
+    channels: ChannelsSettings = Field(default_factory=ChannelsSettings)
 
     # Tenant asset root.  Used by the per-session sandbox pods to mount
     # workspace volumes; the platform itself no longer reads filesystem
