@@ -25,8 +25,10 @@ Security-critical ordering for every request:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -38,7 +40,7 @@ from surogates.channels.inbound import ChannelInboundPipeline, PipelineDeps
 from surogates.channels.registry import ChannelPlatform, ChannelRegistry, VerificationResult
 from surogates.channels.resolve import resolve_tenant
 
-__all__ = ["ChannelWebhookDispatcher"]
+__all__ = ["ChannelWebhookDispatcher", "ChannelDeliveryDispatcher"]
 
 logger = logging.getLogger(__name__)
 
@@ -307,3 +309,166 @@ class ChannelWebhookDispatcher:
         # Assign a unique name so FastAPI doesn't complain about duplicate routes.
         _handler.__name__ = f"_dispatch_{platform.kind}"
         return _handler
+
+
+# ---------------------------------------------------------------------------
+# Outbound delivery dispatcher
+# ---------------------------------------------------------------------------
+
+
+class ChannelDeliveryDispatcher:
+    """Claims pending outbox items for a platform and delivers them via its API.
+
+    Constructor parameters
+    ----------------------
+    cache:
+        ChannelRoutingCache (or any object with ``async get(key) -> dict | None``).
+        Used to resolve the tenant (org_id) for each outbox item's
+        ``channel_identifier`` so credentials can be fetched from the vault.
+    vault:
+        Credential vault with ``async resolve_ref(ref, *, org_id) -> str | None``.
+    delivery_service:
+        :class:`~surogates.channels.delivery.DeliveryService` used to claim
+        batches and mark items delivered or failed.
+    """
+
+    _BATCH_LIMIT = 20
+    _SLEEP_EMPTY = 2.0
+    _SLEEP_ERROR = 5.0
+
+    def __init__(
+        self,
+        *,
+        cache: Any,
+        vault: Any,
+        delivery_service: Any,
+    ) -> None:
+        self._cache = cache
+        self._vault = vault
+        self._delivery = delivery_service
+
+    # ------------------------------------------------------------------
+    # Core batch method (testable; all per-item logic lives here)
+    # ------------------------------------------------------------------
+
+    async def deliver_batch(self, platform: ChannelPlatform) -> int:
+        """Claim and deliver one batch of pending outbox items for *platform*.
+
+        Isolation contract
+        ------------------
+        Each item is processed independently.  A failing send (either a
+        :class:`~surogates.channels.base.SendResult` with ``success=False``
+        or an unexpected exception) marks that specific item failed and
+        continues to the next — one bad item never aborts the batch.
+
+        Returns
+        -------
+        int
+            The number of items processed in this batch (claimed count,
+            regardless of success/failure).
+        """
+        worker_id = f"{platform.kind}-{os.getpid()}"
+        items = await self._delivery.claim_batch(
+            platform.kind, worker_id, limit=self._BATCH_LIMIT
+        )
+
+        for item in items:
+            try:
+                await self._deliver_item(platform, item)
+            except Exception as exc:
+                # Safety net: _deliver_item already catches per-item errors
+                # internally, but guard the outer loop too.
+                logger.exception(
+                    "[delivery] Unexpected error processing outbox %d on %s",
+                    item.id, platform.kind,
+                )
+                try:
+                    await self._delivery.mark_failed(item.id, str(exc))
+                except Exception:
+                    pass
+
+        return len(items)
+
+    # ------------------------------------------------------------------
+    # Long-running loop (thin; all logic in deliver_batch)
+    # ------------------------------------------------------------------
+
+    async def _delivery_loop(self, platform: ChannelPlatform) -> None:
+        """Repeatedly call :meth:`deliver_batch` until cancelled.
+
+        Empty batches are followed by a short sleep to avoid tight-polling
+        the database.  The CLI (a separate task) starts one loop per enabled
+        platform.
+        """
+        while True:
+            try:
+                n = await self.deliver_batch(platform)
+                if not n:
+                    await asyncio.sleep(self._SLEEP_EMPTY)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception(
+                    "[delivery] Loop error on %s — backing off %.1fs",
+                    platform.kind, self._SLEEP_ERROR,
+                )
+                await asyncio.sleep(self._SLEEP_ERROR)
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    async def _deliver_item(self, platform: ChannelPlatform, item: Any) -> None:
+        """Process a single outbox item: resolve creds and call platform.send."""
+        # 1. Extract channel identifier.
+        identifier: str = item.destination.get("channel_identifier", "")
+        if not identifier:
+            logger.warning(
+                "[delivery] Outbox %d has no channel_identifier — marking failed",
+                item.id,
+            )
+            await self._delivery.mark_failed(item.id, "missing channel_identifier")
+            return
+
+        # 2. Resolve tenant from the routing cache.
+        resolved = await resolve_tenant(self._cache, platform.kind, identifier)
+        if resolved is None:
+            logger.warning(
+                "[delivery] Outbox %d identifier %r not found in routing cache — "
+                "channel may have been deprovisioned",
+                item.id, identifier,
+            )
+            await self._delivery.mark_failed(
+                item.id, f"channel deprovisioned: {identifier}"
+            )
+            return
+
+        org_id: str = resolved["org_id"]
+
+        # 3. Resolve credentials.
+        creds = await resolve_channel_credentials(
+            vault=self._vault,
+            kind=platform.kind,
+            identifier=identifier,
+            org_id=org_id,
+            refs=platform.descriptor.vault_refs(identifier),
+        )
+
+        # 4. Send via the platform, with per-item exception isolation.
+        try:
+            result = await platform.send(item, creds=creds)
+        except Exception as exc:
+            logger.error(
+                "[delivery] platform.send raised for outbox %d (%s): %s",
+                item.id, platform.kind, exc,
+            )
+            await self._delivery.mark_failed(item.id, str(exc))
+            return
+
+        if result.success:
+            await self._delivery.mark_delivered(
+                item.id, provider_message_id=result.message_id
+            )
+        else:
+            error = result.error or "send failed"
+            await self._delivery.mark_failed(item.id, error)

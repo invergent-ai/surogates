@@ -343,6 +343,7 @@ class ChannelInboundPipeline:
             config={
                 f"{routing.platform}_channel_id": msg.identifier,
                 f"{routing.platform}_thread_key": msg.thread_key,
+                "channel_identifier": msg.identifier,
             },
             session_factory=deps.session_factory,
         )
