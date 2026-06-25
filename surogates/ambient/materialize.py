@@ -43,6 +43,7 @@ async def materialize_ambient_tick(
             except SessionNotFoundError:
                 pass
         ambient_session_id = uuid4()
+        sched_config = schedule.config or {}
         await session_store.create_session(
             session_id=ambient_session_id,
             user_id=principal_user_id,
@@ -53,9 +54,9 @@ async def materialize_ambient_tick(
             model=settings.llm.model,
             config={
                 "slack_channel_id": schedule.channel_id,
-                "slack_team_id": (schedule.config or {}).get("slack_team_id", ""),
+                "slack_team_id": sched_config.get("slack_team_id", ""),
                 "ambient": True,
-                "ambient_caps": (schedule.config or {}).get("ambient_caps", {}),
+                "ambient_caps": sched_config.get("ambient_caps", {}),
                 "ambient_source_session_id": str(schedule.source_session_id)
                 if schedule.source_session_id else "",
             },

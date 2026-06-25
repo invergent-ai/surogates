@@ -1199,10 +1199,15 @@ async def run_worker(settings: Settings) -> None:
         if not attached_kbs:
             effective_tools.discard("kb_list_pages")
             effective_tools.discard("kb_read_page")
-        # mate_ambient_post is only meaningful inside a dedicated ambient
-        # review session; hide it from every other session.
+        # The "mate" toolset (mate_ambient_post) is only meaningful inside a
+        # dedicated ambient review session; hide it from every other session
+        # (same toolset-gating mechanism as the browser/kb tools above).
         if session.channel != "ambient":
-            effective_tools.discard("mate_ambient_post")
+            effective_tools.difference_update(
+                e.name
+                for e in tool_registry.get_all()
+                if e.toolset == "mate"
+            )
         # "Live browser support" capability: drop the browser_* tools from
         # the model-visible set when the agent has it turned off.  The
         # shared browser pool stays wired; this agent's LLM just never
