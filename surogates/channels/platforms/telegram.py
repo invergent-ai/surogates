@@ -31,7 +31,11 @@ import hmac
 import logging
 from typing import Any
 
+import httpx
+
+from surogates.channels.base import SendResult
 from surogates.channels.inbound import InboundMessage
+from surogates.channels.registry import ChannelDescriptor
 
 __all__ = [
     "TelegramPlatform",
@@ -243,8 +247,63 @@ def _parse(body: dict, *, bot_username: str) -> InboundMessage | None:
 
 
 # ---------------------------------------------------------------------------
-# TelegramPlatform — ChannelPlatform implementation (stub; full strategy next)
+# Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _bot_api_url(bot_token: str, method: str) -> str:
+    """Return the full Telegram Bot API URL for *method*."""
+    return f"https://api.telegram.org/bot{bot_token}/{method}"
+
+
+# ---------------------------------------------------------------------------
+# TelegramPlatform — ChannelPlatform implementation
+# ---------------------------------------------------------------------------
+
+
+async def _register_webhook_impl(
+    identifier: str, url: str, creds: dict
+) -> None:
+    """Async implementation for :attr:`TelegramPlatform.descriptor.register_webhook`.
+
+    Calls ``setWebhook`` on the Telegram Bot API.  Raises :class:`RuntimeError`
+    when the response ``ok`` field is ``False`` so the reconciler's
+    per-identifier error isolation can log it.
+    """
+    bot_token: str = creds.get("bot_token") or ""
+    webhook_secret: str = creds.get("webhook_secret") or ""
+    api_url = _bot_api_url(bot_token, "setWebhook")
+
+    payload: dict[str, Any] = {
+        "url": url,
+        "allowed_updates": ["message", "callback_query"],
+    }
+    if webhook_secret:
+        payload["secret_token"] = webhook_secret
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(api_url, json=payload)
+
+    try:
+        data = resp.json()
+    except Exception:
+        raise RuntimeError(
+            f"TelegramPlatform.register_webhook: non-JSON response "
+            f"(status={resp.status_code}) for identifier={identifier!r}"
+        )
+
+    if not data.get("ok"):
+        description = data.get("description", "no description")
+        raise RuntimeError(
+            f"TelegramPlatform.register_webhook: setWebhook returned ok=false "
+            f"for identifier={identifier!r}: {description}"
+        )
+
+    logger.debug(
+        "TelegramPlatform: setWebhook succeeded for identifier=%r url=%r",
+        identifier,
+        url,
+    )
 
 
 class TelegramPlatform:
@@ -256,16 +315,59 @@ class TelegramPlatform:
     ``{username}`` path parameter in the webhook URL.  Credentials
     (``bot_token`` and ``webhook_secret``) are resolved by the dispatcher
     and passed to every method that requires them.
+
+    Instance caches (keyed by bot_token)
+    -------------------------------------
+    ``_bot_username_cache``:
+        ``{bot_token: username}`` — populated lazily by the first ``parse``
+        call for a given token via ``getMe``.  Mirrors :class:`SlackPlatform`'s
+        ``_bot_user_id_cache`` pattern (``auth.test`` → ``getMe``).
     """
 
     kind = "telegram"
     topology = "webhook"
 
+    descriptor = ChannelDescriptor(
+        vault_refs=lambda identifier: {
+            "bot_token": "bot_token",
+            "webhook_secret": "webhook_secret",
+        },
+        config_keys=(
+            "require_mention",
+            "free_response_chats",
+            "mention_patterns",
+            "reply_to_mode",
+            "reactions_enabled",
+            "per_user_groups",
+        ),
+        webhook_registration="api",
+        register_webhook=_register_webhook_impl,
+    )
+
+    def __init__(self) -> None:
+        # Cache keyed by bot_token → bot username (from getMe).
+        self._bot_username_cache: dict[str, str] = {}
+
+    # ------------------------------------------------------------------
+    # Route path
+    # ------------------------------------------------------------------
+
     def route_path(self, identifier: str | None = None) -> str:
-        """Return the FastAPI path for this platform."""
+        """Return the FastAPI path for this platform.
+
+        Parameters
+        ----------
+        identifier:
+            Bot username (e.g. ``"@my_bot"``).  When ``None`` (template form
+            used by ``build_app``), returns the parametrised path template.
+        """
         if identifier is None:
             return "/telegram/{username}"
         return f"/telegram/{identifier}"
+
+    # ------------------------------------------------------------------
+    # identifier_of / verify — delegates to module functions
+    # ------------------------------------------------------------------
 
     def identifier_of(self, request: Any, body: Any) -> str:
         return identifier_of(request, body)
@@ -273,13 +375,190 @@ class TelegramPlatform:
     def verify(self, request: Any, raw_body: bytes, *, creds: dict) -> bool:
         return verify(request, raw_body, creds=creds)
 
+    # ------------------------------------------------------------------
+    # parse — async; resolves bot username via cached getMe
+    # ------------------------------------------------------------------
+
     async def parse(
         self, body: Any, *, creds: dict | None = None
     ) -> InboundMessage | None:
         """Parse a Telegram update body into an :class:`InboundMessage`.
 
-        The bot username is taken from ``creds["bot_username"]`` if present,
-        otherwise falls back to an empty string (mention detection is skipped).
+        Resolves the bot username via ``getMe`` (cached per bot token) so
+        that mention detection (``@{bot_username}`` in text) works correctly.
+
+        Parameters
+        ----------
+        body:
+            Parsed Telegram JSON update.
+        creds:
+            Credential dict with at least ``bot_token``.  When ``None``
+            (e.g. called from tests without creds), mention detection is
+            skipped (``bot_username=""``).
         """
-        bot_username: str = (creds or {}).get("bot_username") or ""
+        bot_token: str = (creds or {}).get("bot_token") or ""
+        bot_username = await self._resolve_bot_username(bot_token)
         return parse(body, bot_username=bot_username)
+
+    async def _resolve_bot_username(self, bot_token: str) -> str:
+        """Return the bot's username, resolved once per token via getMe."""
+        if not bot_token:
+            return ""
+        if bot_token in self._bot_username_cache:
+            return self._bot_username_cache[bot_token]
+        try:
+            api_url = _bot_api_url(bot_token, "getMe")
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(api_url)
+            data = resp.json()
+            username: str = data.get("result", {}).get("username") or ""
+            self._bot_username_cache[bot_token] = username
+            return username
+        except Exception:
+            logger.debug(
+                "TelegramPlatform: getMe failed for token — skipping bot_username"
+            )
+            return ""
+
+    # ------------------------------------------------------------------
+    # send — POST sendMessage to the Telegram Bot API
+    # ------------------------------------------------------------------
+
+    async def send(self, item: Any, *, creds: dict) -> SendResult:
+        """Post an outbox item to Telegram via ``sendMessage``.
+
+        Parameters
+        ----------
+        item:
+            Outbox item with ``destination`` (``chat_id``, optional
+            ``reply_to_message_id``) and ``payload`` (``content``).
+        creds:
+            Credential dict with ``bot_token``.
+
+        Returns
+        -------
+        SendResult
+            ``success=True`` with ``message_id`` on success; ``success=False``
+            with ``error`` on any Telegram API error or HTTP failure.  Never
+            raises.
+        """
+        bot_token: str = creds.get("bot_token") or ""
+        api_url = _bot_api_url(bot_token, "sendMessage")
+
+        chat_id = item.destination.get("chat_id")
+        text: str = item.payload.get("content", "")
+        reply_to: Any = item.destination.get("reply_to_message_id")
+
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": text,
+        }
+        if reply_to is not None:
+            payload["reply_to_message_id"] = reply_to
+
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(api_url, json=payload)
+            data = resp.json()
+            if data.get("ok"):
+                msg_id = str(data["result"]["message_id"])
+                return SendResult(success=True, message_id=msg_id)
+            description: str = data.get("description", "Telegram API error")
+            return SendResult(success=False, error=description)
+        except Exception as exc:
+            logger.error("[TelegramPlatform] sendMessage failed: %s", exc)
+            return SendResult(success=False, error=str(exc))
+
+    # ------------------------------------------------------------------
+    # handle_non_message_update — callback_query ack-only
+    # ------------------------------------------------------------------
+
+    async def handle_non_message_update(
+        self, body: Any, *, routing: Any, creds: dict, deps: Any
+    ) -> bool:
+        """Handle non-message Telegram updates.
+
+        Currently handles ``callback_query`` updates by sending an
+        ``answerCallbackQuery`` ack (which stops Telegram's loading spinner)
+        and returning ``True`` (handled; inbound pipeline skipped).
+
+        All other update types return ``False`` so the dispatcher falls
+        through to ``parse``.
+
+        Approval rendering and resolution
+        ----------------------------------
+        This method ACKs the callback query but does **not** implement
+        approval resolution.  Full approval handling (rendering approval
+        buttons in ``send``, persisting the decision to a durable store such
+        as Redis, and unblocking the waiting session) is a unified
+        cross-platform follow-up task that applies to both Slack (``/interact``
+        is also ack-only today) and Telegram.  The old in-process dict pattern
+        from the Socket Mode adapter is intentionally not ported — it is
+        process-local and wrong for the stateless multi-replica model.
+
+        Parameters
+        ----------
+        body:
+            Parsed Telegram JSON update.
+        routing:
+            Routing object from the dispatcher (may be ``None`` in tests).
+        creds:
+            Resolved credential dict with ``bot_token``.
+        deps:
+            Pipeline deps (not used here).
+
+        Returns
+        -------
+        True
+            Update was fully handled; pipeline must not be called.
+        False
+            Fall through to the inbound pipeline (``parse`` will handle it).
+        """
+        callback_query = body.get("callback_query")
+        if callback_query is None:
+            return False
+
+        callback_id: str = str(callback_query.get("id", ""))
+        callback_data: str | None = callback_query.get("data")
+        logger.debug(
+            "[TelegramPlatform] callback_query ack — id=%r data=%r "
+            "(approval handling is a follow-up)",
+            callback_id,
+            callback_data,
+        )
+
+        bot_token: str = creds.get("bot_token") or ""
+        if bot_token and callback_id:
+            try:
+                api_url = _bot_api_url(bot_token, "answerCallbackQuery")
+                async with httpx.AsyncClient() as client:
+                    await client.post(
+                        api_url, json={"callback_query_id": callback_id}
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "[TelegramPlatform] answerCallbackQuery failed: %s", exc
+                )
+
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Self-registration
+# ---------------------------------------------------------------------------
+
+
+def _register() -> None:
+    """Register the singleton TelegramPlatform in the module-level registry.
+
+    Called once at import time.  Guarded against double-registration so that
+    test suites that reimport the module (e.g. via importlib.reload) do not
+    raise a ValueError from the registry.
+    """
+    from surogates.channels.registry import registry
+
+    if registry.get("telegram") is None:
+        registry.register(TelegramPlatform())
+
+
+_register()

@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+import respx
 
 from surogates.channels.platforms.telegram import (
     TelegramPlatform,
@@ -16,6 +19,7 @@ from surogates.channels.platforms.telegram import (
     parse,
     verify,
 )
+from surogates.channels.base import SendResult
 from surogates.channels.inbound import InboundMessage
 
 
@@ -469,3 +473,365 @@ class TestTelegramPlatform:
         result = await platform.parse(update, creds={"bot_username": BOT_USERNAME})
         assert result is not None
         assert result.text == "Hello async"
+
+
+# ---------------------------------------------------------------------------
+# TelegramPlatform — descriptor shape
+# ---------------------------------------------------------------------------
+
+
+class TestTelegramDescriptor:
+    def test_descriptor_is_present(self):
+        platform = TelegramPlatform()
+        assert hasattr(platform, "descriptor")
+
+    def test_vault_refs_returns_bot_token_and_webhook_secret(self):
+        platform = TelegramPlatform()
+        refs = platform.descriptor.vault_refs("@my_bot")
+        assert "bot_token" in refs
+        assert "webhook_secret" in refs
+
+    def test_vault_refs_values_are_strings(self):
+        platform = TelegramPlatform()
+        refs = platform.descriptor.vault_refs("@my_bot")
+        for v in refs.values():
+            assert isinstance(v, str)
+
+    def test_config_keys_contains_required_keys(self):
+        platform = TelegramPlatform()
+        keys = platform.descriptor.config_keys
+        for expected in (
+            "require_mention",
+            "free_response_chats",
+            "mention_patterns",
+            "reply_to_mode",
+            "reactions_enabled",
+            "per_user_groups",
+        ):
+            assert expected in keys, f"config_keys missing: {expected!r}"
+
+    def test_webhook_registration_is_api(self):
+        platform = TelegramPlatform()
+        assert platform.descriptor.webhook_registration == "api"
+
+    def test_register_webhook_is_callable(self):
+        platform = TelegramPlatform()
+        assert callable(platform.descriptor.register_webhook)
+
+
+# ---------------------------------------------------------------------------
+# TelegramPlatform — registration on import
+# ---------------------------------------------------------------------------
+
+
+class TestTelegramRegistration:
+    def test_registered_in_global_registry(self):
+        from surogates.channels.registry import registry
+        platform = registry.get("telegram")
+        assert platform is not None
+        assert platform.kind == "telegram"
+
+    def test_double_registration_is_a_noop(self):
+        """Importing the module twice (or calling _register() twice) must not raise."""
+        from surogates.channels.platforms import telegram as _tg_mod
+        from surogates.channels.registry import registry
+        # _register is idempotent: calling it again does nothing
+        _tg_mod._register()
+        assert registry.get("telegram") is not None
+
+
+# ---------------------------------------------------------------------------
+# TelegramPlatform — register_webhook calls setWebhook
+# ---------------------------------------------------------------------------
+
+
+BOT_TOKEN = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+BOT_API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+
+@pytest.mark.asyncio
+async def test_register_webhook_calls_set_webhook():
+    """register_webhook POSTs setWebhook with url, secret_token, allowed_updates."""
+    import json as _json
+
+    platform = TelegramPlatform()
+    webhook_url = "https://example.com/telegram/@my_bot"
+    creds = {"bot_token": BOT_TOKEN, "webhook_secret": "mysecret"}
+    captured: dict = {}
+
+    with respx.mock(assert_all_called=True) as mock_router:
+        mock_router.post(f"{BOT_API_BASE}/setWebhook").mock(
+            return_value=httpx.Response(200, json={"ok": True, "result": True})
+        )
+        await platform.descriptor.register_webhook("@my_bot", webhook_url, creds)
+        assert len(mock_router.calls) == 1
+        captured["body"] = _json.loads(mock_router.calls[0].request.content)
+
+    body = captured["body"]
+    assert body["url"] == webhook_url
+    assert body["secret_token"] == "mysecret"
+    assert "message" in body["allowed_updates"]
+    assert "callback_query" in body["allowed_updates"]
+
+
+@pytest.mark.asyncio
+async def test_register_webhook_raises_on_non_ok():
+    """register_webhook raises (or at minimum logs) when Telegram returns ok=false."""
+    platform = TelegramPlatform()
+    creds = {"bot_token": BOT_TOKEN, "webhook_secret": "s"}
+
+    with respx.mock() as mock_router:
+        mock_router.post(f"{BOT_API_BASE}/setWebhook").mock(
+            return_value=httpx.Response(200, json={"ok": False, "description": "Unauthorized"})
+        )
+        with pytest.raises(Exception):
+            await platform.descriptor.register_webhook("@bot", "https://x.com/bot", creds)
+
+
+# ---------------------------------------------------------------------------
+# TelegramPlatform — parse uses cached getMe for bot_username
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_parse_resolves_bot_username_via_get_me():
+    """platform.parse calls getMe to resolve bot_username when creds has bot_token."""
+    platform = TelegramPlatform()
+    update = _private_message(text="hello")
+    creds = {"bot_token": BOT_TOKEN, "webhook_secret": "s"}
+
+    with respx.mock() as mock_router:
+        mock_router.get(f"{BOT_API_BASE}/getMe").mock(
+            return_value=httpx.Response(
+                200, json={"ok": True, "result": {"id": 123, "username": "my_bot"}}
+            )
+        )
+        result = await platform.parse(update, creds=creds)
+
+    assert result is not None
+    assert result.text == "hello"
+
+
+@pytest.mark.asyncio
+async def test_parse_caches_bot_username_across_calls():
+    """getMe is called only once for the same bot_token, even across multiple parse calls."""
+    platform = TelegramPlatform()
+    update = _private_message(text="hello")
+    creds = {"bot_token": BOT_TOKEN, "webhook_secret": "s"}
+
+    with respx.mock() as mock_router:
+        mock_router.get(f"{BOT_API_BASE}/getMe").mock(
+            return_value=httpx.Response(
+                200, json={"ok": True, "result": {"id": 123, "username": "my_bot"}}
+            )
+        )
+        await platform.parse(update, creds=creds)
+        await platform.parse(update, creds=creds)
+        await platform.parse(update, creds=creds)
+
+        call_count = len(mock_router.calls)
+
+    assert call_count == 1, f"getMe called {call_count} times; expected exactly 1"
+
+
+@pytest.mark.asyncio
+async def test_parse_without_creds_still_works():
+    """parse(body, creds=None) gracefully falls back to empty bot_username."""
+    platform = TelegramPlatform()
+    update = _private_message(text="hello")
+    result = await platform.parse(update, creds=None)
+    assert result is not None
+    assert result.text == "hello"
+
+
+@pytest.mark.asyncio
+async def test_parse_mention_detected_via_get_me():
+    """Mention detection works when bot username comes from getMe."""
+    platform = TelegramPlatform()
+    update = _private_message(text="@my_bot help me please")
+    creds = {"bot_token": BOT_TOKEN}
+
+    with respx.mock() as mock_router:
+        mock_router.get(f"{BOT_API_BASE}/getMe").mock(
+            return_value=httpx.Response(
+                200, json={"ok": True, "result": {"id": 123, "username": "my_bot"}}
+            )
+        )
+        result = await platform.parse(update, creds=creds)
+
+    assert result is not None
+    assert result.is_mention is True
+
+
+# ---------------------------------------------------------------------------
+# TelegramPlatform — send via sendMessage
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_posts_send_message_to_correct_chat():
+    """send POSTs sendMessage with chat_id and text."""
+    platform = TelegramPlatform()
+    item = SimpleNamespace(
+        destination={"chat_id": 111},
+        payload={"content": "Hello there"},
+    )
+    creds = {"bot_token": BOT_TOKEN}
+
+    with respx.mock(assert_all_called=True) as mock_router:
+        mock_router.post(f"{BOT_API_BASE}/sendMessage").mock(
+            return_value=httpx.Response(
+                200,
+                json={"ok": True, "result": {"message_id": 99, "date": 1700000000}},
+            )
+        )
+        result = await platform.send(item, creds=creds)
+
+    assert result.success is True
+    assert result.message_id == "99"
+    assert result.error is None
+
+
+@pytest.mark.asyncio
+async def test_send_includes_reply_to_message_id():
+    """send includes reply_to_message_id in the sendMessage call when present."""
+    import json as _json
+
+    platform = TelegramPlatform()
+    item = SimpleNamespace(
+        destination={"chat_id": 111, "reply_to_message_id": 42},
+        payload={"content": "A reply"},
+    )
+    creds = {"bot_token": BOT_TOKEN}
+    captured: dict = {}
+
+    with respx.mock() as mock_router:
+        mock_router.post(f"{BOT_API_BASE}/sendMessage").mock(
+            return_value=httpx.Response(
+                200,
+                json={"ok": True, "result": {"message_id": 100, "date": 1700000001}},
+            )
+        )
+        result = await platform.send(item, creds=creds)
+        captured["body"] = _json.loads(mock_router.calls[0].request.content)
+
+    assert result.success is True
+    assert captured["body"].get("reply_to_message_id") == 42
+
+
+@pytest.mark.asyncio
+async def test_send_ok_false_returns_send_result_failure():
+    """When Telegram returns ok=false, send returns SendResult(success=False, error=...)."""
+    platform = TelegramPlatform()
+    item = SimpleNamespace(
+        destination={"chat_id": 999},
+        payload={"content": "oops"},
+    )
+    creds = {"bot_token": BOT_TOKEN}
+
+    with respx.mock() as mock_router:
+        mock_router.post(f"{BOT_API_BASE}/sendMessage").mock(
+            return_value=httpx.Response(
+                200,
+                json={"ok": False, "description": "Chat not found"},
+            )
+        )
+        result = await platform.send(item, creds=creds)
+
+    assert result.success is False
+    assert result.error is not None
+
+
+@pytest.mark.asyncio
+async def test_send_http_error_returns_send_result_failure():
+    """An HTTP-level error (e.g. 5xx) → SendResult(success=False); no exception raised."""
+    platform = TelegramPlatform()
+    item = SimpleNamespace(
+        destination={"chat_id": 777},
+        payload={"content": "hi"},
+    )
+    creds = {"bot_token": BOT_TOKEN}
+
+    with respx.mock() as mock_router:
+        mock_router.post(f"{BOT_API_BASE}/sendMessage").mock(
+            return_value=httpx.Response(500, text="Internal Server Error")
+        )
+        result = await platform.send(item, creds=creds)
+
+    assert result.success is False
+    assert result.error is not None
+
+
+# ---------------------------------------------------------------------------
+# TelegramPlatform — handle_non_message_update
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handle_non_message_update_callback_query_returns_true():
+    """callback_query body → answerCallbackQuery is called; returns True."""
+    platform = TelegramPlatform()
+    creds = {"bot_token": BOT_TOKEN}
+    body = _callback_query_update()
+
+    with respx.mock() as mock_router:
+        mock_router.post(f"{BOT_API_BASE}/answerCallbackQuery").mock(
+            return_value=httpx.Response(200, json={"ok": True, "result": True})
+        )
+        result = await platform.handle_non_message_update(
+            body, routing=None, creds=creds, deps=None
+        )
+        ack_call_count = len(mock_router.calls)
+
+    assert result is True
+    assert ack_call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_handle_non_message_update_callback_query_acks_correct_id():
+    """answerCallbackQuery is called with the callback_query id."""
+    import json as _json
+
+    platform = TelegramPlatform()
+    creds = {"bot_token": BOT_TOKEN}
+    body = _callback_query_update()  # has callback_query.id == "abc123"
+    captured: dict = {}
+
+    with respx.mock() as mock_router:
+        mock_router.post(f"{BOT_API_BASE}/answerCallbackQuery").mock(
+            return_value=httpx.Response(200, json={"ok": True, "result": True})
+        )
+        await platform.handle_non_message_update(
+            body, routing=None, creds=creds, deps=None
+        )
+        captured["body"] = _json.loads(mock_router.calls[0].request.content)
+
+    assert captured["body"].get("callback_query_id") == "abc123"
+
+
+@pytest.mark.asyncio
+async def test_handle_non_message_update_non_callback_returns_false():
+    """A non-callback_query update (e.g. channel_post) → returns False (fall through)."""
+    platform = TelegramPlatform()
+    creds = {"bot_token": BOT_TOKEN}
+    body = _non_message_update()
+
+    result = await platform.handle_non_message_update(
+        body, routing=None, creds=creds, deps=None
+    )
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_handle_non_message_update_message_update_returns_false():
+    """A regular message update → returns False (let pipeline handle it)."""
+    platform = TelegramPlatform()
+    creds = {"bot_token": BOT_TOKEN}
+    body = _private_message(text="hello")
+
+    result = await platform.handle_non_message_update(
+        body, routing=None, creds=creds, deps=None
+    )
+
+    assert result is False
