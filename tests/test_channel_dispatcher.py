@@ -545,6 +545,26 @@ class TestHappyPath:
         await _post(app, KNOWN_URL)
         assert len(vault.calls) == 1
 
+    async def test_routing_object_carries_path_identifier(self):
+        """Routing object passed to the pipeline carries the path identifier (app_id).
+
+        The delivery loop uses routing.identifier to key resolve_tenant so it can
+        look up credentials for the bot-token.  The cache is keyed by the routing/app
+        identifier (e.g. Slack app_id), NOT by the chat/channel id embedded in the
+        message body.  This test pins that the dispatcher puts the identifier it
+        extracted from the URL path into routing.identifier.
+        """
+        app, _, _, _, pipeline = _make_app()
+        await _post(app, KNOWN_URL)
+        call = pipeline.calls[0]
+        assert hasattr(call["routing"], "identifier"), (
+            "routing object must have an 'identifier' attribute"
+        )
+        assert call["routing"].identifier == IDENTIFIER, (
+            f"routing.identifier must be the path identifier ({IDENTIFIER!r}), "
+            f"got {call['routing'].identifier!r}"
+        )
+
 
 class TestMalformedBody:
     async def test_malformed_body_after_verification_returns_400(self):

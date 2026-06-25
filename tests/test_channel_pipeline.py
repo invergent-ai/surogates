@@ -160,20 +160,26 @@ def _make_msg(
     )
 
 
-def _make_routing() -> Any:
-    """Minimal routing object with org_id + agent_id.
+@dataclass
+class _Routing:
+    """Minimal routing object with org_id + agent_id + identifier.
 
     ``org_id`` is the *agent's* org (``AGENT_ORG_ID``), distinct from the
     messaging user's org (``identity.org_id`` == ``ORG_ID``).
+
+    ``identifier`` is the routing/app identifier (e.g. Slack app_id) used to
+    key ``channel_routing`` in the cache.  It is DIFFERENT from
+    ``InboundMessage.identifier`` (the chat/channel id, e.g. ``C111``).
     """
 
-    @dataclass
-    class _Routing:
-        org_id: str = str(AGENT_ORG_ID)
-        agent_id: str = AGENT_ID
-        platform: str = "slack"
+    org_id: str = str(AGENT_ORG_ID)
+    agent_id: str = AGENT_ID
+    platform: str = "slack"
+    identifier: str = "A0APP"
 
-    return _Routing()
+
+def _make_routing(*, identifier: str = "A0APP") -> _Routing:
+    return _Routing(identifier=identifier)
 
 
 def _make_config(
@@ -236,7 +242,7 @@ def _make_deps(
         model: str = "",
     ) -> UUID:
         sessions_created.append(
-            {"session_key": session_key, "user_id": user_id, "org_id": org_id},
+            {"session_key": session_key, "user_id": user_id, "org_id": org_id, "config": config},
         )
         return session_id
 
@@ -571,3 +577,50 @@ async def test_user_message_event_content_matches_text():
 
     ev = next(e for e in deps.session_store.events if e[1] == EventType.USER_MESSAGE)
     assert ev[2]["content"] == "What is the plan?"
+
+
+@pytest.mark.asyncio
+async def test_channel_identifier_in_session_config_uses_routing_identifier_not_chat_id():
+    """Session config channel_identifier must be the routing/app identifier, not the chat id.
+
+    The delivery loop resolves credentials via resolve_tenant(kind, channel_identifier).
+    The routing cache is keyed by the app/routing identifier (e.g. Slack app_id ``A0APP``),
+    NOT by the chat/channel id (e.g. ``C111``).  Storing the chat id here causes every
+    outbound reply to fail with "channel deprovisioned".
+
+    This test uses deliberately different values for routing.identifier (``A0APP``) and
+    msg.identifier (``C111``) so the bug cannot silently regress.
+    """
+    ROUTING_IDENTIFIER = "A0APP"   # app_id — the routing/cache key
+    CHAT_ID = "C111"               # channel_id — the Slack channel, NOT the cache key
+
+    msg = _make_msg(is_dm=True, ts="15.0", identifier=CHAT_ID)
+    routing = _make_routing(identifier=ROUTING_IDENTIFIER)
+    config = _make_config()
+    deps = _make_deps()
+
+    pipeline = ChannelInboundPipeline()
+    result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
+
+    assert result == InboundOutcome.PROCESSED
+    assert deps._sessions_created, "session must have been created"
+
+    session_config = deps._sessions_created[0]["config"]
+
+    # The routing/app identifier must be stored as channel_identifier so the
+    # delivery loop can resolve credentials via the routing cache.
+    assert session_config["channel_identifier"] == ROUTING_IDENTIFIER, (
+        f"channel_identifier should be routing.identifier ({ROUTING_IDENTIFIER!r}), "
+        f"got {session_config['channel_identifier']!r}"
+    )
+
+    # The chat id must NOT be used as channel_identifier (this is the bug we're fixing).
+    assert session_config["channel_identifier"] != CHAT_ID, (
+        "channel_identifier must NOT be the chat id (C111) — "
+        "the routing cache has no entry keyed by chat ids"
+    )
+
+    # The platform-specific channel_id key must still carry the actual chat id.
+    assert session_config.get("slack_channel_id") == CHAT_ID, (
+        "slack_channel_id must still hold the actual chat id for sending replies"
+    )

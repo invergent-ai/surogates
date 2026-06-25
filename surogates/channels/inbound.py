@@ -227,7 +227,10 @@ class ChannelInboundPipeline:
         msg:
             Normalised message (platform facts already resolved).
         routing:
-            Object with ``org_id``, ``agent_id``, and ``platform`` attributes.
+            Object with ``org_id``, ``agent_id``, ``platform``, and ``identifier``
+            attributes.  ``identifier`` is the routing/app identifier (e.g. Slack
+            app_id, Telegram bot username) that keys ``channel_routing`` in the
+            cache — it is DIFFERENT from ``msg.identifier`` (the chat/channel id).
         config:
             Channel gating settings extracted from ``channel_routing.config``:
 
@@ -343,7 +346,7 @@ class ChannelInboundPipeline:
             config={
                 f"{routing.platform}_channel_id": msg.identifier,
                 f"{routing.platform}_thread_key": msg.thread_key,
-                "channel_identifier": msg.identifier,
+                "channel_identifier": routing.identifier,
             },
             session_factory=deps.session_factory,
         )

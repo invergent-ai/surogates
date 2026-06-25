@@ -57,6 +57,7 @@ class _RoutingObject:
     org_id: str
     agent_id: str
     platform: str
+    identifier: str
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +263,12 @@ class ChannelWebhookDispatcher:
             # ----------------------------------------------------------------
             # Build routing object (used from step 7 onward).
             # ----------------------------------------------------------------
-            routing = _RoutingObject(org_id=org_id, agent_id=agent_id, platform=platform.kind)
+            routing = _RoutingObject(
+                org_id=org_id,
+                agent_id=agent_id,
+                platform=platform.kind,
+                identifier=identifier,
+            )
 
             # ----------------------------------------------------------------
             # Step 7: Optional non-message update hook.
