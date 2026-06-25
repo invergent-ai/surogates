@@ -624,3 +624,193 @@ async def test_channel_identifier_in_session_config_uses_routing_identifier_not_
     assert session_config.get("slack_channel_id") == CHAT_ID, (
         "slack_channel_id must still hold the actual chat id for sending replies"
     )
+
+
+# ---------------------------------------------------------------------------
+# FIX 3: per_user_groups passed through to build_session_key
+# ---------------------------------------------------------------------------
+
+
+def _make_group_msg(*, platform_user_id: str, ts: str = "50.0") -> InboundMessage:
+    return InboundMessage(
+        kind="text",
+        identifier="CHAT123",
+        thread_key=None,
+        platform_user_id=platform_user_id,
+        user_name=platform_user_id,
+        text="hello group",
+        media_urls=[],
+        media_types=[],
+        is_dm=False,
+        is_mention=False,
+        ts=ts,
+        source={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_per_user_groups_true_different_users_get_different_session_keys():
+    """With per_user_groups=True, two different users in same group → different session keys."""
+    routing = _make_routing()
+    config = _make_config(require_mention=False)
+    config["per_user_groups"] = True
+
+    deps_a = _make_deps()
+    deps_b = _make_deps()
+
+    msg_a = _make_group_msg(platform_user_id="USER_A", ts="51.0")
+    msg_b = _make_group_msg(platform_user_id="USER_B", ts="52.0")
+
+    pipeline_a = ChannelInboundPipeline()
+    pipeline_b = ChannelInboundPipeline()
+
+    await pipeline_a.handle(msg_a, routing=routing, config=config, deps=deps_a)
+    await pipeline_b.handle(msg_b, routing=routing, config=config, deps=deps_b)
+
+    key_a = deps_a._sessions_created[0]["session_key"]
+    key_b = deps_b._sessions_created[0]["session_key"]
+
+    assert key_a != key_b, (
+        f"per_user_groups=True: two different users must get different session keys; "
+        f"got key_a={key_a!r} key_b={key_b!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_per_user_groups_false_different_users_get_same_session_key():
+    """Without per_user_groups (default), two users in same group → same session key."""
+    routing = _make_routing()
+    config = _make_config(require_mention=False)
+    # per_user_groups absent (default False)
+
+    deps_a = _make_deps()
+    deps_b = _make_deps()
+
+    msg_a = _make_group_msg(platform_user_id="USER_A", ts="53.0")
+    msg_b = _make_group_msg(platform_user_id="USER_B", ts="54.0")
+
+    pipeline_a = ChannelInboundPipeline()
+    pipeline_b = ChannelInboundPipeline()
+
+    await pipeline_a.handle(msg_a, routing=routing, config=config, deps=deps_a)
+    await pipeline_b.handle(msg_b, routing=routing, config=config, deps=deps_b)
+
+    key_a = deps_a._sessions_created[0]["session_key"]
+    key_b = deps_b._sessions_created[0]["session_key"]
+
+    assert key_a == key_b, (
+        f"per_user_groups=False: two users in same group must share a session key; "
+        f"got key_a={key_a!r} key_b={key_b!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# FIX 5 (pipeline): allow_bots gate
+# ---------------------------------------------------------------------------
+
+
+def _make_bot_msg(
+    *,
+    is_mention: bool = False,
+    ts: str = "60.0",
+    is_dm: bool = False,
+) -> InboundMessage:
+    """A bot-authored InboundMessage (is_bot=True)."""
+    return InboundMessage(
+        kind="text",
+        identifier="C_BOT",
+        thread_key=None,
+        platform_user_id="BOT_U1",
+        user_name="SomeBot",
+        text="@agent help" if is_mention else "bot chatter",
+        media_urls=[],
+        media_types=[],
+        is_dm=is_dm,
+        is_mention=is_mention,
+        ts=ts,
+        is_bot=True,
+        source={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_allow_bots_none_drops_bot_message():
+    """allow_bots='none': bot message → DROPPED regardless of mention."""
+    msg = _make_bot_msg(is_mention=True, ts="61.0")
+    routing = _make_routing()
+    config = _make_config(allow_bots="none", require_mention=False)
+    deps = _make_deps()
+
+    pipeline = ChannelInboundPipeline()
+    result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
+
+    assert result == InboundOutcome.DROPPED, (
+        f"allow_bots='none' + bot message → DROPPED; got {result}"
+    )
+    assert not deps._sessions_created
+
+
+@pytest.mark.asyncio
+async def test_allow_bots_all_processes_bot_message():
+    """allow_bots='all': bot message → PROCESSED (goes through full pipeline)."""
+    msg = _make_bot_msg(is_mention=False, ts="62.0", is_dm=True)
+    routing = _make_routing()
+    config = _make_config(allow_bots="all", require_mention=False)
+    deps = _make_deps()
+
+    pipeline = ChannelInboundPipeline()
+    result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
+
+    assert result == InboundOutcome.PROCESSED, (
+        f"allow_bots='all' + bot message → PROCESSED; got {result}"
+    )
+    assert deps._sessions_created
+
+
+@pytest.mark.asyncio
+async def test_allow_bots_mentions_drops_non_mention_bot():
+    """allow_bots='mentions': bot message WITHOUT mention → DROPPED."""
+    msg = _make_bot_msg(is_mention=False, ts="63.0", is_dm=True)
+    routing = _make_routing()
+    config = _make_config(allow_bots="mentions", require_mention=False)
+    deps = _make_deps()
+
+    pipeline = ChannelInboundPipeline()
+    result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
+
+    assert result == InboundOutcome.DROPPED, (
+        f"allow_bots='mentions' + bot message without mention → DROPPED; got {result}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_allow_bots_mentions_processes_mentioned_bot():
+    """allow_bots='mentions': bot message WITH mention → PROCESSED."""
+    msg = _make_bot_msg(is_mention=True, ts="64.0", is_dm=True)
+    routing = _make_routing()
+    config = _make_config(allow_bots="mentions", require_mention=False)
+    deps = _make_deps()
+
+    pipeline = ChannelInboundPipeline()
+    result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
+
+    assert result == InboundOutcome.PROCESSED, (
+        f"allow_bots='mentions' + bot message with mention → PROCESSED; got {result}"
+    )
+    assert deps._sessions_created
+
+
+@pytest.mark.asyncio
+async def test_allow_bots_does_not_affect_human_messages():
+    """Human messages (is_bot=False) are unaffected by allow_bots setting."""
+    msg = _make_msg(is_dm=True, ts="65.0")  # is_bot defaults to False
+    routing = _make_routing()
+    config = _make_config(allow_bots="none", require_mention=False)
+    deps = _make_deps()
+
+    pipeline = ChannelInboundPipeline()
+    result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
+
+    assert result == InboundOutcome.PROCESSED, (
+        f"Human message must not be affected by allow_bots='none'; got {result}"
+    )

@@ -96,6 +96,7 @@ class InboundMessage:
     is_mention: bool
     ts: str
     source: dict
+    is_bot: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -263,13 +264,33 @@ class ChannelInboundPipeline:
             return InboundOutcome.DROPPED
 
         # ------------------------------------------------------------------
+        # Gate 2b: Bot filter.
+        #
+        # Runs right after dedup + empty-body so bot messages are gated
+        # consistently before any platform-specific mention logic.
+        # Own-bot messages are dropped at parse (never reach here); this gate
+        # handles OTHER bots' messages based on the allow_bots config key:
+        #   "none"     → drop all bot messages.
+        #   "mentions" → drop if not @-mentioned; pass if mentioned.
+        #   "all"      → pass all bot messages through.
+        # Human messages (is_bot=False) are always unaffected.
+        # ------------------------------------------------------------------
+        if msg.is_bot:
+            allow_bots: str = config.get("allow_bots", "none")
+            if allow_bots == "none":
+                return InboundOutcome.DROPPED
+            if allow_bots == "mentions" and not msg.is_mention:
+                return InboundOutcome.DROPPED
+            # allow_bots == "all", or "mentions" + is_mention → fall through.
+
+        # ------------------------------------------------------------------
         # Gate 3: Mention gating (non-DM only).
         # ------------------------------------------------------------------
         should_process = self._evaluate_mention_gate(msg, config)
 
         if not should_process:
             # Check Redis state for thread-based bypass gates.
-            should_process = await self._check_thread_gates(msg, routing, deps)
+            should_process = await self._check_thread_gates(msg, routing, deps, config)
 
         if not should_process:
             # Not gated for processing — optionally firehose.
@@ -333,7 +354,7 @@ class ChannelInboundPipeline:
             thread_id=msg.thread_key,
             chat_name=msg.identifier,
         )
-        session_key = build_session_key(source)
+        session_key = build_session_key(source, per_user_groups=bool(config.get("per_user_groups", False)))
 
         session_id = await deps.get_or_create_session(
             deps.session_store,
@@ -425,6 +446,7 @@ class ChannelInboundPipeline:
         msg: InboundMessage,
         routing: Any,
         deps: PipelineDeps,
+        config: dict,
     ) -> bool:
         """Return ``True`` if Redis thread state grants processing rights.
 
@@ -454,5 +476,5 @@ class ChannelInboundPipeline:
             user_id=msg.platform_user_id,
             thread_id=thread_key,
         )
-        key = build_session_key(source)
+        key = build_session_key(source, per_user_groups=bool(config.get("per_user_groups", False)))
         return await deps.state.get_session(key) is not None

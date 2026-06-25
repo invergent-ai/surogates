@@ -479,9 +479,19 @@ class TestParseReturnsNone:
         body = self._evt(bot_id="B123", text="I am a bot", user="")
         assert parse(body, bot_user_id=BOT_USER_ID) is None
 
-    def test_bot_subtype_returns_none(self):
+    def test_bot_subtype_with_user_returns_inbound_message_with_is_bot(self):
+        """bot_message subtype from another user (not own bot) → InboundMessage(is_bot=True).
+
+        FIX 5: Only own-bot messages (user==bot_user_id) are hard-dropped here;
+        other-bot messages pass through with is_bot=True so the pipeline's
+        allow_bots gate can decide.  Empty-user bot messages still drop (see
+        test_bot_message_returns_none).
+        """
         body = self._evt(subtype="bot_message", text="bot says hi")
-        assert parse(body, bot_user_id=BOT_USER_ID) is None
+        # user="U1" which is NOT BOT_USER_ID ("U0BOTUSER") → other bot
+        result = parse(body, bot_user_id=BOT_USER_ID)
+        assert result is not None
+        assert result.is_bot is True
 
     def test_message_changed_returns_none(self):
         body = self._evt(subtype="message_changed", text="edited")
@@ -1342,3 +1352,127 @@ class TestHandleInteractiveInteract:
         )
         assert isinstance(result, Response)
         assert result.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# FIX 5 (Slack half): is_bot flag and own-bot vs other-bot filtering
+# ---------------------------------------------------------------------------
+
+
+def _make_bot_event_body(
+    *,
+    app_id: str = APP_ID,
+    user_id: str = "",
+    bot_id: str = "B99999",
+    subtype: str = "bot_message",
+    text: str = "bot says hello",
+    channel: str = "C999",
+    ts: str = "999.0",
+) -> dict:
+    """An event_callback body where the event is from a bot (bot_id set / subtype=bot_message)."""
+    event: dict = {
+        "type": "message",
+        "subtype": subtype,
+        "bot_id": bot_id,
+        "text": text,
+        "channel": channel,
+        "channel_type": "channel",
+        "ts": ts,
+    }
+    if user_id:
+        event["user"] = user_id
+    return {
+        "type": "event_callback",
+        "api_app_id": app_id,
+        "event": event,
+    }
+
+
+def _make_bot_event_with_user(
+    *,
+    app_id: str = APP_ID,
+    bot_user_id: str = BOT_USER_ID,
+    sender_user_id: str = "UOTHER",
+    bot_id: str = "B88888",
+    text: str = "another bot speaks",
+    channel: str = "C888",
+    ts: str = "888.0",
+) -> dict:
+    """An event from another bot: has bot_id but user != our bot_user_id."""
+    event: dict = {
+        "type": "message",
+        "bot_id": bot_id,
+        "user": sender_user_id,
+        "text": text,
+        "channel": channel,
+        "channel_type": "channel",
+        "ts": ts,
+    }
+    return {
+        "type": "event_callback",
+        "api_app_id": app_id,
+        "event": event,
+    }
+
+
+class TestSlackBotFiltering:
+    """FIX 5 (Slack): other-bot messages set is_bot=True; own-bot message drops to None."""
+
+    def test_own_bot_message_returns_none(self):
+        """A message where user==bot_user_id → always None (dropped)."""
+        body = {
+            "type": "event_callback",
+            "api_app_id": APP_ID,
+            "event": {
+                "type": "message",
+                "user": BOT_USER_ID,  # our own bot
+                "bot_id": "B00BOT",
+                "text": "own bot echo",
+                "channel": "C111",
+                "channel_type": "channel",
+                "ts": "111.0",
+            },
+        }
+        result = parse(body, bot_user_id=BOT_USER_ID)
+        assert result is None, (
+            "Our own bot's message (user==bot_user_id) must be dropped; got non-None"
+        )
+
+    def test_other_bot_message_returns_inbound_message_with_is_bot_true(self):
+        """A message from another bot (bot_id present, user != bot_user_id) → is_bot=True."""
+        body = _make_bot_event_with_user(bot_user_id=BOT_USER_ID, sender_user_id="UOTHER_BOT")
+        result = parse(body, bot_user_id=BOT_USER_ID)
+        assert result is not None, (
+            "Another bot's message must NOT be dropped at parse; got None"
+        )
+        assert result.is_bot is True, (
+            f"is_bot should be True for other-bot message; got {result.is_bot!r}"
+        )
+
+    def test_bot_message_subtype_no_user_still_dropped(self):
+        """subtype=bot_message with no 'user' field and no distinguishable sender → None."""
+        body = _make_bot_event_body(user_id="", subtype="bot_message")
+        # No user field → parse already returns None for missing user
+        result = parse(body, bot_user_id=BOT_USER_ID)
+        # Should return None (no user field, so can't be routed)
+        assert result is None
+
+    def test_human_message_has_is_bot_false(self):
+        """A normal human message → InboundMessage with is_bot=False."""
+        body = {
+            "type": "event_callback",
+            "api_app_id": APP_ID,
+            "event": {
+                "type": "message",
+                "user": "U_HUMAN",
+                "text": "hello from human",
+                "channel": "C222",
+                "channel_type": "channel",
+                "ts": "222.0",
+            },
+        }
+        result = parse(body, bot_user_id=BOT_USER_ID)
+        assert result is not None
+        assert result.is_bot is False, (
+            f"Human message must have is_bot=False; got {result.is_bot!r}"
+        )

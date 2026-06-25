@@ -272,12 +272,25 @@ def parse(body: dict, *, bot_user_id: str) -> InboundMessage | None:
 
     # ------------------------------------------------------------------
     # Gate: bot messages.
+    # FIX 5: Drop OWN bot's messages (user == bot_user_id).
+    # For OTHER bots (bot_id present / subtype==bot_message but user !=
+    # bot_user_id), do NOT drop — return InboundMessage with is_bot=True
+    # so the pipeline can apply the allow_bots gate.
     # ------------------------------------------------------------------
     bot_id = event.get("bot_id")
     subtype = event.get("subtype", "")
+    user_id_raw: str = event.get("user", "")
 
-    if bot_id or subtype == "bot_message":
+    # Own-bot message: user matches the bot's own user_id → always drop.
+    if bool(bot_user_id) and user_id_raw == bot_user_id:
         return None
+
+    is_bot: bool = False
+    if bot_id or subtype == "bot_message":
+        # Another bot's message. If there's no user field we can't route it.
+        if not user_id_raw:
+            return None
+        is_bot = True
 
     # ------------------------------------------------------------------
     # Gate: edits and deletions.
@@ -288,7 +301,7 @@ def parse(body: dict, *, bot_user_id: str) -> InboundMessage | None:
     # ------------------------------------------------------------------
     # Extract message fields from the inbound Slack event.
     # ------------------------------------------------------------------
-    user_id: str = event.get("user", "")
+    user_id: str = user_id_raw
     if not user_id:
         return None
 
@@ -353,6 +366,7 @@ def parse(body: dict, *, bot_user_id: str) -> InboundMessage | None:
             "api_app_id": api_app_id,
             "channel_type": channel_type,
         },
+        is_bot=is_bot,
     )
 
 

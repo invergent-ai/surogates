@@ -257,11 +257,17 @@ class TestParse:
         assert result is not None
         assert result.user_name == "777"
 
-    def test_private_message_ts_is_date_string(self):
+    def test_private_message_ts_is_update_id_string(self):
+        """ts must be the update_id (globally unique), not the message date.
+
+        FIX 1: Using update_id ensures two messages in the same second get
+        different dedup keys.
+        """
         update = _private_message(date=1700000000, text="Hi")
+        # _private_message sets update_id=123
         result = parse(update, bot_username=BOT_USERNAME)
         assert result is not None
-        assert result.ts == "1700000000"
+        assert result.ts == "123"
 
     def test_private_message_no_thread_key(self):
         update = _private_message(text="Hi")
@@ -498,11 +504,16 @@ class TestTelegramDescriptor:
             assert isinstance(v, str)
 
     def test_config_keys_contains_required_keys(self):
+        """config_keys must use 'free_response_channels' (not 'free_response_chats').
+
+        FIX 4: Renamed to match the key read by the pipeline and written by
+        the ops provisioner.
+        """
         platform = TelegramPlatform()
         keys = platform.descriptor.config_keys
         for expected in (
             "require_mention",
-            "free_response_chats",
+            "free_response_channels",
             "mention_patterns",
             "reply_to_mode",
             "reactions_enabled",
@@ -835,3 +846,203 @@ async def test_handle_non_message_update_message_update_returns_false():
     )
 
     assert result is False
+
+
+# ---------------------------------------------------------------------------
+# FIX 1: Telegram dedup key is update_id not date
+# ---------------------------------------------------------------------------
+
+
+class TestTelegramDedupKey:
+    """FIX 1: ts must be update_id so two messages with same date get different ts."""
+
+    def test_two_messages_same_date_different_update_id_produce_different_ts(self):
+        """Two updates with same date but different update_id → different ts values."""
+        update_a = {
+            "update_id": 7001,
+            "message": {
+                "message_id": 1,
+                "from": {"id": 100, "is_bot": False, "first_name": "Alice", "username": "alice"},
+                "chat": {"id": 111, "type": "private"},
+                "date": 1700000000,  # SAME date
+                "text": "Message A",
+            },
+        }
+        update_b = {
+            "update_id": 7002,  # DIFFERENT update_id
+            "message": {
+                "message_id": 2,
+                "from": {"id": 100, "is_bot": False, "first_name": "Alice", "username": "alice"},
+                "chat": {"id": 111, "type": "private"},
+                "date": 1700000000,  # SAME date
+                "text": "Message B",
+            },
+        }
+        result_a = parse(update_a, bot_username=BOT_USERNAME)
+        result_b = parse(update_b, bot_username=BOT_USERNAME)
+        assert result_a is not None
+        assert result_b is not None
+        assert result_a.ts != result_b.ts, (
+            f"Two updates with same date but different update_id must produce "
+            f"different ts; got a.ts={result_a.ts!r} b.ts={result_b.ts!r}"
+        )
+
+    def test_same_update_id_produces_same_ts(self):
+        """Repeated delivery of the same update (same update_id) → same ts (dedup catches it)."""
+        update = _private_message(text="retry me", date=1700000000)
+        # update_id=123 from _private_message fixture
+        result_a = parse(update, bot_username=BOT_USERNAME)
+        result_b = parse(update, bot_username=BOT_USERNAME)
+        assert result_a is not None
+        assert result_b is not None
+        assert result_a.ts == result_b.ts, (
+            "Same update_id must produce same ts so dedup works for retries"
+        )
+
+    def test_ts_uses_update_id_not_date(self):
+        """ts value must be the update_id, not the message date."""
+        update = {
+            "update_id": 99999,
+            "message": {
+                "message_id": 5,
+                "from": {"id": 1, "is_bot": False, "first_name": "T", "username": "t"},
+                "chat": {"id": 1, "type": "private"},
+                "date": 1111111111,
+                "text": "hi",
+            },
+        }
+        result = parse(update, bot_username=BOT_USERNAME)
+        assert result is not None
+        # ts must be update_id string, not date string
+        assert result.ts == "99999", (
+            f"ts should be update_id '99999', not date '1111111111'; got {result.ts!r}"
+        )
+
+    def test_ts_fallback_when_update_id_missing(self):
+        """When update_id is absent, ts falls back to 'chat_id:message_id'."""
+        update = {
+            # No update_id key
+            "message": {
+                "message_id": 42,
+                "from": {"id": 7, "is_bot": False, "first_name": "X"},
+                "chat": {"id": 123, "type": "private"},
+                "date": 1700000000,
+                "text": "no update_id",
+            },
+        }
+        result = parse(update, bot_username=BOT_USERNAME)
+        assert result is not None
+        # Fallback: "chat_id:message_id"
+        assert result.ts == "123:42", (
+            f"Fallback ts should be 'chat_id:message_id' '123:42'; got {result.ts!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# FIX 4: Telegram descriptor config_keys must use free_response_channels
+# ---------------------------------------------------------------------------
+
+
+class TestTelegramDescriptorFix4:
+    """FIX 4: config_keys must list 'free_response_channels', not 'free_response_chats'."""
+
+    def test_config_keys_has_free_response_channels_not_free_response_chats(self):
+        """Descriptor must declare 'free_response_channels' to match pipeline."""
+        platform = TelegramPlatform()
+        keys = platform.descriptor.config_keys
+        assert "free_response_channels" in keys, (
+            f"config_keys must contain 'free_response_channels'; got {keys!r}"
+        )
+        assert "free_response_chats" not in keys, (
+            f"config_keys must NOT contain 'free_response_chats' (old name); got {keys!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# FIX 5 (Telegram half): is_bot flag and own-bot filtering
+# ---------------------------------------------------------------------------
+
+
+def _bot_message(
+    *,
+    chat_id: int = -100111,
+    from_id: int = 500,
+    bot_username_in_from: str = "other_bot",
+    text: str = "I am a bot",
+    update_id: int = 8001,
+) -> dict:
+    """Build a Telegram message update where from.is_bot=True (another bot, not ours)."""
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": 10,
+            "from": {
+                "id": from_id,
+                "is_bot": True,
+                "first_name": "OtherBot",
+                "username": bot_username_in_from,
+            },
+            "chat": {"id": chat_id, "type": "group", "title": "Dev"},
+            "date": 1700000100,
+            "text": text,
+        },
+    }
+
+
+def _own_bot_message(
+    *,
+    chat_id: int = -100111,
+    from_id: int = 42,  # will be "our" bot
+    text: str = "I replied",
+    update_id: int = 8002,
+    bot_username_in_from: str = "my_test_bot",  # matches BOT_USERNAME
+) -> dict:
+    """A message from the bot itself (our own bot)."""
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": 11,
+            "from": {
+                "id": from_id,
+                "is_bot": True,
+                "first_name": "MyTestBot",
+                "username": bot_username_in_from,
+            },
+            "chat": {"id": chat_id, "type": "group", "title": "Dev"},
+            "date": 1700000101,
+            "text": text,
+        },
+    }
+
+
+class TestTelegramBotFiltering:
+    """FIX 5 (Telegram): other-bot messages set is_bot=True; own-bot drops to None."""
+
+    def test_other_bot_message_returns_inbound_message_with_is_bot_true(self):
+        """A message from another bot (not our own) → InboundMessage with is_bot=True."""
+        update = _bot_message(bot_username_in_from="other_bot", text="bot says hi")
+        result = parse(update, bot_username=BOT_USERNAME)
+        assert result is not None, (
+            "Other bot's message must NOT be hard-dropped at parse; got None"
+        )
+        assert result.is_bot is True, (
+            f"is_bot should be True for a message from another bot; got {result.is_bot!r}"
+        )
+
+    def test_own_bot_message_returns_none(self):
+        """A message from our own bot (same username as bot_username) → None."""
+        update = _own_bot_message(bot_username_in_from="my_test_bot")
+        result = parse(update, bot_username="@my_test_bot")
+        assert result is None, (
+            "Our own bot's message must be dropped at parse (return None); "
+            f"got {result!r}"
+        )
+
+    def test_human_message_has_is_bot_false(self):
+        """A regular human message → InboundMessage with is_bot=False (default)."""
+        update = _private_message(text="hello from human")
+        result = parse(update, bot_username=BOT_USERNAME)
+        assert result is not None
+        assert result.is_bot is False, (
+            f"Human message must have is_bot=False; got {result.is_bot!r}"
+        )

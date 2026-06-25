@@ -618,3 +618,272 @@ class TestDeliverySeamPipelineKeys:
             f"destination['message_thread_id'] should be '42'; got: {dest.get('message_thread_id')!r}\n"
             "store must read 'telegram_thread_key' and emit 'message_thread_id'."
         )
+
+
+# ---------------------------------------------------------------------------
+# FIX 2: mark_bot_message called after successful delivery
+# ---------------------------------------------------------------------------
+
+
+class _FakeRedis:
+    """Minimal Redis fake tracking set calls."""
+
+    def __init__(self) -> None:
+        self.kv: dict[str, Any] = {}
+
+    async def set(self, key: str, value: Any, ex: int | None = None) -> None:
+        self.kv[key] = value
+
+    async def get(self, key: str) -> Any:
+        return self.kv.get(key)
+
+    async def exists(self, key: str) -> int:
+        return 1 if key in self.kv else 0
+
+
+def _make_dispatcher_with_redis(
+    platform: _FakePlatform | None = None,
+    delivery: _FakeDeliveryService | None = None,
+    cache: _FakeCache | None = None,
+    vault: _FakeVault | None = None,
+    redis: Any = None,
+) -> "ChannelDeliveryDispatcher":
+    from surogates.channels.dispatcher import ChannelDeliveryDispatcher
+
+    return ChannelDeliveryDispatcher(
+        cache=cache or _FakeCache(),
+        vault=vault or _FakeVault(),
+        delivery_service=delivery or _FakeDeliveryService(),
+        redis=redis or _FakeRedis(),
+    )
+
+
+class TestMarkBotMessageAfterDelivery:
+    """FIX 2: After a successful send, mark_bot_message is called in SlackAdapterState."""
+
+    async def test_successful_send_marks_bot_message_for_message_id(self):
+        """After successful delivery, state.is_bot_message(result.message_id) is True."""
+        from surogates.channels.slack_state import SlackAdapterState
+
+        fake_redis = _FakeRedis()
+        agent_id = "agent-x"
+
+        item = _FakeOutboxItem(
+            id=100,
+            destination={"channel_identifier": APP_ID, "channel_id": "C001"},
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        send_result = SendResult(success=True, message_id="sent-msg-ts-001")
+        platform = _FakePlatform(result=send_result)
+        cache = _FakeCache({
+            f"slack:{APP_ID}": {"org_id": ORG_ID, "agent_id": agent_id, "config": {}},
+        })
+
+        dispatcher = _make_dispatcher_with_redis(
+            platform=platform, delivery=delivery, cache=cache, redis=fake_redis
+        )
+        await dispatcher.deliver_batch(platform)
+
+        # Check that the bot message was marked in state for that agent
+        state = SlackAdapterState(fake_redis, agent_id=agent_id)
+        assert await state.is_bot_message("sent-msg-ts-001"), (
+            "After successful delivery, is_bot_message(result.message_id) must be True"
+        )
+
+    async def test_successful_send_marks_bot_message_for_thread_ts(self):
+        """If destination has thread_ts, that thread_ts is also marked as a bot message."""
+        from surogates.channels.slack_state import SlackAdapterState
+
+        fake_redis = _FakeRedis()
+        agent_id = "agent-y"
+
+        item = _FakeOutboxItem(
+            id=101,
+            destination={
+                "channel_identifier": APP_ID,
+                "channel_id": "C001",
+                "thread_ts": "original-thread-001",
+            },
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        send_result = SendResult(success=True, message_id="reply-msg-001")
+        platform = _FakePlatform(result=send_result)
+        cache = _FakeCache({
+            f"slack:{APP_ID}": {"org_id": ORG_ID, "agent_id": agent_id, "config": {}},
+        })
+
+        dispatcher = _make_dispatcher_with_redis(
+            platform=platform, delivery=delivery, cache=cache, redis=fake_redis
+        )
+        await dispatcher.deliver_batch(platform)
+
+        state = SlackAdapterState(fake_redis, agent_id=agent_id)
+        assert await state.is_bot_message("reply-msg-001"), (
+            "reply message_id must be marked as bot message"
+        )
+        assert await state.is_bot_message("original-thread-001"), (
+            "thread_ts from destination must also be marked as bot message"
+        )
+
+    async def test_failed_send_does_not_mark_bot_message(self):
+        """A failed send must NOT mark any bot message."""
+        from surogates.channels.slack_state import SlackAdapterState
+
+        fake_redis = _FakeRedis()
+        agent_id = "agent-z"
+
+        item = _FakeOutboxItem(
+            id=102,
+            destination={"channel_identifier": APP_ID, "channel_id": "C001"},
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _FakePlatform(result=SendResult(success=False, error="channel_not_found"))
+        cache = _FakeCache({
+            f"slack:{APP_ID}": {"org_id": ORG_ID, "agent_id": agent_id, "config": {}},
+        })
+
+        dispatcher = _make_dispatcher_with_redis(
+            platform=platform, delivery=delivery, cache=cache, redis=fake_redis
+        )
+        await dispatcher.deliver_batch(platform)
+
+        # No bot messages should have been marked
+        assert not fake_redis.kv, (
+            f"Failed send must not mark any bot messages; redis had: {fake_redis.kv!r}"
+        )
+
+    async def test_bot_thread_reply_pipeline_processes_non_mention(self):
+        """After marking a bot message, a pipeline run of a non-mention thread reply is PROCESSED."""
+        import sys
+        sys.path.insert(0, "/work/surogates")
+        from surogates.channels.inbound import (
+            ChannelInboundPipeline,
+            InboundMessage,
+            InboundOutcome,
+            PipelineDeps,
+        )
+
+        # Setup: fake state that simulates the bot having sent message_id="bot-reply-ts"
+        class _FakeStateFix2:
+            def __init__(self) -> None:
+                self._botmsg: set[str] = {"bot-reply-ts"}
+                self._mentioned: set[str] = set()
+                self._sessions: dict[str, str] = {}
+
+            async def remember_session(self, k, v):
+                self._sessions[k] = v
+
+            async def get_session(self, k):
+                return self._sessions.get(k)
+
+            async def mark_mentioned_thread(self, t):
+                self._mentioned.add(t)
+
+            async def is_mentioned_thread(self, t):
+                return t in self._mentioned
+
+            async def mark_bot_message(self, ts):
+                self._botmsg.add(ts)
+
+            async def is_bot_message(self, ts):
+                return ts in self._botmsg
+
+        # Fake deps
+        from uuid import uuid4, UUID
+        from surogates.channels.source import SessionSource, build_session_key
+
+        store_events: list = []
+
+        class _FakeSS:
+            async def emit_event(self, sid, et, data):
+                store_events.append((sid, et, data))
+
+        class _FakeRedisInPipeline:
+            def __init__(self):
+                self.kv: dict = {}
+
+            async def set(self, k, v, ex=None):
+                self.kv[k] = v
+
+            async def get(self, k):
+                return self.kv.get(k)
+
+            async def exists(self, k):
+                return 1 if k in self.kv else 0
+
+            async def rpush(self, k, v):
+                pass
+
+            async def ltrim(self, k, s, e):
+                pass
+
+        sessions_created: list = []
+
+        async def get_or_create(ss, redis, *, session_key, user_id, org_id, agent_id, channel, config, session_factory, model=""):
+            sessions_created.append(session_key)
+            return UUID("aaaaaaaa-0000-0000-0000-000000000002")
+
+        enqueued: list = []
+
+        async def enqueue(redis, *, org_id, agent_id, session_id):
+            enqueued.append(session_id)
+
+        async def resolve_id(sf, platform, uid):
+            class _Id:
+                user_id = UUID("bbbbbbbb-0000-0000-0000-000000000001")
+            return _Id()
+
+        async def firehose(*a, **kw):
+            pass
+
+        class _Pairing:
+            async def create(self, *a, **kw):
+                return None
+
+        state = _FakeStateFix2()
+        deps = PipelineDeps(
+            session_store=_FakeSS(),
+            redis=_FakeRedisInPipeline(),
+            state=state,
+            pairing=_Pairing(),
+            firehose_append=firehose,
+            get_or_create_session=get_or_create,
+            enqueue_session=enqueue,
+            resolve_identity=resolve_id,
+            session_factory=None,
+            pairing_sender=lambda *a: None,
+        )
+
+        class _Routing:
+            org_id = "org-fix2"
+            agent_id = "agent-fix2"
+            platform = "slack"
+            identifier = "APP_FIX2"
+
+        # thread_key == "bot-reply-ts" which is already in _botmsg
+        msg = InboundMessage(
+            kind="text",
+            identifier="C_FIX2",
+            thread_key="bot-reply-ts",
+            platform_user_id="USER1",
+            user_name="User1",
+            text="reply without mention",
+            media_urls=[],
+            media_types=[],
+            is_dm=False,
+            is_mention=False,
+            ts="fix2-unique-ts",
+            source={},
+        )
+
+        pipeline = ChannelInboundPipeline()
+        result = await pipeline.handle(
+            msg,
+            routing=_Routing(),
+            config={"require_mention": True},
+            deps=deps,
+        )
+
+        assert result == InboundOutcome.PROCESSED, (
+            f"Non-mention thread reply whose thread_key == a bot message ts → PROCESSED; got {result}"
+        )

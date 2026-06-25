@@ -175,6 +175,7 @@ def build_channels_app(
         cache=cache,
         vault=vault,
         delivery_service=delivery_service,
+        redis=redis,
     )
 
     public_url: str = getattr(getattr(settings, "channels", None), "public_url", "")

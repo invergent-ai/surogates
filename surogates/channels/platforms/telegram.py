@@ -197,6 +197,20 @@ def _parse(body: dict, *, bot_username: str) -> InboundMessage | None:
         or platform_user_id
     )
 
+    # FIX 5: Detect bot messages.
+    # Drop OWN bot messages (the bot's username matches ours).
+    # For OTHER bots, return an InboundMessage with is_bot=True.
+    sender_is_bot: bool = bool(from_user.get("is_bot", False))
+    is_bot: bool = False
+    if sender_is_bot:
+        clean_bot = bot_username.lstrip("@").lower()
+        sender_username = (from_user.get("username") or "").lower()
+        if clean_bot and sender_username == clean_bot:
+            # Own bot's message — drop entirely.
+            return None
+        # Another bot's message — mark is_bot=True but do NOT drop here.
+        is_bot = True
+
     # ------------------------------------------------------------------
     # Text and content guard
     # ------------------------------------------------------------------
@@ -215,7 +229,15 @@ def _parse(body: dict, *, bot_username: str) -> InboundMessage | None:
     # Identifiers
     # ------------------------------------------------------------------
     identifier = str(chat.get("id", ""))
-    ts = str(message.get("date", ""))
+    # FIX 1: Use update_id as dedup key (globally unique per bot; Telegram
+    # repeats the same update_id on webhook retries, so dedup still catches
+    # real retries). Fall back to "chat_id:message_id" if update_id is absent.
+    update_id = body.get("update_id")
+    message_id = message.get("message_id")
+    if update_id is not None:
+        ts = str(update_id)
+    else:
+        ts = f"{identifier}:{message_id}"
 
     # ------------------------------------------------------------------
     # Source metadata
@@ -243,6 +265,7 @@ def _parse(body: dict, *, bot_username: str) -> InboundMessage | None:
         is_mention=is_mention,
         ts=ts,
         source=source,
+        is_bot=is_bot,
     )
 
 
@@ -334,7 +357,7 @@ class TelegramPlatform:
         },
         config_keys=(
             "require_mention",
-            "free_response_chats",
+            "free_response_channels",
             "mention_patterns",
             "reply_to_mode",
             "reactions_enabled",

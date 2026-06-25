@@ -535,10 +535,12 @@ class ChannelDeliveryDispatcher:
         cache: Any,
         vault: Any,
         delivery_service: Any,
+        redis: Any = None,
     ) -> None:
         self._cache = cache
         self._vault = vault
         self._delivery = delivery_service
+        self._redis = redis
 
     # ------------------------------------------------------------------
     # Core batch method (testable; all per-item logic lives here)
@@ -662,6 +664,18 @@ class ChannelDeliveryDispatcher:
             await self._delivery.mark_delivered(
                 item.id, provider_message_id=result.message_id
             )
+            # FIX 2: Mark the sent message (and its thread, if any) as
+            # bot-authored so the inbound pipeline's _check_thread_gates
+            # can bypass the mention gate for follow-up replies.
+            if self._redis is not None and result.message_id:
+                from surogates.channels.slack_state import SlackAdapterState
+                agent_id: str = resolved.get("agent_id", "")
+                if agent_id:
+                    state = SlackAdapterState(self._redis, agent_id=agent_id)
+                    await state.mark_bot_message(result.message_id)
+                    thread_ts: str | None = item.destination.get("thread_ts")
+                    if thread_ts:
+                        await state.mark_bot_message(thread_ts)
         else:
             error = result.error or "send failed"
             await self._delivery.mark_failed(item.id, error)
