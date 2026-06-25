@@ -1112,3 +1112,233 @@ class TestSlackPlatformRegistration:
 
         platform = registry.get("slack")
         assert isinstance(platform, SlackPlatform)
+
+
+# ---------------------------------------------------------------------------
+# SlackPlatform — handle_interactive (slash commands + interactivity)
+# ---------------------------------------------------------------------------
+
+
+def _make_slash_form(
+    *,
+    app_id: str = APP_ID,
+    text: str = "hello world",
+    channel_id: str = "D123",
+    user_id: str = "U42",
+    team_id: str = "T999",
+    command: str = "/surogates",
+) -> dict[str, str]:
+    """Build a form dict that mirrors what Slack sends for a slash command."""
+    return {
+        "command": command,
+        "text": text,
+        "channel_id": channel_id,
+        "user_id": user_id,
+        "team_id": team_id,
+        "api_app_id": app_id,
+    }
+
+
+def _make_interact_form(
+    *,
+    action_id: str = "surogates_approve_once",
+) -> dict[str, str]:
+    """Build a form dict that mirrors what Slack sends for a block_actions payload."""
+    import json as _json
+    payload = {
+        "type": "block_actions",
+        "actions": [{"action_id": action_id}],
+    }
+    return {"payload": _json.dumps(payload)}
+
+
+class TestHandleInteractiveSlash:
+    """handle_interactive on the /commands path produces a synthetic InboundMessage."""
+
+    @pytest.mark.asyncio
+    async def test_slash_with_text_returns_inbound_message(self):
+        p = SlackPlatform()
+        form = _make_slash_form(text="ask me something")
+        from types import SimpleNamespace
+        request = SimpleNamespace(path_params={"app_id": APP_ID})
+        result = await p.handle_interactive(
+            "/slack/{app_id}/commands",
+            form,
+            request=request,
+            creds=_creds(),
+            routing=None,
+        )
+        from surogates.channels.inbound import InboundMessage
+        assert isinstance(result, InboundMessage)
+        assert result.text == "ask me something"
+
+    @pytest.mark.asyncio
+    async def test_slash_message_is_dm(self):
+        p = SlackPlatform()
+        form = _make_slash_form(text="hello", channel_id="D123")
+        from types import SimpleNamespace
+        request = SimpleNamespace(path_params={"app_id": APP_ID})
+        result = await p.handle_interactive(
+            "/slack/{app_id}/commands",
+            form,
+            request=request,
+            creds=_creds(),
+            routing=None,
+        )
+        from surogates.channels.inbound import InboundMessage
+        assert isinstance(result, InboundMessage)
+        assert result.is_dm is True
+
+    @pytest.mark.asyncio
+    async def test_slash_is_not_mention(self):
+        p = SlackPlatform()
+        form = _make_slash_form(text="hello")
+        from types import SimpleNamespace
+        request = SimpleNamespace(path_params={"app_id": APP_ID})
+        result = await p.handle_interactive(
+            "/slack/{app_id}/commands",
+            form,
+            request=request,
+            creds=_creds(),
+            routing=None,
+        )
+        from surogates.channels.inbound import InboundMessage
+        assert isinstance(result, InboundMessage)
+        assert result.is_mention is False
+
+    @pytest.mark.asyncio
+    async def test_slash_identifier_is_channel_id(self):
+        p = SlackPlatform()
+        form = _make_slash_form(text="hello", channel_id="D999")
+        from types import SimpleNamespace
+        request = SimpleNamespace(path_params={"app_id": APP_ID})
+        result = await p.handle_interactive(
+            "/slack/{app_id}/commands",
+            form,
+            request=request,
+            creds=_creds(),
+            routing=None,
+        )
+        from surogates.channels.inbound import InboundMessage
+        assert isinstance(result, InboundMessage)
+        assert result.identifier == "D999"
+
+    @pytest.mark.asyncio
+    async def test_slash_platform_user_id_is_user_id(self):
+        p = SlackPlatform()
+        form = _make_slash_form(text="hello", user_id="U77")
+        from types import SimpleNamespace
+        request = SimpleNamespace(path_params={"app_id": APP_ID})
+        result = await p.handle_interactive(
+            "/slack/{app_id}/commands",
+            form,
+            request=request,
+            creds=_creds(),
+            routing=None,
+        )
+        from surogates.channels.inbound import InboundMessage
+        assert isinstance(result, InboundMessage)
+        assert result.platform_user_id == "U77"
+
+    @pytest.mark.asyncio
+    async def test_slash_empty_text_returns_plain_text_response(self):
+        """Empty slash text → response with usage hint; NOT an InboundMessage."""
+        p = SlackPlatform()
+        form = _make_slash_form(text="")
+        from types import SimpleNamespace
+        from fastapi.responses import Response
+        request = SimpleNamespace(path_params={"app_id": APP_ID})
+        result = await p.handle_interactive(
+            "/slack/{app_id}/commands",
+            form,
+            request=request,
+            creds=_creds(),
+            routing=None,
+        )
+        from surogates.channels.inbound import InboundMessage
+        assert not isinstance(result, InboundMessage), (
+            "Empty slash text must not produce an InboundMessage"
+        )
+        assert isinstance(result, Response)
+        # Response body should contain usage guidance.
+        body = result.body if hasattr(result, "body") else b""
+        assert b"Usage" in body or b"usage" in body or b"surogates" in body.lower()
+
+    @pytest.mark.asyncio
+    async def test_slash_whitespace_only_text_returns_usage_response(self):
+        """Whitespace-only text is treated as empty."""
+        p = SlackPlatform()
+        form = _make_slash_form(text="   ")
+        from types import SimpleNamespace
+        from fastapi.responses import Response
+        request = SimpleNamespace(path_params={"app_id": APP_ID})
+        result = await p.handle_interactive(
+            "/slack/{app_id}/commands",
+            form,
+            request=request,
+            creds=_creds(),
+            routing=None,
+        )
+        from surogates.channels.inbound import InboundMessage
+        assert not isinstance(result, InboundMessage)
+        assert isinstance(result, Response)
+
+    @pytest.mark.asyncio
+    async def test_slash_ts_field_is_a_string(self):
+        """ts must be a non-empty string (required by InboundMessage dedup)."""
+        p = SlackPlatform()
+        form = _make_slash_form(text="ping")
+        from types import SimpleNamespace
+        request = SimpleNamespace(path_params={"app_id": APP_ID})
+        result = await p.handle_interactive(
+            "/slack/{app_id}/commands",
+            form,
+            request=request,
+            creds=_creds(),
+            routing=None,
+        )
+        from surogates.channels.inbound import InboundMessage
+        assert isinstance(result, InboundMessage)
+        assert isinstance(result.ts, str) and result.ts != ""
+
+
+class TestHandleInteractiveInteract:
+    """handle_interactive on the /interact path acks 200 (no pipeline invocation)."""
+
+    @pytest.mark.asyncio
+    async def test_interact_returns_response_not_inbound_message(self):
+        """Block-actions payload → a Response, not an InboundMessage."""
+        p = SlackPlatform()
+        form = _make_interact_form()
+        from types import SimpleNamespace
+        from fastapi.responses import Response
+        request = SimpleNamespace(path_params={"app_id": APP_ID})
+        result = await p.handle_interactive(
+            "/slack/{app_id}/interact",
+            form,
+            request=request,
+            creds=_creds(),
+            routing=None,
+        )
+        from surogates.channels.inbound import InboundMessage
+        assert not isinstance(result, InboundMessage)
+        assert isinstance(result, Response)
+        assert result.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_interact_bad_payload_json_still_returns_200(self):
+        """Malformed payload JSON on /interact → 200 (ack, don't crash)."""
+        p = SlackPlatform()
+        form = {"payload": "not valid json {{{{"}
+        from types import SimpleNamespace
+        from fastapi.responses import Response
+        request = SimpleNamespace(path_params={"app_id": APP_ID})
+        result = await p.handle_interactive(
+            "/slack/{app_id}/interact",
+            form,
+            request=request,
+            creds=_creds(),
+            routing=None,
+        )
+        assert isinstance(result, Response)
+        assert result.status_code == 200

@@ -29,6 +29,7 @@ import asyncio
 import inspect
 import logging
 import os
+import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -36,7 +37,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from surogates.channels.credentials import resolve_channel_credentials
-from surogates.channels.inbound import ChannelInboundPipeline, PipelineDeps
+from surogates.channels.inbound import ChannelInboundPipeline, InboundMessage, PipelineDeps
 from surogates.channels.registry import ChannelPlatform, ChannelRegistry, VerificationResult
 from surogates.channels.resolve import resolve_tenant
 
@@ -128,122 +129,162 @@ class ChannelWebhookDispatcher:
     # ------------------------------------------------------------------
 
     def _mount_platform(self, app: FastAPI, platform: ChannelPlatform) -> None:
-        """Register POST routes for *platform*'s main path and interactive_paths."""
-        paths: list[str] = [platform.route_path()]
-        interactive = getattr(platform, "interactive_paths", ())
-        paths.extend(interactive)
+        """Register POST routes for *platform*'s main path and interactive_paths.
 
+        The main JSON Events route uses :meth:`_make_handler`.  Each path in
+        ``interactive_paths`` uses :meth:`_make_interactive_handler` instead,
+        which parses an ``application/x-www-form-urlencoded`` body and
+        delegates to ``platform.handle_interactive``.  Both handlers share the
+        same secure front-half (raw bytes → identifier → resolve_tenant →
+        creds → verify) via :meth:`_resolve_and_verify`.
+        """
         handler = self._make_handler(platform)
-        for path in paths:
-            app.add_api_route(path, handler, methods=["POST"])
+        app.add_api_route(platform.route_path(), handler, methods=["POST"])
+
+        interactive = getattr(platform, "interactive_paths", ())
+        if interactive:
+            interactive_handler = self._make_interactive_handler(platform)
+            for path in interactive:
+                app.add_api_route(path, interactive_handler, methods=["POST"])
+
+    # ------------------------------------------------------------------
+    # Shared secure front-half
+    # ------------------------------------------------------------------
+
+    async def _resolve_and_verify(
+        self,
+        platform: ChannelPlatform,
+        request: Request,
+        raw_bytes: bytes,
+    ):
+        """Shared secure front-half for all routes on *platform*.
+
+        Executes the security-critical ordering:
+          1. Extract identifier from path (body is NOT consulted).
+          2. Resolve tenant — unknown → ``None`` (caller should fast-ack 200).
+          3. Resolve channel credentials.
+          4. Verify over raw bytes — falsy or non-accepted VerificationResult
+             → returns the appropriate :class:`Response` (caller should return it).
+
+        Returns
+        -------
+        tuple[str, str, dict, dict, _RoutingObject, Response | None]
+            ``(identifier, org_id, config, creds, routing, error_response)``
+
+            * ``error_response`` is ``None`` when all steps passed.  When it
+              is a :class:`Response`, the caller must return it immediately
+              without further processing.
+        """
+        cache = self._cache
+        vault = self._vault
+
+        # Step 1: Extract identifier from path only (body=None).
+        try:
+            identifier = platform.identifier_of(request, None)
+        except Exception:
+            logger.debug(
+                "[dispatcher] identifier_of raised on %s — treating as unknown, acking 200",
+                platform.kind, exc_info=True,
+            )
+            return None, None, {}, {}, None, Response(status_code=200)
+
+        # Step 2: Resolve tenant.
+        resolved = await resolve_tenant(cache, platform.kind, identifier)
+        if resolved is None:
+            logger.debug(
+                "[dispatcher] %s:%s — unknown identifier, acking 200",
+                platform.kind, identifier,
+            )
+            return identifier, None, {}, {}, None, Response(status_code=200)
+
+        org_id: str = resolved["org_id"]
+        agent_id: str = resolved["agent_id"]
+        config: dict = resolved.get("config") or {}
+
+        # Step 3: Resolve credentials.
+        creds = await resolve_channel_credentials(
+            vault=vault,
+            kind=platform.kind,
+            identifier=identifier,
+            org_id=org_id,
+            refs=platform.descriptor.vault_refs(identifier),
+        )
+
+        # Step 4: Verify over raw bytes.
+        try:
+            v = platform.verify(request, raw_bytes, creds=creds)
+            if inspect.isawaitable(v):
+                v = await v
+        except Exception:
+            logger.warning(
+                "[dispatcher] verify raised on %s:%s", platform.kind, identifier,
+                exc_info=True,
+            )
+            return identifier, org_id, config, creds, None, Response(status_code=401)
+
+        if isinstance(v, VerificationResult):
+            if not v.accepted:
+                logger.info(
+                    "[dispatcher] %s:%s — handshake rejected, returning 401",
+                    platform.kind, identifier,
+                )
+                return identifier, org_id, config, creds, None, Response(status_code=401)
+            # Accepted handshake — return the prescribed response.
+            if v.response_body is None:
+                return identifier, org_id, config, creds, None, Response(status_code=v.status_code)
+            if isinstance(v.response_body, dict):
+                return (
+                    identifier, org_id, config, creds, None,
+                    JSONResponse(content=v.response_body, status_code=v.status_code),
+                )
+            return (
+                identifier, org_id, config, creds, None,
+                PlainTextResponse(content=str(v.response_body), status_code=v.status_code),
+            )
+
+        if not v:
+            logger.info(
+                "[dispatcher] %s:%s — verification failed, returning 401",
+                platform.kind, identifier,
+            )
+            return identifier, org_id, config, creds, None, Response(status_code=401)
+
+        routing = _RoutingObject(
+            org_id=org_id,
+            agent_id=agent_id,
+            platform=platform.kind,
+            identifier=identifier,
+        )
+        return identifier, org_id, config, creds, routing, None
 
     # ------------------------------------------------------------------
     # Per-platform handler factory
     # ------------------------------------------------------------------
 
     def _make_handler(self, platform: ChannelPlatform):
-        """Return an async FastAPI route handler closed over *platform*."""
-        cache = self._cache
-        vault = self._vault
+        """Return an async FastAPI route handler for JSON Events API requests.
+
+        Implements the security-critical ordering documented at the top of this
+        module.  The secure front-half (steps 1–5) is shared with the
+        interactive handler via :meth:`_resolve_and_verify`.
+        """
         pipeline = self._pipeline
         deps_factory = self._deps_factory
+        self_ = self
 
         async def _handler(request: Request) -> Response:
             # ----------------------------------------------------------------
-            # Step 1: Read raw bytes (verbatim, for signature verification).
-            # The JSON body is deliberately NOT parsed here — see step 2.
+            # Steps 1–5: raw bytes → identifier → tenant → creds → verify.
+            # Security: the body is never parsed before verify passes; an
+            # unknown identifier gets a fast-ack 200 with zero side effects.
+            # See module docstring for the full ordering contract.
             # ----------------------------------------------------------------
             raw_bytes = await request.body()
-
-            # ----------------------------------------------------------------
-            # Step 2: Extract the workspace / channel identifier from the PATH.
-            #
-            # We pass body=None: our identifiers are path-based, so identifier_of
-            # reads request.path_params and never touches the (untrusted) body.
-            # Parsing the body before the tenant is resolved would (a) leak a
-            # liveness oracle via a 400 on malformed JSON and (b) run untrusted
-            # input through the JSON parser for unprovisioned identifiers. If the
-            # path is malformed and identifier_of raises, treat it as an unknown
-            # identifier (fast-ack 200 in step 3), NOT a 400.
-            # ----------------------------------------------------------------
-            try:
-                identifier = platform.identifier_of(request, None)
-            except Exception:
-                logger.debug(
-                    "[dispatcher] identifier_of raised on %s — treating as unknown, acking 200",
-                    platform.kind, exc_info=True,
-                )
-                return Response(status_code=200)
-
-            # ----------------------------------------------------------------
-            # Step 3: Resolve tenant.  Unknown identifier → fast-ack 200 with
-            # ZERO side effects (no creds, no body parse, no verify, no pipeline).
-            # ----------------------------------------------------------------
-            resolved = await resolve_tenant(cache, platform.kind, identifier)
-            if resolved is None:
-                logger.debug(
-                    "[dispatcher] %s:%s — unknown identifier, acking 200",
-                    platform.kind, identifier,
-                )
-                return Response(status_code=200)
-
-            org_id: str = resolved["org_id"]
-            agent_id: str = resolved["agent_id"]
-            config: dict = resolved.get("config") or {}
-
-            # ----------------------------------------------------------------
-            # Step 4: Resolve credentials (only after a KNOWN identifier).
-            # ----------------------------------------------------------------
-            creds = await resolve_channel_credentials(
-                vault=vault,
-                kind=platform.kind,
-                identifier=identifier,
-                org_id=org_id,
-                refs=platform.descriptor.vault_refs(identifier),
+            _id, org_id, config, creds, routing, err = await self_._resolve_and_verify(
+                platform, request, raw_bytes
             )
-
-            # ----------------------------------------------------------------
-            # Step 5: Verify over the raw bytes.  MUST pass before the body is
-            # parsed or the pipeline runs.
-            #
-            # verify is synchronous by contract (HMAC/secret compare over already-
-            # resolved creds, no I/O).  We await defensively so a future async
-            # impl can't silently bypass verification (a returned coroutine is
-            # truthy and would otherwise sail past the falsy check below).
-            # ----------------------------------------------------------------
-            try:
-                v = platform.verify(request, raw_bytes, creds=creds)
-                if inspect.isawaitable(v):
-                    v = await v
-            except Exception:
-                logger.warning(
-                    "[dispatcher] verify raised on %s:%s", platform.kind, identifier,
-                    exc_info=True,
-                )
-                return Response(status_code=401)
-
-            if isinstance(v, VerificationResult):
-                # Handshake / challenge path. Honour ``accepted``: only emit the
-                # prescribed response when the handshake was actually accepted;
-                # a rejected handshake is a 401 regardless of its status_code.
-                if not v.accepted:
-                    logger.info(
-                        "[dispatcher] %s:%s — handshake rejected, returning 401",
-                        platform.kind, identifier,
-                    )
-                    return Response(status_code=401)
-                if v.response_body is None:
-                    return Response(status_code=v.status_code)
-                if isinstance(v.response_body, dict):
-                    return JSONResponse(content=v.response_body, status_code=v.status_code)
-                return PlainTextResponse(content=str(v.response_body), status_code=v.status_code)
-
-            if not v:
-                logger.info(
-                    "[dispatcher] %s:%s — verification failed, returning 401",
-                    platform.kind, identifier,
-                )
-                return Response(status_code=401)
+            if err is not None:
+                return err
 
             # ----------------------------------------------------------------
             # Step 6: Parse the JSON body — only now, after a known identifier
@@ -256,19 +297,9 @@ class ChannelWebhookDispatcher:
             except Exception:
                 logger.info(
                     "[dispatcher] %s:%s — malformed body on verified request, returning 400",
-                    platform.kind, identifier,
+                    platform.kind, _id,
                 )
                 return Response(status_code=400)
-
-            # ----------------------------------------------------------------
-            # Build routing object (used from step 7 onward).
-            # ----------------------------------------------------------------
-            routing = _RoutingObject(
-                org_id=org_id,
-                agent_id=agent_id,
-                platform=platform.kind,
-                identifier=identifier,
-            )
 
             # ----------------------------------------------------------------
             # Step 7: Optional non-message update hook.
@@ -281,7 +312,7 @@ class ChannelWebhookDispatcher:
                 except Exception:
                     logger.warning(
                         "[dispatcher] handle_non_message_update raised on %s:%s",
-                        platform.kind, identifier, exc_info=True,
+                        platform.kind, _id, exc_info=True,
                     )
                     return Response(status_code=200)
                 if handled:
@@ -310,7 +341,7 @@ class ChannelWebhookDispatcher:
                     msg = msg_or_coro
             except Exception:
                 logger.warning(
-                    "[dispatcher] parse raised on %s:%s", platform.kind, identifier,
+                    "[dispatcher] parse raised on %s:%s", platform.kind, _id,
                     exc_info=True,
                 )
                 return Response(status_code=400)
@@ -333,7 +364,7 @@ class ChannelWebhookDispatcher:
                 except Exception:
                     logger.warning(
                         "[dispatcher] enrich raised on %s:%s — using unenriched message",
-                        platform.kind, identifier,
+                        platform.kind, _id,
                         exc_info=True,
                     )
 
@@ -346,6 +377,131 @@ class ChannelWebhookDispatcher:
         # Assign a unique name so FastAPI doesn't complain about duplicate routes.
         _handler.__name__ = f"_dispatch_{platform.kind}"
         return _handler
+
+    def _make_interactive_handler(self, platform: ChannelPlatform):
+        """Return an async FastAPI route handler for form-encoded interactive requests.
+
+        Used for interactive_paths (slash commands, button clicks).
+
+        Security ordering mirrors the JSON Events handler:
+          Steps 1–5 are shared via :meth:`_resolve_and_verify` (raw bytes →
+          identifier → tenant → creds → verify).  Only after verify passes is
+          the form body parsed (``application/x-www-form-urlencoded``).
+
+        The handler delegates to ``platform.handle_interactive`` which returns
+        one of:
+          - :class:`~surogates.channels.inbound.InboundMessage` — forward
+            through enrich + pipeline, return 200.
+          - :class:`~fastapi.responses.Response` — return directly.
+          - ``None`` — silent 200 ack.
+
+        Only platforms that declare ``interactive_paths`` AND implement
+        ``handle_interactive`` get this handler.  The dispatcher checks for the
+        method via ``getattr``; platforms without it will hit this handler but
+        return 200 silently (they declared the paths but forgot the method).
+        """
+        pipeline = self._pipeline
+        deps_factory = self._deps_factory
+        self_ = self
+
+        async def _interactive_handler(request: Request) -> Response:
+            # ----------------------------------------------------------------
+            # Steps 1–5 (shared with JSON handler): raw bytes → identifier →
+            # tenant → creds → verify.
+            # ----------------------------------------------------------------
+            raw_bytes = await request.body()
+            _id, _org, config, creds, routing, err = await self_._resolve_and_verify(
+                platform, request, raw_bytes
+            )
+            if err is not None:
+                return err
+
+            # ----------------------------------------------------------------
+            # Step 6 (interactive): Parse the form body — only AFTER verify.
+            # ----------------------------------------------------------------
+            try:
+                form: dict[str, str] = dict(
+                    urllib.parse.parse_qsl(raw_bytes.decode("utf-8", errors="replace"))
+                )
+            except Exception:
+                logger.info(
+                    "[dispatcher] %s:%s — malformed form body on interactive route, returning 400",
+                    platform.kind, _id,
+                )
+                return Response(status_code=400)
+
+            # ----------------------------------------------------------------
+            # Step 7: Delegate to the platform's interactive handler.
+            # ----------------------------------------------------------------
+            handle_interactive = getattr(platform, "handle_interactive", None)
+            if handle_interactive is None:
+                # Platform declared interactive_paths but no handler — ack 200.
+                logger.debug(
+                    "[dispatcher] %s:%s — no handle_interactive method, acking 200",
+                    platform.kind, _id,
+                )
+                return Response(status_code=200)
+
+            # Resolve the path template from the matched route so the platform
+            # can dispatch on slash-vs-interact without inspecting the URL again.
+            path_template: str = request.scope.get("path", "")
+            # FastAPI stores the route pattern in scope["endpoint"] or via
+            # request.scope["router"]; the cleanest portable approach is to use
+            # the raw path and match against the declared interactive_paths.
+            interactive_paths = getattr(platform, "interactive_paths", ())
+            matched_template = path_template
+            for tmpl in interactive_paths:
+                # Convert path template to a simple prefix check by replacing
+                # {param} placeholders with the actual path segment.
+                # For Slack: "/slack/{app_id}/commands" → ends with "/commands"
+                # This avoids importing starlette routing internals.
+                suffix = tmpl.split("}")[-1]  # everything after last "}"
+                if path_template.endswith(suffix):
+                    matched_template = tmpl
+                    break
+
+            try:
+                result = await handle_interactive(
+                    matched_template,
+                    form,
+                    request=request,
+                    creds=creds,
+                    routing=routing,
+                )
+            except Exception:
+                logger.warning(
+                    "[dispatcher] handle_interactive raised on %s:%s",
+                    platform.kind, _id, exc_info=True,
+                )
+                return Response(status_code=200)
+
+            # ----------------------------------------------------------------
+            # Step 8: Dispatch on result type.
+            # ----------------------------------------------------------------
+            if result is None:
+                return Response(status_code=200)
+
+            if isinstance(result, InboundMessage):
+                # Run through enrich + pipeline just like the main handler.
+                enrich = getattr(platform, "enrich", None)
+                if enrich is not None:
+                    try:
+                        result = await enrich(result, creds=creds)
+                    except Exception:
+                        logger.warning(
+                            "[dispatcher] enrich raised on interactive %s:%s — using unenriched",
+                            platform.kind, _id, exc_info=True,
+                        )
+
+                deps = deps_factory(platform.kind, routing, creds, platform)
+                await pipeline.handle(result, routing=routing, config=config, deps=deps)
+                return Response(status_code=200)
+
+            # FastAPI Response (or any Response subclass) — return directly.
+            return result
+
+        _interactive_handler.__name__ = f"_dispatch_interactive_{platform.kind}"
+        return _interactive_handler
 
 
 # ---------------------------------------------------------------------------

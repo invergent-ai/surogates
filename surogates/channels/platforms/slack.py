@@ -54,9 +54,23 @@ try:
 except ImportError:
     AsyncWebClient = Any  # type: ignore[misc,assignment]
 
+from fastapi.responses import Response
+
 from surogates.channels.base import SendResult
 from surogates.channels.inbound import InboundMessage
 from surogates.channels.registry import ChannelDescriptor, VerificationResult
+
+
+def _form_timestamp() -> str:
+    """Return a monotonic timestamp string suitable for deduplication.
+
+    Uses ``time.time_ns()`` (nanosecond integer) formatted as a dotted
+    decimal to match the Slack ``ts`` convention.  Called only when the
+    slash-command form body carries no ``ts`` field of its own.
+    """
+    ns = time.time_ns()
+    seconds, frac = divmod(ns, 1_000_000_000)
+    return f"{seconds}.{frac:09d}"
 
 __all__ = [
     "SlackPlatform",
@@ -172,12 +186,21 @@ def verify(
 
     # ------------------------------------------------------------------
     # 3. Parse body (only after signature passes).
+    #
+    # For JSON Events API requests the body is JSON and we can do deeper
+    # checks (url_verification echo, api_app_id crosscheck).  For
+    # form-encoded requests (slash commands, interactivity) the body is
+    # application/x-www-form-urlencoded — not JSON.  In that case the
+    # signature already proved authenticity; we return True immediately
+    # with no further checks (there is nothing to crosscheck from form
+    # fields before the caller has parsed the form).
     # ------------------------------------------------------------------
     try:
         body = json.loads(raw_body)
     except (json.JSONDecodeError, ValueError):
-        logger.debug("verify: body is not valid JSON")
-        return False
+        # Signature passed; body is not JSON (likely form-encoded).
+        # Return True — the caller is responsible for parsing the form.
+        return True
 
     body_type = body.get("type", "")
 
@@ -471,6 +494,146 @@ class SlackPlatform:
         except Exception:
             logger.debug("SlackPlatform: auth.test failed for token — skipping bot_user_id")
             return ""
+
+    # ------------------------------------------------------------------
+    # handle_interactive — slash commands and Block Kit interactions
+    # ------------------------------------------------------------------
+
+    async def handle_interactive(
+        self,
+        path_template: str,
+        form: dict,
+        *,
+        request: Any,
+        creds: dict,
+        routing: Any,
+    ) -> InboundMessage | Any:
+        """Handle a form-encoded interactive Slack request.
+
+        Dispatches on *path_template* to one of two sub-handlers:
+
+        ``/slack/{app_id}/commands``
+            Slash command.  Builds a synthetic :class:`InboundMessage` so the
+            inbound pipeline processes it as a DM from the issuing user.  An
+            empty (or whitespace-only) text field returns a
+            :class:`~fastapi.responses.PlainTextResponse` with usage guidance
+            instead — Slack displays it ephemerally to the user.
+
+        ``/slack/{app_id}/interact``
+            Block Kit button clicks / modal submissions.  ACK-only: parses the
+            ``payload`` field, logs the ``action_id``, and returns a 200
+            :class:`~fastapi.responses.Response`.
+
+            **Approval handling is a follow-up task.**  The current ``send``
+            implementation does not yet render Block Kit approval buttons, and
+            the harness-side approval resolution mechanism (persisting the
+            decision to a durable store and unblocking the waiting session)
+            must be wired before this path does anything beyond ack.  The old
+            in-process ``_approval_resolved`` dict from the Socket Mode adapter
+            is intentionally NOT ported here — it is process-local and wrong
+            for the stateless multi-replica deployment model.
+
+        Parameters
+        ----------
+        path_template:
+            The FastAPI route path template that matched this request, e.g.
+            ``"/slack/{app_id}/commands"``.
+        form:
+            Parsed ``application/x-www-form-urlencoded`` body as a plain dict
+            (keys and values are strings).
+        request:
+            Starlette-like request object (used for path_params if needed).
+        creds:
+            Resolved credential dict (``bot_token``, ``signing_secret``).
+        routing:
+            Routing object from the dispatcher (may be ``None`` in tests).
+
+        Returns
+        -------
+        InboundMessage
+            When the event should be forwarded through the inbound pipeline.
+        Response
+            When the event has been fully handled (usage hint or ack).
+        None
+            When the event should be silently acked with no side effects.
+        """
+        if path_template.endswith("/commands"):
+            return await self._handle_slash(form)
+        if path_template.endswith("/interact"):
+            return await self._handle_interact(form)
+        # Unknown interactive path — ack silently.
+        logger.debug(
+            "[SlackPlatform] Unknown interactive path template %r — acking silently",
+            path_template,
+        )
+        return Response(status_code=200)
+
+    async def _handle_slash(self, form: dict) -> InboundMessage | Any:
+        """Handle a /surogates slash command form payload.
+
+        Returns a :class:`InboundMessage` for non-empty text so the inbound
+        pipeline processes it as a DM, or a :class:`PlainTextResponse` for
+        empty/whitespace-only text (Slack shows it ephemerally to the user).
+        """
+        from fastapi.responses import PlainTextResponse
+
+        text: str = form.get("text", "").strip()
+        channel_id: str = form.get("channel_id", "")
+        user_id: str = form.get("user_id", "")
+        team_id: str = form.get("team_id", "")
+
+        if not text:
+            return PlainTextResponse("Usage: /surogates <message>", status_code=200)
+
+        # Use the form's own timestamp if Slack provides one; otherwise derive
+        # a monotonic counter-style string from the current epoch with enough
+        # granularity to serve as a dedup key without importing time at module
+        # level (avoids the "don't call time.time() at import" anti-pattern).
+        ts: str = form.get("ts", "") or _form_timestamp()
+
+        return InboundMessage(
+            kind="text",
+            identifier=channel_id,
+            thread_key=None,
+            platform_user_id=user_id,
+            user_name=user_id,  # Enrich step resolves display name asynchronously.
+            text=text,
+            media_urls=[],
+            media_types=[],
+            is_dm=True,
+            is_mention=False,
+            ts=ts,
+            source={
+                "platform": "slack",
+                "channel_type": "im",
+                "team": team_id,
+                "via": "slash_command",
+            },
+        )
+
+    async def _handle_interact(self, form: dict) -> Any:
+        """ACK a Block Kit button-click or modal-submission payload.
+
+        Parses the ``payload`` JSON field and logs the ``action_id`` for
+        observability.  Returns a plain 200 so Slack stops retrying.
+
+        Full approval handling is deferred: the harness-side mechanism that
+        persists the decision and unblocks the waiting session must be wired
+        before this path does more than ack.
+        """
+        try:
+            payload = json.loads(form.get("payload", "{}"))
+            actions = payload.get("actions", [])
+            for action in actions:
+                action_id = action.get("action_id", "")
+                if action_id:
+                    logger.debug(
+                        "[SlackPlatform] /interact ack — action_id=%r (approval handling is a follow-up)",
+                        action_id,
+                    )
+        except (json.JSONDecodeError, ValueError):
+            logger.debug("[SlackPlatform] /interact payload is not valid JSON — acking silently")
+        return Response(status_code=200)
 
     # ------------------------------------------------------------------
     # send

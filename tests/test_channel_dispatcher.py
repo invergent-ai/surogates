@@ -811,3 +811,242 @@ class TestEnrichHook:
         assert len(pipeline.calls) == 1
         # The message reaching the pipeline is the ORIGINAL (pre-enrich) one.
         assert pipeline.calls[0]["msg"].user_name == "alice"
+
+
+# ---------------------------------------------------------------------------
+# Slack interactive surface integration tests — form-encoded POSTs
+# ---------------------------------------------------------------------------
+
+
+import hashlib
+import hmac
+import time
+import urllib.parse
+
+
+SLACK_SIGNING_SECRET = "test_signing_secret_ABC123"
+SLACK_APP_ID = "A0TESTAPPID"
+
+
+def _slack_sig(secret: str, timestamp: str, raw_body: bytes) -> str:
+    """Compute the X-Slack-Signature for a given raw body."""
+    basestring = b"v0:" + timestamp.encode("ascii") + b":" + raw_body
+    mac = hmac.new(secret.encode("utf-8"), basestring, hashlib.sha256)
+    return f"v0={mac.hexdigest()}"
+
+
+def _slash_form_body(
+    *,
+    text: str = "hello",
+    channel_id: str = "D100",
+    user_id: str = "U42",
+    team_id: str = "T999",
+    command: str = "/surogates",
+) -> bytes:
+    """Return a URL-encoded slash command body as bytes."""
+    data = {
+        "command": command,
+        "text": text,
+        "channel_id": channel_id,
+        "user_id": user_id,
+        "team_id": team_id,
+    }
+    return urllib.parse.urlencode(data).encode("utf-8")
+
+
+def _interact_form_body(*, action_id: str = "surogates_approve_once") -> bytes:
+    """Return a URL-encoded block_actions body as bytes."""
+    import json as _json
+    payload = {
+        "type": "block_actions",
+        "actions": [{"action_id": action_id}],
+    }
+    data = {"payload": _json.dumps(payload)}
+    return urllib.parse.urlencode(data).encode("utf-8")
+
+
+def _slack_headers(raw_body: bytes, secret: str = SLACK_SIGNING_SECRET) -> dict:
+    ts = str(int(time.time()))
+    sig = _slack_sig(secret, ts, raw_body)
+    return {
+        "x-slack-request-timestamp": ts,
+        "x-slack-signature": sig,
+        "content-type": "application/x-www-form-urlencoded",
+    }
+
+
+def _make_slack_dispatcher() -> tuple:
+    """Return (app, pipeline, cache) wired with the real SlackPlatform."""
+    from surogates.channels.platforms import slack as _slack_mod  # noqa: F401
+    from surogates.channels.registry import registry as _default_registry
+
+    pipeline = _FakePipeline()
+    vault = _FakeVault()
+    # Override vault to return the test signing secret.
+    vault._secret = SLACK_SIGNING_SECRET
+
+    async def _vault_resolve(ref, *, org_id):
+        # ref format: vault://slack_<cred>_<identifier>
+        if "signing_secret" in ref:
+            return SLACK_SIGNING_SECRET
+        return "xoxb-test-token"
+
+    vault.resolve_ref = _vault_resolve
+
+    slack_platform = _default_registry.get("slack")
+
+    # Per-test isolated registry so we don't conflict with the module singleton.
+    from surogates.channels.registry import ChannelRegistry
+    reg = ChannelRegistry()
+    # Re-register a fresh SlackPlatform to avoid shared auth.test cache state.
+    from surogates.channels.platforms.slack import SlackPlatform
+    reg.register(SlackPlatform())
+
+    cache_data = {
+        f"slack:{SLACK_APP_ID}": {
+            "org_id": ORG_ID,
+            "agent_id": AGENT_ID,
+            "config": {},
+        }
+    }
+    cache = _FakeCache(data=cache_data)
+
+    from types import SimpleNamespace
+    settings = SimpleNamespace(
+        channels={"slack": SimpleNamespace(enabled=True)}
+    )
+
+    from surogates.channels.dispatcher import ChannelWebhookDispatcher
+    dispatcher = ChannelWebhookDispatcher(
+        cache=cache,
+        vault=vault,
+        pipeline=pipeline,
+        deps_factory=_deps_factory,
+        settings=settings,
+        registry=reg,
+    )
+    app = dispatcher.build_app()
+    return app, pipeline, cache
+
+
+class TestSlackInteractiveSurfaces:
+    """Integration tests: signed form-encoded POSTs to Slack interactive routes."""
+
+    async def _post_form(self, app, path: str, raw_body: bytes, headers: dict):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://test") as c:
+            return await c.post(path, content=raw_body, headers=headers)
+
+    async def test_slash_with_text_calls_pipeline_once(self):
+        """Signed slash POST with text → pipeline.handle called once."""
+        app, pipeline, _ = _make_slack_dispatcher()
+        raw_body = _slash_form_body(text="hello")
+        headers = _slack_headers(raw_body)
+
+        with __import__("unittest.mock", fromlist=["patch"]).patch(
+            "surogates.channels.platforms.slack.AsyncWebClient",
+        ) as mock_cls:
+            mock_client = __import__("unittest.mock", fromlist=["AsyncMock"]).AsyncMock()
+            mock_client.auth_test.return_value = {"user_id": "UBOTID"}
+            mock_client.users_info.return_value = {
+                "user": {"profile": {"display_name": "Alice"}, "name": "alice"}
+            }
+            mock_cls.return_value = mock_client
+
+            r = await self._post_form(
+                app, f"/slack/{SLACK_APP_ID}/commands", raw_body, headers
+            )
+
+        assert r.status_code == 200
+        assert len(pipeline.calls) == 1
+
+    async def test_slash_pipeline_message_is_dm_with_correct_text(self):
+        """Slash command produces a synthetic InboundMessage(is_dm=True, text=<text>)."""
+        app, pipeline, _ = _make_slack_dispatcher()
+        raw_body = _slash_form_body(text="ask me something")
+        headers = _slack_headers(raw_body)
+
+        with __import__("unittest.mock", fromlist=["patch"]).patch(
+            "surogates.channels.platforms.slack.AsyncWebClient",
+        ) as mock_cls:
+            mock_client = __import__("unittest.mock", fromlist=["AsyncMock"]).AsyncMock()
+            mock_client.auth_test.return_value = {"user_id": "UBOTID"}
+            mock_client.users_info.return_value = {
+                "user": {"profile": {"display_name": "Alice"}, "name": "alice"}
+            }
+            mock_cls.return_value = mock_client
+
+            await self._post_form(
+                app, f"/slack/{SLACK_APP_ID}/commands", raw_body, headers
+            )
+
+        assert len(pipeline.calls) == 1
+        msg = pipeline.calls[0]["msg"]
+        assert msg.text == "ask me something"
+        assert msg.is_dm is True
+
+    async def test_slash_empty_text_returns_200_pipeline_not_called(self):
+        """Empty slash text → 200 with usage message; pipeline NOT called."""
+        app, pipeline, _ = _make_slack_dispatcher()
+        raw_body = _slash_form_body(text="")
+        headers = _slack_headers(raw_body)
+
+        r = await self._post_form(
+            app, f"/slack/{SLACK_APP_ID}/commands", raw_body, headers
+        )
+
+        assert r.status_code == 200
+        assert pipeline.calls == []
+
+    async def test_interact_returns_200_pipeline_not_called(self):
+        """Signed block_actions POST → 200 ack; pipeline NOT called."""
+        app, pipeline, _ = _make_slack_dispatcher()
+        raw_body = _interact_form_body()
+        headers = _slack_headers(raw_body)
+
+        r = await self._post_form(
+            app, f"/slack/{SLACK_APP_ID}/interact", raw_body, headers
+        )
+
+        assert r.status_code == 200
+        assert pipeline.calls == []
+
+    async def test_bad_signature_slash_returns_401(self):
+        """Bad signing secret on slash command → 401."""
+        app, pipeline, _ = _make_slack_dispatcher()
+        raw_body = _slash_form_body(text="hello")
+        # Sign with a wrong key.
+        bad_headers = _slack_headers(raw_body, secret="wrong_secret")
+
+        r = await self._post_form(
+            app, f"/slack/{SLACK_APP_ID}/commands", raw_body, bad_headers
+        )
+
+        assert r.status_code == 401
+        assert pipeline.calls == []
+
+    async def test_bad_signature_interact_returns_401(self):
+        """Bad signing secret on /interact → 401."""
+        app, pipeline, _ = _make_slack_dispatcher()
+        raw_body = _interact_form_body()
+        bad_headers = _slack_headers(raw_body, secret="wrong_secret")
+
+        r = await self._post_form(
+            app, f"/slack/{SLACK_APP_ID}/interact", raw_body, bad_headers
+        )
+
+        assert r.status_code == 401
+        assert pipeline.calls == []
+
+    async def test_unknown_app_id_returns_200_fast_ack_pipeline_not_called(self):
+        """Unknown app_id in path → 200 fast-ack; no creds, no pipeline."""
+        app, pipeline, _ = _make_slack_dispatcher()
+        raw_body = _slash_form_body(text="hello")
+        headers = _slack_headers(raw_body)
+
+        r = await self._post_form(
+            app, "/slack/UNKNOWN_APP_ID/commands", raw_body, headers
+        )
+
+        assert r.status_code == 200
+        assert pipeline.calls == []

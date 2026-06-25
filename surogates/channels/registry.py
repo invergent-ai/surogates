@@ -165,6 +165,46 @@ class ChannelPlatform(Protocol):
         self, body: Any, *, routing: Any, creds: dict, deps: Any
     ) -> bool: ...
 
+    async def handle_interactive(
+        self,
+        path_template: str,
+        form: dict,
+        *,
+        request: Any,
+        creds: dict,
+        routing: Any,
+    ) -> Any:
+        """Handle a form-encoded interactive request (slash commands, button clicks).
+
+        Called by the dispatcher for requests arriving on any of the paths
+        declared in ``interactive_paths``.  Only platforms that declare
+        ``interactive_paths`` and implement this method will receive these calls
+        — the dispatcher uses ``getattr`` to check for its presence.
+
+        Parameters
+        ----------
+        path_template:
+            The FastAPI route path template that matched this request.
+        form:
+            Parsed ``application/x-www-form-urlencoded`` body as a plain dict.
+        request:
+            Starlette-like request object.
+        creds:
+            Resolved credential dict.
+        routing:
+            Routing object from the dispatcher.
+
+        Returns
+        -------
+        InboundMessage
+            Forward through the inbound pipeline (enrich + pipeline.handle).
+        Response
+            Return directly to the caller (e.g. usage hint, ack-only).
+        None
+            Silently ack with 200, no side effects.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Registry
